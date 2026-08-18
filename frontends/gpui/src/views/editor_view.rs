@@ -24,6 +24,7 @@ use holon_frontend::editor_view_model::ConvergeDirective;
 use holon_frontend::editor_view_model::EditorAction;
 use holon_frontend::editor_view_model::EditorKey;
 use holon_frontend::editor_view_model::EditorViewModel;
+use holon_frontend::editor_view_model::StructuralCaret;
 use holon_frontend::editor_view_model::structural_block_action;
 use holon_frontend::input::InputAction;
 use holon_frontend::input::WidgetInput;
@@ -890,22 +891,29 @@ impl EditorView {
         self.converge_to(source, &target, window, cx);
     }
 
-    /// The block's stored state as the editable surface shows it: vault syntax
-    /// for the task-keyword facet, stored content otherwise. `raw` is the
-    /// authority's CONTENT column; the `task_state` comes from the shared row
-    /// cell, read now rather than remembered — a task toggle under an open
-    /// editor must change what the surface shows.
+    /// The block's stored state as the editable surface shows it: the ORG
+    /// SOURCE its `(content, marks)` pair reconstructs, under the task-keyword
+    /// projection. `raw` is the authority's CONTENT column — the stripped
+    /// label — so the marks that turn it back into `~code~` / `[[u][Label]]`
+    /// are read alongside it. Both they and the `task_state` come from the
+    /// shared row cell, read now rather than remembered: a task toggle or a
+    /// peer's mark edit under an open editor must change what the surface
+    /// shows.
     fn project_authority(&self, raw: &str) -> String {
-        let task_state = self.task_row.as_ref().and_then(|row| {
-            row.get_cloned()
-                .get("task_state")
+        let row = self.task_row.as_ref().map(|row| row.get_cloned());
+        let task_state = row.as_ref().and_then(|row| {
+            row.get("task_state")
                 .and_then(|v| v.as_string())
                 .map(str::to_string)
         });
+        let marks = row
+            .as_ref()
+            .map(|row| holon_frontend::link_segments::marks_of(row))
+            .unwrap_or_default();
         self.controller
             .lock()
             .unwrap()
-            .project_authority(raw, task_state.as_deref())
+            .project_authority(raw, &marks, task_state.as_deref())
     }
 
     /// Set `InputState` to an editor-surface `target` that a caller has already
@@ -1207,9 +1215,22 @@ fn grab_focus_and_seed_caret(
     // The seed arrives in CONTENT coordinates (`join_block` reports the merge
     // boundary, `split_block` reports 0) while this buffer holds the SURFACE, so
     // it crosses the keyword prefix on any tasked target (task #93).
-    let seed = services
-        .peek_caret_seed(row)
-        .map(|offset| controller.lock().unwrap().content_offset_to_surface(offset));
+    let seed = services.peek_caret_seed(row).and_then(|offset| {
+        match controller.lock().unwrap().content_offset_to_surface(offset) {
+            Ok(surface) => Some(surface),
+            // The seed was armed against content this buffer no longer shows.
+            // Leaving the caret where it is beats placing it somewhere the op
+            // did not ask for, but it is a divergence, not a normal path.
+            Err(e) => {
+                tracing::error!(
+                    target: "editor.caret_seed",
+                    block = %row,
+                    "caret seed {offset} dropped: {e}"
+                );
+                None
+            }
+        }
+    });
     input.update(cx, |state, cx| {
         if caret_probe() {
             eprintln!(
@@ -1417,17 +1438,39 @@ impl Render for EditorView {
                             // Enter→split decision is shared with the headless
                             // test mirror via `structural_block_action`.
                             let cursor_byte = input.read(cx).cursor();
+                            let live_text = input.read(cx).value().to_string();
                             if caret_probe() {
                                 eprintln!(
                                     "[split-dispatch] target={target_id} cursor={cursor_byte} \
-                                     editor_text={:?}",
-                                    input.read(cx).value().to_string()
+                                     editor_text={live_text:?}"
                                 );
                             }
-                            if let Some(intent) =
-                                structural_block_action(EditorKey::Enter, &target_id, cursor_byte)
+                            // The caret is measured on the vault syntax the
+                            // widget shows; the split cuts the content column
+                            // under it. Crossing that seam is the VM's job and
+                            // it can REFUSE — a caret that does not land on the
+                            // buffer it was measured on is a routing bug, and
+                            // splitting somewhere else would silently rewrite
+                            // the user's text.
+                            let caret = match ctrl
+                                .lock()
+                                .unwrap()
+                                .structural_caret(&live_text, cursor_byte)
                             {
-                                let live_text = input.read(cx).value().to_string();
+                                Ok(caret) => caret,
+                                Err(e) => {
+                                    tracing::error!(
+                                        target: "editor.split",
+                                        block = %target_id,
+                                        "Enter dropped: {e}"
+                                    );
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                            };
+                            if let Some(intent) =
+                                structural_block_action(EditorKey::Enter, &target_id, caret)
+                            {
                                 dispatch_structural_as_commit_point(
                                     &ctrl, &services, &live_text, intent,
                                 );
@@ -1514,8 +1557,11 @@ impl Render for EditorView {
                     }
                     // Backspace-at-0 → join. Decision shared with the headless
                     // mirror via `structural_block_action`.
-                    if let Some(intent) = structural_block_action(EditorKey::Backspace, &row_id, 0)
-                    {
+                    if let Some(intent) = structural_block_action(
+                        EditorKey::Backspace,
+                        &row_id,
+                        StructuralCaret::on_plain_text(0),
+                    ) {
                         let live_text = input.read(cx).value().to_string();
                         dispatch_structural_as_commit_point(&ctrl, &services, &live_text, intent);
                     }
@@ -1531,7 +1577,11 @@ impl Render for EditorView {
                 let input = self.input.clone();
                 let ctrl = self.controller.clone();
                 move |_: &IndentInline, _window, cx: &mut App| {
-                    if let Some(intent) = structural_block_action(EditorKey::Tab, &row_id, 0) {
+                    if let Some(intent) = structural_block_action(
+                        EditorKey::Tab,
+                        &row_id,
+                        StructuralCaret::on_plain_text(0),
+                    ) {
                         let live_text = input.read(cx).value().to_string();
                         dispatch_structural_as_commit_point(&ctrl, &services, &live_text, intent);
                     }
@@ -1544,7 +1594,11 @@ impl Render for EditorView {
                 let input = self.input.clone();
                 let ctrl = self.controller.clone();
                 move |_: &OutdentInline, _window, cx: &mut App| {
-                    if let Some(intent) = structural_block_action(EditorKey::BackTab, &row_id, 0) {
+                    if let Some(intent) = structural_block_action(
+                        EditorKey::BackTab,
+                        &row_id,
+                        StructuralCaret::on_plain_text(0),
+                    ) {
                         let live_text = input.read(cx).value().to_string();
                         // ADR 0028 D1: outdent of a direct page child is REJECTED
                         // by the op engine (it would escape the page container).

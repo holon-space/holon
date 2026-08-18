@@ -369,7 +369,19 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
             text.is_char_boundary(position),
             "[SplitBlock/keystroke] position {position} is not a char boundary of {text:?}"
         );
-        let right_presses = text[..position].chars().count();
+        // `position` is a CONTENT byte while each `right` advances one character
+        // of the editable SURFACE — vault syntax, which carries the task keyword
+        // and every inline-markup delimiter the content column does not. The
+        // driver owns that projection; a count taken on `text` (the content
+        // cell) aims at the wrong glyph the moment the block carries a mark.
+        let right_presses = self
+            .driver
+            .surface_chars_before_content(&resolved, position)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "[SplitBlock/keystroke] cannot place the caret for content byte {position} on                      {resolved}: {e}"
+                )
+            });
         // Caret to `position`, then Enter → `HeadlessEditorMirror` splits at the caret.
         self.key("home", &[], "SplitBlock").await;
         for _ in 0..right_presses {

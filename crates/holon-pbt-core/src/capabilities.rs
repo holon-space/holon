@@ -358,12 +358,26 @@ pub trait RefBlockTreeMut: RefBlockTree {
     }
 
     /// What an editor OPENED on `id` shows: the block's vault syntax
-    /// (`TODO milk`) for the task-keyword facet, its stored content otherwise.
+    /// (`TODO ~code~`) — the org SOURCE its `(content, marks)` pair
+    /// reconstructs, under the task-keyword projection.
     ///
     /// The editable surface is a projection, not the content column, so every
-    /// modelled editor seed reads it here. A reference that does not model task
-    /// state answers with the content, which is exactly right for it.
+    /// modelled editor seed reads it here. A reference that models neither task
+    /// state nor marks answers with the content, which is exactly right for it.
     fn editor_surface_text(&self, id: &EntityUri) -> String {
+        self.block_content(id).unwrap_or_default().to_string()
+    }
+
+    /// [`Self::editor_surface_text`] WITHOUT the task keyword — the org source
+    /// alone.
+    ///
+    /// The two differ by exactly the keyword prefix, which is the only part of
+    /// the surface that is not org source and therefore the only part a caret
+    /// crosses by subtraction; the markup delta underneath it is crossed by an
+    /// offset map instead (`surface_caret_to_content`). Deriving that prefix as
+    /// `surface.len() - content.len()` instead swallows the markup delta and
+    /// splits at the wrong byte.
+    fn editor_source_text(&self, id: &EntityUri) -> String {
         self.block_content(id).unwrap_or_default().to_string()
     }
 

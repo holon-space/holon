@@ -28,6 +28,7 @@ use holon_api::Value;
 use crate::editor_caret;
 use crate::editor_view_model::EditorKey;
 use crate::editor_view_model::EditorViewModel;
+use crate::editor_view_model::StructuralCaret;
 use crate::editor_view_model::structural_block_action;
 use crate::operations::OperationIntent;
 use crate::reactive::BuilderServices;
@@ -189,11 +190,27 @@ impl HeadlessEditorMirror {
     ) -> Result<EditorViewModel> {
         let block_id = block_uri.to_string();
         let services: &dyn BuilderServices = engine.as_ref();
-        let (sql_content, task_state) = self.sql_editor_source(engine, &block_id).await?;
-        let content = match services.editable_text(block_uri, "content") {
-            Ok(mt) => mt.current(),
-            Err(_) => sql_content,
+        let source = self.sql_editor_source(engine, &block_id).await?;
+        let sql_content = source.content.clone().unwrap_or_default();
+        // The surface is rendered from a PAIR, so content and marks must come
+        // from ONE authority. The live cell is preferred for content (it cures
+        // the SQL projection lag), but its marks are not readable here — so
+        // when the two authorities have not converged yet, the cell text is
+        // shown with NO marks rather than with the SQL row's, which would place
+        // delimiters at offsets that text never had.
+        let (content, marks) = match services.editable_text(block_uri, "content") {
+            Ok(mt) => {
+                let live = mt.current();
+                let marks = if live == sql_content {
+                    source.marks.clone()
+                } else {
+                    Vec::new()
+                };
+                (live, marks)
+            }
+            Err(_) => (sql_content, source.marks.clone()),
         };
+        let task_state = source.task_state.clone();
         // Resolved for EVERY seed, tasked or not. Skipping it for a plain block
         // saved one document read and cost correctness: the surface would then
         // be classified `Untasked` under a fabricated vocabulary, and the
@@ -210,7 +227,7 @@ impl HeadlessEditorMirror {
         // Seeding THROUGH the view model is what records the surface state the
         // commit router reads — a seed applied around it would leave the router
         // judging a refused buffer by the vocabulary-free shape rule.
-        let seed = vm.project_authority(&content, task_state.as_deref());
+        let seed = vm.project_authority(&content, &marks, task_state.as_deref());
         vm.set_buffer_from_authority(&seed, 0);
         Ok(vm)
     }
@@ -311,7 +328,9 @@ impl HeadlessEditorMirror {
         engine: &Arc<ReactiveEngine>,
         block_id: &str,
     ) -> Result<()> {
-        let (content, task_state) = self.sql_editor_source(engine, block_id).await?;
+        let source = self.sql_editor_source(engine, block_id).await?;
+        let content = source.content.unwrap_or_default();
+        let task_state = source.task_state;
         let mut converged_to = None;
         let mut eds = self.editors.lock().unwrap();
         if let Some(vm) = eds.get_mut(block_id) {
@@ -319,7 +338,7 @@ impl HeadlessEditorMirror {
             // discriminator compares against is the PROJECTION of the settled
             // row, not its content column — otherwise every source-channel write
             // reads back as an external change and converges the keyword away.
-            let authority = vm.project_authority(&content, task_state.as_deref());
+            let authority = vm.project_authority(&content, &source.marks, task_state.as_deref());
             let seq = vm.last_local_seq();
             if let Some(directive) = vm.converge_from_data_sync(&authority, Some(seq)) {
                 vm.set_buffer_from_authority(&directive.target, directive.seq);
@@ -367,7 +386,10 @@ impl HeadlessEditorMirror {
         if self.tracked_cursor_at(&block_id, occ).is_none() {
             return;
         }
-        self.set_cursor(&block_id, occ, self.seed_into_surface(&block_id, offset));
+        let surface = self
+            .seed_into_surface(&block_id, offset)
+            .expect("an armed caret seed must land on the buffer it was armed for");
+        self.set_cursor(&block_id, occ, surface);
         engine.consume_caret_seed(block_uri);
     }
 
@@ -377,12 +399,57 @@ impl HeadlessEditorMirror {
     /// buffer that consumes either is the projection — so on a tasked target
     /// the raw seed lands inside the keyword (task #93). No editor VM means
     /// no projection to cross.
-    fn seed_into_surface(&self, block_id: &str, offset: usize) -> usize {
+    fn seed_into_surface(&self, block_id: &str, offset: usize) -> Result<usize> {
         self.editors
             .lock()
             .unwrap()
             .get(block_id)
-            .map_or(offset, |vm| vm.content_offset_to_surface(offset))
+            .map_or(Ok(offset), |vm| vm.content_offset_to_surface(offset))
+    }
+
+    /// Characters between the start of this block's editable SURFACE and the
+    /// CONTENT byte `content_byte` — the number of `right` keystrokes that put
+    /// the caret where a content-coordinate position wants it.
+    ///
+    /// The surface is vault syntax: a task keyword the content column does not
+    /// carry heads it, and `~code~` / `[[u][Label]]` inside it are stored as a
+    /// stripped label plus marks. A driver counting characters of the CONTENT
+    /// aims at the wrong glyph the moment a block carries either.
+    pub fn surface_chars_before_content(
+        &self,
+        block_id: &str,
+        content_byte: usize,
+    ) -> Result<usize> {
+        let eds = self.editors.lock().unwrap();
+        let vm = eds.get(block_id).with_context(|| {
+            format!("no editor VM open on {block_id}; focus it before walking its caret")
+        })?;
+        let surface_byte = vm.content_offset_to_surface(content_byte)?;
+        let surface = vm.buffer();
+        let head = surface.get(..surface_byte).with_context(|| {
+            format!(
+                "content byte {content_byte} mapped to surface byte {surface_byte}, which is not                  a boundary of {surface:?}"
+            )
+        })?;
+        Ok(head.chars().count())
+    }
+
+    /// This block's caret in both coordinate systems — the surface byte the
+    /// mirror tracks, and the content byte a structural op cuts at. No VM
+    /// means no projection between them.
+    fn structural_caret(
+        &self,
+        block_id: &str,
+        surface: &str,
+        surface_byte: usize,
+    ) -> Result<StructuralCaret> {
+        self.editors
+            .lock()
+            .unwrap()
+            .get(block_id)
+            .map_or(Ok(StructuralCaret::on_plain_text(surface_byte)), |vm| {
+                vm.structural_caret(surface, surface_byte)
+            })
     }
 
     /// Mirror a user click on a block: seed the tracked caret for
@@ -427,7 +494,7 @@ impl HeadlessEditorMirror {
         &self,
         engine: &Arc<ReactiveEngine>,
         block_id: &str,
-    ) -> Result<(String, Option<String>)> {
+    ) -> Result<holon_api::query_engine::EditorSource> {
         let uri = holon_api::EntityUri::parse(block_id)
             .with_context(|| format!("headless mirror got a non-URI block id {block_id:?}"))?;
         let query_engine = engine.session().query_engine().with_context(|| {
@@ -435,8 +502,7 @@ impl HeadlessEditorMirror {
                 "headless mirror editor-source read for {block_id} needs the Turso query engine"
             )
         })?;
-        let (content, task_state) = query_engine.block_editor_source_by_id(&uri).await?;
-        Ok((content.unwrap_or_default(), task_state))
+        query_engine.block_editor_source_by_id(&uri).await
     }
 
     /// Route a single keystroke through the same logical pipeline GPUI's
@@ -508,7 +574,11 @@ impl HeadlessEditorMirror {
             None => {
                 let init = engine
                     .peek_caret_seed(&block_uri)
-                    .map(|o| self.seed_into_surface(&block_id, o))
+                    .map(|o| {
+                        self.seed_into_surface(&block_id, o).unwrap_or_else(|e| {
+                            panic!("caret seed {o} does not land on {block_id}'s buffer: {e}")
+                        })
+                    })
                     .filter(|&o| current_text.is_char_boundary(o.min(current_text.len())))
                     .map(|o| o.min(current_text.len()))
                     .unwrap_or(current_text.len());
@@ -544,8 +614,12 @@ impl HeadlessEditorMirror {
                 );
             }
             "backspace" if cursor_byte == 0 && !has_ctrl_alt_cmd && !has_shift => {
-                let intent = structural_block_action(EditorKey::Backspace, &block_id, 0)
-                    .expect("Backspace at caret 0 is the structural join_block");
+                let intent = structural_block_action(
+                    EditorKey::Backspace,
+                    &block_id,
+                    self.structural_caret(&block_id, &current_text, 0)?,
+                )
+                .expect("Backspace at caret 0 is the structural join_block");
                 engine.dispatch_intent_sync(intent).await?;
                 // A join that consumed the block moved focus to the merge
                 // target (`apply_structural_focus`); a REFUSED join (page
@@ -576,20 +650,32 @@ impl HeadlessEditorMirror {
                 {
                     engine.dispatch_intent_sync(intent).await?;
                 } else {
-                    let intent = structural_block_action(EditorKey::Enter, &block_id, cursor_byte)
-                        .expect("Enter is the structural split_block");
+                    let intent = structural_block_action(
+                        EditorKey::Enter,
+                        &block_id,
+                        self.structural_caret(&block_id, &current_text, cursor_byte)?,
+                    )
+                    .expect("Enter is the structural split_block");
                     engine.dispatch_intent_sync(intent).await?;
                 }
                 self.forget(&block_id, occ);
             }
             "tab" if !has_shift && !has_ctrl_alt_cmd => {
-                let intent = structural_block_action(EditorKey::Tab, &block_id, cursor_byte)
-                    .expect("Tab is the structural indent");
+                let intent = structural_block_action(
+                    EditorKey::Tab,
+                    &block_id,
+                    self.structural_caret(&block_id, &current_text, cursor_byte)?,
+                )
+                .expect("Tab is the structural indent");
                 engine.dispatch_intent_sync(intent).await?;
             }
             "tab" if has_shift && !has_ctrl_alt_cmd => {
-                let intent = structural_block_action(EditorKey::BackTab, &block_id, cursor_byte)
-                    .expect("Shift+Tab is the structural outdent");
+                let intent = structural_block_action(
+                    EditorKey::BackTab,
+                    &block_id,
+                    self.structural_caret(&block_id, &current_text, cursor_byte)?,
+                )
+                .expect("Shift+Tab is the structural outdent");
                 engine.dispatch_intent_sync(intent).await?;
             }
             "escape" => {

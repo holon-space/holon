@@ -277,14 +277,13 @@ pub fn split_block_apply_to_ref<
     // Prod REFUSES a position the post-commit content cannot carry:
     // `BlockOperations::split_block` returns Err on out-of-range and on a
     // mid-codepoint byte, leaving the tree untouched (crates/holon-core/src/
-    // traits.rs). Two producers still present one here. The commit above can
+    // traits.rs). One producer still presents one here: the commit above can
     // shorten the content by a task keyword the source channel strips, past a
-    // position the precondition measured on the buffer; and `PressKey(Enter)`
-    // hands over an editor caret measured on the SURFACE while the split cuts
-    // the CONTENT column under it (a tasked block shows `TODO milk` and stores
-    // `milk`). Refuse both the way prod does instead of reaching
-    // `split_content_marks`'s assert, which is a correct guard for its own
-    // callers and must stay.
+    // position the precondition measured on the buffer. Refuse it the way prod
+    // does instead of reaching `split_content_marks`'s assert, which is a
+    // correct guard for its own callers and must stay.
+    // `PressKey(Enter)` is NOT such a producer any more: it crosses the
+    // surface→content seam before it gets here, exactly as prod does.
     // A MISSING block is not a refusal and must not fold into one: prod answers
     // it with its own Err, and reaching it here means the reference lost a block
     // it is still being asked to split — a model bug, loud by design.

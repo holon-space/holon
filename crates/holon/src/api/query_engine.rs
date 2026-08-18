@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
 use holon_api::EnrichedChangeStream;
@@ -249,19 +250,37 @@ impl QueryEngine for BackendEngine {
     async fn block_editor_source_by_id(
         &self,
         id: &EntityUri,
-    ) -> Result<(Option<String>, Option<String>)> {
+    ) -> Result<holon_api::query_engine::EditorSource> {
         use crate::storage::BLOCK_WRITE_TABLE;
         let escaped = id.to_string().replace('\'', "''");
         let sql = format!(
-            "SELECT content, json_extract(properties, '$.task_state') AS task_state FROM \
+            "SELECT content, marks, json_extract(properties, '$.task_state') AS task_state FROM \
              {BLOCK_WRITE_TABLE} WHERE id = '{escaped}'"
         );
         let rows = BackendEngine::execute_query(self, sql, HashMap::new(), None).await?;
         let Some(row) = rows.into_iter().next() else {
-            return Ok((None, None));
+            return Ok(holon_api::query_engine::EditorSource::default());
         };
         let field = |key: &str| row.get(key).and_then(|v| v.as_string()).map(str::to_string);
-        Ok((field("content"), field("task_state")))
+        // Parse at the boundary: a `marks` column this editor cannot read is an
+        // Err naming the row, never an empty span set — that would seed the
+        // surface with markup-free text and look exactly like a block that has
+        // no marks.
+        let marks = match field("marks").filter(|m| !m.is_empty() && m != "[]") {
+            Some(raw) => holon_api::marks_from_json(&raw)
+                .map_err(anyhow::Error::from)
+                .with_context(|| {
+                    format!(
+                        "editor-source read for {id}: block row carries unreadable marks {raw:?}"
+                    )
+                })?,
+            None => Vec::new(),
+        };
+        Ok(holon_api::query_engine::EditorSource {
+            content: field("content"),
+            marks,
+            task_state: field("task_state"),
+        })
     }
 
     async fn block_todo_keywords(

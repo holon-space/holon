@@ -25,6 +25,24 @@ use crate::QueryLanguage;
 use crate::Value;
 use crate::query_context::QueryContext;
 
+/// Everything an editor mount reads off the block's row to build its editable
+/// surface.
+///
+/// A struct rather than a tuple because the surface is the ORG SOURCE the pair
+/// `(content, marks)` reconstructs, not the content column: seeding the
+/// stripped label shows markup-free text that is nonetheless styled, and hands
+/// every caret offset to a column that does not carry those bytes
+/// (`2026-08-18-editor-seeded-from-stripped-content-not-source`). Three
+/// positional `Option<String>`s would have made that mistake easy to repeat.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EditorSource {
+    /// The stored content column — the stripped label, marks removed.
+    pub content: Option<String>,
+    /// The mark spans over `content`, in scalar offsets.
+    pub marks: Vec<crate::MarkSpan>,
+    pub task_state: Option<String>,
+}
+
 /// Compile + execute + watch queries, behind storage-agnostic types.
 /// Implemented by the Turso `BackendEngine`; absent in a no-Turso wiring.
 #[async_trait]
@@ -109,17 +127,13 @@ pub trait QueryEngine: Send + Sync {
     /// that hasn't materialised.
     async fn block_task_state_by_id(&self, id: &EntityUri) -> Result<Option<String>>;
 
-    /// The two columns the editable surface is projected from, in ONE read:
-    /// `(content, task_state)`. Both `None` when the row has not materialised.
+    /// The columns the editable surface is projected from, in ONE read.
     ///
-    /// One read rather than two because every editor mount needs both, and the
-    /// keystone budgets count reads per action — a second round trip per focus
-    /// would be a measurable regression for a fact the first row already
-    /// carried.
-    async fn block_editor_source_by_id(
-        &self,
-        id: &EntityUri,
-    ) -> Result<(Option<String>, Option<String>)> {
+    /// One read rather than three because every editor mount needs all of
+    /// them, and the keystone budgets count reads per action — extra round
+    /// trips per focus would be a measurable regression for facts the first
+    /// row already carried.
+    async fn block_editor_source_by_id(&self, id: &EntityUri) -> Result<EditorSource> {
         let _ = id;
         anyhow::bail!("QueryEngine::block_editor_source_by_id not implemented by this impl")
     }

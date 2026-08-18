@@ -456,23 +456,39 @@ impl EditorViewModel {
     /// surface, or its stored content with the refusal disclosed. See
     /// [`crate::editor_source::project_or_disclose`]; the vocabulary is the one
     /// this editor was seeded with on focus.
-    pub fn project_authority(&mut self, content: &str, task_state: Option<&str>) -> String {
+    ///
+    /// `marks` are the spans over `content`. The editable surface is a SOURCE
+    /// projection (F2-arm=d, ratified 2026-08-11), so they are rendered BACK to
+    /// their org delimiters here: entering a block whose content carries
+    /// `~code~` must show the `~`, not markup-free text that is nonetheless
+    /// styled (`2026-08-18-editor-seeded-from-stripped-content-not-source`).
+    /// The keyword prefix goes on top of that source, never on the label.
+    pub fn project_authority(
+        &mut self,
+        content: &str,
+        marks: &[holon_api::MarkSpan],
+        task_state: Option<&str>,
+    ) -> String {
+        let source = holon_org_format::render_inline_marks(content, marks);
         let Some(vocabulary) = self.vocabulary.as_ref() else {
-            // UNRESOLVED, not "declares nothing". The surface stays the content
-            // column and the router stays on the safe channel until the real
+            // UNRESOLVED, not "declares nothing". The surface stays unprefixed
+            // and the router stays on the safe channel until the real
             // vocabulary arrives and this runs again.
             self.surface = crate::editor_source::Surface::Pending;
             self.surface_prefix = 0;
-            return content.to_string();
+            return source;
         };
         let seed = crate::editor_source::project_or_disclose(
             self.handler.context_id().unwrap_or("<unmounted>"),
-            content,
+            &source,
             task_state,
             vocabulary,
         );
         self.surface = seed.surface;
-        self.surface_prefix = seed.text.len().saturating_sub(content.len());
+        // The KEYWORD prefix only. The markup delta between source and content
+        // is not a prefix at all and is crossed by the offset map in
+        // `surface_caret_to_content`.
+        self.surface_prefix = seed.text.len().saturating_sub(source.len());
         seed.text
     }
 
@@ -481,9 +497,51 @@ impl EditorViewModel {
     /// returns the merge boundary into the target's content, `split_block`
     /// returns 0), and the buffer that consumes the seed is the projection — so
     /// without this the caret lands inside the keyword on any tasked target and
-    /// the next keystroke corrupts it (task #93).
-    pub fn content_offset_to_surface(&self, offset: usize) -> usize {
-        offset + self.surface_prefix
+    /// the next keystroke corrupts it (task #93), or before the inline markup
+    /// the buffer carries and the content column does not.
+    pub fn content_offset_to_surface(&self, offset: usize) -> anyhow::Result<usize> {
+        Ok(self.surface_prefix
+            + holon_org_format::source_content_offsets(surface_body(
+                &self.buffer,
+                self.surface_prefix,
+            )?)
+            .source_offset(offset)?)
+    }
+
+    /// This editor's caret in both coordinate systems, for
+    /// [`structural_block_action`]. The ONE place a surface caret becomes a
+    /// content caret in production.
+    ///
+    /// `surface` is the text the caret was measured on, passed in rather than
+    /// read off `self.buffer` for the same reason
+    /// [`Self::chord_commit_intent`] takes it: the widget's buffer can be one
+    /// keystroke ahead of this VM's, and the caret belongs to the widget's.
+    pub fn structural_caret(
+        &self,
+        surface: &str,
+        surface_byte: usize,
+    ) -> anyhow::Result<StructuralCaret> {
+        Ok(StructuralCaret {
+            surface_byte,
+            content_byte: self.surface_offset_to_content(surface, surface_byte)?,
+        })
+    }
+
+    /// The CONTENT byte a caret in this editor's buffer sits at — the seam
+    /// every structural op crosses in the other direction.
+    ///
+    /// The buffer is vault syntax: a keyword the content column does not carry
+    /// heads it, and `~code~` / `*bold*` / `[[u][Label]]` inside it are stored
+    /// as a stripped label plus a mark set. A caret byte measured on it is
+    /// therefore not a content byte, and handing one to `split_block` cut the
+    /// wrong place or was refused outright
+    /// (`2026-08-18-split-position-measured-on-the-editor-surface`).
+    pub fn surface_offset_to_content(
+        &self,
+        surface: &str,
+        surface_byte: usize,
+    ) -> anyhow::Result<usize> {
+        surface_caret_to_content(surface, self.surface_prefix, surface_byte)
     }
 
     /// What this editor's buffer means — see [`crate::editor_source::Surface`].
@@ -1179,6 +1237,47 @@ pub enum EditorKey {
     BackTab,
 }
 
+/// `surface` past the task keyword it shows — the org source the content
+/// column is parsed from.
+fn surface_body(surface: &str, surface_prefix: usize) -> anyhow::Result<&str> {
+    surface.get(surface_prefix..).ok_or_else(|| {
+        anyhow::anyhow!(
+            "surface prefix {surface_prefix} is not a boundary of the {}-byte surface {surface:?}",
+            surface.len(),
+        )
+    })
+}
+
+/// The CONTENT byte a caret measured on an editable SURFACE sits at.
+///
+/// The seam between what the user edits and what the store keeps, in ONE
+/// place: production's [`EditorViewModel::surface_offset_to_content`] and the
+/// keystone's reference model both call this, so the model cannot describe a
+/// caret production does not compute.
+///
+/// `surface_prefix` is the task keyword the surface shows and the content
+/// column does not carry; the rest of the surface is org source, whose
+/// delimiters (`~code~`, `[[u][Label]]`) the store strips into marks.
+pub fn surface_caret_to_content(
+    surface: &str,
+    surface_prefix: usize,
+    surface_byte: usize,
+) -> anyhow::Result<usize> {
+    if surface_byte > surface.len() {
+        anyhow::bail!(
+            "caret {surface_byte} is past the {}-byte surface {surface:?}",
+            surface.len(),
+        );
+    }
+    // A caret inside the keyword precedes every content byte: the keyword is
+    // the surface's, not the content's.
+    let Some(body_byte) = surface_byte.checked_sub(surface_prefix) else {
+        return Ok(0);
+    };
+    holon_org_format::source_content_offsets(surface_body(surface, surface_prefix)?)
+        .content_offset(body_byte)
+}
+
 /// The structural block operation a key triggers when no popup/completion is
 /// active, given the caret byte offset. This is the single source of truth for
 /// the Enter→split / Backspace-at-0→join / Tab→indent / Shift+Tab→outdent
@@ -1191,12 +1290,13 @@ pub enum EditorKey {
 /// mirror mutates its `MutableText` + cursor model directly.
 ///
 /// `target_id` is the block the op acts on (the focused leaf, which a GPUI
-/// Page-level editor resolves via `services.focused_block()`); `cursor_byte`
-/// is the caret offset used to position a split.
+/// Page-level editor resolves via `services.focused_block()`); `caret` carries
+/// the cursor in BOTH coordinate systems, because the two decisions here need
+/// different ones — see [`StructuralCaret`].
 pub fn structural_block_action(
     key: EditorKey,
     target_id: &str,
-    cursor_byte: usize,
+    caret: StructuralCaret,
 ) -> Option<OperationIntent> {
     // A creation affordance is a rendered row, not a block: it mounts no editor
     // and focus on it is intercepted into a birth, so no keystroke can be aimed
@@ -1219,11 +1319,60 @@ pub fn structural_block_action(
         OperationIntent::new(EntityName::new("block"), op.to_string(), params)
     };
     match key {
-        EditorKey::Enter => Some(intent("split_block", Some(cursor_byte as i64))),
-        EditorKey::Backspace if cursor_byte == 0 => Some(intent("join_block", Some(0))),
+        EditorKey::Enter => Some(intent("split_block", Some(caret.content_byte as i64))),
+        EditorKey::Backspace if caret.surface_byte == 0 => Some(intent("join_block", Some(0))),
         EditorKey::Tab => Some(intent("indent", None)),
         EditorKey::BackTab => Some(intent("outdent", None)),
         EditorKey::Backspace | EditorKey::Up | EditorKey::Down | EditorKey::Escape => None,
+    }
+}
+
+/// One caret, in the two coordinate systems a structural key needs.
+///
+/// The buffer the user's caret is measured on is VAULT SYNTAX; the block's
+/// content column is its parse (keyword stripped, `~code~` stored as a label
+/// plus a mark). The two decisions here read different ones and must not be
+/// collapsed: a split CUTS the content, so it needs the content byte, while
+/// "is the caret at the very start" is a question about what the user sees —
+/// on `TODO milk` the surface byte right after the keyword is content byte 0,
+/// and answering Backspace there with a join would swallow the block instead
+/// of deleting a space.
+///
+/// Built by [`EditorViewModel::structural_caret`], which owns the projection
+/// the two coordinates differ by — there is no constructor that lets a caller
+/// pass one number for both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StructuralCaret {
+    surface_byte: usize,
+    content_byte: usize,
+}
+
+impl StructuralCaret {
+    /// A caret on a buffer that IS its own content — no keyword, no markup.
+    /// For callers with no editor projection to cross (the reference model's
+    /// plain-text mirrors, tests seeding a bare block).
+    pub fn on_plain_text(byte: usize) -> Self {
+        Self {
+            surface_byte: byte,
+            content_byte: byte,
+        }
+    }
+
+    /// A caret whose two coordinates a caller already resolved itself — for a
+    /// frontend with no [`EditorViewModel`] to own the projection.
+    pub fn at(surface_byte: usize, content_byte: usize) -> Self {
+        Self {
+            surface_byte,
+            content_byte,
+        }
+    }
+
+    pub fn surface_byte(&self) -> usize {
+        self.surface_byte
+    }
+
+    pub fn content_byte(&self) -> usize {
+        self.content_byte
     }
 }
 
@@ -1693,8 +1842,12 @@ mod tests {
     /// said nothing about it.
     #[test]
     fn an_empty_born_block_indents_immediately() {
-        let intent = structural_block_action(EditorKey::Tab, "block:newborn-1", 0)
-            .expect("Tab in an empty-born block must dispatch indent");
+        let intent = structural_block_action(
+            EditorKey::Tab,
+            "block:newborn-1",
+            StructuralCaret::on_plain_text(0),
+        )
+        .expect("Tab in an empty-born block must dispatch indent");
         assert_eq!(intent.op_name, "indent");
         assert_eq!(intent.params["id"], Value::String("block:newborn-1".into()));
     }
@@ -1705,8 +1858,12 @@ mod tests {
     /// no longer a "commit the slot" special case to be surprised by.
     #[test]
     fn enter_in_an_empty_born_block_splits_like_any_other_block() {
-        let intent = structural_block_action(EditorKey::Enter, "block:newborn-1", 0)
-            .expect("Enter in an empty-born block must dispatch split_block");
+        let intent = structural_block_action(
+            EditorKey::Enter,
+            "block:newborn-1",
+            StructuralCaret::on_plain_text(0),
+        )
+        .expect("Enter in an empty-born block must dispatch split_block");
         assert_eq!(intent.op_name, "split_block");
         assert_eq!(intent.params["position"], Value::Integer(0));
     }
@@ -1718,7 +1875,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "creation-affordance id")]
     fn a_structural_op_against_an_affordance_id_is_a_loud_routing_bug() {
-        structural_block_action(EditorKey::Enter, "block:__virtual:page-1", 0);
+        structural_block_action(
+            EditorKey::Enter,
+            "block:__virtual:page-1",
+            StructuralCaret::on_plain_text(0),
+        );
     }
 
     /// The keystroke sink retires an empty-born block from the reaper BEFORE it
@@ -1890,7 +2051,7 @@ mod tests {
         // its vocabulary — stated explicitly, because an editor that has not
         // resolved one classifies nothing (`Surface::Pending`).
         vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
-        let seed = vm.project_authority("TODO", Some("TODO"));
+        let seed = vm.project_authority("TODO", &[], Some("TODO"));
         vm.set_buffer_from_authority(&seed, 0);
         let intent = vm
             .apply_local_edit("TODO ")
@@ -1916,7 +2077,7 @@ mod tests {
     fn deleting_the_keyword_still_takes_the_source_channel() {
         let mut vm = test_controller();
         vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
-        let seed = vm.project_authority("milk", Some("TODO"));
+        let seed = vm.project_authority("milk", &[], Some("TODO"));
         assert_eq!(seed, "TODO milk");
         vm.set_buffer_from_authority(&seed, 0);
         let intent = vm
@@ -1937,7 +2098,7 @@ mod tests {
     fn ordinary_prose_commits_the_content_channel() {
         let mut vm = test_controller();
         vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
-        let seed = vm.project_authority("buy", None);
+        let seed = vm.project_authority("buy", &[], None);
         vm.set_buffer_from_authority(&seed, 0);
         let intent = vm
             .apply_local_edit("buy milk")
@@ -1957,16 +2118,16 @@ mod tests {
             &["DONE".to_string()],
         ));
         assert_eq!(
-            vm.project_authority("milk", Some("TODO")),
+            vm.project_authority("milk", &[], Some("TODO")),
             "milk",
             "an undeclared keyword must not reach the surface"
         );
         assert_eq!(
-            vm.project_authority("milk", Some("NEXT")),
+            vm.project_authority("milk", &[], Some("NEXT")),
             "NEXT milk",
             "a declared keyword projects to vault syntax"
         );
-        assert_eq!(vm.project_authority("milk", None), "milk");
+        assert_eq!(vm.project_authority("milk", &[], None), "milk");
     }
 
     /// THE VOCABULARY WINDOW, encoded — and made DETERMINISTIC by construction
@@ -1985,7 +2146,7 @@ mod tests {
         // Arm A — a block the real vocabulary would REFUSE. Under the defaults
         // it projects to `TODO ASAP call Bob` and routes source.
         let mut vm = test_controller();
-        let seed = vm.project_authority("ASAP call Bob", Some("TODO"));
+        let seed = vm.project_authority("ASAP call Bob", &[], Some("TODO"));
         assert_eq!(
             seed, "ASAP call Bob",
             "an unresolved vocabulary must not FABRICATE vault syntax — the content \
@@ -2007,7 +2168,7 @@ mod tests {
         // shape rule is vocabulary-free, so it may not be consulted before the
         // vocabulary that would adjudicate it has arrived.
         let mut untasked = test_controller();
-        let seed = untasked.project_authority("call Bob", None);
+        let seed = untasked.project_authority("call Bob", &[], None);
         untasked.set_buffer_from_authority(&seed, 0);
         let intent = untasked
             .apply_local_edit("TODO call Bob")
@@ -2034,7 +2195,7 @@ mod tests {
         // Refused stays on content — for the right reason now, not by accident.
         let mut refused = test_controller();
         refused.set_task_vocabulary(declared.clone());
-        let seed = refused.project_authority("ASAP call Bob", Some("TODO"));
+        let seed = refused.project_authority("ASAP call Bob", &[], Some("TODO"));
         refused.set_buffer_from_authority(&seed, 0);
         assert_eq!(
             refused
@@ -2048,7 +2209,7 @@ mod tests {
         // A DECLARED keyword projects and routes source.
         let mut projected = test_controller();
         projected.set_task_vocabulary(declared.clone());
-        let seed = projected.project_authority("call bank", Some("NEXT"));
+        let seed = projected.project_authority("call bank", &[], Some("NEXT"));
         assert_eq!(seed, "NEXT call bank");
         projected.set_buffer_from_authority(&seed, 0);
         assert_eq!(
@@ -2064,7 +2225,7 @@ mod tests {
         // feature this must not disable.
         let mut untasked = test_controller();
         untasked.set_task_vocabulary(declared);
-        let seed = untasked.project_authority("call bank", None);
+        let seed = untasked.project_authority("call bank", &[], None);
         untasked.set_buffer_from_authority(&seed, 0);
         assert_eq!(
             untasked
@@ -2087,21 +2248,91 @@ mod tests {
     fn a_caret_seed_in_content_coordinates_crosses_the_keyword_prefix() {
         let mut vm = test_controller();
         vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
-        let seed = vm.project_authority("milk", Some("TODO"));
+        let seed = vm.project_authority("milk", &[], Some("TODO"));
         assert_eq!(seed, "TODO milk");
         vm.set_buffer_from_authority(&seed, 0);
 
         // `join_block` reports the merge boundary as an offset into `milk`.
         assert_eq!(
-            vm.content_offset_to_surface(4),
+            vm.content_offset_to_surface(4).unwrap(),
             9,
             "end-of-content is end-of-surface, not four bytes into the keyword"
         );
         assert_eq!(
-            vm.content_offset_to_surface(0),
+            vm.content_offset_to_surface(0).unwrap(),
             5,
             "offset 0 is the START OF THE CONTENT, which sits after the keyword"
         );
+    }
+
+    /// THE DOGFOOD ESCAPE (2026-08-18,
+    /// `2026-08-18-split-position-measured-on-the-editor-surface`). The user
+    /// typed `~installation_source~`; the store kept the stripped label plus a
+    /// `Code` mark, so the caret parked at end of line was two bytes — the two
+    /// `~` — past the content `split_block` cuts. Enter answered "Split
+    /// position 68 exceeds content length 66" and did nothing.
+    #[test]
+    fn a_caret_after_typed_inline_markup_lands_on_the_stripped_content() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
+        let surface = "Add column ~installation_source~ which can contain Ansible reference";
+        let seed = vm.project_authority(surface, &[], None);
+        vm.set_buffer_from_authority(&seed, 0);
+
+        assert_eq!(surface.len(), 68);
+        let caret = vm.structural_caret(surface, surface.len()).unwrap();
+        assert_eq!(caret.surface_byte(), 68);
+        assert_eq!(
+            caret.content_byte(),
+            66,
+            "the two `~` delimiters are surface, not content"
+        );
+    }
+
+    /// The two coordinates a structural key needs stay distinct: on a task the
+    /// surface byte right after the keyword is content byte 0, and Backspace
+    /// there must delete a space rather than join the block away.
+    #[test]
+    fn the_structural_caret_keeps_both_coordinates() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
+        let seed = vm.project_authority("milk", &[], Some("TODO"));
+        assert_eq!(seed, "TODO milk");
+        vm.set_buffer_from_authority(&seed, 0);
+
+        let end = vm.structural_caret(&seed, seed.len()).unwrap();
+        assert_eq!((end.surface_byte(), end.content_byte()), (9, 4));
+        let after_keyword = vm.structural_caret(&seed, 5).unwrap();
+        assert_eq!(
+            (after_keyword.surface_byte(), after_keyword.content_byte()),
+            (5, 0)
+        );
+
+        assert_eq!(
+            structural_block_action(EditorKey::Enter, "block:t", end)
+                .unwrap()
+                .params["position"],
+            Value::Integer(4),
+            "Enter at end of `TODO milk` splits at the end of `milk`, not four bytes past it"
+        );
+        assert!(
+            structural_block_action(EditorKey::Backspace, "block:t", after_keyword).is_none(),
+            "Backspace after the keyword deletes a character; only surface byte 0 joins"
+        );
+    }
+
+    /// A caret that does not land on the surface it was measured on is a
+    /// routing bug and must be an Err naming both numbers — never a clamp that
+    /// silently splits somewhere else.
+    #[test]
+    fn a_caret_past_the_surface_is_refused() {
+        let mut vm = test_controller();
+        vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
+        let seed = vm.project_authority("milk", &[], None);
+        vm.set_buffer_from_authority(&seed, 0);
+
+        let err = vm.structural_caret(&seed, 99).unwrap_err().to_string();
+        assert!(err.contains("99") && err.contains('4'), "{err}");
     }
 
     /// The mapping is a no-op wherever the surface is not a projection — a
@@ -2110,19 +2341,19 @@ mod tests {
     fn a_caret_seed_is_untouched_when_the_surface_shows_the_content_column() {
         let mut vm = test_controller();
         vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
-        let seed = vm.project_authority("milk", None);
+        let seed = vm.project_authority("milk", &[], None);
         vm.set_buffer_from_authority(&seed, 0);
-        assert_eq!(vm.content_offset_to_surface(2), 2);
+        assert_eq!(vm.content_offset_to_surface(2).unwrap(), 2);
 
         let mut refused = test_controller();
         refused.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::for_document(
             &["NEXT".to_string()],
             &["DONE".to_string()],
         ));
-        let seed = refused.project_authority("API rewrite", Some("TODO"));
+        let seed = refused.project_authority("API rewrite", &[], Some("TODO"));
         refused.set_buffer_from_authority(&seed, 0);
         assert_eq!(
-            refused.content_offset_to_surface(3),
+            refused.content_offset_to_surface(3).unwrap(),
             3,
             "a refused surface shows the content column, so the two coordinate \
              spaces are the same one"
@@ -2149,7 +2380,7 @@ mod tests {
         ));
         // The block carries TODO, which THIS document does not declare, so the
         // projection is refused and the surface shows stored content.
-        let seed = vm.project_authority("ASAP call Bob", Some("TODO"));
+        let seed = vm.project_authority("ASAP call Bob", &[], Some("TODO"));
         assert_eq!(seed, "ASAP call Bob", "precondition: the seed was refused");
         vm.set_buffer_from_authority(&seed, 0);
 
@@ -2175,7 +2406,7 @@ mod tests {
             &["NEXT".to_string()],
             &["DONE".to_string()],
         ));
-        let seed = vm.project_authority("API rewrite", Some("TODO"));
+        let seed = vm.project_authority("API rewrite", &[], Some("TODO"));
         vm.set_buffer_from_authority(&seed, 0);
         for typed in ["API rewrite ", "API rewrite n", "NEXT rewrite"] {
             let intent = vm
@@ -2201,7 +2432,7 @@ mod tests {
             &["NEXT".to_string()],
             &["DONE".to_string()],
         ));
-        let seed = vm.project_authority("call bank", Some("NEXT"));
+        let seed = vm.project_authority("call bank", &[], Some("NEXT"));
         assert_eq!(seed, "NEXT call bank", "precondition: the seed projected");
         vm.set_buffer_from_authority(&seed, 0);
 
@@ -2230,7 +2461,7 @@ mod tests {
             &["NEXT".to_string()],
             &["DONE".to_string()],
         ));
-        let seed = vm.project_authority("call bank", Some("NEXT"));
+        let seed = vm.project_authority("call bank", &[], Some("NEXT"));
         vm.set_buffer_from_authority(&seed, 0);
 
         let intent = vm
@@ -2253,7 +2484,7 @@ mod tests {
             &["NEXT".to_string()],
             &["DONE".to_string()],
         ));
-        let seed = vm.project_authority("API rewrite", Some("TODO"));
+        let seed = vm.project_authority("API rewrite", &[], Some("TODO"));
         vm.set_buffer_from_authority(&seed, 0);
 
         let intent = vm
@@ -2296,7 +2527,7 @@ mod tests {
             &["NEXT".to_string()],
             &["DONE".to_string()],
         ));
-        let seed = vm.project_authority("call bank", Some("NEXT"));
+        let seed = vm.project_authority("call bank", &[], Some("NEXT"));
         vm.set_buffer_from_authority(&seed, 0);
         let typed = format!("{seed}s");
         vm.apply_local_edit(&typed)
@@ -2320,7 +2551,7 @@ mod tests {
             &["NEXT".to_string()],
             &["DONE".to_string()],
         ));
-        let seed = vm.project_authority("call bank", Some("NEXT"));
+        let seed = vm.project_authority("call bank", &[], Some("NEXT"));
         vm.set_buffer_from_authority(&seed, 0);
 
         let intent = vm
@@ -2342,7 +2573,7 @@ mod tests {
             &["NEXT".to_string()],
             &["DONE".to_string()],
         ));
-        let seed = vm.project_authority("API rewrite", Some("TODO"));
+        let seed = vm.project_authority("API rewrite", &[], Some("TODO"));
         vm.set_buffer_from_authority(&seed, 0);
 
         let intent = vm
@@ -2387,7 +2618,7 @@ mod tests {
             &["NEXT".to_string()],
             &["DONE".to_string()],
         ));
-        let seed = vm.project_authority("ASAP call Bob", None);
+        let seed = vm.project_authority("ASAP call Bob", &[], None);
         assert_eq!(seed, "ASAP call Bob");
         vm.set_buffer_from_authority(&seed, 0);
 

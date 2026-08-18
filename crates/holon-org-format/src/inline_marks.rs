@@ -61,12 +61,139 @@ pub fn extract_inline_marks_with(
     text: &str,
     classifier: &LinkTargetClassifier,
 ) -> (String, Vec<MarkSpan>) {
+    let state = extract_state(text, classifier, 0);
+    (state.out, state.marks)
+}
+
+/// The one extraction pass. `src_base` is the absolute source byte offset
+/// `text` starts at, so a nested re-parse (the emphasis arm re-parses its
+/// stripped inner string) reports [`OffsetRun`]s in the OUTER source's
+/// coordinates.
+fn extract_state(text: &str, classifier: &LinkTargetClassifier, src_base: usize) -> ExtractState {
     let mut state = ExtractState {
         classifier: classifier.clone(),
+        src_base,
         ..Default::default()
     };
     walk_node(&parse_inline(text), &mut state);
-    (state.out, state.marks)
+    state
+}
+
+/// The byte-offset correspondence between org SOURCE text and the CONTENT
+/// [`extract_inline_marks`] derives from it — the map an editor caret needs to
+/// cross the seam.
+///
+/// The editable surface is vault syntax (`~code~`, `TODO milk`, `[[u][Label]]`)
+/// while the store keeps the stripped content plus a mark set, so a caret byte
+/// measured on one is meaningless against the other. Without this map a split
+/// at the end of `~installation_source~` arrived at the store as a position two
+/// bytes past its own content and was refused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceContentOffsets {
+    runs: Vec<OffsetRun>,
+    source_len: usize,
+    content_len: usize,
+}
+
+/// One run of source bytes and the content bytes it produced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OffsetRun {
+    src: std::ops::Range<usize>,
+    content: std::ops::Range<usize>,
+    /// The two ranges hold the same bytes, so a source offset INSIDE the run
+    /// maps to the matching content offset. A non-verbatim run (a block ref
+    /// whose label was re-spaced) has no interior correspondence: every source
+    /// offset inside it maps to the run's content start.
+    verbatim: bool,
+}
+
+/// [`source_content_offsets_with`] against the built-in link classifier.
+pub fn source_content_offsets(source: &str) -> SourceContentOffsets {
+    source_content_offsets_with(source, &LinkTargetClassifier::default())
+}
+
+/// Map `source`'s bytes onto the content bytes [`extract_inline_marks_with`]
+/// extracts from it, under the same classifier — one parse, one answer.
+pub fn source_content_offsets_with(
+    source: &str,
+    classifier: &LinkTargetClassifier,
+) -> SourceContentOffsets {
+    let state = extract_state(source, classifier, 0);
+    SourceContentOffsets {
+        runs: state.runs,
+        source_len: source.len(),
+        content_len: state.out.len(),
+    }
+}
+
+impl SourceContentOffsets {
+    pub fn content_len(&self) -> usize {
+        self.content_len
+    }
+
+    pub fn source_len(&self) -> usize {
+        self.source_len
+    }
+
+    /// The content byte a source byte sits at.
+    ///
+    /// A source byte inside markup that produces no content — a delimiter, a
+    /// link target — has no content byte of its own; it maps to the boundary
+    /// of the run it borders, which is where a caret placed there splits.
+    pub fn content_offset(&self, source_byte: usize) -> anyhow::Result<usize> {
+        if source_byte > self.source_len {
+            anyhow::bail!(
+                "source byte {source_byte} is past the {}-byte source it was measured on",
+                self.source_len
+            );
+        }
+        let mut mapped = 0;
+        for run in &self.runs {
+            if source_byte < run.src.start {
+                break;
+            }
+            if source_byte < run.src.end {
+                return Ok(if run.verbatim {
+                    run.content.start + (source_byte - run.src.start)
+                } else {
+                    run.content.start
+                });
+            }
+            mapped = run.content.end;
+        }
+        Ok(mapped)
+    }
+
+    /// The source byte a content byte sits at — the inverse of
+    /// [`Self::content_offset`], for carrying a store-reported caret back onto
+    /// the surface. End-of-content is end-of-source, so a caret the store put
+    /// at the end lands after any trailing markup rather than inside it.
+    pub fn source_offset(&self, content_byte: usize) -> anyhow::Result<usize> {
+        if content_byte > self.content_len {
+            anyhow::bail!(
+                "content byte {content_byte} is past the {}-byte content it was measured on",
+                self.content_len
+            );
+        }
+        if content_byte == self.content_len {
+            return Ok(self.source_len);
+        }
+        for run in &self.runs {
+            if content_byte < run.content.end {
+                return Ok(if run.verbatim {
+                    run.src.start + (content_byte - run.content.start)
+                } else {
+                    run.src.start
+                });
+            }
+        }
+        // Unreachable while the runs tile `[0, content_len)`, which they do by
+        // construction (every content byte is pushed by exactly one run).
+        anyhow::bail!(
+            "content byte {content_byte} falls in no run of a {}-byte content",
+            self.content_len
+        )
+    }
 }
 
 fn parse_inline(text: &str) -> SyntaxNode {
@@ -417,6 +544,60 @@ struct ExtractState {
     /// Emit emphasis nodes as their literal source bytes and mint no mark —
     /// the [`expected_reparse`] policy. Links still adopt.
     keep_emphasis_raw: bool,
+    /// Absolute source byte offset of the string being walked (non-zero only
+    /// in the emphasis arm's nested re-parse).
+    src_base: usize,
+    /// Source→content provenance, in source order — see [`OffsetRun`].
+    runs: Vec<OffsetRun>,
+}
+
+/// Where the bytes an emission appends came from in the source.
+enum Provenance {
+    /// One contiguous source range produced the whole appended text.
+    Whole {
+        src: std::ops::Range<usize>,
+        verbatim: bool,
+    },
+    /// A nested re-parse already resolved the provenance, in ABSOLUTE source
+    /// coordinates with content offsets relative to the nested output.
+    Nested(Vec<OffsetRun>),
+}
+
+/// Byte range of `label` inside the link literal `raw` (`[[target][label]]` or
+/// `[[target]]`), as [`strip_link`] carves it — the same `][` split and the
+/// same trim, so the two cannot disagree about where the rendered text sits.
+fn link_label_byte_range(raw: &str, label: &str) -> std::ops::Range<usize> {
+    let inside_start = if raw.starts_with("[[") && raw.ends_with("]]") && raw.len() >= 4 {
+        2
+    } else {
+        0
+    };
+    let inside_end = raw.len() - inside_start;
+    let inside = &raw[inside_start..inside_end];
+    let label_start = inside_start + inside.find("][").map_or(0, |i| i + 2);
+    // Both `strip_link` arms trim the label, so the rendered text is the first
+    // occurrence of that trimmed slice at or after the label's start.
+    raw[label_start..]
+        .find(label)
+        .map_or(label_start..label_start + label.len(), |i| {
+            label_start + i..label_start + i + label.len()
+        })
+}
+
+/// Append `text` to `state.out` and record where in the source it came from.
+///
+/// `src` is ABSOLUTE (already past `src_base`). `verbatim` says whether the
+/// appended bytes are the source bytes, which is what decides if an offset
+/// INSIDE the run maps through.
+fn push_text(state: &mut ExtractState, text: &str, src: std::ops::Range<usize>, verbatim: bool) {
+    let content_start = state.out.len();
+    state.out.push_str(text);
+    state.char_pos += text.chars().count();
+    state.runs.push(OffsetRun {
+        src,
+        content: content_start..state.out.len(),
+        verbatim,
+    });
 }
 
 fn walk_node(node: &SyntaxNode, state: &mut ExtractState) {
@@ -426,8 +607,8 @@ fn walk_node(node: &SyntaxNode, state: &mut ExtractState) {
                 Some(kind_hint) => {
                     if state.keep_emphasis_raw && kind_hint != MarkKindHint::Link {
                         let raw = child_node.text().to_string();
-                        state.char_pos += raw.chars().count();
-                        state.out.push_str(&raw);
+                        let src = node_source_range(&child_node, state);
+                        push_text(state, &raw, src, true);
                     } else {
                         emit_mark(child_node, kind_hint, state);
                     }
@@ -435,7 +616,8 @@ fn walk_node(node: &SyntaxNode, state: &mut ExtractState) {
                 None => walk_node(&child_node, state),
             },
             NodeOrToken::Token(tok) => {
-                scan_text_for_block_refs(tok.text(), state);
+                let tok_start = state.src_base + usize::from(tok.text_range().start());
+                scan_text_for_block_refs(tok.text(), tok_start, state);
             }
         }
     }
@@ -444,15 +626,14 @@ fn walk_node(node: &SyntaxNode, state: &mut ExtractState) {
 /// Scan `text` for `((uuid))` block-ref patterns. Valid UUIDs become
 /// `InlineMark::Link` with `EntityRef::Scheme`; non-UUID `((...))` is
 /// emitted as plain text.
-fn scan_text_for_block_refs(text: &str, state: &mut ExtractState) {
+fn scan_text_for_block_refs(text: &str, src_start: usize, state: &mut ExtractState) {
     let mut pos = 0usize;
     while let Some(open) = text[pos..].find("((") {
         let abs_open = pos + open;
         // Emit plain text before the `((`.
         if open > 0 {
             let before = &text[pos..abs_open];
-            state.out.push_str(before);
-            state.char_pos += before.chars().count();
+            push_text(state, before, src_start + pos..src_start + abs_open, true);
         }
         // Look for `))` after the `((`.
         let after_open = &text[abs_open + 2..];
@@ -465,26 +646,46 @@ fn scan_text_for_block_refs(text: &str, state: &mut ExtractState) {
                     target: EntityRef::from_uri(&EntityUri::block(inner)),
                     label: label.clone(),
                 };
-                push_with_inner_marks(state, &label, vec![], mark);
+                let src = src_start + abs_open..src_start + abs_close;
+                let verbatim = label == text[abs_open..abs_close];
+                push_with_inner_marks(
+                    state,
+                    &label,
+                    vec![],
+                    mark,
+                    Provenance::Whole { src, verbatim },
+                );
             } else {
                 // Emit the full `((...))` as plain text (non-UUID or empty).
                 let full = &text[abs_open..abs_close];
-                state.out.push_str(full);
-                state.char_pos += full.chars().count();
+                push_text(
+                    state,
+                    full,
+                    src_start + abs_open..src_start + abs_close,
+                    true,
+                );
             }
             pos = abs_close;
         } else {
             // No closing `))` — emit `((` as plain text and continue.
-            state.out.push_str("((");
-            state.char_pos += 2;
+            push_text(
+                state,
+                "((",
+                src_start + abs_open..src_start + abs_open + 2,
+                true,
+            );
             pos = abs_open + 2;
         }
     }
     // Emit remaining text.
     let remainder = &text[pos..];
     if !remainder.is_empty() {
-        state.out.push_str(remainder);
-        state.char_pos += remainder.chars().count();
+        push_text(
+            state,
+            remainder,
+            src_start + pos..src_start + text.len(),
+            true,
+        );
     }
 }
 
@@ -517,8 +718,40 @@ fn inline_mark_kind(kind: SyntaxKind) -> Option<MarkKindHint> {
     })
 }
 
+/// Where in the OUTER source a node sits.
+fn node_source_range(node: &SyntaxNode, state: &ExtractState) -> std::ops::Range<usize> {
+    let r = node.text_range();
+    state.src_base + usize::from(r.start())..state.src_base + usize::from(r.end())
+}
+
+/// Byte range of `raw` left after dropping `prefix_chars` scalars from the
+/// front and `suffix_chars` from the back — the byte twin of
+/// [`strip_prefix_suffix`], whose "too short to strip" arm it reproduces.
+fn stripped_byte_range(
+    raw: &str,
+    prefix_chars: usize,
+    suffix_chars: usize,
+) -> std::ops::Range<usize> {
+    if raw.chars().count() < prefix_chars + suffix_chars {
+        return 0..raw.len();
+    }
+    let start = raw
+        .char_indices()
+        .nth(prefix_chars)
+        .map_or(raw.len(), |(i, _)| i);
+    let end = raw.len()
+        - raw
+            .chars()
+            .rev()
+            .take(suffix_chars)
+            .map(char::len_utf8)
+            .sum::<usize>();
+    start..end
+}
+
 fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState) {
     let raw = node.text().to_string();
+    let node_src = node_source_range(&node, state);
 
     match kind_hint {
         MarkKindHint::Link => {
@@ -533,39 +766,75 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
             if text.is_empty() {
                 return;
             }
-            push_with_inner_marks(state, &text, vec![], mark);
+            // The label is a slice of the link literal, so a caret inside it
+            // maps through; the target and brackets around it carry no content.
+            let label_src = link_label_byte_range(&raw, &text);
+            push_with_inner_marks(
+                state,
+                &text,
+                vec![],
+                mark,
+                Provenance::Whole {
+                    src: node_src.start + label_src.start..node_src.start + label_src.end,
+                    verbatim: raw[label_src.clone()] == text,
+                },
+            );
         }
         MarkKindHint::Sub | MarkKindHint::Super => {
             // SUBSCRIPT / SUPERSCRIPT: `_{…}` / `^{…}` — strip 2-char prefix + 1-char
             // suffix. No nested marks supported in sub/super for Phase 1 (rare
             // in practice).
             let inner = strip_prefix_suffix(&raw, 2, 1);
+            let inner_src = stripped_byte_range(&raw, 2, 1);
             let mark = match kind_hint {
                 MarkKindHint::Sub => InlineMark::Sub,
                 MarkKindHint::Super => InlineMark::Super,
                 _ => unreachable!(),
             };
-            push_with_inner_marks(state, &inner, vec![], mark);
+            push_with_inner_marks(
+                state,
+                &inner,
+                vec![],
+                mark,
+                Provenance::Whole {
+                    src: node_src.start + inner_src.start..node_src.start + inner_src.end,
+                    verbatim: true,
+                },
+            );
         }
         MarkKindHint::Verbatim | MarkKindHint::Code => {
             // Org verbatim/code objects are literal: they cannot contain other
             // objects, so the inner text is emitted verbatim with no recursion
             // (otherwise `=a *b* c=` would strip the user's literal asterisks).
             let inner = strip_prefix_suffix(&raw, 1, 1);
+            let inner_src = stripped_byte_range(&raw, 1, 1);
             let mark = match kind_hint {
                 MarkKindHint::Verbatim => InlineMark::Verbatim,
                 MarkKindHint::Code => InlineMark::Code,
                 _ => unreachable!(),
             };
-            push_with_inner_marks(state, &inner, vec![], mark);
+            push_with_inner_marks(
+                state,
+                &inner,
+                vec![],
+                mark,
+                Provenance::Whole {
+                    src: node_src.start + inner_src.start..node_src.start + inner_src.end,
+                    verbatim: true,
+                },
+            );
         }
         _ => {
             // BOLD/ITALIC/UNDERLINE/STRIKE: 1-char delimiter each side.
             let inner = strip_prefix_suffix(&raw, 1, 1);
+            let inner_src = stripped_byte_range(&raw, 1, 1);
             // Recurse into the inner string for nested marks. orgize re-parses
             // the substring fresh; nested mark offsets are scalar offsets
-            // within `inner`, ready to be shifted by the outer start.
-            let (nested_text, nested_marks) = extract_inline_marks_with(&inner, &state.classifier);
+            // within `inner`, ready to be shifted by the outer start. The
+            // re-parse is told where `inner` sits in the OUTER source, so the
+            // runs it reports need no rebasing here.
+            let nested = extract_state(&inner, &state.classifier, node_src.start + inner_src.start);
+            let (nested_text, nested_marks) = (nested.out, nested.marks);
             // The text from recursion may differ from `inner` if it had nested
             // marks (delimiters were stripped). Use nested_text as the actual
             // emitted content.
@@ -576,7 +845,13 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
                 MarkKindHint::Strike => InlineMark::Strike,
                 _ => unreachable!(),
             };
-            push_with_inner_marks(state, &nested_text, nested_marks, outer_mark);
+            push_with_inner_marks(
+                state,
+                &nested_text,
+                nested_marks,
+                outer_mark,
+                Provenance::Nested(nested.runs),
+            );
         }
     }
 }
@@ -588,11 +863,25 @@ fn push_with_inner_marks(
     text: &str,
     inner_marks: Vec<MarkSpan>,
     outer_mark: InlineMark,
+    provenance: Provenance,
 ) {
     let start = state.char_pos;
+    let content_start = state.out.len();
     state.out.push_str(text);
     state.char_pos += text.chars().count();
     let end = state.char_pos;
+    match provenance {
+        Provenance::Whole { src, verbatim } => state.runs.push(OffsetRun {
+            src,
+            content: content_start..state.out.len(),
+            verbatim,
+        }),
+        Provenance::Nested(runs) => state.runs.extend(runs.into_iter().map(|run| OffsetRun {
+            src: run.src,
+            content: content_start + run.content.start..content_start + run.content.end,
+            verbatim: run.verbatim,
+        })),
+    }
 
     state.marks.push(MarkSpan::new(start, end, outer_mark));
     for span in inner_marks {
@@ -1664,5 +1953,130 @@ mod tests {
                 raw: "block:abc-123".to_string()
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod source_content_offset_tests {
+    use super::extract_inline_marks;
+    use super::source_content_offsets;
+
+    /// The end of the source is the end of the content — the offset the Enter
+    /// key hands to `split_block` from a caret parked at end of line.
+    #[test]
+    fn end_of_source_is_end_of_content() {
+        let source = "Add column ~installation_source~ which can contain Ansible reference";
+        let (content, _) = extract_inline_marks(source);
+        let map = source_content_offsets(source);
+        assert_eq!(source.len(), 68);
+        assert_eq!(content.len(), 66);
+        assert_eq!(map.content_offset(source.len()).unwrap(), content.len());
+    }
+
+    /// Every source offset maps into the content, monotonically, and the map
+    /// agrees with the extraction it is derived from: the text left of a
+    /// mapped caret is what extracting the source and cutting there gives.
+    #[test]
+    fn the_map_is_monotone_and_in_bounds_for_every_boundary() {
+        for source in [
+            "plain text",
+            "~code~ tail",
+            "lead *bold* tail",
+            "/it/ and =v= and +s+",
+            "[[block:abc][Label]] tail",
+            "[[Page Name]] tail",
+            "*outer /inner/ rest*",
+            "a _{sub} b ^{sup} c",
+            "((550e8400-e29b-41d4-a716-446655440000)) ref",
+            "ünicöde ~mär~ tail",
+            "no close ~here",
+        ] {
+            let (content, _) = extract_inline_marks(source);
+            let map = source_content_offsets(source);
+            let mut previous = 0;
+            for k in (0..=source.len()).filter(|k| source.is_char_boundary(*k)) {
+                let mapped = map
+                    .content_offset(k)
+                    .unwrap_or_else(|e| panic!("{source:?} @ {k}: {e}"));
+                assert!(
+                    mapped >= previous,
+                    "{source:?}: offset {k} mapped to {mapped}, behind {previous}"
+                );
+                assert!(
+                    content.is_char_boundary(mapped),
+                    "{source:?}: offset {k} mapped to non-boundary {mapped} of {content:?}"
+                );
+                previous = mapped;
+            }
+            assert_eq!(
+                map.content_offset(source.len()).unwrap(),
+                content.len(),
+                "{source:?}: end of source must be end of content"
+            );
+        }
+    }
+
+    /// A caret inside a mark's text maps to the same character on the other
+    /// side of the seam — the property a split depends on.
+    #[test]
+    fn a_caret_inside_markup_maps_to_the_same_character() {
+        let source = "lead ~code~ tail";
+        let (content, _) = extract_inline_marks(source);
+        assert_eq!(content, "lead code tail");
+        let map = source_content_offsets(source);
+        // `lead ~co|de~` → `lead co|de`
+        assert_eq!(map.content_offset(8).unwrap(), 7);
+        // Both delimiters map to the boundary of the text they wrap.
+        assert_eq!(map.content_offset(5).unwrap(), 5);
+        assert_eq!(map.content_offset(6).unwrap(), 5);
+        assert_eq!(map.content_offset(10).unwrap(), 9);
+        assert_eq!(map.content_offset(11).unwrap(), 9);
+    }
+
+    /// Text with no markup is its own content, so the map is the identity —
+    /// the case every untouched block is in.
+    #[test]
+    fn markup_free_text_maps_identically() {
+        let source = "just some words";
+        let map = source_content_offsets(source);
+        for k in 0..=source.len() {
+            assert_eq!(map.content_offset(k).unwrap(), k);
+            assert_eq!(map.source_offset(k).unwrap(), k);
+        }
+    }
+
+    /// Round-trip: a content offset carried back to the surface and forward
+    /// again is the offset it started as.
+    #[test]
+    fn content_offsets_round_trip_through_the_source() {
+        for source in [
+            "~code~ tail",
+            "lead *bold* tail",
+            "[[block:abc][Label]] tail",
+            "a *b /c/ d* e",
+        ] {
+            let (content, _) = extract_inline_marks(source);
+            let map = source_content_offsets(source);
+            for c in (0..=content.len()).filter(|c| content.is_char_boundary(*c)) {
+                let back = map
+                    .source_offset(c)
+                    .unwrap_or_else(|e| panic!("{source:?}: {e}"));
+                assert_eq!(
+                    map.content_offset(back).unwrap(),
+                    c,
+                    "{source:?}: content {c} → source {back} → content mismatch"
+                );
+            }
+        }
+    }
+
+    /// Out-of-range is an Err naming both numbers, never a clamp.
+    #[test]
+    fn an_out_of_range_offset_is_refused() {
+        let map = source_content_offsets("~x~");
+        let err = map.content_offset(4).unwrap_err().to_string();
+        assert!(err.contains('4') && err.contains('3'), "{err}");
+        let err = map.source_offset(2).unwrap_err().to_string();
+        assert!(err.contains('2') && err.contains('1'), "{err}");
     }
 }

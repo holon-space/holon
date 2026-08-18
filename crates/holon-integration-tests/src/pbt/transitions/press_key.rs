@@ -194,11 +194,34 @@ impl<
         // shared cap fn — one implementation for SplitBlock AND PressKey, so
         // the two can't drift (the drift hosted the SplitBlock Heisenbug).
         if matches!(single, Some(Key::Enter)) && !has_modifier {
+            // The caret is measured on the SURFACE the editor shows; the split
+            // cuts the CONTENT column under it. Production crosses that seam
+            // before it dispatches (`EditorViewModel::structural_caret`), and
+            // the model calls the same function so it cannot describe a split
+            // position production never computes.
+            let surface = state
+                .active_editor_text()
+                .expect("PressKey::apply_to_ref: active editor has no text")
+                .to_owned();
+            // The KEYWORD prefix only — `editor_source_text` is the surface
+            // minus exactly that. Subtracting the CONTENT length instead would
+            // swallow the markup delta, which is not a prefix and is crossed by
+            // the offset map inside `surface_caret_to_content`.
+            let surface_prefix = state
+                .editor_surface_text(&block_id)
+                .len()
+                .saturating_sub(state.editor_source_text(&block_id).len());
+            let position = holon_frontend::editor_view_model::surface_caret_to_content(
+                &surface,
+                surface_prefix,
+                cursor_byte,
+            )
+            .unwrap_or_else(|e| {
+                panic!("PressKey::apply_to_ref: caret does not land on {block_id}'s surface: {e}")
+            });
             commit_active_editor_if_changed(state);
             crate::pbt::transitions::split_block::split_block_apply_to_ref(
-                &block_id,
-                cursor_byte,
-                state,
+                &block_id, position, state,
             );
         }
         // Backspace at position 0: commit, then join — IF a merge target

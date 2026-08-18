@@ -48,6 +48,7 @@ use dioxus::prelude::*;
 use gloo_timers::callback::Timeout;
 use holon_frontend::OperationIntent;
 use holon_frontend::editor_view_model::EditorKey;
+use holon_frontend::editor_view_model::StructuralCaret;
 use holon_frontend::editor_view_model::structural_block_action;
 
 use crate::BRIDGE;
@@ -337,7 +338,13 @@ fn handle_structural_key(evt: &KeyboardEvent, entity_id: &str, prop_content: &st
         _ => 0,
     };
 
-    let Some(intent) = structural_block_action(key, entity_id, cursor_byte) else {
+    // `EditorCell` renders the CONTENT column itself — no keyword projection,
+    // no inline markup re-rendered — so its caret is already a content offset
+    // and there is no seam to cross. It gains one the moment this editor shows
+    // vault syntax the way GPUI's does, and then it needs
+    // `EditorViewModel::structural_caret` like GPUI has.
+    let caret = StructuralCaret::on_plain_text(cursor_byte);
+    let Some(intent) = structural_block_action(key, entity_id, caret) else {
         return;
     };
     if key == EditorKey::Backspace {

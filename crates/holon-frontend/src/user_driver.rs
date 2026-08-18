@@ -282,6 +282,23 @@ pub trait UserDriver: Send + Sync {
         Err("editor caret not observable by this driver".to_string())
     }
 
+    /// Characters between the start of `block_id`'s editable SURFACE and the
+    /// CONTENT byte `content_byte` — how many `right` keystrokes place the
+    /// caret where a content-coordinate transition position wants it.
+    ///
+    /// `Err` = this driver has no surface projection to cross, and its caller
+    /// must say what it does instead. The two coordinate systems differ by the
+    /// task keyword and by every inline-markup delimiter the surface shows and
+    /// the content column does not.
+    fn surface_chars_before_content(
+        &self,
+        block_id: &EntityUri,
+        content_byte: usize,
+    ) -> Result<usize, String> {
+        let _ = (block_id, content_byte);
+        Err("editable surface not projected by this driver".to_string())
+    }
+
     /// True iff `entity_id` is visible AND located within `region`'s panel.
     fn is_in_region(&self, entity_id: &EntityUri, region: holon_api::Region) -> bool;
 
@@ -532,6 +549,24 @@ impl ReactiveEngineDriver {
             .note_focus_settled(&self.engine, focused.as_ref().map(EntityUri::as_str))
             .await?;
         if let Some(block) = focused {
+            // A structural op's focus response MOUNTS an editor on the block it
+            // hands the caret to — prod does, and the reference models it
+            // (`open_active_editor`). Without this the mirror left a split's new
+            // block with no VM and `editor_live_text` fell back to the Loro
+            // content cell, reporting the stripped content column as "what the
+            // editor shows" while the surface is a source projection.
+            //
+            // Gated on the armed seed, which is what marks a focus as an op's
+            // response rather than a plain navigation: mounting on every settle
+            // would charge two authority reads per focused block to blocks no
+            // editor ever opened on (the keystone's PinBlock read budget).
+            if self.engine.peek_caret_seed(&block).is_some()
+                && self.editor_mirror.live_text(&block.to_string()).is_none()
+            {
+                self.editor_mirror
+                    .reset_editor_from_authority(&self.engine, &block)
+                    .await?;
+            }
             // A structural op may have armed a caret seed for an editor that
             // is already open (a position-0 split keeps the caret on the
             // ORIGINAL id), in which case nothing mounts to apply it. GPUI
@@ -1259,6 +1294,16 @@ impl UserDriver for ReactiveEngineDriver {
     /// full URI string, matching `handle_keystroke`'s `block_uri.to_string()`.
     fn editor_cursor_byte(&self, block_id: &EntityUri) -> Result<Option<usize>, String> {
         Ok(self.editor_mirror.tracked_cursor(&block_id.to_string()))
+    }
+
+    fn surface_chars_before_content(
+        &self,
+        block_id: &EntityUri,
+        content_byte: usize,
+    ) -> Result<usize, String> {
+        self.editor_mirror
+            .surface_chars_before_content(&block_id.to_string(), content_byte)
+            .map_err(|e| format!("{e:#}"))
     }
 
     /// Tree-aware click: dispatch the bound `click_intent()` if the node has
