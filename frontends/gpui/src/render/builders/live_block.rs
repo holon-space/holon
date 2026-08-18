@@ -4,7 +4,6 @@ use holon_api::EntityUri;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 
 use super::prelude::*;
-use crate::navigation_state::NavigationState;
 use crate::views::ReactiveShell;
 
 /// Render a live_block by looking up or lazily creating a ReactiveShell entity.
@@ -65,21 +64,19 @@ fn get_or_create_live_block(
     // A panel wrapper inherits `Panel` from the window root; a `live_block()`
     // inside an outline row inherits `Nested` from the row's context.
     let placement = ctx.placement;
+    // The AMBIENT router, not a fresh one: `InputRouter` is where the window
+    // installed the root tree and the live-block resolver, and every input a
+    // block's editor bubbles (`Navigate` for the arrows, `KeyChord` for
+    // Tab/Shift+Tab/Alt+Up/Alt+Down) is answered from it. A per-shell router
+    // has no root, so it answers `None` to everything.
+    let nav = ctx.nav.clone();
 
     ctx.local.get_or_create_typed(key, || {
         ctx.with_gpui(|_window, cx| {
             let live_block = services.watch_live(&uri, services.clone());
             cx.new(|cx| {
                 ReactiveShell::new_for_block(
-                    bid,
-                    render_ctx,
-                    services,
-                    live_block,
-                    NavigationState::new(),
-                    bounds,
-                    ancestors,
-                    placement,
-                    cx,
+                    bid, render_ctx, services, live_block, nav, bounds, ancestors, placement, cx,
                 )
             })
         })
