@@ -87,7 +87,9 @@ fn build_rows(
     services: &dyn BuilderServices,
 ) -> Vec<Arc<DataRow>> {
     match chain_uri(focused, level) {
-        Some(uri) => ops_rows_for_uri(uri.as_str(), services),
+        // The focus chain holds no rendered row; a relation-guarded op reaching
+        // here is undecidable and `ops_rows_for_uri` says so.
+        Some(uri) => ops_rows_for_uri(uri.as_str(), services, &DataRow::new()),
         None => Vec::new(),
     }
 }
