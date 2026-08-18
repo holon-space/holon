@@ -36,6 +36,7 @@ pub mod display_placement_canonical_inert;
 pub mod drawer_open_matches_ref;
 pub mod embedded_page_collapsed_lazy;
 pub mod every_page_has_its_own_file;
+pub mod filter_spec_resolves;
 pub mod journal_feed_viewport_lazy;
 pub mod no_errors;
 pub mod no_orphan_blocks;

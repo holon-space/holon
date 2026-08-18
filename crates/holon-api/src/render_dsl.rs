@@ -118,6 +118,24 @@ pub fn parse_render_dsl_with_names(source: &str, names: &[&str]) -> Result<Rende
     parse_render_dsl_with_engine(source, &create_render_engine_with_names(&name_refs))
 }
 
+/// Parse render-DSL predicate text (`eq("completed", 1)`,
+/// `and(…, not(is_not_null("scheduled")))`) into a typed [`Predicate`].
+///
+/// The predicate constructors are registered on the render engine, so this
+/// reuses the same `parse → eval → serde` round-trip the `rules:` argument
+/// takes (`render_interpreter::parse_rules_arg`). Fails loud with the offending
+/// source when the text is not a well-formed predicate — the filter boundary
+/// (FLT-1.b) turns a malformed body into a boundary error, never a default.
+pub fn parse_predicate(source: &str) -> Result<crate::predicate::Predicate> {
+    let expr = parse_render_dsl(source)
+        .with_context(|| format!("filter predicate is not valid DSL: {source:?}"))?;
+    let val = crate::eval_to_value(&expr, &HashMap::<String, crate::Value>::new());
+    let json = serde_json::to_value(&val)
+        .with_context(|| format!("filter predicate Value → JSON failed: {source:?}"))?;
+    serde_json::from_value::<crate::predicate::Predicate>(json)
+        .with_context(|| format!("filter predicate is not a Predicate: {source:?}"))
+}
+
 /// Rhai keywords / built-ins that must NOT be registered as widget functions.
 /// Registering these would either fail or shadow language constructs.
 const RHAI_RESERVED: &[&str] = &[
@@ -769,10 +787,7 @@ mod tests {
     // `parse_rules_arg` (render_interpreter.rs) takes for `rules: [...]`.
 
     fn parse_predicate(source: &str) -> crate::predicate::Predicate {
-        let expr = parse(source).expect("parse predicate DSL");
-        let val = crate::eval_to_value(&expr, &HashMap::<String, crate::Value>::new());
-        let json = serde_json::to_value(&val).expect("Value → JSON");
-        serde_json::from_value::<crate::predicate::Predicate>(json).expect("JSON → Predicate")
+        super::parse_predicate(source).expect("parse predicate DSL")
     }
 
     #[test]

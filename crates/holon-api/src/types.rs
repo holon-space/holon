@@ -410,6 +410,11 @@ pub enum SourceLanguage {
     /// rule card — "legacy 'action' language; rename to holon_rule" — instead
     /// of silently becoming an inert unknown source. See ADR 0024 WP3.
     LegacyAction,
+    /// A bookmarkable filter (FLT-1.b). Its body is a predicate in the render
+    /// DSL predicate grammar (`eq`/`and`/`not`/`is_not_null`/…) and its
+    /// containing headline names it. Typed so a malformed predicate body fails
+    /// loud at the boundary instead of degrading into an inert `Other` source.
+    HolonFilter,
     Other(String),
 }
 
@@ -449,6 +454,7 @@ impl fmt::Display for SourceLanguage {
             SourceLanguage::Render => write!(f, "render"),
             SourceLanguage::HolonRule => write!(f, "holon_rule"),
             SourceLanguage::LegacyAction => write!(f, "action"),
+            SourceLanguage::HolonFilter => write!(f, "holon_filter"),
             SourceLanguage::Other(s) => write!(f, "{s}"),
         }
     }
@@ -466,6 +472,9 @@ impl FromStr for SourceLanguage {
         }
         if s.eq_ignore_ascii_case("action") {
             return Ok(SourceLanguage::LegacyAction);
+        }
+        if s.eq_ignore_ascii_case("holon_filter") {
+            return Ok(SourceLanguage::HolonFilter);
         }
         match QueryLanguage::from_str(s) {
             Ok(q) => Ok(SourceLanguage::Query(q)),

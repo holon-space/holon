@@ -41,6 +41,9 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // `file:` URI), not just the one call site a fix was reported at.
         invariants::no_write_outside_vault_root::wire(),
         invariants::source_language::wire(),
+        // FLT-1.b: every `holon_filter` source block resolves to a typed
+        // FilterSpec over the projected block set. SutBackend only, no ref.
+        invariants::filter_spec_resolves::wire(),
         // Org render fixed point (E1): needs `SutOrgRender`, no ref. Only the
         // frontend slice supplies it (production CacheBlockReader + OrgRenderer).
         invariants::org_render_fixed_point::wire(),

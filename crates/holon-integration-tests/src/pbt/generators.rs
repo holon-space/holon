@@ -838,6 +838,62 @@ pub fn generate_org_file_content_with_keywords(
     // Flip the env var to actively hunt mount-shape regressions (e.g. the
     // May-2026 `Phase 6: Flow Optimization` loop class); leave it off to
     // keep CI green.
+    // Filter file (FLT-1.b): a headline naming the filter plus ONE
+    // `holon_filter` source block whose body is a render-DSL predicate and whose
+    // `:polarity` / `:subtree` header args say what it does. Inert data like the
+    // advice-rule and render-artifact arms — it overrides no profile and renders
+    // as plain text (no `filter_card` until Inc 4) — so it rides in every mix.
+    // Exercises `inv-source-language-iff-source`, the org round-trip oracles, and
+    // `inv-filter-spec-resolves` over the real projection.
+    let file_with_filter = (
+        "[a-z_]+_[0-9]+\\.org",
+        "[A-Z][a-zA-Z0-9 ]{0,15}", // headline = the filter's name
+        "[a-z0-9-]+",              // heading id
+        prop::sample::select(vec![
+            "eq(\"completed\", 1)",
+            "not(is_not_null(\"scheduled\"))",
+            "and(eq(\"level\", 0),\n    is_not_null(\"title\"))",
+        ]),
+        prop::sample::select(vec!["hide", "keep"]),
+        prop::sample::select(vec!["just-block", "with-descendants"]),
+    )
+        .prop_map(|(filename, headline, id, body, polarity, subtree)| {
+            let doc_uri = EntityUri::block("gen-placeholder");
+            let heading_uri = EntityUri::block(&id);
+
+            let mut heading = Block::new_text(heading_uri.clone(), doc_uri.clone(), &headline);
+            heading.set_property("ID", Value::String(id.clone()));
+
+            let mut filter = Block::new_source(
+                EntityUri::block(&format!("{id}::src::0")),
+                heading_uri,
+                "holon_filter",
+                body,
+            );
+            filter.set_sequence(1);
+            filter.set_property("polarity", Value::String(polarity.to_string()));
+            filter.set_property("subtree", Value::String(subtree.to_string()));
+
+            // Round-trip guard (fail loud): the FLT-1.b boundary the invariant
+            // asserts must already hold for the minted intent — a parser-circular
+            // mismatch here is caught before it leaves the arm.
+            let spec = holon_api::filter::FilterSpec::parse(
+                &EntityUri::block(&id),
+                &[heading.clone(), filter.clone()],
+            )
+            .expect("generator-minted filter must resolve to a FilterSpec");
+            assert_eq!(spec.name, headline);
+            let expected_polarity = match polarity {
+                "hide" => holon_api::filter::FilterPolarity::Hide,
+                _ => holon_api::filter::FilterPolarity::Keep,
+            };
+            assert_eq!(spec.polarity, expected_polarity);
+
+            let blocks = vec![heading, filter];
+            (filename, blocks)
+        })
+        .boxed();
+
     let mount_enabled = std::env::var("HOLON_PBT_SHARED_TREE_MOUNT").ok().as_deref() == Some("1");
 
     // Mix the advice-rule arm into a profile-bearing base at a weight
@@ -867,6 +923,7 @@ pub fn generate_org_file_content_with_keywords(
                 1 => index_file_tree,
                 1 => file_with_profile,
                 1 => file_with_render_artifacts,
+                1 => file_with_filter,
                 2 => shared_tree_mount_file,
             ]
             .boxed()
@@ -881,6 +938,7 @@ pub fn generate_org_file_content_with_keywords(
                 1 => index_file_tree,
                 1 => file_with_profile,
                 1 => file_with_render_artifacts,
+                1 => file_with_filter,
             ]
             .boxed()
         };
@@ -895,6 +953,7 @@ pub fn generate_org_file_content_with_keywords(
             8 => regular_file,
             1 => file_with_profile,
             1 => file_with_render_artifacts,
+            1 => file_with_filter,
         ]
         .boxed();
         mix_advice(base, file_with_advice_rule)
@@ -912,6 +971,7 @@ pub fn generate_org_file_content_with_keywords(
         let base = prop_oneof![
             8 => regular_file,
             1 => file_with_render_artifacts,
+            1 => file_with_filter,
         ]
         .boxed();
         mix_advice(base, file_with_advice_rule)
