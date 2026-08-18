@@ -46,6 +46,23 @@ fn parse(source: &str) -> anyhow::Result<holon_org_format::ParseResult> {
     )
 }
 
+/// Collect every `.org` file under `dir`, recursively. The gate must cover
+/// nested asset directories (e.g. `assets/default/types/`), not only the top
+/// level — a non-recursive scan would let a refused asset in a subdirectory
+/// ship green.
+fn org_files_under(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("read asset dir") {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            out.extend(org_files_under(&path));
+        } else if path.extension().is_some_and(|x| x == "org") {
+            out.push(path);
+        }
+    }
+    out
+}
+
 /// THE GATE. Every org file Holon SHIPS must ingest with the production
 /// parser. This is the check whose absence let an asset the parser refuses
 /// ship green.
@@ -54,11 +71,7 @@ fn every_shipped_default_asset_ingests_with_the_production_parser() {
     let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/default");
     let assets = assets.canonicalize().expect("assets/default must exist");
 
-    let mut org_files: Vec<_> = std::fs::read_dir(&assets)
-        .expect("read assets/default")
-        .map(|e| e.expect("dir entry").path())
-        .filter(|p| p.extension().is_some_and(|x| x == "org"))
-        .collect();
+    let mut org_files = org_files_under(&assets);
     org_files.sort();
     assert!(
         !org_files.is_empty(),
@@ -324,5 +337,160 @@ fn instantiating_the_shipped_compass_problem_yields_a_real_contributes_to_edge()
         instance.contributes_to,
         vec![EntityUri::parse("block:the-mission-block").unwrap()],
         "the instantiated Compass problem must carry a REAL contributes-to edge"
+    );
+}
+
+/// A slot on a SOURCE-BLOCK header arg survives the round trip too.
+///
+/// Caught by a verifier probe on the first cut of this change: the
+/// `contributes-to` / `REQUIRES` header-arg branches OWN their key — the
+/// generic property fallthrough beneath them is an `else if` — so a branch that
+/// stored no typed edge for a slot dropped the authored text entirely. Silent
+/// data loss on a template's own file.
+#[test]
+fn a_slot_on_a_source_block_header_arg_survives_the_round_trip() {
+    let source = "\
+* Problem
+:PROPERTIES:
+:ID: tpl-0
+:TEMPLATE: compass-problem
+:TEMPLATE_VARS: title, mission
+:END:
+#+begin_src prql :id s0 :contributes-to {{mission}}
+from x
+#+end_src
+";
+    let parsed = parse(source).expect("a src-block slot inside a template must parse");
+    let sb = parsed
+        .blocks
+        .iter()
+        .find(|b| b.id.id() == "s0")
+        .expect("source block present");
+    assert!(
+        sb.contributes_to.is_empty(),
+        "a slot contributes no typed edge, got {:?}",
+        sb.contributes_to
+    );
+
+    let rendered = OrgRenderer::render_document(
+        &parsed.document,
+        &parsed.blocks,
+        Path::new(FILE),
+        &parsed.document.id,
+    );
+    assert!(
+        rendered.contains("{{mission}}"),
+        "the authored slot must survive write-back — dropping it rewrites the template file \
+         without its slots. Rendered:\n{rendered}"
+    );
+}
+
+/// The `none` sentinel belongs to `:contributes-to:` ALONE.
+///
+/// `:REQUIRES: none` has always meant an edge to a block called `none`.
+/// Widening the sentinel across every edge key silently deletes that edge, so
+/// the scope is pinned here.
+#[test]
+fn none_is_a_contributes_to_sentinel_only_and_requires_keeps_its_edge() {
+    let contributes =
+        parse("* G\n:PROPERTIES:\n:ID: c0\n:contributes-to: none\n:END:\n").expect("parses");
+    let c = contributes
+        .blocks
+        .iter()
+        .find(|b| b.id.id() == "c0")
+        .expect("block present");
+    assert!(
+        c.contributes_to.is_empty(),
+        "`none` is the authored empty set for contributes-to, got {:?}",
+        c.contributes_to
+    );
+
+    let requires = parse("* T\n:PROPERTIES:\n:ID: r0\n:REQUIRES: none\n:END:\n").expect("parses");
+    let r = requires
+        .blocks
+        .iter()
+        .find(|b| b.id.id() == "r0")
+        .expect("block present");
+    assert_eq!(
+        r.requires,
+        vec![EntityUri::parse("block:none").unwrap()],
+        "`:REQUIRES: none` names a block called `none` — it is not an empty-set sentinel"
+    );
+}
+
+/// A headline `:REQUIRES:` / `:BLOCKED-BY:` slot inside a template survives the
+/// round trip too — the same OWNS-the-key hazard as `:contributes-to:`. Both
+/// dependency spellings route through `edge_ids`; a slot yields no edge and the
+/// authored text must be carried as a plain drawer property, not dropped.
+#[test]
+fn a_headline_requires_slot_inside_a_template_survives_the_round_trip() {
+    for key in ["REQUIRES", "BLOCKED-BY"] {
+        let source = format!(
+            "* Task\n:PROPERTIES:\n:ID: tpl-0\n:TEMPLATE: compass-task\n\
+             :TEMPLATE_VARS: dep\n:{key}: {{{{dep}}}}\n:END:\n"
+        );
+        let parsed = parse(&source).unwrap_or_else(|e| panic!("`:{key}:` slot must parse: {e:#}"));
+        let block = parsed
+            .blocks
+            .iter()
+            .find(|b| b.id.id() == "tpl-0")
+            .expect("template root present");
+        assert!(
+            block.requires.is_empty(),
+            "a `:{key}:` slot contributes no dependency edge, got {:?}",
+            block.requires
+        );
+
+        let rendered = OrgRenderer::render_document(
+            &parsed.document,
+            &parsed.blocks,
+            Path::new(FILE),
+            &parsed.document.id,
+        );
+        assert!(
+            rendered.contains("{{dep}}"),
+            "the authored `:{key}:` slot must survive write-back — dropping it rewrites the \
+             template without its dependency slot. Rendered:\n{rendered}"
+        );
+    }
+}
+
+/// A slot on a SOURCE-BLOCK `:REQUIRES` header arg survives too — the src-block
+/// dependency branch OWNS its key exactly like the headline path, so the same
+/// silent-drop hazard applies.
+#[test]
+fn a_requires_slot_on_a_source_block_header_arg_survives_the_round_trip() {
+    let source = "\
+* Task
+:PROPERTIES:
+:ID: tpl-0
+:TEMPLATE: compass-task
+:TEMPLATE_VARS: dep
+:END:
+#+begin_src prql :id s0 :REQUIRES {{dep}}
+from x
+#+end_src
+";
+    let parsed = parse(source).expect("a src-block REQUIRES slot inside a template must parse");
+    let sb = parsed
+        .blocks
+        .iter()
+        .find(|b| b.id.id() == "s0")
+        .expect("source block present");
+    assert!(
+        sb.requires.is_empty(),
+        "a slot contributes no dependency edge, got {:?}",
+        sb.requires
+    );
+
+    let rendered = OrgRenderer::render_document(
+        &parsed.document,
+        &parsed.blocks,
+        Path::new(FILE),
+        &parsed.document.id,
+    );
+    assert!(
+        rendered.contains("{{dep}}"),
+        "the authored src-block `:REQUIRES` slot must survive write-back. Rendered:\n{rendered}"
     );
 }

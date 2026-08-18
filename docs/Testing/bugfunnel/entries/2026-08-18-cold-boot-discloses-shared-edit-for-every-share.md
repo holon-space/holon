@@ -150,9 +150,12 @@ reads `Shared subtree not materialized — <file>`, carrying a typed
 (`crates/holon-loro/src/degraded_signal_bus.rs`,
 `frontends/gpui/src/share_ui.rs`).
 
-Rung: `crates/holon-integration-tests/tests/cold_boot_share_disclosure.rs` —
-cold boot over a vault holding a shared subtree discloses NOTHING, and a
-genuine STORE-side edit inside that share still discloses. The teeth test had
+Rung: `crates/holon-integration-tests/tests/cold_boot_share_disclosure.rs`,
+three cases — cold boot over a vault holding a shared subtree discloses
+NOTHING; a WARM restart over the same vault (store already populated) also
+discloses nothing; and a genuine STORE-side edit inside that share still
+discloses. The warm case runs a real second boot, not a no-op restart: 36
+initial-scan events were counted during it. The teeth test had
 to be re-authored: the original drove the edit by writing the org file, which
 under write-back semantics is already ON disk and correctly produces no gap.
 Red for the right reason with the disclosure disabled:

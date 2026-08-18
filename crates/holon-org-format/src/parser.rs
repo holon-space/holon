@@ -682,28 +682,28 @@ fn emit_section_children(
                     // (the `block_requires` junction) so it round-trips as an
                     // edge, symmetric with the headline path above.
                     if let Some(s) = v.as_string() {
-                        for slug in s
-                            .split(|c: char| c == ',' || c.is_whitespace())
-                            .filter(|s| !s.is_empty())
-                        {
-                            match parse_edge_target(slug, &k, src_block.id.as_str(), template)? {
-                                EdgeTarget::Block(uri) => {
+                        let targets = parse_edge_targets(s, &k, src_block.id.as_str(), template)?;
+                        match edge_ids(&targets) {
+                            Some(ids) => {
+                                for uri in ids {
                                     if !src_block.requires.contains(&uri) {
                                         src_block.requires.push(uri);
                                     }
                                 }
-                                // A slot or `none` names no block; the header
-                                // arg itself is preserved by the standard-args
-                                // fallthrough below.
-                                EdgeTarget::None | EdgeTarget::Slot(_) => {}
+                            }
+                            None => {
+                                src_block.set_property(&k, holon_api::Value::String(s.to_string()))
                             }
                         }
                     }
                 } else if k.eq_ignore_ascii_case("contributes-to") {
                     if let Some(s) = v.as_string() {
                         let targets = parse_edge_targets(s, &k, src_block.id.as_str(), template)?;
-                        if let Some(ids) = edge_ids(&targets) {
-                            src_block.contributes_to = ids;
+                        match edge_ids(&targets) {
+                            Some(ids) => src_block.contributes_to = ids,
+                            None => {
+                                src_block.set_property(&k, holon_api::Value::String(s.to_string()))
+                            }
                         }
                     }
                 } else if k.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
@@ -929,20 +929,20 @@ fn process_headlines(
                 // block_requires.sql). Accept both on input and UNION them into
                 // `block.requires`; the renderer emits the canonical
                 // `:REQUIRES:` (ruling 2026-07-16; `:BLOCKED-BY:` converges).
-                for slug in value
-                    .split(|c: char| c == ',' || c.is_whitespace())
-                    .filter(|s| !s.is_empty())
-                {
-                    match parse_edge_target(slug, key, id.as_str(), scope)? {
-                        EdgeTarget::Block(uri) => {
+                let targets = parse_edge_targets(value, key, id.as_str(), scope)?;
+                match edge_ids(&targets) {
+                    Some(ids) => {
+                        for uri in ids {
                             if !block.requires.contains(&uri) {
                                 block.requires.push(uri);
                             }
                         }
-                        // Neither names a block. A slot-bearing value is kept
-                        // verbatim by the raw-property carrier below.
-                        EdgeTarget::None | EdgeTarget::Slot(_) => {}
                     }
+                    // Slot-bearing: carry the authored text through as a plain
+                    // drawer property. This branch OWNS the key — the loop's
+                    // property fallthrough is an `else if`, so failing to store
+                    // it here loses the slot on write-back.
+                    None => block.set_property(key, holon_api::Value::String(value.to_string())),
                 }
             } else if key.eq_ignore_ascii_case("contributes-to") {
                 // `:contributes-to:` is the Compass CONTRIBUTION edge — same
@@ -1423,7 +1423,10 @@ fn parse_edge_target(
     owner: &str,
     template: Option<&TemplateVars>,
 ) -> anyhow::Result<EdgeTarget> {
-    if slug.eq_ignore_ascii_case("none") {
+    // `none` is the authored empty-set sentinel for `:contributes-to:` ONLY.
+    // `:REQUIRES: none` has always meant an edge to a block called `none`, and
+    // widening the sentinel here would silently drop that edge.
+    if key.eq_ignore_ascii_case("contributes-to") && slug.eq_ignore_ascii_case("none") {
         return Ok(EdgeTarget::None);
     }
     if let Some(name) = template_slot_name(slug) {

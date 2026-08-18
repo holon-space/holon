@@ -1058,16 +1058,16 @@ impl FileSyncController {
         self
     }
 
-    /// Wire the authoritative mount registry (Inc 3). Without it, a file whose
-    /// parsed content looks like a shared-subtree projection is NOT treated as
-    /// one (ingested normally) — the guard only skips ids the registry
-    /// confirms.
     /// Wire the shared-subtree write-back disclosure (see `share_disclosure`).
     pub fn with_share_disclosure(mut self, disclosure: Arc<dyn ShareWritebackDisclosure>) -> Self {
         self.share_disclosure = Some(disclosure);
         self
     }
 
+    /// Wire the authoritative mount registry (Inc 3). Without it, a file whose
+    /// parsed content looks like a shared-subtree projection is NOT treated as
+    /// one (ingested normally) — the guard only skips ids the registry
+    /// confirms.
     pub fn with_mount_registry(mut self, registry: Arc<dyn MountRegistry>) -> Self {
         self.mount_registry = Some(registry);
         self

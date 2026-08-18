@@ -208,3 +208,54 @@ fn a_post_boot_edit_to_an_unmaterialized_share_still_discloses() {
         );
     });
 }
+
+/// WARM BOOT. Restarting over a vault whose blocks the store ALREADY holds must
+/// stay silent too.
+///
+/// The warm path is the one that always worked under the old feed-side
+/// predicate — the `Reset` snapshot covered it — so it is the case a regression
+/// would silently take back. Nothing was edited across the restart, so no write
+/// is owed and no banner is due.
+#[test]
+fn a_warm_restart_over_the_same_vault_discloses_nothing() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut harness = TestEnvironmentBuilder::new()
+            .with_org_file("shared.org", SHARED_FILE)
+            .build(rt.clone())
+            .await
+            .expect("cold boot over a vault with a shared subtree must succeed");
+
+        for id in ["share-mount-block", "share-child-one"] {
+            assert!(
+                harness
+                    .wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
+                    .await,
+                "shared block {id} did not ingest on the first boot"
+            );
+        }
+        assert!(
+            not_materialized_subjects(&harness).is_empty(),
+            "the first boot must be silent before the restart is meaningful"
+        );
+
+        harness.stop_app().await.expect("stop the app");
+        harness
+            .start_app(true)
+            .await
+            .expect("restart over the same vault");
+
+        assert!(
+            harness
+                .wait_for_block("block:share-child-one", SYNC_TIMEOUT)
+                .await,
+            "the shared blocks must still be present after the restart"
+        );
+        let disclosed = not_materialized_subjects(&harness);
+        assert!(
+            disclosed.is_empty(),
+            "a warm restart disclosed a share nobody edited: {disclosed:?}"
+        );
+    });
+}
