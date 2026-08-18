@@ -600,3 +600,13 @@
 # The 6 redundant re-executions inside the merge are REAL and stay visible in the raw count
 # (task #15 redundant-read roster); only the dedup count is under the ceiling.
 {"name": "delete-backward-merges-previous-block-budget", "description": "ORACLE red-first pin (2026-08-11 triage): DeleteBackward with the caret at offset 0 merges the block into its previous sibling, which legitimately writes -- the state-blind keystroke budget (reads 5, writes 0) cannot describe it. Wiring pinned to the counterexample's drawn manifest storage={Turso} sync={} actors={}.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"SplitBlock": {"block_id": "block:parent", "position": 2}}, {"DeleteBackward": {"count": 1}}]}
+
+# --- Backspace-at-0 merges into the VISIBLE-OUTLINE predecessor, not the prev sibling --------
+# Dogfood 2026-08-18 (Martin, GPUI): with blocks alpha / alpha>beta / alpha>gamma / delta,
+# Backspace at the start of `delta` must merge it into `gamma` -- the row directly ABOVE it on
+# screen -- and seat the caret there. Prod merged into `alpha`, the previous SIBLING, jumping
+# two visible rows up. The reference model encoded the same prev-sibling rule, so the
+# differential oracle was blind: model and SUT agreed on the wrong answer. Fixing the model
+# first (`join_merge_target`) turns this RED on `inv-blocks-match-ref` (ref: gamma =
+# "gammadelta"; SUT: alpha = "alphadelta"), which is the red-for-the-right-reason.
+{"name": "join-merges-into-visible-outline-predecessor", "description": "Dogfood 2026-08-18 lock: Backspace at offset 0 in `delta` (last top-level block) merges into `gamma`, the deepest last visible descendant of the previous sibling `alpha` -- NOT into `alpha` itself. Caret lands at gamma's join boundary.", "transitions": [{"CreateBlockUnderFocus": {"content": "alpha", "id": "block:bs-alpha"}}, {"CreateBlockUnderFocus": {"content": "beta", "id": "block:bs-beta"}}, {"Indent": {"block_id": "block:bs-beta"}}, {"CreateBlockUnderFocus": {"content": "gamma", "id": "block:bs-gamma"}}, {"Indent": {"block_id": "block:bs-gamma"}}, {"CreateBlockUnderFocus": {"content": "delta", "id": "block:bs-delta"}}, {"FocusEditableText": {"block_id": "block:bs-delta"}}, {"JoinBlock": {"block_id": "block:bs-delta"}}]}

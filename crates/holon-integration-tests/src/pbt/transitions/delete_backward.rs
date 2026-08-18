@@ -118,7 +118,7 @@ where
         commit_active_editor_if_changed(state);
         let prev = state.previous_sibling(&block_id);
         let target = match (&prev, state.parent_of(&block_id)) {
-            (Some(p), _) => Some(p.clone()),
+            (Some(_), _) => holon_pbt_core::capabilities::join_merge_target(&block_id, state),
             (None, Some(parent)) => (state.is_text_block(&parent)
                 && !state.is_layout_block(&parent)
                 && !parent.is_no_parent()

@@ -167,6 +167,17 @@ impl RefBlockTree for ReferenceState {
             .is_some_and(|b| b.content_type == ContentType::Source)
     }
 
+    fn is_collapsed(&self, id: &EntityUri) -> bool {
+        let Some(uri) = parse_id(id) else {
+            return false;
+        };
+        self.domain
+            .block_state
+            .blocks
+            .get(&uri)
+            .is_some_and(|b| b.collapsed)
+    }
+
     fn all_non_seed_block_ids(&self) -> BTreeSet<EntityUri> {
         self.domain
             .block_state

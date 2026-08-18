@@ -555,6 +555,13 @@ pub trait BlockEntity: MaybeSendSync {
     fn is_page(&self) -> bool {
         self.tags().contains(holon_api::PAGE_TAG)
     }
+
+    /// Whether this block's children are hidden in the outline
+    /// (`block.collapsed`, document state since the 2026-07-11 ruling).
+    /// Synthetic test substrates that model no collapse render expanded.
+    fn collapsed(&self) -> bool {
+        false
+    }
 }
 
 /// Entities that support task management (completion, priority, etc.)
@@ -1010,6 +1017,30 @@ pub struct MovePrefetch {
     pub old_predecessor: Option<Option<EntityUri>>,
     /// Whether the destination parent is a page.
     pub new_parent: Option<bool>,
+}
+
+/// Children of `id` IN ORDER, from the positional authority (`BlockOrdering`)
+/// when one is wired. `get_children` is an UNORDERED `get_all` filter, so it
+/// serves only synthetic in-memory substrates, which have no positional
+/// authority at all.
+///
+/// A free function rather than a `BlockOperations` method: every async method
+/// on that `#[operations_trait]` is registered as a dispatchable operation, and
+/// this is an internal read.
+pub async fn ordered_child_ids<T, S>(store: &S, id: &EntityUri) -> Result<Vec<EntityUri>>
+where
+    T: BlockEntity + MaybeSendSync + 'static,
+    S: BlockOperations<T> + ?Sized,
+{
+    match store.ordering() {
+        Some(ordering) => Ok(ordering.children(id).await?),
+        None => Ok(store
+            .get_children(id)
+            .await?
+            .iter()
+            .map(|c| c.id().clone())
+            .collect()),
+    }
 }
 
 /// Hierarchical structure operations (for any block-like entity)
@@ -1591,10 +1622,13 @@ where
     /// Join a block into its merge target.
     ///
     /// Two cases, both triggered by Backspace at position 0:
-    ///   1. **Previous sibling exists** — symmetric inverse of `split_block`:
-    ///        - appends `id`'s content to the end of the previous sibling
-    ///        - re-parents `id`'s children under the previous sibling, placed
-    ///          after any existing children of the previous sibling
+    ///   1. **Previous sibling exists** — merges into the block directly ABOVE
+    ///      `id` in the visible outline, i.e. the previous sibling's deepest
+    ///      last visible descendant (the sibling itself when it is collapsed,
+    ///      childless, or a page):
+    ///        - appends `id`'s content to the end of that target
+    ///        - re-parents `id`'s children under the target, placed after any
+    ///          existing children of the target
     ///        - deletes `id`
     ///   2. **No previous sibling** (block is the first child) — child→parent
     ///      join, the natural extension when there's no prev to merge into:
@@ -1631,11 +1665,35 @@ where
             .unwrap_or_else(|| block.content().to_string());
         let block_id_str = block.id().to_string();
 
-        // Pick merge target: prev sibling if any, else the parent.
+        // Pick merge target: the block directly ABOVE `id` in the visible
+        // outline. With a previous sibling that is the sibling's deepest last
+        // VISIBLE descendant — those rows render between the sibling and `id`,
+        // so the caret must land on the last of them. The walk stops at a
+        // collapsed block (children not rendered) and at a page (an embedded
+        // page carries no `collapsed` field and renders
+        // collapsed-until-clicked). With no previous sibling the block above IS
+        // the parent — the child→parent join.
         let prev_opt: Option<T> = self.get_prev_sibling(id).await?;
         let into_parent = prev_opt.is_none();
+        // The undo inverse anchors the merged-away block after its PREVIOUS
+        // SIBLING, which the walk above may have left behind.
+        let prev_uri: Option<EntityUri> = prev_opt.as_ref().map(|p| p.id().clone());
         let target: T = if let Some(prev) = prev_opt {
-            prev
+            let mut cursor = prev;
+            loop {
+                if cursor.collapsed() || cursor.is_page() {
+                    break cursor;
+                }
+                let cursor_uri = cursor.id().clone();
+                let Some(last_child) = ordered_child_ids(self, &cursor_uri).await?.pop() else {
+                    break cursor;
+                };
+                cursor = self.get_by_id(last_child.as_str()).await?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "join_block: ordered child {last_child} of {cursor_uri} not found"
+                    )
+                })?;
+            }
         } else {
             let parent_id = block.parent_id().ok_or_else(|| {
                 anyhow::anyhow!("Cannot join: block has no previous sibling and no parent")
@@ -1652,20 +1710,7 @@ where
         let new_content = format!("{}{}", target_content, block_content);
         let target_id = target.id().to_string();
 
-        // Children must come from the positional authority when one is wired
-        // (`BlockOrdering`) — `get_children` is UNORDERED (a `get_all`
-        // filter), so iterating it re-parents the subtree in arbitrary order.
-        let block_children: Vec<EntityUri> = match self.ordering() {
-            Some(ordering) => ordering.children(&join_block_uri).await?,
-            // Synthetic in-memory test substrate (no wired ordering): keep the
-            // unordered read; those substrates have no positional authority.
-            None => self
-                .get_children(&join_block_uri)
-                .await?
-                .iter()
-                .map(|c| c.id().clone())
-                .collect(),
-        };
+        let block_children: Vec<EntityUri> = ordered_child_ids(self, &join_block_uri).await?;
         // Captured before `block_children` is consumed by the re-parent loop:
         // the undo inverse is only exact for the leaf case (see the inverse
         // construction at the tail of this method).
@@ -1703,14 +1748,8 @@ where
             let move_target_uri = target_uri.clone();
             // Same authority rule as above: the append anchor must be the
             // last child IN ORDER, not `.last()` of an unordered read.
-            let mut last_after_uri: Option<EntityUri> = match self.ordering() {
-                Some(ordering) => ordering.children(&move_target_uri).await?.pop(),
-                None => self
-                    .get_children(&move_target_uri)
-                    .await?
-                    .last()
-                    .map(|c| c.id().clone()),
-            };
+            let mut last_after_uri: Option<EntityUri> =
+                ordered_child_ids(self, &move_target_uri).await?.pop();
             for child_uri in block_children {
                 let move_changes = self
                     .move_to_position(&child_uri, &move_target_uri, last_after_uri.as_ref())
@@ -1767,13 +1806,18 @@ where
                 .parent_id()
                 .cloned()
                 .unwrap_or_else(EntityUri::no_parent);
-            // Slot anchor: the merged-away block sat directly after the merge
-            // target in the prev-sibling case; in the child→parent case it was
-            // the parent's first child (anchor `None`).
+            // Slot anchor: the merged-away block sat directly after its
+            // previous SIBLING (not the merge target, which the visible-outline
+            // walk may have taken deeper); in the child→parent case it was the
+            // parent's first child (anchor `None`).
             let after: Option<EntityUri> = if into_parent {
                 None
             } else {
-                Some(target_uri.clone())
+                Some(
+                    prev_uri
+                        .clone()
+                        .expect("a non-into_parent join has a prev sibling"),
+                )
             };
             use crate::__operations_block_operations;
             UndoAction::Undo(__operations_block_operations::restore_split_op(
@@ -2652,6 +2696,10 @@ impl BlockEntity for holon_api::block::Block {
 
     fn tags(&self) -> Tags {
         self.tags.clone()
+    }
+
+    fn collapsed(&self) -> bool {
+        self.collapsed
     }
 }
 

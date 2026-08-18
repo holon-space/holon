@@ -1,11 +1,11 @@
-//! Transition: join a block into its previous sibling (or parent).
+//! Transition: join a block into the block above it in the visible outline.
 //!
 //! @pbt rung input-pipeline
 //!   KEYSTONE: KeystrokeBlockTreeWriter drives Backspace-at-start via the
 //!   editor keystroke path; fixed-id slices fall back to OpDispatchWriter
 //!   (dispatch floor).
-//! @pbt covers join-backspace — backspace-at-start -> join into previous
-//! sibling
+//! @pbt covers join-backspace — backspace-at-start -> join into the visible-
+//! outline predecessor
 //!
 //! Mirrors the legacy logic split across `state_machine.rs:1194-1245`
 //! (generator), `state_machine.rs:3438-3486` (precondition),
@@ -39,8 +39,9 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::expected_sql_for_kind;
 
-/// Join a block into its previous text sibling, or (when first child) into
-/// its non-layout text parent. Mirrors Backspace-at-position-0 semantics.
+/// Join a block into the text block directly above it in the visible outline,
+/// or (when first child) into its non-layout text parent. Mirrors
+/// Backspace-at-position-0 semantics.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
 #[step_template("I join block {block_id} with its predecessor")]
 pub struct JoinBlock {
@@ -92,11 +93,12 @@ pub fn join_block_preconditions<R: RefBlockTree + RefFocus + RefLifecycle>(
         Reason::FocusedNotDescendantOfFocusRoot,
     ));
 
-    // Case 1: previous text sibling exists → join into prev sibling.
-    let prev_text = state
-        .previous_sibling(block_id)
-        .map(|prev| state.is_text_block(&prev))
-        .unwrap_or(false);
+    // Case 1: a previous sibling exists → join into the block above it in the
+    // visible outline (that sibling's deepest last visible descendant), which
+    // must be text.
+    let prev_text = state.previous_sibling(block_id).is_some()
+        && holon_pbt_core::capabilities::join_merge_target(block_id, state)
+            .is_some_and(|target| state.is_text_block(&target));
 
     // Case 2: no previous sibling AND parent is a non-layout text block.
     let parent_ok = if !prev_text && state.previous_sibling(block_id).is_none() {
@@ -141,13 +143,11 @@ pub fn join_block_apply_to_ref<R: RefBlockTree + RefBlockTreeMut + RefFocusMut>(
     if state.sorted_children(block_id).is_empty() {
         state.push_undo_snapshot();
     }
-    // Determine the merge target before mutation: prev sibling if
-    // present, otherwise the parent block (child→parent join).
-    let target_id = state.previous_sibling(block_id).unwrap_or_else(|| {
-        state
-            .parent_of(block_id)
-            .expect("JoinBlock: parent required")
-    });
+    // Determine the merge target before mutation: the block above in the
+    // visible outline (`join_merge_target`) — the previous sibling's deepest
+    // last visible descendant, or the parent (child→parent join).
+    let target_id = holon_pbt_core::capabilities::join_merge_target(block_id, state)
+        .expect("JoinBlock: merge target required");
     state.join_block(block_id);
     // Focus moves to the merge target; cursor lands at the join boundary,
     // but the reference model tracks (line, column) — reset to start to

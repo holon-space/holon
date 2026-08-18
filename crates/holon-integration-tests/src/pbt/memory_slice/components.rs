@@ -271,7 +271,9 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
         }
     }
 
-    /// `ReferenceState::join_block`: target = previous sibling, else the parent
+    /// `ReferenceState::join_block`: target = the block above `id` in the
+    /// visible outline (the previous sibling's deepest last visible
+    /// descendant), else the parent
     /// (child→parent join). Append `id`'s content onto the target, re-parent
     /// `id`'s children onto the target, delete `id`. Order of the moved
     /// children is not invariant-checked (only parent/content/orphan/cycle
@@ -279,7 +281,19 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
     async fn apply_join_block(&self, id: &EntityUri) {
         let block = self.block(id).await;
         let target = match self.prev_sibling(id).await {
-            Some(prev) => prev,
+            Some(prev) => {
+                let mut cursor = prev;
+                loop {
+                    let node = self.block(&cursor).await;
+                    if node.collapsed || node.is_page() {
+                        break cursor;
+                    }
+                    match self.ordered_children(&cursor).await.pop() {
+                        Some(last) => cursor = last,
+                        None => break cursor,
+                    }
+                }
+            }
             None => block.parent_id.clone(),
         };
         let target_content = self.block(&target).await.content;

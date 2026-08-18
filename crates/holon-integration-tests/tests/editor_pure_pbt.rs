@@ -323,12 +323,8 @@ impl RefBlockTreeMut for EditorPureRef {
     /// modelled — this slice checks structure and cursor, not sibling
     /// order.
     fn join_block(&mut self, id: &EntityUri) -> usize {
-        let into = self.previous_sibling(id).unwrap_or_else(|| {
-            self.blocks
-                .get(id)
-                .and_then(|b| b.parent.clone())
-                .expect("join_block: no prev sibling AND no parent")
-        });
+        let into = holon_pbt_core::capabilities::join_merge_target(id, self)
+            .expect("join_block: no prev sibling AND no parent");
         for block in self.blocks.values_mut() {
             if block.parent.as_ref() == Some(id) {
                 block.parent = Some(into.clone());

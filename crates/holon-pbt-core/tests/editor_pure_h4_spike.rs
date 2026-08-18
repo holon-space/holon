@@ -272,12 +272,8 @@ impl RefBlockTreeMut for EditorPureRef {
         )
     }
     fn join_block(&mut self, id: &EntityUri) -> usize {
-        let into = self.previous_sibling(id).unwrap_or_else(|| {
-            self.blocks
-                .get(id)
-                .and_then(|b| b.parent.clone())
-                .expect("join_block: no prev sibling AND no parent")
-        });
+        let into = holon_pbt_core::capabilities::join_merge_target(id, self)
+            .expect("join_block: no prev sibling AND no parent");
         // The joined-away block's children move onto the merge target, as in
         // `ReferenceState::join_block`; dropping them orphans a subtree.
         for block in self.blocks.values_mut() {

@@ -34,6 +34,7 @@ mod tests {
         sort_key: String,
         content: String,
         tags: holon_api::Tags,
+        collapsed: bool,
     }
 
     impl BlockEntity for TestBlock {
@@ -48,6 +49,9 @@ mod tests {
         }
         fn tags(&self) -> holon_api::Tags {
             self.tags.clone()
+        }
+        fn collapsed(&self) -> bool {
+            self.collapsed
         }
     }
 
@@ -65,6 +69,16 @@ mod tests {
 
         fn insert(&self, block: TestBlock) {
             self.blocks.lock().unwrap().push(block);
+        }
+
+        fn set_collapsed(&self, id: &str, collapsed: bool) {
+            let want = canon(id);
+            let mut blocks = self.blocks.lock().unwrap();
+            let block = blocks
+                .iter_mut()
+                .find(|b| b.id.as_str() == want)
+                .unwrap_or_else(|| panic!("set_collapsed: block {want} not inserted"));
+            block.collapsed = collapsed;
         }
 
         fn get(&self, id: &str) -> Option<TestBlock> {
@@ -166,6 +180,7 @@ mod tests {
                     .unwrap_or("")
                     .to_string(),
                 tags: holon_api::Tags::default(),
+                collapsed: false,
             };
             self.blocks.lock().unwrap().push(block);
             Ok((id, OperationResult::irreversible(vec![])))
@@ -375,6 +390,7 @@ mod tests {
                             .unwrap_or_default()
                             .to_string(),
                         tags: holon_api::Tags::default(),
+                        collapsed: false,
                     });
                     return Ok(());
                 }
@@ -409,6 +425,7 @@ mod tests {
             sort_key,
             content: format!("Content {}", id),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
     }
 
@@ -423,6 +440,7 @@ mod tests {
             sort_key,
             content: format!("Page {}", id),
             tags,
+            collapsed: false,
         });
     }
 
@@ -510,6 +528,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "Content B".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         };
         store.insert(b);
 
@@ -613,6 +632,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "Content B".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         };
         store.insert(b);
 
@@ -689,6 +709,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "Hello World".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
 
         store.split_block(&EntityUri::block("A"), 5).await.unwrap();
@@ -719,6 +740,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "Hello".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
 
         store.split_block(&EntityUri::block("A"), 0).await.unwrap();
@@ -756,6 +778,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "Rooted".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         let before = snapshot(&store);
 
@@ -801,6 +824,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "Hello".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
 
         store.split_block(&EntityUri::block("A"), 5).await.unwrap();
@@ -826,6 +850,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "Hi".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
 
         let result = store.split_block(&EntityUri::block("A"), 10).await;
@@ -845,6 +870,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "foo".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -853,6 +879,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
             content: "bar".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
 
         store.join_block(&EntityUri::block("B"), 0).await.unwrap();
@@ -883,6 +910,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "parent ".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         store.insert(TestBlock {
             id: EntityUri::block("A"),
@@ -890,6 +918,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "child".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -898,6 +927,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
             content: "sib1".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         let key_b = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -906,6 +936,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_b), None).unwrap(),
             content: "sib2".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
 
         store.join_block(&EntityUri::block("A"), 0).await.unwrap();
@@ -940,6 +971,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "parent ".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         store.insert(TestBlock {
             id: EntityUri::block("A"),
@@ -947,6 +979,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "child".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -955,6 +988,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
             content: "sib".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         store.insert(TestBlock {
             id: EntityUri::block("X"),
@@ -962,6 +996,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "x".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         let key_x = store.sorted_children("A").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -970,6 +1005,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_x), None).unwrap(),
             content: "y".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
 
         store.join_block(&EntityUri::block("A"), 0).await.unwrap();
@@ -1003,6 +1039,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "alone".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
 
         let result = store.join_block(&EntityUri::block("Root"), 0).await;
@@ -1039,14 +1076,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn join_block_with_children_reparents_them_in_order_into_prev_sibling() {
-        // Case A (prev sibling exists) with children: B's children X, Y must
-        // be appended under A AFTER A's existing child W, in document order.
+    async fn join_block_merges_into_the_visible_outline_predecessor_not_the_prev_sibling() {
+        // Case A (prev sibling exists) with children: the merge target is the
+        // row directly ABOVE B in the visible outline — A's last visible
+        // descendant W, not A itself — and B's children X, Y append under W in
+        // document order.
         // Layout:
         //   P
         //     A ("foo")
-        //       W ("w")
-        //     B ("bar")   <- join target
+        //       W ("w")   <- merge target (the row above B)
+        //     B ("bar")
         //       X ("x")
         //       Y ("y")
         let store = MemStore::new();
@@ -1057,6 +1096,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "foo".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -1065,6 +1105,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
             content: "bar".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         store.insert(TestBlock {
             id: EntityUri::block("W"),
@@ -1072,6 +1113,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "w".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         store.insert(TestBlock {
             id: EntityUri::block("X"),
@@ -1079,6 +1121,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "x".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         let key_x = store.sorted_children("B").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -1087,18 +1130,70 @@ mod tests {
             sort_key: gen_key_between(Some(&key_x), None).unwrap(),
             content: "y".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
 
         store.join_block(&EntityUri::block("B"), 0).await.unwrap();
 
-        let a = store.get("A").unwrap();
-        assert_eq!(a.content, "foobar");
-        assert!(store.get("B").is_none(), "B must be deleted after join");
-        let a_children = store.sorted_children("A");
+        assert_eq!(store.get("W").unwrap().content, "wbar");
         assert_eq!(
-            a_children.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-            vec!["block:W", "block:X", "block:Y"],
-            "B's children append after A's existing child, in order"
+            store.get("A").unwrap().content,
+            "foo",
+            "A is two rows above B; its content must be untouched"
+        );
+        assert!(store.get("B").is_none(), "B must be deleted after join");
+        assert_eq!(
+            store
+                .sorted_children("W")
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["block:X", "block:Y"],
+            "B's children append under the merge target, in order"
+        );
+        assert_eq!(
+            store
+                .sorted_children("A")
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["block:W"]
+        );
+    }
+
+    #[tokio::test]
+    async fn join_block_stops_at_a_collapsed_previous_sibling() {
+        // Same layout, but A is collapsed: W is not rendered, so the row above
+        // B is A itself and the merge lands there.
+        let store = MemStore::new();
+        insert_block(&store, "P", None, None);
+        store.insert(TestBlock {
+            id: EntityUri::block("A"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(None, None).unwrap(),
+            content: "foo".to_string(),
+            tags: holon_api::Tags::default(),
+            collapsed: false,
+        });
+        store.set_collapsed("A", true);
+        let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
+        store.insert(TestBlock {
+            id: EntityUri::block("B"),
+            parent_id: Some(EntityUri::block("P")),
+            sort_key: gen_key_between(Some(&key_a), None).unwrap(),
+            content: "bar".to_string(),
+            tags: holon_api::Tags::default(),
+            collapsed: false,
+        });
+        insert_block(&store, "W", Some("A"), None);
+
+        store.join_block(&EntityUri::block("B"), 0).await.unwrap();
+
+        assert_eq!(store.get("A").unwrap().content, "foobar");
+        assert_eq!(
+            store.get("W").unwrap().content,
+            "Content W",
+            "the hidden child is not a merge target"
         );
     }
 
@@ -1235,6 +1330,7 @@ mod tests {
             // uses the recorded pre-split content, not `content_before`.
             content: "Hello World".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
 
         let before = snapshot(&store);
@@ -1284,6 +1380,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "  Hello".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         let before = snapshot(&store);
 
@@ -1323,6 +1420,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "foo".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -1334,6 +1432,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
             content: "bar".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         let before = snapshot(&store);
 
@@ -1375,6 +1474,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "child".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         let key_b = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -1383,6 +1483,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_b), None).unwrap(),
             content: "sib".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         // Give the parent content so the join boundary is observable.
         store
@@ -1435,6 +1536,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "foo".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         let key_a = store.sorted_children("P").last().unwrap().sort_key.clone();
         store.insert(TestBlock {
@@ -1443,6 +1545,7 @@ mod tests {
             sort_key: gen_key_between(Some(&key_a), None).unwrap(),
             content: "bar".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
         store.insert(TestBlock {
             id: EntityUri::block("B1"),
@@ -1450,6 +1553,7 @@ mod tests {
             sort_key: gen_key_between(None, None).unwrap(),
             content: "grandchild".to_string(),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         });
 
         let join = store.join_block(&EntityUri::block("B"), 0).await.unwrap();
@@ -1503,6 +1607,7 @@ mod tests {
             sort_key: key.to_string(),
             content: format!("Content {id}"),
             tags: holon_api::Tags::default(),
+            collapsed: false,
         };
         DefaultHelpersStore {
             blocks: vec![

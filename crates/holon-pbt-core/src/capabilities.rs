@@ -221,6 +221,13 @@ pub trait RefBlockTree {
         false
     }
 
+    /// True if `id`'s children are hidden (`block.collapsed`, document state
+    /// since the 2026-07-11 ruling), so the visible outline skips them.
+    /// Substrates with no collapse concept render fully expanded → `false`.
+    fn is_collapsed(&self, _: &EntityUri) -> bool {
+        false
+    }
+
     /// All block ids tracked by the reference model, EXCLUDING seed
     /// blocks (those with sentinel/no_parent docs — they're inserted
     /// via direct SQL, never reverse-synced to Loro, and don't appear
@@ -230,6 +237,31 @@ pub trait RefBlockTree {
     /// `SutSqlProjection::all_block_ids()` for set-equality drift
     /// detection at the storage layer.
     fn all_non_seed_block_ids(&self) -> BTreeSet<EntityUri>;
+}
+
+/// The block Backspace-at-0 merges `id` into: the block directly ABOVE it in
+/// the visible outline (pre-order), not its previous sibling.
+///
+/// With a previous sibling the caret walks INTO that sibling's subtree — down
+/// its last child, recursively — because those descendants render between the
+/// sibling and `id`. The walk stops at a collapsed block (its children are not
+/// visible) and at a page block (an embedded page carries no `collapsed` field
+/// and renders collapsed-until-clicked). Without a previous sibling the block
+/// above IS the parent, which is the child→parent join.
+///
+/// `None` when `id` is the first child of a virtual root — nothing precedes it.
+pub fn join_merge_target<R: RefBlockTree + ?Sized>(id: &EntityUri, state: &R) -> Option<EntityUri> {
+    let Some(prev) = state.previous_sibling(id) else {
+        return state.parent_of(id);
+    };
+    let mut target = prev;
+    while !state.is_collapsed(&target) && !state.is_page_block(&target) {
+        match state.sorted_children(&target).pop() {
+            Some(last) => target = last,
+            None => break,
+        }
+    }
+    Some(target)
 }
 
 /// Block-tree mutations. Concrete impls maintain whatever bookkeeping

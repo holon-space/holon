@@ -2405,9 +2405,12 @@ impl ReferenceState {
     /// Join `block_id` into its merge target.
     ///
     /// Two cases, both triggered by Backspace at position 0:
-    ///   1. **Previous sibling exists** (target = prev sibling at same level):
-    ///      - prev.content = prev.content + block.content
-    ///      - re-parent block's children to prev, appended after prev's
+    ///   1. **Previous sibling exists** (target = the block ABOVE in the
+    ///      visible outline — see `join_merge_target`; the previous sibling's
+    ///      deepest last visible descendant, which is the sibling itself only
+    ///      when it is collapsed or childless):
+    ///      - target.content = target.content + block.content
+    ///      - re-parent block's children to target, appended after target's
     ///        existing children
     ///      - delete block
     ///   2. **No previous sibling, parent is text** (target = parent;
@@ -2434,7 +2437,8 @@ impl ReferenceState {
             .clone();
         let prev_id = self.previous_sibling(block_id);
         let target_id = match &prev_id {
-            Some(id) => id.clone(),
+            Some(_) => holon_pbt_core::capabilities::join_merge_target(block_id, self)
+                .expect("join_block: a previous sibling yields a merge target"),
             None => block.parent_id.clone(),
         };
         let into_parent = prev_id.is_none();
