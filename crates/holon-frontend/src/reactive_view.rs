@@ -1851,7 +1851,14 @@ impl ReactiveView {
                 );
                 node.interpret_fn = Some(nif.clone());
                 node.occurrence = occurrence;
-                Arc::new(node)
+                let node = Arc::new(node);
+                // An item template may itself contain a collection (the
+                // integration row's `ops_of` cluster). `start_reactive_views`
+                // walked the tree once, before this row existed, so nothing
+                // else will ever start this item's own drivers — it would build
+                // the collection node and leave it permanently empty.
+                start_reactive_views(&node, &svc, &svc.runtime_handle());
+                node
             }
         };
 

@@ -9,11 +9,10 @@ use super::prelude::*;
 /// Tap → `services.present_op(op, { id: target_id })` — present_op
 /// routes id-only ops to direct dispatch and multi-param ops to the
 /// popup param-collection flow.
-///
-/// Sighted-user fallback label sits underneath the icon because GPUI //
-/// ALLOW(fallback): describes default-branch path, not error swallowing
-/// has no accessibility surface yet (see V2 in the mobile-bar plan —
-/// `Android TalkBack` / `iOS VoiceOver` need upstream GPUI work).
+// ALLOW(fallback): names the default-branch label, not error swallowing
+/// The short label under the icon is what a sighted user reads when the op has
+/// no glyph; GPUI has no accessibility surface yet (see V2 in the mobile-bar
+/// plan — `Android TalkBack` / `iOS VoiceOver` need upstream GPUI work).
 ///
 /// **Delete confirmation:** not yet wired. The plan allows either
 /// long-press-to-confirm or tap→popup-dialog; until GPUI gives us a
@@ -38,7 +37,9 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     let icon_size = ctx.style().icon_size;
     let box_padding = ctx.style().icon_box_padding;
 
-    div()
+    let tracked_id = element_id.clone();
+    let tracked_label = display_name.clone();
+    let inner = div()
         .id(hashed_id(&element_id))
         .flex_shrink_0()
         .flex()
@@ -66,7 +67,19 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
             present_op_from_context(&services, &op_name_owned, &target_id_owned);
         })
-        .into_any_element()
+        .into_any_element();
+
+    // Registered under `op-button-{op}-{target}` as well as the registry's
+    // positional tag: a caller asking "does THIS row offer THAT op" has no
+    // other way to name it.
+    crate::geometry::TransparentTracker::new(
+        tracked_id,
+        "op_button",
+        ctx.bounds_registry.clone(),
+        inner,
+    )
+    .with_displayed_text(tracked_label)
+    .into_any_element()
 }
 
 fn present_op_from_context(

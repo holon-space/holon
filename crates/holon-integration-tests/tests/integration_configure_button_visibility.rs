@@ -154,3 +154,91 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
         "a second click would start a second browser hop and a second loopback listener"
     );
 }
+
+/// The button must reach the RENDERED TREE, not just `ops_of`'s row set.
+///
+/// The row's ops cluster is a collection nested inside the Settings
+/// `live_query`'s item_template. `ops_of` returning the operation and the row
+/// PAINTING it are two different facts, and only this one is what a user sees.
+#[test]
+fn the_offered_operation_reaches_the_rendered_row() {
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap(),
+    );
+    runtime.clone().block_on(rendered(runtime.clone()));
+}
+
+async fn rendered(runtime: Arc<tokio::runtime::Runtime>) {
+    use holon_frontend::view_model::ViewKind;
+    use holon_frontend::view_model::ViewModel;
+
+    fn op_targets(vm: &ViewModel, out: &mut Vec<String>) {
+        if let ViewKind::OpButton {
+            op_name, target_id, ..
+        } = &vm.kind
+        {
+            out.push(format!("{op_name}@{target_id}"));
+        }
+        for c in vm.children() {
+            op_targets(c, out);
+        }
+    }
+
+    let harness = TestEnvironment::new(runtime).expect("new TestEnvironment");
+    harness.start_app(false).await.expect("start_app");
+    let db = harness
+        .injector()
+        .expect("start_app must capture the injector")
+        .resolve::<dyn DbHandleProvider>()
+        .handle();
+    db.transition_to_ready().await.expect("ready");
+
+    let reactive: Arc<ReactiveEngine> = harness
+        .reactive_engine
+        .get()
+        .expect("start_app must resolve a ReactiveEngine")
+        .clone();
+    let services: Arc<dyn BuilderServices> = reactive.clone();
+    let item_template = holon_api::render_dsl::parse_render_dsl(
+        holon_app::integrations_section::SETTINGS_ITEM_TEMPLATE,
+    )
+    .expect("the Settings item_template must parse");
+    let (key, live) = reactive.watch_query_live(
+        holon_app::integrations_section::SETTINGS_SQL.to_string(),
+        holon_api::QueryLanguage::HolonSql,
+        item_template,
+        None,
+        services,
+    );
+
+    let rows = reactive.ensure_watching(&key);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline && rows.snapshot().1.len() < 5 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut found = Vec::new();
+    while std::time::Instant::now() < deadline {
+        found.clear();
+        op_targets(&live.tree.snapshot(), &mut found);
+        if found.iter().any(|f| f.ends_with("@integration:gcal")) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    assert!(
+        found.contains(&"begin_oauth@integration:gcal".to_string()),
+        "gcal's row must RENDER the operation `ops_of` offers it; the rendered tree carried: \
+         {found:?}"
+    );
+    assert!(
+        !found.contains(&"begin_oauth@integration:todoist".to_string()),
+        "todoist has no consent flow, so its row must render none: {found:?}"
+    );
+}
