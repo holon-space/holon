@@ -498,3 +498,153 @@ proptest! {
         );
     }
 }
+
+// ─── The relation arm: one guard, two evaluators, over integration_state ───
+
+/// The `integration_state` columns the relation guards below compare, seeded
+/// into a table shaped like the production mirror.
+struct MirrorRow {
+    id: &'static str,
+    config_status: &'static str,
+    configurable: i64,
+    configure_progress: &'static str,
+}
+
+const MIRROR: &[MirrorRow] = &[
+    MirrorRow {
+        id: "integration:gcal",
+        config_status: "unconfigured",
+        configurable: 1,
+        configure_progress: "",
+    },
+    MirrorRow {
+        id: "integration:gmail",
+        config_status: "configured",
+        configurable: 1,
+        configure_progress: "",
+    },
+    MirrorRow {
+        id: "integration:todoist",
+        config_status: "unconfigured",
+        configurable: 0,
+        configure_progress: "",
+    },
+    MirrorRow {
+        id: "integration:claude-history",
+        config_status: "unconfigured",
+        configurable: 1,
+        configure_progress: "Waiting for you to finish in the browser.",
+    },
+];
+
+async fn setup_mirror_db() -> DbHandle {
+    let (backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
+    std::mem::forget(backend);
+    handle
+        .execute_ddl(
+            "CREATE TABLE integration_state (id TEXT PRIMARY KEY, config_status TEXT NOT NULL, \
+             configurable INTEGER NOT NULL, configure_progress TEXT NOT NULL)",
+        )
+        .await
+        .expect("ddl");
+    for r in MIRROR {
+        handle
+            .execute(
+                "INSERT INTO integration_state (id, config_status, configurable, \
+                 configure_progress) VALUES (?, ?, ?, ?)",
+                vec![
+                    turso::Value::Text(r.id.to_string()),
+                    turso::Value::Text(r.config_status.to_string()),
+                    turso::Value::Integer(r.configurable),
+                    turso::Value::Text(r.configure_progress.to_string()),
+                ],
+            )
+            .await
+            .expect("seed mirror row");
+    }
+    handle
+}
+
+fn row_values(r: &MirrorRow) -> HashMap<String, Value> {
+    HashMap::from([
+        ("id".to_string(), Value::String(r.id.to_string())),
+        (
+            "config_status".to_string(),
+            Value::String(r.config_status.to_string()),
+        ),
+        ("configurable".to_string(), Value::Integer(r.configurable)),
+        (
+            "configure_progress".to_string(),
+            Value::String(r.configure_progress.to_string()),
+        ),
+    ])
+}
+
+/// The SQL gate's verdict per seeded row, in `MIRROR` order.
+async fn sql_relation_verdicts(guard: &Guard) -> Vec<bool> {
+    let handle = setup_mirror_db().await;
+    let sql = guard
+        .to_sql_bound(&CurrentSchema)
+        .expect("a relation guard compiles");
+    let mut out = Vec::new();
+    for r in MIRROR {
+        let rows = handle
+            .query_positional(&sql, vec![turso::Value::Text(r.id.to_string())])
+            .await
+            .unwrap_or_else(|e| panic!("relation gate query failed:\n{sql}\n\nerror: {e}"));
+        out.push(!rows.is_empty());
+    }
+    out
+}
+
+/// The two evaluators must agree row for row, for every guard shape the
+/// relation grammar admits.
+#[test]
+fn a_relation_guard_binds_the_matching_row_in_sql() {
+    let sources = [
+        "integration.config_status == \"unconfigured\"",
+        "integration.config_status != \"unconfigured\"",
+        "integration.configurable == 1",
+        "integration.configure_progress == \"\"",
+        "integration.config_status == \"unconfigured\" and integration.configurable == 1",
+        "integration.config_status == \"unconfigured\" and integration.configurable == 1 and \
+         integration.configure_progress == \"\"",
+        "integration.config_status == \"configured\" or integration.configurable == 0",
+        "not integration.configurable == 1",
+    ];
+    for source in sources {
+        let guard = Guard::parse(source).unwrap_or_else(|e| panic!("{source:?} must parse: {e}"));
+        let sql = rt().block_on(sql_relation_verdicts(&guard));
+        let rows: Vec<bool> = MIRROR
+            .iter()
+            .map(|r| {
+                guard
+                    .evaluate_row(&row_values(r))
+                    .unwrap_or_else(|e| panic!("{source:?} must evaluate over a row: {e}"))
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            sql,
+            "AGREEMENT DISAGREEMENT for {source:?}\n  rows: {:?}",
+            MIRROR.iter().map(|r| r.id).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// A row missing a column the guard names has no answer, in either direction —
+/// the render layer must be told rather than shown a fabricated `false`.
+#[test]
+fn a_row_without_the_guards_column_is_an_error_not_a_false() {
+    let guard = Guard::parse("integration.configurable == 1").expect("parses");
+    let mut row = row_values(&MIRROR[0]);
+    row.remove("configurable");
+    let err = guard
+        .evaluate_row(&row)
+        .expect_err("a missing column must not read as `false`");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("configurable"),
+        "the error must name the missing column, got: {msg}"
+    );
+}

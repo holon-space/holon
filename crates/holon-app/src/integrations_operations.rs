@@ -146,13 +146,14 @@ fn begin_oauth_descriptor() -> OperationDescriptor {
         },
         trigger: None,
         bound_params: Default::default(),
-        // INTERIM, until the relation-scoped guard lands (Inc 4'): the rule —
-        // offer the flow only where it can run — belongs here as a declared
-        // guard, and today's guard language cannot state it. It names the
-        // `block` relation and the clock, and its predicates are `has_tag` /
-        // `block_exists` / `parent`, none of which compares a column of
-        // `integration_state`. Nothing renders the op until the guard is real.
-        guard: holon_api::pattern::OpGuard::None,
+        // Offer the flow only where it can run. The three literals are the
+        // PROJECTED values: `config_status_value` lowercases the display enum,
+        // and `configure_progress` is empty exactly while no flow is running.
+        guard: holon_api::pattern::OpGuard::parse(
+            "integration.config_status == \"unconfigured\" and integration.configurable == 1 and \
+             integration.configure_progress == \"\"",
+        )
+        .unwrap_or_else(|e| panic!("the begin_oauth guard must parse: {e}")),
         arcs: holon_api::arcs::TransitionArcs::Declared {
             reads: vec![
                 holon_api::arcs::ArcPlace::new(ENTITY_NAME, "config_status"),

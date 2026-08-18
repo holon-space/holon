@@ -378,6 +378,14 @@ fn dispatching_begin_oauth_returns_before_the_flow_finishes() {
             Arc::new(NoBrowser),
         )
         .await;
+        // `begin_oauth`'s guard reads the mirror, which is also what renders
+        // the button — so the rung dispatches from the state a click comes from.
+        project_mirror(&engine, vm.clone()).await;
+        assert_eq!(
+            mirror_column(&engine, "gcal", "config_status").await,
+            "unconfigured",
+            "precondition: gcal has not been configured in this rig"
+        );
 
         let mut params: StorageEntity = HashMap::new();
         params.insert("id".into(), Value::String("integration:gcal".into()));
@@ -415,6 +423,106 @@ fn dispatching_begin_oauth_returns_before_the_flow_finishes() {
         panic!(
             "the started flow never reached AwaitingConsent; progress is {:?}",
             progress.get_cloned()
+        );
+    });
+}
+
+/// Mirror the store into `integration_state` — the table `begin_oauth`'s guard
+/// reads and the settings list renders.
+async fn project_mirror(
+    engine: &Arc<holon::api::BackendEngine>,
+    vm: Arc<holon_app::integrations_settings::IntegrationsSettingsVm>,
+) {
+    holon_app::integration_projection::IntegrationStateProjector::new(
+        engine.db_handle().clone(),
+        vm,
+    )
+    .project()
+    .await
+    .expect("projecting the enablement store must succeed");
+}
+
+/// One column of `provider`'s mirror row.
+async fn mirror_column(
+    engine: &Arc<holon::api::BackendEngine>,
+    provider: &str,
+    column: &str,
+) -> String {
+    let rows = engine
+        .db_handle()
+        .query(
+            &format!("SELECT provider_name, {column} FROM integration_state"),
+            HashMap::new(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("reading {column} from the mirror: {e}"));
+    rows.iter()
+        .find(|r| r.get("provider_name").and_then(|v| v.as_string()) == Some(provider))
+        .and_then(|r| r.get(column))
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| panic!("the mirror must carry {column} for '{provider}'"))
+        .to_string()
+}
+
+/// The consent flow is one-time. Once a provider is configured, dispatching it
+/// again must be refused by the declared guard, not started and then failed.
+#[test]
+fn dispatching_begin_oauth_on_a_configured_provider_is_refused() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir.path().join("integrations");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        install_provisioned_gcal(&state_dir);
+
+        let (engine, store, vm) = engine_over_with_browser(
+            dir.path().join("ops.db"),
+            state_dir.clone(),
+            Arc::new(NoBrowser),
+        )
+        .await;
+
+        // Mark gcal configured in the AUTHORITY, then mirror it.
+        let mut state = store.get("gcal").expect("gcal has a state cell");
+        state.configuration = holon_mcp_client::integration_state::Configuration::Configured(
+            holon_mcp_client::integration_state::Credentials {
+                client_id: holon_mcp_client::integration_state::CredentialRef::Env {
+                    var: "GCAL_CLIENT_ID".to_string(),
+                },
+                client_secret: holon_mcp_client::integration_state::CredentialRef::Env {
+                    var: "GCAL_CLIENT_SECRET".to_string(),
+                },
+                refresh_token_file: std::path::PathBuf::from("gcal-refresh-token"),
+            },
+        );
+        store
+            .set("gcal", state)
+            .expect("store the configured state");
+        project_mirror(&engine, vm).await;
+
+        // The guard reads the PROJECTED value, so assert what the table says
+        // before asserting what the guard does with it.
+        assert_eq!(
+            mirror_column(&engine, "gcal", "config_status").await,
+            "configured",
+            "precondition: the projector stores the configuration axis lowercased"
+        );
+
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String("integration:gcal".into()));
+        let err = engine
+            .execute_operation(
+                &EntityName::new("integration"),
+                "begin_oauth",
+                params,
+                OpOrigin::User,
+            )
+            .await
+            .expect_err("a configured provider must not start a second consent flow");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("config_status"),
+            "the refusal must quote the guard that refused, got: {msg}"
         );
     });
 }

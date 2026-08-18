@@ -15,13 +15,18 @@ use holon_turso::turso::DbHandle;
 
 /// The row a dispatched op's guard must hold for.
 ///
-/// `Block` carries the op's `id` param — the same subject the ADR 0028
-/// boundary seam reads, so the two seams agree on what "the subject" is.
+/// `Block` and `Relation` carry the op's `id` param — the same subject the ADR
+/// 0028 boundary seam reads, so the two seams agree on what "the subject" is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardSubject {
     Block(String),
     /// The single `clock` row (`{today}` guards, ADR 0024 P5).
     Clock,
+    /// One row of a declared relation, named by the op's `id`.
+    Relation {
+        relation: String,
+        id: String,
+    },
 }
 
 /// A guard paired with the row it is being asked about. Constructed only by
@@ -41,11 +46,16 @@ impl<'a> GuardQuery<'a> {
     pub fn bind(guard: &'a Guard, op_id: Option<&str>) -> Result<Self> {
         let subject = match &guard.subject {
             Subject::Relation(relation) => {
-                return Err(format!(
-                    "declared guard iterates relation {relation:?}, which this world does not \
-                     evaluate"
-                )
-                .into());
+                let id = op_id.ok_or_else(|| {
+                    format!(
+                        "declared guard iterates relation {relation:?} but the operation names no \
+                         `id` subject; it cannot be evaluated and must not be waved through"
+                    )
+                })?;
+                GuardSubject::Relation {
+                    relation: relation.clone(),
+                    id: id.to_string(),
+                }
             }
             Subject::Block => {
                 let id = op_id.ok_or_else(|| {
@@ -144,6 +154,10 @@ impl GuardWorld for SqlGuardWorld {
                 vec![turso::Value::Text(id.clone())],
             ),
             GuardSubject::Clock => (guard.to_sql_any(&ProjectionSchema), vec![]),
+            GuardSubject::Relation { id, .. } => (
+                guard.to_sql_bound(&ProjectionSchema),
+                vec![turso::Value::Text(id.clone())],
+            ),
         };
         let sql = sql.map_err(|e| format!("guard does not compile to SQL: {e}"))?;
         let rows = self

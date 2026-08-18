@@ -75,6 +75,9 @@ impl GuardWorld for MemoryGuardWorld {
         Ok(match query.subject() {
             GuardSubject::Block(id) => result.bindings.contains(&Binding::Block(id.clone())),
             GuardSubject::Clock => !result.bindings.is_empty(),
+            GuardSubject::Relation { relation, .. } => {
+                return Err(format!("this world holds no rows of relation {relation:?}").into());
+            }
         })
     }
 }

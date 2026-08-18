@@ -297,6 +297,12 @@ pub enum GuardEvalError {
     NeedsClockSubject { subject: String },
     #[error("a guard over relation {relation:?} is not evaluated by this world")]
     WrongWorld { relation: String },
+    #[error("relation {relation:?} has no table a guard can iterate")]
+    UnboundRelation { relation: String },
+    #[error(
+        "the row carries no column {column:?} of relation {relation:?}, so the guard has no answer"
+    )]
+    MissingColumn { relation: String, column: String },
 }
 
 impl Subject {
@@ -309,7 +315,34 @@ impl Subject {
     }
 }
 
+/// One row's column values, for a guard evaluated where no database is
+/// reachable — the render layer holds a row and must decide synchronously.
+pub trait GuardRowValues {
+    fn column(&self, name: &str) -> Option<&Value>;
+}
+
+impl GuardRowValues for std::collections::HashMap<String, Value> {
+    fn column(&self, name: &str) -> Option<&Value> {
+        self.get(name)
+    }
+}
+
 impl Guard {
+    /// Does this relation-scoped guard hold for `row`?
+    ///
+    /// The SQL evaluator answers the same question over the same relation; a
+    /// column the row does not carry is an error rather than `false`, because
+    /// the two evaluators can only agree on a row that carries the guard's
+    /// columns.
+    pub fn evaluate_row(&self, row: &dyn GuardRowValues) -> Result<bool, GuardEvalError> {
+        let Subject::Relation(relation) = &self.subject else {
+            return Err(GuardEvalError::WrongWorld {
+                relation: self.subject.describe(),
+            });
+        };
+        self.body.matches_row(row, relation)
+    }
+
     /// Evaluate this guard in memory (ADR 0024 P1b standalone path). Returns
     /// the matched bindings, sorted for a stable comparison with the SQL
     /// evaluator.
@@ -364,6 +397,57 @@ fn resolve_segment(seg: &PathSegment, world: &InMemoryWorld) -> String {
 }
 
 impl Pattern {
+    fn matches_row(
+        &self,
+        row: &dyn GuardRowValues,
+        relation: &str,
+    ) -> Result<bool, GuardEvalError> {
+        match self {
+            Pattern::Field {
+                field: FieldRef::Column { name, .. },
+                op,
+                rhs,
+            } => {
+                let lhs = row
+                    .column(name)
+                    .ok_or_else(|| GuardEvalError::MissingColumn {
+                        relation: relation.to_string(),
+                        column: name.clone(),
+                    })?;
+                let Operand::Lit(rhs) = rhs else {
+                    return Err(GuardEvalError::NeedsClockSubject {
+                        subject: format!("relation {relation:?}"),
+                    });
+                };
+                Ok(compare_2valued(Some(lhs), *op, rhs))
+            }
+            Pattern::And(ps) => {
+                for p in ps {
+                    if !p.matches_row(row, relation)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Pattern::Or(ps) => {
+                for p in ps {
+                    if p.matches_row(row, relation)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Pattern::Not(p) => Ok(!p.matches_row(row, relation)?),
+            Pattern::Field { .. }
+            | Pattern::HasTag(_)
+            | Pattern::BlockExists(_)
+            | Pattern::Parent(_) => Err(GuardEvalError::NeedsBlockSubject {
+                predicate: "this predicate",
+                subject: format!("relation {relation:?}"),
+            }),
+        }
+    }
+
     fn matches(
         &self,
         row: &SubjectRow,
@@ -582,6 +666,8 @@ enum SqlSubject {
     /// Clock-driven: `today_sql` (e.g. `c.today`) resolves
     /// [`BuiltinRef::Today`].
     Clock { today_sql: String },
+    /// Relation-driven: `alias` binds one row of the relation's table.
+    Relation { alias: String },
 }
 
 impl Guard {
@@ -621,9 +707,26 @@ impl Guard {
                     self.body.to_sql(&ctx)?
                 ))
             }
-            Subject::Relation(relation) => Err(GuardEvalError::WrongWorld {
-                relation: relation.clone(),
-            }),
+            Subject::Relation(relation) => {
+                let binding = crate::schema::builtin_entity(relation)
+                    .and_then(|e| e.binding)
+                    .ok_or_else(|| GuardEvalError::UnboundRelation {
+                        relation: relation.clone(),
+                    })?;
+                let ctx = SqlCtx {
+                    schema,
+                    subject: SqlSubject::Relation {
+                        alias: "r".to_string(),
+                    },
+                    parent_depth: 0,
+                };
+                Ok(format!(
+                    "SELECT r.{} AS binding\nFROM {} r\nWHERE {}",
+                    binding.id_column,
+                    binding.table,
+                    self.body.to_sql(&ctx)?
+                ))
+            }
         }
     }
 
@@ -657,18 +760,33 @@ impl Pattern {
                 predicate,
                 subject: "clock".to_string(),
             }),
+            SqlSubject::Relation { .. } => Err(GuardEvalError::NeedsBlockSubject {
+                predicate,
+                subject: "a relation".to_string(),
+            }),
         };
         Ok(match self {
+            Pattern::Field {
+                field: FieldRef::Column { relation, name },
+                op,
+                rhs,
+            } => {
+                let SqlSubject::Relation { alias } = &ctx.subject else {
+                    return Err(GuardEvalError::WrongWorld {
+                        relation: relation.clone(),
+                    });
+                };
+                // The column is checked against the relation's declared field
+                // list when the guard parses, so it is an identifier here.
+                let rhs = operand_sql(rhs, ctx)?;
+                cmp_2valued_sql(&format!("{alias}.{name}"), *op, &rhs)
+            }
             Pattern::Field { field, op, rhs } => {
                 let alias = block_alias("a field comparison")?;
                 let lhs = match field {
                     FieldRef::Name => ctx.schema.name_column(&alias),
                     FieldRef::Property(k) => ctx.schema.property_expr(&alias, k),
-                    FieldRef::Column { relation, .. } => {
-                        return Err(GuardEvalError::WrongWorld {
-                            relation: relation.clone(),
-                        });
-                    }
+                    FieldRef::Column { .. } => unreachable!("matched by the arm above"),
                 };
                 let rhs = operand_sql(rhs, ctx)?;
                 cmp_2valued_sql(&lhs, *op, &rhs)
@@ -727,6 +845,9 @@ fn builtin_sql(b: &BuiltinRef, ctx: &SqlCtx) -> Result<String, GuardEvalError> {
             SqlSubject::Clock { today_sql } => Ok(today_sql.clone()),
             SqlSubject::Block { .. } => Err(GuardEvalError::NeedsClockSubject {
                 subject: "block".to_string(),
+            }),
+            SqlSubject::Relation { .. } => Err(GuardEvalError::NeedsClockSubject {
+                subject: "a relation".to_string(),
             }),
         },
     }

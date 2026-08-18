@@ -281,3 +281,27 @@ repair-by-re-derivation for file mirrors stays blocked exactly as ADR 0030 state
   keymaps — genuinely valuable, genuinely orthogonal.
 - The scenario store / staging and external-twin overlays. This catalog unblocks them;
   it does not build them.
+
+## Amendment 2026-08-18 — relation-scoped guards
+
+A declared guard may name a relation other than `block` or `clock`, spelled
+`relation.field` — the same vocabulary `#[reads]`/`#[emits]` use. Its predicate
+vocabulary is column comparison (`==`, `!=`) combined with `and` / `or` / `not`;
+`has_tag`, `block_exists` and `parent` remain block-only and are refused at parse
+under a relation subject. A relation is nameable only if it is declared in
+`holon_pattern::schema` AND carries a `RelationBinding` (the table and id column
+a guard iterates), so a guard can never query a relation with no queryable
+mirror.
+
+A relation guard is dual-evaluated. `SqlGuardWorld` answers the dispatcher gate
+by compiling the guard against the relation's table and binding the op's `id`.
+`Guard::evaluate_row` answers the render layer from one row's values, with no
+database: the row is what the render layer already holds. A column the row does
+not carry is an error, never `false` — the two evaluators can only agree on a
+row that carries the guard's columns.
+
+Ruling G1=A is unchanged: the dispatcher gate is authoritative and refuses
+before the op fires. Render-layer evaluation is ADVISORY — it withdraws an
+affordance the gate would refuse. A disagreement between the two is a defect the
+agreement oracle catches (`crates/holon-advice/tests/pattern_agreement.rs`),
+never a security boundary.
