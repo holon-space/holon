@@ -171,8 +171,17 @@ async fn start_rule(
     // Only clock-subject guards have a non-matview reactive binding today. A
     // block-subject operate rule's reactive form hits the chained-matview wall
     // (module docs) — surface it loud rather than fire a half-wired rule.
-    match rule.guard.subject {
+    match &rule.guard.subject {
         Subject::Clock => {}
+        Subject::Relation(relation) => {
+            status.set(
+                &block_id,
+                RuleStatus::CompileError(format!(
+                    "a rule guard iterates blocks or the clock; this one iterates {relation:?}"
+                )),
+            );
+            return;
+        }
         Subject::Block => {
             status.set(
                 &block_id,

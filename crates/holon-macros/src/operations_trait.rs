@@ -1211,9 +1211,12 @@ fn op_guard_tokens(guard: &OpGuard) -> proc_macro2::TokenStream {
     match guard {
         OpGuard::None => quote! { holon_api::pattern::OpGuard::None },
         OpGuard::Declared { guard, source } => {
-            let subject = match guard.subject {
+            let subject = match &guard.subject {
                 Subject::Clock => quote! { holon_api::pattern::Subject::Clock },
                 Subject::Block => quote! { holon_api::pattern::Subject::Block },
+                Subject::Relation(r) => {
+                    quote! { holon_api::pattern::Subject::Relation(#r.to_string()) }
+                }
             };
             let body = pattern_tokens(&guard.body);
             quote! {

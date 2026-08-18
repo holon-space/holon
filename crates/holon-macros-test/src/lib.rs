@@ -296,7 +296,9 @@ mod tests {
             "2026-08-10",
         );
         assert_eq!(
-            g.evaluate(&world).bindings,
+            g.evaluate(&world)
+                .expect("a clock guard evaluates")
+                .bindings,
             vec![Binding::Block("bad".to_string())],
             "only the page under a non-page parent is bound"
         );
@@ -310,6 +312,7 @@ mod tests {
         let journals = vec![block("j", "Journals", None, &[])];
         assert!(
             g.evaluate(&InMemoryWorld::new(journals.clone(), "2026-08-10"))
+                .expect("a clock guard evaluates")
                 .enabled(),
             "no journal today ⇒ enabled"
         );
@@ -318,11 +321,12 @@ mod tests {
         with_today.push(block("d", "2026-08-10", Some("j"), &[]));
         assert!(
             !g.evaluate(&InMemoryWorld::new(with_today, "2026-08-10"))
+                .expect("a clock guard evaluates")
                 .enabled(),
             "today's journal exists ⇒ disabled"
         );
 
-        let sql = g.to_sql(&CurrentSchema);
+        let sql = g.to_sql(&CurrentSchema).expect("a clock guard compiles");
         assert!(sql.contains("FROM clock c"), "{sql}");
         assert!(!sql.contains("date('now')"), "{sql}");
     }

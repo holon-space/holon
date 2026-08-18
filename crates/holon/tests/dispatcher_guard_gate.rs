@@ -68,7 +68,10 @@ struct MemoryGuardWorld {
 #[async_trait]
 impl GuardWorld for MemoryGuardWorld {
     async fn guard_holds(&self, query: &GuardQuery<'_>) -> Result<bool> {
-        let result = query.guard().evaluate(&self.world);
+        let result = query
+            .guard()
+            .evaluate(&self.world)
+            .map_err(|e| format!("guard does not evaluate against a block world: {e}"))?;
         Ok(match query.subject() {
             GuardSubject::Block(id) => result.bindings.contains(&Binding::Block(id.clone())),
             GuardSubject::Clock => !result.bindings.is_empty(),

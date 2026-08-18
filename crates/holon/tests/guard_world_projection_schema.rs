@@ -174,7 +174,9 @@ async fn probe_guard_cost_attribution() {
     }
     const RUNS: u32 = 100;
     let guard = Guard::parse("has_tag(\"Page\")").expect("parses");
-    let wrapped = guard.to_sql_bound(&holon::api::guard_world::ProjectionSchema);
+    let wrapped = guard
+        .to_sql_bound(&holon::api::guard_world::ProjectionSchema)
+        .expect("a block/clock guard compiles");
     let flat = "SELECT b.id AS binding FROM block b WHERE b.id = ?1 AND EXISTS (SELECT 1 FROM \
                 block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'Page') LIMIT 1";
     for (label, sql) in [

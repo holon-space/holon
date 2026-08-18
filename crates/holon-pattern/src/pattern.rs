@@ -69,6 +69,9 @@ pub enum FieldRef {
     Name,
     /// A JSON property of the block, by key.
     Property(String),
+    /// A declared column of the subject relation, spelled `relation.name` —
+    /// the same vocabulary `#[reads]`/`#[emits]` use.
+    Column { relation: String, name: String },
 }
 
 /// The right-hand side of a field comparison: a literal or an environment
@@ -148,11 +151,13 @@ pub enum Pattern {
 /// on day rollover (any guard referencing a [`BuiltinRef`]). `Block` = each
 /// block — drives anchors/advice (guards over the subject block's own
 /// fields/tags).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Subject {
     Clock,
     Block,
+    /// A declared relation with a queryable binding, iterated row by row.
+    Relation(String),
 }
 
 /// A guard = the relation it iterates + the predicate applied to each row. This
@@ -278,28 +283,63 @@ enum SubjectRow<'a> {
     Block(&'a WorldBlock),
 }
 
+/// A guard whose body does not fit its subject — a predicate reached a row kind
+/// it cannot read. Carried rather than panicked: a guard can arrive
+/// deserialized, and the render layer evaluates guards on the paint path.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum GuardEvalError {
+    #[error("{predicate} needs a subject block; this guard's subject is {subject}")]
+    NeedsBlockSubject {
+        predicate: &'static str,
+        subject: String,
+    },
+    #[error("{{today}} resolves against the clock row; this guard's subject is {subject}")]
+    NeedsClockSubject { subject: String },
+    #[error("a guard over relation {relation:?} is not evaluated by this world")]
+    WrongWorld { relation: String },
+}
+
+impl Subject {
+    fn describe(&self) -> String {
+        match self {
+            Subject::Clock => "clock".to_string(),
+            Subject::Block => "block".to_string(),
+            Subject::Relation(r) => format!("relation {r:?}"),
+        }
+    }
+}
+
 impl Guard {
     /// Evaluate this guard in memory (ADR 0024 P1b standalone path). Returns
     /// the matched bindings, sorted for a stable comparison with the SQL
     /// evaluator.
-    pub fn evaluate(&self, world: &InMemoryWorld) -> GuardResult {
-        let mut bindings = match self.subject {
+    pub fn evaluate(&self, world: &InMemoryWorld) -> Result<GuardResult, GuardEvalError> {
+        let subject = self.subject.describe();
+        let mut bindings = match &self.subject {
             Subject::Clock => {
-                if self.body.matches(&SubjectRow::Clock, world) {
+                if self.body.matches(&SubjectRow::Clock, world, &subject)? {
                     vec![Binding::Today(world.today.clone())]
                 } else {
                     vec![]
                 }
             }
-            Subject::Block => world
-                .blocks
-                .iter()
-                .filter(|b| self.body.matches(&SubjectRow::Block(b), world))
-                .map(|b| Binding::Block(b.id.clone()))
-                .collect(),
+            Subject::Block => {
+                let mut out = Vec::new();
+                for b in &world.blocks {
+                    if self.body.matches(&SubjectRow::Block(b), world, &subject)? {
+                        out.push(Binding::Block(b.id.clone()));
+                    }
+                }
+                out
+            }
+            Subject::Relation(relation) => {
+                return Err(GuardEvalError::WrongWorld {
+                    relation: relation.clone(),
+                });
+            }
         };
         bindings.sort();
-        GuardResult { bindings }
+        Ok(GuardResult { bindings })
     }
 }
 
@@ -324,45 +364,59 @@ fn resolve_segment(seg: &PathSegment, world: &InMemoryWorld) -> String {
 }
 
 impl Pattern {
-    fn matches(&self, row: &SubjectRow, world: &InMemoryWorld) -> bool {
+    fn matches(
+        &self,
+        row: &SubjectRow,
+        world: &InMemoryWorld,
+        subject: &str,
+    ) -> Result<bool, GuardEvalError> {
+        let block_row = |predicate: &'static str| match row {
+            SubjectRow::Block(b) => Ok(*b),
+            SubjectRow::Clock => Err(GuardEvalError::NeedsBlockSubject {
+                predicate,
+                subject: subject.to_string(),
+            }),
+        };
         match self {
             Pattern::Field { field, op, rhs } => {
-                let block = match row {
-                    SubjectRow::Block(b) => b,
-                    SubjectRow::Clock => {
-                        panic!("Pattern::Field is block-driven; illegal under a Clock subject")
-                    }
-                };
+                let block = block_row("a field comparison")?;
                 let lhs = field_value(block, field);
                 let rhs = resolve_operand(rhs, world);
-                compare_2valued(lhs.as_ref(), *op, &rhs)
+                Ok(compare_2valued(lhs.as_ref(), *op, &rhs))
             }
             Pattern::HasTag(tag) => {
-                let block = match row {
-                    SubjectRow::Block(b) => b,
-                    SubjectRow::Clock => {
-                        panic!("Pattern::HasTag is block-driven; illegal under a Clock subject")
-                    }
-                };
-                block.tags.iter().any(|t| t == tag)
+                let block = block_row("has_tag")?;
+                Ok(block.tags.iter().any(|t| t == tag))
             }
-            Pattern::BlockExists(path) => path_exists(path, world),
+            Pattern::BlockExists(path) => Ok(path_exists(path, world)),
             Pattern::Parent(inner) => {
-                let block = match row {
-                    SubjectRow::Block(b) => b,
-                    SubjectRow::Clock => {
-                        panic!("Pattern::Parent is block-driven; illegal under a Clock subject")
-                    }
-                };
-                block
+                let block = block_row("parent")?;
+                match block
                     .parent_id
                     .as_deref()
                     .and_then(|pid| world.block_by_id(pid))
-                    .is_some_and(|parent| inner.matches(&SubjectRow::Block(parent), world))
+                {
+                    Some(parent) => inner.matches(&SubjectRow::Block(parent), world, subject),
+                    None => Ok(false),
+                }
             }
-            Pattern::And(ps) => ps.iter().all(|p| p.matches(row, world)),
-            Pattern::Or(ps) => ps.iter().any(|p| p.matches(row, world)),
-            Pattern::Not(p) => !p.matches(row, world),
+            Pattern::And(ps) => {
+                for p in ps {
+                    if !p.matches(row, world, subject)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Pattern::Or(ps) => {
+                for p in ps {
+                    if p.matches(row, world, subject)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Pattern::Not(p) => Ok(!p.matches(row, world, subject)?),
         }
     }
 }
@@ -371,6 +425,9 @@ fn field_value(block: &WorldBlock, field: &FieldRef) -> Option<Value> {
     match field {
         FieldRef::Name => Some(Value::String(block.name.clone())),
         FieldRef::Property(k) => block.properties.get(k).cloned(),
+        // A relation column names no part of a block; the block world binds
+        // none of them.
+        FieldRef::Column { .. } => None,
     }
 }
 
@@ -533,8 +590,8 @@ impl Guard {
     /// the clock row (enabled/disabled) for a clock subject, matching block ids
     /// for a block subject. Deterministic — `{today}` reads the `clock`
     /// relation, never `date('now')`.
-    pub fn to_sql(&self, schema: &dyn SchemaAbstraction) -> String {
-        match self.subject {
+    pub fn to_sql(&self, schema: &dyn SchemaAbstraction) -> Result<String, GuardEvalError> {
+        match &self.subject {
             Subject::Clock => {
                 let (clock, col) = schema.clock_relation();
                 let ctx = SqlCtx {
@@ -544,10 +601,10 @@ impl Guard {
                     },
                     parent_depth: 0,
                 };
-                format!(
+                Ok(format!(
                     "SELECT c.{col} AS binding\nFROM {clock} c\nWHERE {}",
-                    self.body.to_sql(&ctx)
-                )
+                    self.body.to_sql(&ctx)?
+                ))
             }
             Subject::Block => {
                 let block = schema.block_relation();
@@ -558,12 +615,15 @@ impl Guard {
                     },
                     parent_depth: 0,
                 };
-                format!(
+                Ok(format!(
                     "SELECT {} AS binding\nFROM {block} b\nWHERE {}",
                     schema.id_column("b"),
-                    self.body.to_sql(&ctx)
-                )
+                    self.body.to_sql(&ctx)?
+                ))
             }
+            Subject::Relation(relation) => Err(GuardEvalError::WrongWorld {
+                relation: relation.clone(),
+            }),
         }
     }
 
@@ -571,92 +631,103 @@ impl Guard {
     /// `?1` appear among [`Guard::to_sql`]'s bindings? Wraps that query rather
     /// than compiling a second one, so the agreement oracle proving `to_sql`
     /// correct covers this shape too.
-    pub fn to_sql_bound(&self, schema: &dyn SchemaAbstraction) -> String {
-        format!(
+    pub fn to_sql_bound(&self, schema: &dyn SchemaAbstraction) -> Result<String, GuardEvalError> {
+        Ok(format!(
             "SELECT g.binding FROM (\n{}\n) g WHERE g.binding = ?1 LIMIT 1",
-            self.to_sql(schema)
-        )
+            self.to_sql(schema)?
+        ))
     }
 
     /// The dispatcher gate's **unbound** query: does the guard bind ANY row?
     /// The clock-subject form, where the single clock row is the only subject.
-    pub fn to_sql_any(&self, schema: &dyn SchemaAbstraction) -> String {
-        format!(
+    pub fn to_sql_any(&self, schema: &dyn SchemaAbstraction) -> Result<String, GuardEvalError> {
+        Ok(format!(
             "SELECT g.binding FROM (\n{}\n) g LIMIT 1",
-            self.to_sql(schema)
-        )
+            self.to_sql(schema)?
+        ))
     }
 }
 
 impl Pattern {
     /// Compile to a 2-valued SQL boolean fragment (see module docs).
-    fn to_sql(&self, ctx: &SqlCtx) -> String {
-        match self {
+    fn to_sql(&self, ctx: &SqlCtx) -> Result<String, GuardEvalError> {
+        let block_alias = |predicate: &'static str| match &ctx.subject {
+            SqlSubject::Block { alias } => Ok(alias.clone()),
+            SqlSubject::Clock { .. } => Err(GuardEvalError::NeedsBlockSubject {
+                predicate,
+                subject: "clock".to_string(),
+            }),
+        };
+        Ok(match self {
             Pattern::Field { field, op, rhs } => {
-                let SqlSubject::Block { alias } = &ctx.subject else {
-                    panic!("Pattern::Field is block-driven; illegal under a Clock subject")
-                };
+                let alias = block_alias("a field comparison")?;
                 let lhs = match field {
-                    FieldRef::Name => ctx.schema.name_column(alias),
-                    FieldRef::Property(k) => ctx.schema.property_expr(alias, k),
+                    FieldRef::Name => ctx.schema.name_column(&alias),
+                    FieldRef::Property(k) => ctx.schema.property_expr(&alias, k),
+                    FieldRef::Column { relation, .. } => {
+                        return Err(GuardEvalError::WrongWorld {
+                            relation: relation.clone(),
+                        });
+                    }
                 };
-                let rhs = operand_sql(rhs, ctx);
+                let rhs = operand_sql(rhs, ctx)?;
                 cmp_2valued_sql(&lhs, *op, &rhs)
             }
             Pattern::HasTag(tag) => {
-                let SqlSubject::Block { alias } = &ctx.subject else {
-                    panic!("Pattern::HasTag is block-driven; illegal under a Clock subject")
-                };
-                ctx.schema.has_tag_exists(alias, tag)
+                let alias = block_alias("has_tag")?;
+                ctx.schema.has_tag_exists(&alias, tag)
             }
-            Pattern::BlockExists(path) => block_exists_sql(path, ctx),
+            Pattern::BlockExists(path) => block_exists_sql(path, ctx)?,
             Pattern::Parent(inner) => {
-                let SqlSubject::Block { alias } = &ctx.subject else {
-                    panic!("Pattern::Parent is block-driven; illegal under a Clock subject")
-                };
+                let alias = block_alias("parent")?;
                 let (par, up) = ctx.up();
                 format!(
                     "EXISTS (SELECT 1 FROM {} {par} WHERE {} = {} AND {})",
                     ctx.schema.block_relation(),
                     ctx.schema.id_column(&par),
-                    ctx.schema.parent_id_column(alias),
-                    inner.to_sql(&up),
+                    ctx.schema.parent_id_column(&alias),
+                    inner.to_sql(&up)?,
                 )
             }
             Pattern::And(ps) => {
                 if ps.is_empty() {
-                    return "1".to_string();
+                    return Ok("1".to_string());
                 }
-                let parts: Vec<String> = ps.iter().map(|p| p.to_sql(ctx)).collect();
+                let parts = ps
+                    .iter()
+                    .map(|p| p.to_sql(ctx))
+                    .collect::<Result<Vec<_>, _>>()?;
                 format!("({})", parts.join(" AND "))
             }
             Pattern::Or(ps) => {
                 if ps.is_empty() {
-                    return "0".to_string();
+                    return Ok("0".to_string());
                 }
-                let parts: Vec<String> = ps.iter().map(|p| p.to_sql(ctx)).collect();
+                let parts = ps
+                    .iter()
+                    .map(|p| p.to_sql(ctx))
+                    .collect::<Result<Vec<_>, _>>()?;
                 format!("({})", parts.join(" OR "))
             }
-            Pattern::Not(p) => format!("NOT ({})", p.to_sql(ctx)),
-        }
+            Pattern::Not(p) => format!("NOT ({})", p.to_sql(ctx)?),
+        })
     }
 }
 
-fn operand_sql(op: &Operand, ctx: &SqlCtx) -> String {
+fn operand_sql(op: &Operand, ctx: &SqlCtx) -> Result<String, GuardEvalError> {
     match op {
-        Operand::Lit(v) => sql_value(v),
+        Operand::Lit(v) => Ok(sql_value(v)),
         Operand::Builtin(b) => builtin_sql(b, ctx),
     }
 }
 
-fn builtin_sql(b: &BuiltinRef, ctx: &SqlCtx) -> String {
+fn builtin_sql(b: &BuiltinRef, ctx: &SqlCtx) -> Result<String, GuardEvalError> {
     match b {
         BuiltinRef::Today => match &ctx.subject {
-            SqlSubject::Clock { today_sql } => today_sql.clone(),
-            SqlSubject::Block { .. } => panic!(
-                "BuiltinRef::Today under a Block subject: guards referencing a builtin are \
-                 clock-driven by construction (the parser infers Subject::Clock)"
-            ),
+            SqlSubject::Clock { today_sql } => Ok(today_sql.clone()),
+            SqlSubject::Block { .. } => Err(GuardEvalError::NeedsClockSubject {
+                subject: "block".to_string(),
+            }),
         },
     }
 }
@@ -675,7 +746,7 @@ fn cmp_2valued_sql(lhs: &str, op: CmpOp, rhs: &str) -> String {
 
 /// A `[NOT] EXISTS` anti-join over a chain of parent self-joins. The leaf alias
 /// is `p0`; each ancestor is `p1`, `p2`, … up the `parent_id` chain.
-fn block_exists_sql(path: &PathPattern, ctx: &SqlCtx) -> String {
+fn block_exists_sql(path: &PathPattern, ctx: &SqlCtx) -> Result<String, GuardEvalError> {
     assert!(
         !path.segments.is_empty(),
         "block_exists_sql: empty path pattern is ill-formed (parser must reject)"
@@ -696,18 +767,18 @@ fn block_exists_sql(path: &PathPattern, ctx: &SqlCtx) -> String {
     let mut wheres: Vec<String> = Vec::with_capacity(n);
     for (depth, seg) in path.segments.iter().rev().enumerate() {
         let alias = format!("p{depth}");
-        let seg_sql = segment_sql(seg, ctx);
+        let seg_sql = segment_sql(seg, ctx)?;
         wheres.push(format!("{} = {}", ctx.schema.name_column(&alias), seg_sql));
     }
-    format!(
+    Ok(format!(
         "EXISTS (SELECT 1 FROM {from} WHERE {})",
         wheres.join(" AND ")
-    )
+    ))
 }
 
-fn segment_sql(seg: &PathSegment, ctx: &SqlCtx) -> String {
+fn segment_sql(seg: &PathSegment, ctx: &SqlCtx) -> Result<String, GuardEvalError> {
     match seg {
-        PathSegment::Lit(s) => sql_string(s),
+        PathSegment::Lit(s) => Ok(sql_string(s)),
         PathSegment::Builtin(b) => builtin_sql(b, ctx),
     }
 }
@@ -764,6 +835,34 @@ pub enum GuardParseError {
          builtin makes the guard clock-driven, which has no subject block to test"
     )]
     MixedSubject,
+    #[error(
+        "column reference {field:?} names no relation; write it as `relation.column` (the \
+         spelling `#[reads]`/`#[emits]` use)"
+    )]
+    UnqualifiedColumn { field: String },
+    #[error(
+        "guard compares columns of two relations ({first:?} and {second:?}); a guard iterates one \
+         relation"
+    )]
+    MixedRelations { first: String, second: String },
+    #[error(
+        "guard mixes a column comparison on {relation:?} with a block predicate \
+         (has_tag/block_exists/parent/{{today}}), which has no row of {relation:?} to test"
+    )]
+    RelationAndBlockPredicate { relation: String },
+    #[error("unknown relation {relation:?} in a column comparison; known relations are {known}")]
+    UnknownRelation { relation: String, known: String },
+    #[error("relation {relation:?} declares no column {column:?}; its columns are {known}")]
+    UnknownColumn {
+        relation: String,
+        column: String,
+        known: String,
+    },
+    #[error(
+        "relation {relation:?} has no table a guard can iterate, so a column comparison on it \
+         cannot be evaluated"
+    )]
+    UnboundRelation { relation: String },
 }
 
 impl Guard {
@@ -785,6 +884,18 @@ impl Guard {
     pub fn from_body(body: Pattern) -> Result<Guard, GuardParseError> {
         let uses_builtin = pattern_uses_builtin(&body);
         let uses_block = pattern_uses_block_predicate(&body);
+
+        if let Some(relation) = sole_column_relation(&body)? {
+            if uses_builtin || uses_block {
+                return Err(GuardParseError::RelationAndBlockPredicate { relation });
+            }
+            validate_columns(&relation, &body)?;
+            return Ok(Guard {
+                subject: Subject::Relation(relation),
+                body,
+            });
+        }
+
         if uses_builtin && uses_block {
             return Err(GuardParseError::MixedSubject);
         }
@@ -794,6 +905,88 @@ impl Guard {
             Subject::Block
         };
         Ok(Guard { subject, body })
+    }
+}
+
+/// The one relation this body's column comparisons name, or `None` when it has
+/// none. Two relations is a refusal — a guard iterates one.
+fn sole_column_relation(p: &Pattern) -> Result<Option<String>, GuardParseError> {
+    let mut found: Option<String> = None;
+    collect_column_relation(p, &mut found)?;
+    Ok(found)
+}
+
+fn collect_column_relation(p: &Pattern, found: &mut Option<String>) -> Result<(), GuardParseError> {
+    match p {
+        Pattern::Field {
+            field: FieldRef::Column { relation, .. },
+            ..
+        } => match found {
+            Some(first) if first != relation => Err(GuardParseError::MixedRelations {
+                first: first.clone(),
+                second: relation.clone(),
+            }),
+            Some(_) => Ok(()),
+            None => {
+                *found = Some(relation.clone());
+                Ok(())
+            }
+        },
+        Pattern::Field { .. } | Pattern::HasTag(_) | Pattern::BlockExists(_) => Ok(()),
+        Pattern::And(ps) | Pattern::Or(ps) => {
+            for inner in ps {
+                collect_column_relation(inner, found)?;
+            }
+            Ok(())
+        }
+        Pattern::Not(inner) | Pattern::Parent(inner) => collect_column_relation(inner, found),
+    }
+}
+
+/// The relation must be declared, carry a queryable binding, and declare every
+/// column the body names.
+fn validate_columns(relation: &str, body: &Pattern) -> Result<(), GuardParseError> {
+    let entity = crate::schema::builtin_entity(relation).ok_or_else(|| {
+        GuardParseError::UnknownRelation {
+            relation: relation.to_string(),
+            known: crate::schema::BUILTIN_SCHEMAS
+                .iter()
+                .map(|s| s.relation)
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    })?;
+    if entity.binding.is_none() {
+        return Err(GuardParseError::UnboundRelation {
+            relation: relation.to_string(),
+        });
+    }
+    for column in column_names(body) {
+        if entity.field(&column).is_none() {
+            return Err(GuardParseError::UnknownColumn {
+                relation: relation.to_string(),
+                column,
+                known: entity
+                    .fields
+                    .iter()
+                    .map(|f| f.name)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn column_names(p: &Pattern) -> Vec<String> {
+    match p {
+        Pattern::Field {
+            field: FieldRef::Column { name, .. },
+            ..
+        } => vec![name.clone()],
+        Pattern::Field { .. } | Pattern::HasTag(_) | Pattern::BlockExists(_) => vec![],
+        Pattern::And(ps) | Pattern::Or(ps) => ps.iter().flat_map(column_names).collect(),
+        Pattern::Not(inner) | Pattern::Parent(inner) => column_names(inner),
     }
 }
 
@@ -812,6 +1005,10 @@ fn pattern_uses_builtin(p: &Pattern) -> bool {
 
 fn pattern_uses_block_predicate(p: &Pattern) -> bool {
     match p {
+        Pattern::Field {
+            field: FieldRef::Column { .. },
+            ..
+        } => false,
         Pattern::Field { .. } | Pattern::HasTag(_) | Pattern::Parent(_) => true,
         Pattern::BlockExists(_) => false,
         Pattern::And(ps) | Pattern::Or(ps) => ps.iter().any(pattern_uses_block_predicate),
@@ -847,6 +1044,17 @@ fn tokenize(input: &str) -> Result<Vec<String>, GuardParseError> {
             '(' | ')' | ',' => {
                 tokens.push(c.to_string());
                 chars.next();
+            }
+            '=' | '!' => {
+                chars.next();
+                if chars.peek() == Some(&'=') {
+                    chars.next();
+                    tokens.push(format!("{c}="));
+                } else {
+                    return Err(GuardParseError::UnexpectedToken {
+                        token: c.to_string(),
+                    });
+                }
             }
             '"' => {
                 chars.next();
@@ -896,6 +1104,10 @@ struct TokenParser {
 impl TokenParser {
     fn peek(&self) -> Option<&str> {
         self.tokens.get(self.pos).map(|s| s.as_str())
+    }
+
+    fn peek_ahead(&self, n: usize) -> Option<&str> {
+        self.tokens.get(self.pos + n).map(|s| s.as_str())
     }
 
     fn bump(&mut self) -> Option<String> {
@@ -954,11 +1166,50 @@ impl TokenParser {
                 }
                 Ok(inner)
             }
+            Some(_) if matches!(self.peek_ahead(1), Some("==") | Some("!=")) => {
+                self.parse_comparison()
+            }
             Some(_) => self.parse_call(),
             None => Err(GuardParseError::UnexpectedEnd {
                 expected: "a guard function".to_string(),
             }),
         }
+    }
+
+    /// `relation.column == "literal"` — the relation-scoped comparison.
+    ///
+    /// The relation is spelled in the guard text so a parsed [`Guard`] names
+    /// its own subject and survives a serde round trip.
+    fn parse_comparison(&mut self) -> Result<Pattern, GuardParseError> {
+        let lhs = self.bump().ok_or(GuardParseError::UnexpectedEnd {
+            expected: "a `relation.column` reference".to_string(),
+        })?;
+        let (relation, name) = lhs
+            .split_once('.')
+            .filter(|(r, n)| !r.is_empty() && !n.is_empty())
+            .ok_or_else(|| GuardParseError::UnqualifiedColumn { field: lhs.clone() })?;
+
+        let op = match self.bump().as_deref() {
+            Some("==") => CmpOp::Eq,
+            Some("!=") => CmpOp::Ne,
+            other => {
+                return Err(GuardParseError::UnexpectedToken {
+                    token: other.unwrap_or("").to_string(),
+                });
+            }
+        };
+
+        let raw = self.bump().ok_or(GuardParseError::UnexpectedEnd {
+            expected: "a string or integer literal".to_string(),
+        })?;
+        Ok(Pattern::Field {
+            field: FieldRef::Column {
+                relation: relation.to_string(),
+                name: name.to_string(),
+            },
+            op,
+            rhs: Operand::Lit(parse_literal(&raw)?),
+        })
     }
 
     fn parse_call(&mut self) -> Result<Pattern, GuardParseError> {
@@ -998,6 +1249,22 @@ impl TokenParser {
             }),
         }
     }
+}
+
+/// A comparison's right-hand side, typed at the point it is read.
+///
+/// The tokenizer marks a string literal with a leading `"` (an empty literal
+/// is that marker alone). Anything that is neither that nor a run of digits is
+/// refused by name.
+fn parse_literal(raw: &str) -> Result<Value, GuardParseError> {
+    if let Some(text) = raw.strip_prefix('"') {
+        return Ok(Value::String(text.to_string()));
+    }
+    raw.parse::<i64>()
+        .map(Value::Integer)
+        .map_err(|_| GuardParseError::UnexpectedToken {
+            token: raw.to_string(),
+        })
 }
 
 /// Parse a `"Journals/{today}"` path into a [`PathPattern`]. `{name}` segments
@@ -1045,6 +1312,102 @@ pub fn parse_builtin(name: &str) -> Result<BuiltinRef, GuardParseError> {
 mod tests {
     use super::*;
 
+    /// A relation-scoped column comparison is its own guard subject.
+    #[test]
+    fn a_column_comparison_parses_into_a_relation_guard() {
+        let g = Guard::parse("integration.config_status == \"unconfigured\"")
+            .expect("a column comparison must parse");
+        assert_eq!(g.subject, Subject::Relation("integration".to_string()));
+        assert_eq!(
+            g.body,
+            Pattern::Field {
+                field: FieldRef::Column {
+                    relation: "integration".to_string(),
+                    name: "config_status".to_string(),
+                },
+                op: CmpOp::Eq,
+                rhs: Operand::Lit(Value::String("unconfigured".to_string())),
+            }
+        );
+
+        let n = Guard::parse("integration.configurable != 1").expect("`!=` and an integer parse");
+        assert_eq!(
+            n.body,
+            Pattern::Field {
+                field: FieldRef::Column {
+                    relation: "integration".to_string(),
+                    name: "configurable".to_string(),
+                },
+                op: CmpOp::Ne,
+                rhs: Operand::Lit(Value::Integer(1)),
+            }
+        );
+
+        let empty = Guard::parse("integration.configure_progress == \"\"")
+            .expect("the empty-string literal is a value, not junk");
+        assert_eq!(
+            empty.body,
+            Pattern::Field {
+                field: FieldRef::Column {
+                    relation: "integration".to_string(),
+                    name: "configure_progress".to_string(),
+                },
+                op: CmpOp::Eq,
+                rhs: Operand::Lit(Value::String(String::new())),
+            }
+        );
+
+        let conj = Guard::parse(
+            "integration.config_status == \"unconfigured\" and integration.configurable == 1",
+        )
+        .expect("column comparisons combine with `and`");
+        assert_eq!(conj.subject, Subject::Relation("integration".to_string()));
+    }
+
+    #[test]
+    fn the_existing_guard_forms_are_unchanged() {
+        let tag = Guard::parse("has_tag(\"task\")").expect("has_tag parses");
+        assert_eq!(tag.subject, Subject::Block);
+        assert_eq!(tag.body, Pattern::HasTag("task".to_string()));
+
+        let exists =
+            Guard::parse("not block_exists(\"Journals/{today}\")").expect("block_exists parses");
+        assert_eq!(exists.subject, Subject::Clock);
+
+        let parent = Guard::parse("parent(has_tag(\"Page\"))").expect("parent parses");
+        assert_eq!(parent.subject, Subject::Block);
+    }
+
+    #[test]
+    fn junk_on_either_side_of_the_comparison_is_refused() {
+        // (guard text, a fragment the refusal must carry)
+        let cases = [
+            ("config_status == \"x\"", "config_status"),
+            (
+                "integration.config_status == \"a\" and clock.today == \"b\"",
+                "clock",
+            ),
+            ("integration.config_status == 1.5", "1.5"),
+            (
+                "integration.config_status == \"a\" and has_tag(\"task\")",
+                "has_tag",
+            ),
+            ("integration.not_a_column == \"a\"", "not_a_column"),
+            ("nonesuch.field == \"a\"", "nonesuch"),
+            ("block.content == \"a\"", "block"),
+            ("integration.config_status = \"a\"", "="),
+        ];
+        for (text, fragment) in cases {
+            let err =
+                Guard::parse(text).expect_err(&format!("{text:?} must be refused, not accepted"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains(fragment),
+                "the refusal for {text:?} must name {fragment:?}, got: {msg}"
+            );
+        }
+    }
+
     fn wb(id: &str, name: &str, parent: Option<&str>, tags: &[&str]) -> WorldBlock {
         WorldBlock {
             id: id.to_string(),
@@ -1088,7 +1451,12 @@ mod tests {
         let g = Guard::parse("not block_exists(\"Journals/{today}\")").unwrap();
 
         let empty = InMemoryWorld::new(vec![wb("j", "Journals", None, &[])], "2026-07-10");
-        assert!(g.evaluate(&empty).enabled(), "no journal today ⇒ enabled");
+        assert!(
+            g.evaluate(&empty)
+                .expect("a clock guard evaluates")
+                .enabled(),
+            "no journal today ⇒ enabled"
+        );
 
         let present = InMemoryWorld::new(
             vec![
@@ -1098,7 +1466,9 @@ mod tests {
             "2026-07-10",
         );
         assert!(
-            !g.evaluate(&present).enabled(),
+            !g.evaluate(&present)
+                .expect("a clock guard evaluates")
+                .enabled(),
             "journal exists today ⇒ disabled"
         );
 
@@ -1110,13 +1480,20 @@ mod tests {
             ],
             "2026-07-11",
         );
-        assert!(g.evaluate(&tomorrow).enabled(), "next day ⇒ enabled again");
+        assert!(
+            g.evaluate(&tomorrow)
+                .expect("a clock guard evaluates")
+                .enabled(),
+            "next day ⇒ enabled again"
+        );
     }
 
     #[test]
     fn journal_guard_to_sql_reads_clock_not_now() {
         let g = Guard::parse("not block_exists(\"Journals/{today}\")").unwrap();
-        let sql = g.to_sql(&CurrentSchema);
+        let sql = g
+            .to_sql(&CurrentSchema)
+            .expect("a block/clock guard compiles");
         assert!(sql.contains("FROM clock c"), "clock-driven FROM: {sql}");
         assert!(sql.contains("c.today"), "leaf reads the clock: {sql}");
         assert!(sql.contains("NOT (EXISTS"), "inhibitor anti-join: {sql}");
@@ -1129,7 +1506,9 @@ mod tests {
     #[test]
     fn has_tag_to_sql_is_block_exists() {
         let g = Guard::parse("has_tag(\"project\")").unwrap();
-        let sql = g.to_sql(&CurrentSchema);
+        let sql = g
+            .to_sql(&CurrentSchema)
+            .expect("a block/clock guard compiles");
         assert!(sql.contains("FROM block b"), "block-driven: {sql}");
         assert!(sql.contains("block_tags"), "tag anti-join: {sql}");
     }
@@ -1145,11 +1524,13 @@ mod tests {
                 rhs: Operand::Lit(Value::String("note".to_string())),
             })),
         };
-        let sql = g.to_sql(&CurrentSchema);
+        let sql = g
+            .to_sql(&CurrentSchema)
+            .expect("a block/clock guard compiles");
         assert!(sql.contains("IS NOT NULL"), "2-valued eq: {sql}");
         let world = InMemoryWorld::new(vec![wb("a", "A", None, &[])], "d");
         // kind is missing ⇒ eq is false ⇒ NOT is true ⇒ block matches.
-        assert!(g.evaluate(&world).enabled());
+        assert!(g.evaluate(&world).expect("a guard evaluates").enabled());
     }
 
     #[test]
@@ -1219,6 +1600,7 @@ mod tests {
             let world = InMemoryWorld::new(blocks, "2026-08-10");
             let bound = g
                 .evaluate(&world)
+                .expect("a guard evaluates")
                 .bindings
                 .contains(&Binding::Block("c".to_string()));
             assert_eq!(
@@ -1231,7 +1613,9 @@ mod tests {
     #[test]
     fn parent_to_sql_is_a_two_valued_exists_on_the_parent_row() {
         let g = Guard::parse(PAGE_UNDER_NON_PAGE).unwrap();
-        let sql = g.to_sql(&CurrentSchema);
+        let sql = g
+            .to_sql(&CurrentSchema)
+            .expect("a block/clock guard compiles");
         assert!(sql.contains("FROM block par1"), "ancestor alias: {sql}");
         assert!(
             sql.contains("par1.id = b.parent_id"),
@@ -1247,7 +1631,9 @@ mod tests {
     #[test]
     fn nested_parent_hops_get_distinct_aliases() {
         let g = Guard::parse("parent(parent(has_tag(\"Page\")))").unwrap();
-        let sql = g.to_sql(&CurrentSchema);
+        let sql = g
+            .to_sql(&CurrentSchema)
+            .expect("a block/clock guard compiles");
         assert!(sql.contains("par1.id = b.parent_id"), "{sql}");
         assert!(sql.contains("par2.id = par1.parent_id"), "{sql}");
     }

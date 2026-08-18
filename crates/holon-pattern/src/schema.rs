@@ -59,11 +59,30 @@ pub struct SchemaField {
     pub arc_place: bool,
 }
 
+/// Where a relation's rows live, for a guard that iterates them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationBinding {
+    pub table: &'static str,
+    pub id_column: &'static str,
+}
+
 /// An entity's declared field vocabulary.
 #[derive(Debug, Clone, Copy)]
 pub struct EntitySchema {
     pub relation: &'static str,
+    /// The table a relation-subject guard iterates. `None` for a relation a
+    /// guard addresses through its own subject kind rather than by name —
+    /// `block` and `clock` are reached that way.
+    pub binding: Option<RelationBinding>,
     pub fields: &'static [SchemaField],
+}
+
+/// The declared entity for `relation`, or `None` when nothing declares it.
+pub fn builtin_entity(relation: &str) -> Option<&'static EntitySchema> {
+    BUILTIN_SCHEMAS
+        .iter()
+        .copied()
+        .find(|s| s.relation == relation)
 }
 
 impl EntitySchema {
@@ -179,6 +198,7 @@ const fn column(name: &'static str, intent: FieldIntent, arc_place: bool) -> Sch
 /// between the two reads as one list.
 pub const BLOCK: EntitySchema = EntitySchema {
     relation: block::RELATION,
+    binding: None,
     fields: &[
         column(block::ID, FieldIntent::StorageInternal, true),
         column(block::PARENT_ID, FieldIntent::Writable, true),
@@ -250,6 +270,7 @@ pub const BLOCK: EntitySchema = EntitySchema {
 /// `epoch_day` the grain TICK.
 pub const CLOCK: EntitySchema = EntitySchema {
     relation: clock::RELATION,
+    binding: None,
     fields: &[
         column(clock::GRAIN, FieldIntent::Unnamed, true),
         column(clock::TODAY, FieldIntent::Unnamed, true),
@@ -263,6 +284,10 @@ pub const CLOCK: EntitySchema = EntitySchema {
 /// the rest is the projector's bookkeeping.
 pub const INTEGRATION: EntitySchema = EntitySchema {
     relation: integration::RELATION,
+    binding: Some(RelationBinding {
+        table: "integration_state",
+        id_column: integration::ID,
+    }),
     fields: &[
         column(integration::ID, FieldIntent::StorageInternal, true),
         column(integration::PROVIDER_NAME, FieldIntent::Unnamed, true),

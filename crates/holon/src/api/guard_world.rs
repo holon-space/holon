@@ -39,7 +39,14 @@ impl<'a> GuardQuery<'a> {
     /// A block-driven guard on an op that names no subject is undispatchable:
     /// there is no row to evaluate it for, and passing it would be fail-open.
     pub fn bind(guard: &'a Guard, op_id: Option<&str>) -> Result<Self> {
-        let subject = match guard.subject {
+        let subject = match &guard.subject {
+            Subject::Relation(relation) => {
+                return Err(format!(
+                    "declared guard iterates relation {relation:?}, which this world does not \
+                     evaluate"
+                )
+                .into());
+            }
             Subject::Block => {
                 let id = op_id.ok_or_else(|| {
                     "declared guard is block-driven but the operation names no `id` subject; \
@@ -138,6 +145,7 @@ impl GuardWorld for SqlGuardWorld {
             ),
             GuardSubject::Clock => (guard.to_sql_any(&ProjectionSchema), vec![]),
         };
+        let sql = sql.map_err(|e| format!("guard does not compile to SQL: {e}"))?;
         let rows = self
             .db
             .query_positional(&sql, params)

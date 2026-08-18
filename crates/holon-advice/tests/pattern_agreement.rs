@@ -98,7 +98,9 @@ async fn setup_db(world: &InMemoryWorld) -> DbHandle {
 /// The SQL evaluator's bindings for `guard` against `world`, sorted.
 async fn sql_bindings(guard: &Guard, world: &InMemoryWorld) -> Vec<String> {
     let handle = setup_db(world).await;
-    let sql = guard.to_sql(&CurrentSchema);
+    let sql = guard
+        .to_sql(&CurrentSchema)
+        .expect("a block/clock guard compiles");
     let rows = handle
         .query(&sql, HashMap::new())
         .await
@@ -123,9 +125,12 @@ async fn sql_bindings(guard: &Guard, world: &InMemoryWorld) -> Vec<String> {
 async fn sql_gate_verdicts(guard: &Guard, world: &InMemoryWorld, subjects: &[String]) -> Vec<bool> {
     let handle = setup_db(world).await;
     let mut out = Vec::new();
-    match guard.subject {
+    match &guard.subject {
+        Subject::Relation(r) => unreachable!("guard_strategy generates no relation guard: {r}"),
         Subject::Clock => {
-            let sql = guard.to_sql_any(&CurrentSchema);
+            let sql = guard
+                .to_sql_any(&CurrentSchema)
+                .expect("a block/clock guard compiles");
             let rows = handle
                 .query(&sql, HashMap::new())
                 .await
@@ -133,7 +138,9 @@ async fn sql_gate_verdicts(guard: &Guard, world: &InMemoryWorld, subjects: &[Str
             out.push(!rows.is_empty());
         }
         Subject::Block => {
-            let sql = guard.to_sql_bound(&CurrentSchema);
+            let sql = guard
+                .to_sql_bound(&CurrentSchema)
+                .expect("a block/clock guard compiles");
             for s in subjects {
                 let rows = handle
                     .query_positional(&sql, vec![turso::Value::Text(s.clone())])
@@ -150,6 +157,7 @@ async fn sql_gate_verdicts(guard: &Guard, world: &InMemoryWorld, subjects: &[Str
 fn inmem_bindings(guard: &Guard, world: &InMemoryWorld) -> Vec<String> {
     let mut out: Vec<String> = guard
         .evaluate(world)
+        .expect("a block/clock guard evaluates")
         .bindings
         .into_iter()
         .map(|b| match b {
@@ -292,7 +300,7 @@ fn page_under_non_page_fixture_agreement() {
         inmem,
         sql,
         "parent predicate: in-memory ≡ SQL\nsql = {}",
-        guard.to_sql(&CurrentSchema)
+        guard.to_sql(&CurrentSchema).expect("compiles")
     );
 }
 
@@ -450,7 +458,10 @@ proptest! {
         prop_assert_eq!(
             &inmem, &sql,
             "DISAGREEMENT\nguard = {:?}\nsql = {}\nworld today = {}\nblocks = {:?}",
-            guard, guard.to_sql(&CurrentSchema), world.today, world.blocks
+            guard,
+            guard.to_sql(&CurrentSchema).expect("compiles"),
+            world.today,
+            world.blocks
         );
     }
 
@@ -464,7 +475,8 @@ proptest! {
         guard in guard_strategy(),
     ) {
         let inmem = inmem_bindings(&guard, &world);
-        let subjects: Vec<String> = match guard.subject {
+        let subjects: Vec<String> = match &guard.subject {
+            Subject::Relation(r) => unreachable!("guard_strategy generates no relation guard: {r}"),
             Subject::Clock => vec![],
             Subject::Block => world
                 .blocks
@@ -474,7 +486,8 @@ proptest! {
                 .collect(),
         };
         let sql = rt().block_on(sql_gate_verdicts(&guard, &world, &subjects));
-        let expected: Vec<bool> = match guard.subject {
+        let expected: Vec<bool> = match &guard.subject {
+            Subject::Relation(r) => unreachable!("guard_strategy generates no relation guard: {r}"),
             Subject::Clock => vec![!inmem.is_empty()],
             Subject::Block => subjects.iter().map(|s| inmem.contains(s)).collect(),
         };
