@@ -1,3 +1,10 @@
+//! @c4 component
+//! @c4 layer Engine
+//! Pattern: Policy
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-loro "CRDT substrate for the owner log" "Rust"
+//!
 //! `holon-sharing` — ADR 0028 sharing machinery (Increments 4-6: the H2
 //! owner-scoped, totally-ordered crossing log + its migration/undo/enforcement
 //! seams; the D4/H8 owner-signed policy objects + lease membership; and the H4

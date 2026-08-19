@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/lane-crate-split/crates",
+  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/lane-thin-view/crates",
   "root": {
     "name": ".",
     "path": ".",
@@ -728,11 +728,25 @@
       {
         "name": "holon-advice",
         "path": "holon-advice",
-        "c4_level": "unknown",
+        "c4_level": "component",
         "description": "Runtime-definable advice rules (ADR 0022).",
+        "pattern": "Interpreter",
         "pattern_status": "planned",
-        "content": "Runtime-definable advice rules (ADR 0022).\n\nAn advice rule is a vault block (`source_language =\n'holon_advice_rule_yaml'`) discovered by the entity-profile scan pattern,\nparsed at the boundary into a closed typed model, and compiled by the engine\ninto ONE anchor-denormalized materialized view per rule\n(`advice_rule_{slug}`) via `reconcile_named_view`.\n\nThis crate owns the rule *core*: discovery, parse, SQL lowering, and matview\nsynthesis. It does NOT own rendering/weaving (the renderer reads\n`advice_rule_{slug}` filtered to the current anchor — a separate concern).",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Interpreter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-turso \"matview synthesis target\" \"Rust\"\n\nRuntime-definable advice rules (ADR 0022).\n\nAn advice rule is a vault block (`source_language =\n'holon_advice_rule_yaml'`) discovered by the entity-profile scan pattern,\nparsed at the boundary into a closed typed model, and compiled by the engine\ninto ONE anchor-denormalized materialized view per rule\n(`advice_rule_{slug}`) via `reconcile_named_view`.\n\nThis crate owns the rule *core*: discovery, parse, SQL lowering, and matview\nsynthesis. It does NOT own rendering/weaving (the renderer reads\n`advice_rule_{slug}` filtered to the current anchor — a separate concern).",
         "source_file": "holon-advice/src/lib.rs",
+        "layer": "Engine",
+        "relationships": [
+          {
+            "target": "holon-api",
+            "label": "shared value & operation types",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-turso",
+            "label": "matview synthesis target",
+            "protocol": "Rust"
+          }
+        ],
         "dirs": [
           {
             "name": "assets",
@@ -753,9 +767,6 @@
             "files": [
               {
                 "name": "discovery.rs"
-              },
-              {
-                "name": "holon_rule.rs"
               },
               {
                 "name": "lib.rs"
@@ -2992,9 +3003,9 @@
                     "path": "holon-integration-tests/src/pbt/ref_caps",
                     "c4_level": "unknown",
                     "description": "Phase 2 — blanket impls of `holon_pbt_core::capabilities::*` on [`ReferenceState`].",
-                    "pattern": "State",
+                    "pattern": "Adapter",
                     "pattern_status": "planned",
-                    "content": "Phase 2 — blanket impls of `holon_pbt_core::capabilities::*` on\n[`ReferenceState`].\n\n@pbt kind ref\n@pbt covers ref-capmap-wiring — `CapProvider::register` exposes the single\n  `ReferenceState` as the ref `CapMap` for `run_selected`. Every\n`caps.insert`   is registered UNCONDITIONALLY; selection is `SUT ∧ ref`\n(`Needs`), so a ref   cap with no matching SUT cap is inert (deselects), NOT\na vacuity feeder.   FIDELITY: over-registering a ref cap could newly SELECT\na catalog invariant   (the \"catalog scope creep\" risk) — each `caps.insert`\ncomment states which   SUT slice gates it.\n\nTranslates between the capability traits' stringly-typed `EntityUri`\nsurface and `ReferenceState`'s `EntityUri`-based internals. Zero\nbehaviour change: every method delegates to an existing\n`ReferenceState` field or method.\n\nWhen the wide PBT's transitions migrate to capability bounds (Phase 3),\nthey pick these impls up automatically — no code in the transition\nchanges beyond the trait-bound `where` clauses.\n\n## Boundary translation: `EntityUri` ↔ `EntityUri`\n\n- Read methods returning ids: produce `String` via\n  `EntityUri::as_str().to_string()`.\n- Read methods taking ids: parse via `EntityUri::from_str` and propagate\n  `None` on failure (a malformed id can't match anything in the block tree).\n- Write methods taking ids: parse + `.expect()` — wide PBT only ever sees\n  valid `EntityUri`s, so a parse failure is a programmer error.\n\nSplit (RefStateSplit Increment 2, plan\n`docs/Plans/RefStateSplit-2026-07-12.md` §1/§3) into one file per trait\ncluster; this module keeps the id-translation helpers, the `CapProvider`\nimpl, and `reference_state_ref_caps()`.",
+                    "content": "Phase 2 — blanket impls of `holon_pbt_core::capabilities::*` on\n[`ReferenceState`].\n\nPattern: Adapter\n\n@pbt kind ref\n@pbt covers ref-capmap-wiring — `CapProvider::register` exposes the single\n  `ReferenceState` as the ref `CapMap` for `run_selected`. Every\n`caps.insert`   is registered UNCONDITIONALLY; selection is `SUT ∧ ref`\n(`Needs`), so a ref   cap with no matching SUT cap is inert (deselects), NOT\na vacuity feeder.   FIDELITY: over-registering a ref cap could newly SELECT\na catalog invariant   (the \"catalog scope creep\" risk) — each `caps.insert`\ncomment states which   SUT slice gates it.\n\nTranslates between the capability traits' stringly-typed `EntityUri`\nsurface and `ReferenceState`'s `EntityUri`-based internals. Zero\nbehaviour change: every method delegates to an existing\n`ReferenceState` field or method.\n\nWhen the wide PBT's transitions migrate to capability bounds (Phase 3),\nthey pick these impls up automatically — no code in the transition\nchanges beyond the trait-bound `where` clauses.\n\n## Boundary translation: `EntityUri` ↔ `EntityUri`\n\n- Read methods returning ids: produce `String` via\n  `EntityUri::as_str().to_string()`.\n- Read methods taking ids: parse via `EntityUri::from_str` and propagate\n  `None` on failure (a malformed id can't match anything in the block tree).\n- Write methods taking ids: parse + `.expect()` — wide PBT only ever sees\n  valid `EntityUri`s, so a parse failure is a programmer error.\n\nSplit (RefStateSplit Increment 2, plan\n`docs/Plans/RefStateSplit-2026-07-12.md` §1/§3) into one file per trait\ncluster; this module keeps the id-translation helpers, the `CapProvider`\nimpl, and `reference_state_ref_caps()`.",
                     "source_file": "holon-integration-tests/src/pbt/ref_caps/mod.rs",
                     "parent": "holon-integration-tests/src/pbt",
                     "files": [
@@ -4025,9 +4036,6 @@
                 "parent": "holon-loro",
                 "files": [
                   {
-                    "name": "keychain.rs"
-                  },
-                  {
                     "name": "mod.rs"
                   },
                   {
@@ -4391,12 +4399,30 @@
       {
         "name": "holon-markdown",
         "path": "holon-markdown",
-        "c4_level": "unknown",
+        "c4_level": "component",
         "description": "`holon-markdown` — read-only (Tier R/O) ingest adapters for foreign vaults: Obsidian-flavored and LogSeq-flavored Markdown, parsed into the SAME `Block` + `MarkSpan` substrate as org (see `docs/Proposals/ForeignVaultCompat-2026-07-12.md`).",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "`holon-markdown` — read-only (Tier R/O) ingest adapters for foreign vaults:\nObsidian-flavored and LogSeq-flavored Markdown, parsed into the SAME `Block`\n+ `MarkSpan` substrate as org (see\n  `docs/Proposals/ForeignVaultCompat-2026-07-12.md`).\n\nBoth adapters implement `holon_core::FileFormatAdapter`. They are **read\nonly**: `render_document` / `render_blocks` panic (a write to a foreign file\nis loss by definition under ADR 0025 until anchored write-back lands), and\n`writeback_drops` always refuses. The [`ReadOnlyWriteGuard`] is the\ncontroller-level gate that must veto any write to a foreign-vault doc before\na renderer is ever reached.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"FileFormatAdapter port\" \"Rust\"\n@c4 uses holon-org-format \"shared Block/MarkSpan substrate\" \"Rust\"\n\n`holon-markdown` — read-only (Tier R/O) ingest adapters for foreign vaults:\nObsidian-flavored and LogSeq-flavored Markdown, parsed into the SAME `Block`\n+ `MarkSpan` substrate as org (see\n  `docs/Proposals/ForeignVaultCompat-2026-07-12.md`).\n\nBoth adapters implement `holon_core::FileFormatAdapter`. They are **read\nonly**: `render_document` / `render_blocks` panic (a write to a foreign file\nis loss by definition under ADR 0025 until anchored write-back lands), and\n`writeback_drops` always refuses. The [`ReadOnlyWriteGuard`] is the\ncontroller-level gate that must veto any write to a foreign-vault doc before\na renderer is ever reached.",
         "source_file": "holon-markdown/src/lib.rs",
+        "layer": "Adapters",
+        "relationships": [
+          {
+            "target": "holon-api",
+            "label": "shared value & operation types",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-core",
+            "label": "FileFormatAdapter port",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-org-format",
+            "label": "shared Block/MarkSpan substrate",
+            "protocol": "Rust"
+          }
+        ],
         "dirs": [
           {
             "name": "src",
@@ -4678,11 +4704,13 @@
       {
         "name": "holon-mcp-mock",
         "path": "holon-mcp-mock",
-        "c4_level": "unknown",
+        "c4_level": "component",
         "description": "A configurable mock MCP server that reproduces the challenging behaviours seen in real MCP servers, for E2E-testing holon's generic MCP connector.",
+        "pattern": "Test Harness",
         "pattern_status": "planned",
-        "content": "A configurable mock MCP server that reproduces the challenging behaviours\nseen in real MCP servers, for E2E-testing holon's generic MCP connector.\n\nThe server speaks real MCP over stdio (rmcp `transport-io`) so it is driven\nexactly like any production server through the `transport-child-process`\npath. Behaviour is selected by the [`Scenario`] parsed from the\n`MOCK_MCP_SCENARIO` env var (set in a sidecar's `child_process.env`).\n\nCatalogue and rationale: `docs/Plans/McpMockE2E.md`.",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n\nA configurable mock MCP server that reproduces the challenging behaviours\nseen in real MCP servers, for E2E-testing holon's generic MCP connector.\n\nThe server speaks real MCP over stdio (rmcp `transport-io`) so it is driven\nexactly like any production server through the `transport-child-process`\npath. Behaviour is selected by the [`Scenario`] parsed from the\n`MOCK_MCP_SCENARIO` env var (set in a sidecar's `child_process.env`).\n\nCatalogue and rationale: `docs/Plans/McpMockE2E.md`.",
         "source_file": "holon-mcp-mock/src/lib.rs",
+        "layer": "Testing",
         "dirs": [
           {
             "name": "src",
@@ -4782,11 +4810,20 @@
       {
         "name": "holon-oracles",
         "path": "holon-oracles",
-        "c4_level": "unknown",
+        "c4_level": "component",
         "description": "Live oracles — keystone PBT invariants shipped into debug builds.",
+        "pattern": "Monitor",
         "pattern_status": "planned",
-        "content": "Live oracles — keystone PBT invariants shipped into debug builds.\n\nThe composed keystone PBT carries ~37 invariants, but they only run in\ntests, while most escaped bugs are ENVIRONMENT bugs whose home field is\nprod. This crate ships the *ref-less* subset (checkable against live app\nstate alone, no PBT reference model) as background assertions in debug\nbuilds, so every manual dogfood session is an oracle-carrying session.\n\nArchitecture (fail loud, never fake — see CLAUDE.md):\n- [`checks`] — pure check functions, the single shared implementation. The\n  keystone PBT bodies delegate to these; the live runner feeds them from SQL\n  snapshots. One implementation, no drift.\n- [`status`] — process-global violation ledger + change notification. Global\n  because the tracing subscriber (the latency oracle's source) is\n  process-global; the PBT harness never touches it.\n- [`runner`] — background tokio task running the cheap tier on a fixed\n  cadence, off the UI hot path.\n- [`latency`] — a `tracing_subscriber` Layer that turns the existing\n  `holon_latency` stage events (dispatch/rows/projection) into SLO\n  violations (any stage >200ms).\n\nGating: debug builds only (the frontends wire it under\n`cfg(debug_assertions)`), `HOLON_ORACLES=off` opts out, heavier checks are\nreserved for `HOLON_ORACLES=full`.",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Monitor\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n\nLive oracles — keystone PBT invariants shipped into debug builds.\n\nThe composed keystone PBT carries ~37 invariants, but they only run in\ntests, while most escaped bugs are ENVIRONMENT bugs whose home field is\nprod. This crate ships the *ref-less* subset (checkable against live app\nstate alone, no PBT reference model) as background assertions in debug\nbuilds, so every manual dogfood session is an oracle-carrying session.\n\nArchitecture (fail loud, never fake — see CLAUDE.md):\n- [`checks`] — pure check functions, the single shared implementation. The\n  keystone PBT bodies delegate to these; the live runner feeds them from SQL\n  snapshots. One implementation, no drift.\n- [`status`] — process-global violation ledger + change notification. Global\n  because the tracing subscriber (the latency oracle's source) is\n  process-global; the PBT harness never touches it.\n- [`runner`] — background tokio task running the cheap tier on a fixed\n  cadence, off the UI hot path.\n- [`latency`] — a `tracing_subscriber` Layer that turns the existing\n  `holon_latency` stage events (dispatch/rows/projection) into SLO\n  violations (any stage >200ms).\n\nGating: debug builds only (the frontends wire it under\n`cfg(debug_assertions)`), `HOLON_ORACLES=off` opts out, heavier checks are\nreserved for `HOLON_ORACLES=full`.",
         "source_file": "holon-oracles/src/lib.rs",
+        "layer": "Core",
+        "relationships": [
+          {
+            "target": "holon-api",
+            "label": "shared value & operation types",
+            "protocol": "Rust"
+          }
+        ],
         "dirs": [
           {
             "name": "src",
@@ -4999,10 +5036,6 @@
           }
         ],
         "dirs": [
-          {
-            "name": "examples",
-            "path": "holon-orgmode/examples"
-          },
           {
             "name": "src",
             "path": "holon-orgmode/src",
@@ -5514,11 +5547,13 @@
       {
         "name": "holon-secrets",
         "path": "holon-secrets",
-        "c4_level": "unknown",
+        "c4_level": "component",
         "description": "OS-keychain storage for Holon's secret material.",
+        "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "OS-keychain storage for Holon's secret material.\n\nTwo callers share this seam: the owner-identity seed (ADR 0028 C1/D1) and\nthe OAuth2 credentials an integration sidecar references. A secret filed\nhere is identified by a *service* (fixed per store) and an *account*.\n\n- [`KeychainStore`] — the trait every backend implements.\n- [`platform_keychain`] — the backend for the running platform.\n- [`UnavailableKeychainStore`] — the **fail-loud** stand-in for platforms\n  with no wired backend. Every call returns a clear `Err` naming the\n  platform and the missing precondition; it never silently drops the secret\n  to disk or memory.\n- [`InMemoryKeychainStore`] — a test double (never used in production).\n\nSecrets are opaque `&[u8]` here. Nothing in this crate logs the secret\nmaterial.",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Adapter\n\nOS-keychain storage for Holon's secret material.\n\nTwo callers share this seam: the owner-identity seed (ADR 0028 C1/D1) and\nthe OAuth2 credentials an integration sidecar references. A secret filed\nhere is identified by a *service* (fixed per store) and an *account*.\n\n- [`KeychainStore`] — the trait every backend implements.\n- [`platform_keychain`] — the backend for the running platform.\n- [`UnavailableKeychainStore`] — the **fail-loud** stand-in for platforms\n  with no wired backend. Every call returns a clear `Err` naming the\n  platform and the missing precondition; it never silently drops the secret\n  to disk or memory.\n- [`InMemoryKeychainStore`] — a test double (never used in production).\n\nSecrets are opaque `&[u8]` here. Nothing in this crate logs the secret\nmaterial.",
         "source_file": "holon-secrets/src/lib.rs",
+        "layer": "Core",
         "dirs": [
           {
             "name": "src",
@@ -5545,11 +5580,30 @@
       {
         "name": "holon-sharing",
         "path": "holon-sharing",
-        "c4_level": "unknown",
+        "c4_level": "component",
         "description": "`holon-sharing` — ADR 0028 sharing machinery (Increments 4-6: the H2 owner-scoped, totally-ordered crossing log + its migration/undo/enforcement seams; the D4/H8 owner-signed policy objects + lease membership; and the H4 owner-private alias ledger / re-encode baseline).",
+        "pattern": "Policy",
         "pattern_status": "planned",
-        "content": "`holon-sharing` — ADR 0028 sharing machinery (Increments 4-6: the H2\nowner-scoped, totally-ordered crossing log + its migration/undo/enforcement\nseams; the D4/H8 owner-signed policy objects + lease membership; and the H4\nowner-private alias ledger / re-encode baseline).\n\n## What lands here (Inc 5 — [`policy`], [`lease`])\n- [`policy::Policy`] — owner-signed `{selector: stable block id (H6, never a\n  name), principals, capabilities, delegation, lease}`; committed through\n  [`policy::PolicySet`], which enforces the **A7 disjointness invariant**\n  (nested/overlapping selectors rejected loud at commit) and mirrors each\n  commit as a `PolicyEdit` into the Inc-4 log.\n- [`lease`] — lease-based membership (H8): short-lived certs measured on the\n  injected [`holon_api::Clock`] seam (NO `SystemTime::now`), **revocation =\n  non-renewal**, and owner→delegate→peer chain verification\n  ([`lease::verify_membership`]) — else membership is unclaimable.\n- [`policy::evaluate_grant`] — a non-owner grant without delegation rights\n  becomes a **pending request** (D4).\n\n## What lands here (Inc 6 — [`alias_ledger`])\n- [`alias_ledger::AliasLedger`] — owner-private,\n  [`alias_ledger::NonReplicated`] (OQ3) `old-id → new-id` chains; re-encode\n  and owner-signed [`alias_ledger::SuccessionPointer`] baseline. Owner\n  backlinks rewrite through the SQL `block_links` junction; recipients get\n  fresh public ids with no correlation handle and their dangling refs render\n  loud (fail-loud).\n\nHome ratified by OQ2: a NEW crate (not an extension of `holon-loro`) — the\nlog arbitrates *policy*, which is not Loro's concern. It reuses the Loro\nsubstrate (`doc_lamport_height` for the dedicated owner-log clock, delta\nexport/import for merge) and the `share_peer_id` device-key derivation, but\nowns the sharing domain types and arbitration rule.\n\n## What lands here (Inc 4)\n- [`log::CrossingLog`] — one dedicated `LoroDoc` per owner scope, one clock,\n  entries stamped with the FROZEN tuple `(lamport_height(log_doc) at append,\n  stable_peer_id)`; both crossings and policy edits in the one log.\n- [`arbitration`] — concurrent divergent crossings ordered\n  deterministically; the loser is rejected loudly and returned as a\n  *keepable divergent copy*.\n- [`journal`] — idempotent, resumable migration; the journal is the unit of\n  atomicity; leak-direction contract (widen = create-shared-first, narrow =\n  delete-shared-first).\n- [`undo`] — inverse-crossing undo through the same log; a rejected loser\n  NEVER enters the undo stack.\n- [`projection`] — SQL projection semantics across the migration window +\n  the orphan-row tripwire (wired at Inc 3).\n- [`boundary`] — the first runtime consumer of\n  [`holon_api::BoundaryBehavior`]: the allow/reject-loud decision function,\n  incl. the `Unclassified` fail-closed contract and the descriptor-less-op\n  classification design.\n\n## Signature shape (OQ4) — REAL as of the W4 ceremony work\nEvery entry carries an [`types::OwnerSig`] produced by a\n[`types::SigningAuthority`]. The production impl is\n[`types::OwnerKeyAuthority`], backed by the durable Ed25519\n[`holon_loro::owner_identity::OwnerIdentityKey`]; its signatures verify\nunder the owner's public key via [`types::OwnerSig::verify`] and\n[`log::CrossingLog::verify_all`]. [`types::UnverifiedAuthority`] (a blake3\nstand-in) remains ONLY as a test double and its output is REJECTED by\nverification. Swapping authorities required no log-layout change (the field\nshape was committed at Inc 4).",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Policy\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-loro \"CRDT substrate for the owner log\" \"Rust\"\n\n`holon-sharing` — ADR 0028 sharing machinery (Increments 4-6: the H2\nowner-scoped, totally-ordered crossing log + its migration/undo/enforcement\nseams; the D4/H8 owner-signed policy objects + lease membership; and the H4\nowner-private alias ledger / re-encode baseline).\n\n## What lands here (Inc 5 — [`policy`], [`lease`])\n- [`policy::Policy`] — owner-signed `{selector: stable block id (H6, never a\n  name), principals, capabilities, delegation, lease}`; committed through\n  [`policy::PolicySet`], which enforces the **A7 disjointness invariant**\n  (nested/overlapping selectors rejected loud at commit) and mirrors each\n  commit as a `PolicyEdit` into the Inc-4 log.\n- [`lease`] — lease-based membership (H8): short-lived certs measured on the\n  injected [`holon_api::Clock`] seam (NO `SystemTime::now`), **revocation =\n  non-renewal**, and owner→delegate→peer chain verification\n  ([`lease::verify_membership`]) — else membership is unclaimable.\n- [`policy::evaluate_grant`] — a non-owner grant without delegation rights\n  becomes a **pending request** (D4).\n\n## What lands here (Inc 6 — [`alias_ledger`])\n- [`alias_ledger::AliasLedger`] — owner-private,\n  [`alias_ledger::NonReplicated`] (OQ3) `old-id → new-id` chains; re-encode\n  and owner-signed [`alias_ledger::SuccessionPointer`] baseline. Owner\n  backlinks rewrite through the SQL `block_links` junction; recipients get\n  fresh public ids with no correlation handle and their dangling refs render\n  loud (fail-loud).\n\nHome ratified by OQ2: a NEW crate (not an extension of `holon-loro`) — the\nlog arbitrates *policy*, which is not Loro's concern. It reuses the Loro\nsubstrate (`doc_lamport_height` for the dedicated owner-log clock, delta\nexport/import for merge) and the `share_peer_id` device-key derivation, but\nowns the sharing domain types and arbitration rule.\n\n## What lands here (Inc 4)\n- [`log::CrossingLog`] — one dedicated `LoroDoc` per owner scope, one clock,\n  entries stamped with the FROZEN tuple `(lamport_height(log_doc) at append,\n  stable_peer_id)`; both crossings and policy edits in the one log.\n- [`arbitration`] — concurrent divergent crossings ordered\n  deterministically; the loser is rejected loudly and returned as a\n  *keepable divergent copy*.\n- [`journal`] — idempotent, resumable migration; the journal is the unit of\n  atomicity; leak-direction contract (widen = create-shared-first, narrow =\n  delete-shared-first).\n- [`undo`] — inverse-crossing undo through the same log; a rejected loser\n  NEVER enters the undo stack.\n- [`projection`] — SQL projection semantics across the migration window +\n  the orphan-row tripwire (wired at Inc 3).\n- [`boundary`] — the first runtime consumer of\n  [`holon_api::BoundaryBehavior`]: the allow/reject-loud decision function,\n  incl. the `Unclassified` fail-closed contract and the descriptor-less-op\n  classification design.\n\n## Signature shape (OQ4) — REAL as of the W4 ceremony work\nEvery entry carries an [`types::OwnerSig`] produced by a\n[`types::SigningAuthority`]. The production impl is\n[`types::OwnerKeyAuthority`], backed by the durable Ed25519\n[`holon_loro::owner_identity::OwnerIdentityKey`]; its signatures verify\nunder the owner's public key via [`types::OwnerSig::verify`] and\n[`log::CrossingLog::verify_all`]. [`types::UnverifiedAuthority`] (a blake3\nstand-in) remains ONLY as a test double and its output is REJECTED by\nverification. Swapping authorities required no log-layout change (the field\nshape was committed at Inc 4).",
         "source_file": "holon-sharing/src/lib.rs",
+        "layer": "Engine",
+        "relationships": [
+          {
+            "target": "holon-api",
+            "label": "shared value & operation types",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-core",
+            "label": "core datasource traits",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-loro",
+            "label": "CRDT substrate for the owner log",
+            "protocol": "Rust"
+          }
+        ],
         "dirs": [
           {
             "name": "src",
@@ -5630,11 +5684,13 @@
       {
         "name": "holon-toon",
         "path": "holon-toon",
-        "c4_level": "unknown",
-        "description": "`holon-toon` — an experiment crate.",
+        "c4_level": "component",
+        "description": "`holon-toon` — the dense **TOON** wire projection an agent reads and patches. Shipped: `frontends/mcp` encodes query result tables through it.",
+        "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "`holon-toon` — an experiment crate.\n\nA dense, round-trippable **TOON** projection of the Holon block forest,\nbuilt as a structural sibling of `crates/holon-org-format` so it can be\npromoted directly if the experiment wins. The library parses and renders\nthe projection an agent reads and patches; `MAPPING.md` records the\norg<->TOON construct mapping and `examples/measure.rs` measures token cost\nagainst org on real vault files.\n\nLayers (bottom to top):\n- [`toon`] — generic TOON scalar quoting/escaping, row split, props codec.\n  This is the single escaping implementation the whole crate funnels\n  through.\n- [`table`] — the **generic tabular codec**: `Vec<Row>` (`Row =\n  BTreeMap<String, ToonValue>`) <-> TOON text, with a deterministic sorted\n  column union and an explicit absent-vs-empty distinction. This is TOON's\n  real sweet spot (uniform value-heavy rows, e.g. MCP query results) and is\n  block-independent.\n- [`schema`] — the fixed 6-column *block* tabular schema (a second policy\n  over the same `toon` primitives).\n- [`models`] — the block-forest domain types (parse-don't-validate\n  newtypes).\n- [`renderer`] / [`parser`] — `Forest` <-> TOON text.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n\n`holon-toon` — the dense **TOON** wire projection an agent reads and\npatches. Shipped: `frontends/mcp` encodes query result tables through it.\n\nA dense, round-trippable projection of the Holon block forest,\nbuilt as a structural sibling of `crates/holon-org-format` so it can be\npromoted directly if the experiment wins. The library parses and renders\nthe projection an agent reads and patches; `MAPPING.md` records the\norg<->TOON construct mapping and `examples/measure.rs` measures token cost\nagainst org on real vault files.\n\nLayers (bottom to top):\n- [`toon`] — generic TOON scalar quoting/escaping, row split, props codec.\n  This is the single escaping implementation the whole crate funnels\n  through.\n- [`table`] — the **generic tabular codec**: `Vec<Row>` (`Row =\n  BTreeMap<String, ToonValue>`) <-> TOON text, with a deterministic sorted\n  column union and an explicit absent-vs-empty distinction. This is TOON's\n  real sweet spot (uniform value-heavy rows, e.g. MCP query results) and is\n  block-independent.\n- [`schema`] — the fixed 6-column *block* tabular schema (a second policy\n  over the same `toon` primitives).\n- [`models`] — the block-forest domain types (parse-don't-validate\n  newtypes).\n- [`renderer`] / [`parser`] — `Forest` <-> TOON text.",
         "source_file": "holon-toon/src/lib.rs",
+        "layer": "Adapters",
         "dirs": [
           {
             "name": "examples",

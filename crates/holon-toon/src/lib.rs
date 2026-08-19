@@ -1,6 +1,11 @@
-//! `holon-toon` — an experiment crate.
+//! @c4 component
+//! @c4 layer Adapters
+//! Pattern: Adapter
 //!
-//! A dense, round-trippable **TOON** projection of the Holon block forest,
+//! `holon-toon` — the dense **TOON** wire projection an agent reads and
+//! patches. Shipped: `frontends/mcp` encodes query result tables through it.
+//!
+//! A dense, round-trippable projection of the Holon block forest,
 //! built as a structural sibling of `crates/holon-org-format` so it can be
 //! promoted directly if the experiment wins. The library parses and renders
 //! the projection an agent reads and patches; `MAPPING.md` records the

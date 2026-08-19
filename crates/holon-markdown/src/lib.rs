@@ -1,3 +1,10 @@
+//! @c4 component
+//! @c4 layer Adapters
+//! Pattern: Adapter
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "FileFormatAdapter port" "Rust"
+//! @c4 uses holon-org-format "shared Block/MarkSpan substrate" "Rust"
+//!
 //! `holon-markdown` — read-only (Tier R/O) ingest adapters for foreign vaults:
 //! Obsidian-flavored and LogSeq-flavored Markdown, parsed into the SAME `Block`
 //! + `MarkSpan` substrate as org (see

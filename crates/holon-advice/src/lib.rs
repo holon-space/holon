@@ -1,3 +1,9 @@
+//! @c4 component
+//! @c4 layer Engine
+//! Pattern: Interpreter
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-turso "matview synthesis target" "Rust"
+//!
 //! Runtime-definable advice rules (ADR 0022).
 //!
 //! An advice rule is a vault block (`source_language =

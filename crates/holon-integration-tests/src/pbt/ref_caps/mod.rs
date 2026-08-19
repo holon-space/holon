@@ -1,6 +1,8 @@
 //! Phase 2 — blanket impls of `holon_pbt_core::capabilities::*` on
 //! [`ReferenceState`].
 //!
+//! Pattern: Adapter
+//!
 //! @pbt kind ref
 //! @pbt covers ref-capmap-wiring — `CapProvider::register` exposes the single
 //!   `ReferenceState` as the ref `CapMap` for `run_selected`. Every

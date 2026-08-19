@@ -1,3 +1,8 @@
+//! @c4 component
+//! @c4 layer Core
+//! Pattern: Monitor
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//!
 //! Live oracles — keystone PBT invariants shipped into debug builds.
 //!
 //! The composed keystone PBT carries ~37 invariants, but they only run in

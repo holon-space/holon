@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/lane-gate-hygiene/frontends",
+  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/lane-thin-view/frontends",
   "root": {
     "name": ".",
     "path": ".",
@@ -483,6 +483,9 @@
                         "name": "style.rs"
                       },
                       {
+                        "name": "switch_track.rs"
+                      },
+                      {
                         "name": "table_row.rs"
                       },
                       {
@@ -678,6 +681,12 @@
                 "name": "accordion_layout_spike.rs"
               },
               {
+                "name": "arrow_nav_windowed.rs"
+              },
+              {
+                "name": "arrow_nav_windowed_pbt.rs"
+              },
+              {
                 "name": "cmd_enter_chord_dispatch.rs"
               },
               {
@@ -694,6 +703,9 @@
               },
               {
                 "name": "editor_trailing_space_echo.rs"
+              },
+              {
+                "name": "empty_block_hint_windowed.rs"
               },
               {
                 "name": "executor_bridge_test.rs"
@@ -783,6 +795,9 @@
                 "name": "plain_path_scroll.rs"
               },
               {
+                "name": "popup_row_click_windowed.rs"
+              },
+              {
                 "name": "reactive_vm_realwindow_test.rs"
               },
               {
@@ -795,7 +810,19 @@
                 "name": "seeded_sidebar_live_query_height.rs"
               },
               {
+                "name": "settings_integrations_ops_windowed.rs"
+              },
+              {
                 "name": "sidebar_disclosure_affordance.rs"
+              },
+              {
+                "name": "sidebar_scroll_reaches_bottom.rs"
+              },
+              {
+                "name": "slash_command_text_hidden_windowed.rs"
+              },
+              {
+                "name": "state_toggle_switch_windowed.rs"
               },
               {
                 "name": "sticky_accordion_pbt.rs"

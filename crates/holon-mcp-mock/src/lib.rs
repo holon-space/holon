@@ -1,3 +1,7 @@
+//! @c4 component
+//! @c4 layer Testing
+//! Pattern: Test Harness
+//!
 //! A configurable mock MCP server that reproduces the challenging behaviours
 //! seen in real MCP servers, for E2E-testing holon's generic MCP connector.
 //!

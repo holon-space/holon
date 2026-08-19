@@ -1,3 +1,7 @@
+//! @c4 component
+//! @c4 layer Core
+//! Pattern: Adapter
+//!
 //! OS-keychain storage for Holon's secret material.
 //!
 //! Two callers share this seam: the owner-identity seed (ADR 0028 C1/D1) and

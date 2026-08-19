@@ -1,198 +1,14 @@
 {
   "version": "2.0",
-  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/lane-crate-split/frontends",
+  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/lane-thin-view/frontends",
   "root": {
     "name": ".",
     "path": ".",
     "dirs": [
       {
-        "name": "dioxus",
-        "path": "dioxus",
-        "dirs": [
-          {
-            "name": "assets",
-            "path": "dioxus/assets"
-          },
-          {
-            "name": "src",
-            "path": "dioxus/src",
-            "dirs": [
-              {
-                "name": "render",
-                "path": "dioxus/src/render",
-                "c4_level": "unknown",
-                "description": "Dioxus renderer for `holon_frontend::view_model::ViewModel`.",
-                "pattern_status": "planned",
-                "content": "Dioxus renderer for `holon_frontend::view_model::ViewModel`.\n\nMirrors `frontends/gpui/src/render/` in structure: one file per widget under\n[`builders`], dispatched by the shared `holon_macros::builder_registry!`\nmacro. Unlike GPUI, which renders from the live `ReactiveViewModel` tree,\ndioxus-web receives a serialized `ViewModel` snapshot from the worker over\npostMessage and dispatches on the static `ViewKind`.\n\nThe dioxus-only plumbing (worker bridge, contenteditable cell,\nper-`LiveBlock` subscription) stays in `crate::{bridge, editor}`. Everything\nhere is pure `ViewModel → Element`.",
-                "source_file": "dioxus/src/render/mod.rs",
-                "dirs": [
-                  {
-                    "name": "builders",
-                    "path": "dioxus/src/render/builders",
-                    "c4_level": "unknown",
-                    "description": "Widget builder registry for the dioxus desktop snapshot renderer.",
-                    "pattern_status": "planned",
-                    "content": "Widget builder registry for the dioxus desktop snapshot renderer.\n\nUses `holon_macros::builder_registry!` in `node_dispatch` mode, pointing\nat the static `view_model::ViewKind` enum (not the live\n`reactive_view_model::ReactiveViewModel` that GPUI uses — see the\n`node_type` arg below).\n\nEach file in this directory exports `pub fn render(node, ctx) -> Element`\nand matches its own `ViewKind` variant. The macro generates a `render_node`\nthat dispatches on `node.widget_name()` to the matching builder.",
-                    "source_file": "dioxus/src/render/builders/mod.rs",
-                    "parent": "dioxus/src/render",
-                    "files": [
-                      {
-                        "name": "badge.rs"
-                      },
-                      {
-                        "name": "block_operations.rs"
-                      },
-                      {
-                        "name": "card.rs"
-                      },
-                      {
-                        "name": "chat_bubble.rs"
-                      },
-                      {
-                        "name": "checkbox.rs"
-                      },
-                      {
-                        "name": "collapsible.rs"
-                      },
-                      {
-                        "name": "column.rs"
-                      },
-                      {
-                        "name": "columns.rs"
-                      },
-                      {
-                        "name": "dispatch.rs"
-                      },
-                      {
-                        "name": "draggable.rs"
-                      },
-                      {
-                        "name": "drawer.rs"
-                      },
-                      {
-                        "name": "editable_text.rs"
-                      },
-                      {
-                        "name": "error.rs"
-                      },
-                      {
-                        "name": "focusable.rs"
-                      },
-                      {
-                        "name": "icon.rs"
-                      },
-                      {
-                        "name": "list.rs"
-                      },
-                      {
-                        "name": "live_block.rs"
-                      },
-                      {
-                        "name": "live_query.rs"
-                      },
-                      {
-                        "name": "mod.rs"
-                      },
-                      {
-                        "name": "outline.rs"
-                      },
-                      {
-                        "name": "pie_menu.rs"
-                      },
-                      {
-                        "name": "pref_field.rs"
-                      },
-                      {
-                        "name": "prelude.rs"
-                      },
-                      {
-                        "name": "query_result.rs"
-                      },
-                      {
-                        "name": "render_block.rs"
-                      },
-                      {
-                        "name": "row.rs"
-                      },
-                      {
-                        "name": "section.rs"
-                      },
-                      {
-                        "name": "selectable.rs"
-                      },
-                      {
-                        "name": "source_block.rs"
-                      },
-                      {
-                        "name": "source_editor.rs"
-                      },
-                      {
-                        "name": "spacer.rs"
-                      },
-                      {
-                        "name": "state_toggle.rs"
-                      },
-                      {
-                        "name": "table.rs"
-                      },
-                      {
-                        "name": "table_row.rs"
-                      },
-                      {
-                        "name": "text.rs"
-                      },
-                      {
-                        "name": "tree.rs"
-                      },
-                      {
-                        "name": "tree_item.rs"
-                      },
-                      {
-                        "name": "util.rs"
-                      },
-                      {
-                        "name": "view_mode_switcher.rs"
-                      }
-                    ]
-                  }
-                ],
-                "files": [
-                  {
-                    "name": "mod.rs"
-                  }
-                ]
-              }
-            ],
-            "files": [
-              {
-                "name": "editor.rs"
-              },
-              {
-                "name": "main.rs"
-              }
-            ]
-          }
-        ],
-        "files": [
-          {
-            "name": "Cargo.toml"
-          },
-          {
-            "name": "Dioxus.toml"
-          },
-          {
-            "name": "HANDOFF.md"
-          }
-        ]
-      },
-      {
         "name": "dioxus-web",
         "path": "dioxus-web",
         "dirs": [
-          {
-            "name": "assets",
-            "path": "dioxus-web/assets"
-          },
           {
             "name": "src",
             "path": "dioxus-web/src",
@@ -391,28 +207,6 @@
         ]
       },
       {
-        "name": "flutter",
-        "path": "flutter",
-        "dirs": [
-          {
-            "name": "rust_builder",
-            "path": "flutter/rust_builder",
-            "dirs": [
-              {
-                "name": "cargokit",
-                "path": "flutter/rust_builder/cargokit",
-                "dirs": [
-                  {
-                    "name": "build_tool",
-                    "path": "flutter/rust_builder/cargokit/build_tool"
-                  }
-                ]
-              }
-            ]
-          }
-        ]
-      },
-      {
         "name": "gpui",
         "path": "gpui",
         "c4_level": "container",
@@ -474,16 +268,6 @@
                         ]
                       }
                     ]
-                  }
-                ]
-              },
-              {
-                "name": "res",
-                "path": "gpui/android/res",
-                "dirs": [
-                  {
-                    "name": "values",
-                    "path": "gpui/android/res/values"
                   }
                 ]
               }
@@ -1217,10 +1001,6 @@
         "layer": "Services",
         "dirs": [
           {
-            "name": "examples",
-            "path": "mcp/examples"
-          },
-          {
             "name": "src",
             "path": "mcp/src",
             "files": [
@@ -1299,156 +1079,6 @@
           },
           {
             "name": "README.md"
-          }
-        ]
-      },
-      {
-        "name": "ply",
-        "path": "ply",
-        "dirs": [
-          {
-            "name": "src",
-            "path": "ply/src",
-            "dirs": [
-              {
-                "name": "render",
-                "path": "ply/src/render",
-                "dirs": [
-                  {
-                    "name": "builders",
-                    "path": "ply/src/render/builders",
-                    "files": [
-                      {
-                        "name": "badge.rs"
-                      },
-                      {
-                        "name": "block.rs"
-                      },
-                      {
-                        "name": "block_operations.rs"
-                      },
-                      {
-                        "name": "checkbox.rs"
-                      },
-                      {
-                        "name": "col.rs"
-                      },
-                      {
-                        "name": "columns.rs"
-                      },
-                      {
-                        "name": "draggable.rs"
-                      },
-                      {
-                        "name": "drop_zone.rs"
-                      },
-                      {
-                        "name": "editable_text.rs"
-                      },
-                      {
-                        "name": "error.rs"
-                      },
-                      {
-                        "name": "focusable.rs"
-                      },
-                      {
-                        "name": "icon.rs"
-                      },
-                      {
-                        "name": "list.rs"
-                      },
-                      {
-                        "name": "live_block.rs"
-                      },
-                      {
-                        "name": "live_query.rs"
-                      },
-                      {
-                        "name": "mod.rs"
-                      },
-                      {
-                        "name": "operation_helpers.rs"
-                      },
-                      {
-                        "name": "outline.rs"
-                      },
-                      {
-                        "name": "pie_menu.rs"
-                      },
-                      {
-                        "name": "prelude.rs"
-                      },
-                      {
-                        "name": "query_result.rs"
-                      },
-                      {
-                        "name": "render_block.rs"
-                      },
-                      {
-                        "name": "row.rs"
-                      },
-                      {
-                        "name": "section.rs"
-                      },
-                      {
-                        "name": "selectable.rs"
-                      },
-                      {
-                        "name": "source_block.rs"
-                      },
-                      {
-                        "name": "source_editor.rs"
-                      },
-                      {
-                        "name": "spacer.rs"
-                      },
-                      {
-                        "name": "state_toggle.rs"
-                      },
-                      {
-                        "name": "table.rs"
-                      },
-                      {
-                        "name": "text.rs"
-                      },
-                      {
-                        "name": "tree.rs"
-                      }
-                    ]
-                  }
-                ],
-                "files": [
-                  {
-                    "name": "context.rs"
-                  },
-                  {
-                    "name": "interpreter.rs"
-                  },
-                  {
-                    "name": "mod.rs"
-                  }
-                ]
-              }
-            ],
-            "files": [
-              {
-                "name": "cdc.rs"
-              },
-              {
-                "name": "main.rs"
-              },
-              {
-                "name": "state.rs"
-              }
-            ]
-          }
-        ],
-        "files": [
-          {
-            "name": "Cargo.toml"
-          },
-          {
-            "name": "HANDOFF.md"
           }
         ]
       },

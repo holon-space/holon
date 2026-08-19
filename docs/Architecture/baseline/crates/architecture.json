@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/ws-coupling/crates",
+  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/lane-thin-view/crates",
   "root": {
     "name": ".",
     "path": ".",
@@ -202,6 +202,15 @@
                     "name": "block_domain.rs"
                   },
                   {
+                    "name": "guard_world.rs"
+                  },
+                  {
+                    "name": "history_store.rs"
+                  },
+                  {
+                    "name": "holon_rule_watcher.rs"
+                  },
+                  {
                     "name": "holon_service.rs"
                   },
                   {
@@ -229,10 +238,22 @@
                     "name": "repository.rs"
                   },
                   {
+                    "name": "rule_status.rs"
+                  },
+                  {
+                    "name": "task_vocabulary_source.rs"
+                  },
+                  {
+                    "name": "template_source.rs"
+                  },
+                  {
                     "name": "types.rs"
                   },
                   {
                     "name": "ui_watcher.rs"
+                  },
+                  {
+                    "name": "undo_persistence.rs"
                   }
                 ]
               },
@@ -240,6 +261,12 @@
                 "name": "core",
                 "path": "holon/src/core",
                 "files": [
+                  {
+                    "name": "block_to_page_plan.rs"
+                  },
+                  {
+                    "name": "merge_blocks_plan.rs"
+                  },
                   {
                     "name": "mod.rs"
                   },
@@ -262,6 +289,12 @@
                     "name": "stream_cache.rs"
                   },
                   {
+                    "name": "task_keyword_cycle.rs"
+                  },
+                  {
+                    "name": "task_keyword_promotion.rs"
+                  },
+                  {
                     "name": "traits.rs"
                   }
                 ]
@@ -272,7 +305,7 @@
                 "c4_level": "unknown",
                 "description": "Dependency Injection module for holon",
                 "pattern_status": "planned",
-                "content": "Dependency Injection module for holon\n\nThis module provides service registration and resolution using fluxdi.\nIt centralizes dependency wiring and makes it easier to test and configure services.\n\nSubmodules:\n- `runtime`: Async utilities for DI factories\n- `lifecycle`: App lifecycle functions (creating/initializing BackendEngine)\n- `registration`: DI service registration functions",
+                "content": "Dependency Injection module for holon\n\nThis module provides service registration and resolution using fluxdi.\nIt centralizes dependency wiring and makes it easier to test and configure\nservices.\n\nSubmodules:\n- `runtime`: Async utilities for DI factories\n- `lifecycle`: App lifecycle functions (creating/initializing BackendEngine)\n- `registration`: DI service registration functions",
                 "source_file": "holon/src/di/mod.rs",
                 "parent": "holon",
                 "files": [
@@ -303,7 +336,7 @@
                 "description": "Entity identity skeleton.",
                 "pattern": "Observer",
                 "pattern_status": "planned",
-                "content": "Entity identity skeleton.\n\nSchema-and-operations seam so every future integration plugs into one\ncanonical-identity surface instead of growing ad-hoc identity columns.\n\n- **Schema** (already landed): `canonical_entity`, `entity_alias`,\n  `proposal_queue`. See [`IdentitySchemaModule`](holon_turso::schema_modules::IdentitySchemaModule).\n- **Operations** (this module): user-facing `merge_entities`,\n  `propose_merge`, `accept_proposal`, `reject_proposal`; internal undo\n  primitives `restore_canonical_after_merge`, `delete_proposal`,\n  `revert_proposal_status`. All routed through `OperationDispatcher` and\n  logged by `OperationLogObserver` for undo/redo replay.",
+                "content": "Entity identity skeleton.\n\nSchema-and-operations seam so every future integration plugs into one\ncanonical-identity surface instead of growing ad-hoc identity columns.\n\n- **Schema** (already landed): `canonical_entity`, `entity_alias`,\n  `proposal_queue`. See\n  [`IdentitySchemaModule`](holon_turso::schema_modules::IdentitySchemaModule).\n- **Operations** (this module): user-facing `merge_entities`,\n  `propose_merge`, `accept_proposal`, `reject_proposal`; internal undo\n  primitives `restore_canonical_after_merge`, `delete_proposal`,\n  `revert_proposal_status`. All routed through `OperationDispatcher` and\n  logged by `OperationLogObserver` for undo/redo replay.",
                 "source_file": "holon/src/identity/mod.rs",
                 "parent": "holon",
                 "files": [
@@ -321,7 +354,7 @@
                 "c4_level": "unknown",
                 "description": "Navigation module for backend-driven navigation state",
                 "pattern_status": "planned",
-                "content": "Navigation module for backend-driven navigation state\n\nThis module provides navigation operations that work through Turso's IVM (Incremental View Maintenance).\nNavigation state is stored in database tables, and queries JOIN against `current_focus` view\nto automatically update UI when navigation changes.\n\n## Key concepts:\n- `navigation_history`: Stores navigation history for back/forward\n- `navigation_cursor`: Points to current position in history per region\n- `current_focus`: View that JOINs cursor to history for easy querying\n\n## Operations:\n- `focus(region, block_id)`: Navigate to view a block and its children\n- `go_back(region)`: Navigate to previous view in history\n- `go_forward(region)`: Navigate to next view in history\n- `go_home(region)`: Return to root view (clear focus)\n\n## Schema Management\n\nNavigation schema is managed by `NavigationSchemaModule` via the `SchemaRegistry`.\nSee holon-turso `schema_modules.rs` for the schema definition.",
+                "content": "Navigation module for backend-driven navigation state\n\nThis module provides navigation operations that work through Turso's IVM\n(Incremental View Maintenance). Navigation state is stored in database\ntables, and queries JOIN against `current_focus` view to automatically\nupdate UI when navigation changes.\n\n## Key concepts:\n- `navigation_history`: Stores navigation history for back/forward\n- `navigation_cursor`: Points to current position in history per region\n- `current_focus`: View that JOINs cursor to history for easy querying\n\n## Operations:\n- `focus(region, block_id)`: Navigate to view a block and its children\n- `go_back(region)`: Navigate to previous view in history\n- `go_forward(region)`: Navigate to next view in history\n- `go_home(region)`: Return to root view (clear focus)\n\n## Schema Management\n\nNavigation schema is managed by `NavigationSchemaModule` via the\n`SchemaRegistry`. See holon-turso `schema_modules.rs` for the schema\ndefinition.",
                 "source_file": "holon/src/navigation/mod.rs",
                 "parent": "holon",
                 "files": [
@@ -345,6 +378,9 @@
                   },
                   {
                     "name": "backend.rs"
+                  },
+                  {
+                    "name": "local_state.rs"
                   },
                   {
                     "name": "mod.rs"
@@ -377,6 +413,12 @@
                 "parent": "holon",
                 "files": [
                   {
+                    "name": "advice_reconciler.rs"
+                  },
+                  {
+                    "name": "clock_scheduler.rs"
+                  },
+                  {
                     "name": "event_infra_module.rs"
                   },
                   {
@@ -400,7 +442,7 @@
                 "description": "Generic testing infrastructure for OperationProvider implementations",
                 "pattern": "State",
                 "pattern_status": "planned",
-                "content": "Generic testing infrastructure for OperationProvider implementations\n\nThis module provides property-based testing infrastructure that works\nfor any provider implementing the `OperationProvider` trait.\n\nKey components:\n- `GenericProviderState`: Tracks entity state and generates valid operation sequences\n- Integration with `proptest-state-machine` for automatic test generation\n- `E2ETestContext`: End-to-end testing utilities for BackendEngine",
+                "content": "Generic testing infrastructure for OperationProvider implementations\n\nThis module provides property-based testing infrastructure that works\nfor any provider implementing the `OperationProvider` trait.\n\nKey components:\n- `GenericProviderState`: Tracks entity state and generates valid operation\n  sequences\n- Integration with `proptest-state-machine` for automatic test generation\n- `E2ETestContext`: End-to-end testing utilities for BackendEngine",
                 "source_file": "holon/src/testing/mod.rs",
                 "parent": "holon",
                 "files": [
@@ -517,6 +559,18 @@
                     "name": "main.rs"
                   },
                   {
+                    "name": "navigation_focus_refuses_unresolvable_target.rs"
+                  },
+                  {
+                    "name": "tabs_close_cursor_follow.rs"
+                  },
+                  {
+                    "name": "tabs_cursor_filtered_panel.rs"
+                  },
+                  {
+                    "name": "tabs_main_panel_delivery.rs"
+                  },
+                  {
                     "name": "turso_ivm_cdc_zero_changes_repro.rs"
                   },
                   {
@@ -548,7 +602,34 @@
             ],
             "files": [
               {
+                "name": "automations_journal_matview.rs"
+              },
+              {
+                "name": "block_links_junction.rs"
+              },
+              {
                 "name": "block_live_data_catch_up.rs"
+              },
+              {
+                "name": "block_op_catalog_parity.rs"
+              },
+              {
+                "name": "convert_block_to_page_e2e.rs"
+              },
+              {
+                "name": "create_id_collision_semantics.rs"
+              },
+              {
+                "name": "create_page_from_link.rs"
+              },
+              {
+                "name": "cycle_task_state_vocabulary.rs"
+              },
+              {
+                "name": "dispatcher_arc_schema_gate.rs"
+              },
+              {
+                "name": "dispatcher_guard_gate.rs"
               },
               {
                 "name": "e2e_backend_engine_test.rs"
@@ -557,19 +638,43 @@
                 "name": "edge_field_e2e.rs"
               },
               {
+                "name": "fts_e2e.rs"
+              },
+              {
+                "name": "guard_world_projection_schema.rs"
+              },
+              {
+                "name": "history_overhead_bench.rs"
+              },
+              {
+                "name": "history_query_pack.rs"
+              },
+              {
                 "name": "identity_operations.rs"
               },
               {
                 "name": "identity_schema_smoke.rs"
               },
               {
+                "name": "ingest_property_removal.rs"
+              },
+              {
                 "name": "integration_tests.rs"
+              },
+              {
+                "name": "journal_feed_matview.rs"
               },
               {
                 "name": "json_aggregation_e2e_test.rs"
               },
               {
+                "name": "link_candidate_dedup_e2e.rs"
+              },
+              {
                 "name": "link_live_data_feed.rs"
+              },
+              {
+                "name": "live_edit_link_marks.rs"
               },
               {
                 "name": "loro_binary_benchmark.rs"
@@ -578,13 +683,55 @@
                 "name": "petri_e2e_pbt.rs"
               },
               {
+                "name": "promote_task_keyword_compound.rs"
+              },
+              {
+                "name": "query_history_mcp.rs"
+              },
+              {
                 "name": "reliability_tests.rs"
+              },
+              {
+                "name": "sharing_boundary_enforcement_pbt.rs"
               },
               {
                 "name": "stress_tests.rs"
               },
               {
+                "name": "trust_gate.rs"
+              },
+              {
+                "name": "trust_proposals_matview.rs"
+              },
+              {
                 "name": "turso_block_query_source_round_trip_pbt.rs"
+              },
+              {
+                "name": "undo_compound_interleave.rs"
+              },
+              {
+                "name": "undo_concurrent_keystrokes.rs"
+              },
+              {
+                "name": "undo_create_id_stability.rs"
+              },
+              {
+                "name": "undo_foundation.rs"
+              },
+              {
+                "name": "undo_gesture_atomicity.rs"
+              },
+              {
+                "name": "undo_inverse_wave1.rs"
+              },
+              {
+                "name": "undo_inverse_wave2.rs"
+              },
+              {
+                "name": "undo_marks_consistency_repro.rs"
+              },
+              {
+                "name": "undo_move_block_e2e.rs"
               }
             ]
           }
@@ -602,13 +749,98 @@
         ]
       },
       {
+        "name": "holon-advice",
+        "path": "holon-advice",
+        "c4_level": "component",
+        "description": "Runtime-definable advice rules (ADR 0022).",
+        "pattern": "Interpreter",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Interpreter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-turso \"matview synthesis target\" \"Rust\"\n\nRuntime-definable advice rules (ADR 0022).\n\nAn advice rule is a vault block (`source_language =\n'holon_advice_rule_yaml'`) discovered by the entity-profile scan pattern,\nparsed at the boundary into a closed typed model, and compiled by the engine\ninto ONE anchor-denormalized materialized view per rule\n(`advice_rule_{slug}`) via `reconcile_named_view`.\n\nThis crate owns the rule *core*: discovery, parse, SQL lowering, and matview\nsynthesis. It does NOT own rendering/weaving (the renderer reads\n`advice_rule_{slug}` filtered to the current anchor — a separate concern).",
+        "source_file": "holon-advice/src/lib.rs",
+        "layer": "Engine",
+        "relationships": [
+          {
+            "target": "holon-api",
+            "label": "shared value & operation types",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-turso",
+            "label": "matview synthesis target",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "assets",
+            "path": "holon-advice/assets",
+            "files": [
+              {
+                "name": "lessons_for_tasks.yaml"
+              }
+            ]
+          },
+          {
+            "name": "sql",
+            "path": "holon-advice/sql"
+          },
+          {
+            "name": "src",
+            "path": "holon-advice/src",
+            "files": [
+              {
+                "name": "discovery.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "lowering.rs"
+              },
+              {
+                "name": "reconcile_plan.rs"
+              },
+              {
+                "name": "rule.rs"
+              },
+              {
+                "name": "status.rs"
+              },
+              {
+                "name": "synthesis.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-advice/tests",
+            "files": [
+              {
+                "name": "matview_build.rs"
+              },
+              {
+                "name": "pattern_agreement.rs"
+              },
+              {
+                "name": "reparent_overcount.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
         "name": "holon-api",
         "path": "holon-api",
         "c4_level": "component",
         "description": "Shared value types, Operation descriptors, Change/CDC types, and entity conversion traits. No frontend deps.",
         "pattern": "Shared Kernel",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: Shared Kernel\n@c4 uses holon-expr \"compiled Rhai expressions\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nShared value types, Operation descriptors, Change/CDC types, and entity conversion traits. No frontend deps.",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Shared Kernel\n@c4 uses holon-expr \"compiled Rhai expressions\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nShared value types, Operation descriptors, Change/CDC types, and entity\nconversion traits. No frontend deps.",
         "source_file": "holon-api/src/lib.rs",
         "layer": "Core",
         "relationships": [
@@ -647,21 +879,12 @@
             ]
           },
           {
-            "name": "Value",
-            "kind": "enum",
-            "description": "Value type shaped for flutter_rust_bridge interop. // ALLOW(compatibility): FRB constrains the variant shape"
-          },
-          {
             "name": "Change",
             "kind": "enum",
             "description": "Change notification event."
           }
         ],
         "trait_impls": [
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
           {
             "type_name": "EntityName",
             "trait_name": "Hash"
@@ -705,108 +928,47 @@
           {
             "type_name": "EntityName",
             "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "OperationDescriptor",
-            "trait_name": "PartialEq"
-          },
-          {
-            "type_name": "OperationDescriptor",
-            "trait_name": "Default"
-          },
-          {
-            "type_name": "OperationDescriptor",
-            "trait_name": "Debug"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
-          {
-            "type_name": "Value",
-            "trait_name": "From"
           }
         ],
         "dirs": [
           {
+            "name": "proptest-regressions",
+            "path": "holon-api/proptest-regressions",
+            "dirs": [
+              {
+                "name": "live_data",
+                "path": "holon-api/proptest-regressions/live_data"
+              }
+            ]
+          },
+          {
             "name": "src",
             "path": "holon-api/src",
+            "c4_level": "component",
+            "description": "The **A2 subset parser** (ruling: C4 derived-fields, \"A2 subset-first parser on the unchanged `=` surface\"). It parses a deliberate *syntactic subset* of Rhai directly into a typed [`Computation`], so a derived field declared as a `= …` property can be SQL-planted (seat A) instead of forced onto the Rhai projection stage (seat B).",
+            "pattern": "Recursive-descent parser",
+            "pattern_status": "planned",
+            "content": "@c4 component\n@c4 layer Engine\nPattern: Recursive-descent parser\n\nThe **A2 subset parser** (ruling: C4 derived-fields, \"A2 subset-first parser\non the unchanged `=` surface\"). It parses a deliberate *syntactic subset* of\nRhai directly into a typed [`Computation`], so a derived field declared as a\n`= …` property can be SQL-planted (seat A) instead of forced onto the Rhai\nprojection stage (seat B).\n\nThe subset:\n\n```text\nexpr        := if_expr | switch_expr | comparison\nif_expr     := 'if' comparison block ('else' 'if' comparison block)* 'else' block\nswitch_expr := 'switch' comparison '{' arm (',' arm)* ','? '}'\narm         := ('-'? number) '=>' expr | '_' '=>' expr     // labels: distinct numeric literals\nblock       := '{' expr '}'\ncomparison  := additive ( ('=='|'!='|'<'|'<='|'>'|'>=') additive )?\nadditive    := multiplicative ( ('+'|'-') multiplicative )*\nmultiplicative := unary ( ('*'|'/') unary )*\nunary       := '-'? primary\nprimary     := number | identifier | '(' expr ')'\n```\n\n`if`/`switch` both lower to [`Computation::Case`] (see its docs): `switch`\nkeeps its scrutinee; `if` uses a `true` scrutinee with each branch's\n`match_value` being the boolean condition.\n\nThis is a **total function that fails loud with a typed error** — it does\nNOT swallow. The *caller* (petri `=`-prop path) treats a parse error as the\ndisclosed signal to fall back to the full Rhai compiler\n([`Computation::Script`]); falling back to Rhai is the deliberate,\ndisclosed design, not the parser hiding a problem.",
+            "source_file": "holon-api/src/expr_parser.rs",
+            "parent": "holon-api",
+            "layer": "Engine",
+            "dirs": [
+              {
+                "name": "live_data",
+                "path": "holon-api/src/live_data",
+                "files": [
+                  {
+                    "name": "group_by.rs"
+                  },
+                  {
+                    "name": "home_by.rs"
+                  },
+                  {
+                    "name": "supervision.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "action_dsl.rs"
@@ -821,6 +983,9 @@
                 "name": "block_mutation.rs"
               },
               {
+                "name": "block_write_field.rs"
+              },
+              {
                 "name": "capability.rs"
               },
               {
@@ -830,10 +995,19 @@
                 "name": "clock.rs"
               },
               {
+                "name": "computation.rs"
+              },
+              {
                 "name": "computed.rs"
               },
               {
+                "name": "content_canonical.rs"
+              },
+              {
                 "name": "edge_field.rs"
+              },
+              {
+                "name": "effect_id.rs"
               },
               {
                 "name": "entity.rs"
@@ -845,7 +1019,22 @@
                 "name": "entity_uri.rs"
               },
               {
+                "name": "expr_parser.rs"
+              },
+              {
+                "name": "filter.rs"
+              },
+              {
                 "name": "hashmap_value_conversions.rs"
+              },
+              {
+                "name": "history.rs"
+              },
+              {
+                "name": "identity_minting.rs"
+              },
+              {
+                "name": "identity_recognition.rs"
               },
               {
                 "name": "inline_mark.rs"
@@ -855,6 +1044,9 @@
               },
               {
                 "name": "interp_value.rs"
+              },
+              {
+                "name": "latency_e2e.rs"
               },
               {
                 "name": "lib.rs"
@@ -872,7 +1064,16 @@
                 "name": "operation_engine.rs"
               },
               {
+                "name": "perspective.rs"
+              },
+              {
                 "name": "predicate.rs"
+              },
+              {
+                "name": "proposal.rs"
+              },
+              {
+                "name": "provenance.rs"
               },
               {
                 "name": "query_context.rs"
@@ -896,7 +1097,22 @@
                 "name": "repository.rs"
               },
               {
+                "name": "share_props.rs"
+              },
+              {
+                "name": "spawner.rs"
+              },
+              {
+                "name": "storage_error.rs"
+              },
+              {
                 "name": "streaming.rs"
+              },
+              {
+                "name": "template.rs"
+              },
+              {
+                "name": "template_instantiation.rs"
               },
               {
                 "name": "types.rs"
@@ -905,10 +1121,31 @@
                 "name": "ui_watcher.rs"
               },
               {
+                "name": "vault_shape.rs"
+              },
+              {
                 "name": "widget_meta.rs"
               },
               {
                 "name": "widget_spec.rs"
+              },
+              {
+                "name": "write_seq.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-api/tests",
+            "files": [
+              {
+                "name": "derived_field_dual_eval_pbt.rs"
+              },
+              {
+                "name": "descriptor_arcs_roundtrip.rs"
+              },
+              {
+                "name": "descriptor_guard_roundtrip.rs"
               }
             ]
           }
@@ -926,7 +1163,7 @@
         "description": "DI assembly crate (composition root) — owns every wiring that names concrete backends: Turso/Loro/OrgMode modules, MCP integrations, and `FrontendSession`.",
         "pattern": "Composition Root",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Composition\nPattern: Composition Root\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-frontend \"frontend session abstraction\" \"Rust\"\n@c4 uses holon-mcp-client \"MCP client providers\" \"Rust\"\n@c4 uses holon-orgmode \"org-mode sync I/O\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nDI assembly crate (composition root) — owns every wiring that names concrete backends: Turso/Loro/OrgMode modules, MCP integrations, and `FrontendSession`.\n\nOwns all DI assembly that names concrete backends: the Turso\n`BackendEngine` stack ([`wiring`]), the no-Turso Loro stack ([`no_turso`]),\nconfig-driven session construction ([`session`]) and default-layout seeding\n([`seed`]). `holon-frontend` (the shared ViewModel) and `holon-orgmode`\nstay storage-agnostic: they expose capability traits and\n`FrontendSession::from_parts`; this crate supplies the implementations.\n\nOnly frontends that assemble backends depend on this crate (gpui, tui,\nmcp, integration tests) — never the storage-agnostic layers, and never\nthe wasm frontends (which bring their own wiring).",
+        "content": "@c4 component\n@c4 layer Composition\nPattern: Composition Root\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-frontend \"frontend session abstraction\" \"Rust\"\n@c4 uses holon-mcp-client \"MCP client providers\" \"Rust\"\n@c4 uses holon-orgmode \"org-mode sync I/O\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nDI assembly crate (composition root) — owns every wiring that names concrete\nbackends: Turso/Loro/OrgMode modules, MCP integrations, and\n`FrontendSession`.\n\nOwns all DI assembly that names concrete backends: the Turso\n`BackendEngine` stack ([`wiring`]), the no-Turso Loro stack ([`no_turso`]),\nconfig-driven session construction ([`session`]) and default-layout seeding\n([`seed`]). `holon-frontend` (the shared ViewModel) and `holon-orgmode`\nstay storage-agnostic: they expose capability traits and\n`FrontendSession::from_parts`; this crate supplies the implementations.\n\nOnly frontends that assemble backends depend on this crate (gpui, tui,\nmcp, integration tests) — never the storage-agnostic layers, and never\nthe wasm frontends (which bring their own wiring).",
         "source_file": "holon-app/src/lib.rs",
         "layer": "Composition",
         "relationships": [
@@ -982,10 +1219,25 @@
             "path": "holon-app/src",
             "files": [
               {
+                "name": "boot_error.rs"
+              },
+              {
                 "name": "consolidator_epoch.rs"
               },
               {
                 "name": "headless_builder_services.rs"
+              },
+              {
+                "name": "integration_projection.rs"
+              },
+              {
+                "name": "integrations_operations.rs"
+              },
+              {
+                "name": "integrations_section.rs"
+              },
+              {
+                "name": "integrations_settings.rs"
               },
               {
                 "name": "lib.rs"
@@ -1001,6 +1253,9 @@
               },
               {
                 "name": "no_turso_test.rs"
+              },
+              {
+                "name": "ordered_block_crud.rs"
               },
               {
                 "name": "seed.rs"
@@ -1021,6 +1276,51 @@
             "path": "holon-app/tests",
             "files": [
               {
+                "name": "arc_affects_consistency.rs"
+              },
+              {
+                "name": "backlinks_section_seed.rs"
+              },
+              {
+                "name": "boundary_behavior_correspondence.rs"
+              },
+              {
+                "name": "doc_membership_page_boundary_below_root.rs"
+              },
+              {
+                "name": "fresh_db_boot_seed_smoke.rs"
+              },
+              {
+                "name": "integration_set_field_op.rs"
+              },
+              {
+                "name": "integration_state_projection.rs"
+              },
+              {
+                "name": "integration_toggle_round_trip.rs"
+              },
+              {
+                "name": "integrations_section_seed.rs"
+              },
+              {
+                "name": "integrations_settings_vm.rs"
+              },
+              {
+                "name": "org_store_org_round_trip.rs"
+              },
+              {
+                "name": "platform_capabilities_disclosure.rs"
+              },
+              {
+                "name": "seed_copy_on_write.rs"
+              },
+              {
+                "name": "slashmenu_correspondence.rs"
+              },
+              {
+                "name": "sort_key_has_no_default.rs"
+              },
+              {
                 "name": "turso_block_round_trip_pbt.rs"
               }
             ]
@@ -1039,7 +1339,7 @@
         "description": "`cargo test` wrapper that shells out to `archlint --all` for a full-repo architecture sweep.",
         "pattern": "Test Harness",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n\n`cargo test` wrapper that shells out to `archlint --all` for a full-repo architecture sweep.",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n\n`cargo test` wrapper that shells out to `archlint --all` for a full-repo\narchitecture sweep.",
         "source_file": "holon-architecture-tests/src/lib.rs",
         "layer": "Testing",
         "dirs": [
@@ -1119,7 +1419,7 @@
         "description": "Core traits for Holon datasources",
         "pattern": "Port",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: Port\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nCore traits for Holon datasources\n\nThis crate provides the core traits for datasource operations:\n- `CrudOperations`: Basic CRUD operations (create, update, delete)\n- `BlockOperations`: Block-specific operations (indent, outdent, move_block, etc.)\n- `TaskOperations`: Task-specific operations (set_state, set_priority, set_due_date)",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Port\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nCore traits for Holon datasources\n\nThis crate provides the core traits for datasource operations:\n- `CrudOperations`: Basic CRUD operations (create, update, delete)\n- `BlockOperations`: Block-specific operations (indent, outdent, move_block,\n  etc.)\n- `TaskOperations`: Task-specific operations (set_state, set_priority,\n  set_due_date)",
         "source_file": "holon-core/src/lib.rs",
         "layer": "Core",
         "relationships": [
@@ -1209,10 +1509,16 @@
             ],
             "files": [
               {
+                "name": "block_op_catalog.rs"
+              },
+              {
                 "name": "block_operations_tests.rs"
               },
               {
                 "name": "block_ordering.rs"
+              },
+              {
+                "name": "boundary_enforcer.rs"
               },
               {
                 "name": "canonical_path.rs"
@@ -1242,7 +1548,13 @@
                 "name": "lib.rs"
               },
               {
+                "name": "memstats.rs"
+              },
+              {
                 "name": "operation_log.rs"
+              },
+              {
+                "name": "operation_subset.rs"
               },
               {
                 "name": "operation_wrapper.rs"
@@ -1255,6 +1567,9 @@
               },
               {
                 "name": "storage.rs"
+              },
+              {
+                "name": "sync_gate.rs"
               },
               {
                 "name": "traits.rs"
@@ -1281,7 +1596,7 @@
         "description": "Standalone Petri-net engine: YAML-defined nets with Rhai guards, WSJF ranking, and what-if analysis.",
         "pattern": "Interpreter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Engine\nPattern: Interpreter\n@c4 uses holon-expr \"compiled Rhai expressions\" \"Rust\"\n\nStandalone Petri-net engine: YAML-defined nets with Rhai guards, WSJF ranking, and what-if analysis.",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Interpreter\n@c4 uses holon-expr \"compiled Rhai expressions\" \"Rust\"\n\nStandalone Petri-net engine: YAML-defined nets with Rhai guards, WSJF\nranking, and what-if analysis.",
         "source_file": "holon-engine/src/lib.rs",
         "layer": "Engine",
         "relationships": [
@@ -1389,7 +1704,7 @@
         "description": "Compiled Rhai expressions — the shared vocabulary between holon-api entity definitions and the holon-engine Petri-net guard evaluator.",
         "pattern": "Interpreter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Engine\nPattern: Interpreter\n\nCompiled Rhai expressions — the shared vocabulary between holon-api entity definitions and the holon-engine Petri-net guard evaluator.",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Interpreter\n\nCompiled Rhai expressions — the shared vocabulary between holon-api entity\ndefinitions and the holon-engine Petri-net guard evaluator.",
         "source_file": "holon-expr/src/lib.rs",
         "layer": "Engine",
         "dirs": [
@@ -1416,7 +1731,7 @@
         "description": "FileSystem + FileChangeSource ports with in-memory and notify-based adapters (ADR 0011).",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nFileSystem + FileChangeSource ports with in-memory and notify-based adapters (ADR 0011).\n\nThis crate provides the filesystem port traits and their adapters used by other Holon crates.",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nFileSystem + FileChangeSource ports with in-memory and notify-based adapters\n(ADR 0011).\n\nThis crate provides the filesystem port traits and their adapters used by\nother Holon crates.",
         "source_file": "holon-filesystem/src/lib.rs",
         "layer": "Core",
         "relationships": [
@@ -1463,6 +1778,9 @@
                 "name": "in_memory.rs"
               },
               {
+                "name": "ingest_progress.rs"
+              },
+              {
                 "name": "lib.rs"
               },
               {
@@ -1473,6 +1791,12 @@
               },
               {
                 "name": "sync_ports.rs"
+              },
+              {
+                "name": "vault_path.rs"
+              },
+              {
+                "name": "writeback_render.rs"
               }
             ]
           },
@@ -1488,6 +1812,11 @@
                     "name": "sync_base_legacy_sample.json"
                   }
                 ]
+              }
+            ],
+            "files": [
+              {
+                "name": "nearest_page_ancestor_walk.rs"
               }
             ]
           }
@@ -1505,7 +1834,7 @@
         "description": "Frontend session abstraction and the MVVM **ViewModel** layer — owns the reactive `ReactiveViewModel` tree that the GPUI and TUI Views observe.",
         "pattern": "MVVM ViewModel",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: MVVM ViewModel\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nFrontend session abstraction and the MVVM **ViewModel** layer — owns the reactive `ReactiveViewModel` tree that the GPUI and TUI Views observe.\n\nUses `premortem` for layered config (Defaults → TOML → CLI/env) and `clap` for\nCLI parsing. Configuration is defined once in [`config::HolonConfig`] and automatically\ngets CLI + env var + TOML file support.\n\n# Usage\n\n```rust,ignore\nuse holon_frontend::{FrontendSession, cli};\n\nlet (config, session_cfg, config_dir, locked) =\n    cli::build_session(widgets)?;\nlet session = FrontendSession::new_from_config(\n    config, session_cfg, config_dir, locked,\n).await?;\n```",
+        "content": "@c4 component\n@c4 layer Core\nPattern: MVVM ViewModel\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nFrontend session abstraction and the MVVM **ViewModel** layer — owns the\nreactive `ReactiveViewModel` tree that the GPUI and TUI Views observe.\n\nUses `premortem` for layered config (Defaults → TOML → CLI/env) and `clap`\nfor CLI parsing. Configuration is defined once in [`config::HolonConfig`]\nand automatically gets CLI + env var + TOML file support.\n\n# Usage\n\n```rust,ignore\nuse holon_frontend::{FrontendSession, cli};\n\nlet (config, session_cfg, config_dir, locked) =\n    cli::build_session(widgets)?;\nlet session = FrontendSession::new_from_config(\n    config, session_cfg, config_dir, locked,\n).await?;\n```",
         "source_file": "holon-frontend/src/lib.rs",
         "layer": "Core",
         "relationships": [
@@ -1532,8 +1861,8 @@
         ],
         "code_elements": [
           {
-            "name": "ReactiveViewModel",
-            "kind": "struct",
+            "name": "SendState",
+            "kind": "enum",
             "description": "The ViewModel of Holon's MVVM UI — a persistent reactive node."
           }
         ],
@@ -1560,6 +1889,9 @@
                 "name": "shadow_builders",
                 "path": "holon-frontend/src/shadow_builders",
                 "files": [
+                  {
+                    "name": "accordion.rs"
+                  },
                   {
                     "name": "badge.rs"
                   },
@@ -1589,6 +1921,9 @@
                   },
                   {
                     "name": "columns.rs"
+                  },
+                  {
+                    "name": "divider.rs"
                   },
                   {
                     "name": "draggable.rs"
@@ -1624,6 +1959,9 @@
                     "name": "image.rs"
                   },
                   {
+                    "name": "input_box.rs"
+                  },
+                  {
                     "name": "list.rs"
                   },
                   {
@@ -1637,6 +1975,9 @@
                   },
                   {
                     "name": "mod.rs"
+                  },
+                  {
+                    "name": "on_hover.rs"
                   },
                   {
                     "name": "op_button.rs"
@@ -1655,6 +1996,9 @@
                   },
                   {
                     "name": "query_result.rs"
+                  },
+                  {
+                    "name": "question_options.rs"
                   },
                   {
                     "name": "render_entity.rs"
@@ -1734,6 +2078,12 @@
             ],
             "files": [
               {
+                "name": "advice_weaver.rs"
+              },
+              {
+                "name": "bridge_thread.rs"
+              },
+              {
                 "name": "cdc.rs"
               },
               {
@@ -1749,10 +2099,25 @@
                 "name": "config.rs"
               },
               {
+                "name": "creation_slot.rs"
+              },
+              {
+                "name": "dispatch_journal.rs"
+              },
+              {
+                "name": "echo.rs"
+              },
+              {
                 "name": "editor_caret.rs"
               },
               {
+                "name": "editor_source.rs"
+              },
+              {
                 "name": "editor_view_model.rs"
+              },
+              {
+                "name": "expand_toggle.rs"
               },
               {
                 "name": "focus_path.rs"
@@ -1779,6 +2144,15 @@
                 "name": "link_provider.rs"
               },
               {
+                "name": "link_segments.rs"
+              },
+              {
+                "name": "live_block_ancestors.rs"
+              },
+              {
+                "name": "local_edit_epoch.rs"
+              },
+              {
                 "name": "logging.rs"
               },
               {
@@ -1798,6 +2172,9 @@
               },
               {
                 "name": "pbt_caps.rs"
+              },
+              {
+                "name": "platform.rs"
               },
               {
                 "name": "popup_menu.rs"
@@ -1830,13 +2207,25 @@
                 "name": "rich_text_selection.rs"
               },
               {
+                "name": "row_origin.rs"
+              },
+              {
                 "name": "row_pipeline.rs"
               },
               {
                 "name": "size_expectation.rs"
               },
               {
+                "name": "sticky_accordion.rs"
+              },
+              {
+                "name": "template_placement.rs"
+              },
+              {
                 "name": "theme.rs"
+              },
+              {
+                "name": "tour.rs"
               },
               {
                 "name": "user_driver.rs"
@@ -1857,10 +2246,40 @@
             "path": "holon-frontend/tests",
             "files": [
               {
+                "name": "accordion.rs"
+              },
+              {
                 "name": "bottom_dock.rs"
               },
               {
+                "name": "chat_view_render.rs"
+              },
+              {
+                "name": "cold_probe_readiness.rs"
+              },
+              {
                 "name": "container_query_columns.rs"
+              },
+              {
+                "name": "divider.rs"
+              },
+              {
+                "name": "drawer_open_state.rs"
+              },
+              {
+                "name": "numeric_column_text.rs"
+              },
+              {
+                "name": "pending_question_render.rs"
+              },
+              {
+                "name": "sidebar_creation_slot.rs"
+              },
+              {
+                "name": "state_toggle_bool_binding.rs"
+              },
+              {
+                "name": "text_style_kwarg.rs"
               },
               {
                 "name": "trailing_slot.rs"
@@ -1956,6 +2375,37 @@
         ],
         "dirs": [
           {
+            "name": "examples",
+            "path": "holon-integration-tests/examples",
+            "files": [
+              {
+                "name": "crdt_incr_bench.rs"
+              },
+              {
+                "name": "diag_harness.rs"
+              }
+            ]
+          },
+          {
+            "name": "hand-authored-regressions",
+            "path": "holon-integration-tests/hand-authored-regressions",
+            "dirs": [
+              {
+                "name": "fixture-logs-2026-07-31",
+                "path": "holon-integration-tests/hand-authored-regressions/fixture-logs-2026-07-31"
+              }
+            ]
+          },
+          {
+            "name": "profiles",
+            "path": "holon-integration-tests/profiles",
+            "files": [
+              {
+                "name": "martin-vault-2026-07-23.json"
+              }
+            ]
+          },
+          {
             "name": "proptest-regressions",
             "path": "holon-integration-tests/proptest-regressions",
             "dirs": [
@@ -1976,6 +2426,33 @@
                     "path": "holon-integration-tests/proptest-regressions/pbt/transitions"
                   }
                 ]
+              }
+            ]
+          },
+          {
+            "name": "scripts",
+            "path": "holon-integration-tests/scripts",
+            "dirs": [
+              {
+                "name": "seed_wide",
+                "path": "holon-integration-tests/scripts/seed_wide"
+              }
+            ],
+            "files": [
+              {
+                "name": "README.md"
+              },
+              {
+                "name": "ios_reset_sut.sh"
+              },
+              {
+                "name": "run_live_mcp_pbt.sh"
+              },
+              {
+                "name": "soak_reset_rss.py"
+              },
+              {
+                "name": "verify_reset_vault.py"
               }
             ]
           },
@@ -2002,10 +2479,43 @@
                         "path": "holon-integration-tests/src/pbt/composed/invariants",
                         "files": [
                           {
+                            "name": "advice_rows_woven.rs"
+                          },
+                          {
+                            "name": "audience_never_over_approximates.rs"
+                          },
+                          {
+                            "name": "birth_contract.rs"
+                          },
+                          {
+                            "name": "boundary_respected.rs"
+                          },
+                          {
+                            "name": "companion_has_no_child_page_headings.rs"
+                          },
+                          {
+                            "name": "complexity_trend.rs"
+                          },
+                          {
+                            "name": "display_placement_canonical_inert.rs"
+                          },
+                          {
                             "name": "displayed_text.rs"
                           },
                           {
+                            "name": "drawer_open_matches_ref.rs"
+                          },
+                          {
                             "name": "editable_text_has_draggable.rs"
+                          },
+                          {
+                            "name": "embedded_page_collapsed_lazy.rs"
+                          },
+                          {
+                            "name": "every_page_has_its_own_file.rs"
+                          },
+                          {
+                            "name": "filter_spec_resolves.rs"
                           },
                           {
                             "name": "focus_matches_ref.rs"
@@ -2026,6 +2536,18 @@
                             "name": "frontend_root_not_error.rs"
                           },
                           {
+                            "name": "inline_row_mount_present.rs"
+                          },
+                          {
+                            "name": "journal_feed_viewport_lazy.rs"
+                          },
+                          {
+                            "name": "journal_one_per_day.rs"
+                          },
+                          {
+                            "name": "live_block_shell_present.rs"
+                          },
+                          {
                             "name": "live_children_match_ref.rs"
                           },
                           {
@@ -2041,16 +2563,43 @@
                             "name": "main_panel_rows_match_focus.rs"
                           },
                           {
+                            "name": "mark_bounds_within_content.rs"
+                          },
+                          {
+                            "name": "matview_recompute_matches.rs"
+                          },
+                          {
                             "name": "no_errors.rs"
                           },
                           {
                             "name": "no_orphan.rs"
                           },
                           {
+                            "name": "no_page_under_non_page.rs"
+                          },
+                          {
                             "name": "no_parent_cycles.rs"
                           },
                           {
+                            "name": "no_write_outside_vault_root.rs"
+                          },
+                          {
+                            "name": "observed_errors.rs"
+                          },
+                          {
                             "name": "org_render_fixed_point.rs"
+                          },
+                          {
+                            "name": "paint_text_styling.rs"
+                          },
+                          {
+                            "name": "reseed_leak.rs"
+                          },
+                          {
+                            "name": "settle_budget.rs"
+                          },
+                          {
+                            "name": "sidebar_page_tag_preserved.rs"
                           },
                           {
                             "name": "source_language.rs"
@@ -2059,7 +2608,19 @@
                             "name": "sql_budget.rs"
                           },
                           {
+                            "name": "sticky_accordion_spec.rs"
+                          },
+                          {
+                            "name": "task_state_matches_ref.rs"
+                          },
+                          {
                             "name": "task_state_storage_coherence.rs"
+                          },
+                          {
+                            "name": "two_instance_convergence.rs"
+                          },
+                          {
+                            "name": "undo_redo_reference_heal.rs"
                           },
                           {
                             "name": "value_fn_provider_arg_variance_13.rs"
@@ -2098,6 +2659,12 @@
                             "name": "watch_rows.rs"
                           },
                           {
+                            "name": "wheel_occlusion_routing.rs"
+                          },
+                          {
+                            "name": "wheel_two_mode_motion_law.rs"
+                          },
+                          {
                             "name": "window_focus.rs"
                           }
                         ]
@@ -2105,13 +2672,22 @@
                     ],
                     "files": [
                       {
+                        "name": "boundary.rs"
+                      },
+                      {
                         "name": "builder.rs"
                       },
                       {
                         "name": "catalog.rs"
                       },
                       {
+                        "name": "complexity_trend.rs"
+                      },
+                      {
                         "name": "correspondences.rs"
+                      },
+                      {
+                        "name": "first_divergent.rs"
                       },
                       {
                         "name": "fixtures.rs"
@@ -2120,16 +2696,46 @@
                         "name": "harness.rs"
                       },
                       {
+                        "name": "interleave.rs"
+                      },
+                      {
                         "name": "invariants.rs"
                       },
                       {
+                        "name": "live_mcp.rs"
+                      },
+                      {
+                        "name": "observed_errors.rs"
+                      },
+                      {
+                        "name": "reseed_observer.rs"
+                      },
+                      {
+                        "name": "schedule_point.rs"
+                      },
+                      {
+                        "name": "schedule_signature.rs"
+                      },
+                      {
                         "name": "seed_primitives.rs"
+                      },
+                      {
+                        "name": "settle_latency.rs"
+                      },
+                      {
+                        "name": "soak_seed.rs"
                       },
                       {
                         "name": "span_metrics.rs"
                       },
                       {
                         "name": "subsystem_seed.rs"
+                      },
+                      {
+                        "name": "telemetry.rs"
+                      },
+                      {
+                        "name": "two_instance.rs"
                       },
                       {
                         "name": "wide_e2e.rs"
@@ -2151,6 +2757,9 @@
                     "files": [
                       {
                         "name": "assert.rs"
+                      },
+                      {
+                        "name": "assert_steps.rs"
                       },
                       {
                         "name": "gherkin.rs"
@@ -2186,6 +2795,9 @@
                         "name": "navigation_pbt.rs"
                       },
                       {
+                        "name": "peer_image_data.rs"
+                      },
+                      {
                         "name": "structural_pbt.rs"
                       }
                     ]
@@ -2211,16 +2823,46 @@
                         "parent": "holon-integration-tests/src/pbt/invariants",
                         "files": [
                           {
+                            "name": "advice_rows_woven.rs"
+                          },
+                          {
+                            "name": "audience_never_over_approximates.rs"
+                          },
+                          {
+                            "name": "birth_contract.rs"
+                          },
+                          {
                             "name": "block_ids_match_ref.rs"
                           },
                           {
                             "name": "block_tags_references_exist.rs"
                           },
                           {
+                            "name": "boundary_respected.rs"
+                          },
+                          {
+                            "name": "companion_has_no_child_page_headings.rs"
+                          },
+                          {
+                            "name": "display_placement_canonical_inert.rs"
+                          },
+                          {
                             "name": "displayed_text.rs"
                           },
                           {
+                            "name": "drawer_open_matches_ref.rs"
+                          },
+                          {
                             "name": "editable_text_has_draggable.rs"
+                          },
+                          {
+                            "name": "embedded_page_collapsed_lazy.rs"
+                          },
+                          {
+                            "name": "every_page_has_its_own_file.rs"
+                          },
+                          {
+                            "name": "filter_spec_resolves.rs"
                           },
                           {
                             "name": "focus_matches_ref.rs"
@@ -2241,6 +2883,18 @@
                             "name": "frontend_root_not_error.rs"
                           },
                           {
+                            "name": "inline_row_mount_present.rs"
+                          },
+                          {
+                            "name": "journal_feed_viewport_lazy.rs"
+                          },
+                          {
+                            "name": "journal_one_per_day.rs"
+                          },
+                          {
+                            "name": "live_block_shell_present.rs"
+                          },
+                          {
                             "name": "live_children_match_ref.rs"
                           },
                           {
@@ -2256,6 +2910,12 @@
                             "name": "main_panel_rows_match_focus.rs"
                           },
                           {
+                            "name": "mark_bounds_within_content.rs"
+                          },
+                          {
+                            "name": "matview_recompute_matches.rs"
+                          },
+                          {
                             "name": "mod.rs"
                           },
                           {
@@ -2265,10 +2925,25 @@
                             "name": "no_orphan_blocks.rs"
                           },
                           {
+                            "name": "no_page_under_non_page.rs"
+                          },
+                          {
                             "name": "no_parent_cycles.rs"
                           },
                           {
+                            "name": "no_write_outside_vault_root.rs"
+                          },
+                          {
                             "name": "org_render_fixed_point.rs"
+                          },
+                          {
+                            "name": "paint_text_styling.rs"
+                          },
+                          {
+                            "name": "settle_budget.rs"
+                          },
+                          {
+                            "name": "sidebar_page_tag_preserved.rs"
                           },
                           {
                             "name": "source_language_iff_source.rs"
@@ -2277,7 +2952,19 @@
                             "name": "sql_budget.rs"
                           },
                           {
+                            "name": "sticky_accordion_spec.rs"
+                          },
+                          {
+                            "name": "task_state_matches_ref.rs"
+                          },
+                          {
                             "name": "task_state_storage_coherence.rs"
+                          },
+                          {
+                            "name": "two_instance_convergence.rs"
+                          },
+                          {
+                            "name": "undo_redo_reference_heal.rs"
                           },
                           {
                             "name": "value_fn_provider_arg_variance_13.rs"
@@ -2314,6 +3001,12 @@
                           },
                           {
                             "name": "watch_rows_match_ref.rs"
+                          },
+                          {
+                            "name": "wheel_occlusion_routing.rs"
+                          },
+                          {
+                            "name": "wheel_two_mode_motion_law.rs"
                           },
                           {
                             "name": "window_focus_matches_engine_focus.rs"
@@ -2357,7 +3050,7 @@
                     "c4_level": "unknown",
                     "description": "Shared PBT kit for testing `LoroSyncController` against different SUT implementations.",
                     "pattern_status": "planned",
-                    "content": "Shared PBT kit for testing `LoroSyncController` against different SUT\nimplementations.\n\nThis is the Loro-side analogue of the `UserDriver` trait\n(`crates/holon-integration-tests/src/mutation_driver.rs`): it hoists the\ntransition enum, generators, preconditions, reference-state machine, and\nstructural/convergence invariants from `holon::sync::multi_peer` so that\nmultiple tests can exercise the controller against different systems:\n\n- `StubSut` — a minimal in-process `LoroSyncController` wired to stub\n  `OperationProvider` and `EventBus` implementations. Used by the focused\n  bridge PBT (`tests/loro_sync_controller_pbt.rs`).\n- `E2ESut` — the full production stack used by the e2e PBT. Gets the\n  bridge invariants \"for free\" when Loro is enabled.\n\nAll SUTs see the same `GroupTransition` stream and are judged against the\nsame multi-peer structural invariants (S1–S3, C1–C3) plus bridge-specific\ninvariants (I1–I3) defined in this module.",
+                    "content": "Shared PBT kit for testing `LoroSyncController` against different SUT\nimplementations.\n\nThis is the Loro-side analogue of the `UserDriver` trait\n(`crates/holon-integration-tests/src/mutation_driver.rs`): it hoists the\ntransition enum, generators, preconditions, reference-state machine, and\nstructural/convergence invariants from `holon::sync::multi_peer` so that\nmultiple tests can exercise the controller against different systems:\n\n- `StubSut` — a minimal in-process `LoroSyncController` wired to stub\n  `OperationProvider` and `EventBus` implementations. Used by the focused\n  bridge PBT (`tests/loro_sync_controller_pbt.rs`).\n- `E2ESut` — the full production stack used by the e2e PBT. Gets the bridge\n  invariants \"for free\" when Loro is enabled.\n\nAll SUTs see the same `GroupTransition` stream and are judged against the\nsame multi-peer structural invariants (S1–S3, C1–C3) plus bridge-specific\ninvariants (I1–I3) defined in this module.",
                     "source_file": "holon-integration-tests/src/pbt/loro_sync/mod.rs",
                     "parent": "holon-integration-tests/src/pbt",
                     "files": [
@@ -2381,6 +3074,70 @@
                       },
                       {
                         "name": "integration_tests.rs"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "ref_caps",
+                    "path": "holon-integration-tests/src/pbt/ref_caps",
+                    "c4_level": "unknown",
+                    "description": "Phase 2 — blanket impls of `holon_pbt_core::capabilities::*` on [`ReferenceState`].",
+                    "pattern": "Adapter",
+                    "pattern_status": "planned",
+                    "content": "Phase 2 — blanket impls of `holon_pbt_core::capabilities::*` on\n[`ReferenceState`].\n\nPattern: Adapter\n\n@pbt kind ref\n@pbt covers ref-capmap-wiring — `CapProvider::register` exposes the single\n  `ReferenceState` as the ref `CapMap` for `run_selected`. Every\n`caps.insert`   is registered UNCONDITIONALLY; selection is `SUT ∧ ref`\n(`Needs`), so a ref   cap with no matching SUT cap is inert (deselects), NOT\na vacuity feeder.   FIDELITY: over-registering a ref cap could newly SELECT\na catalog invariant   (the \"catalog scope creep\" risk) — each `caps.insert`\ncomment states which   SUT slice gates it.\n\nTranslates between the capability traits' stringly-typed `EntityUri`\nsurface and `ReferenceState`'s `EntityUri`-based internals. Zero\nbehaviour change: every method delegates to an existing\n`ReferenceState` field or method.\n\nWhen the wide PBT's transitions migrate to capability bounds (Phase 3),\nthey pick these impls up automatically — no code in the transition\nchanges beyond the trait-bound `where` clauses.\n\n## Boundary translation: `EntityUri` ↔ `EntityUri`\n\n- Read methods returning ids: produce `String` via\n  `EntityUri::as_str().to_string()`.\n- Read methods taking ids: parse via `EntityUri::from_str` and propagate\n  `None` on failure (a malformed id can't match anything in the block tree).\n- Write methods taking ids: parse + `.expect()` — wide PBT only ever sees\n  valid `EntityUri`s, so a parse failure is a programmer error.\n\nSplit (RefStateSplit Increment 2, plan\n`docs/Plans/RefStateSplit-2026-07-12.md` §1/§3) into one file per trait\ncluster; this module keeps the id-translation helpers, the `CapProvider`\nimpl, and `reference_state_ref_caps()`.",
+                    "source_file": "holon-integration-tests/src/pbt/ref_caps/mod.rs",
+                    "parent": "holon-integration-tests/src/pbt",
+                    "files": [
+                      {
+                        "name": "advice.rs"
+                      },
+                      {
+                        "name": "audience.rs"
+                      },
+                      {
+                        "name": "blocks.rs"
+                      },
+                      {
+                        "name": "boot.rs"
+                      },
+                      {
+                        "name": "clock.rs"
+                      },
+                      {
+                        "name": "docs.rs"
+                      },
+                      {
+                        "name": "editor.rs"
+                      },
+                      {
+                        "name": "entity_schemes.rs"
+                      },
+                      {
+                        "name": "focus.rs"
+                      },
+                      {
+                        "name": "layout.rs"
+                      },
+                      {
+                        "name": "misc.rs"
+                      },
+                      {
+                        "name": "mod.rs"
+                      },
+                      {
+                        "name": "nav.rs"
+                      },
+                      {
+                        "name": "peers.rs"
+                      },
+                      {
+                        "name": "shared_view.rs"
+                      },
+                      {
+                        "name": "toggle.rs"
+                      },
+                      {
+                        "name": "watches.rs"
                       }
                     ]
                   },
@@ -2417,7 +3174,7 @@
                     "c4_level": "unknown",
                     "description": "E2E PBT transitions, file-per-variant.",
                     "pattern_status": "planned",
-                    "content": "E2E PBT transitions, file-per-variant.\n\nEach transition kind owns its data + behaviour (preconditions,\nref-state apply, async SUT apply, expected SQL budget) in its own\nfile. The `declare_e2e_transitions!` macro generates the dispatch\nenum, the trait impls on the enum, the `From<Variant> for Enum`\nconversions, and the `aggregate_transitions(state)` strategy\naggregator used by proptest.\n\nAdding a transition = create one file under this directory + add\none line to the macro invocation below.\n\n# Authoring rule: drive the UI, never the engine\n\n`apply_to_sut` for a user-action transition MUST go through the\n`UserDriver` (clicks, keystrokes, leader chords). It must NOT call\n`engine.execute_op(\"navigation\", ...)` or\n`engine.ui_state().set_focus(...)`. Two architecture tests in\n`crates/holon-architecture-tests/tests/architecture_rules.rs`\n(`no_direct_focus_mutation`, `no_navigation_execute_op_in_tests`)\nenforce this mechanically; the rule itself:\n\n- Real users cannot mutate engine state. Anything reachable from\n  `apply_to_sut` should be reachable from a real keyboard or pointer.\n- Bypasses (silently mirroring focus, executing a navigation op\n  without a chord) hide regressions in the keyboard pipeline,\n  chord resolution, focus-pin reconciliation, and the renderer's\n  selectable registry. Catching those is the entire point.\n- When the production code lacks a binding for an action, ADD the\n  binding (in `frontends/<frontend>/config/keybindings.yaml` or\n  the analogous registry), do not paper over it in the test.\n\nSetup helpers (loading fixtures, seeding files, harness DI wiring)\nare exempt — they aren't simulating a user action.",
+                    "content": "E2E PBT transitions, file-per-variant.\n\nEach transition kind owns its data + behaviour (preconditions,\nref-state apply, async SUT apply, expected SQL budget) in its own\nfile. The `declare_e2e_transitions!` macro generates the dispatch\nenum, the trait impls on the enum, the `From<Variant> for Enum`\nconversions, and the `aggregate_transitions(state)` strategy\naggregator used by proptest.\n\nAdding a transition = create one file under this directory + add\none line to the macro invocation below.\n\n# Authoring rule: drive the UI, never the engine\n\n`apply_to_sut` for a user-action transition MUST go through the\n`UserDriver` (clicks, keystrokes, leader chords). It must NOT call\n`engine.execute_op(\"navigation\", ...)` or\n`engine.ui_state().set_focus(...)`. Two architecture tests in\n`crates/holon-architecture-tests/tests/architecture_rules.rs`\n(`no_direct_focus_mutation`, `no_navigation_execute_op_in_tests`)\nenforce this mechanically; the rule itself:\n\n- Real users cannot mutate engine state. Anything reachable from\n  `apply_to_sut` should be reachable from a real keyboard or pointer.\n- Bypasses (silently mirroring focus, executing a navigation op without a\n  chord) hide regressions in the keyboard pipeline, chord resolution,\n  focus-pin reconciliation, and the renderer's selectable registry. Catching\n  those is the entire point.\n- When the production code lacks a binding for an action, ADD the binding\n  (in `frontends/<frontend>/config/keybindings.yaml` or the analogous\n  registry), do not paper over it in the test.\n\nSetup helpers (loading fixtures, seeding files, harness DI wiring)\nare exempt — they aren't simulating a user action.",
                     "source_file": "holon-integration-tests/src/pbt/transitions/mod.rs",
                     "parent": "holon-integration-tests/src/pbt",
                     "files": [
@@ -2425,10 +3182,16 @@
                         "name": "add_peer.rs"
                       },
                       {
+                        "name": "advance_day.rs"
+                      },
+                      {
                         "name": "apply_mutation.rs"
                       },
                       {
                         "name": "arrow_navigate.rs"
+                      },
+                      {
+                        "name": "block_to_page.rs"
                       },
                       {
                         "name": "bulk_external_add.rs"
@@ -2440,10 +3203,16 @@
                         "name": "concurrent_schema_init.rs"
                       },
                       {
+                        "name": "create_block_under_focus.rs"
+                      },
+                      {
                         "name": "create_directory.rs"
                       },
                       {
                         "name": "create_document.rs"
+                      },
+                      {
+                        "name": "create_page_at_freed_path.rs"
                       },
                       {
                         "name": "create_stale_loro.rs"
@@ -2458,6 +3227,9 @@
                         "name": "deliver_block_content.rs"
                       },
                       {
+                        "name": "dense_projection_edit.rs"
+                      },
+                      {
                         "name": "drag_drop_block.rs"
                       },
                       {
@@ -2470,6 +3242,12 @@
                         "name": "expand_toggle.rs"
                       },
                       {
+                        "name": "external_write_same_block_focused.rs"
+                      },
+                      {
+                        "name": "external_write_while_focused.rs"
+                      },
+                      {
                         "name": "focus_editable_text.rs"
                       },
                       {
@@ -2477,6 +3255,9 @@
                       },
                       {
                         "name": "indent.rs"
+                      },
+                      {
+                        "name": "instantiate_template.rs"
                       },
                       {
                         "name": "jj_git_init.rs"
@@ -2515,6 +3296,9 @@
                         "name": "nothing.rs"
                       },
                       {
+                        "name": "open_tab_via_modifier_click.rs"
+                      },
+                      {
                         "name": "outdent.rs"
                       },
                       {
@@ -2533,7 +3317,19 @@
                         "name": "redo.rs"
                       },
                       {
+                        "name": "register_entity_scheme.rs"
+                      },
+                      {
                         "name": "remove_watch.rs"
+                      },
+                      {
+                        "name": "rename_document.rs"
+                      },
+                      {
+                        "name": "rename_page.rs"
+                      },
+                      {
+                        "name": "select_bias.rs"
                       },
                       {
                         "name": "set_edge_field.rs"
@@ -2542,10 +3338,16 @@
                         "name": "setup_watch.rs"
                       },
                       {
+                        "name": "share_container.rs"
+                      },
+                      {
                         "name": "simulate_restart.rs"
                       },
                       {
                         "name": "split_block.rs"
+                      },
+                      {
+                        "name": "stale_external_rewrite.rs"
                       },
                       {
                         "name": "start_app.rs"
@@ -2555,6 +3357,9 @@
                       },
                       {
                         "name": "switch_view_mode.rs"
+                      },
+                      {
+                        "name": "sync_now.rs"
                       },
                       {
                         "name": "sync_with_peer.rs"
@@ -2579,6 +3384,9 @@
                       },
                       {
                         "name": "unpin_block.rs"
+                      },
+                      {
+                        "name": "wheel_scroll.rs"
                       },
                       {
                         "name": "write_org_file.rs"
@@ -2606,7 +3414,19 @@
                     "name": "action_actor_state.rs"
                   },
                   {
+                    "name": "advice_expectation.rs"
+                  },
+                  {
                     "name": "bisect_driver.rs"
+                  },
+                  {
+                    "name": "block_state.rs"
+                  },
+                  {
+                    "name": "clock_state.rs"
+                  },
+                  {
+                    "name": "complexity_trend.rs"
                   },
                   {
                     "name": "composed.rs"
@@ -2630,10 +3450,16 @@
                     "name": "generators.rs"
                   },
                   {
+                    "name": "hand_authored.rs"
+                  },
+                  {
                     "name": "invariant_mode_override.rs"
                   },
                   {
                     "name": "layout_bridge.rs"
+                  },
+                  {
+                    "name": "live_self_check.rs"
                   },
                   {
                     "name": "local_caps.rs"
@@ -2678,7 +3504,13 @@
                     "name": "retry.rs"
                   },
                   {
+                    "name": "run_result.rs"
+                  },
+                  {
                     "name": "shadow_mesh.rs"
+                  },
+                  {
+                    "name": "sharing_state.rs"
                   },
                   {
                     "name": "sql_loro_slice.rs"
@@ -2720,6 +3552,12 @@
                     "name": "ui_interaction.rs"
                   },
                   {
+                    "name": "ui_types.rs"
+                  },
+                  {
+                    "name": "undo_redo_density.rs"
+                  },
+                  {
                     "name": "validation.rs"
                   },
                   {
@@ -2745,7 +3583,16 @@
                 "name": "fake_mcp_module.rs"
               },
               {
+                "name": "faults.rs"
+              },
+              {
                 "name": "lib.rs"
+              },
+              {
+                "name": "libtest_list.rs"
+              },
+              {
+                "name": "mcp_user_driver.rs"
               },
               {
                 "name": "mutation_driver.rs"
@@ -2763,6 +3610,9 @@
                 "name": "screenshot_overlay.rs"
               },
               {
+                "name": "template_fixture.rs"
+              },
+              {
                 "name": "test_environment.rs"
               },
               {
@@ -2770,6 +3620,15 @@
               },
               {
                 "name": "ui_driver.rs"
+              },
+              {
+                "name": "web_arm.rs"
+              },
+              {
+                "name": "web_relay_oracle.rs"
+              },
+              {
+                "name": "web_user_driver.rs"
               },
               {
                 "name": "widget_state.rs"
@@ -2797,6 +3656,15 @@
                     "path": "holon-integration-tests/tests/fixtures/composed_split_gherkin"
                   },
                   {
+                    "name": "dogfood-recorded",
+                    "path": "holon-integration-tests/tests/fixtures/dogfood-recorded",
+                    "files": [
+                      {
+                        "name": "KNOWN-RED.md"
+                      }
+                    ]
+                  },
+                  {
                     "name": "extended_gen_findings",
                     "path": "holon-integration-tests/tests/fixtures/extended_gen_findings",
                     "files": [
@@ -2815,6 +3683,24 @@
                     ]
                   },
                   {
+                    "name": "logseq_org_vault",
+                    "path": "holon-integration-tests/tests/fixtures/logseq_org_vault",
+                    "dirs": [
+                      {
+                        "name": "journals",
+                        "path": "holon-integration-tests/tests/fixtures/logseq_org_vault/journals"
+                      },
+                      {
+                        "name": "pages",
+                        "path": "holon-integration-tests/tests/fixtures/logseq_org_vault/pages"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "region_writeback_loss",
+                    "path": "holon-integration-tests/tests/fixtures/region_writeback_loss"
+                  },
+                  {
                     "name": "split_block_content_pbt",
                     "path": "holon-integration-tests/tests/fixtures/split_block_content_pbt"
                   }
@@ -2823,25 +3709,136 @@
             ],
             "files": [
               {
+                "name": "advice_dismiss_prod_session_wiring.rs"
+              },
+              {
+                "name": "advice_live_mcp_gate.rs"
+              },
+              {
+                "name": "advice_step4_red.rs"
+              },
+              {
+                "name": "arc_marking_equality.rs"
+              },
+              {
                 "name": "bidirectional_sync.rs"
               },
               {
                 "name": "bisection_pbt.rs"
               },
               {
+                "name": "boot_projector_gated_on_scan.rs"
+              },
+              {
+                "name": "boot_scan_bad_file_survives.rs"
+              },
+              {
+                "name": "chat_view_message_join.rs"
+              },
+              {
+                "name": "class_one_invariant_classifier.rs"
+              },
+              {
+                "name": "cold_boot_share_disclosure.rs"
+              },
+              {
+                "name": "convert_block_to_page_materializes_child_file.rs"
+              },
+              {
                 "name": "cross_medium_caps.rs"
+              },
+              {
+                "name": "cycle_task_state_cold_boot_reingest.rs"
+              },
+              {
+                "name": "doc_id_writeback_stability.rs"
+              },
+              {
+                "name": "dogfood_recorded_replay.rs"
               },
               {
                 "name": "editor_pure_pbt.rs"
               },
               {
+                "name": "forward_edge_ingest_regression.rs"
+              },
+              {
+                "name": "fts_query_block_e2e.rs"
+              },
+              {
                 "name": "general_e2e_composed_pbt.rs"
+              },
+              {
+                "name": "gpui_mcp_replay.rs"
+              },
+              {
+                "name": "hand_authored_regressions.rs"
+              },
+              {
+                "name": "holon_rule_runtime_discovery_prod_session.rs"
+              },
+              {
+                "name": "host_page_with_inline_subpages_ingest.rs"
+              },
+              {
+                "name": "idless_external_reedit_dup.rs"
+              },
+              {
+                "name": "idonly_folder_companion_identity_collision.rs"
+              },
+              {
+                "name": "integration_configure_button_visibility.rs"
+              },
+              {
+                "name": "integration_state_boot_population.rs"
+              },
+              {
+                "name": "integration_state_boot_records_status.rs"
+              },
+              {
+                "name": "integration_state_section_refreshes.rs"
+              },
+              {
+                "name": "integrations_section_renders_every_row.rs"
+              },
+              {
+                "name": "interaction_trace_connectivity.rs"
+              },
+              {
+                "name": "journals_restart_survival.rs"
+              },
+              {
+                "name": "journals_seed_file_collision.rs"
+              },
+              {
+                "name": "junction_survives_reboot_repro.rs"
               },
               {
                 "name": "layout_bridge_smoke.rs"
               },
               {
+                "name": "live_self_check_suite.rs"
+              },
+              {
+                "name": "local_ui_state_precedence.rs"
+              },
+              {
+                "name": "local_vault_fidelity.rs"
+              },
+              {
+                "name": "logseq_org_vault_ingest.rs"
+              },
+              {
+                "name": "loro_create_persists_prod_session.rs"
+              },
+              {
+                "name": "loro_live_entity_wiring.rs"
+              },
+              {
                 "name": "loro_memory_start_app.rs"
+              },
+              {
+                "name": "loro_projection_atomic_advance.rs"
               },
               {
                 "name": "loro_restart_unseeded_vault.rs"
@@ -2853,25 +3850,151 @@
                 "name": "loro_unseeded_vault_split.rs"
               },
               {
+                "name": "matview_duplicate_row_repro.rs"
+              },
+              {
+                "name": "matview_reboot_duplicate_repro.rs"
+              },
+              {
+                "name": "mcp_list_keybindings_matches_registry.rs"
+              },
+              {
+                "name": "mcp_render_org_matches_writeback.rs"
+              },
+              {
+                "name": "merge_blocks_pbt.rs"
+              },
+              {
                 "name": "multiline_serializer_test.rs"
+              },
+              {
+                "name": "navigate_back_keeps_panel_populated.rs"
+              },
+              {
+                "name": "no_tracked_proptest_regressions.rs"
               },
               {
                 "name": "org_roundtrip_pbt.rs"
               },
               {
+                "name": "org_serializer_prod_content_parity.rs"
+              },
+              {
+                "name": "parentage_assertion_replay.rs"
+              },
+              {
+                "name": "perspective_slot_resolution.rs"
+              },
+              {
                 "name": "phantom_loro_exists_repro.rs"
+              },
+              {
+                "name": "pn_catalog_truthfulness_probe.rs"
+              },
+              {
+                "name": "probe_link_marks_roundtrip.rs"
               },
               {
                 "name": "query_equivalence_pbt.rs"
               },
               {
+                "name": "ref_entity_lookup_parity.rs"
+              },
+              {
+                "name": "refdoc1_remap_totality_replay.rs"
+              },
+              {
+                "name": "region_writeback_loss.rs"
+              },
+              {
+                "name": "schedule_boundary_observables.rs"
+              },
+              {
+                "name": "shape_profile_shrink.rs"
+              },
+              {
+                "name": "sidebar_bind_latency_probe.rs"
+              },
+              {
+                "name": "sidebar_modifier_click_open_tab_probe.rs"
+              },
+              {
+                "name": "single_large_document_scale.rs"
+              },
+              {
                 "name": "split_block_content_pbt.rs"
+              },
+              {
+                "name": "split_block_stale_display_regression.rs"
+              },
+              {
+                "name": "split_doc_root_idless_duplicates.rs"
+              },
+              {
+                "name": "split_undo_redo_reconcile.rs"
+              },
+              {
+                "name": "stale_rewrite_sibling_order.rs"
+              },
+              {
+                "name": "step_vocabulary_agreement.rs"
+              },
+              {
+                "name": "step_vocabulary_laws.rs"
+              },
+              {
+                "name": "substrate_corruption_faults.rs"
+              },
+              {
+                "name": "subtree_of_bfs_cost_turso.rs"
+              },
+              {
+                "name": "task_vocabulary_reaches_the_store.rs"
+              },
+              {
+                "name": "tour_spike.rs"
               },
               {
                 "name": "turso_ivm_index_bug.rs"
               },
               {
+                "name": "two_instance_composed_pbt.rs"
+              },
+              {
+                "name": "undo_cycle_task_state_coverage.rs"
+              },
+              {
+                "name": "undo_prod_session_wiring.rs"
+              },
+              {
+                "name": "undo_redo_reference_heal.rs"
+              },
+              {
+                "name": "watch_guard_raii.rs"
+              },
+              {
+                "name": "watch_query_ordering_spec_wiring.rs"
+              },
+              {
+                "name": "watch_recovers_when_table_appears.rs"
+              },
+              {
                 "name": "watch_ui.rs"
+              },
+              {
+                "name": "web_arm_keystone.rs"
+              },
+              {
+                "name": "web_arm_spike.rs"
+              },
+              {
+                "name": "widget_only_headline.rs"
+              },
+              {
+                "name": "wiki_link_ingest_marks_junction.rs"
+              },
+              {
+                "name": "writeback_stale_cross_doc_prune.rs"
               }
             ]
           }
@@ -2892,7 +4015,7 @@
         "description": "Shared layout-testing primitives for Holon's property-based UI tests.",
         "pattern": "Test Harness",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-frontend \"frontend session abstraction\" \"Rust\"\n@c4 uses holon-pbt-core \"PBT transition traits\" \"Rust\"\n\nShared layout-testing primitives for Holon's property-based UI tests.\n\nThis crate contains everything needed to write layout property tests\nagainst any frontend, without any GPUI dependency:\n\n- `BoundsSnapshot` / `Rect`: flat geometry types populated by a frontend\n  render pass and read by the invariant functions.\n- Layout invariants (`assert_nonempty`, `assert_all_nonzero`, etc.):\n  frontend-agnostic checks that a render produced sane geometry.\n- `BlockTreeRegistry`: instance-owned registry mapping block IDs to\n  reactive mode thunks. Replaces the old `static OnceLock<Mutex<…>>` in\n  `frontends/gpui/tests/support/mod.rs`.\n- `vms_button_id_for`: canonical element-id scheme shared between the\n  VMS builder (which tags each mode button) and the test harness (which\n  uses the id to locate the button in `BoundsRegistry`).\n- `UiInteraction`: the shared vocabulary of user-visible UI state changes.\n- `Shape`, `Blueprint`, `BlockHandle`: thunk-based handle types for\n  describing `ReactiveViewModel` trees.",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-frontend \"frontend session abstraction\" \"Rust\"\n@c4 uses holon-pbt-core \"PBT transition traits\" \"Rust\"\n\nShared layout-testing primitives for Holon's property-based UI tests.\n\nThis crate contains everything needed to write layout property tests\nagainst any frontend, without any GPUI dependency:\n\n- `BoundsSnapshot` / `Rect`: flat geometry types populated by a frontend\n  render pass and read by the invariant functions.\n- Layout invariants (`assert_nonempty`, `assert_all_nonzero`, etc.):\n  frontend-agnostic checks that a render produced sane geometry.\n- `BlockTreeRegistry`: instance-owned registry mapping block IDs to reactive\n  mode thunks. Replaces the old `static OnceLock<Mutex<…>>` in\n  `frontends/gpui/tests/support/mod.rs`.\n- `vms_button_id_for`: canonical element-id scheme shared between the VMS\n  builder (which tags each mode button) and the test harness (which uses the\n  id to locate the button in `BoundsRegistry`).\n- `UiInteraction`: the shared vocabulary of user-visible UI state changes.\n- `Shape`, `Blueprint`, `BlockHandle`: thunk-based handle types for\n  describing `ReactiveViewModel` trees.",
         "source_file": "holon-layout-testing/src/lib.rs",
         "layer": "Testing",
         "relationships": [
@@ -2924,7 +4047,7 @@
                 "description": "Shared per-variant `TransitionFactory` + `TransitionImpl` impls for the three UI variants in `holon-pbt-core`. Each file owns one variant.",
                 "pattern": "Factory",
                 "pattern_status": "planned",
-                "content": "Shared per-variant `TransitionFactory` + `TransitionImpl` impls for\nthe three UI variants in `holon-pbt-core`. Each file owns one\nvariant.\n\nThese impls are reusable across every PBT and every frontend\nbecause they're written against the [`crate::sut`] capability traits\nand the [`crate::sut::LayoutRefState`] reference-state trait — the\norphan rule is satisfied via the local [`crate::sut::LayoutSut`] and\n[`crate::sut::LayoutRef`] wrappers (see `sut.rs` docs).\n\n## How a PBT consumes these\n\n1. Implement [`crate::sut::Clickable`] + [`crate::sut::LiveBlockSink`]\n   on the test session.\n2. Implement [`crate::sut::LayoutRefState`] on the reference-state\n   type (or a generation-context struct for the layout PBT).\n3. At the dispatch site: wrap with `LayoutSut::new(&mut session)` /\n   `LayoutRef::new(&ref_state)` and call\n   `transition.apply_to_sut(...)` / `weighted_generator(...)`.\n4. Done — no per-variant code in the PBT crate.",
+                "content": "Shared per-variant `TransitionFactory` + `TransitionImpl` impls for\nthe three UI variants in `holon-pbt-core`. Each file owns one\nvariant.\n\nThese impls are reusable across every PBT and every frontend\nbecause they're written against the [`crate::sut`] capability traits\nand the [`crate::sut::LayoutRefState`] reference-state trait — the\norphan rule is satisfied via the local [`crate::sut::LayoutSut`] and\n[`crate::sut::LayoutRef`] wrappers (see `sut.rs` docs).\n\n## How a PBT consumes these\n\n1. Implement [`crate::sut::Clickable`] + [`crate::sut::LiveBlockSink`] on\n   the test session.\n2. Implement [`crate::sut::LayoutRefState`] on the reference-state type (or\n   a generation-context struct for the layout PBT).\n3. At the dispatch site: wrap with `LayoutSut::new(&mut session)` /\n   `LayoutRef::new(&ref_state)` and call `transition.apply_to_sut(...)` /\n   `weighted_generator(...)`.\n4. Done — no per-variant code in the PBT crate.",
                 "source_file": "holon-layout-testing/src/transitions/mod.rs",
                 "parent": "holon-layout-testing",
                 "files": [
@@ -2993,7 +4116,7 @@
         "description": "Loro CRDT document engine and peer-to-peer synchronization.",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nLoro CRDT document engine and peer-to-peer synchronization.\n\nThis crate provides the Loro CRDT backend, P2P sync infrastructure,\nand snapshot/block query capabilities — extracted from the `holon` god crate.\n\nRe-exported into `holon::sync` so existing `holon::sync::*` paths resolve.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nLoro CRDT document engine and peer-to-peer synchronization.\n\nThis crate provides the Loro CRDT backend, P2P sync infrastructure,\nand snapshot/block query capabilities — extracted from the `holon` god\ncrate.\n\nRe-exported into `holon::sync` so existing `holon::sync::*` paths resolve.",
         "source_file": "holon-loro/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
@@ -3022,6 +4145,26 @@
           {
             "name": "src",
             "path": "holon-loro/src",
+            "dirs": [
+              {
+                "name": "owner_identity",
+                "path": "holon-loro/src/owner_identity",
+                "c4_level": "unknown",
+                "description": "Owner-identity key: the durable authority root for sharing (ADR 0028 D1/OQ4).",
+                "pattern_status": "planned",
+                "content": "Owner-identity key: the durable authority root for sharing (ADR 0028\nD1/OQ4).\n\n# Why this is distinct from the device key\n\n`device_key` ([`crate::device_key_store`]) is a *transport/session*\nidentity: it authenticates a QUIC connection and seeds per-share CRDT peer\nids. It is low-value and stored as a plaintext file beside the vault. The\n**owner key** is different: it *signs durable authority objects* — the\ndevice roster (B1) and the crossing/policy log ([`holon_sharing`]'s\n`SigningAuthority`). If it leaks, an attacker can mint fleet membership; if\nit is lost, the owner can no longer enroll devices. It therefore:\n\n- lives in the OS keychain, not a plaintext file ([`holon_secrets`]);\n- has a one-time [`recovery::RecoveryCode`] so a lost founding device is\n  recoverable;\n- is generated **lazily** — on the first share/enrollment, never at first\n  launch (ADR 0028 D1 \"prompt DEFERRED to first sharing/enrollment use\").\n\nRotation is out of scope here and rides the H4 succession-pointer machinery.\n\n# Secret hygiene\n[`OwnerIdentityKey`] has a redacted `Debug`; its seed never leaves this\nmodule except into the keychain. Signatures and public keys are safe to log.",
+                "source_file": "holon-loro/src/owner_identity/mod.rs",
+                "parent": "holon-loro",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  },
+                  {
+                    "name": "recovery.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "block_cell_registry.rs"
@@ -3033,13 +4176,25 @@
                 "name": "consolidator.rs"
               },
               {
+                "name": "container_registry.rs"
+              },
+              {
                 "name": "debounced_commit_worker.rs"
               },
               {
                 "name": "degraded_signal_bus.rs"
               },
               {
+                "name": "deleted_container_purge.rs"
+              },
+              {
                 "name": "device_key_store.rs"
+              },
+              {
+                "name": "device_pairing.rs"
+              },
+              {
+                "name": "doc_lock.rs"
               },
               {
                 "name": "durable_state.rs"
@@ -3049,6 +4204,9 @@
               },
               {
                 "name": "event_ring.rs"
+              },
+              {
+                "name": "import_atomicity_probe.rs"
               },
               {
                 "name": "iroh_advertiser.rs"
@@ -3093,7 +4251,19 @@
                 "name": "loro_text_cell_backing.rs"
               },
               {
+                "name": "mergeable_child.rs"
+              },
+              {
                 "name": "multi_peer.rs"
+              },
+              {
+                "name": "roster_sidecar.rs"
+              },
+              {
+                "name": "settled_read.rs"
+              },
+              {
+                "name": "share_enrollment.rs"
               },
               {
                 "name": "share_peer_id.rs"
@@ -3103,6 +4273,9 @@
               },
               {
                 "name": "shared_tree.rs"
+              },
+              {
+                "name": "sync_transport.rs"
               },
               {
                 "name": "text_merge_provider.rs"
@@ -3120,13 +4293,132 @@
         ]
       },
       {
+        "name": "holon-loro-testing",
+        "path": "holon-loro-testing",
+        "c4_level": "component",
+        "description": "Companion PBT crate for `holon-loro` — the first subsystem to OWN its composed-keystone contributions (co-location Phase 1, plan §5-loro).",
+        "pattern": "Test Harness",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon-loro \"production CRDT backend under test\" \"Rust\"\n@c4 uses holon-pbt-core \"PBT cap traits + contribution seam\" \"Rust\"\n\nCompanion PBT crate for `holon-loro` — the first subsystem to OWN its\ncomposed-keystone contributions (co-location Phase 1, plan §5-loro).\n\nOwns the Loro storage subsystem's cleanly-decoupled PBT artifacts:\n- [`LoroBackendComponent`] — the SUT cap component wrapping a real\n  `holon_loro::LoroBackend` (`SutBackend` + `SutLoroLog` +\n  `SutLoroTaskState`).\n- [`LoroSut`] — the peer-mesh / Loro-validation SUT (`sut_loro`), plus its\n  [`quiescence`] and [`peer_ops`] helpers.\n- The six peer-sync / CRDT [`transitions`] (`AddPeer`, `PeerEdit`,\n  `PeerCharEdit`, `MergeFromPeer`, `SyncWithPeer`, `CreateStaleLoro`), each\n  generic over the reference type `R`.\n- `inv-loro-no-errors` and `inv-loro-children-match-ref` invariant bodies +\n  their `wire()`s.\n\nExposed to the central fold via [`pbt_contribution`] / [`pbt_footprint`].\n\n## Ref-state independence (plan §4)\nNothing here names a concrete reference-state type: the invariant bodies and\ntransitions read `Ref*` capabilities generically. A guard integration test\n(`tests/no_ref_state_dep.rs`) fails the build if this crate ever reaches for\nthe central `ReferenceState` monolith.\n\n## Dispatch stays central (for now)\nThe `LoroSut` and transitions are co-located here (Phase-1a Step 4), but the\ncentral `declare_e2e_transitions!` enum still assembles them (it re-exports\nthe structs) — the strategy is enum-driven, so [`pbt_contribution`]'s\n`generators` is inert until a later contribution-driven-strategy phase.\n\n## `/loro` correspondence arm co-located (Phase-1a follow-on)\nThe `inv-blocks-match-ref/loro` store arm now lives here\n([`invariants::loro_blocks_match_ref`]) as a single-store\n`Correspondence<NonSeedBlocks>`, contributed through [`pbt_contribution`].\nThis was unblocked by lifting the correspondence framework, the\n`NonSeedBlocks` observable, and the `block_compare` leaf onto the pbt-core\nfloor; the central table keeps only the not-yet-co-located `block_raw` +\n`matview` arms (Phase 2).",
+        "source_file": "holon-loro-testing/src/lib.rs",
+        "layer": "Testing",
+        "relationships": [
+          {
+            "target": "holon-loro",
+            "label": "production CRDT backend under test",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-pbt-core",
+            "label": "PBT cap traits + contribution seam",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-loro-testing/src",
+            "dirs": [
+              {
+                "name": "invariants",
+                "path": "holon-loro-testing/src/invariants",
+                "files": [
+                  {
+                    "name": "loro_blocks_match_ref.rs"
+                  },
+                  {
+                    "name": "loro_children_match_ref.rs"
+                  },
+                  {
+                    "name": "loro_no_errors.rs"
+                  }
+                ]
+              },
+              {
+                "name": "transitions",
+                "path": "holon-loro-testing/src/transitions",
+                "files": [
+                  {
+                    "name": "add_peer.rs"
+                  },
+                  {
+                    "name": "create_stale_loro.rs"
+                  },
+                  {
+                    "name": "merge_from_peer.rs"
+                  },
+                  {
+                    "name": "peer_char_edit.rs"
+                  },
+                  {
+                    "name": "peer_edit.rs"
+                  },
+                  {
+                    "name": "sync_with_peer.rs"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "component.rs"
+              },
+              {
+                "name": "convergence_pbt.rs"
+              },
+              {
+                "name": "invariants.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "peer_ops.rs"
+              },
+              {
+                "name": "quiescence.rs"
+              },
+              {
+                "name": "ref_ext.rs"
+              },
+              {
+                "name": "shadow_mesh.rs"
+              },
+              {
+                "name": "sut_loro.rs"
+              },
+              {
+                "name": "transitions.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-loro-testing/tests",
+            "files": [
+              {
+                "name": "move_storm_convergence.rs"
+              },
+              {
+                "name": "no_ref_state_dep.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
         "name": "holon-macros",
         "path": "holon-macros",
         "c4_level": "component",
         "description": "Procedural macros: `#[operations_trait]`, `#[affects(...)]`, and entity derives.",
         "pattern": "Code Generation",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: Code Generation\n\nProcedural macros: `#[operations_trait]`, `#[affects(...)]`, and entity derives.",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Code Generation\n\nProcedural macros: `#[operations_trait]`, `#[affects(...)]`, and entity\nderives.",
         "source_file": "holon-macros/src/lib.rs",
         "layer": "Core",
         "dirs": [
@@ -3154,6 +4446,9 @@
               },
               {
                 "name": "operations_trait.rs"
+              },
+              {
+                "name": "step_vocabulary.rs"
               },
               {
                 "name": "widget_builder.rs"
@@ -3226,13 +4521,143 @@
         ]
       },
       {
+        "name": "holon-markdown",
+        "path": "holon-markdown",
+        "c4_level": "component",
+        "description": "`holon-markdown` — read-only (Tier R/O) ingest adapters for foreign vaults: Obsidian-flavored and LogSeq-flavored Markdown, parsed into the SAME `Block` + `MarkSpan` substrate as org (see `docs/Proposals/ForeignVaultCompat-2026-07-12.md`).",
+        "pattern": "Adapter",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"FileFormatAdapter port\" \"Rust\"\n@c4 uses holon-org-format \"shared Block/MarkSpan substrate\" \"Rust\"\n\n`holon-markdown` — read-only (Tier R/O) ingest adapters for foreign vaults:\nObsidian-flavored and LogSeq-flavored Markdown, parsed into the SAME `Block`\n+ `MarkSpan` substrate as org (see\n  `docs/Proposals/ForeignVaultCompat-2026-07-12.md`).\n\nBoth adapters implement `holon_core::FileFormatAdapter`. They are **read\nonly**: `render_document` / `render_blocks` panic (a write to a foreign file\nis loss by definition under ADR 0025 until anchored write-back lands), and\n`writeback_drops` always refuses. The [`ReadOnlyWriteGuard`] is the\ncontroller-level gate that must veto any write to a foreign-vault doc before\na renderer is ever reached.",
+        "source_file": "holon-markdown/src/lib.rs",
+        "layer": "Adapters",
+        "relationships": [
+          {
+            "target": "holon-api",
+            "label": "shared value & operation types",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-core",
+            "label": "FileFormatAdapter port",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-org-format",
+            "label": "shared Block/MarkSpan substrate",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-markdown/src",
+            "files": [
+              {
+                "name": "build.rs"
+              },
+              {
+                "name": "inline.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "logseq.rs"
+              },
+              {
+                "name": "obsidian.rs"
+              },
+              {
+                "name": "params.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-markdown/tests",
+            "dirs": [
+              {
+                "name": "fixtures",
+                "path": "holon-markdown/tests/fixtures",
+                "dirs": [
+                  {
+                    "name": "logseq",
+                    "path": "holon-markdown/tests/fixtures/logseq",
+                    "dirs": [
+                      {
+                        "name": "journals",
+                        "path": "holon-markdown/tests/fixtures/logseq/journals",
+                        "files": [
+                          {
+                            "name": "2026_07_11.md"
+                          }
+                        ]
+                      },
+                      {
+                        "name": "logseq",
+                        "path": "holon-markdown/tests/fixtures/logseq/logseq"
+                      },
+                      {
+                        "name": "pages",
+                        "path": "holon-markdown/tests/fixtures/logseq/pages",
+                        "files": [
+                          {
+                            "name": "Compat.md"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "name": "obsidian",
+                    "path": "holon-markdown/tests/fixtures/obsidian",
+                    "dirs": [
+                      {
+                        "name": "Projects",
+                        "path": "holon-markdown/tests/fixtures/obsidian/Projects",
+                        "files": [
+                          {
+                            "name": "Sample Project.md"
+                          }
+                        ]
+                      }
+                    ],
+                    "files": [
+                      {
+                        "name": "Compat.md"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "logseq_ingest.rs"
+              },
+              {
+                "name": "obsidian_ingest.rs"
+              },
+              {
+                "name": "write_guard.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
         "name": "holon-mcp-client",
         "path": "holon-mcp-client",
         "c4_level": "component",
         "description": "Reusable MCP client: connects to MCP servers and exposes their tools as `OperationProvider`s.",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nReusable MCP client: connects to MCP servers and exposes their tools as `OperationProvider`s.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nReusable MCP client: connects to MCP servers and exposes their tools as\n`OperationProvider`s.",
         "source_file": "holon-mcp-client/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
@@ -3287,10 +4712,19 @@
             "path": "holon-mcp-client/src",
             "files": [
               {
+                "name": "bundled_sidecars.rs"
+              },
+              {
                 "name": "credential_store.rs"
               },
               {
+                "name": "entity_mirror.rs"
+              },
+              {
                 "name": "integration_config.rs"
+              },
+              {
+                "name": "integration_state.rs"
               },
               {
                 "name": "lib.rs"
@@ -3326,7 +4760,19 @@
                 "name": "mcp_vtable.rs"
               },
               {
+                "name": "oauth_bootstrap.rs"
+              },
+              {
+                "name": "rest_oauth2.rs"
+              },
+              {
+                "name": "rest_transport.rs"
+              },
+              {
                 "name": "sync_freshness.rs"
+              },
+              {
+                "name": "write_authorization.rs"
               }
             ]
           },
@@ -3335,7 +4781,34 @@
             "path": "holon-mcp-client/tests",
             "files": [
               {
+                "name": "enablement_cutover.rs"
+              },
+              {
+                "name": "entity_link_scheme_join.rs"
+              },
+              {
+                "name": "integration_state_store.rs"
+              },
+              {
                 "name": "mcp_fanout.rs"
+              },
+              {
+                "name": "mcp_fdw_stream.rs"
+              },
+              {
+                "name": "oauth_bootstrap_flow.rs"
+              },
+              {
+                "name": "rest_oauth2_mock.rs"
+              },
+              {
+                "name": "rest_transport_mock.rs"
+              },
+              {
+                "name": "sidecar_conformance.rs"
+              },
+              {
+                "name": "sidecar_drift.rs"
               }
             ]
           }
@@ -3353,13 +4826,192 @@
         ]
       },
       {
+        "name": "holon-mcp-mock",
+        "path": "holon-mcp-mock",
+        "c4_level": "component",
+        "description": "A configurable mock MCP server that reproduces the challenging behaviours seen in real MCP servers, for E2E-testing holon's generic MCP connector.",
+        "pattern": "Test Harness",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n\nA configurable mock MCP server that reproduces the challenging behaviours\nseen in real MCP servers, for E2E-testing holon's generic MCP connector.\n\nThe server speaks real MCP over stdio (rmcp `transport-io`) so it is driven\nexactly like any production server through the `transport-child-process`\npath. Behaviour is selected by the [`Scenario`] parsed from the\n`MOCK_MCP_SCENARIO` env var (set in a sidecar's `child_process.env`).\n\nCatalogue and rationale: `docs/Plans/McpMockE2E.md`.",
+        "source_file": "holon-mcp-mock/src/lib.rs",
+        "layer": "Testing",
+        "relationships": [
+          {
+            "target": "holon",
+            "label": "core orchestration",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-api",
+            "label": "shared value & operation types",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-core",
+            "label": "core datasource traits",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-mcp-client",
+            "label": "MCP client under test",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-turso",
+            "label": "Turso storage adapter",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-mcp-mock/src",
+            "dirs": [
+              {
+                "name": "bin",
+                "path": "holon-mcp-mock/src/bin",
+                "files": [
+                  {
+                    "name": "mock_mcp_raw.rs"
+                  },
+                  {
+                    "name": "mock_mcp_server.rs"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "lib.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-mcp-mock/tests",
+            "dirs": [
+              {
+                "name": "fixtures",
+                "path": "holon-mcp-mock/tests/fixtures",
+                "files": [
+                  {
+                    "name": "claude_history_identity.json"
+                  },
+                  {
+                    "name": "resource.yaml"
+                  },
+                  {
+                    "name": "tool.yaml"
+                  },
+                  {
+                    "name": "tool_cursor.yaml"
+                  },
+                  {
+                    "name": "vtable_identity_declared.yaml"
+                  },
+                  {
+                    "name": "vtable_no_fetch_contract.yaml"
+                  },
+                  {
+                    "name": "vtable_no_identity.yaml"
+                  },
+                  {
+                    "name": "write_disabled.yaml"
+                  },
+                  {
+                    "name": "write_keyed.yaml"
+                  },
+                  {
+                    "name": "write_once_only.yaml"
+                  },
+                  {
+                    "name": "write_once_only_always_run.yaml"
+                  },
+                  {
+                    "name": "write_once_only_keyed_confirm.yaml"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "claude_history_answer_question.rs"
+              },
+              {
+                "name": "claude_history_identity.rs"
+              },
+              {
+                "name": "claude_history_live_fleet.rs"
+              },
+              {
+                "name": "claude_history_send_message.rs"
+              },
+              {
+                "name": "mcp_mock_e2e.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-oracles",
+        "path": "holon-oracles",
+        "c4_level": "component",
+        "description": "Live oracles — keystone PBT invariants shipped into debug builds.",
+        "pattern": "Monitor",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Monitor\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n\nLive oracles — keystone PBT invariants shipped into debug builds.\n\nThe composed keystone PBT carries ~37 invariants, but they only run in\ntests, while most escaped bugs are ENVIRONMENT bugs whose home field is\nprod. This crate ships the *ref-less* subset (checkable against live app\nstate alone, no PBT reference model) as background assertions in debug\nbuilds, so every manual dogfood session is an oracle-carrying session.\n\nArchitecture (fail loud, never fake — see CLAUDE.md):\n- [`checks`] — pure check functions, the single shared implementation. The\n  keystone PBT bodies delegate to these; the live runner feeds them from SQL\n  snapshots. One implementation, no drift.\n- [`status`] — process-global violation ledger + change notification. Global\n  because the tracing subscriber (the latency oracle's source) is\n  process-global; the PBT harness never touches it.\n- [`runner`] — background tokio task running the cheap tier on a fixed\n  cadence, off the UI hot path.\n- [`latency`] — a `tracing_subscriber` Layer that turns the existing\n  `holon_latency` stage events (dispatch/rows/projection) into SLO\n  violations (any stage >200ms).\n\nGating: debug builds only (the frontends wire it under\n`cfg(debug_assertions)`), `HOLON_ORACLES=off` opts out, heavier checks are\nreserved for `HOLON_ORACLES=full`.",
+        "source_file": "holon-oracles/src/lib.rs",
+        "layer": "Core",
+        "relationships": [
+          {
+            "target": "holon-api",
+            "label": "shared value & operation types",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-oracles/src",
+            "files": [
+              {
+                "name": "checks.rs"
+              },
+              {
+                "name": "latency.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "runner.rs"
+              },
+              {
+                "name": "status.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
         "name": "holon-org-format",
         "path": "holon-org-format",
         "c4_level": "component",
         "description": "Org-mode format: pure parsing and rendering.",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nOrg-mode format: pure parsing and rendering.\n\nThis crate contains the format-level concerns for org-mode files:\n- **Parsing**: `parse_org_file` converts `&str` content into typed `Block` entities.\n- **Rendering**: `OrgRenderer` serializes `Block` entities back to org text.\n\nNo disk I/O, no file watching, no DI wiring. Depends only on `holon-api`\ntypes and pure format libraries (`orgize`, `sha2`, `hex`, `chrono`, `uuid`).\n\nThe disk I/O and sync layer lives in `holon-orgmode`, which re-exports // ALLOW(compatibility): see holon-orgmode crate header\neverything from this crate so older import paths keep resolving.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nOrg-mode format: pure parsing and rendering.\n\nThis crate contains the format-level concerns for org-mode files:\n- **Parsing**: `parse_org_file` converts `&str` content into typed `Block`\n  entities.\n- **Rendering**: `OrgRenderer` serializes `Block` entities back to org text.\n\nNo disk I/O, no file watching, no DI wiring. Depends only on `holon-api`\ntypes and pure format libraries (`orgize`, `sha2`, `hex`, `chrono`, `uuid`).\n\nThe disk I/O and sync layer lives in `holon-orgmode`, which re-exports //\nALLOW(compatibility): see holon-orgmode crate header everything from this\ncrate so older import paths keep resolving.",
         "source_file": "holon-org-format/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
@@ -3385,6 +5037,9 @@
             "path": "holon-org-format/examples",
             "files": [
               {
+                "name": "dense_measure.rs"
+              },
+              {
                 "name": "inline_ast_audit.rs"
               }
             ]
@@ -3393,6 +5048,9 @@
             "name": "src",
             "path": "holon-org-format/src",
             "files": [
+              {
+                "name": "dense.rs"
+              },
               {
                 "name": "inline_marks.rs"
               },
@@ -3410,6 +5068,9 @@
               },
               {
                 "name": "parser.rs"
+              },
+              {
+                "name": "task_keyword.rs"
               }
             ]
           },
@@ -3418,10 +5079,61 @@
             "path": "holon-org-format/tests",
             "files": [
               {
+                "name": "compass_property_key_probe.rs"
+              },
+              {
+                "name": "degraded_render_severity.rs"
+              },
+              {
+                "name": "dense_roundtrip_proptest.rs"
+              },
+              {
+                "name": "drawer_key_order_stability.rs"
+              },
+              {
+                "name": "feed_value_drops_resolved_link_form.rs"
+              },
+              {
+                "name": "file_level_property_drawer.rs"
+              },
+              {
+                "name": "get_blocks_flat_order_is_not_document_order.rs"
+              },
+              {
+                "name": "holon_filter_source_roundtrip.rs"
+              },
+              {
                 "name": "inline_marks_proptest.rs"
               },
               {
+                "name": "org_roundtrip_characterization.rs"
+              },
+              {
+                "name": "probe_drawer_order_leak.rs"
+              },
+              {
                 "name": "properties_prefix_headline_repro.rs"
+              },
+              {
+                "name": "render_lossless_shapes.rs"
+              },
+              {
+                "name": "render_marks_fixed_point_pbt.rs"
+              },
+              {
+                "name": "renderer_renests_by_parent.rs"
+              },
+              {
+                "name": "source_projection_fixed_point.rs"
+              },
+              {
+                "name": "template_slot_edges.rs"
+              },
+              {
+                "name": "top_level_source_roundtrip.rs"
+              },
+              {
+                "name": "vault_writeback_stability.rs"
               }
             ]
           }
@@ -3439,7 +5151,7 @@
         "description": "Org-mode disk I/O and sync layer.",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-org-format \"org parse/render\" \"Rust\"\n\nOrg-mode disk I/O and sync layer.\n\nThis crate handles file watching, bidirectional sync between org files and\nthe block store, and DI wiring. Format-level concerns (parsing, rendering,\ndiffing) live in `holon-org-format` and are re-exported here so external // ALLOW(compatibility): re-export bridge during the org-format split\ncallers keep working through the crate split.\n\n# Type System\n\nThis crate uses the generic `Block` type from the core holon crate,\nwith org-specific fields stored in the `properties` JSON field. Extension traits\n(`OrgDocumentExt`, `OrgBlockExt`) provide accessors for these org-specific fields.\n\n- `Block` (with `name` set) + `OrgDocumentExt`: Represents an org file\n- `Block` + `OrgBlockExt`: Represents an org headline",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-org-format \"org parse/render\" \"Rust\"\n\nOrg-mode disk I/O and sync layer.\n\nThis crate handles file watching, bidirectional sync between org files and\nthe block store, and DI wiring. Format-level concerns (parsing, rendering,\ndiffing) live in `holon-org-format` and are re-exported here so external //\nALLOW(compatibility): re-export bridge during the org-format split\ncallers keep working through the crate split.\n\n# Type System\n\nThis crate uses the generic `Block` type from the core holon crate,\nwith org-specific fields stored in the `properties` JSON field. Extension\ntraits (`OrgDocumentExt`, `OrgBlockExt`) provide accessors for these\norg-specific fields.\n\n- `Block` (with `name` set) + `OrgDocumentExt`: Represents an org file\n- `Block` + `OrgBlockExt`: Represents an org headline",
         "source_file": "holon-orgmode/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
@@ -3502,10 +5214,16 @@
                 "name": "file_watcher.rs"
               },
               {
+                "name": "home_authority.rs"
+              },
+              {
                 "name": "lib.rs"
               },
               {
                 "name": "orgmode_sync_provider.rs"
+              },
+              {
+                "name": "writeback_guard.rs"
               }
             ]
           },
@@ -3514,13 +5232,167 @@
             "path": "holon-orgmode/tests",
             "files": [
               {
+                "name": "directory_companion_adoption.rs"
+              },
+              {
+                "name": "dotted_page_title_writeback.rs"
+              },
+              {
+                "name": "file_level_drawer_seam.rs"
+              },
+              {
+                "name": "home_authority_ancestor_walk_cost.rs"
+              },
+              {
+                "name": "idonly_title_heal.rs"
+              },
+              {
+                "name": "incremental_org_writeback_smoke.rs"
+              },
+              {
+                "name": "ingest_data_loss_guard.rs"
+              },
+              {
+                "name": "name_chain_error_propagation.rs"
+              },
+              {
                 "name": "org_block_round_trip_pbt.rs"
+              },
+              {
+                "name": "page_rename_retires_old_file.rs"
+              },
+              {
+                "name": "poll_new_files_containment.rs"
+              },
+              {
+                "name": "prev_sibling_reads_sibling_order_once_per_parent.rs"
+              },
+              {
+                "name": "proposal_writes_do_not_amplify.rs"
+              },
+              {
+                "name": "reingest_task_promotion_idempotent.rs"
               },
               {
                 "name": "round_trip_pbt.rs"
               },
               {
+                "name": "shared_projection_ingest_guard.rs"
+              },
+              {
                 "name": "sync_controller_mutation_pbt.rs"
+              },
+              {
+                "name": "template_block_roundtrip.rs"
+              },
+              {
+                "name": "vault_path_escape.rs"
+              },
+              {
+                "name": "writeback_emits_authored_link_bytes.rs"
+              },
+              {
+                "name": "writeback_readonly_skip.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-pattern",
+        "path": "holon-pattern",
+        "c4_level": "component",
+        "description": "The dual-evaluated guard `Pattern` AST (ADR 0024 / ADR 0031) and the dynamic `Value` it embeds. A leaf crate: `holon-macros` may depend on it to parse guard strings at macro-expansion time, which `holon-api` (a dependent of `holon-macros`) can never allow.",
+        "pattern": "Shared Kernel",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Shared Kernel\n\nThe dual-evaluated guard `Pattern` AST (ADR 0024 / ADR 0031) and the\ndynamic `Value` it embeds. A leaf crate: `holon-macros` may depend on it to\nparse guard strings at macro-expansion time, which `holon-api` (a dependent\nof `holon-macros`) can never allow.\n\n`holon-api` re-exports both, so `holon_api::pattern::*` and\n`holon_api::Value` stay the canonical consumer paths.",
+        "source_file": "holon-pattern/src/lib.rs",
+        "layer": "Core",
+        "code_elements": [
+          {
+            "name": "Value",
+            "kind": "enum",
+            "description": "Value type shaped for flutter_rust_bridge interop. // ALLOW(compatibility): FRB constrains the variant shape"
+          }
+        ],
+        "trait_impls": [
+          {
+            "type_name": "Value",
+            "trait_name": "From"
+          },
+          {
+            "type_name": "Value",
+            "trait_name": "From"
+          },
+          {
+            "type_name": "Value",
+            "trait_name": "From"
+          },
+          {
+            "type_name": "Value",
+            "trait_name": "From"
+          },
+          {
+            "type_name": "Value",
+            "trait_name": "From"
+          },
+          {
+            "type_name": "Value",
+            "trait_name": "From"
+          },
+          {
+            "type_name": "Value",
+            "trait_name": "From"
+          },
+          {
+            "type_name": "Value",
+            "trait_name": "From"
+          },
+          {
+            "type_name": "Value",
+            "trait_name": "From"
+          },
+          {
+            "type_name": "Value",
+            "trait_name": "From"
+          },
+          {
+            "type_name": "Value",
+            "trait_name": "From"
+          },
+          {
+            "type_name": "Value",
+            "trait_name": "From"
+          },
+          {
+            "type_name": "Value",
+            "trait_name": "From"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-pattern/src",
+            "files": [
+              {
+                "name": "arcs.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "pattern.rs"
+              },
+              {
+                "name": "schema.rs"
+              },
+              {
+                "name": "value.rs"
               }
             ]
           }
@@ -3538,7 +5410,7 @@
         "description": "Cross-PBT transition traits shared between `holon-layout-testing` and `holon-integration-tests`.",
         "pattern": "Strategy",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Testing\nPattern: Strategy\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n\nCross-PBT transition traits shared between `holon-layout-testing` and `holon-integration-tests`.\n\nDefines the two PBT transition traits — `TransitionFactory<Ref>` and\n`TransitionImpl<Ref, Sut>` — generic over reference-state and SUT,\nplus the variant structs that show up in more than one PBT.\n\n## Why generic\n\nEach PBT carries its own reference-state and its own SUT handle.\nThe layout PBT has a thin generation context + a frontend\n`LayoutSut`; the integration-tests PBT has a rich `ReferenceState` +\nan async `dyn SutHandle`. By parameterising the traits over `Ref`\nand `Sut`, the *same* variant struct (e.g. [`SwitchViewMode`]) can\nhave one impl per PBT — different `(Ref, Sut)` tuples → distinct\nimpls → no coherence conflict.\n\n## File per variant\n\nEvery variant under [`interactions`] gets its own file holding the\nstruct. The per-PBT impls of `TransitionFactory` / `TransitionImpl`\nlive in the consumer crate's own per-variant file (orphan rule\npermits this — at least one of the type parameters is local to the\nimplementing crate).",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Strategy\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n\nCross-PBT transition traits shared between `holon-layout-testing` and\n`holon-integration-tests`.\n\nDefines the two PBT transition traits — `TransitionFactory<Ref>` and\n`TransitionImpl<Ref, Sut>` — generic over reference-state and SUT,\nplus the variant structs that show up in more than one PBT.\n\n## Why generic\n\nEach PBT carries its own reference-state and its own SUT handle.\nThe layout PBT has a thin generation context + a frontend\n`LayoutSut`; the integration-tests PBT has a rich `ReferenceState` +\nan async `dyn SutHandle`. By parameterising the traits over `Ref`\nand `Sut`, the *same* variant struct (e.g. [`SwitchViewMode`]) can\nhave one impl per PBT — different `(Ref, Sut)` tuples → distinct\nimpls → no coherence conflict.\n\n## File per variant\n\nEvery variant under [`interactions`] gets its own file holding the\nstruct. The per-PBT impls of `TransitionFactory` / `TransitionImpl`\nlive in the consumer crate's own per-variant file (orphan rule\npermits this — at least one of the type parameters is local to the\nimplementing crate).",
         "source_file": "holon-pbt-core/src/lib.rs",
         "layer": "Testing",
         "relationships": [
@@ -3584,10 +5456,22 @@
             ],
             "files": [
               {
+                "name": "attribution.rs"
+              },
+              {
                 "name": "bisect.rs"
               },
               {
+                "name": "block_compare.rs"
+              },
+              {
+                "name": "budget.rs"
+              },
+              {
                 "name": "caching_proxy.rs"
+              },
+              {
+                "name": "cap_transition.rs"
               },
               {
                 "name": "capabilities.rs"
@@ -3599,6 +5483,15 @@
                 "name": "composition.rs"
               },
               {
+                "name": "content_generators.rs"
+              },
+              {
+                "name": "contribution.rs"
+              },
+              {
+                "name": "correspondence.rs"
+              },
+              {
                 "name": "fixture.rs"
               },
               {
@@ -3606,6 +5499,30 @@
               },
               {
                 "name": "lib.rs"
+              },
+              {
+                "name": "null_ref.rs"
+              },
+              {
+                "name": "observables.rs"
+              },
+              {
+                "name": "panic_filter.rs"
+              },
+              {
+                "name": "retry.rs"
+              },
+              {
+                "name": "sibling_order.rs"
+              },
+              {
+                "name": "step_vocabulary.rs"
+              },
+              {
+                "name": "types.rs"
+              },
+              {
+                "name": "validation.rs"
               },
               {
                 "name": "wiring.rs"
@@ -3621,6 +5538,9 @@
               },
               {
                 "name": "invariant_dispatch_smoke.rs"
+              },
+              {
+                "name": "join_merge_target_bound.rs"
               },
               {
                 "name": "widget_snapshot_smoke.rs"
@@ -3641,7 +5561,7 @@
         "description": "Materialization layer: Holon task blocks → Petri Net for WSJF ranking.",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Engine\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-engine \"Petri-net engine\" \"Rust\"\n\nMaterialization layer: Holon task blocks → Petri Net for WSJF ranking.\n\nReads task blocks from the database and constructs a Petri Net where:\n- Tokens represent entities (the user, referenced people/documents)\n- Transitions represent tasks (with dependency ordering via completion tokens)\n- The objective function scores tasks via prototypal inheritance with `=` computed properties\n\nPrototype blocks define both literal defaults and `=`-prefixed Rhai computed attributes.\nInstance (task) blocks inherit from and override prototype properties.\n\nContent prefix parsing order (each strips its marker):\n1. `>` — sequential dependency on previous sibling\n2. `@[[Person]]:` — delegation to another person\n3. `?` — question producing a knowledge token\n\nThe engine then ranks enabled transitions by WSJF (Δobj / duration).",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-engine \"Petri-net engine\" \"Rust\"\n\nMaterialization layer: Holon task blocks → Petri Net for WSJF ranking.\n\nReads task blocks from the database and constructs a Petri Net where:\n- Tokens represent entities (the user, referenced people/documents)\n- Transitions represent tasks (with dependency ordering via completion\n  tokens)\n- The objective function scores tasks via prototypal inheritance with `=`\n  computed properties\n\nPrototype blocks define both literal defaults and `=`-prefixed Rhai computed\nattributes. Instance (task) blocks inherit from and override prototype\nproperties.\n\nContent prefix parsing order (each strips its marker):\n1. `>` — sequential dependency on previous sibling\n2. `@[[Person]]:` — delegation to another person\n3. `?` — question producing a knowledge token\n\nThe engine then ranks enabled transitions by WSJF (Δobj / duration).",
         "source_file": "holon-petri/src/lib.rs",
         "layer": "Engine",
         "relationships": [
@@ -3668,6 +5588,9 @@
             "files": [
               {
                 "name": "lib.rs"
+              },
+              {
+                "name": "parser.rs"
               }
             ]
           }
@@ -3719,7 +5642,19 @@
                 "name": "lib.rs"
               },
               {
+                "name": "trust.rs"
+              },
+              {
                 "name": "type_registry.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-profiles/tests",
+            "files": [
+              {
+                "name": "computed_null_round_trip.rs"
               }
             ]
           }
@@ -3765,13 +5700,240 @@
         ]
       },
       {
+        "name": "holon-secrets",
+        "path": "holon-secrets",
+        "c4_level": "component",
+        "description": "OS-keychain storage for Holon's secret material.",
+        "pattern": "Adapter",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Adapter\n\nOS-keychain storage for Holon's secret material.\n\nTwo callers share this seam: the owner-identity seed (ADR 0028 C1/D1) and\nthe OAuth2 credentials an integration sidecar references. A secret filed\nhere is identified by a *service* (fixed per store) and an *account*.\n\n- [`KeychainStore`] — the trait every backend implements.\n- [`platform_keychain`] — the backend for the running platform.\n- [`UnavailableKeychainStore`] — the **fail-loud** stand-in for platforms\n  with no wired backend. Every call returns a clear `Err` naming the\n  platform and the missing precondition; it never silently drops the secret\n  to disk or memory.\n- [`InMemoryKeychainStore`] — a test double (never used in production).\n\nSecrets are opaque `&[u8]` here. Nothing in this crate logs the secret\nmaterial.",
+        "source_file": "holon-secrets/src/lib.rs",
+        "layer": "Core",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-secrets/src",
+            "files": [
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "mac.rs"
+              },
+              {
+                "name": "non_mac.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-sharing",
+        "path": "holon-sharing",
+        "c4_level": "component",
+        "description": "`holon-sharing` — ADR 0028 sharing machinery (Increments 4-6: the H2 owner-scoped, totally-ordered crossing log + its migration/undo/enforcement seams; the D4/H8 owner-signed policy objects + lease membership; and the H4 owner-private alias ledger / re-encode baseline).",
+        "pattern": "Policy",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Policy\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-loro \"CRDT substrate for the owner log\" \"Rust\"\n\n`holon-sharing` — ADR 0028 sharing machinery (Increments 4-6: the H2\nowner-scoped, totally-ordered crossing log + its migration/undo/enforcement\nseams; the D4/H8 owner-signed policy objects + lease membership; and the H4\nowner-private alias ledger / re-encode baseline).\n\n## What lands here (Inc 5 — [`policy`], [`lease`])\n- [`policy::Policy`] — owner-signed `{selector: stable block id (H6, never a\n  name), principals, capabilities, delegation, lease}`; committed through\n  [`policy::PolicySet`], which enforces the **A7 disjointness invariant**\n  (nested/overlapping selectors rejected loud at commit) and mirrors each\n  commit as a `PolicyEdit` into the Inc-4 log.\n- [`lease`] — lease-based membership (H8): short-lived certs measured on the\n  injected [`holon_api::Clock`] seam (NO `SystemTime::now`), **revocation =\n  non-renewal**, and owner→delegate→peer chain verification\n  ([`lease::verify_membership`]) — else membership is unclaimable.\n- [`policy::evaluate_grant`] — a non-owner grant without delegation rights\n  becomes a **pending request** (D4).\n\n## What lands here (Inc 6 — [`alias_ledger`])\n- [`alias_ledger::AliasLedger`] — owner-private,\n  [`alias_ledger::NonReplicated`] (OQ3) `old-id → new-id` chains; re-encode\n  and owner-signed [`alias_ledger::SuccessionPointer`] baseline. Owner\n  backlinks rewrite through the SQL `block_links` junction; recipients get\n  fresh public ids with no correlation handle and their dangling refs render\n  loud (fail-loud).\n\nHome ratified by OQ2: a NEW crate (not an extension of `holon-loro`) — the\nlog arbitrates *policy*, which is not Loro's concern. It reuses the Loro\nsubstrate (`doc_lamport_height` for the dedicated owner-log clock, delta\nexport/import for merge) and the `share_peer_id` device-key derivation, but\nowns the sharing domain types and arbitration rule.\n\n## What lands here (Inc 4)\n- [`log::CrossingLog`] — one dedicated `LoroDoc` per owner scope, one clock,\n  entries stamped with the FROZEN tuple `(lamport_height(log_doc) at append,\n  stable_peer_id)`; both crossings and policy edits in the one log.\n- [`arbitration`] — concurrent divergent crossings ordered\n  deterministically; the loser is rejected loudly and returned as a\n  *keepable divergent copy*.\n- [`journal`] — idempotent, resumable migration; the journal is the unit of\n  atomicity; leak-direction contract (widen = create-shared-first, narrow =\n  delete-shared-first).\n- [`undo`] — inverse-crossing undo through the same log; a rejected loser\n  NEVER enters the undo stack.\n- [`projection`] — SQL projection semantics across the migration window +\n  the orphan-row tripwire (wired at Inc 3).\n- [`boundary`] — the first runtime consumer of\n  [`holon_api::BoundaryBehavior`]: the allow/reject-loud decision function,\n  incl. the `Unclassified` fail-closed contract and the descriptor-less-op\n  classification design.\n\n## Signature shape (OQ4) — REAL as of the W4 ceremony work\nEvery entry carries an [`types::OwnerSig`] produced by a\n[`types::SigningAuthority`]. The production impl is\n[`types::OwnerKeyAuthority`], backed by the durable Ed25519\n[`holon_loro::owner_identity::OwnerIdentityKey`]; its signatures verify\nunder the owner's public key via [`types::OwnerSig::verify`] and\n[`log::CrossingLog::verify_all`]. [`types::UnverifiedAuthority`] (a blake3\nstand-in) remains ONLY as a test double and its output is REJECTED by\nverification. Swapping authorities required no log-layout change (the field\nshape was committed at Inc 4).",
+        "source_file": "holon-sharing/src/lib.rs",
+        "layer": "Engine",
+        "relationships": [
+          {
+            "target": "holon-api",
+            "label": "shared value & operation types",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-core",
+            "label": "core datasource traits",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-loro",
+            "label": "CRDT substrate for the owner log",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-sharing/src",
+            "files": [
+              {
+                "name": "acceptor.rs"
+              },
+              {
+                "name": "alias_ledger.rs"
+              },
+              {
+                "name": "arbitration.rs"
+              },
+              {
+                "name": "boundary.rs"
+              },
+              {
+                "name": "enforcement.rs"
+              },
+              {
+                "name": "journal.rs"
+              },
+              {
+                "name": "lease.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "log.rs"
+              },
+              {
+                "name": "policy.rs"
+              },
+              {
+                "name": "projection.rs"
+              },
+              {
+                "name": "registry_binding.rs"
+              },
+              {
+                "name": "sync.rs"
+              },
+              {
+                "name": "types.rs"
+              },
+              {
+                "name": "undo.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-sharing/tests",
+            "files": [
+              {
+                "name": "inc4_pbt.rs"
+              },
+              {
+                "name": "inc4_seams.rs"
+              },
+              {
+                "name": "inc56_pbt.rs"
+              },
+              {
+                "name": "inc56_seams.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-toon",
+        "path": "holon-toon",
+        "c4_level": "component",
+        "description": "`holon-toon` — the dense **TOON** wire projection an agent reads and patches. Shipped: `frontends/mcp` encodes query result tables through it.",
+        "pattern": "Adapter",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n\n`holon-toon` — the dense **TOON** wire projection an agent reads and\npatches. Shipped: `frontends/mcp` encodes query result tables through it.\n\nA dense, round-trippable projection of the Holon block forest,\nbuilt as a structural sibling of `crates/holon-org-format` so it can be\npromoted directly if the experiment wins. The library parses and renders\nthe projection an agent reads and patches; `MAPPING.md` records the\norg<->TOON construct mapping and `examples/measure.rs` measures token cost\nagainst org on real vault files.\n\nLayers (bottom to top):\n- [`toon`] — generic TOON scalar quoting/escaping, row split, props codec.\n  This is the single escaping implementation the whole crate funnels\n  through.\n- [`table`] — the **generic tabular codec**: `Vec<Row>` (`Row =\n  BTreeMap<String, ToonValue>`) <-> TOON text, with a deterministic sorted\n  column union and an explicit absent-vs-empty distinction. This is TOON's\n  real sweet spot (uniform value-heavy rows, e.g. MCP query results) and is\n  block-independent.\n- [`schema`] — the fixed 6-column *block* tabular schema (a second policy\n  over the same `toon` primitives).\n- [`models`] — the block-forest domain types (parse-don't-validate\n  newtypes).\n- [`renderer`] / [`parser`] — `Forest` <-> TOON text.",
+        "source_file": "holon-toon/src/lib.rs",
+        "layer": "Adapters",
+        "dirs": [
+          {
+            "name": "examples",
+            "path": "holon-toon/examples",
+            "files": [
+              {
+                "name": "measure.rs"
+              }
+            ]
+          },
+          {
+            "name": "src",
+            "path": "holon-toon/src",
+            "files": [
+              {
+                "name": "error.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "models.rs"
+              },
+              {
+                "name": "org_reader.rs"
+              },
+              {
+                "name": "parser.rs"
+              },
+              {
+                "name": "renderer.rs"
+              },
+              {
+                "name": "schema.rs"
+              },
+              {
+                "name": "table.rs"
+              },
+              {
+                "name": "toon.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-toon/tests",
+            "files": [
+              {
+                "name": "roundtrip_proptest.rs"
+              },
+              {
+                "name": "table_proptest.rs"
+              },
+              {
+                "name": "table_units.rs"
+              },
+              {
+                "name": "units.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          },
+          {
+            "name": "MAPPING.md"
+          },
+          {
+            "name": "README.md"
+          },
+          {
+            "name": "RED_LOG.md"
+          },
+          {
+            "name": "RESULTS.md"
+          }
+        ]
+      },
+      {
         "name": "holon-turso",
         "path": "holon-turso",
         "c4_level": "component",
         "description": "`holon-turso` — the Turso (SQLite-IVM) storage adapter.",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n\n`holon-turso` — the Turso (SQLite-IVM) storage adapter.\n\nThis crate owns everything specific to the Turso substrate: the\n[`TursoBackend`](turso::TursoBackend) actor + `DbHandle`, the materialized-view\nmanager, the SQL parser/transform layer, the GQL graph-schema registry, and\nthe `SchemaModule` lifecycle contract. The adapter-agnostic storage\nabstractions it builds on (`StorageBackend`, `Filter`, `Resource`,\n`StorageError`) live in `holon-core`, so a wiring without Turso need not\ndepend on this crate at all (ADR 0004 Phase 9 — Turso is one of four\nstorage adapters).",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n\n`holon-turso` — the Turso (SQLite-IVM) storage adapter.\n\nThis crate owns everything specific to the Turso substrate: the\n[`TursoBackend`](turso::TursoBackend) actor + `DbHandle`, the\nmaterialized-view manager, the SQL parser/transform layer, the GQL\ngraph-schema registry, and the `SchemaModule` lifecycle contract. The\nadapter-agnostic storage abstractions it builds on (`StorageBackend`,\n`Filter`, `Resource`, `StorageError`) live in `holon-core`, so a wiring\nwithout Turso need not depend on this crate at all (ADR 0004 Phase 9 — Turso\nis one of four storage adapters).",
         "source_file": "holon-turso/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
@@ -3851,16 +6013,25 @@
                 "name": "block_table_names.rs"
               },
               {
+                "name": "derived_reconciler.rs"
+              },
+              {
                 "name": "durable_state.rs"
               },
               {
                 "name": "dynamic_schema_module.rs"
               },
               {
+                "name": "engine_functions.rs"
+              },
+              {
                 "name": "graph_schema.rs"
               },
               {
                 "name": "lib.rs"
+              },
+              {
+                "name": "matview_lease.rs"
               },
               {
                 "name": "matview_manager.rs"
@@ -3893,10 +6064,112 @@
             "path": "holon-turso/tests",
             "files": [
               {
+                "name": "automations_journal_cdc.rs"
+              },
+              {
+                "name": "backlinks_section_matview.rs"
+              },
+              {
+                "name": "cdc_batch_trace_links.rs"
+              },
+              {
+                "name": "chained_matview_cdc_repro.rs"
+              },
+              {
+                "name": "create_table_keyword_columns.rs"
+              },
+              {
                 "name": "ddl_hang_guard.rs"
               },
               {
+                "name": "derived_field_eval_vs_sql.rs"
+              },
+              {
+                "name": "derived_field_matview.rs"
+              },
+              {
+                "name": "derived_field_sidecar.rs"
+              },
+              {
+                "name": "group_by_matview_spike.rs"
+              },
+              {
+                "name": "json_extract_matview_spike.rs"
+              },
+              {
+                "name": "matview_cache_is_per_database.rs"
+              },
+              {
+                "name": "matview_lease_actor.rs"
+              },
+              {
+                "name": "recursive_cte_page_boundary.rs"
+              },
+              {
+                "name": "recursive_cte_shape_architecture.rs"
+              },
+              {
+                "name": "schema_source_ddl_lock.rs"
+              },
+              {
                 "name": "sidecar_views.rs"
+              },
+              {
+                "name": "unregistered_dependency_fast_fail.rs"
+              },
+              {
+                "name": "watch_preserves_order.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-turso-testing",
+        "path": "holon-turso-testing",
+        "c4_level": "component",
+        "description": "Companion PBT crate for `holon-turso` — the Turso storage subsystem's slice of the ONE composed-keystone PBT (co-location Phase 2, plan §5-turso).",
+        "pattern": "Test Harness",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon-turso \"production Turso storage backend under test\" \"Rust\"\n@c4 uses holon-pbt-core \"PBT cap traits + contribution seam\" \"Rust\"\n\nCompanion PBT crate for `holon-turso` — the Turso storage subsystem's slice\nof the ONE composed-keystone PBT (co-location Phase 2, plan §5-turso).\n\nOwns the pure-Turso correspondence ARMS, co-located out of the central\ntable:\n- The two Turso arms (`block_raw`, `matview`) of the SHARED\n  [`NonSeedBlocks`] observable (whose struct + `ref_non_seed_blocks` stay on\n  the pbt-core floor; the `/loro` arm is contributed by\n  `holon-loro-testing`).\n- The whole `block_content` / `block_parent` / `advice_matviews` observables\n  (every arm Turso-owned): observable struct + `impl Observable` +\n  `ref_project` move here entirely.\n\nExposed to the central fold via [`pbt_contribution`] / [`pbt_footprint`].\n\n## Ref-state independence (plan §4)\nNothing here names a concrete reference-state type: the projections read\n`Ref*` / `Sut*` capabilities generically through the composed `CapMap`. A\nguard integration test (`tests/no_ref_state_dep.rs`) fails the build if this\ncrate ever reaches for the central `ReferenceState` monolith.\n\n## SUT component stays central (for now)\nThe `SqlProjectionComponent` SUT cap component is still assembled by the\ncentral `compose_sut_*`; this Phase co-locates the correspondence ARMS only\n(exactly like the Loro follow-on moved the `/loro` arm, not the `LoroSut`).\nSo [`pbt_contribution`]'s `cap_installers` and `generators` are empty.",
+        "source_file": "holon-turso-testing/src/lib.rs",
+        "layer": "Testing",
+        "relationships": [
+          {
+            "target": "holon-turso",
+            "label": "production Turso storage backend under test",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-pbt-core",
+            "label": "PBT cap traits + contribution seam",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-turso-testing/src",
+            "files": [
+              {
+                "name": "correspondences.rs"
+              },
+              {
+                "name": "lib.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-turso-testing/tests",
+            "files": [
+              {
+                "name": "no_ref_state_dep.rs"
               }
             ]
           }
