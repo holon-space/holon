@@ -20,11 +20,6 @@
 pub mod action_watcher;
 // event_ring moved to holon-loro; re-exported below
 // loro_backend moved to holon-loro; re-exported below
-pub mod memory_backend;
-// pbt_infrastructure pulls in proptest which is native-only.
-// Gated behind `testing` (or #[cfg(test)]): zero production consumers.
-#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "testing")))]
-pub mod pbt_infrastructure;
 pub mod repository;
 pub mod types;
 
@@ -34,7 +29,6 @@ pub mod guard_world;
 pub mod history_store;
 pub mod holon_rule_watcher;
 pub mod holon_service;
-pub mod loro_ui_watcher;
 pub mod operation_dispatcher;
 pub mod operation_engine;
 pub mod query_engine;
@@ -63,7 +57,6 @@ pub use holon_api::{
 // Re-export OperationDescriptor and OperationParam for FRB type generation
 pub use holon_api::{OperationDescriptor, OperationParam};
 pub use holon_service::HolonService;
-pub use memory_backend::MemoryBackend;
 pub use operation_dispatcher::AuthoredInput;
 pub use operation_dispatcher::OperationDispatcher;
 pub use operation_engine::DispatchingOperationEngine;

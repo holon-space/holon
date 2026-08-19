@@ -18,6 +18,7 @@ use holon_api::ParentNotFound;
 use holon_api::TypeHint;
 use holon_api::Value;
 use holon_core::BatchOp;
+use holon_core::EventOrigin;
 use holon_core::FieldDelta;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
@@ -31,7 +32,6 @@ use crate::core::merge_blocks_plan;
 use crate::storage::schema_module::EdgeFieldDescriptor;
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::DbHandle;
-use crate::sync::event_bus::EventOrigin;
 
 pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
     match v {

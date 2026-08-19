@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/lane-thin-view/frontends",
+  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/_sw_integ/frontends",
   "root": {
     "name": ".",
     "path": ".",

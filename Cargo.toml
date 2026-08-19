@@ -9,6 +9,7 @@ members = [
   "crates/holon-expr",
   "crates/holon-pattern",
   "crates/holon-rules",
+  "crates/holon-loro-wiring",
   "crates/holon-org-format",
   "crates/holon-toon",
   "crates/holon-orgmode",
@@ -232,11 +233,13 @@ holon-expr = { path = "crates/holon-expr" }
 holon-pattern = { path = "crates/holon-pattern" }
 holon-petri = { path = "crates/holon-petri" }
 holon-rules = { path = "crates/holon-rules" }
+holon-loro-wiring = { path = "crates/holon-loro-wiring" }
 holon-profiles = { path = "crates/holon-profiles" }
 # default-features = false drops holon-loro's `iroh-sync` (iroh → QUIC/TLS/ring,
-# native-only, fatal on wasm). holon's own `iroh-sync` feature re-enables it, so
-# native builds are unchanged; the wasm worker (holon default-features = false)
-# gets a loro stack with no iroh. holon is the only holon-loro consumer.
+# native-only, fatal on wasm). `holon-loro-wiring`'s own `iroh-sync` (on by
+# default) re-enables it for native builds; the wasm worker never pulls the
+# wiring crate, so it gets a loro stack with no iroh. `holon`'s `iroh-sync` is
+# dev-only — it re-enables the transport for holon's own P2P tests.
 holon-loro = { path = "crates/holon-loro", default-features = false }
 holon-secrets = { path = "crates/holon-secrets" }
 holon-sharing = { path = "crates/holon-sharing" }

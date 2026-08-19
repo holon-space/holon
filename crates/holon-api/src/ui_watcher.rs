@@ -2,7 +2,8 @@
 //!
 //! The Turso implementation (CDC-driven `watch_ui` machinery) lives in
 //! `holon::api::ui_watcher`; a no-Turso session renders via
-//! `holon::api::loro_ui_watcher` from a `BlockQuerySource` snapshot instead.
+//! `holon_loro_wiring::loro_ui_watcher` from a `BlockQuerySource` snapshot
+//! instead.
 
 use std::sync::Arc;
 

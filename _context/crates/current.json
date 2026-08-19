@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/lane-thin-view/crates",
+  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/_sw_integ/crates",
   "root": {
     "name": ".",
     "path": ".",
@@ -390,9 +390,9 @@
                 "name": "sync",
                 "path": "holon/src/sync",
                 "c4_level": "unknown",
-                "description": "Synchronization infrastructure — re-exported from `holon-loro`.",
+                "description": "Synchronization infrastructure that belongs to the engine.",
                 "pattern_status": "planned",
-                "content": "Synchronization infrastructure — re-exported from `holon-loro`.\n\nThe Loro CRDT backend, P2P sync, snapshot helpers, and block operation\nproviders now live in `holon-loro`. This module re-exports them as the\ncrate's public facade, so `holon::sync::*` paths keep resolving.\n\nThree wiring modules stay in `holon` because they bridge the `holon::core`\nSQL types into the Loro pipeline (see Phase D partition).",
+                "content": "Synchronization infrastructure that belongs to the engine.\n\nThe Loro CRDT backend and P2P sync live in `holon-loro`; the wiring that\nbinds them to this crate lives in `holon-loro-wiring`. Consumers name\n`holon_loro::` directly — this module deliberately re-exports neither, so\n`holon` never depends on `holon-loro`.",
                 "source_file": "holon/src/sync/mod.rs",
                 "parent": "holon",
                 "files": [
@@ -1541,6 +1541,12 @@
               },
               {
                 "name": "replica_state.rs"
+              },
+              {
+                "name": "sink_reader.rs"
+              },
+              {
+                "name": "sql_cell_registry.rs"
               },
               {
                 "name": "storage.rs"
@@ -2971,7 +2977,7 @@
                     "c4_level": "unknown",
                     "description": "Shared PBT kit for testing `LoroSyncController` against different SUT implementations.",
                     "pattern_status": "planned",
-                    "content": "Shared PBT kit for testing `LoroSyncController` against different SUT\nimplementations.\n\nThis is the Loro-side analogue of the `UserDriver` trait\n(`crates/holon-integration-tests/src/mutation_driver.rs`): it hoists the\ntransition enum, generators, preconditions, reference-state machine, and\nstructural/convergence invariants from `holon::sync::multi_peer` so that\nmultiple tests can exercise the controller against different systems:\n\n- `StubSut` — a minimal in-process `LoroSyncController` wired to stub\n  `OperationProvider` and `EventBus` implementations. Used by the focused\n  bridge PBT (`tests/loro_sync_controller_pbt.rs`).\n- `E2ESut` — the full production stack used by the e2e PBT. Gets the bridge\n  invariants \"for free\" when Loro is enabled.\n\nAll SUTs see the same `GroupTransition` stream and are judged against the\nsame multi-peer structural invariants (S1–S3, C1–C3) plus bridge-specific\ninvariants (I1–I3) defined in this module.",
+                    "content": "Shared PBT kit for testing `LoroSyncController` against different SUT\nimplementations.\n\nThis is the Loro-side analogue of the `UserDriver` trait\n(`crates/holon-integration-tests/src/mutation_driver.rs`): it hoists the\ntransition enum, generators, preconditions, reference-state machine, and\nstructural/convergence invariants from `holon_loro::multi_peer` so that\nmultiple tests can exercise the controller against different systems:\n\n- `StubSut` — a minimal in-process `LoroSyncController` wired to stub\n  `OperationProvider` and `EventBus` implementations. Used by the focused\n  bridge PBT (`tests/loro_sync_controller_pbt.rs`).\n- `E2ESut` — the full production stack used by the e2e PBT. Gets the bridge\n  invariants \"for free\" when Loro is enabled.\n\nAll SUTs see the same `GroupTransition` stream and are judged against the\nsame multi-peer structural invariants (S1–S3, C1–C3) plus bridge-specific\ninvariants (I1–I3) defined in this module.",
                     "source_file": "holon-integration-tests/src/pbt/loro_sync/mod.rs",
                     "parent": "holon-integration-tests/src/pbt",
                     "files": [
@@ -4277,6 +4283,73 @@
               },
               {
                 "name": "no_ref_state_dep.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-loro-wiring",
+        "path": "holon-loro-wiring",
+        "c4_level": "component",
+        "description": "The wiring that binds the Loro CRDT backend to the `holon` engine.",
+        "pattern": "Adapter",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-sharing \"ADR 0028 policy overlay\" \"Rust\"\n\nThe wiring that binds the Loro CRDT backend to the `holon` engine.\n\nEverything here needs BOTH `holon` and `holon-loro`; nothing in `holon`\nneeds it back. Keeping it in its own crate is what lets `holon` compile in\nparallel with `holon-loro` instead of waiting for it.",
+        "source_file": "holon-loro-wiring/src/lib.rs",
+        "layer": "Adapters",
+        "relationships": [
+          {
+            "target": "holon",
+            "label": "core orchestration",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-loro",
+            "label": "Loro CRDT backend & P2P sync",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-turso",
+            "label": "Turso storage adapter",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-sharing",
+            "label": "ADR 0028 policy overlay",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-loro-wiring/src",
+            "files": [
+              {
+                "name": "event_infra_module.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "loro_block_query_source.rs"
+              },
+              {
+                "name": "loro_module.rs"
+              },
+              {
+                "name": "loro_ui_watcher.rs"
+              },
+              {
+                "name": "memory_backend.rs"
+              },
+              {
+                "name": "pbt_infrastructure.rs"
               }
             ]
           }

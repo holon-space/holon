@@ -1,9 +1,9 @@
 //! A Turso-free `watch_ui` that renders a block from a [`BlockQuerySource`]
 //! (Loro) snapshot instead of the Turso CDC pipeline.
 //!
-//! This is the no-Turso counterpart of [`crate::api::ui_watcher::watch_ui`].
+//! This is the no-Turso counterpart of [`holon::api::ui_watcher::watch_ui`].
 //! Where the Turso path subscribes to a structural CDC matview and re-renders
-//! via [`crate::api::BlockDomain::render_entity`], this path takes one
+//! via [`holon::api::BlockDomain::render_entity`], this path takes one
 //! [`BlockQuerySource::snapshot`] and synthesizes the same two [`UiEvent`]s the
 //! reactive engine consumes:
 //!
@@ -22,6 +22,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use holon::api::block_domain::BlockDomain;
+use holon::entity_profile::LiveEntities;
+use holon::entity_profile::ProfileResolver;
+use holon::entity_profile::ProfileResolving;
 use holon_api::EntityUri;
 use holon_api::RenderExpr;
 use holon_api::UiEvent;
@@ -38,11 +42,6 @@ use holon_api::streaming::WithMetadata;
 use holon_core::storage::BlockQuery;
 use holon_core::storage::BlockQuerySource;
 use tokio::sync::mpsc;
-
-use crate::api::block_domain::BlockDomain;
-use crate::entity_profile::LiveEntities;
-use crate::entity_profile::ProfileResolver;
-use crate::entity_profile::ProfileResolving;
 
 /// Build the Turso-free [`ProfileResolving`] the Loro render path uses to
 /// derive collection render expressions.
@@ -69,7 +68,7 @@ pub fn build_turso_free_profile_resolver(
     let type_registry = holon_profiles::create_default_registry().expect("default TypeRegistry");
     let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry);
 
-    let empty_profiles = crate::sync::LiveData::new(
+    let empty_profiles = holon_api::live_data::LiveData::new(
         Vec::new(),
         |_| Ok(String::new()),
         |_| anyhow::bail!("no-Turso session has no user profile source"),
@@ -197,7 +196,7 @@ pub async fn loro_watch_ui(
     Ok(WatchHandle::with_aborts(output_rx, command_tx, aborts))
 }
 
-/// The no-Turso arm of the [`UiWatcher`](crate::api::ui_watcher::UiWatcher)
+/// The no-Turso arm of the [`UiWatcher`](holon::api::ui_watcher::UiWatcher)
 /// capability: renders a block's UI from a [`BlockQuerySource`] snapshot via
 /// [`loro_watch_ui`]. The Turso arm is `BackendEngine`'s own `UiWatcher` impl
 /// (CDC pipeline). Both are present in their respective sessions so `watch_ui`
@@ -228,7 +227,7 @@ impl LoroUiWatcher {
 }
 
 #[async_trait::async_trait]
-impl crate::api::ui_watcher::UiWatcher for LoroUiWatcher {
+impl holon::api::ui_watcher::UiWatcher for LoroUiWatcher {
     async fn watch_ui(self: Arc<Self>, block_id: EntityUri) -> Result<WatchHandle> {
         loro_watch_ui(
             Arc::clone(&self.source),
@@ -531,13 +530,13 @@ fn error_render_expr(message: &str) -> RenderExpr {
 
 #[cfg(test)]
 mod tests {
+    use holon::api::repository::CoreOperations;
+    use holon::api::repository::Lifecycle;
     use holon_api::BlockContent;
     use holon_loro::LoroBackend;
 
     use super::*;
-    use crate::api::repository::CoreOperations;
-    use crate::api::repository::Lifecycle;
-    use crate::sync::loro_block_query_source::LoroBlockQuerySource;
+    use crate::loro_block_query_source::LoroBlockQuerySource;
 
     /// The V2 paint-proof gate, headless at the `watch_ui` seam: a pure-Loro
     /// `BlockQuerySource` snapshot drives the same `UiEvent::Structure` +

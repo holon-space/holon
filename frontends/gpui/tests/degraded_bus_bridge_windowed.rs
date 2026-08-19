@@ -28,11 +28,11 @@ use std::time::Duration;
 use gpui::AssetSource;
 use gpui::PlatformTextSystem;
 use gpui::TestApp;
-use holon::sync::DegradedSignalBus;
-use holon::sync::ShareDegraded;
-use holon::sync::ShareDegradedReason;
 use holon_gpui::launch_holon_window_with_engine_and_share;
 use holon_integration_tests::test_environment::TestEnvironment;
+use holon_loro::DegradedSignalBus;
+use holon_loro::ShareDegraded;
+use holon_loro::ShareDegradedReason;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     let platform = gpui_platform::current_platform(true);

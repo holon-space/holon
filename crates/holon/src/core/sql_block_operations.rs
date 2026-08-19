@@ -36,11 +36,13 @@ use holon_core::BlockOperations;
 use holon_core::BlockQueryHelpers;
 use holon_core::CrudOperations;
 use holon_core::DataSource;
+use holon_core::EventOrigin;
 use holon_core::OperationProvider;
 use holon_core::OperationRegistry;
 use holon_core::OperationResult;
 use holon_core::OriginTaggedWrites;
 use holon_core::Result;
+use holon_core::SqlOnlyCellRegistry;
 use holon_core::UnknownOperationError;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::block_ordering::MintedPosition;
@@ -55,8 +57,6 @@ use holon_core::storage::types::StorageEntity;
 use crate::core::queryable_cache::HasCache;
 use crate::core::queryable_cache::QueryableCache;
 use crate::core::sql_operation_provider::SqlOperationProvider;
-use crate::sync::block_cell_registry::BlockCellRegistry;
-use crate::sync::event_bus::EventOrigin;
 
 /// The decision an order re-key makes, before anything is written.
 struct RekeyPlan {
@@ -77,7 +77,7 @@ pub struct SqlBlockOperations {
     /// behaviour for synthetic `MemStore` test impls is achieved by them
     /// inheriting the `BlockOperations::cells()` default of `None`
     /// rather than calling into this struct.
-    cell_registry: Arc<BlockCellRegistry>,
+    cell_registry: Arc<dyn EntityCellRegistry>,
     /// The session's order/merge role, injected by the DI composition root —
     /// the SQL component is *told* whether it owns order, it does not probe a
     /// Loro-aware component to find out. This is the dependency inversion that
@@ -97,7 +97,7 @@ impl SqlBlockOperations {
         Self {
             sql_ops,
             cache,
-            cell_registry: Arc::new(BlockCellRegistry::sql_only()),
+            cell_registry: Arc::new(SqlOnlyCellRegistry::new()),
             caps: SessionCapabilities::detect_and_pin(false),
         }
     }
@@ -106,7 +106,7 @@ impl SqlBlockOperations {
     /// `event_infra_module` factory so chord-time ops route content
     /// reads/writes through `BlockCellRegistry::live_field<String>` (and
     /// hence the live Loro `LoroText` view) instead of the SQL cache.
-    pub fn with_cell_registry(mut self, registry: Arc<BlockCellRegistry>) -> Self {
+    pub fn with_cell_registry(mut self, registry: Arc<dyn EntityCellRegistry>) -> Self {
         self.cell_registry = registry;
         self
     }
@@ -362,7 +362,7 @@ impl BlockDataSourceHelpers<Block> for SqlBlockOperations {
 }
 impl BlockOperations<Block> for SqlBlockOperations {
     fn cells(&self) -> Option<&dyn EntityCellRegistry> {
-        Some(&*self.cell_registry as &dyn EntityCellRegistry)
+        Some(&*self.cell_registry)
     }
 
     fn ordering(&self) -> Option<&dyn BlockOrdering> {
@@ -645,7 +645,7 @@ impl BlockOrdering for SqlBlockOperations {
                 "update_in_tree: missing 'id' param".into()
             })?;
         let after = params
-            .remove(crate::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM)
+            .remove(holon_api::POSITION_AFTER_BLOCK_ID_PARAM)
             .and_then(|v| v.as_string().map(str::to_string));
 
         if matches!(self.consolidator(), Consolidator::Upstream) {
@@ -659,7 +659,7 @@ impl BlockOrdering for SqlBlockOperations {
             for (field, value) in params.into_iter() {
                 if &*field == "id"
                     || &*field == "parent_id"
-                    || &*field == crate::sync::event_bus::ROUTING_DOC_URI_KEY
+                    || &*field == holon_api::ROUTING_DOC_URI_KEY
                 {
                     continue;
                 }
@@ -717,7 +717,7 @@ impl BlockOrdering for SqlBlockOperations {
             };
             if let Some(after_id) = after {
                 params.insert(
-                    crate::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM.into(),
+                    holon_api::POSITION_AFTER_BLOCK_ID_PARAM.into(),
                     Value::String(after_id),
                 );
             }
@@ -1501,7 +1501,7 @@ mod tests {
         p.insert("content_type".into(), Value::String("text".to_string()));
         if let Some(a) = after {
             p.insert(
-                crate::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM.into(),
+                holon_api::POSITION_AFTER_BLOCK_ID_PARAM.into(),
                 Value::String(a.to_string()),
             );
         }
@@ -2389,7 +2389,7 @@ mod tests {
             .execute_batch_with_origin(
                 &entity,
                 vec![holon_core::BatchOp::placed("update", params, position)],
-                crate::sync::event_bus::EventOrigin::Org,
+                holon_core::EventOrigin::Org,
             )
             .await
             .err()
@@ -2454,7 +2454,7 @@ mod tests {
             .execute_batch_with_origin(
                 &entity,
                 vec![holon_core::BatchOp::data("create", params)],
-                crate::sync::event_bus::EventOrigin::Loro,
+                holon_core::EventOrigin::Loro,
             )
             .await
             .expect("the projection batch applies; the peer _order_rekeys key is inert");

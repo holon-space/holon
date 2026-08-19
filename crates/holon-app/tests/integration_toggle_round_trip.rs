@@ -103,7 +103,7 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
             move |injector| {
                 // The same block-CRUD + event wiring `integration_state_projection`
                 // builds, so the seed has an ordering authority to write through.
-                holon::sync::EventInfraModule
+                holon_loro_wiring::EventInfraModule
                     .configure(injector)
                     .map_err(|e| {
                         anyhow::anyhow!("configure EventInfraModule for the round-trip test: {e}")

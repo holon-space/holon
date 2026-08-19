@@ -21,7 +21,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use holon::di::build_no_turso_container;
-use holon::sync::loro_block_query_source::register_loro_block_query_source;
 use holon_api::BlockContent;
 use holon_api::EntityUri;
 use holon_api::repository::CoreOperations;
@@ -33,6 +32,7 @@ use holon_frontend::reactive::BuilderServicesSlot;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::reactive::ReactiveRenderedRows;
 use holon_loro::LoroBackend;
+use holon_loro_wiring::loro_block_query_source::register_loro_block_query_source;
 use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::capabilities::WidgetSnapshot;
 use holon_pbt_core::composition::CapMap;

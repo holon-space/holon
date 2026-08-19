@@ -36,10 +36,6 @@ use gpui::Stateful;
 use gpui::div;
 use gpui::prelude::*;
 use gpui::px;
-use holon::sync::DegradedChange;
-use holon::sync::DegradedConditionKey;
-use holon::sync::ShareDegraded;
-use holon::sync::ShareDegradedReason;
 use holon_api::EntityName;
 use holon_api::Value;
 use holon_app::PendingState;
@@ -51,6 +47,10 @@ use holon_frontend::FrontendSession;
 use holon_frontend::dispatch_journal::DispatchJournal;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
+use holon_loro::DegradedChange;
+use holon_loro::DegradedConditionKey;
+use holon_loro::ShareDegraded;
+use holon_loro::ShareDegradedReason;
 
 /// Threat-model sentences from `docs/Reference/SUBTREE_SHARING.md` (lines
 /// 34–35). Quoted verbatim — users of the share UI must see the exact wording
@@ -506,7 +506,7 @@ impl gpui::Global for DegradedToastSink {}
 /// must exist in every consolidator mode — keying it off a Loro-only handle
 /// left the shipped SqlOnly build raising conditions nobody listened to.
 pub fn spawn_degraded_bus_bridge(
-    bus: Arc<holon::sync::DegradedSignalBus>,
+    bus: Arc<holon_loro::DegradedSignalBus>,
     rt_handle: tokio::runtime::Handle,
     share_state: Entity<ShareUiState>,
     window_handle: AnyWindowHandle,
@@ -1874,8 +1874,8 @@ fn render_error_modal(
 #[cfg(test)]
 mod tests {
     use futures::channel::oneshot;
-    use holon::sync::ShareDegraded;
-    use holon::sync::ShareDegradedReason;
+    use holon_loro::ShareDegraded;
+    use holon_loro::ShareDegradedReason;
 
     use super::*;
 
@@ -2075,7 +2075,7 @@ mod tests {
     /// `current` — that replay must render a toast just like a live event.
     #[test]
     fn replayed_boot_condition_renders_a_toast() {
-        let bus = holon::sync::DegradedSignalBus::new();
+        let bus = holon_loro::DegradedSignalBus::new();
         bus.emit(ShareDegraded {
             shared_tree_id: "todoist".into(),
             reason: ShareDegradedReason::IntegrationConnectFailed {

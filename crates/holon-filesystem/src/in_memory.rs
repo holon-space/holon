@@ -8,7 +8,7 @@
 //! Path handling: purely lexical (`.` and `..` resolved, no symlinks).
 //! `canonicalize` errors on non-existent paths for parity with
 //! `std::fs::canonicalize`. Use a root that does not exist on the real disk
-//! (e.g. `/holon-virtual/<test>`) so `holon::sync::CanonicalPath::new` — which
+//! (e.g. `/holon-virtual/<test>`) so `holon_loro::CanonicalPath::new` — which
 //! consults the real fs and falls back to the input path — degrades to the
 //! same lexical identity everywhere.
 

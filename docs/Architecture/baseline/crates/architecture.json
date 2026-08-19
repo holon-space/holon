@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/lane-thin-view/crates",
+  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/_sw_integ/crates",
   "root": {
     "name": ".",
     "path": ".",
@@ -146,16 +146,6 @@
             ]
           },
           {
-            "name": "proptest-regressions",
-            "path": "holon/proptest-regressions",
-            "dirs": [
-              {
-                "name": "testing",
-                "path": "holon/proptest-regressions/testing"
-              }
-            ]
-          },
-          {
             "name": "sql",
             "path": "holon/sql",
             "dirs": [
@@ -214,12 +204,6 @@
                     "name": "holon_service.rs"
                   },
                   {
-                    "name": "loro_ui_watcher.rs"
-                  },
-                  {
-                    "name": "memory_backend.rs"
-                  },
-                  {
                     "name": "mod.rs"
                   },
                   {
@@ -227,9 +211,6 @@
                   },
                   {
                     "name": "operation_engine.rs"
-                  },
-                  {
-                    "name": "pbt_infrastructure.rs"
                   },
                   {
                     "name": "query_engine.rs"
@@ -284,9 +265,6 @@
                   },
                   {
                     "name": "sql_operation_provider_diff_test.rs"
-                  },
-                  {
-                    "name": "stream_cache.rs"
                   },
                   {
                     "name": "task_keyword_cycle.rs"
@@ -395,9 +373,6 @@
                     "name": "test_helpers.rs"
                   },
                   {
-                    "name": "turso_block_link_indexer.rs"
-                  },
-                  {
                     "name": "turso_sink_reader.rs"
                   }
                 ]
@@ -406,9 +381,9 @@
                 "name": "sync",
                 "path": "holon/src/sync",
                 "c4_level": "unknown",
-                "description": "Synchronization infrastructure — re-exported from `holon-loro`.",
+                "description": "Synchronization infrastructure that belongs to the engine.",
                 "pattern_status": "planned",
-                "content": "Synchronization infrastructure — re-exported from `holon-loro`.\n\nThe Loro CRDT backend, P2P sync, snapshot helpers, and block operation\nproviders now live in `holon-loro`. This module re-exports them as the\ncrate's public facade, so `holon::sync::*` paths keep resolving.\n\nThree wiring modules stay in `holon` because they bridge the `holon::core`\nSQL types into the Loro pipeline (see Phase D partition).",
+                "content": "Synchronization infrastructure that belongs to the engine.\n\nThe Loro CRDT backend and P2P sync live in `holon-loro`; the wiring that\nbinds them to this crate lives in `holon-loro-wiring`. Consumers name\n`holon_loro::` directly — this module deliberately re-exports neither, so\n`holon` never depends on `holon-loro`.",
                 "source_file": "holon/src/sync/mod.rs",
                 "parent": "holon",
                 "files": [
@@ -417,15 +392,6 @@
                   },
                   {
                     "name": "clock_scheduler.rs"
-                  },
-                  {
-                    "name": "event_infra_module.rs"
-                  },
-                  {
-                    "name": "loro_block_query_source.rs"
-                  },
-                  {
-                    "name": "loro_module.rs"
                   },
                   {
                     "name": "mod.rs"
@@ -516,10 +482,6 @@
               {
                 "name": "fixtures",
                 "path": "holon/tests/fixtures"
-              },
-              {
-                "name": "proptest-regressions",
-                "path": "holon/tests/proptest-regressions"
               },
               {
                 "name": "sync_suite",
@@ -669,9 +631,6 @@
               },
               {
                 "name": "link_candidate_dedup_e2e.rs"
-              },
-              {
-                "name": "link_live_data_feed.rs"
               },
               {
                 "name": "live_edit_link_marks.rs"
@@ -1566,6 +1525,12 @@
                 "name": "replica_state.rs"
               },
               {
+                "name": "sink_reader.rs"
+              },
+              {
+                "name": "sql_cell_registry.rs"
+              },
+              {
                 "name": "storage.rs"
               },
               {
@@ -1760,9 +1725,6 @@
                 "name": "change_source.rs"
               },
               {
-                "name": "directory.rs"
-              },
-              {
                 "name": "error.rs"
               },
               {
@@ -1866,21 +1828,7 @@
             "description": "The ViewModel of Holon's MVVM UI — a persistent reactive node."
           }
         ],
-        "trait_impls": [
-          {
-            "type_name": "ReactiveViewModel",
-            "trait_name": "Default"
-          },
-          {
-            "type_name": "ReactiveViewModel",
-            "trait_name": "WithEntity"
-          }
-        ],
         "dirs": [
-          {
-            "name": "proptest-regressions",
-            "path": "holon-frontend/proptest-regressions"
-          },
           {
             "name": "src",
             "path": "holon-frontend/src",
@@ -2280,9 +2228,6 @@
               },
               {
                 "name": "text_style_kwarg.rs"
-              },
-              {
-                "name": "trailing_slot.rs"
               }
             ]
           }
@@ -2402,30 +2347,6 @@
             "files": [
               {
                 "name": "martin-vault-2026-07-23.json"
-              }
-            ]
-          },
-          {
-            "name": "proptest-regressions",
-            "path": "holon-integration-tests/proptest-regressions",
-            "dirs": [
-              {
-                "name": "pbt",
-                "path": "holon-integration-tests/proptest-regressions/pbt",
-                "dirs": [
-                  {
-                    "name": "frontend_slice",
-                    "path": "holon-integration-tests/proptest-regressions/pbt/frontend_slice"
-                  },
-                  {
-                    "name": "memory_slice",
-                    "path": "holon-integration-tests/proptest-regressions/pbt/memory_slice"
-                  },
-                  {
-                    "name": "transitions",
-                    "path": "holon-integration-tests/proptest-regressions/pbt/transitions"
-                  }
-                ]
               }
             ]
           },
@@ -2901,12 +2822,6 @@
                             "name": "live_tree_matches_fresh.rs"
                           },
                           {
-                            "name": "loro_children_match_ref.rs"
-                          },
-                          {
-                            "name": "loro_no_errors.rs"
-                          },
-                          {
                             "name": "main_panel_rows_match_focus.rs"
                           },
                           {
@@ -3016,9 +2931,6 @@
                     ],
                     "files": [
                       {
-                        "name": "block_compare.rs"
-                      },
-                      {
                         "name": "mod.rs"
                       },
                       {
@@ -3037,9 +2949,6 @@
                         "name": "builders.rs"
                       },
                       {
-                        "name": "components.rs"
-                      },
-                      {
                         "name": "integration_tests.rs"
                       }
                     ]
@@ -3050,7 +2959,7 @@
                     "c4_level": "unknown",
                     "description": "Shared PBT kit for testing `LoroSyncController` against different SUT implementations.",
                     "pattern_status": "planned",
-                    "content": "Shared PBT kit for testing `LoroSyncController` against different SUT\nimplementations.\n\nThis is the Loro-side analogue of the `UserDriver` trait\n(`crates/holon-integration-tests/src/mutation_driver.rs`): it hoists the\ntransition enum, generators, preconditions, reference-state machine, and\nstructural/convergence invariants from `holon::sync::multi_peer` so that\nmultiple tests can exercise the controller against different systems:\n\n- `StubSut` — a minimal in-process `LoroSyncController` wired to stub\n  `OperationProvider` and `EventBus` implementations. Used by the focused\n  bridge PBT (`tests/loro_sync_controller_pbt.rs`).\n- `E2ESut` — the full production stack used by the e2e PBT. Gets the bridge\n  invariants \"for free\" when Loro is enabled.\n\nAll SUTs see the same `GroupTransition` stream and are judged against the\nsame multi-peer structural invariants (S1–S3, C1–C3) plus bridge-specific\ninvariants (I1–I3) defined in this module.",
+                    "content": "Shared PBT kit for testing `LoroSyncController` against different SUT\nimplementations.\n\nThis is the Loro-side analogue of the `UserDriver` trait\n(`crates/holon-integration-tests/src/mutation_driver.rs`): it hoists the\ntransition enum, generators, preconditions, reference-state machine, and\nstructural/convergence invariants from `holon_loro::multi_peer` so that\nmultiple tests can exercise the controller against different systems:\n\n- `StubSut` — a minimal in-process `LoroSyncController` wired to stub\n  `OperationProvider` and `EventBus` implementations. Used by the focused\n  bridge PBT (`tests/loro_sync_controller_pbt.rs`).\n- `E2ESut` — the full production stack used by the e2e PBT. Gets the bridge\n  invariants \"for free\" when Loro is enabled.\n\nAll SUTs see the same `GroupTransition` stream and are judged against the\nsame multi-peer structural invariants (S1–S3, C1–C3) plus bridge-specific\ninvariants (I1–I3) defined in this module.",
                     "source_file": "holon-integration-tests/src/pbt/loro_sync/mod.rs",
                     "parent": "holon-integration-tests/src/pbt",
                     "files": [
@@ -3179,9 +3088,6 @@
                     "parent": "holon-integration-tests/src/pbt",
                     "files": [
                       {
-                        "name": "add_peer.rs"
-                      },
-                      {
                         "name": "advance_day.rs"
                       },
                       {
@@ -3213,9 +3119,6 @@
                       },
                       {
                         "name": "create_page_at_freed_path.rs"
-                      },
-                      {
-                        "name": "create_stale_loro.rs"
                       },
                       {
                         "name": "delete_backward.rs"
@@ -3266,9 +3169,6 @@
                         "name": "join_block.rs"
                       },
                       {
-                        "name": "merge_from_peer.rs"
-                      },
-                      {
                         "name": "mod.rs"
                       },
                       {
@@ -3300,12 +3200,6 @@
                       },
                       {
                         "name": "outdent.rs"
-                      },
-                      {
-                        "name": "peer_char_edit.rs"
-                      },
-                      {
-                        "name": "peer_edit.rs"
                       },
                       {
                         "name": "pin_block.rs"
@@ -3360,9 +3254,6 @@
                       },
                       {
                         "name": "sync_now.rs"
-                      },
-                      {
-                        "name": "sync_with_peer.rs"
                       },
                       {
                         "name": "toggle_collapse.rs"
@@ -3435,9 +3326,6 @@
                     "name": "convergence.rs"
                   },
                   {
-                    "name": "correspondence.rs"
-                  },
-                  {
                     "name": "driver_input.rs"
                   },
                   {
@@ -3462,9 +3350,6 @@
                     "name": "live_self_check.rs"
                   },
                   {
-                    "name": "local_caps.rs"
-                  },
-                  {
                     "name": "loro_slice.rs"
                   },
                   {
@@ -3483,16 +3368,10 @@
                     "name": "panic_diag.rs"
                   },
                   {
-                    "name": "peer_ops.rs"
-                  },
-                  {
                     "name": "query.rs"
                   },
                   {
                     "name": "query_ast.rs"
-                  },
-                  {
-                    "name": "reference_capabilities.rs"
                   },
                   {
                     "name": "reference_domain_state.rs"
@@ -3501,13 +3380,7 @@
                     "name": "reference_state.rs"
                   },
                   {
-                    "name": "retry.rs"
-                  },
-                  {
                     "name": "run_result.rs"
-                  },
-                  {
-                    "name": "shadow_mesh.rs"
                   },
                   {
                     "name": "sharing_state.rs"
@@ -3523,9 +3396,6 @@
                   },
                   {
                     "name": "stepper.rs"
-                  },
-                  {
-                    "name": "sut_loro.rs"
                   },
                   {
                     "name": "sut_metrics.rs"
@@ -3556,9 +3426,6 @@
                   },
                   {
                     "name": "undo_redo_density.rs"
-                  },
-                  {
-                    "name": "validation.rs"
                   },
                   {
                     "name": "value_fn_invariants.rs"
@@ -4218,9 +4085,6 @@
                 "name": "lib.rs"
               },
               {
-                "name": "link_event_subscriber.rs"
-              },
-              {
                 "name": "live_value.rs"
               },
               {
@@ -4401,6 +4265,73 @@
               },
               {
                 "name": "no_ref_state_dep.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-loro-wiring",
+        "path": "holon-loro-wiring",
+        "c4_level": "component",
+        "description": "The wiring that binds the Loro CRDT backend to the `holon` engine.",
+        "pattern": "Adapter",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-sharing \"ADR 0028 policy overlay\" \"Rust\"\n\nThe wiring that binds the Loro CRDT backend to the `holon` engine.\n\nEverything here needs BOTH `holon` and `holon-loro`; nothing in `holon`\nneeds it back. Keeping it in its own crate is what lets `holon` compile in\nparallel with `holon-loro` instead of waiting for it.",
+        "source_file": "holon-loro-wiring/src/lib.rs",
+        "layer": "Adapters",
+        "relationships": [
+          {
+            "target": "holon",
+            "label": "core orchestration",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-loro",
+            "label": "Loro CRDT backend & P2P sync",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-turso",
+            "label": "Turso storage adapter",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-sharing",
+            "label": "ADR 0028 policy overlay",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-loro-wiring/src",
+            "files": [
+              {
+                "name": "event_infra_module.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "loro_block_query_source.rs"
+              },
+              {
+                "name": "loro_module.rs"
+              },
+              {
+                "name": "loro_ui_watcher.rs"
+              },
+              {
+                "name": "memory_backend.rs"
+              },
+              {
+                "name": "pbt_infrastructure.rs"
               }
             ]
           }
@@ -4835,33 +4766,6 @@
         "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n\nA configurable mock MCP server that reproduces the challenging behaviours\nseen in real MCP servers, for E2E-testing holon's generic MCP connector.\n\nThe server speaks real MCP over stdio (rmcp `transport-io`) so it is driven\nexactly like any production server through the `transport-child-process`\npath. Behaviour is selected by the [`Scenario`] parsed from the\n`MOCK_MCP_SCENARIO` env var (set in a sidecar's `child_process.env`).\n\nCatalogue and rationale: `docs/Plans/McpMockE2E.md`.",
         "source_file": "holon-mcp-mock/src/lib.rs",
         "layer": "Testing",
-        "relationships": [
-          {
-            "target": "holon",
-            "label": "core orchestration",
-            "protocol": "Rust"
-          },
-          {
-            "target": "holon-api",
-            "label": "shared value & operation types",
-            "protocol": "Rust"
-          },
-          {
-            "target": "holon-core",
-            "label": "core datasource traits",
-            "protocol": "Rust"
-          },
-          {
-            "target": "holon-mcp-client",
-            "label": "MCP client under test",
-            "protocol": "Rust"
-          },
-          {
-            "target": "holon-turso",
-            "label": "Turso storage adapter",
-            "protocol": "Rust"
-          }
-        ],
         "dirs": [
           {
             "name": "src",
@@ -5187,10 +5091,6 @@
           }
         ],
         "dirs": [
-          {
-            "name": "queries",
-            "path": "holon-orgmode/queries"
-          },
           {
             "name": "src",
             "path": "holon-orgmode/src",

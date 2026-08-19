@@ -11,15 +11,6 @@ mod stateful_tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
-    use holon::api::memory_backend::MemoryBackend;
-    use holon::api::pbt_infrastructure::BlockTransition;
-    use holon::api::pbt_infrastructure::apply_transition;
-    use holon::api::pbt_infrastructure::check_transition_preconditions;
-    use holon::api::pbt_infrastructure::generate_crud_transitions;
-    use holon::api::pbt_infrastructure::populate_initial_id_map;
-    use holon::api::pbt_infrastructure::translate_transition;
-    use holon::api::pbt_infrastructure::update_id_map_after_create;
-    use holon::api::pbt_infrastructure::verify_backends_match;
     use holon::api::repository::CoreOperations;
     use holon::api::repository::Lifecycle;
     use holon::api::types::Traversal;
@@ -29,6 +20,15 @@ mod stateful_tests {
     use holon_api::StreamPosition;
     use holon_api::streaming::ChangeNotifications;
     use holon_loro::LoroBackend;
+    use holon_loro_wiring::memory_backend::MemoryBackend;
+    use holon_loro_wiring::pbt_infrastructure::BlockTransition;
+    use holon_loro_wiring::pbt_infrastructure::apply_transition;
+    use holon_loro_wiring::pbt_infrastructure::check_transition_preconditions;
+    use holon_loro_wiring::pbt_infrastructure::generate_crud_transitions;
+    use holon_loro_wiring::pbt_infrastructure::populate_initial_id_map;
+    use holon_loro_wiring::pbt_infrastructure::translate_transition;
+    use holon_loro_wiring::pbt_infrastructure::update_id_map_after_create;
+    use holon_loro_wiring::pbt_infrastructure::verify_backends_match;
     use proptest::prelude::*;
     use proptest_state_machine::ReferenceStateMachine;
     use proptest_state_machine::StateMachineTest;

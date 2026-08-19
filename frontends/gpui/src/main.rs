@@ -121,7 +121,7 @@ fn main() -> Result<()> {
             }
             tracing::info!("Ctrl+C received — flushing shared-tree snapshots");
             if let Ok(backend) = injector_for_signal
-                .try_resolve::<std::sync::Arc<holon::sync::loro_share_backend::LoroShareBackend>>()
+                .try_resolve::<std::sync::Arc<holon_loro::loro_share_backend::LoroShareBackend>>()
             {
                 backend.flush_all().await;
                 tracing::info!("flush_all complete");
@@ -136,9 +136,9 @@ fn main() -> Result<()> {
     // wraps that in its own `Arc`, so we flatten with `(*arc).clone()`.
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     let share_backend: Option<
-        std::sync::Arc<holon::sync::loro_share_backend::LoroShareBackend>,
+        std::sync::Arc<holon_loro::loro_share_backend::LoroShareBackend>,
     > = match injector
-        .try_resolve::<std::sync::Arc<holon::sync::loro_share_backend::LoroShareBackend>>()
+        .try_resolve::<std::sync::Arc<holon_loro::loro_share_backend::LoroShareBackend>>()
     {
         Ok(arc) => Some((*arc).clone()),
         Err(e) => {
@@ -152,7 +152,7 @@ fn main() -> Result<()> {
     };
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     let share_backend: Option<
-        std::sync::Arc<holon::sync::loro_share_backend::LoroShareBackend>,
+        std::sync::Arc<holon_loro::loro_share_backend::LoroShareBackend>,
     > = None;
 
     // Resolve the shared pending connector-write store (leases/read-write
@@ -163,8 +163,8 @@ fn main() -> Result<()> {
     // Degraded-disclosure bus. `add_frontend` registers it unconditionally, so
     // a missing one is a wiring bug, not a mode — resolve hard rather than ship
     // a window whose only degradation channel is the log.
-    let degraded_bus: std::sync::Arc<holon::sync::DegradedSignalBus> =
-        (*injector.resolve::<std::sync::Arc<holon::sync::DegradedSignalBus>>()).clone();
+    let degraded_bus: std::sync::Arc<holon_loro::DegradedSignalBus> =
+        (*injector.resolve::<std::sync::Arc<holon_loro::DegradedSignalBus>>()).clone();
 
     let pending_writes: Option<std::sync::Arc<holon_app::PendingWriteStore>> =
         match injector.try_resolve::<holon_app::PendingWriteStore>() {
@@ -192,7 +192,7 @@ fn main() -> Result<()> {
         let engine_for_cell = engine.clone();
         let cell = runtime.block_on(async move {
             let loro_sync_handle = injector_for_cell
-                .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
+                .try_resolve_async::<holon_loro::LoroSyncControllerHandle>()
                 .await
                 .ok();
             let block_query_source = Some(session_for_cell.block_query().clone());
@@ -200,7 +200,7 @@ fn main() -> Result<()> {
                 .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
                 .ok();
             let loro_doc_store = injector_for_cell
-                .try_resolve::<holon::sync::LoroBlockOperations>()
+                .try_resolve::<holon_loro::LoroBlockOperations>()
                 .ok()
                 .map(|ops| ops.shared_doc_store());
             let writeback_renderer = injector_for_cell

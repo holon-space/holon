@@ -237,7 +237,7 @@ impl CoreOperations for MemoryBackend {
 
     async fn get_all_blocks(
         &self,
-        traversal: super::types::Traversal,
+        traversal: holon::api::types::Traversal,
     ) -> Result<Vec<Block>, ApiError> {
         let state = self.state.read().unwrap();
         let mut result = Vec::new();
@@ -247,7 +247,7 @@ impl CoreOperations for MemoryBackend {
             block_id: &str,
             current_level: usize,
             state: &MemoryState,
-            traversal: &super::types::Traversal,
+            traversal: &holon::api::types::Traversal,
             result: &mut Vec<Block>,
         ) {
             // Skip deleted blocks

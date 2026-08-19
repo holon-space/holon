@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use holon::api::backend_engine::BackendEngine;
 use holon::api::holon_service::HolonService;
-use holon::sync::LoroDocumentStore;
-use holon::sync::LoroSyncControllerHandle;
 use holon_core::storage::BlockQuerySource;
 use holon_frontend::focus_path::InputRouter;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::user_driver::UserDriver;
+use holon_loro::LoroDocumentStore;
+use holon_loro::LoroSyncControllerHandle;
 use holon_orgmode::OrgSyncIdleSignal;
 use rmcp::ErrorData as McpError;
 use rmcp::RoleServer;

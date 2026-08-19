@@ -43,7 +43,7 @@ pub struct LoroBackendComponent {
     /// `None` for a standalone CRDT (pure-Loro): there is no controller, so
     /// there is no error source — `loro_had_errors` is then honestly
     /// `false`, not fabricated.
-    sync_handle: Option<Arc<holon::sync::LoroSyncControllerHandle>>,
+    sync_handle: Option<Arc<holon_loro::LoroSyncControllerHandle>>,
 }
 
 impl LoroBackendComponent {
@@ -62,7 +62,7 @@ impl LoroBackendComponent {
     /// teeth for `inv-loro-no-errors` in the full (SQL↔Loro mirror) config.
     pub fn new_shared_with_sync_handle(
         backend: Arc<LoroBackend>,
-        sync_handle: Option<Arc<holon::sync::LoroSyncControllerHandle>>,
+        sync_handle: Option<Arc<holon_loro::LoroSyncControllerHandle>>,
     ) -> Self {
         Self {
             backend,

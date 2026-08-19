@@ -26,7 +26,7 @@ use std::sync::Arc;
 use fluxdi::Module;
 use fluxdi::Provider;
 use holon::storage::BLOCK_READ_TABLE;
-use holon::sync::EventInfraModule;
+use holon_loro_wiring::EventInfraModule;
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     Arc::new(

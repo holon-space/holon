@@ -22,7 +22,9 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use holon_api::BlockContent;
 use holon_api::EntityUri;
+use holon_api::Value;
 
+use crate::block_ordering::BlockCreateRequest;
 use crate::cell::Cell;
 use crate::cell::CellBacking;
 
@@ -104,6 +106,58 @@ pub trait EntityCellRegistry: Send + Sync {
     /// (SqlOnly mode, synthetic test stores). Callers fall back to the
     /// SQL delete on `Ok(false)`.
     async fn delete_entity(&self, _: &EntityUri) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Batch twin of [`create_entity`](Self::create_entity): one warm + one
+    /// commit for a whole chunk instead of a create per block.
+    ///
+    /// Returns one `handled` flag per request, positionally. The default
+    /// reports "handled none", so the caller falls back to its per-block path
+    /// for every request — the same contract as `create_entity`.
+    async fn create_entities(&self, requests: &[BlockCreateRequest]) -> Result<Vec<bool>> {
+        Ok(vec![false; requests.len()])
+    }
+
+    /// Is this entity in the authoritative tree? `None` means this registry
+    /// holds no tree to answer from and the caller must decide from SQL — it is
+    /// NOT "no".
+    async fn live_in_tree(&self, _: &str) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
+    /// The authoritative children of `parent_id`, in order. `None` means this
+    /// registry holds no tree to answer from — distinct from `Some(vec![])`,
+    /// which asserts the parent really has no children.
+    async fn live_children(&self, _: &str) -> Result<Option<Vec<String>>> {
+        Ok(None)
+    }
+
+    /// Does this registry sit on a CRDT authority? Callers use it only to
+    /// decide whether a fall-through to SQL is the normal path (`false`) or a
+    /// disclosed degraded one (`true`).
+    fn has_loro_backing(&self) -> bool {
+        false
+    }
+
+    /// Copy-on-write seed refresh against the authority. Returns how many
+    /// blocks were rewritten.
+    ///
+    /// Default `Ok(0)` — "no separate authority to reconcile", the same
+    /// contract the outer
+    /// [`crate::block_ordering::BlockOrdering::reseed_content`]
+    /// seam already documents and defaults to. A registry with no authority has
+    /// genuinely nothing to reconcile: the SQL rows the caller would reseed
+    /// FROM are already the only copy.
+    async fn reseed_content(&self, _: &[(EntityUri, String)]) -> Result<usize> {
+        Ok(0)
+    }
+
+    /// Write one field through the authority. `Ok(true)` when the write landed
+    /// here; `Ok(false)` when this registry does not own the `(uri, field)`
+    /// pair and the caller should run its SQL `set_field` path. On `Err` the
+    /// error is loud and the SQL path is NOT tried.
+    async fn write_field(&self, _: &EntityUri, _: &str, _: Value) -> Result<bool> {
         Ok(false)
     }
 }

@@ -100,14 +100,14 @@ fn not_materialized_subjects(env: &holon_integration_tests::TestEnvironment) -> 
     let injector = env
         .injector()
         .expect("test environment must expose its injector");
-    let bus = injector.resolve::<Arc<holon::sync::DegradedSignalBus>>();
+    let bus = injector.resolve::<Arc<holon_loro::DegradedSignalBus>>();
     bus.subscribe()
         .current
         .into_iter()
         .filter(|c| {
             matches!(
                 c.reason,
-                holon::sync::ShareDegradedReason::SharedSubtreeNotMaterialized { .. }
+                holon_loro::ShareDegradedReason::SharedSubtreeNotMaterialized { .. }
             )
         })
         .map(|c| c.shared_tree_id)

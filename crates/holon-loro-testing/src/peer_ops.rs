@@ -11,8 +11,8 @@
 //! Wraps `multi_peer` helpers with UUID-based block identity so that
 //! peer-created blocks carry the same stable IDs as the primary instance.
 
-use holon::sync::multi_peer;
 use holon_loro::STABLE_ID;
+use holon_loro::multi_peer;
 use loro::LoroDoc;
 use loro::TreeID;
 

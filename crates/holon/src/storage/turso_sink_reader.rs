@@ -9,12 +9,12 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use holon_api::block::Block;
+use holon_core::SinkReader;
 use holon_core::fractional_index::default_sort_key;
 
 use crate::api::SnapshotBlock;
 use crate::storage::BLOCK_WRITE_TABLE;
 use crate::storage::turso::DbHandle;
-use crate::sync::SinkReader;
 
 /// Production [`SinkReader`]: reads the `block_raw` base table directly — NOT
 /// the `block` matview, which can lag `block_raw` under IVM and would make the

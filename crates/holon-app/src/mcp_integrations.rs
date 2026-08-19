@@ -6,13 +6,13 @@ use fluxdi::Injector;
 use fluxdi::Module;
 use fluxdi::Provider;
 use fluxdi::Shared;
-use holon::sync::DegradedSignalBus;
-use holon::sync::ShareDegraded;
-use holon::sync::ShareDegradedReason;
 use holon_api::EntityName;
 use holon_core::OperationProvider;
 use holon_core::SyncGate;
 use holon_core::SyncTokenStore;
+use holon_loro::DegradedSignalBus;
+use holon_loro::ShareDegraded;
+use holon_loro::ShareDegradedReason;
 use holon_mcp_client::IgnoredReason;
 use holon_mcp_client::IgnoredSidecar;
 use holon_mcp_client::IntegrationConfigStore;
@@ -612,8 +612,8 @@ impl Module for McpIntegrationsModule {
 
 #[cfg(test)]
 mod tests {
-    use holon::sync::DegradedSignalBus;
-    use holon::sync::ShareDegradedReason;
+    use holon_loro::DegradedSignalBus;
+    use holon_loro::ShareDegradedReason;
 
     use super::*;
 

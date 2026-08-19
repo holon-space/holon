@@ -82,7 +82,7 @@ fn projector_run_loop_waits_for_org_initial_scan() {
         // Resolve the handle the way the GPUI frontend does at boot — eagerly,
         // without waiting for readiness.
         let handle = injector
-            .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
+            .try_resolve_async::<holon_loro::LoroSyncControllerHandle>()
             .await
             .expect("resolve LoroSyncControllerHandle");
 

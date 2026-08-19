@@ -4270,7 +4270,7 @@ impl HolonMcpServer {
     /// after a reset and would silently answer against the retired session.
     fn current_loro_doc_store(
         &self,
-    ) -> Option<Arc<tokio::sync::RwLock<holon::sync::LoroDocumentStore>>> {
+    ) -> Option<Arc<tokio::sync::RwLock<holon_loro::LoroDocumentStore>>> {
         let from_cell = self
             .debug
             .live_debug

@@ -2,8 +2,8 @@ use std::env;
 
 use anyhow::Result;
 #[cfg(feature = "iroh-sync")]
-use holon::sync::IrohSyncAdapter;
-use holon::sync::LoroDocument;
+use holon_loro::IrohSyncAdapter;
+use holon_loro::LoroDocument;
 use tracing_subscriber;
 
 #[tokio::main]

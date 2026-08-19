@@ -11,13 +11,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use holon::sync::LoroDocumentStore;
-use holon::sync::LoroSyncController;
-use holon::sync::LoroSyncControllerHandle;
-use holon::sync::event_bus::EventOrigin;
-use holon::sync::multi_peer::GroupState;
-use holon::sync::multi_peer::GroupTransition;
-use holon::sync::multi_peer::sync_docs_direct;
 use holon_api::EntityName;
 use holon_api::OperationDescriptor;
 use holon_core::OperationProvider;
@@ -25,6 +18,13 @@ use holon_core::OperationResult;
 use holon_core::OriginTaggedWrites;
 use holon_core::Result as DatasourceResult;
 use holon_core::storage::types::StorageEntity;
+use holon_loro::LoroDocumentStore;
+use holon_loro::LoroSyncController;
+use holon_loro::LoroSyncControllerHandle;
+use holon_loro::event_bus::EventOrigin;
+use holon_loro::multi_peer::GroupState;
+use holon_loro::multi_peer::GroupTransition;
+use holon_loro::multi_peer::sync_docs_direct;
 use loro::Frontiers;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
@@ -88,8 +88,8 @@ impl StubSut {
     /// `OfflineMerge`.
     async fn start_controller(&mut self) -> Result<()> {
         let command_bus: Arc<dyn OriginTaggedWrites> = self.stub_ops.clone();
-        let sink_reader: Arc<dyn holon::sync::SinkReader> = self.stub_ops.clone();
-        let projection = Arc::new(holon::sync::LoroProjection::from_storage(
+        let sink_reader: Arc<dyn holon_loro::SinkReader> = self.stub_ops.clone();
+        let projection = Arc::new(holon_loro::LoroProjection::from_storage(
             self.doc_store.clone(),
             command_bus,
             sink_reader,
@@ -351,7 +351,7 @@ impl StubOperationProvider {
 }
 
 #[async_trait]
-impl holon::sync::SinkReader for StubOperationProvider {
+impl holon_loro::SinkReader for StubOperationProvider {
     async fn read_blocks(
         &self,
     ) -> Result<std::collections::HashMap<String, holon::api::SnapshotBlock>> {

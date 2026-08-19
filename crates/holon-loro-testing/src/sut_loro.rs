@@ -14,11 +14,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use holon::api::CoreOperations;
-use holon::sync::LoroDocumentStore;
-use holon::sync::LoroSyncControllerHandle;
 use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_loro::LoroBackend;
+use holon_loro::LoroDocumentStore;
+use holon_loro::LoroSyncControllerHandle;
 use holon_pbt_core::block_compare::normalize_block;
 use holon_pbt_core::capabilities::PeerEditOp;
 use holon_pbt_core::capabilities::SutLoro;
@@ -45,7 +45,7 @@ use crate::quiescence::wait_for_loro_quiescence_on;
 pub struct LoroSut {
     doc_store: Arc<RwLock<LoroDocumentStore>>,
     /// Loro-only peer instances for multi-instance sync testing.
-    peers: std::cell::RefCell<Vec<holon::sync::multi_peer::PeerState<()>>>,
+    peers: std::cell::RefCell<Vec<holon_loro::multi_peer::PeerState<()>>>,
     /// `LoroSyncController` handle for waiting on quiescence; `None` only if
     /// Loro was enabled without a controller (not expected in the wide PBT).
     sync_handle: Option<Arc<LoroSyncControllerHandle>>,
@@ -232,13 +232,13 @@ impl SutLoro for LoroSut {
             .export_snapshot()
             .expect("Failed to export snapshot for AddPeer");
         let peer_id = (self.peers.borrow().len() as u64) + 100;
-        let peer_doc = holon::sync::multi_peer::init_doc(peer_id);
+        let peer_doc = holon_loro::multi_peer::init_doc(peer_id);
         peer_doc
             .import(&snapshot)
             .expect("Failed to import snapshot into peer");
         self.peers
             .borrow_mut()
-            .push(holon::sync::multi_peer::PeerState {
+            .push(holon_loro::multi_peer::PeerState {
                 doc: peer_doc,
                 peer_id,
                 online: true,
@@ -400,7 +400,7 @@ impl SutLoro for LoroSut {
             let primary = &*primary_doc;
             let peers = self.peers.borrow();
             let peer = &peers[peer_idx];
-            holon::sync::multi_peer::sync_docs_direct(primary, &peer.doc);
+            holon_loro::multi_peer::sync_docs_direct(primary, &peer.doc);
         }
         // Give the controller's spawned task time to process the
         // peer import via subscribe_root → on_loro_changed → SQL.

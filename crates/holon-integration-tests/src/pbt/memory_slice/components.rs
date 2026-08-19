@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use holon::api::BackendEngine;
-use holon::api::MemoryBackend;
 use holon::api::types::Traversal;
 use holon_api::ApiError;
 use holon_api::BlockContent;
@@ -20,6 +19,7 @@ use holon_api::Value;
 use holon_api::repository::CoreOperations;
 use holon_api::types::ContentType;
 use holon_frontend::editor_caret;
+use holon_loro_wiring::MemoryBackend;
 use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutEditorMirrorRead;

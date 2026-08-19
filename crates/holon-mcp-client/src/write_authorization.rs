@@ -136,7 +136,7 @@ pub struct PendingWriteView {
 
 /// What changed about a tracked intent — carried on the store's broadcast so a
 /// frontend can surface a disclosure toast and refresh the pending-writes
-/// panel (increment 4c). Mirrors `holon::sync::ShareDegraded` on the degraded
+/// panel (increment 4c). Mirrors `holon_loro::ShareDegraded` on the degraded
 /// bus.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingWriteEventKind {

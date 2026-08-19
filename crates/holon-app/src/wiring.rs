@@ -26,11 +26,6 @@ use fluxdi::Provider;
 use fluxdi::Shared;
 use holon::api::BackendEngine;
 use holon::di::DbHandleProvider;
-use holon::sync::EventInfraModule;
-use holon::sync::LoroBlockOperations;
-use holon::sync::LoroConfig;
-use holon::sync::LoroModule;
-use holon::sync::PublishErrorTracker;
 use holon_core::CrudAuthority;
 use holon_core::OperationProvider;
 use holon_frontend::FrontendSession;
@@ -44,6 +39,11 @@ use holon_frontend::preferences::PrefKey;
 use holon_frontend::preferences::{self};
 use holon_frontend::render_services::register_render_services;
 use holon_frontend::theme;
+use holon_loro::LoroBlockOperations;
+use holon_loro::PublishErrorTracker;
+use holon_loro_wiring::EventInfraModule;
+use holon_loro_wiring::LoroConfig;
+use holon_loro_wiring::LoroModule;
 
 use crate::mcp_integrations::McpIntegrationRegistry;
 
@@ -130,8 +130,8 @@ impl FrontendInjectorExt for Injector {
         // ingest, share write-back gap), and a container without it degrades
         // invisibly — blank pages, no banner. It is a plain broadcast channel
         // with no Loro/iroh dependency, so mode has no say in whether it exists.
-        self.provide::<Arc<holon::sync::DegradedSignalBus>>(Provider::root(|_| {
-            Shared::new(Arc::new(holon::sync::DegradedSignalBus::new()))
+        self.provide::<Arc<holon_loro::DegradedSignalBus>>(Provider::root(|_| {
+            Shared::new(Arc::new(holon_loro::DegradedSignalBus::new()))
         }));
         disclosure.performed(BootStep::DegradedSignalBus);
 
@@ -140,7 +140,7 @@ impl FrontendInjectorExt for Injector {
         // the one signal saying "your edits stopped reaching disk" must not be
         // reachable only in Loro mode.
         self.provide::<dyn holon_filesystem::WritebackDisclosure>(Provider::root(|resolver| {
-            let bus = resolver.resolve::<Arc<holon::sync::DegradedSignalBus>>();
+            let bus = resolver.resolve::<Arc<holon_loro::DegradedSignalBus>>();
             Arc::new(crate::loro_seams::WritebackDegradedDisclosure {
                 bus: (*bus).clone(),
             }) as Arc<dyn holon_filesystem::WritebackDisclosure>
@@ -263,7 +263,7 @@ impl FrontendInjectorExt for Injector {
             // absence there (di.rs WARN-logs) is correct.
             self.provide::<dyn holon_filesystem::ShareWritebackDisclosure>(Provider::root(
                 |resolver| {
-                    let bus = resolver.resolve::<Arc<holon::sync::DegradedSignalBus>>();
+                    let bus = resolver.resolve::<Arc<holon_loro::DegradedSignalBus>>();
                     Arc::new(crate::loro_seams::ShareDegradedDisclosure {
                         bus: (*bus).clone(),
                     }) as Arc<dyn holon_filesystem::ShareWritebackDisclosure>
@@ -655,11 +655,11 @@ impl FrontendInjectorExt for Injector {
                                      ingested; other files continue syncing: {msg}"
                                 );
                                 resolver_bg
-                                    .resolve_async::<Arc<holon::sync::DegradedSignalBus>>()
+                                    .resolve_async::<Arc<holon_loro::DegradedSignalBus>>()
                                     .await
-                                    .emit(holon::sync::ShareDegraded {
+                                    .emit(holon_loro::ShareDegraded {
                                         shared_tree_id: "org-initial-scan".to_string(),
-                                        reason: holon::sync::ShareDegradedReason::OrgIngestFailed(
+                                        reason: holon_loro::ShareDegradedReason::OrgIngestFailed(
                                             msg.clone(),
                                         ),
                                     });
@@ -682,7 +682,7 @@ impl FrontendInjectorExt for Injector {
                             ),
                         }
                         let _ = resolver_bg
-                            .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
+                            .try_resolve_async::<holon_loro::LoroSyncControllerHandle>()
                             .await;
                     }
                     .instrument(tracing::info_span!(

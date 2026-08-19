@@ -461,14 +461,7 @@ impl LoroSyncController {
     }
 }
 
-/// Read side of the downstream sink, used by [`LoroProjection`] as the diff
-/// "before". Abstracts the concrete sink so the production Turso path and the
-/// in-memory PBT stub share one projection. Returns the current persisted block
-/// state keyed by stable id.
-#[async_trait::async_trait]
-pub trait SinkReader: Send + Sync {
-    async fn read_blocks(&self) -> Result<HashMap<String, SnapshotBlock>>;
-}
+pub use holon_core::SinkReader;
 
 /// The downstream Loro→SQL projection (consolidator → SQL sink convergent
 /// feed). Holds exactly what the projection needs — independent of the

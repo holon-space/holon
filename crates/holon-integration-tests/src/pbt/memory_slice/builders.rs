@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use holon::api::MemoryBackend;
+use holon_loro_wiring::MemoryBackend;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapProvider;
 use holon_pbt_core::composition::Config;

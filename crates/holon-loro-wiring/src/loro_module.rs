@@ -18,20 +18,19 @@ use fluxdi::Injector;
 use fluxdi::Module;
 use fluxdi::Provider;
 use fluxdi::Shared;
+use holon::core::SqlOperationProvider;
+use holon::storage::BLOCK_WRITE_TABLE;
+use holon::storage::schema_module::SchemaModule;
 use holon_core::OriginTaggedWrites;
+use holon_loro::LoroBlockOperations;
+use holon_loro::LoroBlocksDataSource;
+use holon_loro::LoroDocumentStore;
+use holon_loro::LoroSyncController;
+use holon_loro::LoroSyncControllerHandle;
 use holon_turso::schema_modules::BlockSchemaModule;
 use tokio::sync::RwLock;
 use tracing::error;
 use tracing::info;
-
-use crate::core::SqlOperationProvider;
-use crate::storage::BLOCK_WRITE_TABLE;
-use crate::storage::schema_module::SchemaModule;
-use crate::sync::LoroBlockOperations;
-use crate::sync::LoroBlocksDataSource;
-use crate::sync::LoroDocumentStore;
-use crate::sync::LoroSyncController;
-use crate::sync::LoroSyncControllerHandle;
 
 /// Configuration for standalone Loro CRDT support
 #[derive(Clone, Debug)]
@@ -102,9 +101,8 @@ impl Module for LoroModule {
                 not(all(target_arch = "wasm32", target_os = "unknown"))
             ))]
             let ops = {
+                use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
                 use holon_loro::shared_tree::SharedTreeStore;
-
-                use crate::sync::iroh_sync_adapter::SharedTreeSyncManager;
                 let manager = resolver.resolve::<Arc<SharedTreeSyncManager>>();
                 ops.with_shared_trees((*manager).clone() as Arc<dyn SharedTreeStore>)
             };
@@ -119,14 +117,14 @@ impl Module for LoroModule {
         // `devlog/2026-05-08-154449-split-block-discards-pending-edits.md`.
         // Only registered when LoroModule is loaded; SqlOnly mode wires
         // `BlockCellRegistry::sql_only()` in `event_infra_module.rs`.
-        injector.provide::<crate::sync::block_cell_registry::BlockCellRegistry>(
+        injector.provide::<holon_loro::block_cell_registry::BlockCellRegistry>(
             Provider::root_async(|resolver| async move {
                 let doc_store = resolver.resolve::<LoroDocumentStore>();
                 let collab = doc_store
                     .get_global_doc()
                     .await
                     .expect("LoroDocumentStore::get_global_doc failed for BlockCellRegistry");
-                Shared::new(crate::sync::block_cell_registry::BlockCellRegistry::with_loro(collab))
+                Shared::new(holon_loro::block_cell_registry::BlockCellRegistry::with_loro(collab))
             }),
         );
 
@@ -157,11 +155,11 @@ impl Module for LoroModule {
         // sidecar (last session's frontier); Loro's persisted snapshot is the
         // startup source of truth, so the diff is bounded to this session's
         // changes.
-        injector.provide::<crate::sync::loro_sync_controller::LoroProjection>(
-            Provider::root_async(|resolver| async move {
+        injector.provide::<holon_loro::loro_sync_controller::LoroProjection>(Provider::root_async(
+            |resolver| async move {
                 let config = resolver.resolve::<LoroConfig>();
                 let doc_store = resolver.resolve::<LoroDocumentStore>();
-                let db_handle_provider = resolver.resolve::<dyn crate::di::DbHandleProvider>();
+                let db_handle_provider = resolver.resolve::<dyn holon::di::DbHandleProvider>();
                 let db_handle = db_handle_provider.handle();
                 let sql_ops = Arc::new(SqlOperationProvider::with_edge_fields(
                     db_handle.clone(),
@@ -171,24 +169,24 @@ impl Module for LoroModule {
                     BlockSchemaModule.edge_fields(),
                 ));
                 let command_bus: Arc<dyn OriginTaggedWrites> = sql_ops;
-                let sink_reader: Arc<dyn crate::sync::SinkReader> =
-                    Arc::new(crate::storage::TursoSinkReader::new(db_handle));
+                let sink_reader: Arc<dyn holon_loro::SinkReader> =
+                    Arc::new(holon::storage::TursoSinkReader::new(db_handle));
                 let doc_store_arc = Arc::new(RwLock::new((*doc_store).clone()));
                 Shared::new(
-                    crate::sync::loro_sync_controller::LoroProjection::from_storage(
+                    holon_loro::loro_sync_controller::LoroProjection::from_storage(
                         doc_store_arc,
                         command_bus,
                         sink_reader,
                         &config.storage_dir,
                     ),
                 )
-            }),
-        );
+            },
+        ));
 
         injector.provide::<dyn holon_core::DownstreamProjection>(Provider::root_async(
             |resolver| async move {
                 let projection = resolver
-                    .resolve_async::<crate::sync::loro_sync_controller::LoroProjection>()
+                    .resolve_async::<holon_loro::loro_sync_controller::LoroProjection>()
                     .await;
                 projection as Arc<dyn holon_core::DownstreamProjection>
             },
@@ -218,7 +216,7 @@ impl Module for LoroModule {
             // so the controller's run loop and org's flush advance one
             // `last_synced` watermark and serialize on the projection's lock.
             let projection = resolver
-                .resolve_async::<crate::sync::loro_sync_controller::LoroProjection>()
+                .resolve_async::<holon_loro::loro_sync_controller::LoroProjection>()
                 .await;
             tracing::info!("[LoroModule] STAGE 3e: shared projection resolved");
 
@@ -271,8 +269,8 @@ impl Module for LoroModule {
                 not(all(target_arch = "wasm32", target_os = "unknown"))
             ))]
             {
-                use crate::sync::loro_share_backend::LoroShareBackend;
-                use crate::sync::loro_share_backend::rehydrate_shared_trees;
+                use holon_loro::loro_share_backend::LoroShareBackend;
+                use holon_loro::loro_share_backend::rehydrate_shared_trees;
                 let backend = resolver.resolve::<Arc<LoroShareBackend>>();
                 let store = doc_store_arc.read().await;
                 let collab = store
@@ -349,11 +347,10 @@ impl Module for LoroModule {
 ))]
 fn register_subtree_share(injector: &Injector) {
     use holon_core::OperationProvider;
+    use holon_loro::iroh_advertiser::IrohAdvertiser;
+    use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
+    use holon_loro::loro_share_backend::LoroShareBackend;
     use iroh::SecretKey;
-
-    use crate::sync::iroh_advertiser::IrohAdvertiser;
-    use crate::sync::iroh_sync_adapter::SharedTreeSyncManager;
-    use crate::sync::loro_share_backend::LoroShareBackend;
 
     injector.provide::<Arc<SharedTreeSyncManager>>(Provider::root(|_| {
         Shared::new(Arc::new(SharedTreeSyncManager::new()))
@@ -365,7 +362,7 @@ fn register_subtree_share(injector: &Injector) {
     // known-peer dedup on the remote side works across restarts.
     injector.provide::<Arc<SecretKey>>(Provider::root(|resolver| {
         let config = resolver.resolve::<LoroConfig>();
-        let key = crate::sync::device_key_store::load_or_create_device_key(&config.storage_dir)
+        let key = holon_loro::device_key_store::load_or_create_device_key(&config.storage_dir)
             .expect("load_or_create_device_key");
         Shared::new(Arc::new(key))
     }));
@@ -377,13 +374,12 @@ fn register_subtree_share(injector: &Injector) {
     // every container, not only the Loro one, so the composition root
     // (`holon-app`'s `add_frontend`) owns it; resolving it below therefore also
     // asserts this module was configured by a root that provides it.
-    injector.provide::<Arc<crate::sync::shared_snapshot_store::SharedSnapshotStore>>(
+    injector.provide::<Arc<holon_loro::shared_snapshot_store::SharedSnapshotStore>>(
         Provider::root(|resolver| {
             let config = resolver.resolve::<LoroConfig>();
-            let bus =
-                resolver.resolve::<Arc<crate::sync::degraded_signal_bus::DegradedSignalBus>>();
+            let bus = resolver.resolve::<Arc<holon_loro::degraded_signal_bus::DegradedSignalBus>>();
             Shared::new(Arc::new(
-                crate::sync::shared_snapshot_store::SharedSnapshotStore::new(
+                holon_loro::shared_snapshot_store::SharedSnapshotStore::new(
                     config.storage_dir.clone(),
                     (*bus).clone(),
                 ),
@@ -394,10 +390,10 @@ fn register_subtree_share(injector: &Injector) {
     injector.provide::<Arc<LoroShareBackend>>(Provider::root_async(|resolver| async move {
         let doc_store = resolver.resolve::<LoroDocumentStore>();
         let snapshot_store =
-            resolver.resolve::<Arc<crate::sync::shared_snapshot_store::SharedSnapshotStore>>();
+            resolver.resolve::<Arc<holon_loro::shared_snapshot_store::SharedSnapshotStore>>();
         let manager = resolver.resolve::<Arc<SharedTreeSyncManager>>();
         let advertiser = resolver.resolve::<Arc<IrohAdvertiser>>();
-        let bus = resolver.resolve::<Arc<crate::sync::degraded_signal_bus::DegradedSignalBus>>();
+        let bus = resolver.resolve::<Arc<holon_loro::degraded_signal_bus::DegradedSignalBus>>();
         let key = resolver.resolve::<Arc<SecretKey>>();
         let store_arc = Arc::new(RwLock::new((*doc_store).clone()));
 
@@ -406,7 +402,7 @@ fn register_subtree_share(injector: &Injector) {
         // `LoroModule::configure` — separate instance, but points at the
         // same `DbHandle`. Writes go to `block_raw`; `block` is a matview
         // and Turso rejects DML against it.
-        let db_handle_provider = resolver.resolve::<dyn crate::di::DbHandleProvider>();
+        let db_handle_provider = resolver.resolve::<dyn holon::di::DbHandleProvider>();
         let sql_ops = Arc::new(SqlOperationProvider::new(
             db_handle_provider.handle(),
             BLOCK_WRITE_TABLE.to_string(),

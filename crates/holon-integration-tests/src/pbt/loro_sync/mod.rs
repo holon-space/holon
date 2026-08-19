@@ -4,7 +4,7 @@
 //! This is the Loro-side analogue of the `UserDriver` trait
 //! (`crates/holon-integration-tests/src/mutation_driver.rs`): it hoists the
 //! transition enum, generators, preconditions, reference-state machine, and
-//! structural/convergence invariants from `holon::sync::multi_peer` so that
+//! structural/convergence invariants from `holon_loro::multi_peer` so that
 //! multiple tests can exercise the controller against different systems:
 //!
 //! - `StubSut` — a minimal in-process `LoroSyncController` wired to stub
@@ -23,10 +23,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use holon::sync::multi_peer::DirectSync;
-use holon::sync::multi_peer::GroupState;
-use holon::sync::multi_peer::GroupTransition;
-use holon::sync::multi_peer::{self};
+use holon_loro::multi_peer::DirectSync;
+use holon_loro::multi_peer::GroupState;
+use holon_loro::multi_peer::GroupTransition;
+use holon_loro::multi_peer::{self};
 use loro::Frontiers;
 use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
@@ -147,7 +147,7 @@ pub async fn check_bridge_invariants<S: LoroSyncSut + ?Sized>(sut: &S) {
 }
 
 /// Run both the multi-peer structural/convergence invariants (from
-/// `holon::sync::multi_peer`) and the bridge-level invariants.
+/// `holon_loro::multi_peer`) and the bridge-level invariants.
 pub async fn check_all_invariants<S: LoroSyncSut + ?Sized>(sut: &S, ref_state: &GroupState<()>) {
     multi_peer::check_invariants(ref_state);
     check_bridge_invariants(sut).await;

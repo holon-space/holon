@@ -313,7 +313,7 @@ fn main() -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("no injector on TestEnvironment"))?;
             Some(
                 injector
-                    .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
+                    .try_resolve_async::<holon_loro::LoroSyncControllerHandle>()
                     .await
                     .map_err(|e| anyhow::anyhow!("resolve LoroSyncControllerHandle: {e}"))?,
             )
@@ -334,7 +334,7 @@ fn main() -> anyhow::Result<()> {
                     .await?
                     .len();
                 if std::time::Instant::now() >= next_sample {
-                    let s = holon::sync::projection_stats::snapshot();
+                    let s = holon_loro::projection_stats::snapshot();
                     eprintln!(
                         "[diag] t={}ms blocks={} passes={} ops={}",
                         t_boot.elapsed().as_millis(),
@@ -420,7 +420,7 @@ fn main() -> anyhow::Result<()> {
         // Cold-boot CADENCE — the parity metric. Prod (real vault, 2026-07-28)
         // ran 16,333 passes for 25,139 ops, 87.2 % of them single-op, because
         // the projector run loop reconciles per Loro commit during the scan.
-        let st = holon::sync::projection_stats::snapshot();
+        let st = holon_loro::projection_stats::snapshot();
         eprintln!(
             "[diag] PROJECTION CADENCE: passes={} ops={} ops/pass={:.2} \
              single_op={:.1}% snapshot_ms={} apply_ms={}",

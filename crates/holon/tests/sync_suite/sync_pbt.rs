@@ -13,7 +13,7 @@
 mod tests {
     use std::sync::Arc;
 
-    use holon::sync::multi_peer::*;
+    use holon_loro::multi_peer::*;
     use proptest::prelude::*;
     use proptest_state_machine::ReferenceStateMachine;
     use proptest_state_machine::StateMachineTest;
@@ -73,12 +73,12 @@ mod tests {
     // -- Iroh sync PBT (real QUIC transport) --
 
     #[cfg(feature = "iroh-sync")]
-    struct IrohSyncBackend(holon::sync::iroh_sync_adapter::IrohSync);
+    struct IrohSyncBackend(holon_loro::iroh_sync_adapter::IrohSync);
 
     #[cfg(feature = "iroh-sync")]
     impl SyncBackend for IrohSyncBackend {
         fn sync_pair(&self, doc_a: &loro::LoroDoc, doc_b: &loro::LoroDoc) -> anyhow::Result<()> {
-            holon::sync::iroh_sync_adapter::SyncBackend::sync_pair(&self.0, doc_a, doc_b)
+            holon_loro::iroh_sync_adapter::SyncBackend::sync_pair(&self.0, doc_a, doc_b)
         }
     }
 
@@ -91,7 +91,7 @@ mod tests {
         type Transition = GroupTransition;
 
         fn init_state() -> BoxedStrategy<Self::State> {
-            let backend = holon::sync::iroh_sync_adapter::IrohSync::new()
+            let backend = holon_loro::iroh_sync_adapter::IrohSync::new()
                 .expect("Failed to create IrohSync runtime");
             Just(GroupState::new(Arc::new(IrohSyncBackend(backend)))).boxed()
         }
@@ -188,22 +188,22 @@ mod tests {
         use std::path::Path;
         use std::sync::Arc;
 
-        use holon::sync::degraded_signal_bus::DegradedChange;
-        use holon::sync::degraded_signal_bus::DegradedSignalBus;
-        use holon::sync::degraded_signal_bus::ShareDegraded;
-        use holon::sync::degraded_signal_bus::ShareDegradedReason;
-        use holon::sync::device_key_store::load_or_create_device_key;
-        use holon::sync::iroh_advertiser::IrohAdvertiser;
-        use holon::sync::iroh_sync_adapter::SharedTreeSyncManager;
-        use holon::sync::loro_document_store::LoroDocumentStore;
-        use holon::sync::loro_share_backend::LoroShareBackend;
-        use holon::sync::loro_share_backend::SubtreeShareOperations;
-        use holon::sync::loro_share_backend::rehydrate_shared_trees;
-        use holon::sync::multi_peer::TREE_NAME;
-        use holon::sync::multi_peer::get_alive_nodes;
-        use holon::sync::shared_snapshot_store::SharedSnapshotStore;
         use holon_api::InlineMark;
         use holon_api::Value;
+        use holon_loro::degraded_signal_bus::DegradedChange;
+        use holon_loro::degraded_signal_bus::DegradedSignalBus;
+        use holon_loro::degraded_signal_bus::ShareDegraded;
+        use holon_loro::degraded_signal_bus::ShareDegradedReason;
+        use holon_loro::device_key_store::load_or_create_device_key;
+        use holon_loro::iroh_advertiser::IrohAdvertiser;
+        use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
+        use holon_loro::loro_document_store::LoroDocumentStore;
+        use holon_loro::loro_share_backend::LoroShareBackend;
+        use holon_loro::loro_share_backend::SubtreeShareOperations;
+        use holon_loro::loro_share_backend::rehydrate_shared_trees;
+        use holon_loro::multi_peer::TREE_NAME;
+        use holon_loro::multi_peer::get_alive_nodes;
+        use holon_loro::shared_snapshot_store::SharedSnapshotStore;
         use loro::LoroDoc;
         use loro::LoroText;
         use loro::TreeID;
@@ -810,8 +810,8 @@ mod tests {
                         if ref_a.share_usable && ref_b.share_usable {
                             let a_shared = a.manager_for_test().get_doc(&shared_tree_id).unwrap();
                             let b_shared = b.manager_for_test().get_doc(&shared_tree_id).unwrap();
-                            holon::sync::multi_peer::SyncBackend::sync_pair(
-                                &holon::sync::multi_peer::DirectSync,
+                            holon_loro::multi_peer::SyncBackend::sync_pair(
+                                &holon_loro::multi_peer::DirectSync,
                                 &a_shared,
                                 &b_shared,
                             )

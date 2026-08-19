@@ -513,7 +513,7 @@ impl HeadlessFrontendComponent {
         debug.orgmode_root.set(self.org_root.clone()).ok();
         if let Ok(ops) = self
             .injector
-            .try_resolve::<holon::sync::LoroBlockOperations>()
+            .try_resolve::<holon_loro::LoroBlockOperations>()
         {
             debug.loro_doc_store.set(ops.shared_doc_store()).ok();
         }
@@ -690,8 +690,8 @@ impl HeadlessFrontendComponent {
             let injector = injector_slot
                 .get()
                 .expect("DI injector captured during build");
-            let registry: Arc<holon::sync::block_cell_registry::BlockCellRegistry> = injector
-                .resolve_async::<holon::sync::block_cell_registry::BlockCellRegistry>()
+            let registry: Arc<holon_loro::block_cell_registry::BlockCellRegistry> = injector
+                .resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
                 .await;
             let registry_dyn: Arc<dyn holon_frontend::cell::EntityCellRegistry> = registry;
             reactive
@@ -726,10 +726,10 @@ impl HeadlessFrontendComponent {
                     .ok(); // ALLOW(ok): optional DI service — absent when org sync is off
             }
             let sync = injector
-                .try_resolve::<holon::sync::LoroSyncControllerHandle>()
+                .try_resolve::<holon_loro::LoroSyncControllerHandle>()
                 .ok(); // ALLOW(ok): optional DI service — absent when Loro/sync is off
             let store = injector
-                .try_resolve::<holon::sync::LoroDocumentStore>()
+                .try_resolve::<holon_loro::LoroDocumentStore>()
                 .ok() // ALLOW(ok): optional DI service — absent when Loro is off
                 .map(|s| (*s).clone());
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -927,9 +927,9 @@ impl HeadlessFrontendComponent {
     /// The clone shares the underlying
     /// `Arc<RwLock<Option<Arc<LoroDocument>>>>`, so it observes the SAME live
     /// doc.
-    pub(crate) fn loro_doc_store(&self) -> Option<holon::sync::LoroDocumentStore> {
+    pub(crate) fn loro_doc_store(&self) -> Option<holon_loro::LoroDocumentStore> {
         self.injector
-            .try_resolve::<holon::sync::LoroDocumentStore>()
+            .try_resolve::<holon_loro::LoroDocumentStore>()
             .ok() // ALLOW(ok): optional DI service — absent when Loro is disabled
             .map(|store| (*store).clone())
     }
@@ -949,9 +949,9 @@ impl HeadlessFrontendComponent {
     /// must poll until the boot settle completes (see the A0 readiness
     /// probe). `None` when Loro/sync is disabled OR the spawned start task
     /// has not yet resolved the handle.
-    pub(crate) fn loro_sync_handle(&self) -> Option<Arc<holon::sync::LoroSyncControllerHandle>> {
+    pub(crate) fn loro_sync_handle(&self) -> Option<Arc<holon_loro::LoroSyncControllerHandle>> {
         self.injector
-            .try_resolve::<holon::sync::LoroSyncControllerHandle>()
+            .try_resolve::<holon_loro::LoroSyncControllerHandle>()
             .ok() // ALLOW(ok): optional DI service — absent when Loro/sync is disabled
     }
 

@@ -14,7 +14,6 @@ use fluxdi::Injector;
 use fluxdi::Module;
 use fluxdi::ModuleLifecycleFuture;
 use fluxdi::Shared;
-use holon::sync::block_cell_registry::BlockCellRegistry;
 use holon_app::FrontendInjectorExt;
 use holon_frontend::FrontendSession;
 use holon_frontend::config::HolonConfig;
@@ -25,6 +24,7 @@ use holon_frontend::reactive::BuilderServicesSlot;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::reactive::RenderInterpreterInjectorExt;
 use holon_frontend::reactive::make_interpret_fn;
+use holon_loro::block_cell_registry::BlockCellRegistry;
 use holon_mcp::McpInjectorExt;
 use holon_mcp::di::McpServerHandle;
 

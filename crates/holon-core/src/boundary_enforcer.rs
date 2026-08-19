@@ -36,3 +36,28 @@ pub trait BoundaryEnforcer: MaybeSendSync {
         target_parent: Option<&str>,
     ) -> Result<(), BoundaryRejection>;
 }
+
+/// The inert enforcer: no committed share policy, so every operation passes.
+///
+/// This is exactly what production installs today — `holon-sharing`'s
+/// `PolicyOverlayEnforcer::inert()` is an empty `PolicySet` with no containment
+/// relation, and nothing in the tree yet mints or persists a policy. Having the
+/// inert case here lets the engine crate install a seam without depending on
+/// the sharing domain; a composition root that HAS policies registers the real
+/// `dyn BoundaryEnforcer` and that one wins.
+///
+/// It is deliberately NOT a silent fallback for a missing decision: there is no
+/// decision to make until a policy exists.
+pub struct InertBoundaryEnforcer;
+
+impl BoundaryEnforcer for InertBoundaryEnforcer {
+    fn check(
+        &self,
+        _op_name: &str,
+        _behavior: &BoundaryBehavior,
+        _subject: &str,
+        _target_parent: Option<&str>,
+    ) -> Result<(), BoundaryRejection> {
+        Ok(())
+    }
+}

@@ -18,13 +18,16 @@ path = "src/lib.rs"
 
 [features]
 default = ["iroh-sync"]
+# Dev-facing ONLY. `holon`'s library needs no iroh — the P2P transport moved out
+# with `loro_module.rs`. The two/three-peer sync, reconnect and stress tests in
+# `tests/` drive `holon_loro::IrohSyncAdapter`, which `holon-loro` gates behind
+# its own `iroh-sync`, so this feature reaches nothing but the dev-dependency.
+iroh-sync = ["holon-loro/iroh-sync"]
 # Enable test helpers for integration tests that need access to test utilities
-test-helpers = ["dep:tempfile", "holon-loro/test-helpers", "testing", "test-yield"]
+test-helpers = ["dep:tempfile", "testing", "test-yield"]
 # Enable proptest-backed test utilities (`holon::testing`, `api::pbt_infrastructure`).
 # Keeps proptest / proptest-state-machine out of production builds.
 testing = ["dep:proptest", "dep:proptest-state-machine"]
-# Enable Iroh P2P transport for syncing Loro documents across devices
-iroh-sync = ["iroh", "holon-loro/iroh-sync"]
 # Widen the compound write step at the two points a competing write could
 # overtake it (see `EntityWriteLocks`), so the interleave a compound must
 # survive is forceable instead of a stopwatch race. Test-only: it changes
@@ -57,14 +60,6 @@ rand.workspace = true
 holon-petri.workspace = true
 holon-rules.workspace = true
 holon-profiles.workspace = true
-# holon-loro's default `iroh-sync` feature is disabled at the workspace root
-# (it pulls iroh → QUIC/TLS/ring, native-only and fatal on wasm). holon's own
-# `iroh-sync` feature re-enables `holon-loro/iroh-sync`, so native is unchanged.
-holon-loro.workspace = true
-# ADR 0028 C3: the policy-overlay `BoundaryEnforcer` the operation dispatcher
-# installs. holon-sharing depends only on holon-api/holon-core/holon-loro, so
-# this edge introduces no cycle.
-holon-sharing.workspace = true
 fluxdi.workspace = true
 futures.workspace = true
 futures-signals.workspace = true
@@ -72,7 +67,6 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["full"] }
-iroh = { workspace = true, features = ["default"], optional = true }
 uuid.workspace = true
 proptest = { workspace = true, optional = true }
 proptest-state-machine = { workspace = true, optional = true }
@@ -86,12 +80,6 @@ tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, default-features = false, features = ["sync", "macros", "rt", "time"] }
 uuid.workspace = true
 
-# Android-specific dependencies
-# Disable iroh for Android - it pulls in OpenSSL which is complex to build for Android
-# iroh is used for P2P features which may not be needed on mobile
-# Use rustls instead of OpenSSL for Android (OpenSSL requires native compilation)
-[target.'cfg(target_os = "android")'.dependencies]
-iroh = { workspace = true, optional = true }
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 tokio = { workspace = true, default-features = false, features = ["sync", "macros", "rt", "time"] }
 getrandom.workspace = true
@@ -107,6 +95,10 @@ holon-block-roundtrip-testing.workspace = true
 holon-engine = { path = "../holon-engine" }
 holon-filesystem.workspace = true
 holon-loro.workspace = true
+# dev-only cycle: holon-loro-wiring depends on holon. Cargo allows this for
+# dev-dependencies, and holon's Loro-backed tests need the wiring it moved to.
+holon-loro-wiring = { workspace = true, features = ["testing"] }
+holon-sharing.workspace = true
 holon-orgmode = { workspace = true, features = ["di"] }
 proptest.workspace = true
 proptest-state-machine.workspace = true

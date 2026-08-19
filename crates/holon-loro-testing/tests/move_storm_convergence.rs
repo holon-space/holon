@@ -26,8 +26,8 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use holon::sync::multi_peer;
-use holon::sync::multi_peer::TREE_NAME;
+use holon_loro::multi_peer;
+use holon_loro::multi_peer::TREE_NAME;
 use holon_loro_testing::peer_ops;
 use loro::LoroDoc;
 use loro::TreeID;

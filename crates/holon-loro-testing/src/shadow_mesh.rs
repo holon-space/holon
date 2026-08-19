@@ -25,10 +25,10 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use holon::sync::multi_peer::TREE_NAME;
-use holon::sync::multi_peer::{self};
 use holon_api::Block;
 use holon_api::EntityUri;
+use holon_loro::multi_peer::TREE_NAME;
+use holon_loro::multi_peer::{self};
 use loro::LoroDoc;
 
 use crate::peer_ops;

@@ -13,6 +13,7 @@ ignored = ["workspace-hack"]
 async-trait.workspace = true
 chrono.workspace = true
 futures.workspace = true
+futures-signals.workspace = true
 holon-api.workspace = true
 holon-macros.workspace = true
 anyhow.workspace = true

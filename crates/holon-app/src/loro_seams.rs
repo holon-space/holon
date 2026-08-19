@@ -32,7 +32,6 @@ use anyhow::Result as AnyhowResult;
 use async_trait::async_trait;
 use holon::api::repository::CoreOperations;
 use holon::api::types::Traversal;
-use holon::sync::LoroDocumentStore;
 use holon_api::BlockContent;
 use holon_api::Value;
 use holon_api::block::Block;
@@ -45,6 +44,7 @@ use holon_filesystem::AliasRegistrar;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
 use holon_loro::LoroBackend;
+use holon_loro::LoroDocumentStore;
 use tokio::sync::RwLock;
 
 /// Box a Loro `ApiError` (or any error) into the `BlockOrdering` error type,
@@ -444,9 +444,9 @@ impl BlockOrdering for LoroBlockOrdering {
             .and_then(|v| v.as_string().map(str::to_string))
             .ok_or_else(|| boxed("update_in_tree: missing 'id' param"))?;
         let after = params
-            .remove(holon::sync::event_bus::POSITION_AFTER_BLOCK_ID_PARAM)
+            .remove(holon_loro::event_bus::POSITION_AFTER_BLOCK_ID_PARAM)
             .and_then(|v| v.as_string().map(str::to_string));
-        params.remove(holon::sync::event_bus::ROUTING_DOC_URI_KEY);
+        params.remove(holon_loro::event_bus::ROUTING_DOC_URI_KEY);
         let parent_id = params
             .remove("parent_id")
             .and_then(|v| v.as_string().map(str::to_string));
@@ -639,14 +639,14 @@ impl AliasRegistrar for LoroAliasRegistrar {
 /// in the wiring crate because it bridges the storage-agnostic port
 /// (holon-filesystem) to the concrete bus (holon-loro/holon).
 pub struct ShareDegradedDisclosure {
-    pub bus: Arc<holon::sync::DegradedSignalBus>,
+    pub bus: Arc<holon_loro::DegradedSignalBus>,
 }
 
 impl holon_filesystem::ShareWritebackDisclosure for ShareDegradedDisclosure {
     fn shared_subtree_not_materialized(&self, shared_tree_id: &str, file: &Path) {
-        self.bus.emit(holon::sync::ShareDegraded {
+        self.bus.emit(holon_loro::ShareDegraded {
             shared_tree_id: shared_tree_id.to_string(),
-            reason: holon::sync::ShareDegradedReason::SharedSubtreeNotMaterialized {
+            reason: holon_loro::ShareDegradedReason::SharedSubtreeNotMaterialized {
                 file: file.display().to_string(),
             },
         });
@@ -658,17 +658,17 @@ impl holon_filesystem::ShareWritebackDisclosure for ShareDegradedDisclosure {
 /// [`ShareDegradedDisclosure`]: the supervisor lives in holon-orgmode, which
 /// has no view of the concrete bus.
 pub struct WritebackDegradedDisclosure {
-    pub bus: Arc<holon::sync::DegradedSignalBus>,
+    pub bus: Arc<holon_loro::DegradedSignalBus>,
 }
 
 impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
     fn writeback_degraded(&self, detail: &str) {
-        self.bus.emit(holon::sync::ShareDegraded {
+        self.bus.emit(holon_loro::ShareDegraded {
             // Not a share condition; the sentinel subject the
             // `WritebackDegraded` variant documents keeps one process-wide
             // banner instead of one per share.
             shared_tree_id: "org-writeback".to_string(),
-            reason: holon::sync::ShareDegradedReason::WritebackDegraded(detail.to_string()),
+            reason: holon_loro::ShareDegradedReason::WritebackDegraded(detail.to_string()),
         });
     }
 }

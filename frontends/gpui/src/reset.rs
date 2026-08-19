@@ -105,8 +105,8 @@ pub async fn build_fresh_sut(
         let injector = injector_slot
             .get()
             .expect("injector captured in extra_resolve");
-        let registry: Arc<holon::sync::block_cell_registry::BlockCellRegistry> = injector
-            .resolve_async::<holon::sync::block_cell_registry::BlockCellRegistry>()
+        let registry: Arc<holon_loro::block_cell_registry::BlockCellRegistry> = injector
+            .resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
             .await;
         let registry_dyn: Arc<dyn holon_frontend::cell::EntityCellRegistry> = registry;
         reactive
@@ -125,7 +125,7 @@ pub async fn build_fresh_sut(
             .get()
             .expect("injector captured in extra_resolve");
         let loro_sync_handle = injector
-            .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
+            .try_resolve_async::<holon_loro::LoroSyncControllerHandle>()
             .await
             .ok();
         // `BlockQuerySource` is not a DI key — the FrontendSession factory
@@ -135,7 +135,7 @@ pub async fn build_fresh_sut(
             .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
             .ok();
         let loro_doc_store = injector
-            .try_resolve::<holon::sync::LoroBlockOperations>()
+            .try_resolve::<holon_loro::LoroBlockOperations>()
             .ok()
             .map(|ops| ops.shared_doc_store());
         let writeback_renderer = injector

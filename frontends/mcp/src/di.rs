@@ -70,7 +70,7 @@ impl Module for DebugServicesPopulatorModule {
                 .await;
             let debug = injector.resolve::<DebugServices>();
             let loro_doc_store = injector
-                .try_resolve::<holon::sync::LoroBlockOperations>()
+                .try_resolve::<holon_loro::LoroBlockOperations>()
                 .ok()
                 .map(|ops| ops.shared_doc_store());
             if let Some(store) = loro_doc_store {

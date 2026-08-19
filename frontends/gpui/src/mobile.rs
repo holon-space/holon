@@ -184,7 +184,7 @@ fn open_holon_window(
         // `reset_vault` swaps this cell for the fresh session's handles.
         {
             let loro_sync_handle = injector
-                .try_resolve_async::<holon::sync::LoroSyncControllerHandle>()
+                .try_resolve_async::<holon_loro::LoroSyncControllerHandle>()
                 .await
                 .ok();
             // `BlockQuerySource` is not a DI key — the FrontendSession factory
@@ -194,7 +194,7 @@ fn open_holon_window(
                 .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
                 .ok();
             let loro_doc_store = injector
-                .try_resolve::<holon::sync::LoroBlockOperations>()
+                .try_resolve::<holon_loro::LoroBlockOperations>()
                 .ok()
                 .map(|ops| ops.shared_doc_store());
             let writeback_renderer = injector
@@ -213,7 +213,7 @@ fn open_holon_window(
         }
 
         let degraded_bus =
-            (*injector.resolve::<std::sync::Arc<holon::sync::DegradedSignalBus>>()).clone();
+            (*injector.resolve::<std::sync::Arc<holon_loro::DegradedSignalBus>>()).clone();
 
         (session, engine, debug, degraded_bus, app)
     });

@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use holon::api::MemoryBackend;
 use holon_api::repository::CoreOperations;
 use holon_api::repository::Lifecycle;
+use holon_loro_wiring::MemoryBackend;
 use holon_pbt_core::capabilities::RefEditorMirrorMut;
 use holon_pbt_core::capabilities::SutEditorMirrorWrite;
 use holon_pbt_core::composition::CapProvider;

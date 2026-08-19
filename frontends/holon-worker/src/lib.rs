@@ -303,7 +303,7 @@ mod backend {
             .block_on(async {
                 create_backend_engine(path, |injector| {
                     use fluxdi::Module as _;
-                    holon::sync::EventInfraModule
+                    holon_loro_wiring::EventInfraModule
                         .configure(injector)
                         .map_err(|e| anyhow::anyhow!("EventInfraModule: {e}"))?;
 

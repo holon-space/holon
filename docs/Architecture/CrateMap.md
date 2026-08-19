@@ -25,6 +25,7 @@ Library + binary crates under `crates/` (C4 components of the Holon system).
 | `holon-layout-testing` | component | Testing | Test Harness | Shared layout-testing primitives for Holon's property-based UI tests. |
 | `holon-loro` | component | Adapters | Adapter | Loro CRDT document engine and peer-to-peer synchronization. |
 | `holon-loro-testing` | component | Testing | Test Harness | Companion PBT crate for `holon-loro` — the first subsystem to OWN its composed-keystone contributions (co-location Phase 1, plan §5-loro). |
+| `holon-loro-wiring` | component | Adapters | Adapter | The wiring that binds the Loro CRDT backend to the `holon` engine. |
 | `holon-macros` | component | Core | Code Generation | Procedural macros: `#[operations_trait]`, `#[affects(...)]`, and entity derives. |
 | `holon-macros-test` | component | Testing | Test Harness | Macro-expansion tests for `holon-macros`. |
 | `holon-markdown` | component | Adapters | Adapter | `holon-markdown` — read-only (Tier R/O) ingest adapters for foreign vaults: Obsidian-flavored and LogSeq-flavored Markdown, parsed into the SAME `Block` + `MarkSpan` substrate as org (see `docs/Proposals/ForeignVaultCompat-2026-07-12.md`). |

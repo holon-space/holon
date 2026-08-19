@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use anyhow::Result;
 #[cfg(feature = "iroh-sync")]
-use holon::sync::IrohSyncAdapter;
-use holon::sync::LoroDocument;
+use holon_loro::IrohSyncAdapter;
+use holon_loro::LoroDocument;
 #[cfg(feature = "iroh-sync")]
 use serial_test::serial;
 use tokio::time::sleep;

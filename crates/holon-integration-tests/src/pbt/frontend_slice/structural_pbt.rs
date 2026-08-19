@@ -2937,10 +2937,10 @@ entities:
     /// primary carries org-scan/boot history the shadow never replays.
     #[tokio::test(flavor = "multi_thread")]
     async fn shadow_mesh_predicts_sut_peer_merge_exactly() {
-        use holon::sync::multi_peer::create_block_with_id;
-        use holon::sync::multi_peer::pad_to_height;
-        use holon::sync::multi_peer::sync_docs_direct;
-        use holon::sync::multi_peer::{self};
+        use holon_loro::multi_peer::create_block_with_id;
+        use holon_loro::multi_peer::pad_to_height;
+        use holon_loro::multi_peer::sync_docs_direct;
+        use holon_loro::multi_peer::{self};
         use holon_pbt_core::capabilities::SutLoro;
         use holon_pbt_core::capabilities::SutLoroLog;
 
@@ -3087,10 +3087,10 @@ entities:
     /// the shadow merge must reproduce the SUT's exact interleaving.
     #[tokio::test(flavor = "multi_thread")]
     async fn shadow_mesh_predicts_concurrent_primary_peer_merge() {
-        use holon::sync::multi_peer::create_block_with_id;
-        use holon::sync::multi_peer::pad_to_height;
-        use holon::sync::multi_peer::sync_docs_direct;
-        use holon::sync::multi_peer::{self};
+        use holon_loro::multi_peer::create_block_with_id;
+        use holon_loro::multi_peer::pad_to_height;
+        use holon_loro::multi_peer::sync_docs_direct;
+        use holon_loro::multi_peer::{self};
         use holon_pbt_core::capabilities::SutLoro;
         use holon_pbt_core::capabilities::SutLoroLog;
 

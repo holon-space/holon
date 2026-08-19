@@ -29,10 +29,6 @@ use holon::api::BackendEngine;
 use holon::api::RowChangeStream;
 use holon::di::StorageSelector;
 use holon::di::build_no_turso_container;
-use holon::sync::LoroDocumentStore;
-use holon::sync::event_bus::PublishErrorTracker;
-use holon::sync::loro_block_query_source::register_loro_block_query_source;
-use holon::sync::loro_block_query_source::register_loro_operation_engine;
 use holon::testing::e2e_test_helpers::E2ETestContext;
 use holon_api::ContentType;
 use holon_api::EntityUri;
@@ -53,6 +49,10 @@ use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::BuilderServicesSlot;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_loro::LoroBackend;
+use holon_loro::LoroDocumentStore;
+use holon_loro::event_bus::PublishErrorTracker;
+use holon_loro_wiring::loro_block_query_source::register_loro_block_query_source;
+use holon_loro_wiring::loro_block_query_source::register_loro_operation_engine;
 use holon_pbt_core::types::LoroCorruptionType;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
@@ -64,7 +64,7 @@ use tokio::sync::RwLock;
 /// callback is the natural post-`on_start` hook.
 fn populate_debug_services(injector: &fluxdi::Injector) -> Arc<holon_mcp::server::DebugServices> {
     let debug = injector.resolve::<holon_mcp::server::DebugServices>();
-    if let Ok(ops) = injector.try_resolve::<holon::sync::LoroBlockOperations>() {
+    if let Ok(ops) = injector.try_resolve::<holon_loro::LoroBlockOperations>() {
         debug.loro_doc_store.set(ops.shared_doc_store()).ok();
     }
     debug
@@ -130,7 +130,7 @@ pub struct TestEnvironment {
     /// Loro sync controller handle, resolved from DI (None when Loro is
     /// disabled). Used by `wait_for_loro_quiescence` to poll until the
     /// controller has caught up with the current Loro state.
-    loro_sync_handle: OnceCell<Arc<holon::sync::LoroSyncControllerHandle>>,
+    loro_sync_handle: OnceCell<Arc<holon_loro::LoroSyncControllerHandle>>,
 
     /// Reactive engine, resolved from DI (same instance as GPUI uses).
     /// Provides BuilderServices, keybinding registry, operation dispatch.
@@ -458,7 +458,7 @@ impl TestEnvironmentBuilder {
                 };
                 let sync_handle = if enable_loro {
                     injector
-                        .try_resolve::<holon::sync::LoroSyncControllerHandle>()
+                        .try_resolve::<holon_loro::LoroSyncControllerHandle>()
                         .ok()
                 } else {
                     None
@@ -953,7 +953,7 @@ impl TestEnvironment {
                 };
                 let sync_handle = if enable_loro {
                     injector
-                        .try_resolve::<holon::sync::LoroSyncControllerHandle>()
+                        .try_resolve::<holon_loro::LoroSyncControllerHandle>()
                         .ok()
                 } else {
                     None
@@ -1271,7 +1271,7 @@ impl TestEnvironment {
             .unwrap_or_else(|_| panic!("debug_services already latched (start_app ran twice?)"));
     }
 
-    fn latch_loro_sync_handle(&self, value: Arc<holon::sync::LoroSyncControllerHandle>) {
+    fn latch_loro_sync_handle(&self, value: Arc<holon_loro::LoroSyncControllerHandle>) {
         self.loro_sync_handle
             .set(value)
             .unwrap_or_else(|_| panic!("loro_sync_handle already latched (start_app ran twice?)"));
@@ -1351,7 +1351,7 @@ impl TestEnvironment {
 
     /// The `LoroSyncController` handle, if Loro is enabled. Shared into
     /// `LoroSut` so peer-sync ops can wait for reactive quiescence.
-    pub fn loro_sync_handle(&self) -> Option<&Arc<holon::sync::LoroSyncControllerHandle>> {
+    pub fn loro_sync_handle(&self) -> Option<&Arc<holon_loro::LoroSyncControllerHandle>> {
         self.loro_sync_handle.get()
     }
 

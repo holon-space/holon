@@ -453,7 +453,7 @@ async fn main() -> Result<()> {
                     let debug = injector.resolve::<DebugServices>();
                     // ALLOW(ok): optional DI service
                     let loro_doc_store = injector
-                        .try_resolve::<holon::sync::LoroBlockOperations>()
+                        .try_resolve::<holon_loro::LoroBlockOperations>()
                         .ok()
                         .map(|ops| ops.shared_doc_store());
                     if let Some(store) = loro_doc_store {
@@ -516,7 +516,7 @@ async fn main() -> Result<()> {
             }
             tracing::info!("Ctrl+C received — flushing shared-tree snapshots");
             if let Ok(backend) = injector_for_signal
-                .try_resolve::<std::sync::Arc<holon::sync::loro_share_backend::LoroShareBackend>>()
+                .try_resolve::<std::sync::Arc<holon_loro::loro_share_backend::LoroShareBackend>>()
             {
                 backend.flush_all().await;
                 tracing::info!("flush_all complete");

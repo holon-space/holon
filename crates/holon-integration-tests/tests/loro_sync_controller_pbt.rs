@@ -1,5 +1,5 @@
 //! Layer 3 bridge PBT: exercises `LoroSyncController` against the shared
-//! `GroupTransition` stream from `holon::sync::multi_peer`.
+//! `GroupTransition` stream from `holon_loro::multi_peer`.
 //!
 //! The SUT (`StubSyncSut`) wraps a `StubSut` (from the shared PBT kit)
 //! plus a tokio runtime, so `StateMachineTest::apply` — which is sync —

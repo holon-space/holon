@@ -98,6 +98,7 @@ pbt = [
 ]
 
 [dependencies]
+holon-loro-wiring = { workspace = true, features = ["testing"] }
 holon = { workspace = true, features = ["test-helpers", "testing"], optional = true }
 holon-frontend = { workspace = true, optional = true }
 holon-app = { workspace = true, optional = true }

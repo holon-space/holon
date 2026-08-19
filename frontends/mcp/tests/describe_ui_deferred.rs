@@ -43,7 +43,7 @@ async fn fresh_engine(db_path: std::path::PathBuf) -> Arc<holon::api::BackendEng
     holon::di::create_backend_engine_with_extras(
         db_path,
         |injector| {
-            holon::sync::EventInfraModule
+            holon_loro_wiring::EventInfraModule
                 .configure(injector)
                 .map_err(|e| anyhow::anyhow!("configure EventInfraModule: {e}"))?;
             injector.provide_into_set::<dyn holon_core::OperationProvider>(Provider::root(

@@ -32,13 +32,13 @@ use std::sync::Arc;
 
 use fluxdi::Injector;
 use fluxdi::Module;
-use holon::sync::DegradedSignalBus;
 use holon_frontend::config::CrdtPreferences;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::McpConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;
 use holon_gpui::di::GpuiModule;
+use holon_loro::DegradedSignalBus;
 
 fn shipped_module(dir: &std::path::Path, crdt_enabled: Option<bool>) -> GpuiModule {
     GpuiModule {

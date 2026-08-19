@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use holon::api::BackendEngine;
-use holon::sync::LoroDocumentStore;
-use holon::sync::LoroSyncControllerHandle;
 use holon_frontend::reactive::ReactiveEngine;
+use holon_loro::LoroDocumentStore;
+use holon_loro::LoroSyncControllerHandle;
 use holon_orgmode::OrgSyncIdleSignal;
 
 use crate::test_environment::pbt_quiet_floor;

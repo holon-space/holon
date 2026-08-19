@@ -23,6 +23,7 @@ path = "tests/tui_ui_pbt.rs"
 harness = false
 
 [dependencies]
+holon-loro.workspace = true
 # R3BL TUI Framework
 r3bl_tui.workspace = true
 

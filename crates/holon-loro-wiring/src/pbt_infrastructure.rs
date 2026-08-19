@@ -9,6 +9,9 @@ use std::collections::HashSet;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::sync::Arc;
 
+use holon::api::repository::CoreOperations;
+use holon::api::repository::Lifecycle;
+use holon::api::types::NewBlock;
 use holon_api::ApiError;
 use holon_api::Block;
 use holon_api::BlockContent;
@@ -23,10 +26,7 @@ pub use proptest_state_machine::ReferenceStateMachine;
 pub use proptest_state_machine::StateMachineTest;
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-use super::memory_backend::MemoryBackend;
-use super::repository::CoreOperations;
-use super::repository::Lifecycle;
-use super::types::NewBlock;
+use crate::memory_backend::MemoryBackend;
 
 pub type WatcherId = usize;
 
@@ -297,10 +297,10 @@ pub fn verify_backends_match<R1, R2>(
     R2: CoreOperations,
 {
     let ref_blocks = handle
-        .block_on(reference.get_all_blocks(super::types::Traversal::ALL_BUT_ROOT))
+        .block_on(reference.get_all_blocks(holon::api::types::Traversal::ALL_BUT_ROOT))
         .expect("Failed to get reference blocks");
     let sut_blocks = handle
-        .block_on(system_under_test.get_all_blocks(super::types::Traversal::ALL_BUT_ROOT))
+        .block_on(system_under_test.get_all_blocks(holon::api::types::Traversal::ALL_BUT_ROOT))
         .expect("Failed to get SUT blocks");
 
     fn compute_depth_in_slice(block: &Block, all_blocks: &[Block]) -> usize {
@@ -406,7 +406,7 @@ pub async fn populate_initial_id_map<R1: CoreOperations, R2: CoreOperations>(
     ref_backend: &R1,
     sut_backend: &R2,
 ) -> Result<(), ApiError> {
-    use super::types::Traversal;
+    use holon::api::types::Traversal;
 
     // Get all initial blocks from both backends
     let ref_blocks = ref_backend.get_all_blocks(Traversal::ALL).await?;
@@ -635,7 +635,10 @@ pub async fn check_transition_preconditions<B: CoreOperations>(
     backend: &B,
 ) -> bool {
     // Get current block IDs for existence checks
-    let all_blocks = match backend.get_all_blocks(super::types::Traversal::ALL).await {
+    let all_blocks = match backend
+        .get_all_blocks(holon::api::types::Traversal::ALL)
+        .await
+    {
         Ok(blocks) => blocks,
         Err(_) => return false,
     };
@@ -694,9 +697,11 @@ impl ReferenceStateMachine for ReferenceState {
     fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
         // Get all blocks including root (root will be parent for top-level user blocks)
         let all_blocks = tokio::task::block_in_place(|| {
-            state
-                .handle
-                .block_on(state.backend.get_all_blocks(super::types::Traversal::ALL))
+            state.handle.block_on(
+                state
+                    .backend
+                    .get_all_blocks(holon::api::types::Traversal::ALL),
+            )
         })
         .unwrap_or_default();
         let all_ids: Vec<String> = all_blocks.iter().map(|b| b.id.to_string()).collect();

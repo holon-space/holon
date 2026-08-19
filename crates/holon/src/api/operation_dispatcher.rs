@@ -1283,12 +1283,20 @@ impl Module for OperationModule {
                     .link_target_classifier(),
             );
 
-            // ADR 0028 C3 — install the boundary/authz seam. The overlay is
-            // INERT today (no code mints or persists share policies yet), so a
-            // single-user vault pays one slice-length check per op; the moment
-            // a policy is committed the same seam enforces it.
-            dispatcher
-                .set_boundary_enforcer(Arc::new(holon_sharing::PolicyOverlayEnforcer::inert()));
+            // ADR 0028 C3 — install the boundary/authz seam. The concrete
+            // policy overlay lives in `holon-sharing`, so a composition root
+            // that has policies registers it and this crate never learns the
+            // sharing domain. With none registered we fall back to the inert
+            // enforcer, which is exactly what prod installed before this seam
+            // existed (`PolicyOverlayEnforcer::inert()`: an empty PolicySet
+            // whose `check` returns `Ok(())` on the first line).
+            let enforcer = r
+                .optional_resolve_async::<dyn BoundaryEnforcer>()
+                .await
+                .unwrap_or_else(|| {
+                    Arc::new(holon_core::InertBoundaryEnforcer) as Arc<dyn BoundaryEnforcer>
+                });
+            dispatcher.set_boundary_enforcer(enforcer);
 
             // Fail loud if a block pipeline is wired without its content-write
             // ops (the EventInfraModule-only trap). A silent "No provider" drop

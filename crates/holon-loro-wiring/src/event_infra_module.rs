@@ -16,24 +16,24 @@ use fluxdi::Injector;
 use fluxdi::Module;
 use fluxdi::Provider;
 use fluxdi::Shared;
+use holon::core::queryable_cache::QueryableCache;
+use holon::core::sql_block_operations::SqlBlockOperations;
+use holon::core::sql_operation_provider::SqlOperationProvider;
+use holon::di::DbHandleProvider;
+use holon::storage::BLOCK_WRITE_TABLE;
+use holon::storage::schema_module::SchemaModule;
 use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::capability::SessionCapabilities;
+use holon_api::live_data::LiveData;
 use holon_core::OperationProvider;
 use holon_core::OperationRegistry;
 use holon_core::block_ordering::BlockOrdering;
+use holon_core::cell_registry::EntityCellRegistry;
+use holon_loro::PublishErrorTracker;
 use holon_turso::schema_modules::BlockSchemaModule;
-
-use crate::core::queryable_cache::QueryableCache;
-use crate::core::sql_block_operations::SqlBlockOperations;
-use crate::core::sql_operation_provider::SqlOperationProvider;
-use crate::di::DbHandleProvider;
-use crate::storage::BLOCK_WRITE_TABLE;
-use crate::storage::schema_module::SchemaModule;
-use crate::sync::PublishErrorTracker;
-use crate::sync::live_data::LiveData;
 
 /// Build the SqlOnly cell `set_field` write path over `SqlOperationProvider`.
 ///
@@ -43,9 +43,7 @@ use crate::sync::live_data::LiveData;
 /// `BlockCellRegistry::write_field` / `SqlBlockOperations`: the registry is
 /// owned by `SqlBlockOperations`, so routing through it would form an `Arc`
 /// cycle.
-fn sql_cell_set_field_writer(
-    sql_ops: Arc<SqlOperationProvider>,
-) -> crate::sync::block_cell_registry::SqlScalarWriteFn {
+fn sql_cell_set_field_writer(sql_ops: Arc<SqlOperationProvider>) -> holon_core::SqlScalarWriteFn {
     Arc::new(move |uri: EntityUri, field: String, value: Value| {
         let sql_ops = sql_ops.clone();
         Box::pin(async move {
@@ -80,7 +78,7 @@ pub struct EventInfraModule;
 impl Module for EventInfraModule {
     fn configure(&self, injector: &Injector) -> std::result::Result<(), fluxdi::Error> {
         injector.provide::<QueryableCache<Block>>(Provider::root_async(|r| async move {
-            Shared::new(crate::di::create_queryable_cache_async(&r).await)
+            Shared::new(holon::di::create_queryable_cache_async(&r).await)
         }));
 
         injector.provide(Provider::root(move |_| {
@@ -90,7 +88,7 @@ impl Module for EventInfraModule {
         // Shared convergent block feed (`LiveData<Block>` over the `block`
         // matview CDC). Built once; downstream sinks resolve and share it.
         injector.provide::<BlockFeed>(Provider::root_async(|resolver| async move {
-            let matview_manager = resolver.resolve::<crate::sync::MatviewManager>();
+            let matview_manager = resolver.resolve::<holon::sync::MatviewManager>();
             let watch = matview_manager
                 .watch("SELECT * FROM block")
                 .await
@@ -138,26 +136,23 @@ impl Module for EventInfraModule {
                 // Synthetic `MemStore` test impls bypass this entirely
                 // because they inherit the `BlockOperations::cells()`
                 // default of `None`.
-                let cell_registry: Arc<crate::sync::block_cell_registry::BlockCellRegistry> =
-                    match resolver
-                        .optional_resolve_async::<crate::sync::block_cell_registry::BlockCellRegistry>()
-                        .await
-                    {
-                        Some(arc) => arc.clone(),
-                        None => {
-                            // SqlOnly mode: wire cells to the convergent block
-                            // feed (read + CDC signal) + the SQL set_field write
-                            // path so `live_field` presents the same cell surface
-                            // as Full (Loro) mode instead of erroring.
-                            let live = resolver.resolve_async::<BlockFeed>().await;
-                            Arc::new(
-                                crate::sync::block_cell_registry::BlockCellRegistry::sql_only_wired(
-                                    live.0.clone(),
-                                    sql_cell_set_field_writer(sql_ops.clone()),
-                                ),
-                            )
-                        }
-                    };
+                let cell_registry: Arc<dyn EntityCellRegistry> = match resolver
+                    .optional_resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
+                    .await
+                {
+                    Some(arc) => arc.clone() as Arc<dyn EntityCellRegistry>,
+                    None => {
+                        // SqlOnly mode: wire cells to the convergent block
+                        // feed (read + CDC signal) + the SQL set_field write
+                        // path so `live_field` presents the same cell surface
+                        // as Full (Loro) mode instead of erroring.
+                        let live = resolver.resolve_async::<BlockFeed>().await;
+                        Arc::new(holon_core::SqlOnlyCellRegistry::wired(
+                            live.0.clone(),
+                            sql_cell_set_field_writer(sql_ops.clone()),
+                        )) as Arc<dyn EntityCellRegistry>
+                    }
+                };
                 // The composition root knows what's present, so it resolves the
                 // capability role here and injects it — `SqlBlockOperations`
                 // never probes a Loro-aware component itself.
@@ -185,22 +180,19 @@ impl Module for EventInfraModule {
                 BlockSchemaModule.edge_fields(),
             ));
 
-            let cell_registry: Arc<crate::sync::block_cell_registry::BlockCellRegistry> =
-                match resolver
-                    .optional_resolve_async::<crate::sync::block_cell_registry::BlockCellRegistry>()
-                    .await
-                {
-                    Some(arc) => arc.clone(),
-                    None => {
-                        let live = resolver.resolve_async::<BlockFeed>().await;
-                        Arc::new(
-                            crate::sync::block_cell_registry::BlockCellRegistry::sql_only_wired(
-                                live.0.clone(),
-                                sql_cell_set_field_writer(sql_ops.clone()),
-                            ),
-                        )
-                    }
-                };
+            let cell_registry: Arc<dyn EntityCellRegistry> = match resolver
+                .optional_resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
+                .await
+            {
+                Some(arc) => arc.clone() as Arc<dyn EntityCellRegistry>,
+                None => {
+                    let live = resolver.resolve_async::<BlockFeed>().await;
+                    Arc::new(holon_core::SqlOnlyCellRegistry::wired(
+                        live.0.clone(),
+                        sql_cell_set_field_writer(sql_ops.clone()),
+                    )) as Arc<dyn EntityCellRegistry>
+                }
+            };
             let caps = SessionCapabilities::detect_and_pin(cell_registry.has_loro_backing());
             let block_ops = SqlBlockOperations::new(sql_ops, block_cache)
                 .with_cell_registry(cell_registry)

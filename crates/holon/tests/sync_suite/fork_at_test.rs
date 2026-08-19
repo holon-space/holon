@@ -173,7 +173,7 @@ mod tests {
         );
 
         // sync_docs_direct: peer → primary should fire subscribe_root on primary
-        holon::sync::multi_peer::sync_docs_direct(&primary, &peer);
+        holon_loro::multi_peer::sync_docs_direct(&primary, &peer);
 
         assert!(
             callback_count.load(Ordering::SeqCst) > 0,
@@ -221,7 +221,7 @@ mod tests {
             // Sync under write lock (same as StubSut)
             {
                 let doc = &*primary;
-                holon::sync::multi_peer::sync_docs_direct(doc, &peer);
+                holon_loro::multi_peer::sync_docs_direct(doc, &peer);
             }
 
             assert!(
@@ -240,7 +240,7 @@ mod tests {
 
             {
                 let doc = &*primary;
-                holon::sync::multi_peer::sync_docs_direct(doc, &peer2);
+                holon_loro::multi_peer::sync_docs_direct(doc, &peer2);
             }
 
             assert!(

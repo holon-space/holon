@@ -41,7 +41,6 @@ use std::sync::Arc;
 use fluxdi::Module;
 use fluxdi::Provider;
 use holon::storage::BLOCK_READ_TABLE;
-use holon::sync::EventInfraModule;
 use holon_api::EntityName;
 use holon_api::EntityRef;
 use holon_api::EntityUri;
@@ -49,6 +48,7 @@ use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::OpOrigin;
 use holon_api::Value;
+use holon_loro_wiring::EventInfraModule;
 
 const MAIN_PANEL_ID: &str = "block:default-main-panel";
 

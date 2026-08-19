@@ -12,8 +12,8 @@
 
 use std::sync::Arc;
 
-use holon::sync::LoroDocumentStore;
-use holon::sync::LoroSyncControllerHandle;
+use holon_loro::LoroDocumentStore;
+use holon_loro::LoroSyncControllerHandle;
 use tokio::sync::RwLock;
 
 /// Wait until the `LoroSyncController`'s `last_synced` watermark matches the

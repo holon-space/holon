@@ -22,6 +22,9 @@ use async_trait::async_trait;
 use fluxdi::Injector;
 use fluxdi::Provider;
 use fluxdi::Shared;
+use holon::api::DispatchingOperationEngine;
+use holon::api::OperationEngine;
+use holon::api::operation_dispatcher::OperationDispatcher;
 use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_api::repository::CoreOperations;
@@ -30,13 +33,9 @@ use holon_core::storage::BlockQuerySource;
 use holon_core::storage::BlockSnapshot;
 use holon_core::storage::block_query::Result;
 use holon_loro::LoroBackend;
+use holon_loro::loro_block_operations::LoroBlockOperations;
+use holon_loro::loro_document_store::LoroDocumentStore;
 use tokio::sync::RwLock;
-
-use crate::api::DispatchingOperationEngine;
-use crate::api::OperationEngine;
-use crate::api::operation_dispatcher::OperationDispatcher;
-use crate::sync::loro_block_operations::LoroBlockOperations;
-use crate::sync::loro_document_store::LoroDocumentStore;
 
 /// Captures blocks straight from a [`LoroBackend`] tree, with no Turso
 /// connection, into a [`BlockSnapshot`].
@@ -169,9 +168,8 @@ pub fn register_loro_operation_engine(
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
     let block_ops = {
+        use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
         use holon_loro::shared_tree::SharedTreeStore;
-
-        use crate::sync::iroh_sync_adapter::SharedTreeSyncManager;
         match injector.try_resolve::<Arc<SharedTreeSyncManager>>() {
             Ok(manager) => {
                 block_ops.with_shared_trees((*manager).clone() as Arc<dyn SharedTreeStore>)
@@ -182,7 +180,7 @@ pub fn register_loro_operation_engine(
     // Navigation ops (focus / back / forward / home) have no Turso substrate in
     // a Loro-only session; an in-memory provider keeps per-device focus history
     // so click / arrow / back-forward navigation dispatches succeed.
-    let nav_ops = crate::navigation::InMemoryNavigationProvider::new();
+    let nav_ops = holon::navigation::InMemoryNavigationProvider::new();
     let mut dispatcher = OperationDispatcher::new(vec![
         Arc::new(block_ops) as Arc<dyn OperationProvider>,
         Arc::new(nav_ops) as Arc<dyn OperationProvider>,
@@ -209,19 +207,19 @@ pub fn register_loro_operation_engine(
     // than silently omitting history.
     let engine: Arc<dyn OperationEngine> = Arc::new(
         DispatchingOperationEngine::new(Arc::new(dispatcher))
-            .with_history_store(Arc::new(crate::api::DegradedHistoryStore::new())),
+            .with_history_store(Arc::new(holon::api::DegradedHistoryStore::new())),
     );
     injector.provide::<dyn OperationEngine>(Provider::root(move |_| engine.clone()));
 }
 
 #[cfg(test)]
 mod tests {
+    use holon::di::lifecycle::build_no_turso_container;
     use holon_api::BlockContent;
     use holon_api::repository::Lifecycle;
     use holon_core::storage::BlockQuery;
 
     use super::*;
-    use crate::di::lifecycle::build_no_turso_container;
 
     async fn seed_backend() -> (Arc<LoroBackend>, EntityUri, Vec<EntityUri>, EntityUri) {
         let backend = LoroBackend::create_new("loro-query-source-test".to_string())

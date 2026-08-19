@@ -5095,6 +5095,7 @@ dependencies = [
  "holon-engine",
  "holon-filesystem",
  "holon-loro",
+ "holon-loro-wiring",
  "holon-macros",
  "holon-org-format",
  "holon-orgmode",
@@ -5103,7 +5104,6 @@ dependencies = [
  "holon-rules",
  "holon-sharing",
  "holon-turso",
- "iroh",
  "loro",
  "loro_fractional_index 1.6.0",
  "proptest 1.11.0",
@@ -5194,6 +5194,7 @@ dependencies = [
  "holon-filesystem",
  "holon-frontend",
  "holon-loro",
+ "holon-loro-wiring",
  "holon-mcp-client",
  "holon-org-format",
  "holon-orgmode",
@@ -5230,6 +5231,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "futures-signals",
  "holon-api",
  "holon-macros",
  "loro_fractional_index 1.6.0",
@@ -5368,6 +5370,7 @@ dependencies = [
  "holon-frontend",
  "holon-integration-tests",
  "holon-layout-testing",
+ "holon-loro",
  "holon-macros",
  "holon-mcp",
  "holon-mcp-client",
@@ -5422,6 +5425,7 @@ dependencies = [
  "holon-layout-testing",
  "holon-loro",
  "holon-loro-testing",
+ "holon-loro-wiring",
  "holon-macros",
  "holon-mcp",
  "holon-mcp-client",
@@ -5535,6 +5539,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-loro-wiring"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fluxdi",
+ "futures",
+ "holon",
+ "holon-advice",
+ "holon-api",
+ "holon-core",
+ "holon-loro",
+ "holon-profiles",
+ "holon-sharing",
+ "holon-turso",
+ "iroh",
+ "loro",
+ "proptest 1.11.0",
+ "proptest-state-machine",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-macros"
 version = "0.1.0"
 dependencies = [
@@ -5591,6 +5625,7 @@ dependencies = [
  "holon-filesystem",
  "holon-frontend",
  "holon-loro",
+ "holon-loro-wiring",
  "holon-mcp-client",
  "holon-org-format",
  "holon-orgmode",
@@ -5880,6 +5915,7 @@ dependencies = [
  "holon-app",
  "holon-frontend",
  "holon-integration-tests",
+ "holon-loro",
  "holon-mcp",
  "holon-pbt-core",
  "miette",

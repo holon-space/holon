@@ -1,0 +1,53 @@
+[package]
+name = "holon-loro-wiring"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
+[features]
+default = ["iroh-sync"]
+# Iroh P2P transport for syncing Loro documents across devices. Moves here with
+# `loro_module.rs`, the only file that binds an iroh endpoint.
+iroh-sync = ["iroh", "holon-loro/iroh-sync"]
+test-helpers = ["holon/test-helpers", "holon-loro/test-helpers", "testing"]
+# proptest-backed test utilities (`pbt_infrastructure`). Keeps proptest out of
+# production builds.
+testing = ["dep:proptest", "dep:proptest-state-machine"]
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+fluxdi.workspace = true
+futures.workspace = true
+holon.workspace = true
+holon-advice.workspace = true
+holon-api.workspace = true
+holon-core.workspace = true
+holon-loro.workspace = true
+holon-profiles.workspace = true
+holon-sharing.workspace = true
+holon-turso.workspace = true
+loro.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio-stream.workspace = true
+tracing.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
+proptest = { workspace = true, optional = true }
+proptest-state-machine = { workspace = true, optional = true }
+iroh = { workspace = true, features = ["default"], optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+proptest-state-machine.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -283,10 +283,7 @@ impl<'a> BlockDomain<'a> {
     /// degradation: a query block in a session without a query engine
     /// renders this bare, with no switcher chrome (ADR 0004 Phase 9 —
     /// capabilities contribute view modes).
-    pub(crate) fn source_editor_expr(
-        query_source: &str,
-        query_language: QueryLanguage,
-    ) -> RenderExpr {
+    pub fn source_editor_expr(query_source: &str, query_language: QueryLanguage) -> RenderExpr {
         use holon_api::render_types::Arg;
         RenderExpr::FunctionCall {
             name: "source_editor".to_string(),

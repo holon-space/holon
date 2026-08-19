@@ -34,11 +34,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use holon::api::BackendEngine;
-use holon::sync::LoroDocumentStore;
 use holon_api::EntityUri;
 use holon_api::repository::CoreOperations;
 use holon_api::repository::NewBlock;
 use holon_loro::LoroBackend;
+use holon_loro::LoroDocumentStore;
 use holon_loro_testing::LoroBackendComponent;
 use holon_pbt_core::Actor;
 use holon_pbt_core::ComponentSet;
@@ -322,14 +322,14 @@ async fn compose_sut_seeded_impl(
     // i.e. an editor config). The Loro arm builds its read caps over THIS
     // store's authority doc so a write through the frontend op pipeline is
     // visible to them (task #4).
-    let mut frontend_loro_store: Option<holon::sync::LoroDocumentStore> = None;
+    let mut frontend_loro_store: Option<holon_loro::LoroDocumentStore> = None;
     // The frontend session's `LoroSyncController` handle (when the frontend boots
     // with Loro on). In full mode (`has_turso && has_loro`) the Loro arm hands
     // this to `LoroSut` so a `MergeFromPeer` waits for the controller to
     // project the imported peer delta into Turso `block_raw` before the block
     // invariants read it. `None` in the pure-Loro fast path (no controller, no
     // SQL mirror — quiescence is a no-op).
-    let mut frontend_sync_handle: Option<Arc<holon::sync::LoroSyncControllerHandle>> = None;
+    let mut frontend_sync_handle: Option<Arc<holon_loro::LoroSyncControllerHandle>> = None;
 
     // Canonical backend (Turso wins precedence, registered first).
     if has_turso && has_frontend {
