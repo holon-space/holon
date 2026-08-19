@@ -77,4 +77,3 @@ Keystone (`general_e2e_composed_pbt.rs`) does not reproduce: it generates
 synthetic org and never authors template subtrees with cross-key dependency
 drawers — the same generation gap this entry records. The dedicated PBT is the
 right home (per the dedicated-PBTs-share-keystone-structure directive).
-</content>

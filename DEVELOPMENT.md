@@ -539,6 +539,11 @@ Notes:
   2026-08-15: warm 2s; only the first build of the wasm dep graph costs minutes —
   the same warm/cold profile `gate-compile` has, which is why it earns a Tier 1
   slot and still runs again at Tier 2 and landing: a 2s check is free insurance.
+- **Why `gate-arch` sits in Tier 2 and not Tier 1**: it shells out to
+  `archlint`, which scans the tree — measured 2026-08-14 at ~35s (25s of it the
+  scan) regardless of build warmth, too slow for a per-commit tier and cheap
+  against Tier 2's five-minute keystone leg. It runs first within Tier 2 so a
+  structural red lands before that leg starts.
 - **Why lanes should compose `landing-gate` rather than their own string**: the
   gate strings drifted per lane, and a lane spelling the feature list
   differently is a lane running a different gate. Its body is recipe names and
