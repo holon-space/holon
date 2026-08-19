@@ -11,7 +11,7 @@
 //! matview, with a `watch_view` matview on top (exactly what `query_and_watch`
 //! builds for a live_query).
 //!
-//! The trigger for the SILENT (vs loud) refusal is a COMPUTED conjunct beside
+//! The trigger for the SILENT (vs loud) refusal was a COMPUTED conjunct beside
 //! the subquery — Now.org's leading `json_extract(...)='TODO' AND NOT EXISTS
 //! (…)` — not chaining (turso-6f 8-shape bisect; corroborated here). The
 //! projection rewrite aliased the subquery onto a shared `__temp_filter_expr`
@@ -20,21 +20,19 @@
 //! Result matrix (this file is the executable record):
 //!   * single `json_extract` property filter              -> IVM-maintained  ✅
 //!     green (`prop_matview_consistent_maintainable`)
-//!   * `json_extract` conjunct + correlated `NOT EXISTS`  -> matview empty   ❌
-//!     red — CREATE silently succeeds, then never populates ("matview 0 !=
-//!     fresh 5"). `#[ignore]`d. See docs/Testing/bugfunnel/entries/
+//!   * `json_extract` conjunct + correlated `NOT EXISTS`  -> REJECTED LOUDLY at
+//!     DDL, in both the isolated and the full Now.org shape
+//!     (`antijoin_isolated_create_refuses_loudly`,
+//!     `now_org_antijoin_create_refuses_loudly_after_fix`). See
+//!     docs/Testing/bugfunnel/entries/
 //!     2026-08-19-ivm-antijoin-matview-silently-empty.md
 //!   * a PLAIN-column conjunct + `NOT EXISTS` over a base table -> REJECTED
 //!     LOUDLY at DDL. Pinned green (`base_table_antijoin_ddl_rejected`).
 //!
-//! POST-FIX EXPECTATION (turso-6f bypass fix, re-pin `90f25523`): the fork does
-//! NOT add `EXISTS`/anti-join maintenance — it makes the refusal LOUD in ALL
-//! combinations. So the two `#[ignore]`d cases below do NOT flip to
-//! matview≡fresh; after the `90f25523` re-pin the `reconcile_named_view` CREATE
-//! for the computed-conjunct+subquery shape ERRORS (loud), like the base-table
-//! case. When re-pinning, re-point these to assert loud refusal. The render
-//! path is unaffected either way: `sql_ivm_maintainable` routes the shape eager
-//! BEFORE any CREATE.
+//! The fork does NOT maintain `EXISTS`/anti-joins — the bypass fix made the
+//! refusal LOUD in ALL conjunct combinations, so the anti-join cases assert
+//! refusal, not matview≡fresh. The render path is unaffected either way:
+//! `sql_ivm_maintainable` routes the shape eager BEFORE any CREATE.
 //!
 //! Now.org rewrite option: the readiness clause CAN be rewritten to a
 //! maintainable `LEFT JOIN … IS NULL` — VERIFIED correct on the landed populate
@@ -51,12 +49,6 @@ use holon_turso::matview_manager::reconcile_named_view;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
 use proptest::prelude::*;
-
-const IGNORE_REASON: &str = "RED (right reason): a computed conjunct beside a correlated NOT EXISTS makes the \
-     Turso fork CREATE the matview then serve 0 rows (silent temp-column always-false filter) while \
-     fresh recompute returns rows. On the turso-6f bypass-fix re-pin 90f25523 the CREATE refuses \
-     LOUDLY instead — re-point to assert refusal, not maintenance. See \
-     docs/Testing/bugfunnel/entries/2026-08-19-ivm-antijoin-matview-silently-empty.md";
 
 // --- Harness ---------------------------------------------------------------
 
@@ -342,61 +334,23 @@ proptest! {
     }
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
-
-    /// RED (ignored): the anti-join matview diverges from its recompute. The
-    /// engine-fix property — flips green once the fork maintains correlated
-    /// NOT EXISTS.
-    #[test]
-    #[ignore = "see IGNORE_REASON — flips green (as loud CREATE refusal) on the turso-6f bypass-fix re-pin 90f25523; bugfunnel 2026-08-19-ivm-antijoin-matview-silently-empty"]
-    fn prop_matview_consistent_antijoin(muts in mutations_strategy()) {
-        let (mv, fresh) = runtime().block_on(drive(ANTIJOIN_ISOLATED, &muts));
-        prop_assert_eq!(mv, fresh, "anti-join matview must equal fresh recompute");
-    }
-}
-
-/// RED (ignored): the deterministic Now.org regression — the canonical
-/// "matview 0 != fresh 5" proof. Five unblocked, agent-eligible G1 TODOs; the
-/// matview serves none.
+/// The anti-join ISOLATED: one maintainable `json_extract` conjunct plus the
+/// correlated `NOT EXISTS`. The anti-join is the only un-maintainable element
+/// vs `SIMPLE_FILTER`, so the refusal attributes cleanly to it.
 #[tokio::test]
-#[ignore = "see IGNORE_REASON — flips green (as loud CREATE refusal) on the turso-6f bypass-fix re-pin 90f25523; bugfunnel 2026-08-19-ivm-antijoin-matview-silently-empty"]
-async fn now_org_antijoin_regression() {
-    let muts = now_org_scenario();
+async fn antijoin_isolated_create_refuses_loudly() {
     let handle = block_schema().await;
-    reconcile_named_view(&handle, "watch_view_now", ANTIJOIN)
-        .await
-        .expect("Now.org watch matview create (succeeds over chained block matview)");
-    for m in &muts {
-        apply(&handle, m).await;
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let mv = matview_ids(&handle, "watch_view_now").await;
-    let fresh = recompute_ids(&handle, ANTIJOIN).await;
-    assert_eq!(
-        fresh.len(),
-        5,
-        "sanity: fresh recompute returns the 5 unblocked TODOs"
-    );
-    assert_eq!(
-        mv,
-        fresh,
-        "IVM matview ({}) != fresh recompute ({}) — the Now.org anti-join bug",
-        mv.len(),
-        fresh.len()
+    let result = reconcile_named_view(&handle, "watch_view_isolated_loud", ANTIJOIN_ISOLATED).await;
+    assert!(
+        result.is_err(),
+        "a computed conjunct beside a correlated NOT EXISTS must refuse LOUDLY at CREATE, not \
+         silently succeed-empty; got {result:?}"
     );
 }
 
-/// DUAL-FORM acceptance gate (post-fix). The turso-6f engine fix does NOT add
-/// anti-join maintenance — it makes the computed-conjunct + subquery shape
-/// refuse LOUDLY at CREATE (no more silent temp-column always-false filter).
-/// So the fix's acceptance is: the CREATE that today succeeds-empty (the
-/// witness above) will ERROR. RED now (`reconcile_named_view` currently returns
-/// `Ok`), GREEN on the bypass-fix re-pin (~`90f25523`), at which point THIS
-/// test un-ignores and `now_org_antijoin_regression` retires.
+/// The FULL Now.org shape: anti-join plus `OR(EXISTS, NOT EXISTS)`. The CREATE
+/// that once succeeded-then-served-0-rows now ERRORs.
 #[tokio::test]
-#[ignore = "flips green on the bypass-fix re-pin (90f25523): CREATE refuses loudly instead of \
-            silently succeeding-empty. bugfunnel 2026-08-19-ivm-antijoin-matview-silently-empty"]
 async fn now_org_antijoin_create_refuses_loudly_after_fix() {
     let handle = block_schema().await;
     let result = reconcile_named_view(&handle, "watch_view_now_loud", ANTIJOIN).await;
@@ -405,53 +359,6 @@ async fn now_org_antijoin_create_refuses_loudly_after_fix() {
         "post-fix the computed-conjunct + subquery matview CREATE must refuse LOUDLY, not \
          silently succeed-empty; got {result:?}"
     );
-}
-
-/// The Now.org data: b0..b4 are unblocked agent-eligible G1 TODOs (5 rows);
-/// b5 is a blocked/excluded control.
-fn now_org_scenario() -> Vec<Mutation> {
-    let mut m = vec![];
-    for id in 0..5u8 {
-        m.push(Mutation::SetBlock {
-            id,
-            task_state: "TODO",
-            gate: "G1",
-        });
-        m.push(Mutation::AddTag {
-            block: id,
-            tag: "agent",
-        });
-    }
-    // A DONE dependency (b8) does NOT block b0.
-    m.push(Mutation::SetBlock {
-        id: 8,
-        task_state: "DONE",
-        gate: "G2",
-    });
-    m.push(Mutation::AddRequires {
-        block: 0,
-        required: 8,
-    });
-    // b5: a TODO that requires an unfinished task -> blocked -> excluded.
-    m.push(Mutation::SetBlock {
-        id: 5,
-        task_state: "TODO",
-        gate: "G1",
-    });
-    m.push(Mutation::AddTag {
-        block: 5,
-        tag: "agent",
-    });
-    m.push(Mutation::SetBlock {
-        id: 7,
-        task_state: "TODO",
-        gate: "G2",
-    });
-    m.push(Mutation::AddRequires {
-        block: 5,
-        required: 7,
-    });
-    m
 }
 
 /// GREEN: the SAME anti-join over a BASE TABLE is rejected at DDL — the fork's
@@ -476,10 +383,4 @@ async fn base_table_antijoin_ddl_rejected() {
         result.is_err(),
         "base-table correlated NOT EXISTS must be rejected at matview DDL; got {result:?}"
     );
-}
-
-// Keep the constant referenced so the `#[ignore]` reason strings stay honest.
-#[test]
-fn ignore_reason_is_documented() {
-    assert!(IGNORE_REASON.contains("bugfunnel"));
 }
