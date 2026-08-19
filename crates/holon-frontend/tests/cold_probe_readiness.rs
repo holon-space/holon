@@ -87,6 +87,7 @@ fn data_batch(generation: u64) -> UiEvent {
                 linked_contexts: Vec::new(),
                 sync_token: None,
                 seq: 0,
+                degraded: None,
             },
         },
         generation,

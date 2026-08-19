@@ -400,6 +400,15 @@ pub struct BatchMetadata {
     /// so any batch on the broadcast channel has a positive `seq`.
     #[serde(default)]
     pub seq: u64,
+    /// Set when this batch is served in a DEGRADED mode the viewer must be told
+    /// about — a query the IVM engine cannot incrementally maintain, served by
+    /// eager re-execution instead of a matview. Carries the human-readable
+    /// disclosure (e.g. the engine's own refusal text for a shape the routing
+    /// predicate did not foresee). The reactive watcher lifts it onto the
+    /// query's `ReactiveRenderedRows::degraded` so the render surfaces it.
+    /// `None` on every normally-maintained batch.
+    #[serde(default)]
+    pub degraded: Option<String>,
 }
 
 /// Trace context for distributed tracing across FFI and async boundaries

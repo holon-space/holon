@@ -168,6 +168,186 @@ pub async fn reconcile_named_view(
 /// Every dynamic watch matview is named `watch_view_{hash-of-its-SELECT}`.
 pub const WATCH_VIEW_PREFIX: &str = "watch_view_";
 
+/// Whether the fork's DBSP IVM can correctly maintain a matview for `sql`.
+///
+/// The DBSP incremental engine cannot maintain a **subquery-valued predicate**
+/// — `EXISTS`, `NOT EXISTS`, or `IN (subquery)` / `NOT IN (subquery)` — the
+/// `Exists` operator itself, negated or not (`Cannot convert LogicalExpr to AST
+/// Expr: Exists { … negated: false/true }`).
+///
+/// Whether that refusal is LOUD or SILENT depends not on chaining but on what
+/// sits BESIDE the subquery in `WHERE` (turso-6f 8-shape bisect, corroborated
+/// by this lane's own probe D/E):
+///   * a plain-column conjunct beside the subquery (`b.id <> 'x' AND NOT EXISTS
+///     (…)`) → refused LOUDLY at DDL.
+///   * a COMPUTED conjunct beside it (Now.org's leading
+///     `json_extract(properties,'$.task_state')='TODO' AND NOT EXISTS (…)`) →
+///     the projection rewrite's catch-all aliased the subquery onto the shared
+///     `__temp_filter_expr` temp column, so CREATE SILENTLY SUCCEEDED with an
+///     always-false compiled filter (0 rows) while a fresh recompute returns
+///     the real set (bugfunnel 2026-08-19-ivm-antijoin-matview-silently-empty).
+/// The silent case is the fail-loud violation. The turso engine fix (validate
+/// every substituted sub-expression through the conversion authority, no
+/// allowlist) makes unsupported shapes refuse LOUDLY in ALL combinations; this
+/// predicate stays correct under that fix (it routes every subquery-in-`WHERE`
+/// shape eager regardless), so such a query is never served from a matview —
+/// the caller serves it by eager re-execution in a disclosed degraded mode.
+///
+/// The decision is **inverted to engine truth**: route to a matview ONLY when
+/// the shape is provably maintainable. A raw-SQL substring test cannot do this
+/// — it misses the `NOT (EXISTS …)` spelling the keystone's own generator emits
+/// and false-flags a `'… not exists'` string literal. So we PARSE and VISIT the
+/// AST NODES (not its Debug text): a query is un-maintainable iff its parse
+/// tree contains an `Exists` or `InSubquery` expression anywhere (any nesting,
+/// any spelling). Because we match on the typed node — never on rendered text —
+/// a string literal like `content = 'Exists {'` cannot trip the check. A parse
+/// failure is conservatively un-maintainable (eager always serves correct
+/// rows), disclosed by a warning.
+///
+/// This is a subset filter, not a full capability oracle: it names the WHERE
+/// subquery-predicate shapes we KNOW the fork mis-handles, to skip a doomed
+/// CREATE. Anything it lets through that the engine still refuses (a scalar
+/// subquery in the SELECT list, `EXCEPT`/`INTERSECT`, a derived table) is
+/// caught at CREATE by the permanent-refusal backstop in `query_and_watch` and
+/// served eager — so a false-negative here degrades gracefully, never wrongly.
+pub fn sql_ivm_maintainable(sql: &str) -> bool {
+    match crate::sql_parser::parse_sql(sql) {
+        Ok(statements) => !statements.iter().any(statement_has_subquery_predicate),
+        Err(e) => {
+            tracing::warn!(
+                sql = %sql.chars().take(160).collect::<String>(),
+                "sql_ivm_maintainable: SQL did not parse — routing to eager re-execution \
+                 (conservative; eager always serves correct rows): {e}"
+            );
+            false
+        }
+    }
+}
+
+/// Does any expression anywhere under `stmt` use `EXISTS` or `IN (subquery)`?
+fn statement_has_subquery_predicate(stmt: &sqlparser::ast::Statement) -> bool {
+    match stmt {
+        sqlparser::ast::Statement::Query(q) => query_has_subquery_predicate(q),
+        _ => false,
+    }
+}
+
+fn query_has_subquery_predicate(q: &sqlparser::ast::Query) -> bool {
+    use sqlparser::ast::SetExpr;
+    if let Some(with) = &q.with {
+        if with
+            .cte_tables
+            .iter()
+            .any(|c| query_has_subquery_predicate(&c.query))
+        {
+            return true;
+        }
+    }
+    fn setexpr(body: &SetExpr) -> bool {
+        match body {
+            SetExpr::Select(s) => select_has_subquery_predicate(s),
+            SetExpr::Query(q) => query_has_subquery_predicate(q),
+            SetExpr::SetOperation { left, right, .. } => setexpr(left) || setexpr(right),
+            _ => false,
+        }
+    }
+    setexpr(&q.body)
+}
+
+fn select_has_subquery_predicate(s: &sqlparser::ast::Select) -> bool {
+    use sqlparser::ast::GroupByExpr;
+    use sqlparser::ast::SelectItem;
+    use sqlparser::ast::TableFactor;
+    let projection = s.projection.iter().any(|item| match item {
+        SelectItem::UnnamedExpr(e) => expr_has_subquery(e),
+        SelectItem::ExprWithAlias { expr, .. } => expr_has_subquery(expr),
+        _ => false,
+    });
+    let selection = s.selection.as_ref().is_some_and(expr_has_subquery);
+    let having = s.having.as_ref().is_some_and(expr_has_subquery);
+    let group_by = match &s.group_by {
+        GroupByExpr::Expressions(exprs, _) => exprs.iter().any(expr_has_subquery),
+        _ => false,
+    };
+    let from = s.from.iter().any(|twj| {
+        let derived = |tf: &TableFactor| {
+            matches!(tf, TableFactor::Derived { subquery, .. } if query_has_subquery_predicate(subquery))
+        };
+        let joins = twj.joins.iter().any(|j| {
+            derived(&j.relation)
+                || join_on_expr(&j.join_operator).is_some_and(expr_has_subquery)
+        });
+        derived(&twj.relation) || joins
+    });
+    projection || selection || having || group_by || from
+}
+
+/// The load-bearing node check: an `Exists` / `InSubquery` expression, at any
+/// nesting depth reachable through the common compound operators. A shape this
+/// misses is caught by the CREATE-time backstop, so `_ => false` on an exotic
+/// leaf is safe, not silent-wrong.
+fn expr_has_subquery(e: &sqlparser::ast::Expr) -> bool {
+    use sqlparser::ast::Expr;
+    let recur = expr_has_subquery;
+    match e {
+        Expr::Exists { .. } | Expr::InSubquery { .. } => true,
+        Expr::Subquery(q) => query_has_subquery_predicate(q),
+        Expr::BinaryOp { left, right, .. } => recur(left) || recur(right),
+        Expr::UnaryOp { expr, .. } => recur(expr),
+        Expr::Nested(x) => recur(x),
+        Expr::IsNull(x)
+        | Expr::IsNotNull(x)
+        | Expr::IsTrue(x)
+        | Expr::IsNotTrue(x)
+        | Expr::IsFalse(x)
+        | Expr::IsNotFalse(x)
+        | Expr::IsUnknown(x)
+        | Expr::IsNotUnknown(x) => recur(x),
+        Expr::Between {
+            expr, low, high, ..
+        } => recur(expr) || recur(low) || recur(high),
+        Expr::InList { expr, list, .. } => recur(expr) || list.iter().any(recur),
+        Expr::Like { expr, pattern, .. }
+        | Expr::ILike { expr, pattern, .. }
+        | Expr::SimilarTo { expr, pattern, .. } => recur(expr) || recur(pattern),
+        Expr::Cast { expr, .. } | Expr::Collate { expr, .. } => recur(expr),
+        Expr::Case {
+            operand,
+            conditions,
+            else_result,
+            ..
+        } => {
+            operand.as_deref().is_some_and(recur)
+                || conditions
+                    .iter()
+                    .any(|w| recur(&w.condition) || recur(&w.result))
+                || else_result.as_deref().is_some_and(recur)
+        }
+        Expr::Tuple(xs) => xs.iter().any(recur),
+        _ => false,
+    }
+}
+
+/// The `ON` expression of a join, for the common constraint-bearing operators.
+/// Missing an operator only forfeits an early eager route — the CREATE-time
+/// backstop still catches an un-maintainable join.
+fn join_on_expr(op: &sqlparser::ast::JoinOperator) -> Option<&sqlparser::ast::Expr> {
+    use sqlparser::ast::JoinConstraint;
+    use sqlparser::ast::JoinOperator;
+    let constraint = match op {
+        JoinOperator::Inner(c)
+        | JoinOperator::LeftOuter(c)
+        | JoinOperator::RightOuter(c)
+        | JoinOperator::FullOuter(c)
+        | JoinOperator::Join(c) => c,
+        _ => return None,
+    };
+    match constraint {
+        JoinConstraint::On(e) => Some(e),
+        _ => None,
+    }
+}
+
 /// True when `sql` references `name` as a standalone identifier token
 /// (`block` matches `FROM block b` but not `block_raw`).
 fn sql_references_identifier(sql: &str, name: &str) -> bool {
@@ -1019,6 +1199,60 @@ impl MatviewManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ivm_maintainable_flags_every_subquery_predicate_spelling() {
+        // Maintainable (no WHERE subquery predicate): plain filters, plain/
+        // aliased joins, and the `LEFT JOIN … IS NULL` anti-join, which the fork
+        // maintains CORRECTLY after the c6cfab7d populate fix (pinned end-to-end
+        // by `left_join_isnull_matview_matches_fresh_after_populate_fix`).
+        assert!(sql_ivm_maintainable(
+            "SELECT id FROM block WHERE json_extract(properties,'$.task_state')='TODO'"
+        ));
+        assert!(sql_ivm_maintainable(
+            "SELECT b.id FROM block b JOIN block_tags t ON t.block_id = b.id WHERE t.tag='agent'"
+        ));
+        assert!(sql_ivm_maintainable(
+            "SELECT b.id FROM block b LEFT JOIN block_requires r ON r.block_id = b.id WHERE \
+             r.block_id IS NULL"
+        ));
+        // A string literal containing "exists" must NOT be flagged — we visit the
+        // typed AST nodes, so only a genuine `Exists`/`InSubquery` node counts,
+        // never rendered text.
+        assert!(sql_ivm_maintainable(
+            "SELECT id FROM block WHERE content = 'this does not exists'"
+        ));
+        assert!(sql_ivm_maintainable(
+            "SELECT id FROM block WHERE content = 'Exists {'"
+        ));
+
+        // Un-maintainable: EVERY subquery-predicate spelling, all silently-empty
+        // over the chained `block` matview (verifier 2b). `NOT EXISTS`,
+        // `NOT (EXISTS …)` (the keystone generator's spelling), plain `EXISTS`
+        // (the fork refuses `Exists { negated: false }` — the operator itself),
+        // `IN (subquery)` and `NOT IN (subquery)`, any nesting.
+        for sql in [
+            "SELECT b.* FROM block b WHERE NOT EXISTS (SELECT 1 FROM block_requires br WHERE \
+             br.block_id=b.id)",
+            "SELECT b.id FROM block b WHERE NOT (EXISTS (SELECT 1 FROM block_tags t WHERE \
+             t.block_id=b.id))",
+            "SELECT b.id FROM block b WHERE EXISTS (SELECT 1 FROM block_tags t WHERE \
+             t.block_id=b.id)",
+            "SELECT b.id FROM block b WHERE b.id IN (SELECT block_id FROM block_tags WHERE \
+             tag='agent')",
+            "SELECT b.id FROM block b WHERE b.id NOT IN (SELECT block_id FROM block_requires)",
+            "SELECT 1 WHERE a OR NOT EXISTS (SELECT 1 FROM block_tags)",
+            "select 1 from block where not   exists (select 1 from block_tags)",
+        ] {
+            assert!(
+                !sql_ivm_maintainable(sql),
+                "must route eager (un-maintainable subquery predicate): {sql}"
+            );
+        }
+
+        // A query that does not parse is conservatively un-maintainable.
+        assert!(!sql_ivm_maintainable("this is not valid sql !@#"));
+    }
 
     #[test]
     fn normalize_collapses_whitespace_and_lowercases() {

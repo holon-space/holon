@@ -338,6 +338,7 @@ impl SyncableProvider for OrgModeSyncProvider {
             linked_contexts: Vec::new(),
             sync_token: None,
             seq: 0,
+            degraded: None,
         };
 
         info!(

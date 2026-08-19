@@ -589,6 +589,30 @@ impl BackendEngine {
         self.bind_context_params(&mut params_with_context, &ctx);
         let sql_with_params = Self::inline_parameters(&transformed_sql, &params_with_context);
 
+        // Shapes the fork's DBSP IVM cannot maintain (subquery predicates —
+        // EXISTS / NOT EXISTS / IN) would be served from a silently-empty
+        // matview — a fail-loud violation. Route them to eager re-execution on
+        // the row-change bus UP FRONT, before any CREATE. The disclosure travels
+        // with the stream (batch metadata) so the render surfaces a degraded
+        // banner. See `holon_turso::matview_manager::sql_ivm_maintainable`.
+        if !holon_turso::matview_manager::sql_ivm_maintainable(&sql_with_params) {
+            tracing::warn!(
+                sql = %sql_with_params.chars().take(160).collect::<String>(),
+                "[query_and_watch] query shape is not IVM-maintainable (subquery predicate); \
+                 serving by eager re-execution in disclosed degraded mode"
+            );
+            return self
+                .eager_requery_stream(
+                    sql_with_params,
+                    "Live results served by re-execution — this query's shape (a subquery \
+                     predicate: EXISTS / NOT EXISTS / IN) cannot be incrementally maintained, so \
+                     rows are recomputed on each change rather than served from a matview. If a \
+                     recompute fails the last known rows are kept until the next change."
+                        .to_string(),
+                )
+                .await;
+        }
+
         // Diagnostic for HANDOFF_DATA_CDC_SCOPE_LEAK.md.
         // HOLON_TRACE_QUERY_BLOCK=<substring> matches against the inlined SQL so
         // we can see exactly which matview is created for a given block_id and
@@ -603,8 +627,35 @@ impl BackendEngine {
             );
         }
 
-        // Ensure view exists, subscribe to CDC, and query initial data
-        let view_name = self.matview_manager.ensure_view(&sql_with_params).await?;
+        // Ensure view exists, subscribe to CDC, and query initial data.
+        // BACKSTOP: the shape predicate above is one classifier; the engine's
+        // matview-conversion authority is another. If a shape the predicate
+        // thought maintainable is refused PERMANENTLY at CREATE (`Cannot convert
+        // LogicalExpr` — e.g. a `CASE` the predicate does not model), fall to
+        // eager re-execution and disclose the engine's own refusal text, rather
+        // than returning an Err that spins the watcher's retry loop forever on a
+        // permanent failure. A TRANSIENT error (a dependency table not built
+        // yet) is NOT swallowed — it propagates so the watcher retries.
+        let view_name = match self.matview_manager.ensure_view(&sql_with_params).await {
+            Ok(view_name) => view_name,
+            Err(e) if Self::is_permanent_matview_conversion_error(&e) => {
+                tracing::warn!(
+                    sql = %sql_with_params.chars().take(160).collect::<String>(),
+                    "[query_and_watch] matview CREATE refused permanently ({e}); serving by eager \
+                     re-execution in disclosed degraded mode (predicate did not foresee this shape)"
+                );
+                return self
+                    .eager_requery_stream(
+                        sql_with_params,
+                        format!(
+                            "Live results served by re-execution — the engine cannot maintain this \
+                             query as a materialized view ({e}). Rows are recomputed on each change."
+                        ),
+                    )
+                    .await;
+            }
+            Err(e) => return Err(e),
+        };
         let cdc_stream = self.matview_manager.subscribe_cdc(&view_name).await?;
 
         // The snapshot read deliberately does NOT re-apply the ORDER BY that
@@ -654,6 +705,223 @@ impl BackendEngine {
         Ok(Self::prepend_initial_data(data, &view_name, cdc_stream))
     }
 
+    /// Serve a query the IVM engine cannot maintain (see
+    /// [`holon_turso::matview_manager::sql_ivm_maintainable`]) by eager
+    /// re-execution: read the current rows directly, then re-run the whole
+    /// query on every base-table change and emit the diff. No matview is
+    /// created, so nothing can go silently stale — the price is O(query) per
+    /// change instead of O(delta). Correctness over incrementality; the shape
+    /// is rare (planning queries with anti-joins) and disclosed as degraded.
+    ///
+    /// `disclosure` is the degraded-mode text stamped onto every emitted
+    /// batch's metadata; the reactive watcher lifts it onto the query's
+    /// `degraded` state so the render discloses the degraded serving mode
+    /// (fail-loud: a degraded mode is only acceptable when disclosed).
+    async fn eager_requery_stream(
+        &self,
+        sql_with_params: String,
+        disclosure: String,
+    ) -> Result<RowChangeStream> {
+        let relation = crate::sync::MatviewManager::compute_view_name(&sql_with_params);
+        let initial = self
+            .db_handle
+            .query(&sql_with_params, HashMap::new())
+            .await?;
+        let cdc_rx = self.db_handle.subscribe_row_changes();
+        Ok(Self::spawn_eager_stream(
+            self.db_handle.clone(),
+            sql_with_params,
+            relation,
+            disclosure,
+            initial,
+            cdc_rx,
+        ))
+    }
+
+    /// A matview CREATE error the engine will NEVER succeed on for THIS SQL —
+    /// the IVM compiler refused the shape outright. Retrying cannot help, so
+    /// the eager backstop must take over rather than let the watcher spin
+    /// forever. The full permanent-refusal class the fork emits (measured,
+    /// verifier R3):
+    ///   * `Cannot convert LogicalExpr …`           — subquery-predicate
+    ///     refusal
+    ///   * `… not yet supported …`                  — scalar subquery in
+    ///     SELECT, `EXCEPT`/`INTERSECT`
+    ///   * `no such column …`                       — derived-table `FROM
+    ///     (SELECT…)` (the `_change_origin` transform)
+    /// Deliberately NOT matched (TRANSIENT — a dependency not built yet, which
+    /// retrying resolves): `no such table`, `waiting for dependencies`,
+    /// `database is locked`, `Database schema changed`. The classifier is
+    /// biased SAFE anyway: were a transient error mis-classed permanent,
+    /// the eager path's own initial query would hit the same error and
+    /// propagate it back to the retry loop — self-correcting — whereas the
+    /// reverse miss (permanent → transient) is the one that wedges, so we
+    /// err toward permanent.
+    fn is_permanent_matview_conversion_error(e: &anyhow::Error) -> bool {
+        let text = format!("{e:?}");
+        if text.contains("no such table") {
+            return false; // transient: dependency table not built yet
+        }
+        text.contains("Cannot convert LogicalExpr")
+            || text.contains("not yet supported")
+            || text.contains("no such column")
+    }
+
+    /// Stable diff key for an eager-served row. An entity row keys on its `id`
+    /// (so a `Deleted` matches the reactive layer's id-keyed store). An id-less
+    /// aggregate row keys on its sorted `key=value` pairs — DETERMINISTIC
+    /// across re-executions, unlike `format!("{row:?}")`, whose `HashMap`
+    /// iteration order is per-instance randomized and would mint a fresh
+    /// key every tick (full Deleted+Created churn forever).
+    fn eager_row_key(row: &StorageEntity) -> String {
+        if let Some(Value::String(s)) = row.get("id") {
+            return s.to_string();
+        }
+        let mut pairs: Vec<String> = row.iter().map(|(k, v)| format!("{k}={v:?}")).collect();
+        pairs.sort();
+        pairs.join("\u{1f}")
+    }
+
+    /// The eager re-execution task. Emits the initial rows as `Created`, then
+    /// on each base-table CDC batch re-runs `sql`, emitting `Deleted` for rows
+    /// that vanished and `Created` for rows that are new or whose content
+    /// changed (the reactive layer folds a `Created` for a known key into an
+    /// update).
+    fn spawn_eager_stream(
+        db_handle: DbHandle,
+        sql: String,
+        relation: String,
+        disclosure: String,
+        initial: Vec<StorageEntity>,
+        mut cdc_rx: broadcast::Receiver<BatchWithMetadata<RowChange>>,
+    ) -> RowChangeStream {
+        use holon_api::streaming::Batch;
+        use holon_api::streaming::BatchMetadata;
+        use holon_api::streaming::Change;
+        use holon_api::streaming::ChangeOrigin;
+        use holon_api::streaming::WithMetadata;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+
+        let make_batch = |items: Vec<RowChange>, relation: &str, seq: u64, disclosure: &str| {
+            WithMetadata {
+                inner: Batch { items },
+                metadata: BatchMetadata {
+                    relation_name: relation.to_string(),
+                    trace_context: None,
+                    linked_contexts: Vec::new(),
+                    sync_token: None,
+                    seq,
+                    // Every eager batch carries the disclosure so a watcher that
+                    // subscribes mid-stream still learns it is degraded.
+                    degraded: Some(disclosure.to_string()),
+                },
+            }
+        };
+        let created = |row: StorageEntity, relation: &str| RowChange {
+            relation_name: relation.to_string(),
+            change: Change::Created {
+                data: row,
+                origin: ChangeOrigin::Local {
+                    operation_id: None,
+                    trace_id: None,
+                },
+            },
+        };
+
+        crate::util::spawn_actor(async move {
+            let mut prev: HashMap<String, StorageEntity> = HashMap::new();
+            let mut seq: u64 = 0;
+
+            let initial_changes: Vec<RowChange> = initial
+                .into_iter()
+                .map(|row| {
+                    prev.insert(Self::eager_row_key(&row), row.clone());
+                    created(row, &relation)
+                })
+                .collect();
+            if tx
+                .send(make_batch(initial_changes, &relation, seq, &disclosure))
+                .await
+                .is_err()
+            {
+                return;
+            }
+
+            loop {
+                match cdc_rx.recv().await {
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+                // Coalesce a burst of changes into one re-execution.
+                while cdc_rx.try_recv().is_ok() {}
+
+                let rows = match db_handle.query(&sql, HashMap::new()).await {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        // NOT silent: the whole query is already served under a
+                        // standing degraded-mode disclosure (the frontend sets it
+                        // for every eager-served shape, and its text says the last
+                        // known rows are retained if a refresh fails). Keeping the
+                        // last-good rows here — rather than blanking to empty — is
+                        // the disclosed behaviour; the failure is surfaced at ERROR
+                        // for debuggability and the next CDC tick retries. The
+                        // INITIAL load failure is loud separately: it propagates as
+                        // `Err` from `eager_requery_stream` (before this loop) into
+                        // the frontend watcher's `set_error`.
+                        tracing::error!(
+                            relation = %relation,
+                            "[eager_requery] re-execution failed; retaining last-known rows under \
+                             the standing degraded disclosure, will retry on next change: {e}"
+                        );
+                        continue;
+                    }
+                };
+                let next: HashMap<String, StorageEntity> = rows
+                    .into_iter()
+                    .map(|row| (Self::eager_row_key(&row), row))
+                    .collect();
+
+                let mut items: Vec<RowChange> = Vec::new();
+                for (key, _) in prev.iter() {
+                    if !next.contains_key(key) {
+                        items.push(RowChange {
+                            relation_name: relation.clone(),
+                            change: Change::Deleted {
+                                id: key.clone(),
+                                origin: ChangeOrigin::Local {
+                                    operation_id: None,
+                                    trace_id: None,
+                                },
+                            },
+                        });
+                    }
+                }
+                for (key, row) in next.iter() {
+                    if prev.get(key) != Some(row) {
+                        items.push(created(row.clone(), &relation));
+                    }
+                }
+
+                prev = next;
+                if items.is_empty() {
+                    continue;
+                }
+                seq += 1;
+                if tx
+                    .send(make_batch(items, &relation, seq, &disclosure))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+
+        tokio_stream::wrappers::ReceiverStream::new(rx)
+    }
+
     /// Create a RowChangeStream that emits initial rows as the first `Created`
     /// batch, then forwards CDC updates from the underlying stream.
     fn prepend_initial_data(
@@ -695,6 +963,7 @@ impl BackendEngine {
                     linked_contexts: Vec::new(),
                     sync_token: None,
                     seq: 0,
+                    degraded: None,
                 },
             };
             if tx.send(initial_batch).await.is_err() {
@@ -1610,5 +1879,342 @@ mod tests {
             result.is_err(),
             "missing-block path lookup must Err (fail loud), got fabricated: {result:?}"
         );
+    }
+
+    /// Render-unblock for the Now.org anti-join bug
+    /// (bugfunnel 2026-08-19-ivm-antijoin-matview-silently-empty): a live_query
+    /// whose shape the IVM engine cannot maintain must be served CORRECTLY by
+    /// eager re-execution, not from a silently-empty matview. The matview path
+    /// returns 0 rows here; the eager path must return the 5 unblocked TODOs
+    /// AND react to a mutation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn antijoin_live_query_served_eagerly_yields_rows_and_reacts() {
+        use tokio_stream::StreamExt;
+
+        let engine = create_test_engine().await.unwrap();
+        let table = crate::storage::BLOCK_WRITE_TABLE;
+
+        // Five unblocked, agent-tagged, G1 TODOs (b0..b4) + a DONE dep (b8) that
+        // does NOT block b0.
+        for i in 0..5 {
+            engine
+                .db_handle()
+                .execute(
+                    &format!(
+                        "INSERT INTO {table} (id, parent_id, content, content_type, properties) \
+                         VALUES ('block:b{i}', 'sentinel:no_parent', 'T{i}', 'text', \
+                         '{{\"task_state\":\"TODO\",\"gate\":\"G1\"}}')"
+                    ),
+                    vec![],
+                )
+                .await
+                .unwrap();
+            engine
+                .db_handle()
+                .execute(
+                    &format!(
+                        "INSERT INTO block_tags (block_id, tag) VALUES ('block:b{i}', 'agent')"
+                    ),
+                    vec![],
+                )
+                .await
+                .unwrap();
+        }
+        engine
+            .db_handle()
+            .execute(
+                &format!(
+                    "INSERT INTO {table} (id, parent_id, content, content_type, properties) VALUES \
+                     ('block:b8', 'sentinel:no_parent', 'Done dep', 'text', \
+                     '{{\"task_state\":\"DONE\",\"gate\":\"G2\"}}')"
+                ),
+                vec![],
+            )
+            .await
+            .unwrap();
+        engine
+            .db_handle()
+            .execute(
+                "INSERT INTO block_requires (block_id, required_id) VALUES ('block:b0', 'block:b8')",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let sql = "SELECT b.* FROM block b WHERE \
+            json_extract(b.properties,'$.task_state') = 'TODO' AND \
+            json_extract(b.properties,'$.gate') = 'G1' AND \
+            NOT EXISTS (SELECT 1 FROM block_requires br JOIN block bl ON bl.id = br.required_id \
+                WHERE br.block_id = b.id AND COALESCE(json_extract(bl.properties,'$.task_state'),'') != 'DONE') AND \
+            (EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'agent') \
+             OR NOT EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'human-only'))";
+
+        let mut stream = engine
+            .query_and_watch(sql.to_string(), HashMap::new(), None)
+            .await
+            .expect("watch anti-join query");
+
+        // First batch is the eager initial snapshot: the 5 unblocked TODOs.
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("initial batch within 5s")
+            .expect("stream yields an initial batch");
+        let created = first
+            .inner
+            .items
+            .iter()
+            .filter(|c| matches!(c.change, holon_api::streaming::Change::Created { .. }))
+            .count();
+        assert_eq!(
+            created, 5,
+            "eager initial snapshot must serve the 5 unblocked TODOs (matview serves 0)"
+        );
+        // The disclosure travels with the stream so the render discloses the
+        // degraded serving mode.
+        assert!(
+            first
+                .metadata
+                .degraded
+                .as_deref()
+                .is_some_and(|d| d.contains("re-execution")),
+            "eager batch must carry the degraded disclosure; got {:?}",
+            first.metadata.degraded
+        );
+
+        // React to a mutation: block b1 by requiring an unfinished task -> the
+        // eager re-execution must emit a Deleted for b1.
+        engine
+            .db_handle()
+            .execute(
+                &format!(
+                    "INSERT INTO {table} (id, parent_id, content, content_type, properties) VALUES \
+                     ('block:b7', 'sentinel:no_parent', 'Open dep', 'text', \
+                     '{{\"task_state\":\"TODO\",\"gate\":\"G2\"}}')"
+                ),
+                vec![],
+            )
+            .await
+            .unwrap();
+        engine
+            .db_handle()
+            .execute(
+                "INSERT INTO block_requires (block_id, required_id) VALUES ('block:b1', 'block:b7')",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let mut saw_delete_b1 = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_secs(1), stream.next()).await {
+                Ok(Some(batch)) => {
+                    for change in &batch.inner.items {
+                        if let holon_api::streaming::Change::Deleted { id, .. } = &change.change
+                            && id.contains("b1")
+                        {
+                            saw_delete_b1 = true;
+                        }
+                    }
+                    if saw_delete_b1 {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(
+            saw_delete_b1,
+            "eager re-execution must retract b1 once it becomes blocked"
+        );
+    }
+
+    /// The eager BACKSTOP: a shape the routing predicate thinks is maintainable
+    /// (no subquery node) but the engine REFUSES PERMANENTLY at matview CREATE
+    /// (`CASE` → "Cannot convert LogicalExpr") must still be served by eager
+    /// re-execution WITH a disclosure — never a wedged/error widget. Two
+    /// classifiers (parser + engine), defense-in-depth.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn permanent_matview_refusal_falls_back_to_eager_with_disclosure() {
+        use tokio_stream::StreamExt;
+
+        let engine = create_test_engine().await.unwrap();
+        let table = crate::storage::BLOCK_WRITE_TABLE;
+        engine
+            .db_handle()
+            .execute(
+                &format!(
+                    "INSERT INTO {table} (id, parent_id, content, content_type, properties) VALUES \
+                     ('block:c0', 'sentinel:no_parent', 'C0', 'text', '{{\"task_state\":\"TODO\"}}')"
+                ),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // `CASE` has no Exists/InSubquery node, so `sql_ivm_maintainable` returns
+        // true and the matview path is taken — where the fork's IVM planner
+        // refuses `CASE` at DDL. The backstop must catch that and serve eager.
+        assert!(
+            holon_turso::matview_manager::sql_ivm_maintainable(
+                "SELECT b.id, CASE WHEN json_extract(b.properties,'$.task_state')='TODO' THEN 1 \
+                 ELSE 0 END AS flag FROM block b"
+            ),
+            "sanity: the predicate does NOT flag CASE (only the engine refuses it) — that is why \
+             the backstop exists"
+        );
+
+        let sql = "SELECT b.id, CASE WHEN json_extract(b.properties,'$.task_state')='TODO' THEN 1 \
+                   ELSE 0 END AS flag FROM block b";
+        let mut stream = engine
+            .query_and_watch(sql.to_string(), HashMap::new(), None)
+            .await
+            .expect("watch_query must NOT error on a permanent CREATE refusal — it serves eager");
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("initial batch within 5s")
+            .expect("stream yields an initial batch");
+        let created = first
+            .inner
+            .items
+            .iter()
+            .filter(|c| matches!(c.change, holon_api::streaming::Change::Created { .. }))
+            .count();
+        assert_eq!(
+            created, 1,
+            "eager backstop must serve the row the matview could not"
+        );
+        assert!(
+            first
+                .metadata
+                .degraded
+                .as_deref()
+                .is_some_and(|d| d.contains("materialized view") && d.contains("Cannot convert")),
+            "backstop disclosure must carry the engine's own refusal text; got {:?}",
+            first.metadata.degraded
+        );
+    }
+
+    /// Fork-regression GUARD for the `LEFT JOIN … IS NULL` anti-join. The
+    /// routing predicate keeps this shape on the matview path (no `Exists`/
+    /// `InSubquery` node), so it is served by the IVM matview — which the turso
+    /// populate fix (`c6cfab7d`, "matview-antijoin-populate-fix") makes
+    /// CORRECT. On the pre-fix pin `54f3cc5e` this over-served (direct=4,
+    /// matview=5, undisclosed); measured 4==4 on `c6cfab7d`. This test
+    /// guards the fork against regressing that fix: it exercises the REAL
+    /// `block` matview through `query_and_watch` (the differential PBT's
+    /// simplified harness did NOT reproduce the divergence — only the prod
+    /// matview does).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn left_join_isnull_matview_matches_fresh_after_populate_fix() {
+        use tokio_stream::StreamExt;
+        let engine = create_test_engine().await.unwrap();
+        let table = crate::storage::BLOCK_WRITE_TABLE;
+        for i in 0..5 {
+            engine
+                .db_handle()
+                .execute(
+                    &format!(
+                        "INSERT INTO {table} (id, parent_id, content, content_type) VALUES \
+                         ('block:lj{i}', 'sentinel:no_parent', 'L{i}', 'text')"
+                    ),
+                    vec![],
+                )
+                .await
+                .unwrap();
+        }
+        // lj0 has a requires edge → EXCLUDED by `r.block_id IS NULL` (4 remain).
+        engine
+            .db_handle()
+            .execute(
+                "INSERT INTO block_requires (block_id, required_id) VALUES ('block:lj0', 'block:lj1')",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let sql = "SELECT b.id FROM block b LEFT JOIN block_requires r ON r.block_id = b.id WHERE \
+                   r.block_id IS NULL AND b.id LIKE 'block:lj%'";
+        let direct = engine
+            .db_handle()
+            .query(sql, HashMap::new())
+            .await
+            .unwrap()
+            .len();
+        let mut stream = engine
+            .query_and_watch(sql.to_string(), HashMap::new(), None)
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("initial batch")
+            .expect("a batch");
+        let served = first
+            .inner
+            .items
+            .iter()
+            .filter(|c| matches!(c.change, holon_api::streaming::Change::Created { .. }))
+            .count();
+        assert_eq!(
+            served, direct,
+            "LEFT JOIN…IS NULL matview must match fresh (regressed pre-c6cfab7d: served 5 vs 4)"
+        );
+        // It stays maintained on the matview path (no degraded disclosure).
+        assert_eq!(
+            first.metadata.degraded, None,
+            "a maintainable shape must NOT be disclosed as degraded"
+        );
+    }
+
+    #[test]
+    fn permanent_vs_transient_matview_error_classifier() {
+        // PERMANENT (→ eager backstop). Includes the ACTUAL text measured today
+        // on c6cfab7d for a correlated scalar subquery in the SELECT list — the
+        // one of the three "not-maintainable" shapes the backstop serves
+        // end-to-end (measured: eager + disclosure). The others are R3-era
+        // strings kept because they may return once the transform bugs below are
+        // fixed and the engine's clean refusal surfaces.
+        for permanent in [
+            "matview 'watch_view_x' could not be created: Failed to execute DDL: Parse error: \
+             Cannot convert LogicalExpr to AST Expr: Case { … }",
+            // measured today (SCALAR_SUBQ) — caught, served eager:
+            "Correlated scalar subqueries in materialized view SELECT lists are not yet supported \
+             by the IVM compiler",
+            "INTERSECT and EXCEPT not yet supported in logical plans",
+            "Failed to prepare query: Parse error: no such column: x.id",
+        ] {
+            assert!(
+                BackendEngine::is_permanent_matview_conversion_error(&anyhow::anyhow!(
+                    "{permanent}"
+                )),
+                "must be PERMANENT (eager backstop): {permanent}"
+            );
+        }
+        // TRANSIENT (→ propagate, watcher retries): a dependency not built yet.
+        // The last two are the ACTUAL errors measured today for EXCEPT and a
+        // derived table — they are indistinguishable from a real transient error
+        // (SQLite syntax / missing table), so the classifier CANNOT safely route
+        // them eager. They therefore WEDGE — but the root cause is a pair of
+        // pre-existing holon SQL-transform bugs (EXCEPT → invalid `EXCEPT ALL`;
+        // the `_change_origin` transform leaking a derived table's inner alias),
+        // triaged OPEN in bugfunnel 2026-08-19-except-transform-emits-except-all
+        // and 2026-08-19-change-origin-transform-leaks-derived-alias. Both paths
+        // (matview AND eager) hit the mangled SQL, so widening the classifier
+        // would not rescue them — the fix is the transforms.
+        for transient in [
+            "no such table: block_tags_agg",
+            "DDL timed out after 30s waiting for dependencies",
+            "database is locked",
+            "Database schema changed",
+            "Failed to execute DDL: near \"ALL\": syntax error",
+            "Failed to prepare query: Parse error: no such table: b",
+        ] {
+            assert!(
+                !BackendEngine::is_permanent_matview_conversion_error(&anyhow::anyhow!(
+                    "{transient}"
+                )),
+                "must be TRANSIENT (retry preserved): {transient}"
+            );
+        }
     }
 }

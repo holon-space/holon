@@ -94,7 +94,7 @@ web-time = "1"
 holon-block-roundtrip-testing.workspace = true
 holon-engine = { path = "../holon-engine" }
 holon-filesystem.workspace = true
-holon-loro.workspace = true
+holon-loro = { workspace = true, features = ["test-helpers"] }
 # dev-only cycle: holon-loro-wiring depends on holon. Cargo allows this for
 # dev-dependencies, and holon's Loro-backed tests need the wiring it moved to.
 holon-loro-wiring = { workspace = true, features = ["testing"] }

@@ -1955,6 +1955,7 @@ impl TursoBackend {
             // Filled in by `set_change_callback` in `new_with_options` after
             // `process_cdc_event` returns — process-wide monotonic counter.
             seq: 0,
+            degraded: None,
         };
 
         BatchWithMetadata {

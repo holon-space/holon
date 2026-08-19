@@ -348,6 +348,7 @@ async fn run_watch_loop(
                     linked_contexts: Vec::new(),
                     sync_token: None,
                     seq,
+                    degraded: None,
                 },
             };
             if output_tx
@@ -457,7 +458,7 @@ fn derive_render_expr(
 /// this naturally.
 ///
 /// A snapshot without a root-layout block renders as a leaf (mirrors the
-/// Turso arm's disclosed fallback); a broken pointer/perspective fails loud
+/// Turso arm's disclosed degraded arm); a broken pointer/perspective fails loud
 /// as a red `error(...)` node.
 fn derive_root_slot_expr(
     snapshot: &holon_core::storage::BlockSnapshot,
@@ -879,7 +880,7 @@ mod tests {
     }
 
     /// A dangling pointer fails loud as a visible error node, never a silent
-    /// fallback to the default layout.
+    /// degrade to the default layout.
     #[test]
     fn root_slot_dangling_pointer_renders_error_node() {
         let root_uri = holon_api::root_layout_block_uri();

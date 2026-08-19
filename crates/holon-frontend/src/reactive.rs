@@ -1148,6 +1148,13 @@ pub struct ReactiveRenderedRows {
     /// watcher spawns; a block watcher (`watch_ui`) leaves it `None` so
     /// outline children keep their fractional-index order.
     ordering_spec: std::sync::RwLock<Option<String>>,
+    /// Set when this query's shape is NOT IVM-maintainable and is therefore
+    /// served by eager re-execution rather than an incrementally-maintained
+    /// matview. Unlike [`Self::error`] it COEXISTS with rows (the data is
+    /// correct, only the maintenance path is degraded), so the render shows the
+    /// rows AND discloses the degraded mode. Observable so the disclosure is
+    /// testable headlessly and paintable as a banner.
+    degraded: Mutable<Option<String>>,
 }
 
 impl Default for ReactiveRenderedRows {
@@ -1172,7 +1179,25 @@ impl ReactiveRenderedRows {
             first_data_seen: std::sync::atomic::AtomicBool::new(false),
             data_ready: tokio::sync::Notify::new(),
             ordering_spec: std::sync::RwLock::new(None),
+            degraded: Mutable::new(None),
         }
+    }
+
+    /// Disclose that this query is served by eager re-execution, not an
+    /// incrementally-maintained matview (its shape is not IVM-maintainable).
+    /// The note coexists with the rows.
+    pub fn set_degraded(&self, note: impl Into<String>) {
+        self.degraded.set(Some(note.into()));
+    }
+
+    /// The degraded-mode disclosure, if this query is served eagerly.
+    pub fn degraded(&self) -> Option<String> {
+        self.degraded.get_cloned()
+    }
+
+    /// Reactive signal of the degraded-mode disclosure, for a banner to render.
+    pub fn degraded_signal(&self) -> impl Signal<Item = Option<String>> {
+        self.degraded.signal_cloned()
     }
 
     /// Declare the row order this query's `ORDER BY` asks for. Collections
@@ -1435,14 +1460,16 @@ impl ReactiveRenderedRows {
     {
         let expr_signal = self.render_expr.signal_cloned();
         let data_signal = self.rows.data_signal();
+        let degraded_signal = self.degraded.signal_cloned();
 
         map_ref! {
             let expr = expr_signal,
             let entries = data_signal,
+            let degraded = degraded_signal,
             let _ui_gen = ui_gen_signal
             => {
                 let rows: Vec<Arc<DataRow>> = entries.iter().map(|(_, v)| Arc::clone(v)).collect();
-                interpret_fn(expr, &rows)
+                annotate_degraded(interpret_fn(expr, &rows), degraded)
             }
         }
     }
@@ -1464,14 +1491,20 @@ impl ReactiveRenderedRows {
     {
         let rows = &self.rows;
         let data = rows.data.clone();
-        self.render_expr.signal_cloned().map(move |expr| {
-            let rows: Vec<Arc<DataRow>> = data
-                .lock_ref()
-                .values()
-                .map(|cell| cell.get_cloned())
-                .collect();
-            interpret_fn(&expr, &rows)
-        })
+        let expr_signal = self.render_expr.signal_cloned();
+        let degraded_signal = self.degraded.signal_cloned();
+        map_ref! {
+            let expr = expr_signal,
+            let degraded = degraded_signal
+            => {
+                let rows: Vec<Arc<DataRow>> = data
+                    .lock_ref()
+                    .values()
+                    .map(|cell| cell.get_cloned())
+                    .collect();
+                annotate_degraded(interpret_fn(expr, &rows), degraded)
+            }
+        }
     }
 
     /// Like `structural_signal` but also re-interprets when `ui_gen_signal`
@@ -1490,9 +1523,11 @@ impl ReactiveRenderedRows {
     {
         let expr_signal = self.render_expr.signal_cloned();
         let data = self.rows.data.clone();
+        let degraded_signal = self.degraded.signal_cloned();
 
         map_ref! {
             let expr = expr_signal,
+            let degraded = degraded_signal,
             let _ui_gen = ui_gen_signal
             => {
                 let rows: Vec<Arc<DataRow>> = data
@@ -1501,10 +1536,26 @@ impl ReactiveRenderedRows {
                     .map(|cell| cell.get_cloned())
                     .collect();
                 INTERPRETATION_PASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                interpret_fn(expr, &rows)
+                annotate_degraded(interpret_fn(expr, &rows), degraded)
             }
         }
     }
+}
+
+/// Stamp the degraded-mode disclosure onto a freshly-interpreted view model so
+/// it surfaces in the rendered tree (and thus `describe_ui` and the platform
+/// renderers) instead of dying as an unread field. Non-destructive: it adds a
+/// `degraded_disclosure` prop to the node and never restructures or hides the
+/// content, so a renderer that does not yet paint a banner still shows correct
+/// rows. `None` leaves the view model untouched.
+fn annotate_degraded(vm: ReactiveViewModel, degraded: &Option<String>) -> ReactiveViewModel {
+    if let Some(note) = degraded {
+        vm.props.lock_mut().insert(
+            "degraded_disclosure".to_string(),
+            holon_api::Value::String(note.clone()),
+        );
+    }
+    vm
 }
 
 /// Re-interpretation passes driven by a ui-state generation bump.
@@ -3223,6 +3274,13 @@ impl ReactiveEngine {
         // the return — the caller builds the collection synchronously after, and
         // the flat driver latches `sort_key.is_some()` at construction.
         results.set_ordering_spec(self.query_ordering_spec(&query, lang));
+        // A query whose shape the IVM engine cannot maintain is served by eager
+        // re-execution (decided in the backend, either up-front by shape or as a
+        // backstop when a matview CREATE refuses). The backend stamps the
+        // disclosure onto the batch metadata; the consumer loop below lifts it
+        // onto `results.set_degraded` so the render shows a degraded banner. One
+        // source of truth (the backend), so disclosure never disagrees with what
+        // is actually served.
         // The query prefix classifies a watcher offline (sidebar-shaped vs
         // main-panel-shaped SQL) when reading a memory profile.
         tracing::debug!(
@@ -3251,6 +3309,15 @@ impl ReactiveEngine {
                             }
                             let mut rx = stream.into_inner();
                             while let Some(batch) = rx.recv().await {
+                                // Lift a backend degraded-mode disclosure (eager
+                                // re-execution) onto the reactive state so the
+                                // render surfaces it. Idempotent: the backend
+                                // stamps it on every eager batch.
+                                if let Some(note) = &batch.metadata.degraded {
+                                    if reactive.degraded().as_deref() != Some(note.as_str()) {
+                                        reactive.set_degraded(note.clone());
+                                    }
+                                }
                                 for enriched_change in batch.inner.items {
                                     reactive.apply_change(enriched_change, 1);
                                     // Publish consumer progress so a settle can
@@ -4968,6 +5035,7 @@ mod tests {
                         linked_contexts: Vec::new(),
                         sync_token: None,
                         seq: 0,
+                        degraded: None,
                     },
                 },
                 generation,
@@ -5020,6 +5088,100 @@ mod tests {
         assert_eq!(ids(&rqr), vec!["block:b", "block:c", "block:d"]);
     }
 
+    /// The degraded-mode disclosure (render-unblock for the Now.org anti-join
+    /// bug) must COEXIST with rows — unlike `error`, which replaces content.
+    /// This is the headless-observable surface a live_query served by eager
+    /// re-execution sets so the render can show rows AND a banner.
+    #[test]
+    fn degraded_disclosure_coexists_with_rows_and_is_observable() {
+        use holon_api::streaming::Batch;
+        use holon_api::streaming::BatchMetadata;
+        use holon_api::streaming::Change;
+        use holon_api::streaming::ChangeOrigin;
+        use holon_api::streaming::UiEvent;
+        use holon_api::streaming::WithMetadata;
+
+        let rqr = ReactiveRenderedRows::new();
+        assert_eq!(rqr.degraded(), None, "a fresh query is not degraded");
+
+        // Rows arrive (as they do on the eager path's initial snapshot).
+        rqr.apply_event(UiEvent::Structure {
+            render_expr: RenderExpr::Literal {
+                value: Value::String("expr".into()),
+            },
+            candidates: Vec::new(),
+            generation: 1,
+        });
+        rqr.apply_event(UiEvent::Data {
+            batch: WithMetadata {
+                inner: Batch {
+                    items: vec![Change::Created {
+                        data: HashMap::from([("id".to_string(), Value::String("block:r0".into()))]),
+                        origin: ChangeOrigin::Local {
+                            operation_id: None,
+                            trace_id: None,
+                        },
+                    }],
+                },
+                metadata: BatchMetadata {
+                    relation_name: "t".into(),
+                    trace_context: None,
+                    linked_contexts: Vec::new(),
+                    sync_token: None,
+                    seq: 0,
+                    degraded: None,
+                },
+            },
+            generation: 1,
+        });
+
+        rqr.set_degraded("served by re-execution (correlated NOT EXISTS)");
+
+        let (_, rows) = rqr.snapshot();
+        assert_eq!(rows.len(), 1, "degraded mode must not drop the served rows");
+        assert!(
+            rqr.degraded().is_some_and(|d| d.contains("re-execution")),
+            "the degraded disclosure must be observable alongside the rows"
+        );
+        assert_eq!(
+            rqr.error(),
+            None,
+            "degraded mode is NOT an error state — rows are correct, only maintenance is degraded"
+        );
+
+        // The disclosure must REACH THE RENDERED TREE — the emitted view model
+        // (what `describe_ui` and the platform renderers read) carries a
+        // `degraded_disclosure` prop. Without this the field is a dead Mutable.
+        use futures::StreamExt;
+        use futures_signals::signal::SignalExt;
+        let interpret = Arc::new(|_: &RenderExpr, _: &[Arc<DataRow>]| {
+            ReactiveViewModel::from_widget("table", std::collections::HashMap::new())
+        });
+        let vm = futures::executor::block_on(rqr.reactive_signal(interpret).to_stream().next())
+            .expect("reactive signal emits a view model");
+        let note = vm
+            .props
+            .lock_ref()
+            .get("degraded_disclosure")
+            .and_then(|v| v.as_string().map(str::to_string));
+        assert!(
+            note.as_deref().is_some_and(|d| d.contains("re-execution")),
+            "emitted view model must carry the degraded_disclosure prop; got {note:?}"
+        );
+
+        // A non-degraded query's view model must NOT carry the prop.
+        let plain = ReactiveRenderedRows::new();
+        let interpret2 = Arc::new(|_: &RenderExpr, _: &[Arc<DataRow>]| {
+            ReactiveViewModel::from_widget("table", std::collections::HashMap::new())
+        });
+        let vm2 = futures::executor::block_on(plain.reactive_signal(interpret2).to_stream().next())
+            .expect("reactive signal emits");
+        assert!(
+            !vm2.props.lock_ref().contains_key("degraded_disclosure"),
+            "a maintainable query must not be annotated as degraded"
+        );
+    }
+
     /// Regression (dogfood 2026-07-10, crash chain: focus `block:journals` →
     /// render the journals day-list collection): a Created row that carries NO
     /// entity-shaped `id` (the day-list `SELECT date('now') AS name` row
@@ -5069,6 +5231,7 @@ mod tests {
                     linked_contexts: Vec::new(),
                     sync_token: None,
                     seq: 0,
+                    degraded: None,
                 },
             },
             generation: 1,
@@ -5942,6 +6105,7 @@ mod tests {
                     linked_contexts: Vec::new(),
                     sync_token: None,
                     seq: 0,
+                    degraded: None,
                 },
             },
             generation: 1,
@@ -5978,6 +6142,7 @@ mod tests {
                     linked_contexts: Vec::new(),
                     sync_token: None,
                     seq: 0,
+                    degraded: None,
                 },
             },
             generation: 1,
@@ -6013,6 +6178,7 @@ mod tests {
                     linked_contexts: Vec::new(),
                     sync_token: None,
                     seq: 0,
+                    degraded: None,
                 },
             },
             generation: 1,
@@ -6065,6 +6231,7 @@ mod tests {
                     linked_contexts: Vec::new(),
                     sync_token: None,
                     seq: 0,
+                    degraded: None,
                 },
             },
             generation: 1,
