@@ -669,33 +669,43 @@ fn emit_section_children(
                 "prologue",
                 "epilogue",
             ];
+            // Resolve the `:REQUIRES:`/`:BLOCKED-BY:` group as a UNIT before the
+            // header_args map is consumed below, so one writer owns the
+            // canonical key (symmetric with the headline path). header_args is a
+            // HashMap, so its iteration order is not the authored order — sort
+            // the group by key for a DETERMINISTIC carried value: a write ->
+            // read -> write fixed point must not depend on map iteration order.
+            let mut dep_entries: Vec<(String, String)> = source_block
+                .header_args
+                .iter()
+                .filter(|(k, _)| is_dependency_key(k))
+                .filter_map(|(k, v)| v.as_string().map(|s| (k.clone(), s.to_string())))
+                .collect();
+            dep_entries.sort();
+            let dep_refs: Vec<(&str, &str)> = dep_entries
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            match resolve_dependency_edge(&dep_refs, src_block.id.as_str(), template)? {
+                Some(DependencyEdge::Typed(ids)) => {
+                    for uri in ids {
+                        if !src_block.requires.contains(&uri) {
+                            src_block.requires.push(uri);
+                        }
+                    }
+                }
+                Some(DependencyEdge::CarriedSlot(merged)) => {
+                    src_block.set_property("REQUIRES", holon_api::Value::String(merged));
+                }
+                None => {}
+            }
+
             let mut standard_args = HashMap::new();
             for (k, v) in source_block.header_args {
                 if KNOWN_HEADER_ARGS.contains(&k.as_str()) {
                     standard_args.insert(k, v);
-                } else if k.eq_ignore_ascii_case("REQUIRES") || k.eq_ignore_ascii_case("BLOCKED-BY")
-                {
-                    // `:BLOCKED-BY <bare>` (canonical) / `:REQUIRES <bare>`
-                    // (legacy alias) is an edge-typed header arg emitted by
-                    // `source_block_to_org` via `drawer_properties()`. UNION
-                    // both spellings into the typed `block.requires` edge field
-                    // (the `block_requires` junction) so it round-trips as an
-                    // edge, symmetric with the headline path above.
-                    if let Some(s) = v.as_string() {
-                        let targets = parse_edge_targets(s, &k, src_block.id.as_str(), template)?;
-                        match edge_ids(&targets) {
-                            Some(ids) => {
-                                for uri in ids {
-                                    if !src_block.requires.contains(&uri) {
-                                        src_block.requires.push(uri);
-                                    }
-                                }
-                            }
-                            None => {
-                                src_block.set_property(&k, holon_api::Value::String(s.to_string()))
-                            }
-                        }
-                    }
+                } else if is_dependency_key(&k) {
+                    // Resolved as a group above (canonical `REQUIRES`).
                 } else if k.eq_ignore_ascii_case("contributes-to") {
                     if let Some(s) = v.as_string() {
                         let targets = parse_edge_targets(s, &k, src_block.id.as_str(), template)?;
@@ -922,28 +932,34 @@ fn process_headlines(
         // promoted to `block:` URIs at the boundary so block_requires.required_id
         // matches block.id (per docs/Reference/ORG_SYNTAX.md). Anything else stays as
         // a flat string property on block.properties.
-        for (key, value) in string_properties.iter() {
-            if key.eq_ignore_ascii_case("REQUIRES") || key.eq_ignore_ascii_case("BLOCKED-BY") {
-                // `:REQUIRES:` and `:BLOCKED-BY:` are two org-drawer spellings of
-                // the SAME dependency edge (the `block_requires` junction — see
-                // block_requires.sql). Accept both on input and UNION them into
-                // `block.requires`; the renderer emits the canonical
-                // `:REQUIRES:` (ruling 2026-07-16; `:BLOCKED-BY:` converges).
-                let targets = parse_edge_targets(value, key, id.as_str(), scope)?;
-                match edge_ids(&targets) {
-                    Some(ids) => {
-                        for uri in ids {
-                            if !block.requires.contains(&uri) {
-                                block.requires.push(uri);
-                            }
-                        }
+        // `:REQUIRES:` and `:BLOCKED-BY:` are two spellings of the SAME
+        // `block_requires` edge (block_requires.sql). Resolve the whole group as
+        // a UNIT so exactly one writer owns the canonical `REQUIRES` drawer key:
+        // an all-real group becomes the typed edge, a group holding any slot is
+        // carried verbatim (authored order). Handled here, skipped in the loop.
+        let dep_entries: Vec<(&str, &str)> = string_properties
+            .iter()
+            .filter(|(k, _)| is_dependency_key(k))
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        match resolve_dependency_edge(&dep_entries, id.as_str(), scope)? {
+            Some(DependencyEdge::Typed(ids)) => {
+                for uri in ids {
+                    if !block.requires.contains(&uri) {
+                        block.requires.push(uri);
                     }
-                    // Slot-bearing: carry the authored text through as a plain
-                    // drawer property. This branch OWNS the key — the loop's
-                    // property fallthrough is an `else if`, so failing to store
-                    // it here loses the slot on write-back.
-                    None => block.set_property(key, holon_api::Value::String(value.to_string())),
                 }
+            }
+            Some(DependencyEdge::CarriedSlot(merged)) => {
+                block.set_property("REQUIRES", holon_api::Value::String(merged));
+            }
+            None => {}
+        }
+
+        for (key, value) in string_properties.iter() {
+            if is_dependency_key(key) {
+                // Resolved as a group above (canonical `REQUIRES`).
+                continue;
             } else if key.eq_ignore_ascii_case("contributes-to") {
                 // `:contributes-to:` is the Compass CONTRIBUTION edge — same
                 // bare-ID grammar as `:REQUIRES:`, routed to the
@@ -1501,6 +1517,65 @@ fn edge_ids(targets: &[EdgeTarget]) -> Option<Vec<EntityUri>> {
             })
             .collect(),
     )
+}
+
+/// The two org-drawer spellings of the `block_requires` dependency edge. Both
+/// name the SAME junction, so a block's `:REQUIRES:` and `:BLOCKED-BY:` values
+/// are resolved together by [`resolve_dependency_edge`] rather than key-by-key.
+fn is_dependency_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("REQUIRES") || key.eq_ignore_ascii_case("BLOCKED-BY")
+}
+
+/// How a block's whole `:REQUIRES:`/`:BLOCKED-BY:` group resolves.
+enum DependencyEdge {
+    /// Every authored value named real block ids — union into `block.requires`.
+    Typed(Vec<EntityUri>),
+    /// At least one value was slot-bearing, so the group cannot be a typed edge
+    /// (a slot has no junction row). Carry it verbatim under the canonical
+    /// `REQUIRES` key instead.
+    CarriedSlot(String),
+}
+
+/// Resolve the `:REQUIRES:`/`:BLOCKED-BY:` group of one block from its authored
+/// `(key, value)` entries, given in the order the carried form must render.
+///
+/// The two spellings are one edge, so a slot under one and a real id under the
+/// other are a single mixed dependency list split across two keys — exactly the
+/// `:REQUIRES: {{x}} real-dep` shape that already round-trips verbatim. Lifting
+/// only the real side into a typed edge would leave TWO writers over the
+/// canonical `REQUIRES` drawer key (the edge writer and the carried slot), and
+/// the edge writer silently clobbers the slot on write-back. So a group holding
+/// ANY slot contributes NO typed edge and is carried whole under `REQUIRES`;
+/// only an all-real group becomes the typed edge.
+fn resolve_dependency_edge(
+    entries: &[(&str, &str)],
+    owner: &str,
+    template: Option<&TemplateVars>,
+) -> anyhow::Result<Option<DependencyEdge>> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let mut targets = Vec::new();
+    for (key, value) in entries {
+        targets.extend(parse_edge_targets(value, key, owner, template)?);
+    }
+    if targets.iter().any(|t| matches!(t, EdgeTarget::Slot(_))) {
+        let merged = entries
+            .iter()
+            .map(|(_, v)| *v)
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Ok(Some(DependencyEdge::CarriedSlot(merged)));
+    }
+    let mut ids: Vec<EntityUri> = Vec::new();
+    for target in targets {
+        if let EdgeTarget::Block(uri) = target {
+            if !ids.contains(&uri) {
+                ids.push(uri);
+            }
+        }
+    }
+    Ok(Some(DependencyEdge::Typed(ids)))
 }
 
 /// The template variables declared by `properties` when it marks a template

@@ -31,11 +31,16 @@
 use std::path::Path;
 
 use holon_api::EntityUri;
+use holon_api::block::Block;
 use holon_org_format::OrgRenderer;
 use holon_org_format::parse_org_file;
 
 const ROOT: &str = "/vault";
 const FILE: &str = "/vault/doc.org";
+
+/// A template root that declares `mission`, ready for a slot line plus
+/// `:END:`. Shared by the fixed-point cases below.
+const TEMPLATE_HEAD: &str = "* Problem\n:PROPERTIES:\n:ID: tpl-0\n:TEMPLATE: compass-problem\n:TEMPLATE_VARS: title, mission\n";
 
 fn parse(source: &str) -> anyhow::Result<holon_org_format::ParseResult> {
     parse_org_file(
@@ -323,18 +328,58 @@ fn instantiating_the_shipped_compass_problem_yields_a_real_contributes_to_edge()
         "instantiation must substitute the slot with the bound mission id: {props}"
     );
 
-    // The instance is an ORDINARY block — no `:TEMPLATE:` marker — so the same
-    // drawer value now parses as a real typed edge rather than a slot.
-    let instance_org = "* Onboarding is slow\n:PROPERTIES:\n:ID: \
-                        instance-0\n:contributes-to: the-mission-block\n:END:\n";
-    let reparsed = parse(instance_org).expect("the instance must parse");
-    let instance = reparsed
+    // Now render the PLANNED instance and read it back. The org text comes from
+    // the plan's own params — not a hand-authored literal — so the chain under
+    // test is genuinely asset -> plan -> params -> org -> typed edge.
+    //
+    // The block is assembled field-by-field because the planner emits create-op
+    // PARAMS, and there is no params -> Block deserializer to reuse: the SQL
+    // row deserializer requires edge columns (`requires`, `advice_suppressed`,
+    // …) that a create param map does not carry.
+    let mut instance = Block::new_text(
+        EntityUri::parse("block:instance-0").unwrap(),
+        EntityUri::parse("block:target-page").unwrap(),
+        created
+            .get("content")
+            .and_then(|v| v.as_string())
+            .expect("instance carries content"),
+    );
+    let serde_json::Value::Object(prop_map) = &props else {
+        panic!("instance properties must be a JSON object: {props}");
+    };
+    for (k, v) in prop_map {
+        if let serde_json::Value::String(text) = v {
+            instance.set_property(k.as_str(), holon_api::Value::String(text.clone()));
+        }
+    }
+
+    let mut page = Block::new_text(
+        EntityUri::parse("block:target-page").unwrap(),
+        EntityUri::no_parent(),
+        "Target page",
+    );
+    page.set_page(true);
+    let rendered = OrgRenderer::render_document(
+        &page,
+        std::slice::from_ref(&instance),
+        Path::new(FILE),
+        &page.id,
+    );
+    assert!(
+        rendered.contains(":contributes-to: the-mission-block"),
+        "the rendered instance must carry the substituted id, not a slot:\n{rendered}"
+    );
+
+    // The instance is an ORDINARY block — no `:TEMPLATE:` marker — so that same
+    // drawer value parses back as a real typed edge rather than a slot.
+    let reparsed = parse(&rendered).expect("the rendered instance must parse");
+    let read_back = reparsed
         .blocks
         .iter()
         .find(|b| b.id.id() == "instance-0")
-        .expect("instance block present");
+        .expect("instance block present after the round trip");
     assert_eq!(
-        instance.contributes_to,
+        read_back.contributes_to,
         vec![EntityUri::parse("block:the-mission-block").unwrap()],
         "the instantiated Compass problem must carry a REAL contributes-to edge"
     );
@@ -493,4 +538,293 @@ from x
         rendered.contains("{{dep}}"),
         "the authored src-block `:REQUIRES` slot must survive write-back. Rendered:\n{rendered}"
     );
+}
+
+/// EVERY edge key on EVERY block kind carries a slot through a full
+/// write -> read -> write cycle, byte-identically.
+///
+/// The per-key tests above assert the slot is PRESENT after one render. This
+/// one pins the stronger property the round trip actually needs: rendering the
+/// re-parsed document reproduces the first render exactly, so a template file
+/// on disk is a fixed point rather than something that drifts each time
+/// write-back touches it.
+///
+/// `:BLOCKED-BY:` is included deliberately: it canonicalises onto `:REQUIRES:`
+/// at render, so its slot has to survive a key rename as well as the carrier.
+#[test]
+fn every_edge_key_and_block_kind_reaches_a_slot_preserving_fixed_point() {
+    let cases: [(&str, String); 4] = [
+        (
+            "headline contributes-to",
+            format!("{TEMPLATE_HEAD}:contributes-to: {{{{mission}}}}\n:END:\n"),
+        ),
+        (
+            "headline REQUIRES",
+            format!("{TEMPLATE_HEAD}:REQUIRES: {{{{mission}}}}\n:END:\n"),
+        ),
+        (
+            "headline BLOCKED-BY",
+            format!("{TEMPLATE_HEAD}:BLOCKED-BY: {{{{mission}}}}\n:END:\n"),
+        ),
+        (
+            "source-block BLOCKED-BY header arg",
+            format!(
+                "{TEMPLATE_HEAD}:END:\n#+begin_src prql :id s0 :BLOCKED-BY                  {{{{mission}}}}\nfrom x\n#+end_src\n"
+            ),
+        ),
+    ];
+
+    for (name, source) in cases {
+        let first = parse(&source).unwrap_or_else(|e| panic!("{name}: must parse: {e:#}"));
+        let r1 = OrgRenderer::render_document(
+            &first.document,
+            &first.blocks,
+            Path::new(FILE),
+            &first.document.id,
+        );
+        assert!(
+            r1.contains("{{mission}}"),
+            "{name}: the slot was dropped on the first write-back:\n{r1}"
+        );
+
+        let second = parse(&r1).unwrap_or_else(|e| panic!("{name}: re-parse must succeed: {e:#}"));
+        let r2 = OrgRenderer::render_document(
+            &second.document,
+            &second.blocks,
+            Path::new(FILE),
+            &second.document.id,
+        );
+        assert_eq!(
+            r1, r2,
+            "{name}: write -> read -> write is not a fixed point, so the file drifts on every \
+             sync tick"
+        );
+    }
+}
+
+/// THE CROSS-KEY CLOBBER (verifier probe, 2026-08-19). `:REQUIRES:` and
+/// `:BLOCKED-BY:` are two spellings of the SAME `block_requires` edge, so a
+/// slot under one and a real id under the other are ONE mixed dependency list
+/// split across two keys — semantically identical to `:REQUIRES: {{mission}}
+/// real-dep` in a single value.
+///
+/// The pre-fix parser lifted the real side into `block.requires` AND carried
+/// the slot as a plain `REQUIRES` property. At render both claimed the
+/// canonical `REQUIRES` drawer key, and the typed-edge writer (an unconditional
+/// `insert`) clobbered the carried slot — `{{mission}}` was silently dropped on
+/// the FIRST write-back. A template that can no longer be instantiated,
+/// rewritten to disk without a word of warning.
+///
+/// The fix resolves the whole group as a unit: any slot in it means NO typed
+/// edge and ONE merged verbatim value under `REQUIRES`, authored order kept.
+#[test]
+fn a_cross_key_slot_and_real_id_survive_the_round_trip() {
+    // (label, slot spelling, real spelling, slot-first?) — both drawer spellings
+    // in both orders. The merged carried value is authored order, first line first.
+    let cases: [(&str, &str, &str, bool); 4] = [
+        (
+            "REQUIRES-slot then BLOCKED-BY-real",
+            "REQUIRES",
+            "BLOCKED-BY",
+            true,
+        ),
+        (
+            "BLOCKED-BY-slot then REQUIRES-real",
+            "BLOCKED-BY",
+            "REQUIRES",
+            true,
+        ),
+        (
+            "REQUIRES-real then BLOCKED-BY-slot",
+            "REQUIRES",
+            "BLOCKED-BY",
+            false,
+        ),
+        (
+            "BLOCKED-BY-real then REQUIRES-slot",
+            "BLOCKED-BY",
+            "REQUIRES",
+            false,
+        ),
+    ];
+    for (label, slot_key, real_key, slot_first) in cases {
+        let (first_line, second_line, expected_merged) = if slot_first {
+            (
+                format!(":{slot_key}: {{{{mission}}}}"),
+                format!(":{real_key}: real-dep"),
+                "{{mission}} real-dep",
+            )
+        } else {
+            (
+                format!(":{real_key}: real-dep"),
+                format!(":{slot_key}: {{{{mission}}}}"),
+                "real-dep {{mission}}",
+            )
+        };
+        let source = format!("{TEMPLATE_HEAD}{first_line}\n{second_line}\n:END:\n");
+
+        let first = parse(&source).unwrap_or_else(|e| panic!("{label}: must parse: {e:#}"));
+        let block = first
+            .blocks
+            .iter()
+            .find(|b| b.id.id() == "tpl-0")
+            .expect("template root present");
+        assert!(
+            block.requires.is_empty(),
+            "{label}: a group holding a slot contributes NO typed edge (the slot has no junction \
+             row), got {:?}",
+            block.requires
+        );
+
+        let r1 = OrgRenderer::render_document(
+            &first.document,
+            &first.blocks,
+            Path::new(FILE),
+            &first.document.id,
+        );
+        assert!(
+            r1.contains("{{mission}}"),
+            "{label}: the slot was clobbered by the typed edge on the first write-back:\n{r1}"
+        );
+        assert!(
+            r1.contains("real-dep"),
+            "{label}: the real dependency was dropped on the first write-back:\n{r1}"
+        );
+        assert!(
+            r1.contains(&format!(":REQUIRES: {expected_merged}")),
+            "{label}: the two spellings must merge into one canonical `:REQUIRES:` value in \
+             authored order (expected {expected_merged:?}):\n{r1}"
+        );
+
+        let second = parse(&r1).unwrap_or_else(|e| panic!("{label}: re-parse must succeed: {e:#}"));
+        let r2 = OrgRenderer::render_document(
+            &second.document,
+            &second.blocks,
+            Path::new(FILE),
+            &second.document.id,
+        );
+        assert_eq!(
+            r1, r2,
+            "{label}: write -> read -> write is not a fixed point:\n{r1}\n---\n{r2}"
+        );
+    }
+}
+
+/// The same cross-key clobber on a SOURCE-BLOCK's header args. `header_args` is
+/// a `HashMap`, so authored order is unrecoverable — the carried value is
+/// sorted for determinism, and the pin asserts only that BOTH the slot and the
+/// real id survive and the round trip is a fixed point (no order claim).
+#[test]
+fn a_cross_key_slot_and_real_id_on_a_source_block_survive_the_round_trip() {
+    for (label, line) in [
+        (
+            "REQUIRES slot, BLOCKED-BY real",
+            ":REQUIRES {{mission}} :BLOCKED-BY real-dep",
+        ),
+        (
+            "BLOCKED-BY slot, REQUIRES real",
+            ":BLOCKED-BY {{mission}} :REQUIRES real-dep",
+        ),
+    ] {
+        let source =
+            format!("{TEMPLATE_HEAD}:END:\n#+begin_src prql :id s0 {line}\nfrom x\n#+end_src\n");
+        let first = parse(&source).unwrap_or_else(|e| panic!("{label}: must parse: {e:#}"));
+        let sb = first
+            .blocks
+            .iter()
+            .find(|b| b.id.id() == "s0")
+            .expect("source block present");
+        assert!(
+            sb.requires.is_empty(),
+            "{label}: a group holding a slot contributes NO typed edge, got {:?}",
+            sb.requires
+        );
+
+        let r1 = OrgRenderer::render_document(
+            &first.document,
+            &first.blocks,
+            Path::new(FILE),
+            &first.document.id,
+        );
+        assert!(
+            r1.contains("{{mission}}") && r1.contains("real-dep"),
+            "{label}: slot or real id dropped on first write-back:\n{r1}"
+        );
+
+        let second = parse(&r1).unwrap_or_else(|e| panic!("{label}: re-parse must succeed: {e:#}"));
+        let r2 = OrgRenderer::render_document(
+            &second.document,
+            &second.blocks,
+            Path::new(FILE),
+            &second.document.id,
+        );
+        assert_eq!(
+            r1, r2,
+            "{label}: write -> read -> write is not a fixed point:\n{r1}\n---\n{r2}"
+        );
+    }
+}
+
+/// The single-value mixed list is the reference shape the cross-key fix funnels
+/// into: `:REQUIRES: {{mission}} real-dep` yields NO edge and is carried
+/// verbatim, byte-stable across the round trip.
+#[test]
+fn a_mixed_list_in_one_value_yields_no_edge_and_round_trips() {
+    let source = format!("{TEMPLATE_HEAD}:REQUIRES: {{{{mission}}}} real-dep\n:END:\n");
+    let first = parse(&source).expect("mixed list must parse inside a template");
+    let block = first
+        .blocks
+        .iter()
+        .find(|b| b.id.id() == "tpl-0")
+        .expect("template root present");
+    assert!(
+        block.requires.is_empty(),
+        "a value holding a slot contributes no edge, got {:?}",
+        block.requires
+    );
+
+    let r1 = OrgRenderer::render_document(
+        &first.document,
+        &first.blocks,
+        Path::new(FILE),
+        &first.document.id,
+    );
+    assert!(
+        r1.contains(":REQUIRES: {{mission}} real-dep"),
+        "the mixed list must be carried verbatim:\n{r1}"
+    );
+    let second = parse(&r1).expect("re-parse must succeed");
+    let r2 = OrgRenderer::render_document(
+        &second.document,
+        &second.blocks,
+        Path::new(FILE),
+        &second.document.id,
+    );
+    assert_eq!(r1, r2, "mixed list is not a fixed point:\n{r1}\n---\n{r2}");
+}
+
+/// The slot boundary at the edge tokenizer. A declared slot parses; an
+/// undeclared one, an empty `{{}}`, and an unclosed `{{x}` are each a loud
+/// error, never silently swallowed. (`{{ mission }}` with inner spaces is NOT a
+/// slot: the value tokenizes on whitespace, so it is three slugs — pinned as a
+/// refusal so that stays visible.)
+#[test]
+fn slot_spelling_variants_at_the_edge_boundary() {
+    for (label, value, ok) in [
+        ("declared", "{{mission}}", true),
+        ("undeclared", "{{zzz}}", false),
+        ("empty", "{{}}", false),
+        ("unclosed", "{{mission}", false),
+        ("inner-spaces", "{{ mission }}", false),
+    ] {
+        let source = format!("{TEMPLATE_HEAD}:contributes-to: {value}\n:END:\n");
+        let outcome = parse(&source);
+        assert_eq!(
+            outcome.is_ok(),
+            ok,
+            "{label}: `:contributes-to: {value}` expected {}, got {}",
+            if ok { "OK" } else { "ERR" },
+            if outcome.is_ok() { "OK" } else { "ERR" }
+        );
+    }
 }
