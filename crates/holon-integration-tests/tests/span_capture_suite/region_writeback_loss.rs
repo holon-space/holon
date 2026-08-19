@@ -54,8 +54,14 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
 
 const SYNC_TIMEOUT: Duration = Duration::from_secs(15);
 
-const FRONTENDS_ORG: &str = include_str!("fixtures/region_writeback_loss/Frontends.org");
-const GPUI_ORG: &str = include_str!("fixtures/region_writeback_loss/GPUI.org");
+const FRONTENDS_ORG: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/region_writeback_loss/Frontends.org"
+));
+const GPUI_ORG: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/region_writeback_loss/GPUI.org"
+));
 
 const GPUI_DOC_ID: &str = "d09025cc-3748-404e-ad4d-432fcdc194d5";
 

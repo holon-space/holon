@@ -46,9 +46,18 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
 // LogSeq lays a vault out as journals/YYYY_MM_DD.org + pages/<Title>.org. The
 // fixtures live as real .org files so their exact bytes are the fixture (and to
 // dodge the rustfmt escaped-string hazard).
-const JOURNAL_2026_07_15: &str = include_str!("fixtures/logseq_org_vault/journals/2026_07_15.org");
-const PAGE_PROJECT_ALPHA: &str = include_str!("fixtures/logseq_org_vault/pages/Project Alpha.org");
-const PAGE_PROJECT_BETA: &str = include_str!("fixtures/logseq_org_vault/pages/Project Beta.org");
+const JOURNAL_2026_07_15: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/logseq_org_vault/journals/2026_07_15.org"
+));
+const PAGE_PROJECT_ALPHA: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/logseq_org_vault/pages/Project Alpha.org"
+));
+const PAGE_PROJECT_BETA: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/logseq_org_vault/pages/Project Beta.org"
+));
 
 // Bare ids (block: scheme stripped) of every `:id:`-bearing headline in the
 // fixture vault. Each MUST land in block_raw — parsed == projected.

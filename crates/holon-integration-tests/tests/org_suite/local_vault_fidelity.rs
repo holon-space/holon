@@ -36,7 +36,10 @@ use holon_integration_tests::TestEnvironmentBuilder;
 
 /// The profile the extractor produced for this vault (checked into the repo).
 /// Its `depth.total()` is the extractor's independent block count — the oracle.
-const EXTRACTOR_PROFILE_JSON: &str = include_str!("../profiles/martin-vault-2026-07-23.json");
+const EXTRACTOR_PROFILE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/profiles/martin-vault-2026-07-23.json"
+));
 
 /// Consecutive equal count readings that declare the projection quiescent.
 const STABLE_POLLS_REQUIRED: u32 = 5;

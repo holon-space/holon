@@ -423,6 +423,7 @@ fn a_consolidated_batch_links_every_writer_past_the_first() {
                     linked_contexts: vec![ctx("00f067aa0ba902b8"), ctx("00f067aa0ba902b9")],
                     sync_token: None,
                     seq: 1,
+                    degraded: None,
                 },
             }]),
         );

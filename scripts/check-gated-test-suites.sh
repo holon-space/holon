@@ -49,6 +49,16 @@ for file in "${gated_files[@]}"; do
     pkg=$(grep -m1 -E '^name *= *"' "$manifest" | sed -E 's/^name *= *"([^"]+)".*/\1/')
     stem=$(basename "$file" .rs)
 
+    # A `mod`-based suite (tests/<suite>/main.rs + tests/<suite>/<member>.rs)
+    # compiles to ONE target named after its DIRECTORY, so `--test` must name
+    # the suite while messages still name the member file.
+    rel="${file#*/tests/}"
+    if [ "$rel" = "${rel##*/}" ]; then
+        target="$stem"
+    else
+        target="${rel%%/*}"
+    fi
+
     # Extract the gating feature. Fail loud on any form this guard can't parse
     # (e.g. `all(feature=..., feature=...)`) rather than silently skipping it —
     # an unparsed gate would reintroduce exactly the blind spot this guards.
@@ -87,7 +97,7 @@ for file in "${gated_files[@]}"; do
     fi
 
     # (1) non-empty with its feature?
-    list_out=$(cargo test -p "$pkg" --features "$feat" --test "$stem" -- --list 2>&1)
+    list_out=$(cargo test -p "$pkg" --features "$feat" --test "$target" -- --list 2>&1)
     rc=$?
     if [ "$rc" -ne 0 ]; then
         echo "FAIL: compiling/listing $pkg/$stem with --features $feat exited $rc"
