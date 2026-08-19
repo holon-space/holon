@@ -3,11 +3,11 @@
 //! Pattern: Facade
 //! @c4 uses holon-api "shared value & operation types" "Rust"
 //! @c4 uses holon-core "core datasource traits" "Rust"
-//! @c4 uses holon-engine "Petri-net engine" "Rust"
 //! @c4 uses holon-macros "entity/operation derive macros" "Rust"
 //! @c4 uses holon-turso "Turso storage adapter" "Rust"
 //! @c4 uses holon-loro "Loro CRDT backend & P2P sync" "Rust"
 //! @c4 uses holon-petri "Petri-net task materialization" "Rust"
+//! @c4 uses holon-rules "holon_rule YAML front-end" "Rust"
 //! @c4 uses holon-profiles "entity profile resolution" "Rust"
 //!
 //! Main orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API,

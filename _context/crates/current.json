@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "scan_root": "/Users/martin/Workspaces/pkm/holon/crates",
+  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/lane-crate-split/crates",
   "root": {
     "name": ".",
     "path": ".",
@@ -12,7 +12,7 @@
         "description": "Main orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API, BackendEngine, and DI modules.",
         "pattern": "Facade",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: Facade\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-engine \"Petri-net engine\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-petri \"Petri-net task materialization\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nMain orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API,\nBackendEngine, and DI modules.",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Facade\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-petri \"Petri-net task materialization\" \"Rust\"\n@c4 uses holon-rules \"holon_rule YAML front-end\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nMain orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API,\nBackendEngine, and DI modules.",
         "source_file": "holon/src/lib.rs",
         "layer": "Core",
         "relationships": [
@@ -24,11 +24,6 @@
           {
             "target": "holon-core",
             "label": "core datasource traits",
-            "protocol": "Rust"
-          },
-          {
-            "target": "holon-engine",
-            "label": "Petri-net engine",
             "protocol": "Rust"
           },
           {
@@ -49,6 +44,11 @@
           {
             "target": "holon-petri",
             "label": "Petri-net task materialization",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-rules",
+            "label": "holon_rule YAML front-end",
             "protocol": "Rust"
           },
           {
@@ -988,6 +988,9 @@
                 "name": "expr_parser.rs"
               },
               {
+                "name": "filter.rs"
+              },
+              {
                 "name": "hashmap_value_conversions.rs"
               },
               {
@@ -1191,6 +1194,18 @@
                 "name": "headless_builder_services.rs"
               },
               {
+                "name": "integration_projection.rs"
+              },
+              {
+                "name": "integrations_operations.rs"
+              },
+              {
+                "name": "integrations_section.rs"
+              },
+              {
+                "name": "integrations_settings.rs"
+              },
+              {
                 "name": "lib.rs"
               },
               {
@@ -1236,13 +1251,31 @@
                 "name": "boundary_behavior_correspondence.rs"
               },
               {
+                "name": "doc_membership_page_boundary_below_root.rs"
+              },
+              {
                 "name": "fresh_db_boot_seed_smoke.rs"
+              },
+              {
+                "name": "integration_set_field_op.rs"
+              },
+              {
+                "name": "integration_state_projection.rs"
+              },
+              {
+                "name": "integration_toggle_round_trip.rs"
               },
               {
                 "name": "integrations_section_seed.rs"
               },
               {
+                "name": "integrations_settings_vm.rs"
+              },
+              {
                 "name": "org_store_org_round_trip.rs"
+              },
+              {
+                "name": "platform_capabilities_disclosure.rs"
               },
               {
                 "name": "seed_copy_on_write.rs"
@@ -2033,6 +2066,9 @@
                 "name": "editor_view_model.rs"
               },
               {
+                "name": "expand_toggle.rs"
+              },
+              {
                 "name": "focus_path.rs"
               },
               {
@@ -2060,6 +2096,9 @@
                 "name": "link_segments.rs"
               },
               {
+                "name": "live_block_ancestors.rs"
+              },
+              {
                 "name": "local_edit_epoch.rs"
               },
               {
@@ -2082,6 +2121,9 @@
               },
               {
                 "name": "pbt_caps.rs"
+              },
+              {
+                "name": "platform.rs"
               },
               {
                 "name": "popup_menu.rs"
@@ -2171,6 +2213,9 @@
                 "name": "divider.rs"
               },
               {
+                "name": "drawer_open_state.rs"
+              },
+              {
                 "name": "numeric_column_text.rs"
               },
               {
@@ -2178,6 +2223,9 @@
               },
               {
                 "name": "sidebar_creation_slot.rs"
+              },
+              {
+                "name": "state_toggle_bool_binding.rs"
               },
               {
                 "name": "text_style_kwarg.rs"
@@ -2377,6 +2425,9 @@
                             "name": "displayed_text.rs"
                           },
                           {
+                            "name": "drawer_open_matches_ref.rs"
+                          },
+                          {
                             "name": "editable_text_has_draggable.rs"
                           },
                           {
@@ -2384,6 +2435,9 @@
                           },
                           {
                             "name": "every_page_has_its_own_file.rs"
+                          },
+                          {
+                            "name": "filter_spec_resolves.rs"
                           },
                           {
                             "name": "focus_matches_ref.rs"
@@ -2405,6 +2459,9 @@
                           },
                           {
                             "name": "inline_row_mount_present.rs"
+                          },
+                          {
+                            "name": "journal_feed_viewport_lazy.rs"
                           },
                           {
                             "name": "journal_one_per_day.rs"
@@ -2537,6 +2594,9 @@
                     ],
                     "files": [
                       {
+                        "name": "boundary.rs"
+                      },
+                      {
                         "name": "builder.rs"
                       },
                       {
@@ -2571,6 +2631,12 @@
                       },
                       {
                         "name": "reseed_observer.rs"
+                      },
+                      {
+                        "name": "schedule_point.rs"
+                      },
+                      {
+                        "name": "schedule_signature.rs"
                       },
                       {
                         "name": "seed_primitives.rs"
@@ -2706,6 +2772,9 @@
                             "name": "displayed_text.rs"
                           },
                           {
+                            "name": "drawer_open_matches_ref.rs"
+                          },
+                          {
                             "name": "editable_text_has_draggable.rs"
                           },
                           {
@@ -2713,6 +2782,9 @@
                           },
                           {
                             "name": "every_page_has_its_own_file.rs"
+                          },
+                          {
+                            "name": "filter_spec_resolves.rs"
                           },
                           {
                             "name": "focus_matches_ref.rs"
@@ -2734,6 +2806,9 @@
                           },
                           {
                             "name": "inline_row_mount_present.rs"
+                          },
+                          {
+                            "name": "journal_feed_viewport_lazy.rs"
                           },
                           {
                             "name": "journal_one_per_day.rs"
@@ -3264,6 +3339,9 @@
                     "name": "generators.rs"
                   },
                   {
+                    "name": "hand_authored.rs"
+                  },
+                  {
                     "name": "invariant_mode_override.rs"
                   },
                   {
@@ -3412,6 +3490,15 @@
                 "name": "ui_driver.rs"
               },
               {
+                "name": "web_arm.rs"
+              },
+              {
+                "name": "web_relay_oracle.rs"
+              },
+              {
+                "name": "web_user_driver.rs"
+              },
+              {
                 "name": "widget_state.rs"
               }
             ]
@@ -3520,6 +3607,9 @@
                 "name": "class_one_invariant_classifier.rs"
               },
               {
+                "name": "cold_boot_share_disclosure.rs"
+              },
+              {
                 "name": "convert_block_to_page_materializes_child_file.rs"
               },
               {
@@ -3563,6 +3653,21 @@
               },
               {
                 "name": "idonly_folder_companion_identity_collision.rs"
+              },
+              {
+                "name": "integration_configure_button_visibility.rs"
+              },
+              {
+                "name": "integration_state_boot_population.rs"
+              },
+              {
+                "name": "integration_state_boot_records_status.rs"
+              },
+              {
+                "name": "integration_state_section_refreshes.rs"
+              },
+              {
+                "name": "integrations_section_renders_every_row.rs"
               },
               {
                 "name": "interaction_trace_connectivity.rs"
@@ -3670,6 +3775,9 @@
                 "name": "region_writeback_loss.rs"
               },
               {
+                "name": "schedule_boundary_observables.rs"
+              },
+              {
                 "name": "shape_profile_shrink.rs"
               },
               {
@@ -3740,6 +3848,12 @@
               },
               {
                 "name": "watch_ui.rs"
+              },
+              {
+                "name": "web_arm_keystone.rs"
+              },
+              {
+                "name": "web_arm_spike.rs"
               },
               {
                 "name": "widget_only_headline.rs"
@@ -3906,7 +4020,7 @@
                 "c4_level": "unknown",
                 "description": "Owner-identity key: the durable authority root for sharing (ADR 0028 D1/OQ4).",
                 "pattern_status": "planned",
-                "content": "Owner-identity key: the durable authority root for sharing (ADR 0028\nD1/OQ4).\n\n# Why this is distinct from the device key\n\n`device_key` ([`crate::device_key_store`]) is a *transport/session*\nidentity: it authenticates a QUIC connection and seeds per-share CRDT peer\nids. It is low-value and stored as a plaintext file beside the vault. The\n**owner key** is different: it *signs durable authority objects* — the\ndevice roster (B1) and the crossing/policy log ([`holon_sharing`]'s\n`SigningAuthority`). If it leaks, an attacker can mint fleet membership; if\nit is lost, the owner can no longer enroll devices. It therefore:\n\n- lives in the OS keychain, not a plaintext file ([`keychain`]);\n- has a one-time [`recovery::RecoveryCode`] so a lost founding device is\n  recoverable;\n- is generated **lazily** — on the first share/enrollment, never at first\n  launch (ADR 0028 D1 \"prompt DEFERRED to first sharing/enrollment use\").\n\nRotation is out of scope here and rides the H4 succession-pointer machinery.\n\n# Secret hygiene\n[`OwnerIdentityKey`] has a redacted `Debug`; its seed never leaves this\nmodule except into the keychain. Signatures and public keys are safe to log.",
+                "content": "Owner-identity key: the durable authority root for sharing (ADR 0028\nD1/OQ4).\n\n# Why this is distinct from the device key\n\n`device_key` ([`crate::device_key_store`]) is a *transport/session*\nidentity: it authenticates a QUIC connection and seeds per-share CRDT peer\nids. It is low-value and stored as a plaintext file beside the vault. The\n**owner key** is different: it *signs durable authority objects* — the\ndevice roster (B1) and the crossing/policy log ([`holon_sharing`]'s\n`SigningAuthority`). If it leaks, an attacker can mint fleet membership; if\nit is lost, the owner can no longer enroll devices. It therefore:\n\n- lives in the OS keychain, not a plaintext file ([`holon_secrets`]);\n- has a one-time [`recovery::RecoveryCode`] so a lost founding device is\n  recoverable;\n- is generated **lazily** — on the first share/enrollment, never at first\n  launch (ADR 0028 D1 \"prompt DEFERRED to first sharing/enrollment use\").\n\nRotation is out of scope here and rides the H4 succession-pointer machinery.\n\n# Secret hygiene\n[`OwnerIdentityKey`] has a redacted `Debug`; its seed never leaves this\nmodule except into the keychain. Signatures and public keys are safe to log.",
                 "source_file": "holon-loro/src/owner_identity/mod.rs",
                 "parent": "holon-loro",
                 "files": [
@@ -4460,6 +4574,9 @@
                 "name": "integration_config.rs"
               },
               {
+                "name": "integration_state.rs"
+              },
+              {
                 "name": "lib.rs"
               },
               {
@@ -4493,6 +4610,9 @@
                 "name": "mcp_vtable.rs"
               },
               {
+                "name": "oauth_bootstrap.rs"
+              },
+              {
                 "name": "rest_oauth2.rs"
               },
               {
@@ -4511,13 +4631,22 @@
             "path": "holon-mcp-client/tests",
             "files": [
               {
+                "name": "enablement_cutover.rs"
+              },
+              {
                 "name": "entity_link_scheme_join.rs"
+              },
+              {
+                "name": "integration_state_store.rs"
               },
               {
                 "name": "mcp_fanout.rs"
               },
               {
                 "name": "mcp_fdw_stream.rs"
+              },
+              {
+                "name": "oauth_bootstrap_flow.rs"
               },
               {
                 "name": "rest_oauth2_mock.rs"
@@ -4783,6 +4912,9 @@
                 "name": "get_blocks_flat_order_is_not_document_order.rs"
               },
               {
+                "name": "holon_filter_source_roundtrip.rs"
+              },
+              {
                 "name": "inline_marks_proptest.rs"
               },
               {
@@ -4805,6 +4937,9 @@
               },
               {
                 "name": "source_projection_fixed_point.rs"
+              },
+              {
+                "name": "template_slot_edges.rs"
               },
               {
                 "name": "top_level_source_roundtrip.rs"
@@ -5217,6 +5352,9 @@
                 "name": "invariant_dispatch_smoke.rs"
               },
               {
+                "name": "join_merge_target_bound.rs"
+              },
+              {
                 "name": "widget_snapshot_smoke.rs"
               }
             ]
@@ -5329,6 +5467,71 @@
             "files": [
               {
                 "name": "computed_null_round_trip.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-rules",
+        "path": "holon-rules",
+        "c4_level": "component",
+        "description": "`holon_rule` YAML front-end (ADR 0024 Phase-2/3, plan §7.2) — the single-block rule surface: a guard (`when:` / arc `input:`) **and** its effect (`emit:` / arc `output:`), parsed at the boundary into a closed typed representation ([`HolonRule`]). Mirrors the ADR 0022 discipline (`parse_advice_rule` + typed error enum + newtypes; `deny_unknown_fields` so malformed rules fail loud).",
+        "pattern": "Shared Kernel",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Core\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\nPattern: Shared Kernel\n\n`holon_rule` YAML front-end (ADR 0024 Phase-2/3, plan §7.2) — the\nsingle-block rule surface: a guard (`when:` / arc `input:`) **and** its\neffect (`emit:` / arc `output:`), parsed at the boundary into a closed typed\nrepresentation ([`HolonRule`]). Mirrors the ADR 0022 discipline\n(`parse_advice_rule` + typed error enum + newtypes; `deny_unknown_fields` so\nmalformed rules fail loud).\n\nA `holon_rule` block is valid YAML in the `holon_advice_rule_yaml` family\n(ADR 0024 Amendment: \"Rule blocks get a `holon_rule` source language … Rule\nbodies are valid YAML, with guard expressions as strings parsed by the\nPattern parser\"). Two authoring forms desugar to the *same* [`HolonRule`]:\n\n- **sugar** — top-level `when:` guard string + `emit:` marking delta. The\n  `place:` value carries the placement kind: a bare root (`journals`) is an\n  inline child; `page(journals)` is a page-file child (the emitted block is\n  `Page`-tagged so it materializes into its own `Journals/{today}.org` — ADR\n  0024 §7.2 journal intent; grammar + watcher landed, default seed flip\n  deferred to Fork B B1 companion de-inline): ```yaml name: daily_journal\n  when: 'not block_exists(\"Journals/{today}\")' emit: place: page(journals)\n  name: \"{today}\" ```\n- **canonical arc-array** — explicit read / inhibitor input arcs + output\n  arcs (ADR 0024 \"guards are on arcs\"; `absent: true` = the inhibitor arc, a\n  `type: clock` arc = the read arc that makes the rule clock-driven):\n  ```yaml name: daily_journal input:\n    - bind: c type: clock\n    - bind: j type: journal when: 'block_exists(\"Journals/{today}\")' absent:\n      true\n  output:\n    - emit: place: journals name: \"{today}\"\n  ```\n\n## What is lowered vs deferred (plan §7.2 scope)\n\n- **Guard** — fully lowered to the dual-evaluated [`Guard`] (matching path).\n- **Effect** — the *ratcheted create* emission (`emit: {place, name}`) is\n  lowered to a typed [`Emit`]: a canonical placement + a\n  `{today}`-interpolated name template. The placement is either an inline\n  child (`place: journals`) or a page-file child (`place: page(journals)`,\n  `Place::is_page` true). This is the journal-auto-create shape.\n- **Deferred (documented, not silently dropped):** display placement\n  (`place: display(...)`, the advice/maintained-view side — stays ADR 0022);\n  `consume:` input arcs (delete/move effects); multi-arc (`OutputSlot > 0`)\n  emission. A rule that requests any of these parses its guard but carries\n  no [`Emit`]; the operate watcher surfaces a loud status rather than firing\n  a half-understood effect.",
+        "source_file": "holon-rules/src/lib.rs",
+        "layer": "Core",
+        "relationships": [
+          {
+            "target": "holon-pattern",
+            "label": "guard AST & parser",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-rules/src",
+            "files": [
+              {
+                "name": "lib.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-secrets",
+        "path": "holon-secrets",
+        "c4_level": "unknown",
+        "description": "OS-keychain storage for Holon's secret material.",
+        "pattern_status": "planned",
+        "content": "OS-keychain storage for Holon's secret material.\n\nTwo callers share this seam: the owner-identity seed (ADR 0028 C1/D1) and\nthe OAuth2 credentials an integration sidecar references. A secret filed\nhere is identified by a *service* (fixed per store) and an *account*.\n\n- [`KeychainStore`] — the trait every backend implements.\n- [`platform_keychain`] — the backend for the running platform.\n- [`UnavailableKeychainStore`] — the **fail-loud** stand-in for platforms\n  with no wired backend. Every call returns a clear `Err` naming the\n  platform and the missing precondition; it never silently drops the secret\n  to disk or memory.\n- [`InMemoryKeychainStore`] — a test double (never used in production).\n\nSecrets are opaque `&[u8]` here. Nothing in this crate logs the secret\nmaterial.",
+        "source_file": "holon-secrets/src/lib.rs",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-secrets/src",
+            "files": [
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "mac.rs"
+              },
+              {
+                "name": "non_mac.rs"
               }
             ]
           }
@@ -5656,6 +5859,9 @@
                 "name": "backlinks_section_matview.rs"
               },
               {
+                "name": "cdc_batch_trace_links.rs"
+              },
+              {
                 "name": "chained_matview_cdc_repro.rs"
               },
               {
@@ -5687,6 +5893,9 @@
               },
               {
                 "name": "recursive_cte_page_boundary.rs"
+              },
+              {
+                "name": "recursive_cte_shape_architecture.rs"
               },
               {
                 "name": "schema_source_ddl_lock.rs"

@@ -7,7 +7,6 @@ Container_Boundary(holon_api_code, "holon-api") {
     Component(holon_api__EntityName, "EntityName", "enum", "Typed entity name — the canonical name for a domain entity (e.g., 'block', 'document').")
     Component(holon_api__OperationDescriptor, "OperationDescriptor", "struct", "Complete metadata for an operation")
     Component(holon_api__Operation, "Operation", "struct", "An executable operation with all parameters")
-    Component(holon_api__Value, "Value", "enum", "Value type shaped for flutter_rust_bridge interop. // ALLOW(compatibility): FRB constrains the variant shape")
     Component(holon_api__Change, "Change", "enum", "Change notification event.")
 }
 
@@ -20,7 +19,11 @@ Container_Boundary(holon_core_code, "holon-core") {
 }
 
 Container_Boundary(holon_frontend_code, "holon-frontend") {
-    Component(holon_frontend__ReactiveViewModel, "ReactiveViewModel", "struct", "The ViewModel of Holon's MVVM UI — a persistent reactive node.")
+    Component(holon_frontend__SendState, "SendState", "enum", "The ViewModel of Holon's MVVM UI — a persistent reactive node.")
+}
+
+Container_Boundary(holon_pattern_code, "holon-pattern") {
+    Component(holon_pattern__Value, "Value", "enum", "Value type shaped for flutter_rust_bridge interop. // ALLOW(compatibility): FRB constrains the variant shape")
 }
 
 Container_Boundary(holon_turso_code, "holon-turso") {

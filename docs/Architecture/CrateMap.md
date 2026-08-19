@@ -11,6 +11,7 @@ Library + binary crates under `crates/` (C4 components of the Holon system).
 | Name | C4 | Layer | Pattern | Purpose |
 |------|----|-------|---------|---------|
 | `holon` | component | Core | Facade | Main orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API, BackendEngine, and DI modules. |
+| `holon-advice` | — | — | — | Runtime-definable advice rules (ADR 0022). |
 | `holon-api` | component | Core | Shared Kernel | Shared value types, Operation descriptors, Change/CDC types, and entity conversion traits. No frontend deps. |
 | `holon-app` | component | Composition | Composition Root | DI assembly crate (composition root) — owns every wiring that names concrete backends: Turso/Loro/OrgMode modules, MCP integrations, and `FrontendSession`. |
 | `holon-architecture-tests` | component | Testing | Test Harness | `cargo test` wrapper that shells out to `archlint --all` for a full-repo architecture sweep. |
@@ -23,15 +24,25 @@ Library + binary crates under `crates/` (C4 components of the Holon system).
 | `holon-integration-tests` | component | Testing | Test Harness | Shared test infrastructure for Holon integration tests |
 | `holon-layout-testing` | component | Testing | Test Harness | Shared layout-testing primitives for Holon's property-based UI tests. |
 | `holon-loro` | component | Adapters | Adapter | Loro CRDT document engine and peer-to-peer synchronization. |
+| `holon-loro-testing` | component | Testing | Test Harness | Companion PBT crate for `holon-loro` — the first subsystem to OWN its composed-keystone contributions (co-location Phase 1, plan §5-loro). |
 | `holon-macros` | component | Core | Code Generation | Procedural macros: `#[operations_trait]`, `#[affects(...)]`, and entity derives. |
 | `holon-macros-test` | component | Testing | Test Harness | Macro-expansion tests for `holon-macros`. |
+| `holon-markdown` | — | — | Adapter | `holon-markdown` — read-only (Tier R/O) ingest adapters for foreign vaults: Obsidian-flavored and LogSeq-flavored Markdown, parsed into the SAME `Block` + `MarkSpan` substrate as org (see `docs/Proposals/ForeignVaultCompat-2026-07-12.md`). |
 | `holon-mcp-client` | component | Adapters | Adapter | Reusable MCP client: connects to MCP servers and exposes their tools as `OperationProvider`s. |
+| `holon-mcp-mock` | — | — | — | A configurable mock MCP server that reproduces the challenging behaviours seen in real MCP servers, for E2E-testing holon's generic MCP connector. |
+| `holon-oracles` | — | — | — | Live oracles — keystone PBT invariants shipped into debug builds. |
 | `holon-org-format` | component | Adapters | Adapter | Org-mode format: pure parsing and rendering. |
 | `holon-orgmode` | component | Adapters | Adapter | Org-mode disk I/O and sync layer. |
+| `holon-pattern` | component | Core | Shared Kernel | The dual-evaluated guard `Pattern` AST (ADR 0024 / ADR 0031) and the dynamic `Value` it embeds. A leaf crate: `holon-macros` may depend on it to parse guard strings at macro-expansion time, which `holon-api` (a dependent of `holon-macros`) can never allow. |
 | `holon-pbt-core` | component | Testing | Strategy | Cross-PBT transition traits shared between `holon-layout-testing` and `holon-integration-tests`. |
 | `holon-petri` | component | Engine | Adapter | Materialization layer: Holon task blocks → Petri Net for WSJF ranking. |
 | `holon-profiles` | component | Core | Strategy | EntityProfile system: per-entity, per-row render + operation resolution. |
+| `holon-rules` | component | Core | Shared Kernel | `holon_rule` YAML front-end (ADR 0024 Phase-2/3, plan §7.2) — the single-block rule surface: a guard (`when:` / arc `input:`) **and** its effect (`emit:` / arc `output:`), parsed at the boundary into a closed typed representation ([`HolonRule`]). Mirrors the ADR 0022 discipline (`parse_advice_rule` + typed error enum + newtypes; `deny_unknown_fields` so malformed rules fail loud). |
+| `holon-secrets` | — | — | — | OS-keychain storage for Holon's secret material. |
+| `holon-sharing` | — | — | — | `holon-sharing` — ADR 0028 sharing machinery (Increments 4-6: the H2 owner-scoped, totally-ordered crossing log + its migration/undo/enforcement seams; the D4/H8 owner-signed policy objects + lease membership; and the H4 owner-private alias ledger / re-encode baseline). |
+| `holon-toon` | — | — | — | `holon-toon` — an experiment crate. |
 | `holon-turso` | component | Adapters | Adapter | `holon-turso` — the Turso (SQLite-IVM) storage adapter. |
+| `holon-turso-testing` | component | Testing | Test Harness | Companion PBT crate for `holon-turso` — the Turso storage subsystem's slice of the ONE composed-keystone PBT (co-location Phase 2, plan §5-turso). |
 
 ## Frontends
 
@@ -43,3 +54,4 @@ Deployable apps under `frontends/` (C4 containers). Prototype/excluded frontends
 | `holon-worker` | container | Services | Worker | Holon worker — Phase 1 spike. |
 | `mcp` | container | Services | MCP Server | MCP server frontend (stdio + HTTP). |
 | `tui` | container | UI | MVVM View | Terminal UI frontend — the MVVM **View** layer; its render functions build ratatui widgets from holon-frontend's `ReactiveViewModel`. |
+| `waterui` | — | — | Builder | WaterUI frontend — PARKED / bit-rotted experimental spike. |

@@ -1,3 +1,8 @@
+//! @c4 component
+//! @c4 layer Core
+//! @c4 uses holon-pattern "guard AST & parser" "Rust"
+//! Pattern: Shared Kernel
+//!
 //! `holon_rule` YAML front-end (ADR 0024 Phase-2/3, plan §7.2) — the
 //! single-block rule surface: a guard (`when:` / arc `input:`) **and** its
 //! effect (`emit:` / arc `output:`), parsed at the boundary into a closed typed
@@ -44,12 +49,12 @@
 //!   no [`Emit`]; the operate watcher surfaces a loud status rather than firing
 //!   a half-understood effect.
 
-use holon_api::pattern::BuiltinRef;
-use holon_api::pattern::Guard;
-use holon_api::pattern::GuardParseError;
-use holon_api::pattern::Pattern;
-use holon_api::pattern::parse_builtin;
-use holon_api::pattern::parse_guard_body;
+use holon_pattern::pattern::BuiltinRef;
+use holon_pattern::pattern::Guard;
+use holon_pattern::pattern::GuardParseError;
+use holon_pattern::pattern::Pattern;
+use holon_pattern::pattern::parse_builtin;
+use holon_pattern::pattern::parse_guard_body;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -438,7 +443,7 @@ fn guard_from_arcs(arcs: &[InputArcWire]) -> Result<Guard, HolonRuleParseError> 
 
 #[cfg(test)]
 mod tests {
-    use holon_api::pattern::Subject;
+    use holon_pattern::pattern::Subject;
 
     use super::*;
 

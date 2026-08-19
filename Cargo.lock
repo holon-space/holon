@@ -5081,7 +5081,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
  "chrono",
  "fluxdi",
  "futures",
@@ -5101,6 +5100,7 @@ dependencies = [
  "holon-orgmode",
  "holon-petri",
  "holon-profiles",
+ "holon-rules",
  "holon-sharing",
  "holon-turso",
  "iroh",
@@ -5110,7 +5110,6 @@ dependencies = [
  "proptest-state-machine",
  "prqlc",
  "rand 0.9.5",
- "reqwest 0.13.4",
  "rhai",
  "serde",
  "serde_json",
@@ -5136,6 +5135,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "holon-api",
+ "holon-rules",
  "holon-turso",
  "proptest 1.11.0",
  "serde",
@@ -5795,6 +5795,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
+name = "holon-rules"
+version = "0.1.0"
+dependencies = [
+ "holon-pattern",
+ "serde",
+ "serde_yaml",
+ "thiserror 2.0.19",
  "workspace-hack 0.1.0",
 ]
 

@@ -24,7 +24,7 @@ test-helpers = ["dep:tempfile", "holon-loro/test-helpers", "testing", "test-yiel
 # Keeps proptest / proptest-state-machine out of production builds.
 testing = ["dep:proptest", "dep:proptest-state-machine"]
 # Enable Iroh P2P transport for syncing Loro documents across devices
-iroh-sync = ["iroh", "base64", "holon-loro/iroh-sync"]
+iroh-sync = ["iroh", "holon-loro/iroh-sync"]
 # Widen the compound write step at the two points a competing write could
 # overtake it (see `EntityWriteLocks`), so the interleave a compound must
 # survive is forceable instead of a stopwatch race. Test-only: it changes
@@ -37,7 +37,6 @@ loro_fractional_index.workspace = true
 tokio-stream.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
@@ -55,9 +54,8 @@ prqlc.workspace = true
 gql-parser.workspace = true
 gql-transform.workspace = true
 rand.workspace = true
-rhai.workspace = true
-holon-engine = { path = "../holon-engine" }
 holon-petri.workspace = true
+holon-rules.workspace = true
 holon-profiles.workspace = true
 # holon-loro's default `iroh-sync` feature is disabled at the workspace root
 # (it pulls iroh → QUIC/TLS/ring, native-only and fatal on wasm). holon's own
@@ -75,11 +73,9 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["full"] }
 iroh = { workspace = true, features = ["default"], optional = true }
-reqwest.workspace = true
 uuid.workspace = true
 proptest = { workspace = true, optional = true }
 proptest-state-machine = { workspace = true, optional = true }
-base64 = { version = "0.22", optional = true }
 tempfile = { workspace = true, optional = true }
 
 # wasm32-wasip1-threads (holon-worker) — wasi has std::time and std::thread
@@ -96,11 +92,9 @@ uuid.workspace = true
 # Use rustls instead of OpenSSL for Android (OpenSSL requires native compilation)
 [target.'cfg(target_os = "android")'.dependencies]
 iroh = { workspace = true, optional = true }
-reqwest.workspace = true
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 tokio = { workspace = true, default-features = false, features = ["sync", "macros", "rt", "time"] }
 getrandom.workspace = true
-reqwest.workspace = true
 uuid = { workspace = true, features = ["js"] }
 wasm-bindgen-futures = "0.4"
 # Browser-backed Instant/SystemTime. wasm32-unknown has no std::time clock.
@@ -110,12 +104,15 @@ web-time = "1"
 
 [dev-dependencies]
 holon-block-roundtrip-testing.workspace = true
+holon-engine = { path = "../holon-engine" }
 holon-filesystem.workspace = true
 holon-loro.workspace = true
 holon-orgmode = { workspace = true, features = ["di"] }
 proptest.workspace = true
 proptest-state-machine.workspace = true
+rhai.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber.workspace = true
 serial_test.workspace = true
 tempfile.workspace = true
 similar-asserts = "1.7.0"

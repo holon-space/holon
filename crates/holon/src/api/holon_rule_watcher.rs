@@ -42,8 +42,6 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
-use holon_advice::holon_rule::Emit;
-use holon_advice::holon_rule::parse_holon_rule;
 use holon_api::EntityName;
 use holon_api::Value;
 use holon_api::effect_id::FiringKey;
@@ -54,6 +52,8 @@ use holon_api::link_parser::PageId;
 use holon_api::pattern::Subject;
 use holon_api::streaming::Change;
 use holon_core::storage::types::StorageEntity;
+use holon_rules::Emit;
+use holon_rules::parse_holon_rule;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 use tracing::info;
@@ -584,9 +584,9 @@ fn extract_string(row: &StorageEntity, key: &str) -> Option<String> {
 mod tests {
     use std::time::Duration;
 
-    use holon_advice::holon_rule::Emit;
-    use holon_advice::holon_rule::NameTemplate;
-    use holon_advice::holon_rule::Place;
+    use holon_rules::Emit;
+    use holon_rules::NameTemplate;
+    use holon_rules::Place;
 
     use super::*;
     use crate::core::sql_operation_provider::SqlOperationProvider;

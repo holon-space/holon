@@ -13,7 +13,6 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use holon_advice::holon_rule::parse_holon_rule;
 use holon_api::Value;
 use holon_api::pattern::BuiltinRef;
 use holon_api::pattern::CmpOp;
@@ -27,6 +26,7 @@ use holon_api::pattern::PathSegment;
 use holon_api::pattern::Pattern;
 use holon_api::pattern::Subject;
 use holon_api::pattern::WorldBlock;
+use holon_rules::parse_holon_rule;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
 use proptest::prelude::*;

@@ -1,0 +1,20 @@
+[package]
+name = "holon-rules"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
+[dependencies]
+# `holon-pattern` directly, not `holon-api`: `holon_api::pattern` is a pure
+# re-export, and depending on it would drag the whole shared-kernel API (and
+# `holon-macros`) into a leaf that only needs the guard AST.
+holon-pattern.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }

@@ -12,7 +12,7 @@
         "description": "Main orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API, BackendEngine, and DI modules.",
         "pattern": "Facade",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: Facade\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-engine \"Petri-net engine\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-petri \"Petri-net task materialization\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nMain orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API, BackendEngine, and DI modules.",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Facade\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-petri \"Petri-net task materialization\" \"Rust\"\n@c4 uses holon-rules \"holon_rule YAML front-end\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nMain orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API,\nBackendEngine, and DI modules.",
         "source_file": "holon/src/lib.rs",
         "layer": "Core",
         "relationships": [
@@ -24,11 +24,6 @@
           {
             "target": "holon-core",
             "label": "core datasource traits",
-            "protocol": "Rust"
-          },
-          {
-            "target": "holon-engine",
-            "label": "Petri-net engine",
             "protocol": "Rust"
           },
           {
@@ -49,6 +44,11 @@
           {
             "target": "holon-petri",
             "label": "Petri-net task materialization",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-rules",
+            "label": "holon_rule YAML front-end",
             "protocol": "Rust"
           },
           {
@@ -3720,6 +3720,40 @@
               },
               {
                 "name": "type_registry.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-rules",
+        "path": "holon-rules",
+        "c4_level": "component",
+        "description": "`holon_rule` YAML front-end (ADR 0024 Phase-2/3, plan §7.2) — the single-block rule surface: a guard (`when:` / arc `input:`) **and** its effect (`emit:` / arc `output:`), parsed at the boundary into a closed typed representation ([`HolonRule`]). Mirrors the ADR 0022 discipline (`parse_advice_rule` + typed error enum + newtypes; `deny_unknown_fields` so malformed rules fail loud).",
+        "pattern": "Shared Kernel",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Core\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\nPattern: Shared Kernel\n\n`holon_rule` YAML front-end (ADR 0024 Phase-2/3, plan §7.2) — the\nsingle-block rule surface: a guard (`when:` / arc `input:`) **and** its\neffect (`emit:` / arc `output:`), parsed at the boundary into a closed typed\nrepresentation ([`HolonRule`]). Mirrors the ADR 0022 discipline\n(`parse_advice_rule` + typed error enum + newtypes; `deny_unknown_fields` so\nmalformed rules fail loud).\n\nA `holon_rule` block is valid YAML in the `holon_advice_rule_yaml` family\n(ADR 0024 Amendment: \"Rule blocks get a `holon_rule` source language … Rule\nbodies are valid YAML, with guard expressions as strings parsed by the\nPattern parser\"). Two authoring forms desugar to the *same* [`HolonRule`]:\n\n- **sugar** — top-level `when:` guard string + `emit:` marking delta. The\n  `place:` value carries the placement kind: a bare root (`journals`) is an\n  inline child; `page(journals)` is a page-file child (the emitted block is\n  `Page`-tagged so it materializes into its own `Journals/{today}.org` — ADR\n  0024 §7.2 journal intent; grammar + watcher landed, default seed flip\n  deferred to Fork B B1 companion de-inline): ```yaml name: daily_journal\n  when: 'not block_exists(\"Journals/{today}\")' emit: place: page(journals)\n  name: \"{today}\" ```\n- **canonical arc-array** — explicit read / inhibitor input arcs + output\n  arcs (ADR 0024 \"guards are on arcs\"; `absent: true` = the inhibitor arc, a\n  `type: clock` arc = the read arc that makes the rule clock-driven):\n  ```yaml name: daily_journal input:\n    - bind: c type: clock\n    - bind: j type: journal when: 'block_exists(\"Journals/{today}\")' absent:\n      true\n  output:\n    - emit: place: journals name: \"{today}\"\n  ```\n\n## What is lowered vs deferred (plan §7.2 scope)\n\n- **Guard** — fully lowered to the dual-evaluated [`Guard`] (matching path).\n- **Effect** — the *ratcheted create* emission (`emit: {place, name}`) is\n  lowered to a typed [`Emit`]: a canonical placement + a\n  `{today}`-interpolated name template. The placement is either an inline\n  child (`place: journals`) or a page-file child (`place: page(journals)`,\n  `Place::is_page` true). This is the journal-auto-create shape.\n- **Deferred (documented, not silently dropped):** display placement\n  (`place: display(...)`, the advice/maintained-view side — stays ADR 0022);\n  `consume:` input arcs (delete/move effects); multi-arc (`OutputSlot > 0`)\n  emission. A rule that requests any of these parses its guard but carries\n  no [`Emit`]; the operate watcher surfaces a loud status rather than firing\n  a half-understood effect.",
+        "source_file": "holon-rules/src/lib.rs",
+        "layer": "Core",
+        "relationships": [
+          {
+            "target": "holon-pattern",
+            "label": "guard AST & parser",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-rules/src",
+            "files": [
+              {
+                "name": "lib.rs"
               }
             ]
           }

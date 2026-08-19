@@ -8,6 +8,7 @@ members = [
   "crates/holon-engine",
   "crates/holon-expr",
   "crates/holon-pattern",
+  "crates/holon-rules",
   "crates/holon-org-format",
   "crates/holon-toon",
   "crates/holon-orgmode",
@@ -230,6 +231,7 @@ holon-engine = { path = "crates/holon-engine" }
 holon-expr = { path = "crates/holon-expr" }
 holon-pattern = { path = "crates/holon-pattern" }
 holon-petri = { path = "crates/holon-petri" }
+holon-rules = { path = "crates/holon-rules" }
 holon-profiles = { path = "crates/holon-profiles" }
 # default-features = false drops holon-loro's `iroh-sync` (iroh → QUIC/TLS/ring,
 # native-only, fatal on wasm). holon's own `iroh-sync` feature re-enables it, so
