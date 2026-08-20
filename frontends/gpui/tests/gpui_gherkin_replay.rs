@@ -43,6 +43,10 @@ fn main() {
     let mut guard = RunResultGuard::new("gherkin-replay", fixtures.len() as u32);
 
     for fixture in &fixtures {
+        if fixture.skipped {
+            eprintln!("[Holon Gherkin Replay] SKIP @wip: {:?}", fixture.name);
+            continue;
+        }
         eprintln!(
             "[Holon Gherkin Replay] replaying {:?} ({} steps) from {path}",
             fixture.name,

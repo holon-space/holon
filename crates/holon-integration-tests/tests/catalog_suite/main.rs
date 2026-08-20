@@ -11,6 +11,7 @@ mod dogfood_recorded_replay;
 mod gpui_mcp_replay;
 mod holon_rule_runtime_discovery_prod_session;
 mod live_self_check_suite;
+mod logseq_parity_replay;
 mod no_tracked_proptest_regressions;
 mod parentage_assertion_replay;
 mod pn_catalog_truthfulness_probe;

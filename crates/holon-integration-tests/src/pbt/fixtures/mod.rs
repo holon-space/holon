@@ -67,6 +67,9 @@ pub struct NamedFixture {
     /// replayers (the windowed minimizer) must apply these before stepping.
     /// Empty for hand-authored sources.
     pub env_flags: std::collections::BTreeMap<String, String>,
+    /// `@wip`: the runner reports this fixture skipped instead of replaying it.
+    /// Its `steps` are empty (a `@wip` scenario is never parsed).
+    pub skipped: bool,
     pub steps: Vec<FixtureStep>,
 }
 
@@ -117,9 +120,18 @@ where
     crate::pbt::set_loro_peer_id_if_unset("1");
     for source in sources {
         let kind = source.kind();
+        let mut skipped = 0usize;
+        let mut replayed = 0usize;
         for fixture in source.load() {
+            if fixture.skipped {
+                eprintln!("[fixtures:{kind}] SKIP @wip: {:?}", fixture.name);
+                skipped += 1;
+                continue;
+            }
             replay_one::<M, S>(kind, &fixture);
+            replayed += 1;
         }
+        eprintln!("[fixtures:{kind}] {replayed} replayed, {skipped} skipped (@wip)");
     }
 }
 
@@ -137,9 +149,21 @@ where
         "[gherkin] {} contained no scenarios",
         path.display()
     );
+    let mut skipped = 0usize;
+    let mut replayed = 0usize;
     for fixture in &fixtures {
+        if fixture.skipped {
+            eprintln!("[fixtures:gherkin] SKIP @wip: {:?}", fixture.name);
+            skipped += 1;
+            continue;
+        }
         replay_one::<M, S>("gherkin", fixture);
+        replayed += 1;
     }
+    eprintln!(
+        "[fixtures:gherkin] {replayed} replayed, {skipped} skipped (@wip) from {}",
+        path.display()
+    );
 }
 
 fn replay_one<M, S>(kind: &str, fixture: &NamedFixture)

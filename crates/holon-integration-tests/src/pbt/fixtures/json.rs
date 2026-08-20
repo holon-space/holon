@@ -42,6 +42,7 @@ pub fn load_file(path: &Path) -> NamedFixture {
         description: fixture.description,
         wiring: fixture.environment.wiring,
         env_flags: fixture.environment.env_flags,
+        skipped: false,
         steps: fixture
             .transitions
             .into_iter()

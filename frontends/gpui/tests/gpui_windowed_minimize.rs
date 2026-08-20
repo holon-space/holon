@@ -86,6 +86,7 @@ fn main() {
             description: String::new(),
             wiring: wiring.clone(),
             env_flags: Default::default(),
+            skipped: false,
             steps: seq.iter().cloned().map(FixtureStep::Action).collect(),
         };
         match replay_fixture_windowed("minimize-window", &candidate) {

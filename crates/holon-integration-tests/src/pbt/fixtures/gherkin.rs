@@ -24,20 +24,102 @@ use crate::pbt::transitions::E2ETransition;
 /// One scenario (or one Outline row) flattened into an ordered step sequence.
 pub struct FeatureCase {
     pub name: String,
+    /// Feature-level and scenario-level tags merged, `@` already stripped by
+    /// the parser (`@wip` arrives as `"wip"`).
+    pub tags: Vec<String>,
+    /// Empty when `skipped`.
     pub steps: Vec<FixtureStep>,
+    pub skipped: bool,
+}
+
+/// A `@wip` feature or scenario is not executed. `tags` is the feature-level
+/// and scenario-level tags merged.
+pub fn is_wip(tags: &[String]) -> bool {
+    tags.iter().any(|t| t.eq_ignore_ascii_case("wip"))
+}
+
+/// The tag tokens on the `@`-lines preceding the `Feature:` keyword, `@`
+/// stripped. Read by a line scan so a `@wip` feature can be recognised and
+/// skipped before its body is structurally parsed — a not-yet-implemented
+/// feature need not be valid Gherkin yet.
+fn feature_level_tags(text: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('@') {
+            tags.extend(
+                line.split_whitespace()
+                    .filter_map(|t| t.strip_prefix('@'))
+                    .map(str::to_string),
+            );
+            continue;
+        }
+        break;
+    }
+    tags
+}
+
+/// Names of every `Scenario:` / `Scenario Outline:` in source order, by line
+/// scan. Used to report one skip per scenario for a `@wip` feature without
+/// structurally parsing its (possibly not-yet-valid) body.
+fn scenario_names(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("Scenario Outline:")
+                .or_else(|| line.strip_prefix("Scenario:"))
+                .map(|name| name.trim().to_string())
+        })
+        .collect()
 }
 
 /// Parse every scenario in `path` into one or more [`FeatureCase`]s. A plain
 /// scenario yields one case; a `Scenario Outline` yields one per `Examples`
-/// data row. Parse errors and unmatched steps are returned as `Err` (caller
-/// fails loud).
+/// data row. A `@wip` feature yields one skipped case per scenario without
+/// structural parsing. Parse errors and unmatched steps are returned as `Err`
+/// (caller fails loud).
 pub fn parse_feature_file(path: impl AsRef<Path>) -> Result<Vec<FeatureCase>, String> {
     let path = path.as_ref();
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+
+    let feature_tags = feature_level_tags(&text);
+    if is_wip(&feature_tags) {
+        return Ok(scenario_names(&text)
+            .into_iter()
+            .map(|name| FeatureCase {
+                name,
+                tags: feature_tags.clone(),
+                steps: Vec::new(),
+                skipped: true,
+            })
+            .collect());
+    }
+
     let feature = Feature::parse_path(path, GherkinEnv::default())
         .map_err(|e| format!("parse {}: {e}", path.display()))?;
 
     let mut cases = Vec::new();
     for scenario in &feature.scenarios {
+        let mut tags = feature.tags.clone();
+        tags.extend(scenario.tags.iter().cloned());
+
+        if is_wip(&tags) {
+            // Steps stay unparsed: a `@wip` scenario may use phrasings the
+            // step registry does not know yet, and `build_case` fails loud on
+            // an unknown step. The runner reports it skipped.
+            cases.push(FeatureCase {
+                name: scenario.name.clone(),
+                tags,
+                steps: Vec::new(),
+                skipped: true,
+            });
+            continue;
+        }
+
         // Background first, then the scenario's own steps. Re-materialised
         // per Outline row so each row sees its own substitutions.
         let steps: Vec<&Step> = feature
@@ -48,7 +130,13 @@ pub fn parse_feature_file(path: impl AsRef<Path>) -> Result<Vec<FeatureCase>, St
             .collect();
 
         if scenario.examples.is_empty() {
-            cases.push(build_case(path, &scenario.name, &steps, &HashMap::new())?);
+            cases.push(build_case(
+                path,
+                &scenario.name,
+                &steps,
+                &HashMap::new(),
+                &tags,
+            )?);
             continue;
         }
 
@@ -66,7 +154,7 @@ pub fn parse_feature_file(path: impl AsRef<Path>) -> Result<Vec<FeatureCase>, St
                     .map(|(h, v)| (h.as_str(), v.as_str()))
                     .collect();
                 let name = format!("{} [example {}: {}]", scenario.name, ri + 1, row.join(", "));
-                cases.push(build_case(path, &name, &steps, &subs)?);
+                cases.push(build_case(path, &name, &steps, &subs, &tags)?);
             }
         }
     }
@@ -78,6 +166,7 @@ fn build_case(
     name: &str,
     steps: &[&Step],
     subs: &HashMap<&str, &str>,
+    tags: &[String],
 ) -> Result<FeatureCase, String> {
     let mut out = Vec::new();
     for step in steps {
@@ -100,7 +189,9 @@ fn build_case(
     }
     Ok(FeatureCase {
         name: name.to_string(),
+        tags: tags.to_vec(),
         steps: out,
+        skipped: false,
     })
 }
 
@@ -177,6 +268,7 @@ impl FixtureSource for GherkinFixtureSource {
                     wiring: None,
                     env_flags: Default::default(),
                     steps: case.steps,
+                    skipped: case.skipped,
                 });
             }
         }
