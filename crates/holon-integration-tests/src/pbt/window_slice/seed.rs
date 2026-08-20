@@ -397,6 +397,22 @@ pub async fn graft_journal_days(
     Ok(days)
 }
 
+/// Graft ONE journal day page with NO child blocks — the empty-day case a
+/// fresh journal starts in. Returns its `(id, content)`. The feed must still
+/// afford a first empty bullet on it (creation slot), which only works with the
+/// explicit-`virtual_parent` empty-collection affordance.
+pub async fn graft_empty_journal_day(
+    env: &TestEnvironment,
+    id: &str,
+    content: &str,
+) -> Result<(String, String)> {
+    let journals = EntityUri::block(JOURNALS_ID);
+    create_page_block(env, id, journals.as_str(), content)
+        .await
+        .with_context(|| format!("graft empty day page {id} under {}", journals.as_str()))?;
+    Ok((id.to_string(), content.to_string()))
+}
+
 /// `block.create` with the `Page` tag — the only shape
 /// [`TestEnvironment::create_block`] cannot express, and the one the journals
 /// feed's day-page predicate selects on.

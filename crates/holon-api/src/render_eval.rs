@@ -534,6 +534,20 @@ impl ResolvedArgs {
         }
     }
 
+    /// Read a named numeric arg, failing loud when it is present with a
+    /// non-numeric value. `Ok(None)` = absent, `Ok(Some(f))` = a real number,
+    /// `Err` = present but not numeric (a config bug the caller must surface,
+    /// never silently coerce to a default). Mirrors [`Self::get_bool_strict`].
+    pub fn get_f64_strict(&self, name: &str) -> Result<Option<f64>, String> {
+        match self.named.get(name) {
+            None => Ok(None),
+            Some(v) => match value_to_f64(v) {
+                Some(f) => Ok(Some(f)),
+                None => Err(format!("arg `{name}` must be a number, got {v:?}")),
+            },
+        }
+    }
+
     /// Get positional arg as string, coercing non-string values.
     pub fn get_positional_string(&self, index: usize) -> Option<String> {
         self.positional.get(index).and_then(|v| match v {

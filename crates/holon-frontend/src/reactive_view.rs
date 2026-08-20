@@ -117,6 +117,13 @@ pub struct VirtualChildSlot {
     /// (BugFunnel #61). The single-root main-panel slot is unaffected by
     /// this flag.
     pub allow_root_creation: bool,
+    /// The DSL author EXPLICITLY named `parent_id` via `virtual_parent`
+    /// (`virtual_parent: true`/`col("id")`), rather than it being derived from
+    /// the surrounding context row. Only an explicit container may afford a
+    /// creation slot on an EMPTY collection (`resolve_creation_parent`): the
+    /// author has asserted where a first child belongs, so an empty LogSeq
+    /// journal day can still be written into.
+    pub parent_is_explicit: bool,
 }
 
 /// Where an [`AppendedRowsProvider`]'s suffix row comes from — the only thing
@@ -135,6 +142,10 @@ enum SuffixSource {
         defaults: std::collections::HashMap<String, holon_api::Value>,
         container: holon_api::EntityUri,
         allow_root_creation: bool,
+        /// Author explicitly named `container` via `virtual_parent` — the
+        /// gate that lets an EMPTY collection still afford a creation slot
+        /// (see [`crate::row_origin::resolve_creation_parent`]).
+        parent_is_explicit: bool,
         inner: Arc<dyn ReactiveRowProvider>,
     },
     /// A LIVE row derived from a canonical block's row cell (ADR 0015 P2
@@ -189,12 +200,14 @@ impl SuffixSource {
                 defaults,
                 container,
                 allow_root_creation,
+                parent_is_explicit,
                 inner,
             } => {
                 match crate::row_origin::resolve_creation_parent(
                     &inner.rows_snapshot(),
                     container,
                     *allow_root_creation,
+                    *parent_is_explicit,
                 ) {
                     Some(parent) => vec![creation_slot_keyed_row(&parent, defaults)],
                     None => vec![],
@@ -233,11 +246,13 @@ impl SuffixSource {
                 defaults,
                 container,
                 allow_root_creation,
+                parent_is_explicit,
                 inner,
             } => {
                 let defaults = defaults.clone();
                 let container = container.clone();
                 let allow_root_creation = *allow_root_creation;
+                let parent_is_explicit = *parent_is_explicit;
                 Box::pin(
                     inner
                         .rows_signal_vec()
@@ -247,6 +262,7 @@ impl SuffixSource {
                                 &rows,
                                 &container,
                                 allow_root_creation,
+                                parent_is_explicit,
                             ) {
                                 Some(parent) => {
                                     vec![creation_slot_keyed_row(&parent, &defaults)]
@@ -313,6 +329,7 @@ impl AppendedRowsProvider {
                 defaults: slot.defaults.clone(),
                 container: slot.parent_id.clone(),
                 allow_root_creation: slot.allow_root_creation,
+                parent_is_explicit: slot.parent_is_explicit,
                 inner,
             },
         }
@@ -365,9 +382,42 @@ impl ReactiveRowProvider for AppendedRowsProvider {
                 + Send,
         >,
     > {
+        use futures_signals::signal::SignalExt;
         use futures_signals::signal_vec::SignalVecExt;
-        let suffix = self.suffix.keyed_signal_vec().map(|(_, r)| r);
-        Box::pin(self.inner.rows_signal_vec().chain(suffix))
+        match &self.suffix {
+            SuffixSource::CreationSlot {
+                defaults,
+                container,
+                allow_root_creation,
+                parent_is_explicit,
+                ..
+            } if *parent_is_explicit => {
+                let defaults = defaults.clone();
+                let container = container.clone();
+                let allow = *allow_root_creation;
+                Box::pin(
+                    self.inner
+                        .rows_signal_vec()
+                        .to_signal_cloned()
+                        .map(move |mut rows| {
+                            if let Some(parent) = crate::row_origin::resolve_creation_parent(
+                                &rows, &container, allow, true,
+                            ) {
+                                rows.push(creation_slot_keyed_row(&parent, &defaults).1);
+                            }
+                            rows
+                        })
+                        .to_signal_vec(),
+                )
+            }
+            // Derived creation slot (main panel etc.) and LiveCell keep the
+            // INCREMENTAL chain — see `keyed_rows_signal_vec` for why the atomic
+            // recompose is scoped to the explicit path only.
+            _ => {
+                let suffix = self.suffix.keyed_signal_vec().map(|(_, r)| r);
+                Box::pin(self.inner.rows_signal_vec().chain(suffix))
+            }
+        }
     }
 
     fn keyed_rows_signal_vec(
@@ -379,12 +429,63 @@ impl ReactiveRowProvider for AppendedRowsProvider {
                 > + Send,
         >,
     > {
+        use futures_signals::signal::SignalExt;
         use futures_signals::signal_vec::SignalVecExt;
-        Box::pin(
-            self.inner
-                .keyed_rows_signal_vec()
-                .chain(self.suffix.keyed_signal_vec()),
-        )
+        match &self.suffix {
+            SuffixSource::CreationSlot {
+                defaults,
+                container,
+                allow_root_creation,
+                parent_is_explicit,
+                ..
+            } if *parent_is_explicit => {
+                let defaults = defaults.clone();
+                let container = container.clone();
+                let allow = *allow_root_creation;
+                // ATOMIC recompose (derived-data-contracts, Law 3), scoped to the
+                // EXPLICIT-`virtual_parent` path (the journals feed). The appended
+                // creation slot is a function of the CURRENT inner rows,
+                // recomputed and re-appended on every inner change in ONE
+                // emission. `SignalVec::chain` cannot deliver this reliably — a
+                // live inner's `Replace` (content reload) DROPS the chained
+                // trailing slot, and restoring it from a separate suffix stream
+                // races the painted frame, so an empty day's bullet flakes absent
+                // at settled frames. Folding the slot into the inner's own signal
+                // makes it present at every settled frame BY CONSTRUCTION.
+                //
+                // SCOPE: explicit only. A whole-vec `Replace` makes the tree
+                // driver `rebuild` (re-interpret every row → re-run its per-row
+                // queries), so applying it to a DERIVED collection (the main
+                // panel, many rows) grows the `inv-sql-budget` re-execution
+                // ratchet on edits. The derived path keeps the incremental chain
+                // below. The journals feed is empty-only (JRN-2): a non-empty day
+                // resolves to no slot and its handful of descendant rows carry
+                // negligible recompose cost; an empty day is the case that needs
+                // the guarantee.
+                Box::pin(
+                    self.inner
+                        .keyed_rows_signal_vec()
+                        .to_signal_cloned()
+                        .map(move |mut keyed| {
+                            let rows: Vec<_> = keyed.iter().map(|(_, r)| r.clone()).collect();
+                            if let Some(parent) = crate::row_origin::resolve_creation_parent(
+                                &rows, &container, allow, true,
+                            ) {
+                                keyed.push(creation_slot_keyed_row(&parent, &defaults));
+                            }
+                            keyed
+                        })
+                        .to_signal_vec(),
+                )
+            }
+            // Derived creation slot (main panel etc.) and LiveCell keep the
+            // INCREMENTAL chain — no whole-vec Replace, so no re-interpret storm.
+            _ => Box::pin(
+                self.inner
+                    .keyed_rows_signal_vec()
+                    .chain(self.suffix.keyed_signal_vec()),
+            ),
+        }
     }
 
     fn cache_identity(&self) -> u64 {
@@ -2579,6 +2680,7 @@ mod tests {
             defaults: HashMap::new(),
             parent_id: holon_api::EntityUri::block("journals"),
             allow_root_creation: false,
+            parent_is_explicit: false,
         };
         assert_eq!(appended_row_count(inner, &slot), 0);
     }
@@ -2602,6 +2704,7 @@ mod tests {
             defaults: HashMap::new(),
             parent_id: holon_api::EntityUri::block("journals-sidebar"),
             allow_root_creation: false,
+            parent_is_explicit: false,
         };
         // No panic; no creation slot appended.
         let provider =
@@ -2630,6 +2733,7 @@ mod tests {
             defaults: HashMap::new(),
             parent_id: holon_api::EntityUri::block("default-main-panel"),
             allow_root_creation: false,
+            parent_is_explicit: false,
         };
         assert_eq!(appended_row_count(inner, &slot), 1);
         // The appended row is a creation placeholder parented to the focus root.
@@ -2665,6 +2769,7 @@ mod tests {
             defaults: HashMap::new(),
             parent_id: holon_api::EntityUri::block("journals"),
             allow_root_creation: true,
+            parent_is_explicit: false,
         };
         assert_eq!(appended_row_count(inner, &slot), 1);
     }
@@ -2740,6 +2845,7 @@ mod tests {
                 defaults: HashMap::new(),
                 parent_id: EntityUri::block("parent-under-test"),
                 allow_root_creation: false,
+                parent_is_explicit: false,
             };
             // The creation slot resolves its parent from `inner`'s rows (bug 2A):
             // seed one row that is a direct child of the container so the flat

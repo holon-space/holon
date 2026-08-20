@@ -38,10 +38,13 @@ pub(crate) fn virtual_child_slot_from_arg(
     if !creation_slot {
         return None;
     }
-    let vp = ba
-        .args
-        .get_string("virtual_parent")
-        .map(|s| s.to_string())
+    // An EXPLICIT `virtual_parent` (the DSL author naming the container) is the
+    // only form allowed to afford a creation slot on an EMPTY collection — it
+    // is the author's assertion of where a first child belongs. The two
+    // fallbacks below derive the container from context and stay implicit.
+    let explicit = ba.args.get_string("virtual_parent").map(|s| s.to_string());
+    let vp = explicit
+        .clone()
         // Streaming path: context row IS the parent block.
         .or_else(|| {
             ba.ctx
@@ -68,6 +71,7 @@ pub(crate) fn virtual_child_slot_from_arg(
         defaults: config.defaults,
         parent_id: uri,
         allow_root_creation: creation_slot,
+        parent_is_explicit: explicit.is_some(),
     })
 }
 
@@ -124,6 +128,7 @@ pub(crate) fn interpret_virtual_child(
         &ba.ctx.data_rows,
         &slot.parent_id,
         slot.allow_root_creation,
+        slot.parent_is_explicit,
     )?;
     let row = virtual_child_row(&parent, &slot.defaults);
     let row_ctx = ba.ctx.with_row(row);

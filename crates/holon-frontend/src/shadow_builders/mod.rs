@@ -60,6 +60,20 @@ pub fn build_shadow_interpreter() -> RenderInterpreter<ReactiveViewModel> {
     interp.set_widget_metas(all_widget_metas());
     interp.register("column", |ba: prelude::BA<'_>| {
         let gap = ba.args.get_f64("gap").unwrap_or(0.0) as f32;
+        // A vertical floor: the column never paints shorter than `min_height`
+        // px, so a short/empty section (a LogSeq journal day) still occupies a
+        // comfortable block. Parsed at the boundary — present-but-non-numeric or
+        // negative is a config bug surfaced loud, never coerced to a default.
+        let min_height = match ba.args.get_f64_strict("min_height") {
+            Ok(Some(v)) if v < 0.0 => {
+                return ReactiveViewModel::error(
+                    "column",
+                    format!("`min_height` must be >= 0, got {v}"),
+                );
+            }
+            Ok(v) => v,
+            Err(msg) => return ReactiveViewModel::error("column", msg),
+        };
         // A vertical flow column honours `LayoutHint::PinnedToEnd`: it renders
         // such children at its trailing edge while the rest scrolls. The offer
         // goes to EVERY direct child — the column never inspects what a child
@@ -74,6 +88,9 @@ pub fn build_shadow_interpreter() -> RenderInterpreter<ReactiveViewModel> {
             .collect();
         let mut props = std::collections::HashMap::new();
         props.insert("gap".to_string(), holon_api::Value::Float(gap as f64));
+        if let Some(mh) = min_height {
+            props.insert("min_height".to_string(), holon_api::Value::Float(mh));
+        }
         ReactiveViewModel {
             children: children.into_iter().map(std::sync::Arc::new).collect(),
             ..ReactiveViewModel::from_widget("column", props)

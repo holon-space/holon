@@ -156,11 +156,16 @@ impl RowOrigin {
 ///   stated parent is not itself displayed) → new items parent to that root,
 ///   i.e. `fr.root_id`, the focused block.
 ///
-/// `container` is used ONLY to recognise the flat shape; it is NEVER returned
-/// blindly. Per the fail-loud contract:
-/// - empty / not-yet-resolvable rowset → `None` (the streaming path shows no
-///   slot rather than silently mis-parenting; the panel's `0..N` query always
-///   returns its root, so a focused page is never truly empty here);
+/// `explicit_container` (the DSL author NAMED the container via
+/// `virtual_parent`) switches the whole policy to LogSeq-faithful EMPTY-ONLY
+/// (Martin, JRN-2): an EMPTY collection resolves to its named container (a
+/// fresh journal day / empty page becomes writable), and a NON-empty one
+/// resolves to `None` (no redundant trailing bullet — you add via the existing
+/// rows). The flat/rooted/multi-root shapes below are the DERIVED
+/// (non-explicit) policy, where `container` is used ONLY to recognise the flat
+/// shape and is NEVER returned blindly (bug 2A). Per the fail-loud contract, on
+/// the derived path:
+/// - empty / not-yet-resolvable rowset → `None` (no silent mis-parent, bug 2A);
 /// - a single forest root → parent to that root;
 /// - a multi-root forest → gated by `allow_root_creation` (below).
 ///
@@ -194,6 +199,7 @@ pub fn resolve_creation_parent(
     rows: &[std::sync::Arc<holon_api::widget_spec::DataRow>],
     container: &EntityUri,
     allow_root_creation: bool,
+    explicit_container: bool,
 ) -> Option<EntityUri> {
     use holon_api::widget_spec::data_row_parent_id;
 
@@ -202,7 +208,20 @@ pub fn resolve_creation_parent(
         .iter()
         .filter(|r| !RowOrigin::from_row(r).is_creation_placeholder())
         .collect();
+    if explicit_container {
+        // The DSL author EXPLICITLY named the container via `virtual_parent`.
+        // LogSeq-faithful semantics (Martin, JRN-2): afford the trailing "type
+        // here" bullet ONLY when the collection is EMPTY — a fresh journal day
+        // (no blocks yet) becomes writable, while a NON-empty day shows no
+        // redundant trailing bullet (you add via its existing rows). This is
+        // also what keeps the empty affordance off bug 2A's derived path: only
+        // an author-named container resolves an empty collection, and it
+        // resolves to nothing when non-empty.
+        return real.is_empty().then(|| container.clone());
+    }
     if real.is_empty() {
+        // Derived (non-explicit) empty collection: unresolvable — the parent is
+        // derived from displayed rows, never the static container (bug 2A).
         return None;
     }
 
@@ -481,7 +500,7 @@ mod tests {
             row("block:c1", Some("block:page")),
             row("block:c2", Some("block:page")),
         ];
-        let parent = resolve_creation_parent(&rows, &uri("block:default-main-panel"), false)
+        let parent = resolve_creation_parent(&rows, &uri("block:default-main-panel"), false, false)
             .expect("resolvable");
         assert_eq!(parent.as_str(), "block:page");
     }
@@ -491,7 +510,7 @@ mod tests {
     #[test]
     fn empty_focused_page_resolves_to_the_page() {
         let rows = vec![row("block:page", Some("block:root-layout"))];
-        let parent = resolve_creation_parent(&rows, &uri("block:default-main-panel"), false)
+        let parent = resolve_creation_parent(&rows, &uri("block:default-main-panel"), false, false)
             .expect("resolvable");
         assert_eq!(parent.as_str(), "block:page");
     }
@@ -504,8 +523,8 @@ mod tests {
             row("block:a", Some("block:container")),
             row("block:b", Some("block:container")),
         ];
-        let parent =
-            resolve_creation_parent(&rows, &uri("block:container"), false).expect("resolvable");
+        let parent = resolve_creation_parent(&rows, &uri("block:container"), false, false)
+            .expect("resolvable");
         assert_eq!(parent.as_str(), "block:container");
     }
 
@@ -514,16 +533,51 @@ mod tests {
     #[test]
     fn flat_single_child_resolves_to_container() {
         let rows = vec![row("block:only", Some("block:container"))];
-        let parent =
-            resolve_creation_parent(&rows, &uri("block:container"), false).expect("resolvable");
+        let parent = resolve_creation_parent(&rows, &uri("block:container"), false, false)
+            .expect("resolvable");
         assert_eq!(parent.as_str(), "block:container");
     }
 
-    /// An empty rowset is not yet resolvable → `None` (no silent container
-    /// mis-parent). On the streaming path this shows no slot until data loads.
+    /// An empty rowset with an IMPLICIT (derived-from-rows) container is not
+    /// resolvable → `None` (no silent container mis-parent, bug 2A). On the
+    /// streaming path this shows no slot until data loads.
     #[test]
-    fn empty_rowset_is_unresolvable() {
-        assert!(resolve_creation_parent(&[], &uri("block:container"), false).is_none());
+    fn empty_rowset_implicit_container_is_unresolvable() {
+        assert!(resolve_creation_parent(&[], &uri("block:container"), false, false).is_none());
+    }
+
+    /// An empty rowset with an EXPLICIT container (`virtual_parent` named by
+    /// the author) resolves to that container — the case that lets an EMPTY
+    /// LogSeq journal day afford its first bullet. Gated on
+    /// `explicit_container=true` so the bug-2A derived path (previous test)
+    /// stays `None`.
+    #[test]
+    fn empty_rowset_explicit_container_resolves_to_container() {
+        assert_eq!(
+            resolve_creation_parent(&[], &uri("block:the-day"), true, true),
+            Some(uri("block:the-day")),
+        );
+    }
+
+    /// A NON-empty rowset with an EXPLICIT container gets NO slot (LogSeq-
+    /// faithful, JRN-2: the trailing bullet appears only on an empty day). The
+    /// same rows with an IMPLICIT container still resolve (flat shape) — the
+    /// empty-only rule is scoped to author-named containers.
+    #[test]
+    fn nonempty_explicit_container_gets_no_slot() {
+        let rows = vec![
+            row("block:a", Some("block:the-day")),
+            row("block:b", Some("block:the-day")),
+        ];
+        assert!(
+            resolve_creation_parent(&rows, &uri("block:the-day"), true, true).is_none(),
+            "explicit container + non-empty rowset → no trailing slot"
+        );
+        // Sanity: the derived (implicit) path over the same rows DOES resolve.
+        assert_eq!(
+            resolve_creation_parent(&rows, &uri("block:the-day"), true, false),
+            Some(uri("block:the-day")),
+        );
     }
 
     /// An already-appended creation-slot row is ignored (idempotent).
@@ -533,7 +587,7 @@ mod tests {
             row("block:page", Some("block:root-layout")),
             row("block:__virtual:page", Some("block:page")),
         ];
-        let parent = resolve_creation_parent(&rows, &uri("block:default-main-panel"), false)
+        let parent = resolve_creation_parent(&rows, &uri("block:default-main-panel"), false, false)
             .expect("resolvable");
         assert_eq!(parent.as_str(), "block:page");
     }
@@ -551,7 +605,7 @@ mod tests {
             row("block:pageB", Some(sentinel.as_str())),
             row("block:pageC", Some(sentinel.as_str())),
         ];
-        assert!(resolve_creation_parent(&rows, &uri("block:journals"), false).is_none());
+        assert!(resolve_creation_parent(&rows, &uri("block:journals"), false, false).is_none());
     }
 
     /// An editable top-level-pages list that DOES opt in
@@ -565,8 +619,8 @@ mod tests {
             row("block:pageB", Some(sentinel.as_str())),
             row("block:pageC", Some(sentinel.as_str())),
         ];
-        let parent =
-            resolve_creation_parent(&rows, &uri("block:journals"), true).expect("resolvable");
+        let parent = resolve_creation_parent(&rows, &uri("block:journals"), true, false)
+            .expect("resolvable");
         assert_eq!(parent, sentinel);
     }
 
@@ -581,7 +635,10 @@ mod tests {
             row("block:p1", Some("block:outsideA")),
             row("block:p2", Some("block:outsideB")),
         ];
-        assert!(resolve_creation_parent(&rows, &uri("block:default-main-panel"), false).is_none());
+        assert!(
+            resolve_creation_parent(&rows, &uri("block:default-main-panel"), false, false)
+                .is_none()
+        );
     }
 
     /// BugFunnel #67 reproduction at the unit level: a NESTED-PAGE forest. The
@@ -598,7 +655,9 @@ mod tests {
             row("block:pageA", Some(sentinel.as_str())),
             row("block:journal-2026-07-10", Some("block:journals")), // parent filtered out
         ];
-        assert!(resolve_creation_parent(&rows, &uri("block:journals-sidebar"), false).is_none());
+        assert!(
+            resolve_creation_parent(&rows, &uri("block:journals-sidebar"), false, false).is_none()
+        );
     }
 
     /// The SAME mixed nested-page forest on an editable list that opts in
@@ -612,7 +671,7 @@ mod tests {
             row("block:pageA", Some(sentinel.as_str())),
             row("block:journal-2026-07-10", Some("block:journals")),
         ];
-        let parent = resolve_creation_parent(&rows, &uri("block:journals-sidebar"), true)
+        let parent = resolve_creation_parent(&rows, &uri("block:journals-sidebar"), true, false)
             .expect("resolvable");
         assert_eq!(parent, sentinel);
     }
@@ -631,7 +690,9 @@ mod tests {
             row("block:p1", Some("block:outsideA")),
             row("block:p2", Some("block:outsideB")),
         ];
-        assert!(resolve_creation_parent(&rows, &uri("block:default-main-panel"), true).is_none());
+        assert!(
+            resolve_creation_parent(&rows, &uri("block:default-main-panel"), true, false).is_none()
+        );
     }
 
     /// Boot-race regression (row_origin.rs panic under ActionEngine wiring).
@@ -660,7 +721,8 @@ mod tests {
             row("block:journals-day-other", Some("block:journals")),
         ];
         assert!(
-            resolve_creation_parent(&rows, &uri("block:journals::action::0"), true).is_none(),
+            resolve_creation_parent(&rows, &uri("block:journals::action::0"), true, false)
+                .is_none(),
             "a non-top-level creation-enabled multi-root forest offers no slot"
         );
     }

@@ -85,15 +85,16 @@ variants:
     priority: 2
     condition: 'is_def_var("expand_default") && expand_default == 1 && (!is_def_var("role") || role != "page_title")'
     render: >-
+      column(#{min_height: 220},
       expand_toggle(#{
         default_expanded: true,
         hover_reveal_toggle: true,
-        header: selectable(row(icon("orgmode", #{size: 12}), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})}),
+        header: selectable(row(icon("orgmode", #{size: 12}), text(col("content"), #{style: "h2"})), #{action: navigation_focus(#{region: "main", block_id: col("id")})}),
         content: live_query(#{
           prql: "from descendants",
-          item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity()})
+          item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), creation_slot: true, virtual_parent: true, item_template: render_entity()})
         })
-      })
+      }))
   # Embedded page-blocks: non-root pages (strict descendants of the focus root)
   # rendered as a collapsed expand_toggle with lazy subtree. condition uses
   # is_def_var guard because rows from live_query content queries have no `role`

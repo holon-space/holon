@@ -640,7 +640,7 @@ impl ReactiveEngineDriver {
             // The main panel is always a single focus-rooted tree, so the
             // `no_parent` forest-root opt-in never applies here (`false`).
             if let Some(parent) =
-                crate::row_origin::resolve_creation_parent(&rows, &main_panel, false)
+                crate::row_origin::resolve_creation_parent(&rows, &main_panel, false, false)
             {
                 break parent;
             }

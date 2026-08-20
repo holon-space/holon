@@ -296,6 +296,11 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     if gap > 0.0 {
         container = container.gap(px(gap));
     }
+    // A `min_height` floor keeps a short/empty section (a LogSeq journal day)
+    // occupying a comfortable block; taller content grows past it.
+    if let Some(mh) = node.prop_f64("min_height") {
+        container = container.min_h(px(mh as f32));
+    }
     for child in children {
         // This container is content-sized (`flex_col`, no height), so a
         // `live_query` child's `Panel` shape — shell `size_full` plus
