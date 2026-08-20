@@ -43,8 +43,10 @@ ships.
 - Bare `NOT EXISTS`, and any `NOT EXISTS` with a **plain-column** conjunct
   (`b.id <> 'x' AND NOT EXISTS (…)`), is REFUSED LOUDLY at DDL over EVERY source
   (base table AND the chained `block` matview) —
-  `Cannot convert LogicalExpr to AST Expr: Exists { … }`. (This lane's probe E,
-  and `crates/holon-turso/tests/antijoin_pbt.rs::base_table_antijoin_ddl_rejected`.)
+  `Cannot convert LogicalExpr to AST Expr: Exists { … }`. (This lane's probe E.
+  SUPERSEDED at turso rev `2f475750`, which de-correlates `EXISTS` into
+  indicator anti-joins: this shape is now IVM-MAINTAINED, pinned by
+  `crates/holon-turso/tests/antijoin_pbt.rs::base_table_antijoin_matview_matches_fresh`.)
 - When a **COMPUTED** conjunct sits beside the subquery — Now.org's leading
   `json_extract(properties,'$.task_state')='TODO' AND NOT EXISTS (…)` — the
   projection rewrite's catch-all pointed the `EXISTS` at the shared
@@ -145,13 +147,16 @@ Two, both structural:
   `degraded_disclosure_coexists_with_rows_and_is_observable` (prop reaches the
   view model). NOTE: painting a styled banner from that prop lives in the
   external `holon-gpui` crate (not in this repo) and is a thin follow-up.
-- **Post-fix acceptance (dual-form):** the fork does NOT add anti-join
-  maintenance — it makes the shape refuse LOUDLY. `now_org_antijoin_regression`
-  is the CURRENT witness ("matview 0 vs fresh 5", succeeds-empty);
-  `now_org_antijoin_create_refuses_loudly_after_fix` is the post-fix gate
-  (`reconcile_named_view(...).is_err()`), RED now (returns `Ok`) and GREEN on the
-  bypass-fix re-pin (~`90f25523`), at which point it un-ignores and the witness
-  retires.
+- **Post-fix acceptance — SUPERSEDED TWICE.** The bypass-fix re-pin (`1640d838`)
+  made the shape refuse LOUDLY, pinned by a `reconcile_named_view(...).is_err()`
+  gate. Turso rev `2f475750` then went further and MAINTAINS the shape, so that
+  refusal gate flipped again and is now the differential acceptance pin
+  `crates/holon-turso/tests/antijoin_pbt.rs::prop_matview_consistent_now_org`
+  (matview ≡ fresh recompute after any mutation sequence), with
+  `now_org_matview_populates_non_empty_and_matches_fresh` as its non-vacuity
+  witness. Boundaries that still refuse LOUDLY at DDL: non-equality correlation,
+  uncorrelated `EXISTS`, foreign-table subquery sources, both-sides-complex
+  comparisons.
 - **`LEFT JOIN … IS NULL` populate fix — measured + pinned.** This anti-join
   spelling has NO subquery node, so `sql_ivm_maintainable` keeps it on the
   matview path. On the pre-fix pin `54f3cc5e` the matview OVER-served (measured

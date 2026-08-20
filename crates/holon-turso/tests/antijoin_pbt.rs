@@ -4,43 +4,39 @@
 //! This is `inv-matview-consistent-with-recompute` applied at the engine tier,
 //! with a generator whose shapes MUST include the correlated `NOT EXISTS`
 //! anti-join and `OR(EXISTS, NOT EXISTS)` that Martin's `Now.org` planning
-//! query uses — the shapes the fork's DBSP IVM cannot maintain.
+//! query uses.
 //!
 //! The DB is the faithful prod shape: `block_raw` + per-junction aggregation
 //! matviews (`block_requires_agg`, `block_tags_agg`) + the chained `block`
 //! matview, with a `watch_view` matview on top (exactly what `query_and_watch`
 //! builds for a live_query).
 //!
-//! The trigger for the SILENT (vs loud) refusal was a COMPUTED conjunct beside
-//! the subquery — Now.org's leading `json_extract(...)='TODO' AND NOT EXISTS
-//! (…)` — not chaining (turso-6f 8-shape bisect; corroborated here). The
-//! projection rewrite aliased the subquery onto a shared `__temp_filter_expr`
-//! temp column, so CREATE succeeded with an always-false filter.
-//!
 //! Result matrix (this file is the executable record):
-//!   * single `json_extract` property filter              -> IVM-maintained  ✅
-//!     green (`prop_matview_consistent_maintainable`)
-//!   * `json_extract` conjunct + correlated `NOT EXISTS`  -> REJECTED LOUDLY at
-//!     DDL, in both the isolated and the full Now.org shape
-//!     (`antijoin_isolated_create_refuses_loudly`,
-//!     `now_org_antijoin_create_refuses_loudly_after_fix`). See
-//!     docs/Testing/bugfunnel/entries/
-//!     2026-08-19-ivm-antijoin-matview-silently-empty.md
-//!   * a PLAIN-column conjunct + `NOT EXISTS` over a base table -> REJECTED
-//!     LOUDLY at DDL. Pinned green (`base_table_antijoin_ddl_rejected`).
+//!   * single `json_extract` property filter -> IVM-maintained
+//!     (`prop_matview_consistent_maintainable`)
+//!   * `json_extract` conjunct + correlated `NOT EXISTS` -> IVM-maintained, in
+//!     both the isolated and the full Now.org shape
+//!     (`prop_matview_consistent_antijoin_isolated`,
+//!     `prop_matview_consistent_now_org`)
+//!   * a PLAIN-column conjunct + `NOT EXISTS` over base tables ->
+//!     IVM-maintained (`base_table_antijoin_matview_matches_fresh`)
 //!
-//! The fork does NOT maintain `EXISTS`/anti-joins — the bypass fix made the
-//! refusal LOUD in ALL conjunct combinations, so the anti-join cases assert
-//! refusal, not matview≡fresh. The render path is unaffected either way:
-//! `sql_ivm_maintainable` routes the shape eager BEFORE any CREATE.
+//! The engine de-correlates `EXISTS` subqueries into indicator anti-joins and
+//! gives each distinct computed conjunct its own temp column, so these shapes
+//! are maintained rather than refused; `prop_matview_consistent_now_org` is the
+//! acceptance pin for that support. Boundaries that still refuse LOUDLY at DDL
+//! (never wrong rows): non-equality correlation, uncorrelated `EXISTS`,
+//! foreign-table subquery sources, both-sides-complex comparisons.
 //!
-//! Now.org rewrite option: the readiness clause CAN be rewritten to a
-//! maintainable `LEFT JOIN … IS NULL` — VERIFIED correct on the landed populate
-//! fix `c6cfab7d` (served == fresh, end-to-end pin
-//! `left_join_isnull_matview_matches_fresh_after_populate_fix` in
-//! backend_engine.rs). It was NOT correct before that pin (over-served,
-//! undisclosed), so eager + disclosure stays the honest default and the rewrite
-//! is a later optimization, not a workaround to reach for on an older engine.
+//! The render path does NOT yet exploit this: `sql_ivm_maintainable` routes
+//! every `Exists`/`InSubquery` shape eager BEFORE any CREATE, which is now
+//! over-conservative but still correct. Widening it is a separate change with
+//! its own red-first test.
+//!
+//! History: these anti-join cases previously asserted LOUD REFUSAL, and before
+//! that shape's bypass fix the CREATE silently succeeded with an always-false
+//! filter (0 rows). See docs/Testing/bugfunnel/entries/
+//! 2026-08-19-ivm-antijoin-matview-silently-empty.md.
 
 use std::collections::HashMap;
 
@@ -264,8 +260,8 @@ const SIMPLE_FILTER: &str =
 
 /// Anti-join under test, ISOLATED: one `json_extract` (maintainable on its own,
 /// per `SIMPLE_FILTER`) plus the correlated `NOT EXISTS` wrapping an inner
-/// JOIN. The ONLY un-maintainable element vs `SIMPLE_FILTER` is the anti-join,
-/// so a divergence here attributes cleanly to it.
+/// JOIN. The anti-join is the ONLY element added vs `SIMPLE_FILTER`, so a
+/// divergence here attributes cleanly to it.
 const ANTIJOIN_ISOLATED: &str = "SELECT b.id FROM block b WHERE \
     json_extract(b.properties,'$.task_state') = 'TODO' AND \
     NOT EXISTS (SELECT 1 FROM block_requires br JOIN block bl ON bl.id = br.required_id \
@@ -332,39 +328,31 @@ proptest! {
         let (mv, fresh) = runtime().block_on(drive(SIMPLE_FILTER, &muts));
         prop_assert_eq!(mv, fresh, "simple-filter matview must equal fresh recompute");
     }
+
+    /// The anti-join ISOLATED: one `json_extract` conjunct plus the correlated
+    /// `NOT EXISTS`. The anti-join is the only element beyond `SIMPLE_FILTER`,
+    /// so a divergence attributes cleanly to the de-correlated indicator
+    /// anti-join.
+    #[test]
+    fn prop_matview_consistent_antijoin_isolated(muts in mutations_strategy()) {
+        let (mv, fresh) = runtime().block_on(drive(ANTIJOIN_ISOLATED, &muts));
+        prop_assert_eq!(mv, fresh, "isolated anti-join matview must equal fresh recompute");
+    }
+
+    /// ACCEPTANCE PIN for the engine's correlated-EXISTS IVM support: the FULL
+    /// Now.org readiness shape is maintained as a LIVE matview, and its served
+    /// rows equal a fresh recompute after any mutation sequence.
+    #[test]
+    fn prop_matview_consistent_now_org(muts in mutations_strategy()) {
+        let (mv, fresh) = runtime().block_on(drive(ANTIJOIN, &muts));
+        prop_assert_eq!(mv, fresh, "Now.org-shape matview must equal fresh recompute");
+    }
 }
 
-/// The anti-join ISOLATED: one maintainable `json_extract` conjunct plus the
-/// correlated `NOT EXISTS`. The anti-join is the only un-maintainable element
-/// vs `SIMPLE_FILTER`, so the refusal attributes cleanly to it.
+/// GREEN: the SAME anti-join over BASE TABLES (plain columns, no chained
+/// matview underneath) is maintained too, and its rows track base-table deltas.
 #[tokio::test]
-async fn antijoin_isolated_create_refuses_loudly() {
-    let handle = block_schema().await;
-    let result = reconcile_named_view(&handle, "watch_view_isolated_loud", ANTIJOIN_ISOLATED).await;
-    assert!(
-        result.is_err(),
-        "a computed conjunct beside a correlated NOT EXISTS must refuse LOUDLY at CREATE, not \
-         silently succeed-empty; got {result:?}"
-    );
-}
-
-/// The FULL Now.org shape: anti-join plus `OR(EXISTS, NOT EXISTS)`. The CREATE
-/// that once succeeded-then-served-0-rows now ERRORs.
-#[tokio::test]
-async fn now_org_antijoin_create_refuses_loudly_after_fix() {
-    let handle = block_schema().await;
-    let result = reconcile_named_view(&handle, "watch_view_now_loud", ANTIJOIN).await;
-    assert!(
-        result.is_err(),
-        "post-fix the computed-conjunct + subquery matview CREATE must refuse LOUDLY, not \
-         silently succeed-empty; got {result:?}"
-    );
-}
-
-/// GREEN: the SAME anti-join over a BASE TABLE is rejected at DDL — the fork's
-/// AST conversion cannot lower `NOT EXISTS`. Pins the other failure mode.
-#[tokio::test]
-async fn base_table_antijoin_ddl_rejected() {
+async fn base_table_antijoin_matview_matches_fresh() {
     let (_backend, handle) = TursoBackend::new_in_memory().await.unwrap();
     std::mem::forget(_backend);
     handle
@@ -378,9 +366,79 @@ async fn base_table_antijoin_ddl_rejected() {
     let select = "SELECT b.id FROM blk b WHERE NOT EXISTS (SELECT 1 FROM blk_requires br JOIN blk \
                   bl ON bl.id = br.required_id WHERE br.block_id = b.id AND \
                   COALESCE(bl.task_state,'') != 'DONE')";
-    let result = reconcile_named_view(&handle, "aj_base", select).await;
-    assert!(
-        result.is_err(),
-        "base-table correlated NOT EXISTS must be rejected at matview DDL; got {result:?}"
+    reconcile_named_view(&handle, "aj_base", select)
+        .await
+        .expect("base-table correlated NOT EXISTS matview create");
+
+    for (id, state) in [("a", "TODO"), ("b", "TODO"), ("c", "DONE")] {
+        handle
+            .execute(
+                "INSERT INTO blk (id, task_state) VALUES (?, ?)",
+                vec![
+                    turso::Value::Text(id.into()),
+                    turso::Value::Text(state.into()),
+                ],
+            )
+            .await
+            .unwrap();
+    }
+    // `a` blocked by the unfinished `b`; `b` cleared by the finished `c`.
+    for (block, required) in [("a", "b"), ("b", "c")] {
+        handle
+            .execute(
+                "INSERT INTO blk_requires (block_id, required_id) VALUES (?, ?)",
+                vec![
+                    turso::Value::Text(block.into()),
+                    turso::Value::Text(required.into()),
+                ],
+            )
+            .await
+            .unwrap();
+    }
+    // Unblock `a` by finishing `b` — the delta the anti-join must propagate.
+    handle
+        .execute("UPDATE blk SET task_state = 'DONE' WHERE id = 'b'", vec![])
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let mv = matview_ids(&handle, "aj_base").await;
+    let fresh = recompute_ids(&handle, select).await;
+    assert_eq!(
+        mv, fresh,
+        "base-table anti-join matview must equal fresh recompute"
     );
+}
+
+/// Non-vacuity + populate pin for the Now.org shape: a deterministic seed whose
+/// readiness set is NON-EMPTY, so the differential properties above cannot pass
+/// by comparing two empty results.
+#[tokio::test]
+async fn now_org_matview_populates_non_empty_and_matches_fresh() {
+    let muts = vec![
+        Mutation::SetBlock {
+            id: 0,
+            task_state: "TODO",
+            gate: "G1",
+        },
+        Mutation::SetBlock {
+            id: 1,
+            task_state: "DONE",
+            gate: "G1",
+        },
+        Mutation::AddRequires {
+            block: 0,
+            required: 1,
+        },
+        Mutation::AddTag {
+            block: 0,
+            tag: "agent",
+        },
+    ];
+    let (mv, fresh) = drive(ANTIJOIN, &muts).await;
+    assert!(
+        !fresh.is_empty(),
+        "seed must yield a non-empty readiness set; got {fresh:?}"
+    );
+    assert_eq!(mv, fresh, "Now.org matview must equal fresh recompute");
 }

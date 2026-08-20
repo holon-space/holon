@@ -200,15 +200,15 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 # native-only by construction: the wasm frontends (holon-worker, dioxus-web) are
 # excluded from this workspace with their own dep graphs, and turso_core
 # additionally cfg-gates all fts code behind `not(target_family = "wasm")`.
-turso = { git = "https://github.com/nightscape/turso.git", rev = "1640d838468488da2fc4220e08a47780bd7dabce", default-features = false, features = [
+turso = { git = "https://github.com/nightscape/turso.git", rev = "2f475750ef428e9a42e145f52f4b0a24fbf1e7e6", default-features = false, features = [
   "fts",
 ] }
-turso_core = { git = "https://github.com/nightscape/turso.git", rev = "1640d838468488da2fc4220e08a47780bd7dabce", default-features = false, features = [
+turso_core = { git = "https://github.com/nightscape/turso.git", rev = "2f475750ef428e9a42e145f52f4b0a24fbf1e7e6", default-features = false, features = [
   "json",
   "fts",
 ] }
-turso_sdk_kit = { git = "https://github.com/nightscape/turso.git", rev = "1640d838468488da2fc4220e08a47780bd7dabce", default-features = false }
-turso_ext = { git = "https://github.com/nightscape/turso.git", rev = "1640d838468488da2fc4220e08a47780bd7dabce", default-features = false }
+turso_sdk_kit = { git = "https://github.com/nightscape/turso.git", rev = "2f475750ef428e9a42e145f52f4b0a24fbf1e7e6", default-features = false }
+turso_ext = { git = "https://github.com/nightscape/turso.git", rev = "2f475750ef428e9a42e145f52f4b0a24fbf1e7e6", default-features = false }
 prqlc = { git = "https://github.com/nightscape/prql.git", branch = "main" }
 prqlc-parser = { git = "https://github.com/nightscape/prql.git", branch = "main" }
 gql-parser = { git = "https://github.com/holon-space/gql-to-sql.git", branch = "main" }
