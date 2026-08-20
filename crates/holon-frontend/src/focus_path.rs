@@ -1289,7 +1289,7 @@ mod tests {
     }
 
     fn list(items: Vec<ReactiveViewModel>) -> ReactiveViewModel {
-        ReactiveViewModel::static_collection("list", items, 0.0)
+        ReactiveViewModel::static_collection("list", items, 0.0, false)
     }
 
     /// Test-helper mirroring the typed-id boundary: bare → `block:`,

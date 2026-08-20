@@ -18,4 +18,4 @@ entity_name: integration
 
 variants:
   - name: default
-    render: 'row(#{gap: 8, align: "center"}, text(col("provider_name")), text(col("config_status"), #{muted: true}), text(col("status"), #{muted: true}), state_toggle(#{field: "enabled", binding: "bool", appearance: "switch"}), row(#{gap: 6, align: "center"}, list(#{collection: ops_of(col("id")), item_template: op_button(col("name"))}), text(col("configure_progress"), #{muted: true})))'
+    render: 'row(#{gap: 8, align: "center"}, text(col("provider_name")), text(col("config_status"), #{muted: true}), text(col("status"), #{muted: true}), state_toggle(#{field: "enabled", binding: "bool", appearance: "switch"}), row(#{gap: 6, align: "center"}, list(#{collection: ops_of(col("id")), item_template: op_button(col("name")), horizontal: true, gap: 8}), text(col("configure_progress"), #{muted: true})))'

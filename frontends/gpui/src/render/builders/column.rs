@@ -190,7 +190,20 @@ mod split_target_tests {
 /// `tree_item` are skipped. `tree_item_collapse_state` returns `None` for flat
 /// rows (e.g. the sync-states `live_query`), so those always render.
 pub(crate) fn eager_collection_div(view: &ReactiveView, ctx: &GpuiRenderContext) -> Div {
-    let mut list_div = div().flex().flex_col().w_full();
+    // A `horizontal` collection (an integration row's op buttons) lays its
+    // items along one baseline at content width, so every item sits on its
+    // row's line. The default stacks them full-width — what a page tree or
+    // outline wants.
+    let layout = view.layout();
+    let mut list_div = if layout.as_ref().is_some_and(|l| l.horizontal) {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(layout.as_ref().map(|l| l.gap).unwrap_or(0.0)))
+    } else {
+        div().flex().flex_col().w_full()
+    };
     let mut skip_below: Option<usize> = None;
     for item in view.children_snapshot() {
         if let Some((depth, collapsed)) = super::tree_item_collapse_state(item.as_ref(), ctx) {

@@ -92,11 +92,20 @@ impl CollectionData {
 pub struct CollectionVariant {
     pub spec: crate::collection_layout::LayoutSpec,
     pub gap: f32,
+    /// Lay the items out along a row instead of stacking them. A `Flat`
+    /// collection whose call site passes `horizontal: true` (e.g. an
+    /// integration row's op buttons) renders its `item_template` instances
+    /// side by side on one baseline; the default is the stacked column.
+    pub horizontal: bool,
 }
 
 impl CollectionVariant {
     pub fn new(spec: crate::collection_layout::LayoutSpec, gap: f32) -> Self {
-        Self { spec, gap }
+        Self {
+            spec,
+            gap,
+            horizontal: false,
+        }
     }
 
     /// Look up a registered layout by name and pair it with a gap. Panics
@@ -104,7 +113,11 @@ impl CollectionVariant {
     /// callers that consume user-supplied names should use
     /// `from_name_optional` instead.
     pub fn from_name(name: &str, gap: f32) -> Option<Self> {
-        crate::collection_layout::lookup_layout(name).map(|spec| Self { spec, gap })
+        crate::collection_layout::lookup_layout(name).map(|spec| Self {
+            spec,
+            gap,
+            horizontal: false,
+        })
     }
 
     /// Builtin convenience constructors. Each one panics if the named
@@ -176,7 +189,22 @@ pub fn collection_variant_of(expr: &RenderExpr) -> Option<CollectionVariant> {
         })
         .unwrap_or(spec.default_gap);
 
-    Some(CollectionVariant { spec, gap })
+    let horizontal = args
+        .iter()
+        .find(|a| a.name.as_deref() == Some("horizontal"))
+        .and_then(|a| match &a.value {
+            RenderExpr::Literal {
+                value: Value::Boolean(b),
+            } => Some(*b),
+            _ => None,
+        })
+        .unwrap_or(false);
+
+    Some(CollectionVariant {
+        spec,
+        gap,
+        horizontal,
+    })
 }
 
 /// Returns true if both variants are the same kind (same registered name).
@@ -1673,6 +1701,7 @@ impl ReactiveViewModel {
         item_template: RenderExpr,
         data_source: std::sync::Arc<dyn holon_api::ReactiveRowProvider>,
         gap: f32,
+        horizontal: bool,
         sort_key: Option<String>,
         parent_space: Option<crate::render_context::AvailableSpace>,
         child_space_fn: Option<std::sync::Arc<crate::reactive_view::ChildSpaceFn>>,
@@ -1682,7 +1711,7 @@ impl ReactiveViewModel {
         if widget == "query_result" {
             return Self::from_widget("query_result", HashMap::new());
         }
-        let layout = Self::widget_layout(widget, gap);
+        let layout = Self::widget_layout(widget, gap, horizontal);
         let view = crate::reactive_view::ReactiveView::new_collection(
             crate::reactive_view::CollectionConfig {
                 layout,
@@ -1702,14 +1731,19 @@ impl ReactiveViewModel {
     }
 
     /// Create a static collection node.
-    pub fn static_collection(widget: &str, items: Vec<ReactiveViewModel>, gap: f32) -> Self {
+    pub fn static_collection(
+        widget: &str,
+        items: Vec<ReactiveViewModel>,
+        gap: f32,
+        horizontal: bool,
+    ) -> Self {
         if widget == "query_result" {
             return Self {
                 children: items.into_iter().map(Arc::new).collect(),
                 ..Self::from_widget("query_result", HashMap::new())
             };
         }
-        let layout = Self::widget_layout(widget, gap);
+        let layout = Self::widget_layout(widget, gap, horizontal);
         let view = crate::reactive_view::ReactiveView::new_static_with_layout(items, layout);
         Self {
             collection: Some(std::sync::Arc::new(view)),
@@ -1717,21 +1751,23 @@ impl ReactiveViewModel {
         }
     }
 
-    fn widget_layout(widget: &str, gap: f32) -> CollectionVariant {
+    fn widget_layout(widget: &str, gap: f32, horizontal: bool) -> CollectionVariant {
         // Single source of truth: the `collection_layout` registry. Falls
         // back to a `list`-shaped variant for unknown widgets so the
         // streaming runtime stays well-typed even if a frontend forgets
         // to register a custom layout.
-        CollectionVariant::from_name(widget, gap).unwrap_or_else(|| {
+        let mut variant = CollectionVariant::from_name(widget, gap).unwrap_or_else(|| {
             CollectionVariant::from_name("list", gap)
                 .expect("`list` layout is registered as a builtin")
-        })
+        });
+        variant.horizontal = horizontal;
+        variant
     }
 
     /// Create a layout node from a widget name and children.
     pub fn layout(widget: &str, children: Vec<ReactiveViewModel>) -> Self {
         if widget == "columns" {
-            return Self::static_collection("columns", children, 16.0);
+            return Self::static_collection("columns", children, 16.0, false);
         }
         let mut props = HashMap::new();
         match widget {

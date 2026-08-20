@@ -30,7 +30,7 @@ holon_macros::widget_builder! {
                 // focus exactly like the other rows.
                 let virtual_child = virtual_child_slot_from_arg(&ba);
                 let __rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
-                ViewModel::streaming_collection("tree", tmpl.clone(), ds, 4.0, __sort_key, __parent_space, None, virtual_child, __rules)
+                ViewModel::streaming_collection("tree", tmpl.clone(), ds, 4.0, false, __sort_key, __parent_space, None, virtual_child, __rules)
             }
             (Some(tmpl), None) => {
                 let mut flat: Vec<(ViewModel, usize, std::collections::HashMap<String, Value>)> =
@@ -46,7 +46,7 @@ holon_macros::widget_builder! {
                     return ViewModel::leaf("text", Value::String("[tree: no item_template]".into()));
                 }
                 let items = weave_advice_into_items(&ba, flat_tree_items(flat));
-                ViewModel::static_collection("tree", items, 4.0)
+                ViewModel::static_collection("tree", items, 4.0, false)
             }
             (None, _) => {
                 ViewModel::leaf("text", Value::String("[tree: no item_template]".into()))
