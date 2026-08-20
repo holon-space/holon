@@ -11,7 +11,7 @@ holon_macros::widget_builder! {
         match children {
             CollectionData::Streaming { item_template, data_source, sort_key, rules } => {
                 let virtual_child = virtual_child_slot_from_arg(&ba);
-                ViewModel::streaming_collection("list", item_template, data_source, gap, horizontal, sort_key, __parent_space, None, virtual_child, rules)
+                ViewModel::streaming_collection("list", item_template, data_source, gap, horizontal, sort_key, __parent_space, None, virtual_child, rules, Default::default())
             }
             CollectionData::Static { mut items } => {
                 if let Some(tmpl) = ba.args.get_template("item_template").or(ba.args.get_template("item")) {
@@ -20,7 +20,7 @@ holon_macros::widget_builder! {
                     }
                 }
                 let items = weave_advice_into_items(&ba, items);
-                ViewModel::static_collection("list", items, gap, horizontal)
+                ViewModel::static_collection("list", items, gap, horizontal, Default::default())
             }
         }
     }

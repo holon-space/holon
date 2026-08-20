@@ -1,6 +1,7 @@
 mod columns;
 pub(crate) mod prelude;
 pub mod style;
+mod table;
 
 // Re-export tree_item collapse helper for use by ReactiveShell.
 // Re-export the sidebar drag-resize machinery so the root view (`lib.rs`) can
@@ -27,7 +28,7 @@ pub(crate) mod switch_track;
 pub(crate) use switch_track::switch_track;
 
 holon_macros::builder_registry!("src/render/builders",
-    skip: [prelude, columns, style, switch_track],
+    skip: [prelude, columns, style, switch_track, table],
     node_dispatch: AnyElement,
     context: GpuiRenderContext,
     transform: crate::render::builders::tag_node(ctx, __name, node, __inner),
@@ -416,6 +417,18 @@ pub(crate) fn register_builtin_layout_renderers(
         "board".to_string(),
         std::sync::Arc::new(
             board::render as fn(&ReactiveViewModel, &GpuiRenderContext) -> AnyElement,
+        ),
+    );
+    // `table_columnar` is deliberately a SEPARATE layout name from `table`.
+    // Dispatch here is by layout name, so registering this under `table` would
+    // route a bare `table` — `live_query`'s default item template — through the
+    // columnar renderer too. Keeping the names apart is what makes "bare-table
+    // behaviour is untouched" a structural fact rather than a runtime guard.
+    // Collapse the two only with a proof of equivalence.
+    registry.insert(
+        "table_columnar".to_string(),
+        std::sync::Arc::new(
+            table::render as fn(&ReactiveViewModel, &GpuiRenderContext) -> AnyElement,
         ),
     );
 }

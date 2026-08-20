@@ -126,6 +126,9 @@ fn registry() -> &'static RwLock<LayoutRegistry> {
 fn register_builtins(r: &mut LayoutRegistry) {
     r.register(LayoutSpec::flat("list", 4.0));
     r.register(LayoutSpec::flat("table", 0.0));
+    // `table(#{columns: …})`. A layout of its own so a bare `table` keeps the
+    // default render path exactly as it was.
+    r.register(LayoutSpec::flat("table_columnar", 0.0));
     r.register(LayoutSpec::flat("columns", 16.0));
     r.register(LayoutSpec::flat("board", 0.0));
     r.register(LayoutSpec::hierarchical("tree"));
@@ -157,7 +160,15 @@ mod tests {
 
     #[test]
     fn builtins_register() {
-        for name in ["list", "table", "columns", "board", "tree", "outline"] {
+        for name in [
+            "list",
+            "table",
+            "table_columnar",
+            "columns",
+            "board",
+            "tree",
+            "outline",
+        ] {
             assert!(
                 lookup_layout(name).is_some(),
                 "builtin layout {name} should be registered",

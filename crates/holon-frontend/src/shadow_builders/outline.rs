@@ -21,7 +21,7 @@ holon_macros::widget_builder! {
         match (__template, ba.ctx.data_source.clone()) {
             (Some(tmpl), Some(ds)) => {
                 let virtual_child = virtual_child_slot_from_arg(&ba);
-                ViewModel::streaming_collection("outline", tmpl.clone(), ds, 4.0, false, __sort_key, __parent_space, None, virtual_child, __rules)
+                ViewModel::streaming_collection("outline", tmpl.clone(), ds, 4.0, false, __sort_key, __parent_space, None, virtual_child, __rules, Default::default())
             }
             (Some(tmpl), None) => {
                 let mut flat: Vec<(ViewModel, usize, std::collections::HashMap<String, Value>)> =
@@ -33,7 +33,7 @@ holon_macros::widget_builder! {
                     flat.push((vc, 0, std::collections::HashMap::new()));
                 }
                 let items = weave_advice_into_items(&ba, flat_tree_items(flat));
-                ViewModel::static_collection("outline", items, 4.0, false)
+                ViewModel::static_collection("outline", items, 4.0, false, Default::default())
             }
             (None, _) => ViewModel::error("outline", "no item_template"),
         }

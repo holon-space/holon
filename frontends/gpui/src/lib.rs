@@ -2769,7 +2769,14 @@ pub fn render_supported_widgets() -> std::collections::HashSet<String> {
     // Collection layouts are handled via ReactiveShell, not individual GPUI
     // builders. They must be in the supported set so profile variant filtering
     // doesn't drop them.
-    for name in ["table", "tree", "list", "outline", "columns"] {
+    for name in [
+        "table",
+        "table_columnar",
+        "tree",
+        "list",
+        "outline",
+        "columns",
+    ] {
         widgets.insert(name.to_string());
     }
     widgets

@@ -762,6 +762,7 @@ pub fn is_template_arg(name: &str) -> bool {
             | "sort_key"
             | "context"
             | "states"
+            | "columns"
     ) || name.starts_with("mode_")
 }
 

@@ -48,7 +48,7 @@ fn parse_json_rows(s: &str) -> ViewModel {
                     }
                 })
                 .collect();
-            ViewModel::static_collection("query_result", items, 4.0, false)
+            ViewModel::static_collection("query_result", items, 4.0, false, Default::default())
         }
         _ => ViewModel::leaf("text", Value::String(s.to_string())),
     }

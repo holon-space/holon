@@ -44,18 +44,27 @@ pub const SIDEBAR_ITEM_TEMPLATE: &str = "list(#{item_template: row(#{gap: 8, ali
                                          text(col(\"provider_name\")), text(col(\"status\"), \
                                          #{muted: true}))})";
 
-/// A COLLECTION wrapping `render_entity()`, and both halves are load-bearing.
+/// Every bundled integration as one row of a columnar table, columns aligned
+/// across the header and all rows (Integration / Config / Status / Enabled /
+/// Setup). `live_query` applies this as the WHOLE render expression,
+/// interpreted once against the delivered row set, and `table` iterates the
+/// rows itself — a scalar template would render a single instance
+/// (`integrations_section_renders_every_row`).
 ///
-/// `live_query` applies its `item_template` as the WHOLE render expression,
-/// interpreted once against the delivered row set, so `list(...)` is what
-/// iterates the rows; a scalar template renders a single instance. Pinned by
-/// `integrations_section_renders_every_row`.
-///
-/// `render_entity()` inside it, rather than an inline `row(...)`, because
-/// `shared_render_entity_build` resolves the entity profile and is therefore
-/// what attaches `operations` to the node — the switch is inert without them.
-/// The entity owns its row, the layout owns its placement.
-pub const SETTINGS_ITEM_TEMPLATE: &str = "list(#{item_template: render_entity()})";
+/// The interactive cells carry their own render-exprs; `table` resolves each
+/// row's entity profile and attaches its operations, so the `enabled` switch
+/// and the `ops_of` op_buttons are wired without a `render_entity` wrapper.
+pub const SETTINGS_ITEM_TEMPLATE: &str = concat!(
+    "table(#{columns: [",
+    "#{header: \"Integration\", cell: text(col(\"provider_name\")), width: flex(2)}, ",
+    "#{header: \"Config\", cell: text(col(\"config_status\"), #{muted: true}), width: flex(1)}, ",
+    "#{header: \"Status\", cell: text(col(\"status\"), #{muted: true}), width: flex(1)}, ",
+    "#{header: \"Enabled\", cell: state_toggle(#{field: \"enabled\", binding: \"bool\", appearance: \"switch\"}), width: fixed(80)}, ",
+    "#{header: \"Setup\", cell: row(#{gap: 6, align: \"center\"}, ",
+    "list(#{collection: ops_of(col(\"id\")), item_template: op_button(col(\"name\")), horizontal: true, gap: 8}), ",
+    "text(col(\"configure_progress\"), #{muted: true})), width: flex(2)}",
+    "]})"
+);
 
 /// The words beside the switches. The switch stores a decision and does not act
 /// on the running fleet, so the surface has to say so; a silent next-launch

@@ -1695,6 +1695,10 @@ impl ReactiveViewModel {
     }
 
     /// Create a streaming collection node.
+    ///
+    /// `props` land on the collection NODE itself (not on its items) — a
+    /// layout whose geometry is authored once and applied to every row, such
+    /// as `table`'s column-width vector, carries it here.
     #[allow(clippy::too_many_arguments)]
     pub fn streaming_collection(
         widget: &str,
@@ -1707,9 +1711,10 @@ impl ReactiveViewModel {
         child_space_fn: Option<std::sync::Arc<crate::reactive_view::ChildSpaceFn>>,
         virtual_child: Option<crate::reactive_view::VirtualChildSlot>,
         rules: Vec<holon_api::render_types::RuleSpec>,
+        props: HashMap<String, Value>,
     ) -> Self {
         if widget == "query_result" {
-            return Self::from_widget("query_result", HashMap::new());
+            return Self::from_widget("query_result", props);
         }
         let layout = Self::widget_layout(widget, gap, horizontal);
         let view = crate::reactive_view::ReactiveView::new_collection(
@@ -1726,28 +1731,30 @@ impl ReactiveViewModel {
         );
         Self {
             collection: Some(std::sync::Arc::new(view)),
-            ..Self::from_widget(widget, HashMap::new())
+            ..Self::from_widget(widget, props)
         }
     }
 
-    /// Create a static collection node.
+    /// Create a static collection node. `props` land on the node itself, as
+    /// in [`Self::streaming_collection`].
     pub fn static_collection(
         widget: &str,
         items: Vec<ReactiveViewModel>,
         gap: f32,
         horizontal: bool,
+        props: HashMap<String, Value>,
     ) -> Self {
         if widget == "query_result" {
             return Self {
                 children: items.into_iter().map(Arc::new).collect(),
-                ..Self::from_widget("query_result", HashMap::new())
+                ..Self::from_widget("query_result", props)
             };
         }
         let layout = Self::widget_layout(widget, gap, horizontal);
         let view = crate::reactive_view::ReactiveView::new_static_with_layout(items, layout);
         Self {
             collection: Some(std::sync::Arc::new(view)),
-            ..Self::from_widget(widget, HashMap::new())
+            ..Self::from_widget(widget, props)
         }
     }
 
@@ -1767,7 +1774,7 @@ impl ReactiveViewModel {
     /// Create a layout node from a widget name and children.
     pub fn layout(widget: &str, children: Vec<ReactiveViewModel>) -> Self {
         if widget == "columns" {
-            return Self::static_collection("columns", children, 16.0, false);
+            return Self::static_collection("columns", children, 16.0, false, Default::default());
         }
         let mut props = HashMap::new();
         match widget {

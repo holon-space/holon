@@ -126,7 +126,7 @@ holon_macros::widget_builder! {
                 None => {
                     let items: Vec<ViewModel> =
                         exprs.iter().map(|e| (ba.interpret)(e, ba.ctx)).collect();
-                    return ViewModel::static_collection("columns", items, gap, false);
+                    return ViewModel::static_collection("columns", items, gap, false, Default::default());
                 }
             }
         }
@@ -174,6 +174,7 @@ holon_macros::widget_builder! {
                     child_space_fn,
                     None,
                     rules,
+                    Default::default(),
                 )
             }
             (Some(tmpl), None) => {
@@ -208,7 +209,7 @@ holon_macros::widget_builder! {
                         (ba.interpret)(&tmpl, &row_ctx)
                     })
                     .collect();
-                ViewModel::static_collection("columns", items, gap, false)
+                ViewModel::static_collection("columns", items, gap, false, Default::default())
             }
             (None, _) => {
                 // No template, no positional children — fail loud rather than
