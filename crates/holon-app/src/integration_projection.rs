@@ -174,18 +174,37 @@ impl IntegrationStateProjector {
 
         // Built by position rather than interpolation so a provider name can
         // never reach the statement as sql.
-        let placeholders = vec!["?"; rows.len()].join(", ");
+        let projected_ids: Vec<String> = rows
+            .iter()
+            .map(|r| integration_row_id(r.provider))
+            .collect();
+        let placeholders = vec!["?"; projected_ids.len()].join(", ");
         self.db
             .execute_values(
                 &format!("DELETE FROM integration_state WHERE id NOT IN ({placeholders})"),
-                rows.iter()
-                    .map(|r| Value::String(integration_row_id(r.provider)))
-                    .collect(),
+                projected_ids.iter().cloned().map(Value::String).collect(),
             )
             .await
             .map_err(|e| {
                 anyhow::anyhow!("pruning unbundled providers from integration_state: {e}")
             })?;
+
+        // This mirror IS the projection-visible surface for integrations: the
+        // Settings `live_query` and the sidebar read it, and nothing else makes
+        // an enablement change visible. Report the projected rows to the e2e
+        // latency correlator so a `set_field` interaction closes here, the same
+        // way a block mirror closes its interactions from `LiveData::subscribe`.
+        // Absent this, a settings `set_field` never sees a block-row delivery
+        // for its `integration:` target and expires as `e2e_expired`.
+        holon_api::latency_e2e::rows_delivered(
+            "integration_state",
+            projected_ids.iter().map(|id| {
+                (
+                    id.as_str(),
+                    holon_api::latency_e2e::Observable::BlockRow(None),
+                )
+            }),
+        );
 
         // The boot log carried NOT ONE line from this projector while the
         // Integrations section was visibly wrong, so the only way to tell

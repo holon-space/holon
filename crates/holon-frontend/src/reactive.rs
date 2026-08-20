@@ -3768,13 +3768,15 @@ impl BuilderServices for ReactiveEngine {
             });
             return;
         }
-        // Multi-param activation (popup param-collection flow) is tracked as
-        // follow-up work: extracting the CommandProvider param-collection
-        // machinery out of `ViewEventHandler` and anchoring it to the
-        // op_button site. For now fail loudly so it's visible.
+        // op_button sites gather still-missing params through their own inline
+        // param-collection popup (`render/builders/op_button.rs`) and only reach
+        // `present_op` once every param is resolved, so a click never lands here
+        // unsatisfied. This stays as a fail-loud guard: a caller that hands
+        // `present_op` unresolved params has no collection UI, and a silent
+        // no-op would hide that gap.
         panic!(
-            "present_op({}.{}): multi-param popup activation is not yet wired for op_button \
-             sites; {} param(s) missing (follow-up to mobile-bar PR)",
+            "present_op({}.{}): {} required param(s) unresolved and this call site has no \
+             param-collection popup to gather them",
             op.entity_name,
             op.name,
             matched.missing_params.len()

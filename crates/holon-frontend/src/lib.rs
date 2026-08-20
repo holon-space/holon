@@ -216,6 +216,7 @@ pub mod mutable_tree;
 pub mod navigation;
 pub(crate) mod operation_matcher;
 pub mod operations;
+pub mod param_collection;
 /// PBT SUT capability traits owned by the frontend (cap home-rule). Gated
 /// behind the `pbt` feature so production builds never pull `holon-pbt-core`.
 #[cfg(feature = "pbt")]
