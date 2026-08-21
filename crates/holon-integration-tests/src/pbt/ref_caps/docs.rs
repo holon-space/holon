@@ -255,8 +255,9 @@ impl RefDocumentsMut for ReferenceState {
             // the tag-less title — mirror that order or mark offsets computed
             // over a still-tagged line diverge from the SUT's.
             crate::pbt::types::apply_org_headline_tag_split(&mut block);
-            let (content, marks) = crate::pbt::types::normalize_content_for_org_roundtrip(
+            let (content, marks) = crate::pbt::types::normalize_parsed_block_for_org_roundtrip(
                 &block.content,
+                block.marks.as_deref(),
                 block.content_type,
             );
             block.content = content;

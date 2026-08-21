@@ -158,14 +158,47 @@ pub fn normalize_content_for_org_roundtrip_with(
     content_type: ContentType,
     classifier: &holon_api::link_parser::LinkTargetClassifier,
 ) -> (String, Option<Vec<holon_api::MarkSpan>>) {
+    normalize_seeded(content, &[], content_type, classifier)
+}
+
+/// [`normalize_content_for_org_roundtrip`] for a block whose marks the
+/// PRODUCTION parser already extracted — the shape
+/// `WriteOrgFile::from_org_text` hands the reference for a hand-authored
+/// `Given an org file:` docstring.
+///
+/// Such a block's `content` is the delimiter-STRIPPED text, so re-deriving its
+/// marks from that content alone finds none and drops every link the file
+/// authored, while the SUT leg re-renders the same block WITH its marks. Seed
+/// the fixed point with the marks instead, so both legs start from the same
+/// on-disk org text.
+pub fn normalize_parsed_block_for_org_roundtrip(
+    content: &str,
+    marks: Option<&[holon_api::MarkSpan]>,
+    content_type: ContentType,
+) -> (String, Option<Vec<holon_api::MarkSpan>>) {
+    normalize_seeded(
+        content,
+        marks.unwrap_or(&[]),
+        content_type,
+        &holon_api::link_parser::LinkTargetClassifier::default(),
+    )
+}
+
+/// The render→re-ingest fixed point, started from `(content, seed_marks)`.
+fn normalize_seeded(
+    content: &str,
+    seed_marks: &[holon_api::MarkSpan],
+    content_type: ContentType,
+    classifier: &holon_api::link_parser::LinkTargetClassifier,
+) -> (String, Option<Vec<holon_api::MarkSpan>>) {
     if content_type == ContentType::Source {
         return (content.trim_end().to_string(), None);
     }
     let mut text = content.to_string();
-    let mut marks: Vec<holon_api::MarkSpan> = Vec::new();
+    let mut marks: Vec<holon_api::MarkSpan> = seed_marks.to_vec();
     for _ in 0..32 {
-        // Writeback: what the block looks like on disk (identity while no
-        // marks have been extracted yet — the raw input IS the org text).
+        // Writeback: what the block looks like on disk (identity while the
+        // mark set is empty — an unseeded raw input IS the org text).
         let on_disk = holon_orgmode::inline_marks::render_inline_marks(&text, &marks);
         // Re-ingest: headline-title trim, then mark extraction.
         let trimmed_end = on_disk.trim_end();
