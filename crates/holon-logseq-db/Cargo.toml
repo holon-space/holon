@@ -11,6 +11,9 @@ ignored = ["workspace-hack"]
 
 [dependencies]
 holon-api.workspace = true
+# The import base is persisted as JSON; `Block` itself is serde-free by design,
+# so the base carries its own serializable shape.
+serde = { workspace = true, features = ["derive"] }
 # Store entry goes through `BlockOrdering`, the same boundary org re-ingest
 # uses. Confined to the `ingest` module so decode/projection stays store-free.
 holon-core.workspace = true

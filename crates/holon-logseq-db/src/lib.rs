@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use holon_api::Block;
 use holon_api::EntityUri;
 
+pub mod base;
 mod datoms;
 pub mod ingest;
 mod project;
