@@ -7,6 +7,7 @@ pub mod sql_operation_provider;
 pub mod task_keyword_cycle;
 pub mod task_keyword_promotion;
 pub mod traits;
+pub mod type_declaration;
 
 // Re-export DynamicEntity from holon_api (single source of truth)
 pub use holon_api::DynamicEntity;

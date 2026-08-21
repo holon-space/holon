@@ -3450,9 +3450,10 @@ mod attribution_tests {
 /// create such an entity and lets an invariant read it back off the matview and
 /// prove its id never lands in a block table.
 ///
-/// `#[capmap_adapter]` hosts it on `CapMap`, so the composed keystone dispatches
-/// `CreateTypedEntity` and selects the typed-matview invariant only when a Turso
-/// config supplies it (a Loro-only / no-Turso slice deselects honestly).
+/// `#[capmap_adapter]` hosts it on `CapMap`, so the composed keystone
+/// dispatches `CreateTypedEntity` and selects the typed-matview invariant only
+/// when a Turso config supplies it (a Loro-only / no-Turso slice deselects
+/// honestly).
 #[allow(async_fn_in_trait)]
 #[holon_macros::capmap_adapter] // emits async-trait + CapName + `impl … for CapMap`
 pub trait SutTypedEntity {

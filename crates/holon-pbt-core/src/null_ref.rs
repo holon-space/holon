@@ -24,10 +24,13 @@ use crate::capabilities::RefEditorMirror;
 use crate::capabilities::RefFocus;
 use crate::capabilities::RefGlobalFocus;
 use crate::capabilities::RefHistoryExpectation;
+use crate::capabilities::RefJournalFeed;
 use crate::capabilities::RefLayout;
+use crate::capabilities::RefNavHistory;
 use crate::capabilities::RefSharedView;
 use crate::capabilities::RefTaskState;
 use crate::capabilities::RefToggle;
+use crate::capabilities::RefTypedEntities;
 use crate::capabilities::RefUndoRedoBurned;
 use crate::capabilities::RefViewSelection;
 use crate::capabilities::RefWatch;
@@ -40,7 +43,7 @@ pub struct NullRef;
 /// The trait names `NullRef` answers for — the ref caps the classifier
 /// can host. Asserted by the classifier test so a newly registered ref
 /// capability cannot silently escape classification.
-pub const NULL_REF_CAPS: [&str; 16] = [
+pub const NULL_REF_CAPS: [&str; 19] = [
     "RefAdvice",
     "RefAudience",
     "RefBackend",
@@ -50,10 +53,13 @@ pub const NULL_REF_CAPS: [&str; 16] = [
     "RefFocus",
     "RefGlobalFocus",
     "RefHistoryExpectation",
+    "RefJournalFeed",
     "RefLayout",
+    "RefNavHistory",
     "RefSharedView",
     "RefTaskState",
     "RefToggle",
+    "RefTypedEntities",
     "RefUndoRedoBurned",
     "RefViewSelection",
     "RefWatch",
@@ -219,6 +225,45 @@ impl RefHistoryExpectation for NullRef {
 }
 
 #[allow(unused_variables)]
+impl RefJournalFeed for NullRef {
+    fn feed_day_pages(&self) -> Vec<EntityUri> {
+        panic!("class-2: invariant read RefJournalFeed::feed_day_pages")
+    }
+}
+
+#[allow(unused_variables)]
+impl RefNavHistory for NullRef {
+    fn can_go_back(&self, region: holon_api::Region) -> bool {
+        panic!("class-2: invariant read RefNavHistory::can_go_back")
+    }
+    fn can_go_forward(&self, region: holon_api::Region) -> bool {
+        panic!("class-2: invariant read RefNavHistory::can_go_forward")
+    }
+    fn predicts_navigation_focus(&self, block_id: &EntityUri, region: holon_api::Region) -> bool {
+        panic!("class-2: invariant read RefNavHistory::predicts_navigation_focus")
+    }
+    fn predicted_sidebar_navigation_targets(&self) -> Vec<EntityUri> {
+        panic!("class-2: invariant read RefNavHistory::predicted_sidebar_navigation_targets")
+    }
+    fn drawer_is_open(&self, panel_id: &str) -> bool {
+        panic!("class-2: invariant read RefNavHistory::drawer_is_open")
+    }
+}
+
+#[allow(unused_variables)]
+impl RefTypedEntities for NullRef {
+    fn typed_entity_schemas(&self) -> Vec<(String, Vec<String>)> {
+        panic!("class-2: invariant read RefTypedEntities::typed_entity_schemas")
+    }
+    fn expected_typed_entity_rows(&self, type_name: &str) -> Vec<Vec<String>> {
+        panic!("class-2: invariant read RefTypedEntities::expected_typed_entity_rows")
+    }
+    fn typed_entity_ids(&self) -> BTreeSet<String> {
+        panic!("class-2: invariant read RefTypedEntities::typed_entity_ids")
+    }
+}
+
+#[allow(unused_variables)]
 impl RefLayout for NullRef {
     fn layout_block_ids(&self) -> BTreeSet<EntityUri> {
         panic!("class-2: invariant read RefLayout::layout_block_ids")
@@ -336,10 +381,13 @@ pub fn null_ref_caps() -> CapMap {
     caps.insert(nr.clone() as Arc<dyn RefFocus>);
     caps.insert(nr.clone() as Arc<dyn RefGlobalFocus>);
     caps.insert(nr.clone() as Arc<dyn RefHistoryExpectation>);
+    caps.insert(nr.clone() as Arc<dyn RefJournalFeed>);
     caps.insert(nr.clone() as Arc<dyn RefLayout>);
+    caps.insert(nr.clone() as Arc<dyn RefNavHistory>);
     caps.insert(nr.clone() as Arc<dyn RefSharedView>);
     caps.insert(nr.clone() as Arc<dyn RefTaskState>);
     caps.insert(nr.clone() as Arc<dyn RefToggle>);
+    caps.insert(nr.clone() as Arc<dyn RefTypedEntities>);
     caps.insert(nr.clone() as Arc<dyn RefUndoRedoBurned>);
     caps.insert(nr.clone() as Arc<dyn RefViewSelection>);
     caps.insert(nr as Arc<dyn RefWatch>);
@@ -357,10 +405,13 @@ pub fn null_ref_cap_ids() -> Vec<CapId> {
         CapId::of::<dyn RefFocus>(),
         CapId::of::<dyn RefGlobalFocus>(),
         CapId::of::<dyn RefHistoryExpectation>(),
+        CapId::of::<dyn RefJournalFeed>(),
         CapId::of::<dyn RefLayout>(),
+        CapId::of::<dyn RefNavHistory>(),
         CapId::of::<dyn RefSharedView>(),
         CapId::of::<dyn RefTaskState>(),
         CapId::of::<dyn RefToggle>(),
+        CapId::of::<dyn RefTypedEntities>(),
         CapId::of::<dyn RefUndoRedoBurned>(),
         CapId::of::<dyn RefViewSelection>(),
         CapId::of::<dyn RefWatch>(),

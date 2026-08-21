@@ -319,6 +319,8 @@ impl TursoAdapter {
         db_handle: &DbHandle,
     ) -> Result<TursoArtifacts> {
         Self::reject_keyword_identifiers(type_def)?;
+        Self::reject_non_lowercase_name(type_def)?;
+        Self::reject_non_identifier_name(type_def)?;
         for module in Self::schema_modules(type_def) {
             module.ensure_schema(db_handle).await.map_err(|e| {
                 StorageError::DatabaseError(format!(
@@ -387,6 +389,67 @@ impl TursoAdapter {
              IVM normalizes quoted identifiers, keyword-named types cannot be safely written — \
              quoting them silently stops matview maintenance, and not quoting them is a syntax \
              error. Rename the type or field, or wait for the engine fix.",
+            type_def.name
+        )))
+    }
+
+    /// Reject a type whose name is not already lowercase.
+    ///
+    /// TEMPORARY, and lifted by the same engine fix as
+    /// [`Self::reject_keyword_identifiers`] — the fork's IVM dependency
+    /// tracking keys on the identifier as WRITTEN, so it is blind to case just
+    /// as it is blind to quoting. A bare `INSERT INTO Person` needs no quotes,
+    /// so `DbHandle`'s quoted-write guard never sees it, and the write reports
+    /// success while every matview over the table silently stops being
+    /// maintained. A matview over a mixed-case table does not even populate
+    /// from the rows already there. Rejecting at DECLARATION keeps the failure
+    /// at the boundary, where the name can still be changed.
+    fn reject_non_lowercase_name(type_def: &TypeDefinition) -> Result<()> {
+        if type_def.name == type_def.name.to_lowercase() {
+            return Ok(());
+        }
+        Err(StorageError::DatabaseError(format!(
+            "type '{}' is not lowercase: until our Turso fork's IVM normalizes identifier case, a \
+             mixed-case type cannot be safely written — an unquoted write to it silently stops \
+             matview maintenance (and needs no quotes, so the quoted-write guard cannot catch \
+             it), and its matview never populates from existing rows. Rename the type to '{}', or \
+             wait for the engine fix.",
+            type_def.name,
+            type_def.name.to_lowercase()
+        )))
+    }
+
+    /// Reject a name this adapter cannot spell as a bare SQL identifier
+    /// (`[a-z][a-z0-9_]*`).
+    ///
+    /// This is a limit of the TURSO SERIALIZATION, not a rule about type names
+    /// in general — `TypeRegistry` deliberately carries hyphenated types, and
+    /// a hyphen is a perfectly good URI scheme. It is the DDL that cannot take
+    /// one: the name is interpolated UNQUOTED into `CREATE TABLE`, so `gen-1`
+    /// arrives at the parser as a syntax error.
+    ///
+    /// TEMPORARY, on the same register as [`Self::reject_non_lowercase_name`]
+    /// and lifted by the same engine fix: quoting is what would let this
+    /// adapter carry the wider alphabet, and quoting is exactly what the
+    /// fork's IVM cannot survive today. Lifting means WIDENING, not deleting:
+    /// a leading digit or an embedded space can never be a valid URI scheme,
+    /// so those shapes stay refused here even once quoting is safe (else they
+    /// reach `EntityName::new`'s debug_assert). While the restriction stands
+    /// it also keeps `EntityName`'s `_`→`-` fold injective over serialized
+    /// types (`gen-1` and `gen_1` both canonicalize to `gen-1`).
+    fn reject_non_identifier_name(type_def: &TypeDefinition) -> Result<()> {
+        let mut chars = type_def.name.chars();
+        let shaped = matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        if shaped {
+            return Ok(());
+        }
+        Err(StorageError::DatabaseError(format!(
+            "type '{}' cannot be serialized to Turso: its raw table name is interpolated unquoted \
+             into DDL, so the name must match [a-z][a-z0-9_]* — a hyphen, a space, or a leading \
+             digit reaches the SQL parser as a syntax error. The type itself may keep any name \
+             the registry accepts; only its Turso serialization is refused. Until our fork's IVM \
+             survives quoted identifiers, rename the type for storage.",
             type_def.name
         )))
     }
@@ -711,7 +774,9 @@ mod tests {
             .await
             .expect("in-memory backend");
         let td = person_td();
-        TursoAdapter::register(&td, &handle).await.expect("register");
+        TursoAdapter::register(&td, &handle)
+            .await
+            .expect("register");
 
         let text = |v: &str| turso::Value::Text(v.to_string());
         let err = handle
@@ -793,15 +858,127 @@ mod tests {
             )
             .await
             .expect("query sqlite_master");
-        assert!(created.is_empty(), "a rejected type must leave no artifacts");
+        assert!(
+            created.is_empty(),
+            "a rejected type must leave no artifacts"
+        );
 
         // A keyword FIELD name is rejected the same way.
         let mut td2 = person_td();
-        td2.fields.push(FieldSchema::new("select", "TEXT").nullable());
+        td2.fields
+            .push(FieldSchema::new("select", "TEXT").nullable());
         let err2 = TursoAdapter::register(&td2, &handle)
             .await
             .expect_err("a SQL-keyword field name must be rejected");
         assert!(err2.to_string().contains("select"));
+
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// The case half of the same TEMPORARY restriction. A mixed-case name needs
+    /// no quotes, so the quoted-write guard cannot catch it — the declaration
+    /// boundary is the only place left to refuse it.
+    #[tokio::test]
+    async fn a_mixed_case_type_is_rejected_at_registration() {
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory backend");
+        let mut td = person_td();
+        td.name = "Person".to_string();
+
+        let err = TursoAdapter::register(&td, &handle)
+            .await
+            .expect_err("a mixed-case type name must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("silently stops matview maintenance"),
+            "the error must name the limitation; got: {msg}"
+        );
+        assert!(
+            msg.contains("Person") && msg.contains("person"),
+            "the error must name the offending identifier AND the fix; got: {msg}"
+        );
+
+        // Refused BEFORE any DDL — an uppercase name leaves no artifacts.
+        let created = handle
+            .query(
+                "SELECT name FROM sqlite_master WHERE name IN ('Person', 'Person_raw')",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("query sqlite_master");
+        assert!(
+            created.is_empty(),
+            "a rejected type must leave no artifacts"
+        );
+
+        // An already-lowercase name is untouched by this rule.
+        TursoAdapter::register(&person_td(), &handle)
+            .await
+            .expect("a lowercase type registers normally");
+
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// The shape rule, on the three ways a lowercase name can still be
+    /// unspellable as a bare SQL identifier. Each would otherwise surface as a
+    /// DDL syntax error from deep inside `ensure_schema`, naming a generated
+    /// statement rather than the type that caused it.
+    #[tokio::test]
+    async fn a_name_that_is_not_a_bare_identifier_is_rejected_at_registration() {
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory backend");
+
+        // Hyphen, leading digit, embedded space. All are lowercase, so they
+        // clear the case rule and reach this one.
+        for bad in ["gen-1", "1x", "a b"] {
+            let mut td = person_td();
+            td.name = bad.to_string();
+
+            let msg = TursoAdapter::register(&td, &handle)
+                .await
+                .expect_err("a non-identifier type name must be rejected")
+                .to_string();
+            assert!(
+                msg.contains("cannot be serialized to Turso") && msg.contains("[a-z][a-z0-9_]*"),
+                "the error must name the rule; got: {msg}"
+            );
+            assert!(
+                msg.contains(bad),
+                "the error must name the offending identifier; got: {msg}"
+            );
+            assert!(
+                msg.contains("may keep any name the registry accepts"),
+                "the error must scope itself to the Turso serialization — the registry carries \
+                 hyphenated types on purpose; got: {msg}"
+            );
+        }
+
+        // Refused BEFORE any DDL.
+        let created = handle
+            .query(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'gen-1%' OR name LIKE '1x%'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("query sqlite_master");
+        assert!(
+            created.is_empty(),
+            "a rejected type must leave no artifacts"
+        );
+
+        // Underscores and digits AFTER the first character are legal — this is
+        // exactly the `gen_N` shape the keystone generator draws.
+        let mut ok = person_td();
+        ok.name = "gen_1".to_string();
+        TursoAdapter::register(&ok, &handle)
+            .await
+            .expect("a bare identifier registers normally");
 
         handle.shutdown().await.expect("shutdown");
     }

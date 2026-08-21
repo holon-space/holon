@@ -15,6 +15,7 @@ use holon_api::OperationDescriptor;
 use holon_api::OperationParam;
 use holon_api::PAGE_TAG;
 use holon_api::ParentNotFound;
+use holon_api::TypeDefinition;
 use holon_api::TypeHint;
 use holon_api::Value;
 use holon_core::BatchOp;
@@ -200,6 +201,69 @@ fn blocks_known_columns() -> Vec<&'static str> {
     holon_api::schema::BLOCK.columns()
 }
 
+/// The column vocabulary one entity's write table exposes, derived from that
+/// entity's schema.
+///
+/// Everything the write path used to ASSUME about `block` — that a param
+/// outside the column set can be packed into a `properties` JSON column, that
+/// a create stamps `created_at`/`updated_at` — is a question asked of this
+/// schema instead. A runtime-declared type that declares none of those columns
+/// therefore gets none of that behaviour, rather than inheriting block's shape
+/// and writing SQL against columns its table does not have.
+#[derive(Clone, Debug)]
+struct WriteSchema {
+    columns: HashSet<String>,
+}
+
+impl WriteSchema {
+    /// The JSON column that absorbs params outside [`Self::columns`]. An entity
+    /// whose table lacks it has NO overflow, so an unknown param is an error.
+    const OVERFLOW_COLUMN: &'static str = "properties";
+
+    fn new(columns: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            columns: columns.into_iter().collect(),
+        }
+    }
+
+    /// The block write vocabulary, single-sourced from
+    /// `holon_api::schema::BLOCK`.
+    fn block() -> Self {
+        Self::new(blocks_known_columns().iter().map(|s| s.to_string()))
+    }
+
+    /// The vocabulary a runtime-declared type's raw table exposes: its
+    /// PERSISTED fields. Computed and transient fields are not written.
+    fn from_type_def(type_def: &TypeDefinition) -> Self {
+        Self::new(
+            type_def
+                .persistent_fields()
+                .into_iter()
+                .map(|f| f.name.clone()),
+        )
+    }
+
+    fn is_column(&self, name: &str) -> bool {
+        self.columns.contains(name)
+    }
+
+    fn has_overflow(&self) -> bool {
+        self.columns.contains(Self::OVERFLOW_COLUMN)
+    }
+
+    /// Whether a create stamps write-time timestamps: only when the table
+    /// declares the columns to hold them.
+    fn stamps_timestamps(&self) -> bool {
+        self.is_column("created_at") && self.is_column("updated_at")
+    }
+
+    fn column_list(&self) -> Vec<&str> {
+        let mut cols: Vec<&str> = self.columns.iter().map(String::as_str).collect();
+        cols.sort_unstable();
+        cols
+    }
+}
+
 /// A prepared operation, split into two FK-ordered phases so a batch can apply
 /// ALL block_raw rows before ANY edge junction (rows-then-edges). This makes
 /// the op-vec order irrelevant for FK safety: a create batch containing a
@@ -231,7 +295,9 @@ pub struct SqlOperationProvider {
     table_name: String,
     entity_name: String,
     entity_short_name: String,
-    known_columns: HashSet<String>,
+    /// What this entity's write table can hold — derived from its schema, so
+    /// the write path never assumes block's columns for a non-block type.
+    write_schema: WriteSchema,
     /// Edge-typed fields (multi-valued, projected to a junction table).
     /// Indexed by field name for O(1) partition-time lookup.
     edge_fields: HashMap<String, EdgeFieldDescriptor>,
@@ -265,10 +331,48 @@ impl SqlOperationProvider {
         entity_short_name: String,
         edge_fields: Vec<EdgeFieldDescriptor>,
     ) -> Self {
-        let known_columns = blocks_known_columns()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        Self::with_write_schema(
+            db_handle,
+            table_name,
+            entity_name,
+            entity_short_name,
+            edge_fields,
+            WriteSchema::block(),
+        )
+    }
+
+    /// The write authority for a type declared at runtime: table, entity name
+    /// and column vocabulary ALL derived from its [`TypeDefinition`].
+    ///
+    /// This is the generic counterpart of the hand-wired block provider — the
+    /// same code path, parameterized by the type instead of defaulting to
+    /// block. Registering it is what makes a declared type writable; see
+    /// [`crate::core::type_declaration::declare_type`].
+    pub fn for_type(db_handle: DbHandle, type_def: &TypeDefinition) -> Self {
+        // Routed by the CANONICAL entity name. `EntityName` folds `_` to `-`
+        // so the name is a valid URI scheme; a provider that kept the raw
+        // `gen_1` would advertise `gen-1` in its descriptors and match nothing
+        // the dispatcher looks up. The TABLE keeps the raw spelling — that is
+        // `EntityName::table_name`'s direction, and `TursoAdapter` derives it.
+        let entity_name = EntityName::new(type_def.name.clone());
+        Self::with_write_schema(
+            db_handle,
+            holon_turso::turso_adapter::TursoAdapter::raw_table_name(type_def),
+            entity_name.as_str().to_string(),
+            entity_name.as_str().to_string(),
+            Vec::new(),
+            WriteSchema::from_type_def(type_def),
+        )
+    }
+
+    fn with_write_schema(
+        db_handle: DbHandle,
+        table_name: String,
+        entity_name: String,
+        entity_short_name: String,
+        edge_fields: Vec<EdgeFieldDescriptor>,
+        write_schema: WriteSchema,
+    ) -> Self {
         let edge_fields = edge_fields
             .into_iter()
             .filter(|d| d.entity == entity_name)
@@ -279,10 +383,50 @@ impl SqlOperationProvider {
             table_name,
             entity_name,
             entity_short_name,
-            known_columns,
+            write_schema,
             edge_fields,
             clock: std::sync::Arc::new(holon_api::SystemClock),
         }
+    }
+
+    /// What a dispatched op of this entity targets. Block-shaped entities
+    /// target the focused block; a free-standing entity sits in no block tree,
+    /// so its ops are global — claiming `Block` would list them on the block
+    /// context menu, where they have no subject.
+    fn target_scope(&self) -> holon_api::TargetScope {
+        if self.advertises_content_compounds() {
+            holon_api::TargetScope::Block
+        } else {
+            holon_api::TargetScope::Global
+        }
+    }
+
+    /// Whether this entity can answer the content/hierarchy compound ops
+    /// (task-state cycling, link resolution, block→page, merge). They read
+    /// `content` and `parent_id`; a table declaring neither has nothing for
+    /// them to operate on.
+    fn advertises_content_compounds(&self) -> bool {
+        self.write_schema.is_column("content") && self.write_schema.is_column("parent_id")
+    }
+
+    /// Where a param or `set_field` field is written: a real column, or the
+    /// `properties` overflow. A type declaring neither has nowhere to put it —
+    /// an error at the write boundary, never SQL against a column the table
+    /// does not have (nor a value quietly dropped into JSON nobody reads).
+    fn require_write_route(&self, field: &str) -> Result<()> {
+        if self.write_schema.is_column(field) || self.write_schema.has_overflow() {
+            return Ok(());
+        }
+        Err(format!(
+            "{entity}: field '{field}' is not a column of `{table}` and `{entity}` declares no \
+             `{overflow}` overflow column, so this write has nowhere to land. Declared columns: \
+             {cols:?}. Add the field to the type definition, or write it to a type that has it.",
+            entity = self.entity_name,
+            table = self.table_name,
+            overflow = WriteSchema::OVERFLOW_COLUMN,
+            cols = self.write_schema.column_list(),
+        )
+        .into())
     }
 
     /// Override the clock (tests). Defaults to SystemClock.
@@ -339,11 +483,11 @@ impl SqlOperationProvider {
     fn partition_params(
         &self,
         params: &StorageEntity,
-    ) -> (
+    ) -> Result<(
         Vec<(String, String)>,
         std::collections::HashMap<String, Value>,
         Vec<(EdgeFieldDescriptor, Vec<String>)>,
-    ) {
+    )> {
         let mut sql_fields = Vec::new();
         let mut extra_props = std::collections::HashMap::new();
         let mut edge_field_params: Vec<(EdgeFieldDescriptor, Vec<String>)> = Vec::new();
@@ -403,7 +547,7 @@ impl SqlOperationProvider {
                     })
                     .collect();
                 edge_field_params.push((descriptor.clone(), ids));
-            } else if self.known_columns.contains(key.as_ref()) {
+            } else if self.write_schema.is_column(key.as_ref()) {
                 // Trim trailing whitespace from content — org files don't
                 // preserve it, so storing untrimmed content would cause
                 // permanent divergence between DB and org round-trips.
@@ -414,6 +558,7 @@ impl SqlOperationProvider {
                 };
                 sql_fields.push((key.to_string(), Self::value_to_sql(value)));
             } else {
+                self.require_write_route(key)?;
                 extra_props.insert(key.to_string(), value.clone());
             }
         }
@@ -440,7 +585,7 @@ impl SqlOperationProvider {
             }
         }
 
-        (sql_fields, extra_props, edge_field_params)
+        Ok((sql_fields, extra_props, edge_field_params))
     }
 
     /// `UPDATE` of one TEXT column of one row, by id.
@@ -709,8 +854,10 @@ impl SqlOperationProvider {
             match params.get("id").and_then(|v| v.as_string()) {
                 Some(existing) => holon_api::identity_minting::CreateId::Carried(
                     holon_api::identity_minting::CarriedId::from_stored(
-                        // ALLOW(entity_uri_from_raw): id is a validated create param
-                        EntityUri::from_raw(existing),
+                        // Schemed against THIS entity: a create knows what it is
+                        // creating, so an unschemed id must not take the raw
+                        // parse's block default.
+                        EntityUri::from_raw_for(&self.entity_name, existing),
                     ),
                 ),
                 None => holon_api::identity_minting::CreateId::Minted(
@@ -743,7 +890,7 @@ impl SqlOperationProvider {
                 None => params.remove("sort_key"),
             };
         }
-        let prepared = self.prepare_create(&params, held.as_ref());
+        let prepared = self.prepare_create(&params, held.as_ref())?;
         // block_links junction (links increment 2): derived from the
         // marks param, written in the SAME transaction as the row +
         // edge junctions. A Page-tagged create also re-resolves
@@ -1119,8 +1266,8 @@ impl SqlOperationProvider {
             )
             .into());
         };
-        // ALLOW(entity_uri_from_raw): create param id at the write boundary.
-        let uri = EntityUri::from_raw(id);
+        // Schemed against THIS entity, matching what the create will store.
+        let uri = EntityUri::from_raw_for(&self.entity_name, id);
         match holon_api::identity_recognition::recognize_derived_id(
             &uri,
             held_title.as_deref(),
@@ -1157,7 +1304,11 @@ impl SqlOperationProvider {
     /// [`recognize_create`](Self::recognize_create)) — `Some` turns the create
     /// into a recognized RE-create, which re-asserts only what it supplies and
     /// only where that differs from what is stored.
-    fn prepare_create(&self, params: &StorageEntity, held: Option<&StorageEntity>) -> PreparedOp {
+    fn prepare_create(
+        &self,
+        params: &StorageEntity,
+        held: Option<&StorageEntity>,
+    ) -> Result<PreparedOp> {
         // Ensure timestamps are present so the event payload is a complete Block.
         // Without this, CacheEventSubscriber fails to deserialize: "missing field
         // created_at".
@@ -1166,7 +1317,8 @@ impl SqlOperationProvider {
         // once, and re-stamping `created_at`/`updated_at` on a create that
         // changed nothing is exactly the clobber this arm exists to stop.
         let mut params = params.clone();
-        if held.is_none() {
+        // Only a table that DECLARES the timestamp columns gets them stamped.
+        if held.is_none() && self.write_schema.stamps_timestamps() {
             let now_ms = self.clock.now_millis();
             params
                 .entry("created_at".into())
@@ -1176,7 +1328,7 @@ impl SqlOperationProvider {
                 .or_insert_with(|| Value::Integer(now_ms));
         }
 
-        let (mut sql_fields, extra_props, edge_field_params) = self.partition_params(&params);
+        let (mut sql_fields, extra_props, edge_field_params) = self.partition_params(&params)?;
 
         if !extra_props.is_empty() {
             // `Value::Null` props are removal sentinels (see `prepare_update`);
@@ -1260,10 +1412,10 @@ impl SqlOperationProvider {
             ));
         }
 
-        PreparedOp {
+        Ok(PreparedOp {
             row_statements,
             edge_statements,
-        }
+        })
     }
 
     /// Build SQL for an update operation without executing.
@@ -1287,7 +1439,7 @@ impl SqlOperationProvider {
         // end of this function still keeps no-op UPDATEs from firing
         // spurious CDC.
 
-        let (sql_fields, extra_props, edge_field_params) = self.partition_params(params);
+        let (sql_fields, extra_props, edge_field_params) = self.partition_params(params)?;
 
         // TRACE: any non-standard custom property being written via update path
         const STANDARD_PROP_KEYS: &[&str] = &[
@@ -2160,7 +2312,7 @@ impl SqlOperationProvider {
     /// null/absent field both read back as [`Value::Null`] — the sentinel the
     /// inverse `set_field` uses to REMOVE a property (`json_remove`).
     async fn read_field_old_value(&self, id: &str, field: &str) -> Result<Value> {
-        let sql = if self.known_columns.contains(field) {
+        let sql = if self.write_schema.is_column(field) {
             format!(
                 "SELECT {col} AS v FROM {table} WHERE id = '{id}'",
                 col = Self::quote_identifier(field),
@@ -2575,7 +2727,7 @@ impl OperationProvider for SqlOperationProvider {
                 id_column: "id".to_string(),
                 affected_fields: vec![],
                 param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Block,
+                target_scope: self.target_scope(),
                 boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Internal,
@@ -2605,7 +2757,7 @@ impl OperationProvider for SqlOperationProvider {
                 required_params: vec![],
                 affected_fields: vec![],
                 param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Block,
+                target_scope: self.target_scope(),
                 boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Internal,
@@ -2629,7 +2781,7 @@ impl OperationProvider for SqlOperationProvider {
                 id_column: "id".to_string(),
                 affected_fields: vec![],
                 param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Block,
+                target_scope: self.target_scope(),
                 boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
                 menu_exposure: holon_api::MenuExposure::NotListed {
                     surface: holon_api::NonMenuSurface::Internal,
@@ -2653,176 +2805,13 @@ impl OperationProvider for SqlOperationProvider {
                 id_column: "id".to_string(),
                 affected_fields: vec![],
                 param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Block,
+                target_scope: self.target_scope(),
                 boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
                 menu_exposure: holon_api::MenuExposure::Listed {
                     surfaces: holon_api::SurfaceSet {
                         slash_menu: true,
                         action_bar: false,
                     },
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
-            },
-            OperationDescriptor {
-                entity_name: self.entity_name.clone().into(),
-                entity_short_name: self.entity_short_name.clone(),
-                name: "cycle_task_state".to_string(),
-                display_name: "Cycle Task State".to_string(),
-                description: "Cycle to the next task state".to_string(),
-                required_params: vec![OperationParam {
-                    name: "id".to_string(),
-                    type_hint: TypeHint::String,
-                    description: "Entity ID".to_string(),
-                }],
-                affected_fields: vec!["task_state".to_string()],
-                id_column: "id".to_string(),
-                param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Block,
-                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
-                menu_exposure: holon_api::MenuExposure::Listed {
-                    surfaces: holon_api::SurfaceSet {
-                        slash_menu: true,
-                        action_bar: false,
-                    },
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
-            },
-            OperationDescriptor {
-                entity_name: self.entity_name.clone().into(),
-                entity_short_name: self.entity_short_name.clone(),
-                name: "create_page_from_link".to_string(),
-                display_name: "Create Page From Link".to_string(),
-                description: "Create a page chain from a wiki-link target".to_string(),
-                required_params: vec![OperationParam {
-                    name: "target".to_string(),
-                    type_hint: TypeHint::String,
-                    description: "Wiki-link target (e.g. Projects/X)".to_string(),
-                }],
-                id_column: "id".to_string(),
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Block,
-                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::Internal,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
-            },
-            OperationDescriptor {
-                entity_name: self.entity_name.clone().into(),
-                entity_short_name: self.entity_short_name.clone(),
-                name: "rewrite_link_resolution".to_string(),
-                display_name: "Rewrite Link Resolution".to_string(),
-                description: "Re-point block_links resolved from one id to another".to_string(),
-                required_params: vec![
-                    OperationParam {
-                        name: "from".to_string(),
-                        type_hint: TypeHint::String,
-                        description: "Current resolved_id to rewrite".to_string(),
-                    },
-                    OperationParam {
-                        name: "to".to_string(),
-                        type_hint: TypeHint::String,
-                        description: "New resolved_id".to_string(),
-                    },
-                ],
-                id_column: "id".to_string(),
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Block,
-                boundary_behavior: holon_api::BoundaryBehavior::IdentityOp,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::Internal,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
-            },
-            OperationDescriptor {
-                entity_name: self.entity_name.clone().into(),
-                entity_short_name: self.entity_short_name.clone(),
-                name: "restore_link_resolution".to_string(),
-                display_name: "Restore Link Resolution".to_string(),
-                description: "Inverse of rewrite_link_resolution — restore captured \
-                     resolved_ids"
-                    .to_string(),
-                required_params: vec![OperationParam {
-                    name: "rows".to_string(),
-                    type_hint: TypeHint::String,
-                    description: "Captured block_links rows to restore".to_string(),
-                }],
-                id_column: "id".to_string(),
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Block,
-                boundary_behavior: holon_api::BoundaryBehavior::IdentityOp,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::Internal,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
-            },
-            OperationDescriptor {
-                entity_name: self.entity_name.clone().into(),
-                entity_short_name: self.entity_short_name.clone(),
-                name: "block_to_page_plan".to_string(),
-                display_name: "Block To Page Plan".to_string(),
-                description: "Read-only planner for the convert_block_to_page compound".to_string(),
-                required_params: vec![OperationParam {
-                    name: "target".to_string(),
-                    type_hint: TypeHint::String,
-                    description: "Origin block id to convert".to_string(),
-                }],
-                id_column: "id".to_string(),
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Block,
-                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::Internal,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
-            },
-            OperationDescriptor {
-                entity_name: self.entity_name.clone().into(),
-                entity_short_name: self.entity_short_name.clone(),
-                name: "merge_blocks_plan".to_string(),
-                display_name: "Merge Blocks Plan".to_string(),
-                description: "Read-only planner for the merge_blocks compound".to_string(),
-                required_params: vec![
-                    OperationParam {
-                        name: "canonical".to_string(),
-                        type_hint: TypeHint::String,
-                        description: "The surviving block id".to_string(),
-                    },
-                    OperationParam {
-                        name: "duplicate".to_string(),
-                        type_hint: TypeHint::String,
-                        description: "The block id folded away".to_string(),
-                    },
-                ],
-                id_column: "id".to_string(),
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Block,
-                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::Internal,
                 },
                 trigger: None,
                 bound_params: Default::default(),
@@ -2830,6 +2819,181 @@ impl OperationProvider for SqlOperationProvider {
                 arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
         ];
+
+        // The compounds below READ block's content/hierarchy vocabulary
+        // (`content`, `parent_id`, marks, task properties), so an entity whose
+        // write table declares none of it cannot answer them. Advertising them
+        // anyway would put undispatchable commands on that entity's surface —
+        // the same lesson the edge-field gating below records (BugFunnel row
+        // 26), applied to the compounds.
+        if self.advertises_content_compounds() {
+            ops.extend([
+                OperationDescriptor {
+                    entity_name: self.entity_name.clone().into(),
+                    entity_short_name: self.entity_short_name.clone(),
+                    name: "cycle_task_state".to_string(),
+                    display_name: "Cycle Task State".to_string(),
+                    description: "Cycle to the next task state".to_string(),
+                    required_params: vec![OperationParam {
+                        name: "id".to_string(),
+                        type_hint: TypeHint::String,
+                        description: "Entity ID".to_string(),
+                    }],
+                    affected_fields: vec!["task_state".to_string()],
+                    id_column: "id".to_string(),
+                    param_mappings: vec![],
+                    target_scope: self.target_scope(),
+                    boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+                    menu_exposure: holon_api::MenuExposure::Listed {
+                        surfaces: holon_api::SurfaceSet {
+                            slash_menu: true,
+                            action_bar: false,
+                        },
+                    },
+                    trigger: None,
+                    bound_params: Default::default(),
+                    guard: holon_api::pattern::OpGuard::None,
+                    arcs: holon_api::arcs::TransitionArcs::Undeclared,
+                },
+                OperationDescriptor {
+                    entity_name: self.entity_name.clone().into(),
+                    entity_short_name: self.entity_short_name.clone(),
+                    name: "create_page_from_link".to_string(),
+                    display_name: "Create Page From Link".to_string(),
+                    description: "Create a page chain from a wiki-link target".to_string(),
+                    required_params: vec![OperationParam {
+                        name: "target".to_string(),
+                        type_hint: TypeHint::String,
+                        description: "Wiki-link target (e.g. Projects/X)".to_string(),
+                    }],
+                    id_column: "id".to_string(),
+                    affected_fields: vec![],
+                    param_mappings: vec![],
+                    target_scope: self.target_scope(),
+                    boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+                    menu_exposure: holon_api::MenuExposure::NotListed {
+                        surface: holon_api::NonMenuSurface::Internal,
+                    },
+                    trigger: None,
+                    bound_params: Default::default(),
+                    guard: holon_api::pattern::OpGuard::None,
+                    arcs: holon_api::arcs::TransitionArcs::Undeclared,
+                },
+                OperationDescriptor {
+                    entity_name: self.entity_name.clone().into(),
+                    entity_short_name: self.entity_short_name.clone(),
+                    name: "rewrite_link_resolution".to_string(),
+                    display_name: "Rewrite Link Resolution".to_string(),
+                    description: "Re-point block_links resolved from one id to another".to_string(),
+                    required_params: vec![
+                        OperationParam {
+                            name: "from".to_string(),
+                            type_hint: TypeHint::String,
+                            description: "Current resolved_id to rewrite".to_string(),
+                        },
+                        OperationParam {
+                            name: "to".to_string(),
+                            type_hint: TypeHint::String,
+                            description: "New resolved_id".to_string(),
+                        },
+                    ],
+                    id_column: "id".to_string(),
+                    affected_fields: vec![],
+                    param_mappings: vec![],
+                    target_scope: self.target_scope(),
+                    boundary_behavior: holon_api::BoundaryBehavior::IdentityOp,
+                    menu_exposure: holon_api::MenuExposure::NotListed {
+                        surface: holon_api::NonMenuSurface::Internal,
+                    },
+                    trigger: None,
+                    bound_params: Default::default(),
+                    guard: holon_api::pattern::OpGuard::None,
+                    arcs: holon_api::arcs::TransitionArcs::Undeclared,
+                },
+                OperationDescriptor {
+                    entity_name: self.entity_name.clone().into(),
+                    entity_short_name: self.entity_short_name.clone(),
+                    name: "restore_link_resolution".to_string(),
+                    display_name: "Restore Link Resolution".to_string(),
+                    description: "Inverse of rewrite_link_resolution — restore captured \
+                     resolved_ids"
+                        .to_string(),
+                    required_params: vec![OperationParam {
+                        name: "rows".to_string(),
+                        type_hint: TypeHint::String,
+                        description: "Captured block_links rows to restore".to_string(),
+                    }],
+                    id_column: "id".to_string(),
+                    affected_fields: vec![],
+                    param_mappings: vec![],
+                    target_scope: self.target_scope(),
+                    boundary_behavior: holon_api::BoundaryBehavior::IdentityOp,
+                    menu_exposure: holon_api::MenuExposure::NotListed {
+                        surface: holon_api::NonMenuSurface::Internal,
+                    },
+                    trigger: None,
+                    bound_params: Default::default(),
+                    guard: holon_api::pattern::OpGuard::None,
+                    arcs: holon_api::arcs::TransitionArcs::Undeclared,
+                },
+                OperationDescriptor {
+                    entity_name: self.entity_name.clone().into(),
+                    entity_short_name: self.entity_short_name.clone(),
+                    name: "block_to_page_plan".to_string(),
+                    display_name: "Block To Page Plan".to_string(),
+                    description: "Read-only planner for the convert_block_to_page compound"
+                        .to_string(),
+                    required_params: vec![OperationParam {
+                        name: "target".to_string(),
+                        type_hint: TypeHint::String,
+                        description: "Origin block id to convert".to_string(),
+                    }],
+                    id_column: "id".to_string(),
+                    affected_fields: vec![],
+                    param_mappings: vec![],
+                    target_scope: self.target_scope(),
+                    boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+                    menu_exposure: holon_api::MenuExposure::NotListed {
+                        surface: holon_api::NonMenuSurface::Internal,
+                    },
+                    trigger: None,
+                    bound_params: Default::default(),
+                    guard: holon_api::pattern::OpGuard::None,
+                    arcs: holon_api::arcs::TransitionArcs::Undeclared,
+                },
+                OperationDescriptor {
+                    entity_name: self.entity_name.clone().into(),
+                    entity_short_name: self.entity_short_name.clone(),
+                    name: "merge_blocks_plan".to_string(),
+                    display_name: "Merge Blocks Plan".to_string(),
+                    description: "Read-only planner for the merge_blocks compound".to_string(),
+                    required_params: vec![
+                        OperationParam {
+                            name: "canonical".to_string(),
+                            type_hint: TypeHint::String,
+                            description: "The surviving block id".to_string(),
+                        },
+                        OperationParam {
+                            name: "duplicate".to_string(),
+                            type_hint: TypeHint::String,
+                            description: "The block id folded away".to_string(),
+                        },
+                    ],
+                    id_column: "id".to_string(),
+                    affected_fields: vec![],
+                    param_mappings: vec![],
+                    target_scope: self.target_scope(),
+                    boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+                    menu_exposure: holon_api::MenuExposure::NotListed {
+                        surface: holon_api::NonMenuSurface::Internal,
+                    },
+                    trigger: None,
+                    bound_params: Default::default(),
+                    guard: holon_api::pattern::OpGuard::None,
+                    arcs: holon_api::arcs::TransitionArcs::Undeclared,
+                },
+            ]);
+        }
 
         // `dismiss_advice` (ADR 0021/0022) is the SqlOnly-authority twin of the
         // Loro provider's op: it appends a lesson to the anchor's
@@ -2932,6 +3096,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 let raw_value = params
                     .get("value")
                     .ok_or_else(|| "Missing 'value' parameter".to_string())?;
+                // Decided ONCE, before any read or write: a field with no route
+                // on this entity is refused here rather than reaching the
+                // `properties` overflow that only block-shaped tables have.
+                self.require_write_route(field)?;
 
                 // Rich content write (text + marks as one Object) — the SQL
                 // mirror of the Loro `content=Object` path. Reached via undo/redo
@@ -3037,7 +3205,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     .and_then(|v| v.as_i64())
                     .map(|seq| format!(", {} = {}", Self::quote_identifier("write_seq"), seq));
 
-                let sql = if self.known_columns.contains(field) {
+                let sql = if self.write_schema.is_column(field) {
                     format!(
                         "UPDATE {} SET {} = {}{} WHERE id = '{}'",
                         self.table_name,
@@ -3183,7 +3351,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // an empty precondition (single-writer safe) but still a real
                 // inverse. `Value::Null` old-value on a property drives the
                 // inverse `json_remove`, restoring "absent" faithfully.
-                let changes = if self.known_columns.contains(field) {
+                let changes = if self.write_schema.is_column(field) {
                     vec![FieldDelta::new(
                         id.to_string(),
                         field.to_string(),
@@ -4104,7 +4272,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
             // layer, never by intent (`BlockWriteField` rejects it). A held
             // create is a re-observation of a row already present, so it is
             // skipped along with everything else that would re-stamp the row.
-            if held.is_none() && self.known_columns.contains(holon_api::CHANGE_ORIGIN_COLUMN) {
+            if held.is_none() && self.write_schema.is_column(holon_api::CHANGE_ORIGIN_COLUMN) {
                 params.insert(
                     holon_api::CHANGE_ORIGIN_COLUMN.into(),
                     Value::String(holon_api::ChangeOrigin::local_with_current_span().to_json()),
@@ -4119,7 +4287,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 };
             }
             let prepared = match op_name.as_str() {
-                "create" => self.prepare_create(&params, held.as_ref()),
+                "create" => self.prepare_create(&params, held.as_ref())?,
                 "update" => match self.prepare_update(&params).await? {
                     Some(p) => p,
                     None => continue,
@@ -4208,6 +4376,56 @@ impl OriginTaggedWrites for SqlOperationProvider {
 mod sql_operation_provider_diff_test;
 
 #[cfg(test)]
+mod write_schema_tests {
+    use holon_api::FieldSchema;
+
+    use super::TypeDefinition;
+    use super::WriteSchema;
+
+    fn declared(name: &str, columns: &[&str]) -> TypeDefinition {
+        let mut fields = vec![FieldSchema::new("id", "TEXT").primary_key()];
+        fields.extend(
+            columns
+                .iter()
+                .map(|c| FieldSchema::new(*c, "TEXT").nullable()),
+        );
+        TypeDefinition::new(name, fields)
+    }
+
+    /// Block's shape is a PROPERTY of its schema, not a universal law: it
+    /// declares a `properties` overflow column and timestamp columns, so the
+    /// write path packs unknown params into JSON and stamps creates. A type
+    /// that declares neither must get neither.
+    #[test]
+    fn overflow_and_timestamps_come_from_the_schema_not_from_block() {
+        let block = WriteSchema::block();
+        assert!(block.has_overflow());
+        assert!(block.stamps_timestamps());
+        assert!(block.is_column("parent_id"));
+
+        let free_standing = WriteSchema::from_type_def(&declared("person", &["email"]));
+        assert!(free_standing.is_column("email"));
+        assert!(
+            !free_standing.has_overflow(),
+            "a type declaring no `properties` column has nowhere to pack an unknown param"
+        );
+        assert!(
+            !free_standing.stamps_timestamps(),
+            "stamping a column the table does not have would fail the INSERT"
+        );
+        assert!(!free_standing.is_column("content"));
+    }
+
+    /// The derivation reads the type's PERSISTED fields — nothing else. A
+    /// column named here can never come from block's vocabulary.
+    #[test]
+    fn a_declared_types_vocabulary_is_exactly_its_persisted_fields() {
+        let schema = WriteSchema::from_type_def(&declared("gen_1", &["aaa", "bbb"]));
+        assert_eq!(schema.column_list(), vec!["aaa", "bbb", "id"]);
+    }
+}
+
+#[cfg(test)]
 mod clock_tests {
     use std::sync::Arc;
 
@@ -4241,7 +4459,9 @@ mod clock_tests {
 
         let mut params = StorageEntity::new();
         params.insert("id".into(), Value::String("b1".to_string()));
-        let prepared = provider.prepare_create(&params, None);
+        let prepared = provider
+            .prepare_create(&params, None)
+            .expect("block schema has a properties overflow");
 
         db_handle
             .execute(&prepared.row_statements[0], vec![])

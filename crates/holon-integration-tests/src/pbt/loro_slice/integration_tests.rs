@@ -59,6 +59,7 @@ async fn loro_slice_runs_structural_block_invariants_over_loro() {
     assert_eq!(
         ran,
         [
+            "inv-filter-spec-resolves",
             "inv-loro-no-errors",
             "inv-mark-bounds-within-content",
             "inv-no-orphan-blocks",

@@ -5997,36 +5997,38 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
                 .map(|c| holon_api::FieldSchema::new(c, "TEXT").nullable()),
         );
         let type_def = holon_api::TypeDefinition::new(type_name, fields);
-        holon_turso::turso_adapter::TursoAdapter::register(&type_def, self.engine.db_handle())
-            .await
-            .unwrap_or_else(|e| {
-                panic!("SutTypedEntity::declare_typed_schema('{type_name}') failed: {e}")
-            });
+        let registry = self.injector.resolve::<holon_profiles::TypeRegistry>();
+        holon::core::type_declaration::declare_type(
+            &type_def,
+            self.engine.db_handle(),
+            &registry,
+            &self.engine.get_dispatcher(),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!("SutTypedEntity::declare_typed_schema('{type_name}') failed: {e}")
+        });
     }
 
     async fn create_typed_entity(&self, type_name: &str, id: &str, fields: Vec<(String, String)>) {
-        let raw = format!("{type_name}_raw");
-        let mut cols: Vec<String> = vec!["id".to_string()];
-        let mut params: Vec<holon_api::Value> = vec![holon_api::Value::String(id.to_string())];
+        // The write goes through the SAME authority a block write goes through
+        // — the `OperationDispatcher`, routed by entity name. A type declared at
+        // runtime must own a write authority derived from ITS `TypeDefinition`;
+        // dispatching here is what proves the routing exists instead of the
+        // test reaching around it with raw SQL.
+        use holon_core::OperationProvider;
+        let mut params = holon_core::storage::types::StorageEntity::new();
+        params.insert("id".into(), holon_api::Value::String(id.to_string()));
         for (col, val) in fields {
-            cols.push(col);
-            params.push(holon_api::Value::String(val));
+            params.insert(col.into(), holon_api::Value::String(val));
         }
-        let placeholders = vec!["?"; cols.len()].join(", ");
-        // The table name is deliberately UNQUOTED, matching the production
-        // writer (`StorageBackend::insert`). Quoting it makes Turso's IVM stop
-        // maintaining every matview over the table while the INSERT still
-        // reports success — a silent projection desync, pinned by
-        // holon-turso: `matview_is_ivm_maintained_for_execute_values_writes`.
-        let sql = format!(
-            "INSERT INTO {raw} ({}) VALUES ({placeholders})",
-            cols.join(", ")
-        );
         self.engine
-            .db_handle()
-            .execute_values(&sql, params)
+            .get_dispatcher()
+            .execute_operation(&holon_api::EntityName::new(type_name), "create", params)
             .await
-            .unwrap_or_else(|e| panic!("SutTypedEntity::create_typed_entity failed ({sql}): {e}"));
+            .unwrap_or_else(|e| {
+                panic!("SutTypedEntity::create_typed_entity('{type_name}', '{id}') failed: {e}")
+            });
     }
 
     async fn typed_entity_rows(&self, type_name: &str, columns: Vec<String>) -> Vec<Vec<String>> {

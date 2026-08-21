@@ -793,8 +793,11 @@ where
             q(id_field),
             update_clause
         );
-        let delete_sql =
-            format!("DELETE FROM {} WHERE {} = ?", write_table(table_name), q(id_field));
+        let delete_sql = format!(
+            "DELETE FROM {} WHERE {} = ?",
+            write_table(table_name),
+            q(id_field)
+        );
 
         // Build statements for each change
         for change in changes {

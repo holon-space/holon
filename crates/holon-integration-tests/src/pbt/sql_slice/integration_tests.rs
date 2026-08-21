@@ -50,6 +50,7 @@ async fn sql_slice_runs_structural_block_invariants_over_turso() {
     assert_eq!(
         ran,
         [
+            "inv-filter-spec-resolves",
             "inv-mark-bounds-within-content",
             "inv-no-orphan-blocks",
             "inv-no-parent-cycles",

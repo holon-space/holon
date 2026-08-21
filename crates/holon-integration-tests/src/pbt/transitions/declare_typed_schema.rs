@@ -32,6 +32,23 @@
 //! type can never collide with a registry type or a core table. A generator
 //! that could emit `order` would spend its cases bouncing off a declaration
 //! error instead of testing the adapter.
+//!
+//! LOWERCASE is part of that precondition, for the same reason and with the
+//! same expiry: `TursoAdapter::register` refuses a mixed-case type until the
+//! fork's IVM normalizes identifier case (an unquoted mixed-case write silently
+//! stops matview maintenance). Both halves of that rejection are pinned by unit
+//! tests next to the rule — `a_keyword_named_type_is_rejected_at_registration`
+//! and `a_mixed_case_type_is_rejected_at_registration` — because this generator
+//! deliberately cannot reach either. When the engine fix retires the
+//! restriction, widening the alphabet here is the way to start exercising the
+//! names it currently avoids.
+//!
+//! The `gen_` prefix also satisfies the adapter's third rule — a serialized
+//! name must be a bare `[a-z][a-z0-9_]*` identifier, since the raw table name
+//! goes unquoted into DDL (pinned by
+//! `a_name_that_is_not_a_bare_identifier_is_rejected_at_registration`). It
+//! expires with the other two, and for the same reason: quoting is what would
+//! widen the alphabet, and quoting is what the fork cannot survive.
 
 use holon_pbt_core::RequiredWiring;
 use holon_pbt_core::StorageAdapter;

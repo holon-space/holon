@@ -195,6 +195,18 @@ impl EntityUri {
         Self::already_schemed(s).unwrap_or_else(|| Self::block(s))
     }
 
+    /// [`from_raw`] for a boundary that KNOWS which entity it is parsing for:
+    /// an unschemed string belongs to `scheme`, not to `block`.
+    ///
+    /// `from_raw`'s block default is right only where block is genuinely the
+    /// implied entity (the org headline parser, whose files store bare ids).
+    /// A typed write knows its entity, and taking the block default there
+    /// files the row under a scheme the entity does not have — a free-standing
+    /// `person` create landing as `block:person-0`.
+    pub fn from_raw_for(scheme: &str, s: &str) -> Self {
+        Self::already_schemed(s).unwrap_or_else(|| Self::new(scheme, s))
+    }
+
     /// Fallible [`from_raw`], for boundaries that ingest text authored outside
     /// the system (org drawers, MCP params). There, a string that forms no URI
     /// is a content error belonging to one file — not the internal

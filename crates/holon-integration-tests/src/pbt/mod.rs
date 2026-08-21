@@ -66,8 +66,8 @@ mod sut_row_parsing;
 #[cfg(feature = "otel-testing")]
 pub mod transition_budgets;
 pub mod transition_dispatch;
-pub mod typed_entity_schemas;
 pub mod transitions;
+pub mod typed_entity_schemas;
 pub mod types;
 pub mod ui_actor_state;
 pub mod ui_harness;

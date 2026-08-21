@@ -459,7 +459,7 @@ pub fn register_schema_providers(injector: &Injector) {
 /// `block` is excluded by name because its Turso serialization is still
 /// hand-written (`CoreSchemaModule` + `BlockMatviewSchemaModule`); the literal
 /// dissolves once block itself becomes an adapter instance.
-fn is_free_standing(type_def: &holon_api::TypeDefinition) -> bool {
+pub(crate) fn is_free_standing(type_def: &holon_api::TypeDefinition) -> bool {
     type_def.id_references.is_none()
         && !type_def.persistent_fields().is_empty()
         && type_def.name != "block"

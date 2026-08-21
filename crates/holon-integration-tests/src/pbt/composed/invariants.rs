@@ -56,11 +56,11 @@ pub mod loro_no_errors;
 pub mod main_panel_rows_match_focus;
 pub mod mark_bounds_within_content;
 pub mod matview_recompute_matches;
-pub mod typed_matview_matches_ref;
 pub mod observed_errors;
 pub mod paint_text_styling;
 pub mod reseed_leak;
 pub mod sticky_accordion_spec;
+pub mod typed_matview_matches_ref;
 pub mod wheel_occlusion_routing;
 pub mod wheel_two_mode_motion_law;
 // `navigation_focus` is now auto-derived by `capability_pair! { pub trait Focus

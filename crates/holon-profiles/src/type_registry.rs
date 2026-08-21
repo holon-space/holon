@@ -697,15 +697,32 @@ mod tests {
         );
     }
 
+    /// The FK is a property of `id_references`, not of being a bundled type.
+    /// A type that names a referent gets the FK; a FREE-STANDING one owns its
+    /// identity and must get none — `person` is free-standing, so a DDL
+    /// anchoring it to `block` would recreate the coupling the datatype
+    /// generalization removed.
     #[test]
-    fn extension_table_ddl_has_foreign_key() {
+    fn extension_table_ddl_has_a_foreign_key_only_when_the_type_references_one() {
         let yaml = std::fs::read_to_string("../../assets/default/types/person.yaml")
             .expect("person.yaml not found");
-        let td: TypeDefinition = serde_yaml::from_str(&yaml).unwrap();
-        let sql = td.to_create_table_sql();
+        let free_standing: TypeDefinition = serde_yaml::from_str(&yaml).unwrap();
+        assert!(
+            free_standing.id_references.is_none(),
+            "person is the free-standing seed type; this test's premise changed"
+        );
+        let sql = free_standing.to_create_table_sql();
+        assert!(
+            !sql.contains("REFERENCES"),
+            "a free-standing type's table must anchor to nothing: {sql}"
+        );
+
+        let mut referencing = free_standing;
+        referencing.id_references = Some("block".to_string());
+        let sql = referencing.to_create_table_sql();
         assert!(
             sql.contains("REFERENCES \"block\"(id)"),
-            "Extension table should FK to block: {sql}"
+            "a type declaring `id_references: block` must FK to it: {sql}"
         );
     }
 }

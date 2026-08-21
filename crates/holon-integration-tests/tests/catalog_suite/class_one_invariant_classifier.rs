@@ -61,6 +61,7 @@ const CLASS_ONE: &[&str] = &[
     "inv-birth-contract-satisfied",
     "inv-complexity-class-trend",
     "inv-display-placement-canonical-inert",
+    "inv-filter-spec-resolves",
     "inv-frontend-engine",
     "inv-frontend-no-error-widgets",
     "inv-frontend-root-not-error",

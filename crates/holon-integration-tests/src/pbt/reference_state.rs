@@ -585,7 +585,29 @@ impl TypedEntitiesRefState {
     /// Record an entity the oracle created. `values` are the schema's value
     /// columns in order (the id is the key, not a value).
     pub fn add(&mut self, type_name: String, id: String, values: Vec<String>) {
-        self.by_type.entry(type_name).or_default().insert(id, values);
+        let stored = Self::stored_id(&type_name, &id);
+        self.by_type
+            .entry(type_name)
+            .or_default()
+            .insert(stored, values);
+    }
+
+    /// The id the write authority STORES for a create. An id arriving without
+    /// a scheme belongs to the entity being written, so the authority
+    /// qualifies it with that entity's own scheme — mirroring
+    /// `EntityUri::from_raw_for` on the create boundary. (The raw parse used to
+    /// default every unschemed id to `block:`, filing a free-standing row
+    /// under a scheme it does not have.)
+    fn stored_id(type_name: &str, id: &str) -> String {
+        if id.contains(':') {
+            id.to_string()
+        } else {
+            // The CANONICAL entity name is the scheme (`EntityName` folds `_`
+            // to `-`, since a scheme carrying an underscore is not a valid URI
+            // scheme) — the same name the write authority routes by.
+            let scheme = holon_api::EntityName::new(type_name);
+            format!("{}:{id}", scheme.as_str())
+        }
     }
 
     /// How many entities of this type exist (the generator's id counter).

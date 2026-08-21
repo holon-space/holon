@@ -45,6 +45,11 @@ use crate::api::guard_world::GuardQuery;
 #[derive(Default)]
 pub struct OperationDispatcher {
     providers: Vec<Arc<dyn OperationProvider>>,
+    /// Write authorities registered AFTER composition, when a type is declared
+    /// at runtime (`crate::core::type_declaration::declare_type`). A declared
+    /// type's writes route here exactly as a wired entity's route to
+    /// `providers`; the two lists differ only in when they were filled.
+    declared_providers: std::sync::RwLock<Vec<Arc<dyn OperationProvider>>>,
     observers: Vec<Arc<dyn OperationObserver>>,
     sync_token_store: Option<Arc<dyn SyncTokenStore>>,
     matview_manager: Option<Arc<crate::sync::MatviewManager>>,
@@ -153,7 +158,11 @@ impl OperationDispatcher {
 
     /// Check if a provider is registered for an entity type
     pub fn has_provider(&self, entity_name: &str) -> bool {
-        self.providers.iter().any(|provider| {
+        // Canonicalized first: descriptors carry `EntityName`, whose `_`→`-`
+        // fold means a raw `gen_1` compares unequal to the `gen-1` a provider
+        // for that very type advertises.
+        let entity_name = EntityName::new(entity_name);
+        self.all_providers().iter().any(|provider| {
             provider
                 .operations()
                 .iter()
@@ -164,7 +173,7 @@ impl OperationDispatcher {
     /// Get list of registered entity names
     pub fn registered_entities(&self) -> Vec<EntityName> {
         let mut entity_names = HashSet::new();
-        for provider in &self.providers {
+        for provider in &self.all_providers() {
             for op in provider.operations() {
                 entity_names.insert(op.entity_name);
             }
@@ -174,13 +183,66 @@ impl OperationDispatcher {
 
     /// Get the number of registered providers
     pub fn provider_count(&self) -> usize {
-        self.providers.len()
+        self.all_providers().len()
     }
 
     /// Get a copy of all providers (for reconstructing dispatcher with
     /// additional providers)
     pub fn providers(&self) -> Vec<Arc<dyn OperationProvider>> {
-        self.providers.clone()
+        self.all_providers()
+    }
+
+    /// Every provider routing decisions consult: the composed ones plus the
+    /// ones runtime type declarations added. Cloned out so no lock is held
+    /// across an `await`.
+    fn all_providers(&self) -> Vec<Arc<dyn OperationProvider>> {
+        let declared = self
+            .declared_providers
+            .read()
+            .expect("declared-provider registry poisoned");
+        self.providers
+            .iter()
+            .chain(declared.iter())
+            .cloned()
+            .collect()
+    }
+
+    /// Give a type declared at runtime its write authority.
+    ///
+    /// Refuses a provider whose entity is already routable: two authorities for
+    /// one entity means writes land in whichever the routing scan reaches
+    /// first, which is exactly the silent misroute this increment exists to
+    /// remove.
+    ///
+    /// The refusal is TERMINAL for that entity in this increment. This registry
+    /// is append-only — nothing removes a declared authority — so re-declaring
+    /// a type is not a recoverable path, and the error says so rather than
+    /// naming a teardown that would not help.
+    pub fn register_provider(&self, provider: Arc<dyn OperationProvider>) -> Result<()> {
+        let entities: HashSet<EntityName> = provider
+            .operations()
+            .into_iter()
+            .map(|op| op.entity_name)
+            .collect();
+        for entity in &entities {
+            if self.has_provider(entity.as_str()) {
+                return Err(format!(
+                    "[OperationDispatcher] entity '{entity}' already has a write authority; \
+                     registering a second one would make the routing scan decide which of the \
+                     two a write lands in. Re-declaring a live type is NOT SUPPORTED in this \
+                     increment: this registry is append-only, and `TursoAdapter::teardown` drops \
+                     only the SQL artifacts, so no sequence of calls frees the name. Declaring \
+                     over a live type arrives with the migrate primitive (OQ-5), which retires \
+                     this error. Until then, use a name that is not yet declared."
+                )
+                .into());
+            }
+        }
+        self.declared_providers
+            .write()
+            .expect("declared-provider registry poisoned")
+            .push(provider);
+        Ok(())
     }
 
     /// Fail-loud guard against the "block pipeline wired but no CRUD" trap.
@@ -202,46 +264,58 @@ impl OperationDispatcher {
     /// a no-op when no `block` provider is registered at all (a read-only /
     /// nav-only backend never dispatches block writes).
     pub fn assert_content_write_capability(&self) -> Result<()> {
-        // The content-write ops any writable-block frontend dispatches. Kept in
-        // sync with `CrudOperations` (holon-core `traits.rs`): the ops a
-        // structural-only provider does NOT advertise.
-        const REQUIRED_BLOCK_WRITE_OPS: [&str; 3] = ["create", "set_field", "delete"];
-
-        // No block pipeline => nothing dispatches block writes => nothing to guard.
+        // No block pipeline => nothing dispatches block writes => nothing to
+        // guard. A read-only / nav-only backend never reaches the check.
         if !self.has_provider("block") {
             return Ok(());
         }
+        self.assert_write_capability_for("block")
+    }
 
-        let block_ops: HashSet<String> = self
+    /// The same check for ONE entity, required rather than optional: the
+    /// entity must be routable AND must advertise the full CRUD triple.
+    ///
+    /// Runtime type declaration calls this after registering a type's write
+    /// authority, so a type whose serialization exists but whose writes would
+    /// be dropped fails at DECLARATION rather than at the first write.
+    pub fn assert_write_capability_for(&self, entity: &str) -> Result<()> {
+        // The content-write ops any writable frontend dispatches. Kept in
+        // sync with `CrudOperations` (holon-core `traits.rs`): the ops a
+        // structural-only provider does NOT advertise.
+        const REQUIRED_WRITE_OPS: [&str; 3] = ["create", "set_field", "delete"];
+
+        // Canonicalized: see `has_provider`.
+        let entity = EntityName::new(entity);
+        let entity_ops: HashSet<String> = self
             .operations()
             .into_iter()
-            .filter(|op| op.entity_name == "block")
+            .filter(|op| op.entity_name == entity)
             .map(|op| op.name)
             .collect();
 
-        let missing: Vec<&str> = REQUIRED_BLOCK_WRITE_OPS
+        let missing: Vec<&str> = REQUIRED_WRITE_OPS
             .into_iter()
-            .filter(|op| !block_ops.contains(*op))
+            .filter(|op| !entity_ops.contains(*op))
             .collect();
 
         if missing.is_empty() {
             return Ok(());
         }
 
-        let mut present: Vec<&str> = block_ops.iter().map(String::as_str).collect();
+        let mut present: Vec<&str> = entity_ops.iter().map(String::as_str).collect();
         present.sort_unstable();
 
         Err(format!(
-            "[OperationDispatcher] the `block` pipeline is wired but the operation registry is \
+            "[OperationDispatcher] the `{entity}` pipeline is wired but the operation registry is \
              missing content-write op(s) {missing:?}. Every dispatch of those ops would be \
-             silently dropped as \"No provider registered for entity: block\", losing user \
-             content. `EventInfraModule` alone advertises only STRUCTURAL block ops (indent / \
-             outdent / move_* / split_block / join_block); the CRUD ops (create / set_field / \
-             delete) come from a SEPARATE provider. Fix the wiring: register a block-CRUD \
-             `OperationProvider` - LoroModule + OrgModeModule (native, via holon-app \
-             `add_frontend`) under Loro authority, or a bare `SqlOperationProvider` for the \
-             `block` entity in SqlOnly embedders (see frontends/holon-worker/src/lib.rs). Present \
-             block ops: {present:?}"
+             silently dropped as \"No provider registered for entity: {entity}\", losing user \
+             content. For `block`: `EventInfraModule` alone advertises only STRUCTURAL ops \
+             (indent / outdent / move_* / split_block / join_block); the CRUD ops come from a \
+             SEPARATE provider — LoroModule + OrgModeModule (native, via holon-app \
+             `add_frontend`) under Loro authority, or a bare `SqlOperationProvider` in SqlOnly \
+             embedders (see frontends/holon-worker/src/lib.rs). For a type declared at runtime: \
+             its write authority is registered by `core::type_declaration::declare_type`. Present \
+             `{entity}` ops: {present:?}"
         )
         .into())
     }
@@ -369,7 +443,7 @@ impl OperationDispatcher {
     /// is a declaration that can never be violated and never red. Refuse the
     /// registration instead of carrying the string.
     pub fn assert_declared_arcs_match_schema(&self, schemas: &dyn SchemaSource) -> Result<()> {
-        for provider in &self.providers {
+        for provider in &self.all_providers() {
             for op in provider.operations() {
                 op.arcs.validate_against(schemas).map_err(|e| {
                     format!(
@@ -469,7 +543,7 @@ impl OperationDispatcher {
                     }
 
                     // Step 2: Clear all caches (execute clear_cache on all providers that have it)
-                    for provider in &self.providers {
+                    for provider in &self.all_providers() {
                         if let Some(op) = provider
                             .operations()
                             .iter()
@@ -515,7 +589,7 @@ impl OperationDispatcher {
                     info!("[OperationDispatcher] Executing sync on all providers");
                     let mut sync_success_count = 0;
                     let mut sync_error_count = 0;
-                    for provider in &self.providers {
+                    for provider in &self.all_providers() {
                         if let Some(op) = provider.operations().iter().find(|op| op.name == "sync")
                         {
                             let entity_name = op.entity_name.as_str();
@@ -550,7 +624,7 @@ impl OperationDispatcher {
 
                 // Find all providers that have an operation with matching op_name
                 let mut matching_providers = Vec::new();
-                for provider in &self.providers {
+                for provider in &self.all_providers() {
                     let ops = provider.operations();
                     if ops.iter().any(|op| op.name == op_name) {
                         matching_providers.push(provider.clone());
@@ -632,8 +706,11 @@ impl OperationDispatcher {
                 }
             } else {
                 // Regular operation - route to specific provider
-                let available_ops: Vec<_> =
-                    self.providers.iter().flat_map(|p| p.operations()).collect();
+                let available_ops: Vec<_> = self
+                    .all_providers()
+                    .iter()
+                    .flat_map(|p| p.operations())
+                    .collect();
                 let entity_name_str = entity_name.as_str();
                 let matching_ops: Vec<_> = available_ops
                     .iter()
@@ -813,8 +890,8 @@ impl OperationDispatcher {
                 }
 
                 let provider = self
-                    .providers
-                    .iter()
+                    .all_providers()
+                    .into_iter()
                     .find(|provider| {
                         provider
                             .operations()
@@ -1073,7 +1150,7 @@ impl OperationProvider for OperationDispatcher {
     /// operations.
     fn operations(&self) -> Vec<OperationDescriptor> {
         let mut ops: Vec<OperationDescriptor> = self
-            .providers
+            .all_providers()
             .iter()
             .flat_map(|provider| provider.operations())
             .collect();
@@ -1298,6 +1375,30 @@ impl Module for OperationModule {
                 });
             dispatcher.set_boundary_enforcer(enforcer);
 
+            // Every free-standing type the registry carries gets a write
+            // authority derived from ITS definition. `FreeStandingTypeViews`
+            // creates the type's Turso serialization; without this the type
+            // would be queryable but every write to it would find "No provider
+            // registered for entity: <type>" — the exact gap the block-shaped
+            // write path used to hide by being the only authority there is.
+            let type_registry = r.resolve_async::<holon_profiles::TypeRegistry>().await;
+            for type_def in type_registry.all() {
+                if !crate::di::schema_providers::is_free_standing(&type_def) {
+                    continue;
+                }
+                crate::core::type_declaration::register_write_authority(
+                    &type_def,
+                    &db_handle_provider.handle(),
+                    &dispatcher,
+                )
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "[OperationModule] write authority for free-standing type '{}': {e}",
+                        type_def.name
+                    )
+                });
+            }
+
             // Fail loud if a block pipeline is wired without its content-write
             // ops (the EventInfraModule-only trap). A silent "No provider" drop
             // of every create/set_field/delete is worse than a startup crash.
@@ -1433,6 +1534,81 @@ mod tests {
         });
         let dispatcher = OperationDispatcher::new(vec![p1, p2]);
         let _ = dispatcher.operations();
+    }
+
+    #[tokio::test]
+    async fn a_runtime_registered_provider_becomes_routable_and_writable() {
+        let dispatcher = OperationDispatcher::new(vec![]);
+        assert!(!dispatcher.has_provider("gen_1"));
+
+        dispatcher
+            .register_provider(Arc::new(MockProvider {
+                entity_name: "gen_1".to_string(),
+                operations_list: vec![
+                    create_test_operation("gen_1", "create"),
+                    create_test_operation("gen_1", "set_field"),
+                    create_test_operation("gen_1", "delete"),
+                ],
+            }))
+            .expect("first authority for gen_1");
+
+        // Looked up by the RAW type name, as a declaration site spells it: the
+        // dispatcher canonicalizes, so the `_`→`-` fold cannot make a type look
+        // unregistered.
+        assert!(dispatcher.has_provider("gen_1"));
+        dispatcher
+            .assert_write_capability_for("gen_1")
+            .expect("a runtime-registered CRUD provider makes its entity writable");
+
+        // A second authority for the same entity would make routing pick
+        // whichever the scan reaches first.
+        let second = dispatcher.register_provider(Arc::new(MockProvider {
+            entity_name: "gen_1".to_string(),
+            operations_list: vec![create_test_operation("gen_1", "create")],
+        }));
+        assert!(second.is_err(), "a duplicate authority must be refused");
+    }
+
+    /// The duplicate-authority refusal must not promise a recovery path that
+    /// does not exist. Nothing removes a declared authority, so an error
+    /// telling the reader to tear the type down and retry would send them
+    /// round a loop that cannot terminate.
+    ///
+    /// This test pins the wording only. The BEHAVIOUR it describes — that not
+    /// even a teardown frees the name — is pinned by
+    /// `core::type_declaration::tests::a_declared_type_cannot_be_redeclared_even_after_teardown`,
+    /// which is where the migrate primitive rewrites the contract.
+    #[tokio::test]
+    async fn the_duplicate_authority_error_does_not_promise_a_recovery_path() {
+        let dispatcher = OperationDispatcher::new(vec![]);
+        let authority = || {
+            Arc::new(MockProvider {
+                entity_name: "gen_1".to_string(),
+                operations_list: vec![create_test_operation("gen_1", "create")],
+            })
+        };
+        dispatcher
+            .register_provider(authority())
+            .expect("first authority for gen_1");
+
+        let msg = dispatcher
+            .register_provider(authority())
+            .expect_err("a duplicate authority must be refused")
+            .to_string();
+
+        assert!(
+            msg.contains("NOT SUPPORTED in this increment") && msg.contains("append-only"),
+            "the error must say re-declaration is unsupported and why; got: {msg}"
+        );
+        assert!(
+            msg.contains("OQ-5"),
+            "the error must name what retires the restriction; got: {msg}"
+        );
+        assert!(
+            !msg.contains("Tear the type down"),
+            "teardown drops SQL artifacts only — it never frees the name, so the error must \
+             not send the reader round a loop that cannot terminate; got: {msg}"
+        );
     }
 
     #[tokio::test]
