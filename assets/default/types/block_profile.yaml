@@ -81,6 +81,11 @@ variants:
   # it is checked before the collapsed embedded_page (priority 1). The
   # `default_expanded: true` param seeds the expand_toggle gate OPEN; the header
   # is a click-to-open navigation link (LogSeq-style journal feed).
+  # `show_bullet: false` on every row because a block already draws its OWN
+  # bullet (the `default` variant's `bullet_shape` icon) — the same rule the
+  # production outline carries (`collection_profile.yaml` `tree_view`,
+  # `index.org`). Without it `tree_item` defaults to true and each row shows a
+  # grey chrome dot beside the block's blue one (dogfood 2026-08-20).
   - name: embedded_page_expanded
     priority: 2
     condition: 'is_def_var("expand_default") && expand_default == 1 && (!is_def_var("role") || role != "page_title")'
@@ -92,7 +97,7 @@ variants:
         header: selectable(row(icon("orgmode", #{size: 12}), text(col("content"), #{style: "h2"})), #{action: navigation_focus(#{region: "main", block_id: col("id")})}),
         content: live_query(#{
           prql: "from descendants",
-          item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), creation_slot: true, virtual_parent: true, item_template: render_entity()})
+          item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), creation_slot: true, virtual_parent: true, item_template: render_entity(), rules: [#{when: always(), override: #{show_bullet: false}}]})
         })
       }))
   # Embedded page-blocks: non-root pages (strict descendants of the focus root)
@@ -109,7 +114,7 @@ variants:
         header: row(icon("orgmode", #{size: 12}), text(col("content"))),
         content: live_query(#{
           prql: "from descendants",
-          item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity()})
+          item_template: tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity(), rules: [#{when: always(), override: #{show_bullet: false}}]})
         })
       })
   # NOTE: the former `root_layout` variant (hardcoded 3-column layout keyed on

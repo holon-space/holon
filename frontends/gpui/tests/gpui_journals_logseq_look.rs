@@ -1,7 +1,9 @@
 //! LogSeq-look journals feed — the batch windowed PBT for the three-part
 //! restyle: (REQ1) the date renders as a HEADING, (REQ2) each day-page section
 //! has a MIN-HEIGHT floor, (REQ3) each day shows an empty BULLET to write into,
-//! including a truly EMPTY day.
+//! including a truly EMPTY day — plus the two dogfood escapes of 2026-08-20:
+//! (REQ4) a row shows exactly ONE bullet glyph, and (REQ5) mutating the feed
+//! while it is LIVE never destroys an unrelated day's section.
 //!
 //! Windowed, not headless: the feed's per-day content is a `live_query`
 //! deferred to the platform layer that never materialises in the headless
@@ -23,6 +25,16 @@
 //!    EMPTY-day bullet additionally needs the `resolve_creation_parent`
 //!    explicit-empty affordance: without it, only non-empty days get a slot and
 //!    the empty-day assertion fails.
+//!  - REQ4: drop the `rules: [#{when: always(), override: #{show_bullet:
+//!    false}}]` from the journals `tree(...)` variants → `tree_item`'s
+//!    `show_bullet` default (TRUE) paints a chrome dot beside the block's own
+//!    bullet → the `tree_bullet::<row>` assertion fails.
+//!  - REQ5: restore the in-place `entries.sort_by(...)` in
+//!    `create_flat_driver`'s `full_rebuild` → the sorted mirror desynchronises
+//!    from upstream and the rename's `UpdateAt` clobbers an unrelated day → the
+//!    EMPTY day loses its section (`empty_slot` true → false) and both the REQ5
+//!    and REQ3 (a) assertions fail. The late day's POSITION is load-bearing:
+//!    sorting it below the empty day makes REQ5 unable to go red (measured).
 //!
 //! DETERMINISM: the feed default-expands the days it draws, but which days the
 //! window materialises varies (viewport-lazy / expand-state timing). The
@@ -75,6 +87,9 @@ const FLOOR_MIN: f32 = 218.0;
 
 /// The `min_height` value authored in `block_profile.yaml`.
 const AUTHORED_FLOOR: f32 = 220.0;
+
+/// The late day's child row — a real block, so it draws its own bullet.
+const LATE_ENTRY_ID: &str = "jday-zz-late-entry";
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_platform(true).text_system()
@@ -249,8 +264,70 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
         .expect("click journals");
     settle(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
+    // ── REQ5 drive: mutate the feed while it is LIVE ─────────────────────────
+    // Everything above grafts BEFORE the feed view exists, so the feed's first
+    // emission is a single `Replace` and no indexed delta ever follows — which
+    // is exactly why this test could not see the duplicate-day bug. These two
+    // steps produce the indexed deltas production sees:
+    //   (1) midnight rollover: a day whose ID sorts LAST in block-id order (the
+    //       upstream `MutableBTreeMap` key order) but whose CONTENT sorts FIRST
+    //       under the feed's `sortkey: "-content"` (date DESC). An in-place sort
+    //       of the shared `entries` mirror desynchronises it from upstream here.
+    //       Its position is LOAD-BEARING: pushing the feed down by one section
+    //       is what makes the EMPTY day the row the corrupted mirror destroys,
+    //       which is the half REQ5 can observe. Moving it below the empty day
+    //       makes REQ5 unable to go red at all (measured).
+    //   (2) the org write-back leg: an `UpdateAt { index }` on that same row
+    //       while the feed is live. Against a desynchronised mirror this writes
+    //       one day's row over an unrelated entry — duplicating a date and
+    //       silently dropping another.
+    // The late day carries a CHILD block, for two reasons. It sorts to the TOP
+    // of the date-DESC feed, so unlike the pre-seeded 2026-01-0x days it is
+    // materialised in the main panel where the double-bullet is visible; and a
+    // real child row draws its OWN bullet (`block_profile.yaml` `default`:
+    // `icon(col("bullet_shape"))`), which is what the tree chrome must not
+    // double (REQ4).
+    let late_day = runtime
+        .block_on(graft_empty_journal_day(&env, "jday-zz-late", "2026-12-31"))
+        .expect("graft late day");
+    runtime
+        .block_on(env.create_block(LATE_ENTRY_ID, &late_day.0, "late day entry"))
+        .expect("graft the late day's entry row");
+    feed.push(late_day.clone());
+    runtime
+        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(120)));
+    settle(&mut app, &bounds, &runtime, Duration::from_secs(120));
+
+    // Rename to another date that still sorts FIRST — a real content change, so
+    // the `set_neq` CDC-echo suppressor cannot swallow it.
+    const LATE_DAY_RENAMED: &str = "2026-12-30";
+    runtime
+        .block_on(env.update_block_content(&late_day.0, LATE_DAY_RENAMED))
+        .expect("rename the late day");
+    feed.last_mut().expect("late day in feed").1 = LATE_DAY_RENAMED.to_string();
+    runtime
+        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(120)));
+    settle(&mut app, &bounds, &runtime, Duration::from_secs(120));
+
+    // Converge the frame, don't just settle it. `settle` stops at the first
+    // STABLE element count, and the streaming creation slot can arrive after
+    // that: `AppendedRowsProvider` appends it once its inner stream resolves,
+    // which is a later frame. Re-settle and re-snapshot until the EMPTY day's
+    // slot is present, then read EVERY assertion off that one converged frame.
+    // Measured without this: 1 run in 8 lost the empty day's section and failed
+    // REQ5/REQ3 with the fix correctly in place. A frame that never converges
+    // falls through after the cap, so a genuinely missing slot still fails —
+    // this waits for convergence, it does not assume it.
     let sut = window_wide(Box::new(bounds.clone()), engine.clone());
-    let elements = runtime.block_on(async { sut.rendered_elements().await });
+    let empty = EntityUri::block(&empty_day.0);
+    let mut elements = runtime.block_on(async { sut.rendered_elements().await });
+    for _ in 0..10 {
+        if slot_painted(&elements, &empty) {
+            break;
+        }
+        settle(&mut app, &bounds, &runtime, Duration::from_secs(30));
+        elements = runtime.block_on(async { sut.rendered_elements().await });
+    }
 
     // ── Classify the feed days by what the frame actually painted ────────────
     let materialized: Vec<&(String, String)> = feed
@@ -275,7 +352,6 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
         .iter()
         .filter_map(|(id, content)| header_width(&elements, &EntityUri::block(id), content))
         .fold(0.0f32, f32::max);
-    let empty = EntityUri::block(&empty_day.0);
 
     eprintln!(
         "[journals-logseq] materialized={} floored={} slotted_nonempty={} max_hdr_w={max_hdr_w:.0} \
@@ -319,6 +395,37 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
         materialized.len(),
     );
 
+    // ── REQ5: a live feed mutation must not destroy an unrelated day ────────
+    // The feed is driven LIVE above (a day grafted, then renamed) so that the
+    // collection receives INDEXED deltas — `Push`/`UpdateAt` — and not just the
+    // single `Replace` a pre-seeded feed emits. That is the parity this harness
+    // was missing: `create_flat_driver`'s `entries` is the index-addressed
+    // mirror of the upstream keyed rows, and sorting it IN PLACE for display
+    // permutes it away from upstream, so the next `UpdateAt { index }` writes
+    // its row over an UNRELATED entry — one day renders twice and another is
+    // destroyed (dogfood 2026-08-20: `2026-08-20` shown as two adjacent day
+    // sections).
+    //
+    // The DUPLICATE half is unobservable from here, measured both ways:
+    // `rendered_elements` comes from the bounds registry, which keys by
+    // `el_id`, so a block painted twice registers once; and
+    // `widget_tree_snapshot` is a sync RE-DERIVATION from the query — under the
+    // reverted fix it still reports all five days exactly once. The duplicate
+    // is therefore pinned one rung down, at
+    // `holon_frontend::reactive_view::tests::flat_driver_sorted_feed_survives_update_after_reorder`.
+    //
+    // The DESTROYED half is fully observable and is what this rung asserts: the
+    // empty day's section must survive a mutation aimed at ANOTHER day. With
+    // the in-place sort restored it does not — `empty_slot` goes true → false.
+    assert!(
+        slot_painted(&elements, &EntityUri::block(&empty_day.0)),
+        "REQ5 live-mutation faithfulness: the EMPTY day {} lost its section when ANOTHER day was \
+         grafted and renamed in the live feed. A sorted streaming collection must stay a faithful \
+         mirror of its upstream row set — `create_flat_driver`'s `full_rebuild` must sort a COPY, \
+         never the index-addressed `entries` mirror itself",
+        empty_day.0,
+    );
+
     // ── REQ3: LogSeq-faithful empty bullet — EMPTY day only ──────────────────
     // Martin's JRN-2 ruling: the trailing `block:__virtual:<day>` "type here"
     // bullet affords ONLY on an EMPTY day (a fresh journal, nothing written yet);
@@ -350,6 +457,43 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
         "REQ3 (b) empty-only: NON-empty days must paint NO trailing bullet (LogSeq-faithful), but \
          {stray:?} did. `resolve_creation_parent` must resolve an explicit container to `None` \
          when the rowset is non-empty",
+    );
+
+    // ── REQ4: exactly ONE bullet glyph per row ───────────────────────────────
+    // A real block ALWAYS draws its own bullet — `block_profile.yaml`'s
+    // `default` variant renders `icon(col("bullet_shape"), ...)` for every
+    // block. So the tree chrome must draw NO second one: `tree_item`'s
+    // `show_bullet` defaults to TRUE, and a tree that does not override it
+    // paints a grey chrome dot beside the block's blue bullet (dogfood
+    // 2026-08-20). Every other outline in the app suppresses it via
+    // `rules: [#{when: always(), override: #{show_bullet: false}}]`
+    // (`collection_profile.yaml`, `index.org`); the journals tree variants must
+    // carry the same rule.
+    //
+    // Read as an ID, not as geometry: the chrome bullet registers under
+    // `tree_bullet_id_for(target)` (`tree_item.rs` `LeadingMarker::Bullet`),
+    // which is exactly the row it belongs to.
+    let late_entry = EntityUri::block(LATE_ENTRY_ID);
+    assert!(
+        elements
+            .iter()
+            .any(|e| e.entity_id.as_ref() == Some(&late_entry)),
+        "vacuity: the late day's child row {LATE_ENTRY_ID} must be painted for REQ4 to mean \
+         anything — it drew nothing, so no row was checked for a double bullet",
+    );
+    let chrome_bullet = holon_frontend::geometry::tree_bullet_id_for(late_entry.as_str());
+    let doubled: Vec<&str> = elements
+        .iter()
+        .filter(|e| e.el_id == chrome_bullet)
+        .map(|e| e.el_id.as_str())
+        .collect();
+    assert!(
+        doubled.is_empty(),
+        "REQ4 one bullet per row: the day-content row {LATE_ENTRY_ID} already draws its own \
+         `bullet_shape` bullet, so the tree chrome must draw none — but {doubled:?} painted, \
+         giving the row TWO dots. The journals `tree(...)` variants in `block_profile.yaml` \
+         (`embedded_page_expanded`, `embedded_page`) need \
+         `rules: [#{{when: always(), override: #{{show_bullet: false}}}}]`",
     );
 
     // Clean shutdown, then leak the app/env: dropping the gpui HeadlessApp's

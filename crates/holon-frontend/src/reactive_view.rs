@@ -1964,7 +1964,15 @@ impl ReactiveView {
             }
         };
 
-        // Full rebuild: sort entries, interpret all, replace target.
+        // Full rebuild: interpret every entry in DISPLAY order and replace target.
+        //
+        // `entries` is the index-addressed mirror of the upstream
+        // `keyed_rows_signal_vec` — a `VecDiff`'s `index` addresses it directly —
+        // so the display sort runs on a COPY. Sorting `entries` itself permuted it
+        // away from upstream's order, and the next `UpdateAt { index }` then wrote
+        // its row over an unrelated entry: that entry vanished and the updated one
+        // rendered twice (dogfood 2026-08-20, the journals feed showing one day as
+        // two adjacent sections).
         let full_rebuild = {
             let entries = entries.clone();
             let sort_key = sort_key.clone();
@@ -1974,7 +1982,7 @@ impl ReactiveView {
             let csf = child_space_fn.clone();
             let interpret = interpret_and_attach.clone();
             Arc::new(move || {
-                let mut lock = entries.lock().unwrap();
+                let mut ordered = entries.lock().unwrap().clone();
                 if let Some(ref spec) = sort_key {
                     // Honor the `-`-prefixed DESCENDING convention (e.g.
                     // `sortkey: "-content"` for the newest-first journal feed).
@@ -1984,19 +1992,19 @@ impl ReactiveView {
                     // (dogfood #6 row 34: feed rendered arrival-order). Mirrors
                     // the static `sorted_rows` + tree-driver `parse_sort_key`.
                     let (col, descending) = holon_api::render_eval::parse_sort_key(spec);
-                    lock.sort_by(|(ka, a), (kb, b)| {
+                    ordered.sort_by(|(ka, a), (kb, b)| {
                         let ord = holon_api::render_eval::cmp_values(a.get(col), b.get(col));
                         let ord = if descending { ord.reverse() } else { ord };
                         ord.then_with(|| ka.cmp(kb))
                     });
                 }
                 let parent_space = space.get_cloned();
-                let count = lock.len();
+                let count = ordered.len();
                 let child_space = match (parent_space, csf.as_ref()) {
                     (Some(p), Some(f)) => Some(f(p, count)),
                     _ => parent_space,
                 };
-                let items: Vec<Arc<ReactiveViewModel>> = lock
+                let items: Vec<Arc<ReactiveViewModel>> = ordered
                     .iter()
                     .map(|(k, row)| interpret(&tmpl, row.clone(), child_space, k.1.clone()))
                     .collect();
@@ -2005,7 +2013,6 @@ impl ReactiveView {
                     items.len(),
                     child_space,
                 );
-                drop(lock);
                 target.lock_mut().replace_cloned(items);
             })
         };
@@ -3099,6 +3106,344 @@ mod tests {
             "streaming `list` must sort NEWEST-FIRST for sort_key=\"-content\" (DESC by content); \
              got {order:?}"
         );
+    }
+
+    /// Dogfood (Martin, 2026-08-20): the live journals feed showed the SAME day
+    /// (`2026-08-20`) as TWO adjacent day sections, and healed on restart.
+    ///
+    /// `create_flat_driver` keeps ONE `entries` vec serving two incompatible
+    /// roles: it is the index-addressed mirror of the upstream
+    /// `keyed_rows_signal_vec` (a `VecDiff`'s `index` addresses it directly),
+    /// AND the buffer `full_rebuild` sorts by `sort_key`. Sorting it IN PLACE
+    /// permutes it away from upstream's order, so the NEXT `UpdateAt { index }`
+    /// writes the updated row over an unrelated entry: that entry's day
+    /// vanishes and the updated day appears twice — adjacent, once
+    /// re-sorted.
+    ///
+    /// Prod sequence reproduced here: the feed boots sorted (`ORDER BY content
+    /// DESC`, indices aligned), the `daily_journal` rule mints the new day at
+    /// the midnight rollover (arrives as a trailing `Push` → the rebuild's
+    /// sort moves it to the FRONT and breaks alignment), then the org
+    /// write-back of `Journals/<day>.org` updates that same block
+    /// (`UpdateAt` at its upstream trailing index → clobbers the OLDEST
+    /// day).
+    #[tokio::test]
+    async fn flat_driver_sorted_feed_survives_update_after_reorder() {
+        crate::shadow_builders::register_render_dsl_widget_names();
+
+        let row_set = ReactiveRowSet::new();
+        row_set.set_generation(1);
+        // Boot snapshot: already newest-first, exactly as `SELECT * FROM
+        // journal_feed ORDER BY content DESC` delivers it.
+        for content in ["2026-08-19", "2026-08-18", "2026-08-17"] {
+            row_set.apply_change(
+                holon_api::Change::Created {
+                    data: enriched(make_row(content, content)),
+                    origin: remote_origin(),
+                },
+                1,
+            );
+        }
+        let row_set = Arc::new(row_set);
+        let data_source: Arc<dyn holon_api::ReactiveRowProvider> = row_set.clone();
+
+        let item_template = holon_api::render_dsl::parse_render_dsl(r#"text(col("content"))"#)
+            .expect("item_template parses");
+
+        let view = ReactiveView::new_collection(
+            CollectionConfig {
+                layout: CollectionVariant::from_name("list", 0.0).expect("`list` layout"),
+                item_template,
+                sort_key: Some("-content".to_string()),
+                virtual_child: None,
+                rules: Vec::new(),
+            },
+            data_source,
+            None,
+            None,
+        );
+
+        let services: Arc<dyn crate::reactive::BuilderServices> =
+            Arc::new(StubBuilderServices::new());
+        view.start(services, &tokio::runtime::Handle::current());
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Midnight rollover: `daily_journal` mints today's page. It arrives at the
+        // END of the upstream vec; the sort renders it FIRST.
+        row_set.apply_change(
+            holon_api::Change::Created {
+                data: enriched(make_row("2026-08-20", "2026-08-20")),
+                origin: remote_origin(),
+            },
+            1,
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Org write-back of `Journals/2026-08-20.org` re-emits the same block with
+        // a fresh `updated_at` — a REAL field change, so it is not swallowed by
+        // the `set_neq` CDC-echo suppressor.
+        let mut written_back = make_row("2026-08-20", "2026-08-20");
+        written_back.insert("updated_at".to_string(), Value::String("1".to_string()));
+        row_set.apply_change(
+            holon_api::Change::Updated {
+                id: "2026-08-20".to_string(),
+                data: enriched(written_back),
+                origin: remote_origin(),
+            },
+            1,
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let order: Vec<String> = view
+            .items
+            .lock_ref()
+            .iter()
+            .filter_map(|n| n.prop_str("content"))
+            .collect();
+        view.stop();
+
+        assert_eq!(
+            order,
+            vec!["2026-08-20", "2026-08-19", "2026-08-18", "2026-08-17"],
+            "a sorted streaming `list` must stay a faithful mirror of its upstream row set across \
+             an update that follows a sort-induced reorder — no day duplicated, none lost; got \
+             {order:?}"
+        );
+    }
+
+    /// One generated CDC step: which row, what it becomes, and what happens to
+    /// it. The op is a REQUEST — `drive_sorted_collection` maps it against the
+    /// live model so only VALID changes reach the driver (no update of a row
+    /// that does not exist), which is what the CDC stream itself guarantees.
+    #[derive(Clone, Copy, Debug)]
+    enum RowOp {
+        /// Create the row, or — if it is already live — re-sort it by writing a
+        /// new sort value. Both are the same request: "this row exists, with
+        /// this value".
+        Upsert {
+            slot: usize,
+            value: usize,
+        },
+        Delete {
+            slot: usize,
+        },
+    }
+
+    /// Upserts outnumber deletes 3:1 so a case builds up a populated
+    /// collection to reorder rather than emptying itself. The slot and value
+    /// domains are small and deliberately unequal: 5 identities against 3 sort
+    /// values, so reorders and ties are frequent inside a short sequence.
+    fn arb_row_op() -> impl proptest::strategy::Strategy<Value = RowOp> {
+        use proptest::strategy::Strategy;
+        proptest::prop_oneof![
+            3 => (0usize..5, 0usize..3)
+                .prop_map(|(slot, value)| RowOp::Upsert { slot, value }),
+            1 => (0usize..5).prop_map(|slot| RowOp::Delete { slot }),
+        ]
+    }
+
+    /// A row of the generated collection: `id` is the stable identity the
+    /// oracle reads back, `sortval` is the ONLY thing the collection sorts on.
+    /// They are separate columns on purpose — the sort value has a deliberately
+    /// tiny domain so ties (and therefore tie-break ordering) are common, while
+    /// identity stays unique so a duplicated or dropped row is unambiguous.
+    fn sortable_row(slot: usize, value: usize) -> DataRow {
+        let mut row = DataRow::new();
+        row.insert("id".to_string(), Value::String(format!("row-{slot}")));
+        row.insert("sortval".to_string(), Value::String(format!("v{value}")));
+        row
+    }
+
+    /// The MODEL's order: the live rows, sorted the way a sorted collection is
+    /// defined to render them. Deliberately computed from an independently
+    /// maintained map — the property is that the driver's index-addressed
+    /// mirror stays faithful, NOT that the comparator is correct, so sharing
+    /// the comparator with production is what isolates the mirror.
+    fn model_order(
+        model: &std::collections::BTreeMap<String, Arc<DataRow>>,
+        spec: &str,
+    ) -> Vec<String> {
+        let (col, descending) = holon_api::render_eval::parse_sort_key(spec);
+        let mut rows: Vec<(holon_api::EntityUri, Arc<DataRow>)> = model
+            .values()
+            .map(|row| {
+                let uri = holon_api::data_row_entity_uri(row).expect("generated row carries an id");
+                (uri, row.clone())
+            })
+            .collect();
+        rows.sort_by(|(ka, a), (kb, b)| {
+            let ord = holon_api::render_eval::cmp_values(a.get(col), b.get(col));
+            let ord = if descending { ord.reverse() } else { ord };
+            ord.then_with(|| ka.cmp(kb))
+        });
+        rows.iter()
+            .map(|(_, row)| {
+                row.get("id")
+                    .and_then(|v| v.as_string())
+                    .expect("generated row carries an id")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Drive `ops` through a live sorted collection, checking convergence after
+    /// EVERY step. Returns `Err` with the first divergence.
+    ///
+    /// Settle-then-assert: each step polls until the rendered order matches the
+    /// model, up to a generous timeout, and only then compares. A reactive
+    /// collection's contract is EVENTUAL — a slow machine must not fail the
+    /// test — but a mirror that has desynchronised never converges, so it
+    /// spends the timeout and reports the order it is stuck in.
+    async fn drive_sorted_collection(
+        ops: &[RowOp],
+        spec: &str,
+        handle: &tokio::runtime::Handle,
+    ) -> Result<(), String> {
+        crate::shadow_builders::register_render_dsl_widget_names();
+
+        let row_set = ReactiveRowSet::new();
+        row_set.set_generation(1);
+        let row_set = Arc::new(row_set);
+        let data_source: Arc<dyn holon_api::ReactiveRowProvider> = row_set.clone();
+
+        // Renders the row's IDENTITY, so the observed sequence names exactly
+        // which row landed where — a swap of two equal-`sortval` rows is
+        // legitimate, a duplicated or missing id never is.
+        let item_template = holon_api::render_dsl::parse_render_dsl(r#"text(col("id"))"#)
+            .expect("item_template parses");
+
+        let view = ReactiveView::new_collection(
+            CollectionConfig {
+                layout: CollectionVariant::from_name("list", 0.0).expect("`list` layout"),
+                item_template,
+                sort_key: Some(spec.to_string()),
+                virtual_child: None,
+                rules: Vec::new(),
+            },
+            data_source,
+            None,
+            None,
+        );
+        let services: Arc<dyn crate::reactive::BuilderServices> =
+            Arc::new(StubBuilderServices::new());
+        view.start(services, handle);
+
+        let mut model: std::collections::BTreeMap<String, Arc<DataRow>> =
+            std::collections::BTreeMap::new();
+
+        for (step, op) in ops.iter().enumerate() {
+            match *op {
+                RowOp::Upsert { slot, value } => {
+                    let row = sortable_row(slot, value);
+                    let id = format!("row-{slot}");
+                    let change = if model.contains_key(&id) {
+                        holon_api::Change::Updated {
+                            id: id.clone(),
+                            data: enriched(row.clone()),
+                            origin: remote_origin(),
+                        }
+                    } else {
+                        holon_api::Change::Created {
+                            data: enriched(row.clone()),
+                            origin: remote_origin(),
+                        }
+                    };
+                    model.insert(id, Arc::new(row));
+                    row_set.apply_change(change, 1);
+                }
+                RowOp::Delete { slot } => {
+                    let id = format!("row-{slot}");
+                    // A delete of a row that is not live is not a change the
+                    // CDC stream can emit; skip rather than model it.
+                    if model.remove(&id).is_none() {
+                        continue;
+                    }
+                    row_set.apply_change(
+                        holon_api::Change::Deleted {
+                            id,
+                            origin: remote_origin(),
+                        },
+                        1,
+                    );
+                }
+            }
+
+            let expected = model_order(&model, spec);
+            let mut observed = Vec::new();
+            for _ in 0..100 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                observed = view
+                    .items
+                    .lock_ref()
+                    .iter()
+                    .filter_map(|n| n.prop_str("content"))
+                    .collect();
+                if observed == expected {
+                    break;
+                }
+            }
+            if observed != expected {
+                view.stop();
+                return Err(format!(
+                    "step {step} ({op:?}) under sort_key {spec:?}: the collection never converged \
+                     on its row set.\n  expected: {expected:?}\n  observed: {observed:?}\n  ops so \
+                     far: {:?}",
+                    &ops[..=step],
+                ));
+            }
+        }
+        view.stop();
+        Ok(())
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            // Each case boots a live collection and settles after every step.
+            // Measured: 48 cases ≈ 3s, which keeps this inside the crate's
+            // ordinary test run rather than needing a lane of its own.
+            cases: 48,
+            failure_persistence: None,
+            ..proptest::test_runner::Config::default()
+        })]
+
+        /// THE convergence contract of a SORTED streaming collection: after
+        /// every CDC change, `create_flat_driver` must render exactly the live
+        /// row set in sorted order — no row duplicated, none lost.
+        ///
+        /// This is the property the duplicate-day dogfood bug of 2026-08-20 is
+        /// one instance of (see
+        /// [`flat_driver_sorted_feed_survives_update_after_reorder`], the
+        /// hand-authored pin for that exact sequence). The mechanism it guards:
+        /// `entries` is the index-addressed mirror of the upstream keyed rows —
+        /// every `VecDiff` arm writes it at an UPSTREAM index — while
+        /// `full_rebuild` needs a DISPLAY-ordered view of the same rows. Sorting
+        /// the mirror itself satisfies the second role and destroys the first,
+        /// and the corruption only shows up on the NEXT indexed delta. A single
+        /// example pins one path to that state; this reaches the others
+        /// (`InsertAt`/`RemoveAt`/`Pop` after an arbitrary reorder) and shrinks
+        /// any failure to a minimal sequence.
+        ///
+        /// Generated at the `Change` level, not by synthesising `VecDiff`s:
+        /// `Change` is what production feeds the provider, and the provider
+        /// decides which diff arm that becomes. Hand-built diffs would test an
+        /// input production never produces.
+        ///
+        /// UNSORTED collections are deliberately out of scope: with no
+        /// `sort_key` the driver never reorders, so display order IS upstream
+        /// order and the mirror has nothing to desynchronise from.
+        #[test]
+        fn sorted_collection_converges_on_its_row_set_after_every_change(
+            ops in proptest::collection::vec(arb_row_op(), 1..14),
+            descending in proptest::bool::ANY,
+        ) {
+            let spec = if descending { "-sortval" } else { "sortval" };
+            let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+            let handle = runtime.handle().clone();
+            let outcome = runtime.block_on(drive_sorted_collection(&ops, spec, &handle));
+            if let Err(divergence) = outcome {
+                proptest::prop_assert!(false, "{}", divergence);
+            }
+        }
     }
 
     /// Increment B smallest-first-step (also validates Increment G's premise):
