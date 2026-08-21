@@ -166,6 +166,9 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 # Increment 2.5 catalog-truthfulness probe: the PN simulator the declared
 # transitions are fired on (tests/pn_catalog_truthfulness_probe.rs).
 holon-engine.workspace = true
+# LogSeq-DB stage-1 import: the store-entry keystone
+# (tests/logseq_db_import_store.rs) drives the real importer into a real store.
+holon-logseq-db.workspace = true
 chrono.workspace = true
 # Testing infrastructure (enable pbt feature for test targets)
 proptest.workspace = true

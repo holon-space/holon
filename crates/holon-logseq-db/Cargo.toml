@@ -1,0 +1,36 @@
+[package]
+name = "holon-logseq-db"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
+[dependencies]
+holon-api.workspace = true
+# Store entry goes through `BlockOrdering`, the same boundary org re-ingest
+# uses. Confined to the `ingest` module so decode/projection stays store-free.
+holon-core.workspace = true
+# LogSeq DB graphs are standard on-disk SQLite; libsql opens them read-only to
+# read the `kvs` Transit-JSON node table.
+libsql.workspace = true
+# `preserve_order`: nested EDN carried opaque in `_logseq_raw/*` must round-trip
+# in author order, same rationale as holon-org-format's drawer ordering.
+serde_json = { workspace = true, features = ["preserve_order"] }
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
+# The store-boundary test implements `BlockOrdering`, which is `#[async_trait]`.
+async-trait.workspace = true
+# The fail-loud contract tests drive MUTATED COPIES of the fixture; the copies
+# live in a temp dir so the committed fixture is never written.
+tempfile.workspace = true

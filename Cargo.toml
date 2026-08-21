@@ -11,6 +11,7 @@ members = [
   "crates/holon-rules",
   "crates/holon-loro-wiring",
   "crates/holon-org-format",
+  "crates/holon-logseq-db",
   "crates/holon-toon",
   "crates/holon-orgmode",
   "crates/holon-markdown",
@@ -226,6 +227,7 @@ r3bl_tui = { git = "https://github.com/nightscape/r3bl-open-core.git", branch = 
 holon = { path = "crates/holon" }
 holon-advice = { path = "crates/holon-advice" }
 holon-api = { path = "crates/holon-api" }
+holon-logseq-db = { path = "crates/holon-logseq-db" }
 holon-oracles = { path = "crates/holon-oracles" }
 holon-core = { path = "crates/holon-core" }
 holon-engine = { path = "crates/holon-engine" }
