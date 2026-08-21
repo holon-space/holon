@@ -52,6 +52,21 @@ pub struct WriteOrgFile {
     pub keyword_set: Option<crate::pbt::generators::TodoKeywordSet>,
 }
 
+/// A document that DECLARES its own task-keyword ring — the shape a
+/// hand-authored `Given an org file "x":` docstring takes when the scenario
+/// needs keywords outside the parser defaults.
+const DECLARING_EXAMPLE_ORG: &str =
+    "#+TODO: NEXT WAITING | DONE\n* NEXT thing\n:PROPERTIES:\n:ID: blk-b\n:END:\n";
+
+/// The ring [`DECLARING_EXAMPLE_ORG`] declares.
+fn declaring_example_keyword_set() -> crate::pbt::generators::TodoKeywordSet {
+    crate::pbt::generators::TodoKeywordSet(vec![
+        holon_api::TaskState::active("NEXT"),
+        holon_api::TaskState::active("WAITING"),
+        holon_api::TaskState::done("DONE"),
+    ])
+}
+
 /// The placeholder document uri the generator parents top-level blocks to.
 /// Top-level headings carry this as their `parent_id`; `apply_to_ref` remaps
 /// it to the resolved per-document uri, and the SUT-side renderer uses it as
@@ -64,6 +79,12 @@ impl WriteOrgFile {
     /// the text with the production org parser, then reparents top-level blocks
     /// onto the `GEN_PLACEHOLDER` document uri so they flow through the same
     /// seeding path as generator-produced blocks.
+    ///
+    /// A `#+TODO:` header is carried out of the document block the parser
+    /// already resolved it into. Dropping it would be silent corruption rather
+    /// than mere loss: the parser resolves the declared keywords into the
+    /// blocks' task states, so a replay that re-emitted the file WITHOUT the
+    /// header would leave those states unparseable.
     pub fn from_org_text(filename: String, content: &str) -> anyhow::Result<Self> {
         let placeholder = EntityUri::block(GEN_PLACEHOLDER);
         let parsed = holon_orgmode::parse_org_file(
@@ -73,6 +94,8 @@ impl WriteOrgFile {
             std::path::Path::new("."),
         )?;
         let doc_id = parsed.document.id.clone();
+        let keyword_set = holon_org_format::models::OrgDocumentExt::todo_keywords(&parsed.document)
+            .map(crate::pbt::generators::TodoKeywordSet);
         let blocks = parsed
             .blocks
             .into_iter()
@@ -86,7 +109,7 @@ impl WriteOrgFile {
         Ok(Self {
             filename,
             blocks,
-            keyword_set: None,
+            keyword_set,
         })
     }
 }
@@ -147,9 +170,6 @@ impl holon_pbt_core::step_vocabulary::StepVocabulary for WriteOrgFile {
     }
 
     fn step_examples() -> Vec<Self> {
-        // Keyword-set-carrying examples are deliberately absent: the parse side
-        // reads the org text with the production parser, which resolves the
-        // `#+TODO:` header into task states rather than handing the set back.
         vec![
             Self {
                 filename: "example.org".to_string(),
@@ -161,6 +181,18 @@ impl holon_pbt_core::step_vocabulary::StepVocabulary for WriteOrgFile {
                 "* HelloWorld\n:PROPERTIES:\n:ID: blk-a\n:END:\n",
             )
             .expect("the example org text must parse"),
+            // A DECLARING document. `keyword_set` is the one field the
+            // round-trip law would otherwise never see, and it is exactly what
+            // a hand-authored feature file puts in its docstring. The blocks
+            // come from the same text the header governs, so the law compares
+            // the header alone.
+            {
+                let mut declaring =
+                    Self::from_org_text("custom_vocab.org".to_string(), DECLARING_EXAMPLE_ORG)
+                        .expect("the declaring example org text must parse");
+                declaring.keyword_set = Some(declaring_example_keyword_set());
+                declaring
+            },
         ]
     }
 

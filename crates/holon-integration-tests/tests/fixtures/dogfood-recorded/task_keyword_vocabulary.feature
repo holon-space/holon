@@ -10,13 +10,17 @@ Feature: A document's own task-keyword vocabulary governs its keywords
   NEITHER HALF IS FULLY RECORDABLE, and the two reasons are the session's top
   vocabulary gaps:
 
-  1. A `#+TODO:`-declaring document cannot be authored. `Given an org file
-     "<name>":` + docstring is refused whenever the org content leads with a
-     `#+…` line — verbatim: `step "an org file \"custom_vocab.org\":" matches
-     the WriteOrgFile template but its fields do not parse: org-file step "an
-     org file \"custom_vocab.org\":" needs a docstring holding the org
-     content`. So every scenario below runs under the DEFAULT vocabulary, and
-     the custom ring is reported in the session report only.
+  1. RESOLVED 2026-08-22 — a `#+TODO:`-declaring document IS authorable. The
+     claim recorded here (that `Given an org file "<name>":` + docstring is
+     refused whenever the org content leads with a `#+…` line) was refuted by
+     probing the Gherkin layer directly: the docstring arrives intact, header
+     and all. The refusal seen live came from a docstring that never attached,
+     not from its content. A real defect was found underneath — `from_org_text`
+     dropped the parsed ring, so a declaring document replayed WITHOUT its
+     header while its blocks already carried the declared keywords — and is
+     fixed; see bugfunnel `2026-08-22-org-file-step-drops-declared-todo-ring`.
+     The scenarios below still run under the DEFAULT vocabulary because no one
+     has written the declaring scenario yet, not because it is impossible.
   2. Putting a block into an UNDECLARED state needs
      `set_field(task_state, …)`; there is no set-field verb, and
      `I cycle block … to state …` can only reach states the ring offers. The
