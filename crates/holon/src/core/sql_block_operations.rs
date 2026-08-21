@@ -507,8 +507,22 @@ impl BlockOrdering for SqlBlockOperations {
     /// Result is a strictly-increasing total order (correct) that touches
     /// only the blocks that actually moved (low churn). Idempotent: an
     /// already-ordered parent makes zero writes.
+    ///
+    /// Only under `Consolidator::Store`. When an upstream consolidator owns
+    /// order, the tree holds the fractional index and the outbound projector
+    /// writes `sort_key` FROM it, so a relabel here would be overwritten
+    /// unread — the whole call would silently do nothing. There we restate the
+    /// order through [`place`](Self::place), which routes to the tree.
     async fn place_all(&self, parent_id: &EntityUri, ordered_ids: &[EntityUri]) -> Result<()> {
         if ordered_ids.is_empty() {
+            return Ok(());
+        }
+        if matches!(self.consolidator(), Consolidator::Upstream) {
+            let mut prev: Option<&EntityUri> = None;
+            for id in ordered_ids {
+                self.place(id, parent_id, prev).await?;
+                prev = Some(id);
+            }
             return Ok(());
         }
         let parent_str = parent_id.as_str();
