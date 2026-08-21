@@ -1,9 +1,12 @@
 //! Replay of the LogSeq-parity corpus (`tests/fixtures/logseq-parity/`).
 //!
-//! Every feature carries a feature-level `@wip` tag, so the strict runner skips
-//! the whole corpus and reports the skip count. Un-tag a scenario and the
-//! runner executes it through `ComposedSut<WideE2E>` and requires it to pass.
-//! See the directory `README.md` for the `@wip` contract.
+//! The corpus is a mix: a scenario still tagged `@wip` is reported skipped (its
+//! steps are never parsed, because it uses phrasings the step registry does not
+//! implement yet), and an un-tagged one executes through `ComposedSut<WideE2E>`
+//! under strict semantics and MUST pass — a failed precondition or an unmatched
+//! `Then` is a hard panic, never a silent skip. Un-tagging a scenario is how a
+//! parity expectation becomes a live gate. See the directory `README.md` for
+//! the `@wip` contract.
 
 #![cfg(feature = "pbt")]
 
@@ -27,7 +30,7 @@ fn parity_features() -> Vec<PathBuf> {
 }
 
 #[test]
-fn logseq_parity_corpus_skips_while_wip() {
+fn logseq_parity_corpus_replay() {
     for file in parity_features() {
         holon_integration_tests::pbt::fixtures::run_feature_strict::<
             WideE2EMachine,

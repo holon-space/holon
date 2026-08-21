@@ -26,8 +26,10 @@ Because `@wip` is currently feature-level, un-tagging one scenario means moving
 the feature.
 
 `logseq_parity_replay.rs` (in `tests/catalog_suite/`) globs this directory and
-runs every file through the strict runner. While the corpus is fully `@wip` the
-run is green and reports 67 scenarios skipped.
+runs every file through the strict runner. Each run prints, per file, how many
+scenarios it replayed and how many it skipped as `@wip`; the replayed ones are a
+live gate and must pass. Deliberately stated without a count here — every
+un-tagging changes it, and a number in this README goes stale the same night.
 
 ## Candidate-deviation semantics
 

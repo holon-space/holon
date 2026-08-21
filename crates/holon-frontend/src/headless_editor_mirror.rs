@@ -569,10 +569,21 @@ impl HeadlessEditorMirror {
         // `peek_caret_seed`; without a seed, default to end-of-text
         // (`set_value` behaviour). A tracked cursor always wins — the seed is
         // only the mount-time initial position.
+        //
+        // This IS the mount that consumes the seed: leaving it armed lets the
+        // next `converge_editors` settle re-seat the caret this keystroke run
+        // has since advanced (`adopt_armed_caret_seed` only re-seats a caret it
+        // already tracks), which yanked the caret back to a split's offset 0
+        // after the user had typed.
+        //
+        // Map first, then consume only what actually applied — the same order as
+        // prod's mount (`frontends/gpui/src/views/editor_view.rs:1218-1263`),
+        // where the consumed `seed` is the POST-mapping value. A seed the
+        // boundary filter drops stays armed, as it does in prod.
         let cursor_byte = match self.tracked_cursor_at(&block_id, occ) {
             Some(c) => c,
             None => {
-                let init = engine
+                let applied = engine
                     .peek_caret_seed(&block_uri)
                     .map(|o| {
                         self.seed_into_surface(&block_id, o).unwrap_or_else(|e| {
@@ -580,9 +591,12 @@ impl HeadlessEditorMirror {
                         })
                     })
                     .filter(|&o| current_text.is_char_boundary(o.min(current_text.len())))
-                    .map(|o| o.min(current_text.len()))
-                    .unwrap_or(current_text.len());
+                    .map(|o| o.min(current_text.len()));
+                let init = applied.unwrap_or(current_text.len());
                 self.set_cursor(&block_id, occ, init);
+                if applied.is_some() {
+                    engine.consume_caret_seed(&block_uri);
+                }
                 init
             }
         };
