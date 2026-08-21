@@ -29,4 +29,5 @@ pub mod sql_parser;
 pub mod sql_utils;
 pub mod turso;
 pub mod turso_actor_stats;
+pub mod turso_adapter;
 pub mod util;

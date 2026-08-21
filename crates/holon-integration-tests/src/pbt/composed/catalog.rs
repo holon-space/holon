@@ -157,6 +157,7 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // assert it by id.
         holon_pbt_core::capabilities::inv_pair_focus_current_focus_rows(),
         invariants::focus_roots::wire(),
+        invariants::typed_matview_matches_ref::wire(),
         // ViewModel liveness/coherence invariants (Bundle C-remainder port,
         // 2026-06-23): need `SutViewSelection` (`frontend_engine`/`frontend_root_not_error`/
         // `live_tree_matches_fresh`) or `SutViewSelection + RefViewSelection` (`view_selection`).

@@ -345,6 +345,117 @@ fn named_params_fingerprint(params: &HashMap<String, Value>) -> String {
 /// one bucket over-subtract their combined excess — so a truncated fingerprint
 /// carries a hash of the FULL text, making it injective in the SQL while the
 /// readable head/tail survives for the reader.
+/// Split SQL into identifier-ish tokens. A double-quoted identifier keeps its
+/// quotes and stays ONE token even when it abuts the previous word
+/// (`INSERT INTO"t"`); every other punctuation character is a separator.
+///
+/// Deliberately not a SQL parser — just enough to find the token sitting in a
+/// write statement's TABLE position.
+fn sql_tokens(sql: &str) -> Vec<&str> {
+    // char_indices, never raw byte indexing: SQL carries arbitrary text in its
+    // literals (an em dash in a block's content is enough), and slicing on a
+    // byte offset inside a multi-byte character panics.
+    let mut out = Vec::new();
+    let mut it = sql.char_indices().peekable();
+    while let Some(&(idx, c)) = it.peek() {
+        if c == '"' {
+            it.next();
+            let mut end = sql.len();
+            while let Some((j, d)) = it.next() {
+                if d == '"' {
+                    // `""` is an escaped quote INSIDE the identifier.
+                    if it.peek().map(|&(_, e)| e) == Some('"') {
+                        it.next();
+                        continue;
+                    }
+                    end = j + d.len_utf8();
+                    break;
+                }
+            }
+            out.push(&sql[idx..end]);
+        } else if c.is_alphanumeric() || c == '_' {
+            let mut end = sql.len();
+            while let Some(&(j, d)) = it.peek() {
+                if d.is_alphanumeric() || d == '_' {
+                    it.next();
+                } else {
+                    end = j;
+                    break;
+                }
+            }
+            out.push(&sql[idx..end]);
+        } else {
+            it.next();
+        }
+    }
+    out
+}
+
+/// The double-quoted table identifier a write statement targets, if it has one.
+///
+/// Quoting a table name in an INSERT/UPDATE/DELETE makes our Turso fork's IVM
+/// stop maintaining every matview over that table while the write still
+/// succeeds — a silent projection desync. Both write entry points
+/// ([`DbHandle::execute`] and [`DbHandle::transaction`]) reject on a `Some`
+/// here. DDL is deliberately out of scope: a matview's defining SELECT may
+/// quote its FROM, and that is proven harmless.
+///
+/// Handles the `OR <action>` modifiers (`INSERT OR IGNORE`, `UPDATE OR
+/// REPLACE`) and a `WITH`-prefixed write. Anything it does not recognise as a
+/// write returns `None` — it never guesses a table position.
+fn quoted_write_target(sql: &str) -> Option<&str> {
+    let tokens = sql_tokens(sql);
+    // A CTE-prefixed write hides the verb behind the WITH clause; find it.
+    let verb_at = if tokens.first()?.eq_ignore_ascii_case("WITH") {
+        tokens.iter().position(|t| {
+            ["INSERT", "REPLACE", "UPDATE", "DELETE"]
+                .iter()
+                .any(|v| t.eq_ignore_ascii_case(v))
+        })?
+    } else {
+        0
+    };
+    let rest = &tokens[verb_at..];
+    let target = match rest.first()?.to_ascii_uppercase().as_str() {
+        // `INSERT INTO t`, plus the `INSERT OR IGNORE INTO t` family: the
+        // target is whatever follows INTO.
+        "INSERT" | "REPLACE" => {
+            let into = rest.iter().position(|t| t.eq_ignore_ascii_case("INTO"))?;
+            rest.get(into + 1)?
+        }
+        // `UPDATE t`, plus `UPDATE OR REPLACE t`: skip the OR + conflict action.
+        "UPDATE" => {
+            if rest.get(1).is_some_and(|t| t.eq_ignore_ascii_case("OR")) {
+                rest.get(3)?
+            } else {
+                rest.get(1)?
+            }
+        }
+        "DELETE" => {
+            let from = rest.iter().position(|t| t.eq_ignore_ascii_case("FROM"))?;
+            rest.get(from + 1)?
+        }
+        _ => return None,
+    };
+    target.starts_with('"').then_some(*target)
+}
+
+/// The loud rejection both write entry points share. `position` names where the
+/// offending statement sat in a transaction batch, or `None` for a lone write.
+fn reject_quoted_write(sql: &str, quoted: &str, position: Option<usize>) -> StorageError {
+    let where_ = match position {
+        Some(i) => format!(" (statement {i} of the transaction batch)"),
+        None => String::new(),
+    };
+    StorageError::DatabaseError(format!(
+        "refusing to execute a write whose table identifier is double-quoted ({quoted}){where_}: \
+         quoted table names bypass IVM dependency tracking in our Turso fork, so every \
+         materialized view over the table silently stops being maintained while the write still \
+         reports success — see `matview_is_ivm_maintained_for_execute_values_writes` in \
+         crates/holon-turso/src/turso_adapter.rs. Write the table name unquoted. Statement: {sql}"
+    ))
+}
+
 fn sql_fingerprint(sql: &str) -> String {
     use std::hash::Hash;
     use std::hash::Hasher;
@@ -458,6 +569,9 @@ impl DbHandle {
     /// count
     #[tracing::instrument(skip(self, params), fields(sql = %sql_fingerprint(sql), params_fp = %positional_params_fingerprint(&params)))]
     pub async fn execute(&self, sql: &str, params: Vec<turso::Value>) -> Result<u64> {
+        if let Some(quoted) = quoted_write_target(sql) {
+            return Err(reject_quoted_write(sql, quoted, None));
+        }
         let (response_tx, response_rx) = oneshot::channel();
         self.tx
             .send(DbCommand::Execute {
@@ -522,8 +636,51 @@ impl DbHandle {
             .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
     }
 
-    /// Execute multiple statements in a transaction
+    /// Execute a write WITHOUT the quoted-identifier guard.
+    ///
+    /// EXISTS ONLY to keep the engine defect the guard exists for demonstrable.
+    /// With the guard armed, nothing in the suite can reach the broken engine
+    /// path any more, so a fork that fixed IVM identifier tracking — or a
+    /// careless removal of the guard — would go unnoticed. The A/B pin
+    /// (`matview_is_ivm_maintained_for_execute_values_writes`) drives the
+    /// quoted leg through here.
+    ///
+    /// DELETE THIS, with the guard and the pin, when the fork normalizes quoted
+    /// identifiers in IVM dependency tracking.
+    #[cfg(test)]
+    pub(crate) async fn execute_unguarded(
+        &self,
+        sql: &str,
+        params: Vec<holon_api::Value>,
+    ) -> Result<u64> {
+        let params = params.iter().map(value_to_turso_param).collect();
+        let (response_tx, response_rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::Execute {
+                sql: sql.to_string(),
+                params,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+        response_rx
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
+    }
+
+    /// Execute multiple statements in a transaction.
+    ///
+    /// Every statement is screened for a quoted table identifier BEFORE any of
+    /// them runs, so a single offender rejects the whole batch rather than
+    /// letting part of it through. This is the highest-volume write path —
+    /// guarding only `execute` would leave the batch writers routing around the
+    /// check entirely.
     pub async fn transaction(&self, statements: Vec<(String, Vec<turso::Value>)>) -> Result<()> {
+        for (i, (sql, _)) in statements.iter().enumerate() {
+            if let Some(quoted) = quoted_write_target(sql) {
+                return Err(reject_quoted_write(sql, quoted, Some(i)));
+            }
+        }
         let (response_tx, response_rx) = oneshot::channel();
         self.tx
             .send(DbCommand::Transaction {
@@ -3234,6 +3391,56 @@ mod tests {
     fn test_database_phase_default() {
         let phase = DatabasePhase::default();
         assert_eq!(phase, DatabasePhase::SchemaInit);
+    }
+
+    #[test]
+    fn quoted_write_target_flags_every_write_form_and_spares_the_rest() {
+        for sql in [
+            "INSERT INTO \"person_raw\" (id) VALUES (?)",
+            "insert or replace into \"person_raw\" (id) values (?)",
+            "UPDATE \"person_raw\" SET email = ? WHERE id = ?",
+            "DELETE FROM \"person_raw\" WHERE id = ?",
+        ] {
+            assert_eq!(
+                quoted_write_target(sql),
+                Some("\"person_raw\""),
+                "must flag the quoted write target in: {sql}"
+            );
+        }
+
+        // Modifier and spacing shapes that a naive whitespace scan gets wrong.
+        for sql in [
+            "UPDATE OR REPLACE \"person_raw\" SET email = ? WHERE id = ?",
+            "UPDATE OR IGNORE \"person_raw\" SET email = ?",
+            "INSERT INTO\"person_raw\" (id) VALUES (?)",
+            "WITH src AS (SELECT 1) INSERT INTO \"person_raw\" (id) VALUES (?)",
+        ] {
+            assert_eq!(
+                quoted_write_target(sql),
+                Some("\"person_raw\""),
+                "must flag the quoted write target in: {sql}"
+            );
+        }
+
+        for sql in [
+            // The shape every production writer uses.
+            "INSERT INTO person_raw (id) VALUES (?)",
+            "UPDATE OR REPLACE person_raw SET email = ?",
+            "INSERT INTO person_raw(id) VALUES (?)",
+            "UPDATE person_raw SET email = ? WHERE id = ?",
+            "DELETE FROM person_raw WHERE id = ?",
+            // A quoted COLUMN is harmless — only the table identifier matters.
+            "INSERT INTO person_raw (\"id\", \"email\") VALUES (?, ?)",
+            // Multi-byte text in a literal must not panic the tokenizer — an
+            // em dash in block content was enough to crash the keystone.
+            "INSERT INTO person_raw (id, content) VALUES (?, 'a — b')",
+            "UPDATE person_raw SET content = 'ünïcode — ✓' WHERE id = ?",
+            // Reads and DDL are out of scope; a matview's quoted FROM is legal.
+            "SELECT \"id\" FROM \"person_raw\"",
+            "CREATE MATERIALIZED VIEW person AS SELECT \"id\" FROM \"person_raw\"",
+        ] {
+            assert_eq!(quoted_write_target(sql), None, "must not flag: {sql}");
+        }
     }
 
     #[test]

@@ -3440,3 +3440,64 @@ mod attribution_tests {
         }
     }
 }
+
+// ─── Datatype axis (BG-1): free-standing typed entities ───────────────
+
+/// SUT-side create/read of a FREE-STANDING typed entity — the datatype axis
+/// (block-generalization increment 1). A free-standing type (e.g. `person`,
+/// `id_references: None`) serializes to its own Turso table + read matview via
+/// the `TursoAdapter`, with NO block table involved. This cap lets a transition
+/// create such an entity and lets an invariant read it back off the matview and
+/// prove its id never lands in a block table.
+///
+/// `#[capmap_adapter]` hosts it on `CapMap`, so the composed keystone dispatches
+/// `CreateTypedEntity` and selects the typed-matview invariant only when a Turso
+/// config supplies it (a Loro-only / no-Turso slice deselects honestly).
+#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter] // emits async-trait + CapName + `impl … for CapMap`
+pub trait SutTypedEntity {
+    /// Declare a NEW free-standing type at runtime and serialize it: create its
+    /// `<type_name>_raw` write table and `<type_name>` read matview through the
+    /// generic adapter. `value_columns` are TEXT columns alongside the `id`
+    /// primary key. Fails loud if the declaration is rejected.
+    ///
+    /// This is what makes the axis schema-generic rather than type-generic: the
+    /// keystone draws a SHAPE and declares it, instead of relying on types
+    /// someone hand-authored in YAML.
+    async fn declare_typed_schema(&self, type_name: &str, value_columns: Vec<String>);
+
+    /// Insert one row into the type's raw write table (`<type_name>_raw`),
+    /// carrying `id` plus each `(column, value)` in `fields`. Fails loud if the
+    /// serialization is absent (no such table) — that absence IS the
+    /// red-for-the-right-reason before the adapter is wired.
+    async fn create_typed_entity(&self, type_name: &str, id: &str, fields: Vec<(String, String)>);
+
+    /// Read `columns` (in order) from the type's read matview (`<type_name>`),
+    /// one inner Vec per row, canonically sorted for order-insensitive diffing.
+    async fn typed_entity_rows(&self, type_name: &str, columns: Vec<String>) -> Vec<Vec<String>>;
+
+    /// Every id present in the write-side `block_raw` table. The datatype-axis
+    /// identity asserts a free-standing entity's id is absent from this set.
+    async fn block_raw_ids(&self) -> std::collections::BTreeSet<String>;
+}
+
+/// Ref-side expectation for the datatype axis: the free-standing entities the
+/// oracle has created, as canonically-sorted rows matching
+/// [`SutTypedEntity::typed_entity_rows`]'s column order.
+///
+/// Type-agnostic BY CONTRACT: the oracle reports WHICH types it tracks and the
+/// columns to compare, so a new free-standing type adds no method here.
+#[holon_macros::capmap_adapter] // sync trait → no async-trait; emits CapName + `impl … for CapMap`
+pub trait RefTypedEntities {
+    /// Each tracked type as `(type_name, columns)`, columns in comparison order
+    /// with the primary key first.
+    fn typed_entity_schemas(&self) -> Vec<(String, Vec<String>)>;
+
+    /// Expected rows for one type, canonically sorted. A type with no created
+    /// entities expects none.
+    fn expected_typed_entity_rows(&self, type_name: &str) -> Vec<Vec<String>>;
+
+    /// Every typed-entity id the oracle created, across all types. The
+    /// datatype-axis identity asserts none of them reaches a block table.
+    fn typed_entity_ids(&self) -> std::collections::BTreeSet<String>;
+}

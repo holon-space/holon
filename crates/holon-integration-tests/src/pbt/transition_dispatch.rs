@@ -242,6 +242,7 @@ macro_rules! declare_e2e_transitions {
             + ::holon_pbt_core::capabilities::SutAppLifecycle
             + ::holon_pbt_core::capabilities::SutTwoInstance
             + ::holon_pbt_core::capabilities::SutEntityTypeRegister
+            + ::holon_pbt_core::capabilities::SutTypedEntity
             + $crate::pbt::transitions::apply_mutation::SutApplyMutation
             + $crate::pbt::transitions::start_app::SutBootWatches>
             ::holon_pbt_core::TransitionImpl<

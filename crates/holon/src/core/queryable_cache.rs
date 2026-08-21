@@ -37,6 +37,18 @@ fn q(ident: &str) -> String {
     format!("\"{ident}\"")
 }
 
+/// The table identifier for a WRITE statement (INSERT/UPDATE/DELETE) — bare,
+/// never quoted.
+///
+/// A quoted table name in a write bypasses IVM dependency tracking in our Turso
+/// fork: the write succeeds and every matview over the table silently stops
+/// being maintained. `DbHandle::execute` rejects the quoted form outright; this
+/// helper is why the cache's writes are accepted. Columns and DDL keep [`q`] —
+/// only the write target matters.
+fn write_table(ident: &str) -> &str {
+    ident
+}
+
 /// A queryable cache backed by DbHandle (SQLite via database actor).
 ///
 /// QueryableCache receives data exclusively through change streams
@@ -229,7 +241,7 @@ where
 
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT({}) DO UPDATE SET {}",
-            q(&type_def.name),
+            write_table(&type_def.name),
             quoted_columns,
             placeholders.join(", "),
             q(id_field),
@@ -289,7 +301,7 @@ where
 
         let sql = format!(
             "DELETE FROM {} WHERE {} = ?",
-            q(&type_def.name),
+            write_table(&type_def.name),
             q(id_field)
         );
         let params = vec![turso::Value::Text(id.to_string())];
@@ -341,7 +353,7 @@ where
     pub async fn clear(&self) -> Result<()> {
         let type_def = self.type_def.clone();
         let table_name = &type_def.name;
-        let sql = format!("DELETE FROM {}", q(table_name));
+        let sql = format!("DELETE FROM {}", write_table(table_name));
 
         self.db_handle
             .execute(&sql, vec![])
@@ -769,19 +781,20 @@ where
         // block is re-created with a new UUID while the old one still exists.
         let insert_ignore_sql = format!(
             "INSERT OR IGNORE INTO {} ({}) VALUES ({})",
-            q(table_name),
+            write_table(table_name),
             quoted_columns,
             placeholders.join(", "),
         );
         let upsert_sql = format!(
             "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT({}) DO UPDATE SET {}",
-            q(table_name),
+            write_table(table_name),
             quoted_columns,
             placeholders.join(", "),
             q(id_field),
             update_clause
         );
-        let delete_sql = format!("DELETE FROM {} WHERE {} = ?", q(table_name), q(id_field));
+        let delete_sql =
+            format!("DELETE FROM {} WHERE {} = ?", write_table(table_name), q(id_field));
 
         // Build statements for each change
         for change in changes {

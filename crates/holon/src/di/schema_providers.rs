@@ -139,6 +139,12 @@ impl DbResource for GraphEavSchema {}
 pub struct TrustProposalsView;
 impl DbResource for TrustProposalsView {}
 
+/// The Turso serialization (`<name>_raw` + `<name>` matview) of every
+/// free-standing type in the `TypeRegistry` — derived generically by
+/// `TursoAdapter`, with nothing hand-written per type.
+pub struct FreeStandingTypeViews;
+impl DbResource for FreeStandingTypeViews {}
+
 /// `block_derived` — the C4 derived-field SIDECAR table (narrow
 /// `(block_id, field_name)` cache; maintained reactively by the derived-field
 /// CDC watcher, not by boot DDL beyond table creation).
@@ -422,6 +428,41 @@ pub fn register_schema_providers(injector: &Injector) {
         })
         .with_dependency::<DbReady<CoreTables>>(),
     );
+
+    // -- FreeStandingTypeViews: every free-standing type's own raw table +
+    // read matview, derived from its TypeDefinition by TursoAdapter. No
+    // dependency on the block chain — a free-standing type references nothing.
+    injector.provide::<DbReady<FreeStandingTypeViews>>(Provider::root_async(|inj| async move {
+        let type_registry = inj.resolve::<holon_profiles::TypeRegistry>();
+        let db = inj.resolve::<dyn DbHandleProvider>();
+        for type_def in type_registry.all() {
+            if !is_free_standing(&type_def) {
+                continue;
+            }
+            holon_turso::turso_adapter::TursoAdapter::register(&type_def, &db.handle())
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "FreeStandingTypeViews: registering type '{}' failed: {e}",
+                        type_def.name
+                    )
+                });
+        }
+        Shared::new(DbReady::<FreeStandingTypeViews>::new())
+    }));
+}
+
+/// A type is free-standing when its id references nothing and it has persisted
+/// fields of its own. Persisted, not merely declared: a type carrying only
+/// computed fields stores nothing, so it has no write table to derive.
+///
+/// `block` is excluded by name because its Turso serialization is still
+/// hand-written (`CoreSchemaModule` + `BlockMatviewSchemaModule`); the literal
+/// dissolves once block itself becomes an adapter instance.
+fn is_free_standing(type_def: &holon_api::TypeDefinition) -> bool {
+    type_def.id_references.is_none()
+        && !type_def.persistent_fields().is_empty()
+        && type_def.name != "block"
 }
 
 /// All core schema TypeIds. Single source of truth for `resolve_eager_roots`
@@ -445,5 +486,6 @@ pub fn all_schema_roots() -> Vec<std::any::TypeId> {
         TypeId::of::<DbReady<JournalDayPagesView>>(),
         TypeId::of::<DbReady<JournalFeedView>>(),
         TypeId::of::<DbReady<BlockDerivedTable>>(),
+        TypeId::of::<DbReady<FreeStandingTypeViews>>(),
     ]
 }

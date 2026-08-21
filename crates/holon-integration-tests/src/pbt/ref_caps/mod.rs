@@ -73,6 +73,7 @@ mod nav;
 mod peers;
 mod shared_view;
 mod toggle;
+mod typed_entities;
 mod watches;
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -208,6 +209,11 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // owner→receiver round count the two-instance convergence/boundary
         // oracles read. Ref-only; both invariants ALSO need a receiver SUT cap,
         // so they deselect on every single-instance slice.
+        // `RefTypedEntities` carries the datatype-axis oracle (BG-1): the
+        // free-standing entities `CreateTypedEntity` created, per type. The
+        // typed-matview invariant ALSO needs the `SutTypedEntity` SUT cap
+        // (Turso-only), so a Loro-only / no-Turso slice deselects honestly.
+        caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefTypedEntities>);
         caps.insert(self as Arc<dyn holon_pbt_core::capabilities::RefSharedView>);
     }
 }

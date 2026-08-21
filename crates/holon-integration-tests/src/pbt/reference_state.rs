@@ -536,6 +536,89 @@ pub struct ReferenceState {
     /// [`holon_pbt_core::capabilities::RefPageIdentity::freed_page_paths`],
     /// which filters out any path a page has since re-occupied.
     pub renamed_away_page_paths: Vec<String>,
+
+    /// Datatype-axis oracle (BG-1): the free-standing typed entities the model
+    /// has created, keyed by TYPE. Read by `RefTypedEntities`, compared against
+    /// each type's matview by `inv-typed-matview-matches-ref`. Carries no type
+    /// name of its own — the set comes from the registry.
+    pub typed_entities: TypedEntitiesRefState,
+}
+
+/// Reference model of the datatype axis (BG-1): which free-standing types are
+/// DECLARED, and which entities exist for each.
+///
+/// Types are not a fixed list. The registry's own free-standing types seed this
+/// at construction, and `DeclareTypedSchema` adds runtime-declared ones with
+/// proptest-drawn shapes — so the axis exercises arbitrary schemas, not one
+/// hand-authored type. Nothing here names a type.
+#[derive(Debug, Clone, Default)]
+pub struct TypedEntitiesRefState {
+    /// type name -> value columns, in the schema's order (the primary key is
+    /// always `id` and is not listed).
+    schemas: BTreeMap<String, Vec<String>>,
+    /// type name -> entity id -> value cells, aligned with `schemas`.
+    by_type: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+}
+
+impl TypedEntitiesRefState {
+    /// Declare a type the SUT has serialized. Idempotent per name; the
+    /// generator only ever proposes undeclared names.
+    pub fn declare(&mut self, type_name: String, value_columns: Vec<String>) {
+        self.schemas.insert(type_name, value_columns);
+    }
+
+    /// Whether a type has been declared (a create's precondition).
+    pub fn is_declared(&self, type_name: &str) -> bool {
+        self.schemas.contains_key(type_name)
+    }
+
+    /// Every declared type with its value columns, in a stable order.
+    pub fn declared(&self) -> impl Iterator<Item = (&String, &Vec<String>)> {
+        self.schemas.iter()
+    }
+
+    /// How many types are declared — the generator's name counter.
+    pub fn declared_count(&self) -> usize {
+        self.schemas.len()
+    }
+
+    /// Record an entity the oracle created. `values` are the schema's value
+    /// columns in order (the id is the key, not a value).
+    pub fn add(&mut self, type_name: String, id: String, values: Vec<String>) {
+        self.by_type.entry(type_name).or_default().insert(id, values);
+    }
+
+    /// How many entities of this type exist (the generator's id counter).
+    pub fn count(&self, type_name: &str) -> usize {
+        self.by_type.get(type_name).map_or(0, BTreeMap::len)
+    }
+
+    /// Expected rows for one type as `[id, ..values]`, canonically sorted to
+    /// match the SUT matview read. A declared-but-empty type expects no rows.
+    pub fn rows(&self, type_name: &str) -> Vec<Vec<String>> {
+        let mut rows: Vec<Vec<String>> = self
+            .by_type
+            .get(type_name)
+            .map(|entities| {
+                entities
+                    .iter()
+                    .map(|(id, values)| {
+                        let mut row = vec![id.clone()];
+                        row.extend(values.iter().cloned());
+                        row
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        rows.sort();
+        rows
+    }
+
+    /// Every id the oracle created, across all types — the identity check
+    /// asserts none of them reaches a block table.
+    pub fn all_ids(&self) -> impl Iterator<Item = &String> {
+        self.by_type.values().flat_map(BTreeMap::keys)
+    }
 }
 
 /// Witness that a [`ReferenceState`]'s ids live in the SUT's id space — either
@@ -757,6 +840,16 @@ impl ReferenceState {
             history_min_op_groups: 0,
             undo_redo_burned_ids: BTreeSet::new(),
             renamed_away_page_paths: Vec::new(),
+            typed_entities: {
+                // Seed the types the app registers at boot (the registry's
+                // free-standing set). Runtime-declared types join them via
+                // `DeclareTypedSchema`.
+                let mut t = TypedEntitiesRefState::default();
+                for schema in crate::pbt::typed_entity_schemas::free_standing_schemas() {
+                    t.declare(schema.type_name.clone(), schema.value_columns.clone());
+                }
+                t
+            },
         }
     }
 

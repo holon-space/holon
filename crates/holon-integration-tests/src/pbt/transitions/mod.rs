@@ -101,6 +101,8 @@ pub mod bulk_external_add;
 pub mod click_block;
 mod concurrent_schema_init;
 mod create_block_under_focus;
+pub mod create_typed_entity;
+mod declare_typed_schema;
 mod create_directory;
 mod create_document;
 pub(crate) mod create_page_at_freed_path;
@@ -169,6 +171,8 @@ pub use bulk_external_add::BulkExternalAdd;
 pub use click_block::ClickBlock;
 pub use concurrent_schema_init::ConcurrentSchemaInit;
 pub use create_block_under_focus::CreateBlockUnderFocus;
+pub use create_typed_entity::CreateTypedEntity;
+pub use declare_typed_schema::DeclareTypedSchema;
 pub use create_directory::CreateDirectory;
 pub use create_document::CreateDocument;
 pub use create_page_at_freed_path::CreatePageAtFreedPath;
@@ -254,6 +258,8 @@ crate::declare_e2e_transitions! {
         ExternalWriteSameBlockFocused(ExternalWriteSameBlockFocused),
         ClickBlock(ClickBlock),
         CreateBlockUnderFocus(CreateBlockUnderFocus),
+        CreateTypedEntity(CreateTypedEntity),
+        DeclareTypedSchema(DeclareTypedSchema),
         CreateDocument(CreateDocument),
         RenameDocument(RenameDocument),
         WriteOrgFile(WriteOrgFile),

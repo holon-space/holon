@@ -1,7 +1,6 @@
 name: person
 default_lifetime: persistent
 primary_key: id
-id_references: block
 graph_label: Person
 source: pre_configured
 fields:

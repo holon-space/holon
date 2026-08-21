@@ -412,6 +412,13 @@ async fn compose_sut_seeded_impl(
         // engine dispatches. Org-only draws never reach this arm, so they omit
         // the cap and the history invariants deselect honestly.
         caps.insert(comp.clone() as Arc<dyn SutHistory>);
+        // `SutTypedEntity` (datatype axis, BG-1): create/read a FREE-STANDING
+        // typed entity over THIS frontend's Turso engine — its own
+        // `<type>_raw` table + `<type>` read matview, no block table. Hosted
+        // only on the Turso+frontend arm (`CreateTypedEntity` requires Turso
+        // storage); a Loro-only / storage-only slice never reaches here, so
+        // the typed-matview invariant deselects honestly there.
+        caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutTypedEntity>);
         // The editor READ cap (the WRITE cap rides the gesture rung). Selects the
         // `inv-editor-{text,caret}-matches-ref` invariants. Hosted on EVERY frontend
         // arm, not just Loro ones: the reads come from the driver's

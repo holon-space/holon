@@ -88,21 +88,21 @@ mod tests {
     #[test]
     fn dynamic_module_provides_and_requires() {
         let td = TypeDefinition {
-            name: "person".to_string(),
+            name: "block_note".to_string(),
             id_references: Some("block".to_string()),
             ..TypeDefinition::new(
-                "person",
+                "block_note",
                 vec![
                     FieldSchema::new("id", "TEXT").primary_key(),
-                    FieldSchema::new("email", "TEXT").indexed(),
-                    FieldSchema::new("role", "TEXT").nullable(),
+                    FieldSchema::new("body", "TEXT").indexed(),
+                    FieldSchema::new("author", "TEXT").nullable(),
                 ],
             )
         };
 
         let module = DynamicSchemaModule::new(td);
-        assert_eq!(module.name(), "person");
-        assert_eq!(module.provides(), vec![Resource::schema("person")]);
+        assert_eq!(module.name(), "block_note");
+        assert_eq!(module.provides(), vec![Resource::schema("block_note")]);
         assert_eq!(module.requires(), vec![Resource::schema("block")]);
     }
 

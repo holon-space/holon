@@ -625,7 +625,9 @@ mod tests {
             .expect("person.yaml not found");
         let td: TypeDefinition = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(td.name, "person");
-        assert_eq!(td.id_references.as_deref(), Some("block"));
+        // Free-standing (BG-1): person owns its identity, so it declares no
+        // id_references and its raw table carries no FK to block.
+        assert_eq!(td.id_references, None);
         assert_eq!(td.graph_label.as_deref(), Some("Person"));
         assert!(td.fields.iter().any(|f| f.name == "email"));
         // Schema-only: no profile_variants (those live in person_profile.yaml)

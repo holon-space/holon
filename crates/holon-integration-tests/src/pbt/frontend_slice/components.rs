@@ -5979,3 +5979,74 @@ mod tests {
         );
     }
 }
+
+// ─── Datatype axis (BG-1): free-standing typed entities ───────────────
+//
+// `SutTypedEntity` over this frontend's real `BackendEngine`. Writes target the
+// TursoAdapter raw table (`<type>_raw`); reads target the generated read
+// matview (`<type>`). Before the adapter is wired those objects don't exist, so
+// `create_typed_entity` fails loud ("no such table: <type>_raw") — the
+// red-for-the-right-reason the keystone datatype axis captures.
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent {
+    async fn declare_typed_schema(&self, type_name: &str, value_columns: Vec<String>) {
+        let mut fields = vec![holon_api::FieldSchema::new("id", "TEXT").primary_key()];
+        fields.extend(
+            value_columns
+                .iter()
+                .map(|c| holon_api::FieldSchema::new(c, "TEXT").nullable()),
+        );
+        let type_def = holon_api::TypeDefinition::new(type_name, fields);
+        holon_turso::turso_adapter::TursoAdapter::register(&type_def, self.engine.db_handle())
+            .await
+            .unwrap_or_else(|e| {
+                panic!("SutTypedEntity::declare_typed_schema('{type_name}') failed: {e}")
+            });
+    }
+
+    async fn create_typed_entity(&self, type_name: &str, id: &str, fields: Vec<(String, String)>) {
+        let raw = format!("{type_name}_raw");
+        let mut cols: Vec<String> = vec!["id".to_string()];
+        let mut params: Vec<holon_api::Value> = vec![holon_api::Value::String(id.to_string())];
+        for (col, val) in fields {
+            cols.push(col);
+            params.push(holon_api::Value::String(val));
+        }
+        let placeholders = vec!["?"; cols.len()].join(", ");
+        // The table name is deliberately UNQUOTED, matching the production
+        // writer (`StorageBackend::insert`). Quoting it makes Turso's IVM stop
+        // maintaining every matview over the table while the INSERT still
+        // reports success — a silent projection desync, pinned by
+        // holon-turso: `matview_is_ivm_maintained_for_execute_values_writes`.
+        let sql = format!(
+            "INSERT INTO {raw} ({}) VALUES ({placeholders})",
+            cols.join(", ")
+        );
+        self.engine
+            .db_handle()
+            .execute_values(&sql, params)
+            .await
+            .unwrap_or_else(|e| panic!("SutTypedEntity::create_typed_entity failed ({sql}): {e}"));
+    }
+
+    async fn typed_entity_rows(&self, type_name: &str, columns: Vec<String>) -> Vec<Vec<String>> {
+        let sql = format!("SELECT {} FROM \"{type_name}\"", columns.join(", "));
+        let rows = self.sql_query(&sql).await;
+        let mut out: Vec<Vec<String>> = rows
+            .iter()
+            .map(|row| {
+                columns
+                    .iter()
+                    .map(|c| Self::cell(row, c).unwrap_or_default())
+                    .collect()
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    async fn block_raw_ids(&self) -> std::collections::BTreeSet<String> {
+        let rows = self.sql_query("SELECT id FROM block_raw").await;
+        rows.iter().filter_map(|r| Self::cell(r, "id")).collect()
+    }
+}
