@@ -120,7 +120,7 @@ failing test names — the 9 are the documented region-literal known-red family
 
 Every typed field of `Block` against what the matview arm's comparator
 (`compare_block_fields`) compares, what each table stores, and what each of the
-THREE harness readers selects. Done because fixing one blind field is worth
+harness readers selects (three SELECT-based readers, plus the `/org` arm below). Done because fixing one blind field is worth
 little if its siblings are blind too.
 
 | `Block` field | compared? | stored | matview reader | block_raw reader | `SutOrgRender` |
@@ -133,7 +133,11 @@ little if its siblings are blind too.
 | `created_at` / `updated_at` | normalized away | yes | no — declared | no — declared | already |
 | `tags` / `requires` / `advice_suppressed` / `contributes_to` | yes | junctions | yes | n/a | already |
 
-Three readers, not two — the third was found by the verifier:
+FOUR arms observe `collapsed`, not three. Besides the two snapshot readers and
+`SutOrgRender`, the `/org` correspondence arm observes it too: a deliberate
+store corruption reds `/org` independently, including the `:COLLAPSED: t` drawer
+echo in the properties bag. The third SELECT-based reader was found by the
+verifier:
 `SutOrgRender` (`frontend_slice/components.rs:2081-2089`) runs its OWN header
 SELECT and parses with `Block::try_from`, whose `optional_bool`
 (`holon-api/src/block.rs:817-826`) defaults an absent column to `false` BY

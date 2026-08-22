@@ -259,6 +259,122 @@ pub struct HeadlessFrontendComponent {
     render_cache_enabled: std::sync::atomic::AtomicBool,
 }
 
+/// Does this defining SELECT carry a real BIND PLACEHOLDER (so
+/// `inv-matview-consistent-with-recompute` cannot recompute it)?
+///
+/// A SUBSTRING test is wrong in both directions, which is why this is a
+/// scanner: `trust_proposals`' SELECT is fully static but its `json_extract`
+/// JSON paths hold `$` inside string LITERALS (skipped every run — the view was
+/// never recomputed), while `:name` / `@name` placeholders are real and a
+/// `?`/`$` search misses them entirely (recomputed with an unbound parameter).
+///
+/// So: scan outside single-quoted literals (`''` escapes), double-quoted
+/// identifiers, `--` line comments and `/* */` block comments, and report
+/// SQLite's four placeholder forms — `?`, `?NNN`, `$name`, `:name`, `@name`.
+/// A hand scanner rather than a SQL parser dependency; the cases are pinned by
+/// `placeholder_scan_tests`.
+fn has_bind_placeholder(select_sql: &str) -> bool {
+    let b = select_sql.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'\'' => {
+                i += 1;
+                while i < b.len() {
+                    if b[i] == b'\'' {
+                        // `''` is an escaped quote, not the end of the literal.
+                        if i + 1 < b.len() && b[i + 1] == b'\'' {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'-' if i + 1 < b.len() && b[i + 1] == b'-' => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < b.len() && b[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+            }
+            // `?` alone or `?NNN` is always a placeholder.
+            b'?' => return true,
+            // `$name` / `:name` / `@name` only when a name actually follows —
+            // a bare sigil is not a bind parameter.
+            b'$' | b':' | b'@' => {
+                let next = b.get(i + 1).copied().unwrap_or(b' ');
+                if next.is_ascii_alphanumeric() || next == b'_' {
+                    return true;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod placeholder_scan_tests {
+    use super::has_bind_placeholder;
+
+    /// The defining SELECT of `trust_proposals_matview.sql`, verbatim: a fully
+    /// STATIC select whose only `$`s live inside single-quoted JSON-path
+    /// literals. `inv-matview-consistent-with-recompute` must RECOMPUTE it; the
+    /// substring predicate skipped it on every run, so any IVM defect on that
+    /// view was invisible to the keystone.
+    const TRUST_PROPOSALS_SELECT: &str = "SELECT\n    id,\n    json_extract(properties, \
+        '$._proposal.status') AS status,\n    json_extract(properties, '$._proposal.entity') AS \
+        entity,\n    content\nFROM block_raw\nWHERE json_extract(properties, '$._proposal') IS \
+        NOT NULL";
+
+    #[test]
+    fn static_json_path_select_is_not_a_placeholder() {
+        assert!(
+            !has_bind_placeholder(TRUST_PROPOSALS_SELECT),
+            "trust_proposals' SELECT is static — its `$`s are inside string literals, so the \
+             recompute oracle must not skip it"
+        );
+    }
+
+    #[test]
+    fn real_placeholders_are_detected() {
+        assert!(has_bind_placeholder("SELECT * FROM t WHERE id = ?"));
+        assert!(has_bind_placeholder("SELECT * FROM t WHERE id = ?1"));
+        assert!(has_bind_placeholder("SELECT * FROM t WHERE id = $id"));
+        assert!(has_bind_placeholder("SELECT * FROM t WHERE id = :id"));
+        assert!(has_bind_placeholder("SELECT * FROM t WHERE id = @id"));
+    }
+
+    #[test]
+    fn placeholder_characters_inside_literals_and_comments_are_not_placeholders() {
+        assert!(!has_bind_placeholder("SELECT '$x' AS a"));
+        assert!(!has_bind_placeholder("SELECT '?' AS a"));
+        assert!(!has_bind_placeholder("SELECT ':name' AS a"));
+        // An escaped quote ('') keeps the scanner inside the literal.
+        assert!(!has_bind_placeholder("SELECT 'it''s $x' AS a"));
+        assert!(!has_bind_placeholder("SELECT 1 -- what? $x\n"));
+        assert!(!has_bind_placeholder("SELECT 1 /* what? $x */"));
+        // A literal that CLOSES still exposes a later real placeholder.
+        assert!(has_bind_placeholder("SELECT '$lit' AS a WHERE b = ?"));
+    }
+}
+
 impl HeadlessFrontendComponent {
     /// Stand up a windowless frontend session over the given org files (written
     /// to an in-memory FS before the engine boots, exactly as a real frontend
@@ -2592,7 +2708,7 @@ impl SutMatviews for HeadlessFrontendComponent {
             let select_sql = sql[as_at + 4..].to_string();
             // Context-param / placeholder views are out of scope for Inc 1: skip
             // WITH DISCLOSURE rather than mis-recompute (plan §1).
-            if select_sql.contains('?') || select_sql.contains('$') {
+            if has_bind_placeholder(&select_sql) {
                 eprintln!(
                     "[inv-matview-consistent-with-recompute] SKIP view {name}: \
                      defining SELECT carries a ?/$ placeholder (context-param, Inc 4)"
