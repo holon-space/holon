@@ -349,7 +349,9 @@ async fn pick_target() -> (String, String) {
 async fn write_edited_copy(dir: &Path) -> (kvs_writer::TitleEdit, kvs_writer::WriteReport, String) {
     let (uuid, _) = pick_target().await;
     let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
-    let entity = kvs_writer::entity_by_uuid(&graph, &uuid).expect("the target block has an entity");
+    let entity = kvs_writer::entity_by_uuid(&graph, &uuid)
+        .expect("read")
+        .expect("the target block has an entity");
 
     let edit = kvs_writer::replace_block_title(&mut graph, entity, NEW_TITLE).expect("title edit");
     std::fs::create_dir_all(dir).expect("copy dir");
@@ -390,7 +392,9 @@ async fn the_tail_holds_one_retract_and_one_assert_under_a_new_tx() {
     let root_max_tx = graph.root.max_tx;
 
     let (uuid, _) = pick_target().await;
-    let entity = kvs_writer::entity_by_uuid(&graph, &uuid).expect("entity");
+    let entity = kvs_writer::entity_by_uuid(&graph, &uuid)
+        .expect("read")
+        .expect("entity");
     let edit = kvs_writer::replace_block_title(&mut graph, entity, NEW_TITLE).expect("edit");
 
     let tail = graph.tail().expect("edited tail parses");

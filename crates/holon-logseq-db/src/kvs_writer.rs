@@ -40,6 +40,8 @@ use libsql::Builder;
 use libsql::OpenFlags;
 
 use crate::TransitNode;
+use crate::base::BaseBlock;
+use crate::base::ImportBase;
 use crate::transit::decode_document;
 use crate::tree::EditableTree;
 use crate::tree::Index;
@@ -234,6 +236,45 @@ pub enum RowError {
         existing: usize,
         adding: usize,
         limit: usize,
+    },
+    /// A block the diff names is not in the graph at all.
+    #[error("no block with uuid {uuid} exists in this graph, so its change cannot be pushed")]
+    PushUnknownBlock { uuid: String },
+    /// The diff asks for structure this increment does not write.
+    ///
+    /// One variant carrying the shape's name rather than four near-identical
+    /// ones: the caller's recovery is the same in every case (drop the change
+    /// or wait for the increment that writes it), and the message already
+    /// says which shape it was.
+    #[error(
+        "pushing a {shape} is not in this increment's scope; block {uuid} was left untouched \
+         and so was every other block in this push"
+    )]
+    PushOutOfScope { shape: &'static str, uuid: String },
+    /// The block is one of LogSeq's own built-in property or class pages.
+    ///
+    /// LogSeq's outliner refuses to edit these; its storage layer does not, so
+    /// nothing below this line would stop Holon from rewriting the graph's
+    /// schema. This is that stop. See docs/Testing/LogseqDbPush.md.
+    #[error(
+        "block {uuid} (entity {entity}) is one of LogSeq's built-in pages \
+         (:logseq.property/built-in? true); Holon does not rewrite LogSeq's own schema"
+    )]
+    PushBuiltIn { uuid: String, entity: i64 },
+    /// The graph moved under the base.
+    ///
+    /// The retract half of a title replacement names the value it supersedes,
+    /// so pushing against a stale base would either retract a value that is no
+    /// longer there or overwrite a LogSeq-side edit Holon never saw. Both are
+    /// silent data loss; this is loud instead.
+    #[error(
+        "block {uuid} holds {found:?} in the graph but the base last observed {expected:?}; \
+         LogSeq changed it since the import, so re-import before pushing"
+    )]
+    PushBaseStale {
+        uuid: String,
+        expected: String,
+        found: String,
     },
 }
 
@@ -496,6 +537,14 @@ pub struct KvsGraph {
 
 impl KvsGraph {
     /// Take the next transaction id, as LogSeq's transactor would.
+    /// The next transaction id this graph will hand out.
+    ///
+    /// Exposed so a test can assert a failed push left the counter alone:
+    /// it is not part of `rows`, so a row comparison cannot see it move.
+    pub fn next_tx(&self) -> i64 {
+        self.next_tx
+    }
+
     pub fn allocate_tx(&mut self) -> Result<TxId, RowError> {
         self.next_tx += 1;
         TxId::new(self.next_tx)
@@ -874,22 +923,79 @@ fn is_cardinality_many(schema: &TransitNode, attribute: &str) -> bool {
         == Some("db.cardinality/many")
 }
 
-/// The entity id LogSeq gave the block with this uuid.
+/// Every datom the graph CURRENTLY holds.
 ///
-/// Holon addresses blocks by uuid and the tail addresses them by entity id, so
-/// something has to bridge the two; this is that. Returns `None` rather than an
-/// error because "no such block" is a question a caller may legitimately ask.
-pub fn entity_by_uuid(graph: &KvsGraph, uuid: &str) -> Option<i64> {
-    for row in &graph.rows {
-        for tuple in datom_tuples(&row.node) {
-            if let Some((e, "block/uuid", TransitNode::Uuid(found))) = tuple_parts(tuple) {
-                if found == uuid {
-                    return Some(e);
+/// The reachable eavt tree with the tail replayed over it: an assert adds, a
+/// retraction removes the matching `(e, a, v)` ignoring tx. The same rule the
+/// importer replays a tail by, stated once.
+///
+/// This is the only place any predicate in this module may learn what the
+/// graph says, and it exists because the alternative was measured to be
+/// wrong. `is_built_in` used to scan `graph.rows` through `datom_tuples`,
+/// which returns `&[]` for the tail row (a list of transactions, not a node
+/// map) — so a built-in marker that LogSeq had transacted but not yet flushed
+/// was invisible, and push happily rewrote a built-in page. Meanwhile
+/// `current_title` replayed the tail on purpose. Two readers, two answers,
+/// and the disagreement resolved in the direction that WRITES.
+///
+/// Reachable, not `graph.rows`: the fixture carries 17 unreferenced rows that
+/// still hold datoms, and a row scan reports their entities as live.
+///
+/// Both halves are measured against LogSeq (`oracle/probe_tail_builtin.cljs`,
+/// `oracle/probe_mirror.cljs`): a flag asserted in the tail makes an entity
+/// built-in, and a flag retracted in the tail makes a flagged-only entity stop
+/// being built-in.
+pub fn datoms_now(graph: &KvsGraph) -> Result<Vec<crate::tree::TreeDatom>, RowError> {
+    let mut datoms = crate::tree::Tree::load(graph, crate::tree::Index::Eavt)?.datoms()?;
+    for transaction in graph.tail()?.transactions() {
+        for entry in transaction {
+            match entry.op {
+                DatomOp::Assert => {
+                    if !is_cardinality_many(&graph.root.schema, &entry.attribute) {
+                        // Cardinality-ONE supersedes, and it supersedes BY
+                        // POSITION. Resolving by tx magnitude would be wrong:
+                        // two tail transactions can legitimately carry the
+                        // SAME |tx| for the same (e, a) — measured across two
+                        // LogSeq sessions with no store between them, because
+                        // nothing updates the root's max-tx while edits sit in
+                        // the tail, so the next session allocates the same id
+                        // again. A highest-tx merge is ambiguous exactly there
+                        // and can keep the superseded value.
+                        datoms
+                            .retain(|held| !(held.e == entry.entity && held.a == entry.attribute));
+                    }
+                    // Cardinality-MANY simply ADDS: measured, `:block/tags`
+                    // {3} plus an unflushed `[:db/add 144 :block/tags 5]`
+                    // restores as (3 5). Superseding here would silently drop
+                    // tag 3 — and 149 of this graph's entities carry tags.
+                    datoms.push(crate::tree::TreeDatom {
+                        e: entry.entity,
+                        a: entry.attribute.clone(),
+                        v: entry.value.clone(),
+                        tx: entry.tx.get(),
+                    });
                 }
+                // A retraction removes ONLY the value it names, for either
+                // cardinality: measured, tags {3} with assert 5 then retract 3
+                // restores as (5).
+                DatomOp::Retract => datoms.retain(|held| {
+                    !(held.e == entry.entity && held.a == entry.attribute && held.v == entry.value)
+                }),
             }
         }
     }
-    None
+    Ok(datoms)
+}
+
+/// The entity id LogSeq gave the block with this uuid.
+///
+/// Holon addresses blocks by uuid and the tail addresses them by entity id, so
+/// something has to bridge the two; this is that. `None` rather than an error
+/// because "no such block" is a question a caller may legitimately ask.
+pub fn entity_by_uuid(graph: &KvsGraph, uuid: &str) -> Result<Option<i64>, RowError> {
+    Ok(datoms_now(graph)?.into_iter().find_map(|d| {
+        (d.a == "block/uuid" && d.v == TransitNode::Uuid(uuid.to_string())).then_some(d.e)
+    }))
 }
 
 /// What one title replacement did.
@@ -903,67 +1009,28 @@ pub struct TitleEdit {
 
 /// The value `entity`'s `:block/title` currently resolves to.
 ///
-/// The trees hold the stored state and the tail is replayed over them, so the
-/// tail must win — otherwise a second edit in one session would retract a value
-/// that is no longer current, and LogSeq would replay a retraction that matches
-/// nothing.
+/// Highest transaction wins: branch nodes repeat the leaves' datoms as
+/// separators, so the same datom is seen several times, and a tail assert
+/// carries a newer tx than the tree value it supersedes.
 fn current_title(graph: &KvsGraph, entity: i64) -> Result<String, RowError> {
-    let mut best: Option<(i64, &TransitNode)> = None;
-    for row in &graph.rows {
-        for tuple in datom_tuples(&row.node) {
-            let Some((e, attr, value)) = tuple_parts(tuple) else {
-                continue;
-            };
-            if e != entity || attr != TITLE {
-                continue;
-            }
-            // Branch nodes repeat the leaves' datoms as separators, so the same
-            // datom is seen several times; highest transaction wins.
-            let tx = match tuple {
-                TransitNode::List(slots) => match slots.get(3) {
-                    Some(TransitNode::Int(tx)) => *tx,
-                    _ => 0,
-                },
-                _ => 0,
-            };
-            if best.is_none_or(|(best_tx, _)| tx >= best_tx) {
-                best = Some((tx, value));
-            }
+    // LAST by position, not highest tx. `datoms_now` already superseded
+    // cardinality-one values in tail order, so at most one survives from the
+    // tail; taking the last is what keeps later-wins true when two tail
+    // transactions share a tx id, which LogSeq does produce.
+    let mut best: Option<TransitNode> = None;
+    for datom in datoms_now(graph)? {
+        if datom.e == entity && datom.a == TITLE {
+            best = Some(datom.v);
         }
     }
-
-    let mut current = match best {
-        Some((_, TransitNode::Str(s))) => Some(s.clone()),
-        Some((_, other)) => {
-            return Err(RowError::TitleNotAString {
-                entity,
-                found: node_kind(other),
-            });
-        }
-        None => None,
-    };
-
-    for tx in graph.tail()?.transactions() {
-        for datom in tx {
-            if datom.entity != entity || datom.attribute != TITLE {
-                continue;
-            }
-            current = match datom.op {
-                DatomOp::Assert => match &datom.value {
-                    TransitNode::Str(s) => Some(s.clone()),
-                    other => {
-                        return Err(RowError::TitleNotAString {
-                            entity,
-                            found: node_kind(other),
-                        });
-                    }
-                },
-                DatomOp::Retract => None,
-            };
-        }
+    match best {
+        Some(TransitNode::Str(s)) => Ok(s),
+        Some(other) => Err(RowError::TitleNotAString {
+            entity,
+            found: node_kind(&other),
+        }),
+        None => Err(RowError::NoTitle { entity }),
     }
-
-    current.ok_or(RowError::NoTitle { entity })
 }
 
 /// Replace one existing block's `:block/title`, as a tail transaction.
@@ -999,7 +1066,22 @@ pub fn replace_block_title(
             attribute: TITLE.to_string(),
         });
     }
+    edit_title(graph, entity, new_title).map(|(edit, _)| edit)
+}
 
+/// One title replacement, and whether appending it overflowed the tail.
+///
+/// The single place a title transaction is written. [`push`] needs the flush
+/// flag that [`replace_block_title`] has no use for; splitting the report off
+/// here keeps both on one code path rather than growing a second writer whose
+/// tail shape could drift from the measured one.
+///
+/// The caller has already checked the schema version and the cardinality.
+fn edit_title(
+    graph: &mut KvsGraph,
+    entity: i64,
+    new_title: &str,
+) -> Result<(TitleEdit, bool), RowError> {
     let old_title = current_title(graph, entity)?;
     let tx = graph.allocate_tx()?;
     let mut tail = graph.tail()?;
@@ -1030,12 +1112,232 @@ pub fn replace_block_title(
         flush_tail(graph)?;
     }
 
-    Ok(TitleEdit {
-        entity,
-        old_title,
-        new_title: new_title.to_string(),
-        tx,
-    })
+    Ok((
+        TitleEdit {
+            entity,
+            old_title,
+            new_title: new_title.to_string(),
+            tx,
+        },
+        overflowed,
+    ))
+}
+
+/// LogSeq's marker for the property and class pages it ships with.
+const BUILT_IN: &str = "logseq.property/built-in?";
+
+/// Whether `keyword` is an ident LogSeq minted for itself.
+///
+/// A MEASURED APPROXIMATION of LogSeq's `internal-ident?`, not a restatement
+/// of it. LogSeq's is a MEMBERSHIP test over the idents it declares plus the
+/// ones it creates at runtime — same namespace, opposite verdicts:
+/// `:block/title` is internal, `:block/uuid` is not; `:logseq.kv/*` is,
+/// `:logseq/foo` is not.
+///
+/// Exact membership was tried and REJECTED by measurement: LogSeq's DECLARED
+/// schema set (146 idents) misses 35 of this graph's 171 — every
+/// `:logseq.kv/*` and every closed-value ident, all created at runtime —
+/// including all eight entities that are built-in by this leg alone. Matching
+/// on the declared set would make those PUSHABLE, which is the under-refusing
+/// direction and the one that loses data.
+///
+/// So a namespace rule stays, and BOTH namespaces are here because the
+/// alternative is worse in the direction that matters. LogSeq calls 13 of the
+/// 16 declared `block/*` idents internal; this arm over-refuses the other
+/// three (`:block/name`, `:block/tx-id`, `:block/uuid`). Dropping the arm to
+/// avoid those three would instead UNDER-refuse the 13 — and this function is
+/// `pub`, so a caller reaching an entity push cannot reach would get the
+/// permissive answer with nothing to warn them. Fail closed: over-refusing an
+/// edit is visible, under-refusing one rewrites LogSeq's schema silently.
+///
+/// No base-reachable entity is built-in by a `block/*` ident ALONE (measured —
+/// every such entity in this graph also carries the flag, so leg 1 answers
+/// first), so push does not exercise this arm today. That makes it a guard
+/// against future reach, not a live code path, and it is drivable only by a
+/// constructed entity — which is exactly how the tests drive it.
+///
+/// All nine divergences are OVER-refusals: the three `block/*` above and six
+/// third-party namespaces merely beginning with "logseq" (`:logseq/foo`,
+/// `:logseqfoo/bar`, `:logseq-plugin/x`, `:logseq.thirdparty/x`,
+/// `:logseq_x/y`, `:logseqified/x`). 182 of 191 measured idents agree exactly.
+/// Pinned ident by ident, with the divergence set asserted as over-refusal, in
+/// `tests/fixtures/logseq-db/internal-ident-reference.json`.
+fn is_internal_ident(keyword: &str) -> bool {
+    let namespace = keyword.split('/').next().unwrap_or("");
+    namespace == "block" || namespace.starts_with("logseq")
+}
+
+/// Whether `entity` is one of LogSeq's own built-in nodes.
+///
+/// Three legs, because LogSeq's `outliner-validate/built-in-entity?` has
+/// three and says in its own docstring that the flag alone is not enough:
+/// the flag, OR a `:file/path` (config.edn, custom.css and friends carry no
+/// flag at all), OR an internal `:db/ident` (the `:logseq.kv/*` entries).
+///
+/// Reads [`datoms_now`], so a marker LogSeq has transacted but not yet
+/// flushed counts, and one retracted in the tail stops counting. Both
+/// directions are measured against LogSeq, and both were wrong before.
+pub fn is_built_in(graph: &KvsGraph, entity: i64) -> Result<bool, RowError> {
+    Ok(datoms_now(graph)?.iter().any(|d| {
+        d.e == entity
+            && match (d.a.as_str(), &d.v) {
+                (BUILT_IN, TransitNode::Bool(true)) => true,
+                ("file/path", _) => true,
+                ("db/ident", TransitNode::Keyword(k)) => is_internal_ident(k),
+                _ => false,
+            }
+    }))
+}
+
+/// The name of the change `before` -> `after` asks for beyond a title edit, if
+/// there is one.
+///
+/// `BaseBlock` is destructured exhaustively on purpose: a field added to the
+/// base must fail to compile here rather than become a difference this
+/// function cannot see and therefore silently declines to refuse.
+fn out_of_scope_shape(before: &BaseBlock, after: &BaseBlock) -> Option<&'static str> {
+    let BaseBlock {
+        content: _,
+        parent_id,
+        position,
+        tags,
+        requires,
+        contributes_to,
+        advice_suppressed,
+        properties,
+    } = before;
+
+    if *parent_id != after.parent_id {
+        return Some("re-parent");
+    }
+    if *position != after.position {
+        return Some("re-order");
+    }
+    if *tags != after.tags {
+        return Some("tag change");
+    }
+    if *requires != after.requires {
+        return Some("requires-edge change");
+    }
+    if *contributes_to != after.contributes_to {
+        return Some("contributes-to-edge change");
+    }
+    if *advice_suppressed != after.advice_suppressed {
+        return Some("advice-suppression change");
+    }
+    if *properties != after.properties {
+        return Some("property change");
+    }
+    None
+}
+
+/// What one push did.
+///
+/// `transactions` and `datoms` count what push APPENDED, not what the tail
+/// holds afterwards: a push that overflows flushes, so the tail can be empty
+/// while both counts are non-zero.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PushReport {
+    pub transactions: usize,
+    pub datoms: usize,
+    pub flushes: usize,
+    /// The entities edited, in push order.
+    pub blocks: Vec<i64>,
+}
+
+/// Write the difference between two bases into the graph as tail transactions.
+///
+/// `before` is the base Holon last observed from this graph; `after` is what
+/// Holon now wants it to hold. Every changed block becomes ONE transaction of
+/// two datoms — the retract of the stored title and the assert of the new one
+/// — which is the shape LogSeq's own transactor writes and the shape B proved
+/// byte-identical through a flush.
+///
+/// EVERY refusal is decided before any datom is appended, so a push either
+/// applies in full or leaves the graph exactly as it found it. A partially
+/// applied push would leave the base describing a state that exists nowhere.
+///
+/// Scope is the title only. Creation, removal, re-parent, re-order, edges and
+/// properties are refused by name; so are LogSeq's built-in pages, whose
+/// storage layer would accept an edit that its outliner refuses.
+pub fn push(
+    graph: &mut KvsGraph,
+    before: &ImportBase,
+    after: &ImportBase,
+) -> Result<PushReport, RowError> {
+    assert_pinned_schema_version(&graph.rows)?;
+    if is_cardinality_many(&graph.root.schema, TITLE) {
+        return Err(RowError::NotCardinalityOne {
+            attribute: TITLE.to_string(),
+        });
+    }
+
+    let diff = before.diff_against(after);
+    if let Some(uuid) = diff.created.first() {
+        return Err(RowError::PushOutOfScope {
+            shape: "block creation",
+            uuid: uuid.clone(),
+        });
+    }
+    if let Some(uuid) = diff.removed.first() {
+        return Err(RowError::PushOutOfScope {
+            shape: "block removal",
+            uuid: uuid.clone(),
+        });
+    }
+
+    let mut plan: Vec<(i64, String)> = Vec::with_capacity(diff.changed.len());
+    for uuid in &diff.changed {
+        let observed = before.get(uuid).expect("changed uuids are in both bases");
+        let wanted = after.get(uuid).expect("changed uuids are in both bases");
+
+        if let Some(shape) = out_of_scope_shape(observed, wanted) {
+            return Err(RowError::PushOutOfScope {
+                shape,
+                uuid: uuid.clone(),
+            });
+        }
+        let entity = entity_by_uuid(graph, uuid)?
+            .ok_or_else(|| RowError::PushUnknownBlock { uuid: uuid.clone() })?;
+        if is_built_in(graph, entity)? {
+            return Err(RowError::PushBuiltIn {
+                uuid: uuid.clone(),
+                entity,
+            });
+        }
+        let stored = current_title(graph, entity)?;
+        if stored != observed.content {
+            return Err(RowError::PushBaseStale {
+                uuid: uuid.clone(),
+                expected: observed.content.clone(),
+                found: stored,
+            });
+        }
+        plan.push((entity, wanted.content.clone()));
+    }
+
+    // Every edit lands on a COPY, which replaces the caller's graph only once
+    // all of them have succeeded.
+    //
+    // Pre-validation is not enough to make this loop infallible and it was a
+    // mistake to reason as though it were: `flush_tail` is fallible in seven
+    // places (a malformed node, a missing child, a value the comparator
+    // cannot order), and `allocate_tx` bumps `next_tx` BEFORE it can reject
+    // the id. So an error partway through would leave some blocks written,
+    // some not, and a counter advanced — a graph no base describes and the
+    // caller cannot undo. Copy-and-swap makes all-or-nothing a property of
+    // the shape rather than of an argument about which errors are reachable.
+    let mut staged = graph.clone();
+    let mut report = PushReport::default();
+    for (entity, new_title) in plan {
+        let flushed = edit_title(&mut staged, entity, &new_title)?.1;
+        report.transactions += 1;
+        report.datoms += 2;
+        report.flushes += usize::from(flushed);
+        report.blocks.push(entity);
+    }
+    *graph = staged;
+    Ok(report)
 }
 
 /// Read and guard the whole `kvs` table of the graph at `path`.

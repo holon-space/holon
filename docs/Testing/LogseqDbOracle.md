@@ -87,7 +87,18 @@ git -C /path/to/logseq worktree add "$ORACLE" fab27740975dcda1e93dbca718d1f620ed
 git -C "$ORACLE" show ef96a8d0^:deps/db/script/validate_db.cljs > "$ORACLE/deps/db/script/validate_db.cljs"
 git -C "$ORACLE" show f28e001b^:deps/db/script/diff_graphs.cljs  > "$ORACLE/deps/db/script/diff_graphs.cljs"
 
+# Holon's own scripts. apply_edits.cljs drives the head-to-head legs and the
+# bisect; without it those tests cannot run at all. The probes back the
+# built-in predicate's pins.
+cp crates/holon-logseq-db/oracle/*.cljs "$ORACLE/deps/db/script/"
+
 pnpm --dir "$ORACLE/deps/db" install --frozen-lockfile --ignore-workspace
+
+# probe_built_in.cljs reaches into deps/outliner and deps/graph-parser, which
+# carry their own node_modules — without these two the run dies with
+# "Could not find namespace: logseq.clj-fractional-indexing"
+pnpm --dir "$ORACLE/deps/graph-parser" install --ignore-workspace
+pnpm --dir "$ORACLE/deps/outliner"     install --ignore-workspace
 ```
 
 Then run the legs:
@@ -96,9 +107,11 @@ Then run the legs:
 HOLON_LOGSEQ_ORACLE="$ORACLE" just lsqdb-oracle
 ```
 
-Expect 5 passed, 0 ignored. The tests assert `node_modules` and both scripts
-exist before doing anything, so a half-finished setup fails with the reason
-rather than passing quietly.
+Expect the whole crate green with 0 ignored. `Oracle::find` asserts that
+`node_modules` exists before anything runs, so a graph-less setup fails with
+the reason rather than passing quietly. It does NOT check that the individual
+scripts are present — a missing script surfaces as the nbb invocation failing
+inside whichever leg needed it.
 
 ## Naming a graph
 
@@ -110,6 +123,29 @@ absolute paths to `<dir>/db.sqlite`; by hand, from `deps/db`, either works:
 ./node_modules/.bin/nbb-logseq script/validate_db.cljs /abs/path/db.sqlite --closed-maps --group-errors
 ./node_modules/.bin/nbb-logseq script/diff_graphs.cljs /abs/a/db.sqlite /abs/b/db.sqlite -T
 ```
+
+`probe_built_in.cljs` needs more: it loads namespaces from sibling `deps/`, so
+it takes an explicit classpath AND `NODE_PATH`, without which nbb resolves its
+own dependencies against the wrong `node_modules`. From `deps/db`:
+
+```sh
+NODE_PATH=$(pwd)/node_modules ./node_modules/.bin/nbb-logseq \
+  -cp src:../outliner/src:../graph-parser/src:../common/src \
+  script/probe_built_in.cljs /abs/path/db.sqlite /abs/out/built-in-entities.json
+```
+
+`probe_tail_builtin.cljs` and `probe_mirror.cljs` take the same invocation and
+need no second argument; they print LogSeq's verdict on a built-in marker that
+lives only in the unflushed tail, and on one retracted there. Those two answers
+are what `is_built_in` is written to, and both were measured after a
+tree-only predicate got them wrong in the direction that writes.
+
+The second argument writes the recording that
+`crates/holon-logseq-db/tests/fixtures/logseq-db/built-in-entities.json` holds.
+Regenerate it only when LogSeq's version moves — the pin exists to make such a
+move visible, so a silently-refreshed recording defeats it. A script placed
+outside `deps/db/script/` fails with a namespace-resolution error even with the
+classpath set; copy it in rather than pointing at it in place.
 
 `--closed-maps` rejects unknown attributes rather than tolerating them, and
 `-T` keeps timestamps in the diff — without it a write that dropped every

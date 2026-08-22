@@ -46,7 +46,9 @@ async fn graph_with_a_full_tail() -> (kvs_writer::KvsGraph, Vec<String>) {
     assert_eq!(targets.len(), 17, "need 17 editable blocks");
 
     for (i, uuid) in targets.iter().take(16).enumerate() {
-        let entity = kvs_writer::entity_by_uuid(&graph, uuid).expect("entity");
+        let entity = kvs_writer::entity_by_uuid(&graph, uuid)
+            .expect("read")
+            .expect("entity");
         kvs_writer::replace_block_title(&mut graph, entity, &title(i)).expect("edit");
     }
     assert_eq!(

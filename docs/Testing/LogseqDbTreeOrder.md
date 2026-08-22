@@ -250,6 +250,18 @@ asserted by `head_to_head_with_logseqs_own_flush`, and
 count, so a regression in split, merge, redistribution or root collapse cannot
 pass quietly.
 
+**All 17 of those targets are built-in entities** by LogSeq's own
+`built-in-entity?` — every one carries `:logseq.property/built-in? true` and is
+in the 192 that W2's predicate now refuses. This does not weaken the equality
+above: it is a claim about the WRITER, and the writer does not care whose
+datoms it stores — the same datoms in produce the same bytes out. It does mean
+the 17-edit scenario is not one a person could produce through LogSeq's UI,
+which refuses to edit built-ins. W2's
+`head_to_head_with_logseq_applying_the_same_pushes` re-establishes the same
+identity on the blocks a person can reach (24 edits over the 12 editable
+non-built-in blocks, also 458/458, also bisected prefix by prefix). See
+[LogseqDbPush.md](LogseqDbPush.md).
+
 ## Unreferenced rows exist in the wild
 
 The committed fixture's `kvs` table holds 456 rows: the head (addr 0), the
