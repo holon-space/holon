@@ -33,22 +33,21 @@
 //! that could emit `order` would spend its cases bouncing off a declaration
 //! error instead of testing the adapter.
 //!
-//! LOWERCASE is part of that precondition, for the same reason and with the
-//! same expiry: `TursoAdapter::register` refuses a mixed-case type until the
-//! fork's IVM normalizes identifier case (an unquoted mixed-case write silently
-//! stops matview maintenance). Both halves of that rejection are pinned by unit
-//! tests next to the rule — `a_keyword_named_type_is_rejected_at_registration`
-//! and `a_mixed_case_type_is_rejected_at_registration` — because this generator
-//! deliberately cannot reach either. When the engine fix retires the
-//! restriction, widening the alphabet here is the way to start exercising the
-//! names it currently avoids.
+//! LOWERCASE, and permanently. The Turso serialization canonicalizes a type's
+//! names to lowercase, so a mixed-case draw would be a spelling the schema
+//! never keeps — and `TursoAdapter::register` refuses one, because two types
+//! differing only by case share one table and one matview undetectably. The
+//! engine's own case handling is pinned where it belongs, next to the adapter
+//! (`mixed_case_sql_resolves_to_the_lowercase_type`), not by drawing type names
+//! this layer would only bounce off.
 //!
-//! The `gen_` prefix also satisfies the adapter's third rule — a serialized
-//! name must be a bare `[a-z][a-z0-9_]*` identifier, since the raw table name
-//! goes unquoted into DDL (pinned by
-//! `a_name_that_is_not_a_bare_identifier_is_rejected_at_registration`). It
-//! expires with the other two, and for the same reason: quoting is what would
-//! widen the alphabet, and quoting is what the fork cannot survive.
+//! SQL KEYWORDS stay out of reach, and permanently, not pending an engine fix:
+//! this adapter interpolates the matview name UNQUOTED into
+//! `CREATE MATERIALIZED VIEW`, so a type named `order` is a DDL syntax error
+//! (pinned by `a_keyword_named_type_is_rejected_at_registration`). The `gen_`
+//! prefix also keeps a drawn name a bare `[a-z][a-z0-9_]*` identifier,
+//! which the same unquoted interpolation requires (pinned by
+//! `a_name_that_is_not_a_bare_identifier_is_rejected_at_registration`).
 
 use holon_pbt_core::RequiredWiring;
 use holon_pbt_core::StorageAdapter;

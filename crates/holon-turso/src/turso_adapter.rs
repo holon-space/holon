@@ -362,13 +362,15 @@ impl TursoAdapter {
 
     /// Reject a type whose table or column name is a SQL keyword.
     ///
-    /// TEMPORARY, and lifted by the engine fix. Quoting is the normal way to
-    /// use a keyword as an identifier, but a quoted table name in a write
-    /// bypasses IVM dependency tracking in our Turso fork, so `DbHandle`
-    /// refuses quoted writes — which leaves a keyword-named type
-    /// unwritable. Catching it HERE, at declaration, turns what would be a
-    /// syntax error at the first write (runtime, far from the cause) into a
-    /// typed error at the boundary.
+    /// Quoting is the normal way to use a keyword as an identifier, and this
+    /// adapter does not spell one: [`reconcile_named_view`] interpolates the
+    /// matview name UNQUOTED into `CREATE MATERIALIZED VIEW`, so a type named
+    /// `order` dies with `near "order": syntax error` and never gets a read
+    /// surface — while writes to `order_raw` succeed, leaving the type
+    /// half-created. `SqlOperationProvider`'s INSERT/UPDATE/DELETE interpolate
+    /// the table name unquoted too. Catching it HERE, at declaration, turns a
+    /// DDL syntax error raised deep inside `ensure_schema` into a typed error
+    /// naming the type that caused it.
     fn reject_keyword_identifiers(type_def: &TypeDefinition) -> Result<()> {
         let mut offenders: Vec<&str> = Vec::new();
         if is_sql_keyword(&type_def.name) {
@@ -385,36 +387,46 @@ impl TursoAdapter {
             return Ok(());
         }
         Err(StorageError::DatabaseError(format!(
-            "type '{}' declares SQL keyword identifier(s) {offenders:?}: until our Turso fork's \
-             IVM normalizes quoted identifiers, keyword-named types cannot be safely written — \
-             quoting them silently stops matview maintenance, and not quoting them is a syntax \
-             error. Rename the type or field, or wait for the engine fix.",
+            "type '{}' declares SQL keyword identifier(s) {offenders:?}: this adapter \
+             interpolates the name unquoted into `CREATE MATERIALIZED VIEW` and into every \
+             INSERT/UPDATE/DELETE, so a keyword reaches the SQL parser as a syntax error and the \
+             type never gets a read surface. Rename the type or field.",
             type_def.name
         )))
     }
 
     /// Reject a type whose name is not already lowercase.
     ///
-    /// TEMPORARY, and lifted by the same engine fix as
-    /// [`Self::reject_keyword_identifiers`] — the fork's IVM dependency
-    /// tracking keys on the identifier as WRITTEN, so it is blind to case just
-    /// as it is blind to quoting. A bare `INSERT INTO Person` needs no quotes,
-    /// so `DbHandle`'s quoted-write guard never sees it, and the write reports
-    /// success while every matview over the table silently stops being
-    /// maintained. A matview over a mixed-case table does not even populate
-    /// from the rows already there. Rejecting at DECLARATION keeps the failure
-    /// at the boundary, where the name can still be changed.
+    /// The Turso serialization CANONICALIZES a type's names to lowercase: a
+    /// type declared `Person` reaches the schema as table `person_raw`, view
+    /// `person` and state table `__turso_internal_dbsp_state_v1_person`. So a
+    /// non-lowercase type name is not representable in storage — it is a
+    /// spelling the schema never keeps.
+    ///
+    /// That makes it worse than cosmetic. `TypeRegistry` keys its map on the
+    /// raw `String` and `EntityName` compares case-sensitively, so `Person` and
+    /// `person` are two distinct types everywhere above storage and ONE table
+    /// and ONE matview inside it — and because the declared case is discarded
+    /// before `sqlite_master` sees it, nothing downstream can tell the
+    /// collision from an ordinary re-registration. Refusing the non-canonical
+    /// spelling at declaration is what keeps that state unrepresentable.
+    ///
+    /// This is NOT a limit of the engine's identifier handling: writes and
+    /// reads that SPELL the name in any case resolve to the same table (pinned
+    /// by [`mixed_case_sql_resolves_to_the_lowercase_type`]). It is a limit of
+    /// letting two type names differ only by a distinction storage discards.
     fn reject_non_lowercase_name(type_def: &TypeDefinition) -> Result<()> {
         if type_def.name == type_def.name.to_lowercase() {
             return Ok(());
         }
         Err(StorageError::DatabaseError(format!(
-            "type '{}' is not lowercase: until our Turso fork's IVM normalizes identifier case, a \
-             mixed-case type cannot be safely written — an unquoted write to it silently stops \
-             matview maintenance (and needs no quotes, so the quoted-write guard cannot catch \
-             it), and its matview never populates from existing rows. Rename the type to '{}', or \
-             wait for the engine fix.",
+            "type '{}' is not lowercase: the Turso serialization canonicalizes names to \
+             lowercase, so this type would reach the schema as '{}' — the declared spelling is \
+             discarded. A second type named '{}' would then share one table and one matview with \
+             it, undetectably. Rename the type to '{}'.",
             type_def.name,
+            type_def.name.to_lowercase(),
+            type_def.name.to_lowercase(),
             type_def.name.to_lowercase()
         )))
     }
@@ -428,15 +440,18 @@ impl TursoAdapter {
     /// one: the name is interpolated UNQUOTED into `CREATE TABLE`, so `gen-1`
     /// arrives at the parser as a syntax error.
     ///
-    /// TEMPORARY, on the same register as [`Self::reject_non_lowercase_name`]
-    /// and lifted by the same engine fix: quoting is what would let this
-    /// adapter carry the wider alphabet, and quoting is exactly what the
-    /// fork's IVM cannot survive today. Lifting means WIDENING, not deleting:
-    /// a leading digit or an embedded space can never be a valid URI scheme,
-    /// so those shapes stay refused here even once quoting is safe (else they
-    /// reach `EntityName::new`'s debug_assert). While the restriction stands
-    /// it also keeps `EntityName`'s `_`→`-` fold injective over serialized
-    /// types (`gen-1` and `gen_1` both canonicalize to `gen-1`).
+    /// Quoting is what would let this adapter carry the wider alphabet, and
+    /// this adapter does not quote — the same limit
+    /// [`Self::reject_keyword_identifiers`] names. Even if it did, a leading
+    /// digit or an embedded space can never be a valid URI scheme, so those
+    /// shapes would stay refused here (else they reach `EntityName::new`'s
+    /// debug_assert). The rule also keeps `EntityName`'s `_`→`-` fold
+    /// injective over serialized types (`gen-1` and `gen_1` both canonicalize
+    /// to `gen-1`).
+    ///
+    /// Case is handled one rule earlier, by
+    /// [`Self::reject_non_lowercase_name`], so by the time a name reaches this
+    /// check it is already lowercase.
     fn reject_non_identifier_name(type_def: &TypeDefinition) -> Result<()> {
         let mut chars = type_def.name.chars();
         let shaped = matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
@@ -448,8 +463,8 @@ impl TursoAdapter {
             "type '{}' cannot be serialized to Turso: its raw table name is interpolated unquoted \
              into DDL, so the name must match [a-z][a-z0-9_]* — a hyphen, a space, or a leading \
              digit reaches the SQL parser as a syntax error. The type itself may keep any name \
-             the registry accepts; only its Turso serialization is refused. Until our fork's IVM \
-             survives quoted identifiers, rename the type for storage.",
+             the registry accepts; only its Turso serialization is refused. Rename the type for \
+             storage.",
             type_def.name
         )))
     }
@@ -670,18 +685,9 @@ mod tests {
     // `DbHandle::execute_values` (the path every non-`StorageBackend` writer
     // takes), not only for `StorageBackend::insert`.
     //
-    // HAZARD this pins, BOTH LEGS: writing `INSERT INTO "person_raw" ...` — the
-    // table name DOUBLE-QUOTED — makes Turso's IVM silently stop maintaining
-    // every matview over that table, while the insert still reports success and
-    // the row really is in the base table.
-    //
-    // The quoted leg runs through `execute_unguarded` ON PURPOSE. The guard now
-    // rejects quoted writes at both entry points, so without that bypass the
-    // broken engine path is unreachable and this test would silently stop
-    // demonstrating anything — passing whether or not the defect still exists.
-    //
-    // WHEN THE QUOTED LEG FAILS, the fork has been fixed: delete the guard,
-    // `execute_unguarded`, and that assertion together.
+    // The second leg spells the table name DOUBLE-QUOTED. The engine resolves a
+    // write's table through the schema before keying the IVM delta, so the
+    // quoted spelling maintains the matview exactly like the bare one.
     #[tokio::test]
     async fn matview_is_ivm_maintained_for_execute_values_writes() {
         use std::collections::HashMap;
@@ -724,11 +730,8 @@ mod tests {
             "IVM must maintain the person matview for an execute_values write"
         );
 
-        // The B leg: the SAME insert with the table name quoted, driven past the
-        // guard. The row lands in the base table and the matview does NOT move —
-        // that divergence IS the engine defect.
         handle
-            .execute_unguarded(
+            .execute_values(
                 "INSERT INTO \"person_raw\" (id, email, role) VALUES (?, ?, ?)",
                 vec![
                     holon_api::Value::String("person-1".into()),
@@ -737,13 +740,13 @@ mod tests {
                 ],
             )
             .await
-            .expect("unguarded quoted insert reaches the engine");
+            .expect("quoted insert");
 
         let raw_after = handle
             .query("SELECT id FROM person_raw", HashMap::new())
             .await
             .expect("query raw");
-        assert_eq!(raw_after.len(), 2, "the quoted write DID land in the table");
+        assert_eq!(raw_after.len(), 2, "the quoted write landed in the table");
 
         let matview_after = handle
             .query("SELECT id FROM person", HashMap::new())
@@ -751,21 +754,93 @@ mod tests {
             .expect("query matview");
         assert_eq!(
             matview_after.len(),
-            1,
-            "ENGINE DEFECT still present: a quoted write must leave the matview stale at 1 row. \
-             If this is 2, the fork now normalizes quoted identifiers — delete the guard, \
-             execute_unguarded, and this leg."
+            2,
+            "a quoted write must maintain the matview like the bare spelling"
         );
 
         handle.shutdown().await.expect("shutdown");
     }
 
-    // The batch path is the one the guard was BUILT for — QueryableCache's
-    // change-stream writer submits through `transaction`, not `execute`. A
-    // guard on `execute` alone would let the highest-volume writer route
-    // straight around it.
+    // Every write FORM, spelled with a quoted table identifier, must leave the
+    // matview in step with the base table. INSERT alone would not cover it:
+    // UPDATE and DELETE reach the IVM through their own emit sites.
     #[tokio::test]
-    async fn a_quoted_write_inside_a_transaction_batch_rejects_the_whole_batch() {
+    async fn every_quoted_write_form_maintains_the_matview() {
+        use std::collections::HashMap;
+
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory backend");
+        let td = person_td();
+        TursoAdapter::register(&td, &handle)
+            .await
+            .expect("register");
+
+        let rows_in = |handle: &crate::turso::DbHandle, sql: &'static str| {
+            let handle = handle.clone();
+            async move {
+                handle
+                    .query(sql, HashMap::new())
+                    .await
+                    .expect("query")
+                    .len()
+            }
+        };
+
+        for (i, sql) in [
+            "INSERT INTO \"person_raw\" (id, email, role) VALUES ('q-0', 'a', 'x')",
+            "INSERT OR REPLACE INTO \"person_raw\" (id, email, role) VALUES ('q-1', 'b', 'y')",
+            "INSERT INTO\"person_raw\" (id, email, role) VALUES ('q-2', 'c', 'z')",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            handle.execute(sql, vec![]).await.expect(sql);
+            assert_eq!(
+                rows_in(&handle, "SELECT id FROM person").await,
+                i + 1,
+                "matview must track the quoted insert: {sql}"
+            );
+        }
+
+        handle
+            .execute(
+                "UPDATE \"person_raw\" SET email = 'updated' WHERE id = 'q-0'",
+                vec![],
+            )
+            .await
+            .expect("quoted update");
+        let updated = handle
+            .query("SELECT email FROM person WHERE id = 'q-0'", HashMap::new())
+            .await
+            .expect("query matview");
+        assert_eq!(
+            updated.first().and_then(|r| r.get("email")),
+            Some(&holon_api::Value::String("updated".into())),
+            "matview must carry the quoted UPDATE"
+        );
+
+        handle
+            .execute("DELETE FROM \"person_raw\" WHERE id = 'q-1'", vec![])
+            .await
+            .expect("quoted delete");
+        assert_eq!(
+            rows_in(&handle, "SELECT id FROM person").await,
+            2,
+            "matview must track the quoted DELETE"
+        );
+
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    // The batch path is the highest-volume writer — QueryableCache's
+    // change-stream submits through `transaction`, not `execute` — so the
+    // quoted spelling has to maintain the matview here too, not only on the
+    // single-statement path.
+    #[tokio::test]
+    async fn a_quoted_write_inside_a_transaction_batch_maintains_the_matview() {
         use std::collections::HashMap;
 
         use crate::turso::TursoBackend;
@@ -779,17 +854,15 @@ mod tests {
             .expect("register");
 
         let text = |v: &str| turso::Value::Text(v.to_string());
-        let err = handle
+        handle
             .transaction(vec![
                 (
                     "INSERT INTO person_raw (id, email) VALUES (?, ?)".to_string(),
                     vec![text("ok-0"), text("a")],
                 ),
                 (
-                    // The offender, sitting SECOND — a guard that only checked
-                    // the first statement would miss it.
                     "INSERT INTO \"person_raw\" (id, email) VALUES (?, ?)".to_string(),
-                    vec![text("bad-1"), text("b")],
+                    vec![text("quoted-1"), text("b")],
                 ),
                 (
                     "INSERT INTO person_raw (id, email) VALUES (?, ?)".to_string(),
@@ -797,36 +870,31 @@ mod tests {
                 ),
             ])
             .await
-            .expect_err("a quoted table identifier anywhere in the batch must reject it");
+            .expect("a batch mixing quoted and bare spellings must commit");
 
-        let msg = err.to_string();
-        assert!(
-            msg.contains("bypass IVM dependency tracking"),
-            "the error must name the defect; got: {msg}"
-        );
-        assert!(
-            msg.contains("statement 1 of the transaction batch"),
-            "the error must name WHICH statement offended; got: {msg}"
-        );
-
-        // Screened BEFORE anything ran: the two legal statements must not have
-        // landed either, or the guard would be leaving partial writes behind.
         let rows = handle
             .query("SELECT id FROM person_raw", HashMap::new())
             .await
             .expect("query raw");
-        assert!(
-            rows.is_empty(),
-            "a rejected batch must execute NOTHING; found {} row(s)",
-            rows.len()
+        assert_eq!(rows.len(), 3, "all three statements must have landed");
+
+        let via_matview = handle
+            .query("SELECT id FROM person", HashMap::new())
+            .await
+            .expect("query matview");
+        assert_eq!(
+            via_matview.len(),
+            3,
+            "the matview must carry the quoted statement too, not only the bare ones"
         );
 
         handle.shutdown().await.expect("shutdown");
     }
 
     // A keyword-named type is rejected at DECLARATION, not at the first write.
-    // The restriction is temporary: it exists only because a keyword identifier
-    // must be quoted, and a quoted write bypasses IVM in our fork.
+    // Measured: without this, `CREATE MATERIALIZED VIEW order AS ...` dies with
+    // `near "order": syntax error`, the read matview is never created, and
+    // writes to `order_raw` still succeed — a half-created type.
     #[tokio::test]
     async fn a_keyword_named_type_is_rejected_at_registration() {
         use crate::turso::TursoBackend;
@@ -842,7 +910,7 @@ mod tests {
             .expect_err("a SQL-keyword type name must be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains("keyword-named types cannot be safely written"),
+            msg.contains("interpolates the name unquoted"),
             "the error must name the limitation; got: {msg}"
         );
         assert!(
@@ -875,9 +943,76 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
-    /// The case half of the same TEMPORARY restriction. A mixed-case name needs
-    /// no quotes, so the quoted-write guard cannot catch it — the declaration
-    /// boundary is the only place left to refuse it.
+    /// The ENGINE property, isolated from the naming policy: a type is declared
+    /// (and stored) lowercase, but SQL that SPELLS its names in any case
+    /// resolves to the same table and the same matview, and maintenance
+    /// follows. This is what the quoted/mixed-case identifier work in the
+    /// pinned fork bought; [`TursoAdapter::reject_non_lowercase_name`]
+    /// refusing mixed-case type NAMES is a separate concern and does not
+    /// weaken it.
+    #[tokio::test]
+    async fn mixed_case_sql_resolves_to_the_lowercase_type() {
+        use std::collections::HashMap;
+
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory backend");
+        TursoAdapter::register(&person_td(), &handle)
+            .await
+            .expect("register the lowercase type");
+
+        // Writes spelled in three different cases, one of them quoted.
+        for (id, sql) in [
+            (
+                "p-0",
+                "INSERT INTO PERSON_RAW (id, email, role) VALUES (?, ?, ?)",
+            ),
+            (
+                "p-1",
+                "INSERT INTO Person_Raw (id, email, role) VALUES (?, ?, ?)",
+            ),
+            (
+                "p-2",
+                "INSERT INTO \"PeRsOn_RaW\" (id, email, role) VALUES (?, ?, ?)",
+            ),
+        ] {
+            handle
+                .execute_values(
+                    sql,
+                    vec![
+                        holon_api::Value::String(id.into()),
+                        holon_api::Value::String("e".into()),
+                        holon_api::Value::String("r".into()),
+                    ],
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        }
+
+        // Reads spelled in a different case than the stored matview name.
+        for sql in [
+            "SELECT id FROM person",
+            "SELECT id FROM Person",
+            "SELECT id FROM PERSON",
+        ] {
+            let rows = handle
+                .query(sql, HashMap::new())
+                .await
+                .unwrap_or_else(|e| panic!("{sql}: {e}"));
+            assert_eq!(
+                rows.len(),
+                3,
+                "every spelling must reach the same maintained matview: {sql}"
+            );
+        }
+
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    /// A mixed-case type NAME is refused at declaration: storage canonicalizes
+    /// it away, so two types differing only by case would collide invisibly.
     #[tokio::test]
     async fn a_mixed_case_type_is_rejected_at_registration() {
         use crate::turso::TursoBackend;
@@ -888,30 +1023,31 @@ mod tests {
         let mut td = person_td();
         td.name = "Person".to_string();
 
-        let err = TursoAdapter::register(&td, &handle)
+        let msg = TursoAdapter::register(&td, &handle)
             .await
-            .expect_err("a mixed-case type name must be rejected");
-        let msg = err.to_string();
+            .expect_err("a mixed-case type name must be rejected")
+            .to_string();
         assert!(
-            msg.contains("silently stops matview maintenance"),
-            "the error must name the limitation; got: {msg}"
+            msg.contains("canonicalizes names to lowercase"),
+            "the error must name the mechanism; got: {msg}"
         );
         assert!(
             msg.contains("Person") && msg.contains("person"),
             "the error must name the offending identifier AND the fix; got: {msg}"
         );
 
-        // Refused BEFORE any DDL — an uppercase name leaves no artifacts.
+        // Refused BEFORE any DDL — a rejected type leaves no artifacts, under
+        // either spelling (storage would have lowercased it).
         let created = handle
             .query(
-                "SELECT name FROM sqlite_master WHERE name IN ('Person', 'Person_raw')",
+                "SELECT name FROM sqlite_master WHERE name LIKE 'person%' COLLATE NOCASE",
                 std::collections::HashMap::new(),
             )
             .await
             .expect("query sqlite_master");
         assert!(
             created.is_empty(),
-            "a rejected type must leave no artifacts"
+            "a rejected type must leave no artifacts; found {created:?}"
         );
 
         // An already-lowercase name is untouched by this rule.
@@ -983,15 +1119,14 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
-    // The quoted form is REJECTED at BOTH DbHandle write entry points —
-    // `execute` and `transaction`. Loud beats silent: normalizing the SQL
-    // instead would route around the fork bug and hide the pressure to fix it.
-    //
-    // (An earlier version of this comment claimed the hazard "cannot reach the
-    // engine at all". That was FALSE while `transaction` was unguarded — the
-    // batch writers went straight past the check.)
+    // A quoted write reaching the adapter's own matview keeps it in step. The
+    // engine resolves the written table through the schema before keying the
+    // IVM delta, so the quoted spelling names the same circuit input the bare
+    // one does.
     #[tokio::test]
-    async fn a_quoted_write_is_rejected_before_it_can_desync_a_matview() {
+    async fn a_quoted_write_is_maintained_through_the_matview() {
+        use std::collections::HashMap;
+
         use crate::turso::TursoBackend;
 
         let (_backend, handle) = TursoBackend::new_in_memory()
@@ -1002,7 +1137,7 @@ mod tests {
             .await
             .expect("register");
 
-        let err = handle
+        handle
             .execute_values(
                 "INSERT INTO \"person_raw\" (id, email, role) VALUES (?, ?, ?)",
                 vec![
@@ -1012,16 +1147,16 @@ mod tests {
                 ],
             )
             .await
-            .expect_err("a double-quoted write target must be rejected");
+            .expect("a double-quoted write target must be accepted");
 
-        let msg = err.to_string();
-        assert!(
-            msg.contains("bypass IVM dependency tracking"),
-            "the error must name the defect; got: {msg}"
-        );
-        assert!(
-            msg.contains("matview_is_ivm_maintained_for_execute_values_writes"),
-            "the error must point at the pin test; got: {msg}"
+        let via_matview = handle
+            .query("SELECT id, email, role FROM person", HashMap::new())
+            .await
+            .expect("query matview");
+        assert_eq!(
+            via_matview.len(),
+            1,
+            "the quoted write must be visible through the matview"
         );
 
         handle.shutdown().await.expect("shutdown");
