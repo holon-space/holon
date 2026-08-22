@@ -993,6 +993,25 @@ impl Module for OrgModeModule {
             },
         ));
 
+        // `rehome_entity`. The operation is contributed here, not by the
+        // substrate: pricing the move needs both homes' capability profiles and
+        // `holon` may not link `holon-capability`. It builds no writer of its
+        // own — the move is dispatched as data (`move_block`) through the
+        // router, and the shared `BlockOrdering` answers the reads.
+        injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
+            |resolver| async move {
+                // A profile that will not parse is a startup failure: a move
+                // nobody can price must not be dispatchable.
+                let registry = Arc::new(
+                    holon_capability::registry::shipped_profiles()
+                        .expect("the shipped capability profiles must parse"),
+                );
+                Arc::new(crate::rehome_entity::RehomeEntityProvider::new(
+                    resolver, registry,
+                )) as Arc<dyn OperationProvider>
+            },
+        ));
+
         Ok(())
     }
 }

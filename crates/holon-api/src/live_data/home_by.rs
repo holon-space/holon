@@ -42,6 +42,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -67,6 +68,51 @@ use super::LiveData;
 pub struct Home<K> {
     pub doc: K,
     pub prev: Option<String>,
+}
+
+/// A durable format that can hold a [`Home`]'s document.
+///
+/// Holon's own store is the ABSENCE of a variant rather than one of them: a
+/// home nothing outside Holon holds answers `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableFormat {
+    Org,
+}
+
+impl DurableFormat {
+    pub fn from_extension(extension: &str) -> Result<Self> {
+        match extension {
+            "org" => Ok(Self::Org),
+            other => anyhow::bail!(
+                "`.{other}` names no durable format Holon knows, so a home backed by it cannot \
+                 be resolved"
+            ),
+        }
+    }
+}
+
+/// A [`Home`]'s document key, read as the durable artifact holding it.
+///
+/// The key type varies by authority — a file path under the write-back
+/// harness, a document uri under [`HomeAuthority`] — and only the key itself
+/// knows what holds it.
+pub trait HomeDoc {
+    fn durable_format(&self) -> Result<Option<DurableFormat>>;
+}
+
+impl HomeDoc for Option<PathBuf> {
+    fn durable_format(&self) -> Result<Option<DurableFormat>> {
+        let Some(path) = self else {
+            return Ok(None);
+        };
+        let extension = path.extension().and_then(|e| e.to_str()).with_context(|| {
+            format!(
+                "home file `{}` carries no readable extension",
+                path.display()
+            )
+        })?;
+        DurableFormat::from_extension(extension).map(Some)
+    }
 }
 
 /// Where the authority says a block sits structurally: its owning document and

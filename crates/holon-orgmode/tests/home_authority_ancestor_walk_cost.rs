@@ -338,3 +338,108 @@ async fn without_the_dual_read_a_poisoned_memo_silently_rehomes_the_block() {
     );
     assert_eq!(poisoned.doc, DocHome::Unresolved);
 }
+
+// ─── What the derived home-profile lookup costs ──────────────────────────
+//
+// The home-profile binding is DERIVED on every read: resolve the block's home,
+// then map it to a profile id. The question this measures is whether that
+// derivation needs a stored column beside it.
+//
+// The unit is READS, not wall-clock. This reader is a `BTreeMap`, so its
+// wall-clock excludes every byte of Turso I/O and would be a floor, not a
+// measurement — quoting it against the 200 ms p95 interaction SLO would be
+// dishonest. What this harness CAN establish honestly is the shape: how many
+// authoritative point reads one lookup costs, and how that grows with depth.
+// The SLO answer is that count multiplied by whatever one `block_raw` point
+// read costs on the target device.
+
+/// Depths that bracket the keystone's own tree. Its working set is a page with
+/// leaf children (`structural-page` → `parent`/`c1`/`c2`) and the journals page
+/// with its rule-minted day and children, so 1–4 is the real range; 16 is
+/// included to show the growth law rather than to claim a vault is that deep.
+const MEASURED_DEPTHS: &[usize] = &[1, 2, 4, 16];
+
+/// One lookup's read cost at `depth` intermediate blocks under a page.
+async fn derived_lookup_reads(depth: usize) -> usize {
+    let mut chain: Vec<(String, bool)> = vec![("page".to_string(), true)];
+    for i in 0..depth {
+        chain.push((format!("mid{i}"), false));
+    }
+    let borrowed: Vec<(&str, bool)> = chain.iter().map(|(s, p)| (s.as_str(), *p)).collect();
+    let reader = Arc::new(RecordingReader::new(&borrowed));
+    let target = format!("block:{}", chain.last().unwrap().0);
+
+    authority(reader.clone())
+        .locate(&target, &mut HomeBurstMemo::default())
+        .await
+        .unwrap()
+        .unwrap();
+    reader.reads().len()
+}
+
+/// A stored column would answer in ONE read. This is that arm: the same reader,
+/// asked for the block itself and nothing above it.
+async fn stored_column_reads(depth: usize) -> usize {
+    let mut chain: Vec<(String, bool)> = vec![("page".to_string(), true)];
+    for i in 0..depth {
+        chain.push((format!("mid{i}"), false));
+    }
+    let borrowed: Vec<(&str, bool)> = chain.iter().map(|(s, p)| (s.as_str(), *p)).collect();
+    let reader = Arc::new(RecordingReader::new(&borrowed));
+    let target = EntityUri::block(&chain.last().unwrap().0);
+
+    reader.get_block_authoritative(&target).await.unwrap();
+    reader.reads().len()
+}
+
+/// The measurement 2b.4b rests on: what the derived lookup costs per depth,
+/// against the one read a column would cost.
+///
+/// Arms ALTERNATE within each depth so any drift in the harness lands on both,
+/// and every arm's run count is asserted — a measurement that quietly ran fewer
+/// iterations than it reports is the failure mode worth guarding here.
+#[tokio::test]
+async fn the_derived_home_profile_lookup_costs_one_read_per_ancestor() {
+    const RUNS_PER_ARM: usize = 8;
+
+    let mut report = String::from("derived home-profile lookup, reads per lookup\n");
+    for &depth in MEASURED_DEPTHS {
+        let mut derived: Vec<usize> = Vec::new();
+        let mut stored: Vec<usize> = Vec::new();
+        for _ in 0..RUNS_PER_ARM {
+            // A then B, every iteration.
+            derived.push(derived_lookup_reads(depth).await);
+            stored.push(stored_column_reads(depth).await);
+        }
+
+        assert_eq!(
+            (derived.len(), stored.len()),
+            (RUNS_PER_ARM, RUNS_PER_ARM),
+            "both arms must have run {RUNS_PER_ARM} times at depth {depth}"
+        );
+        // The fixture is real: a lookup that read nothing measured nothing.
+        assert!(
+            derived.iter().all(|&r| r > 0) && stored.iter().all(|&r| r > 0),
+            "every run must have issued reads at depth {depth}: {derived:?} / {stored:?}"
+        );
+
+        // The DISTRIBUTION, not a ratio: min/max of each arm, both stated.
+        let d_min = *derived.iter().min().unwrap();
+        let d_max = *derived.iter().max().unwrap();
+        let s_min = *stored.iter().min().unwrap();
+        let s_max = *stored.iter().max().unwrap();
+        report.push_str(&format!(
+            "  depth {depth:>2}: derived {d_min}..{d_max} reads · stored-column {s_min}..{s_max} \
+             reads\n"
+        ));
+
+        assert_eq!(
+            (d_min, d_max),
+            (depth + 1, depth + 1),
+            "the walk reads the block plus each ancestor up to the page — one read per step, no \
+             spread"
+        );
+        assert_eq!((s_min, s_max), (1, 1), "a column answers in one read");
+    }
+    println!("{report}");
+}

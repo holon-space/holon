@@ -2142,6 +2142,23 @@ pub trait SutOrgRender {
     async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)>;
 }
 
+// ─── The home-profile binding ────────────────────────────────────────
+//
+// Binds: `inv-home-profile-matches-derived`.
+
+#[holon_macros::capmap_adapter] // emits async-trait + CapName + `impl … for CapMap`
+pub trait SutHomeProfile {
+    /// Every block the SUT holds, paired with the capability profile
+    /// PRODUCTION resolves for its home — `(block_id, profile_id)`.
+    ///
+    /// The profile is a bare id STRING on purpose. The reference must compare
+    /// against a literal (`"org"`, `"holon-native"`) derived from the draw, so
+    /// handing it a typed profile would invite it to ask the resolver what the
+    /// answer is — and an oracle that consults the code under test cannot
+    /// fail.
+    async fn home_profiles(&self) -> Vec<(String, String)>;
+}
+
 // ─── Phase 6f' — OrgRead cluster ─────────────────────────────────────
 //
 // Binds: `inv-blocks-match-ref/org`. The org-file store in the
@@ -2345,6 +2362,9 @@ pub trait RefNavHistoryMut: RefNavHistory {
 /// Reference-side document read surface — the `files.documents` map (uri →
 /// filename) that the document + boot transitions query. Returns names / uris /
 /// counts / bools; never the integration-test-only map type.
+// `inv-home-profile-matches-derived` selects on this capability, so the CapMap
+// adapter is emitted for it.
+#[holon_macros::capmap_adapter] // sync trait → no async-trait; emits CapName + `impl … for CapMap`
 pub trait RefDocuments {
     /// Every tracked document filename (values of `files.documents`).
     fn document_names(&self) -> Vec<String>;
@@ -2366,6 +2386,26 @@ pub trait RefDocuments {
     fn document_uris(&self) -> Vec<EntityUri>;
     /// True iff `uri` is a tracked document.
     fn has_document_uri(&self, uri: &EntityUri) -> bool;
+    /// Where the DRAW puts this block.
+    ///
+    /// Distinct from [`Self::block_document_of`], which classifies a block as
+    /// seed or non-seed and answers the no-parent sentinel for a seed: a
+    /// sentinel is not a file, and a block under a tracked page has a file
+    /// whether or not it carries an entry of its own.
+    fn file_home_of(&self, block_id: &EntityUri) -> DrawnHome;
+}
+
+/// What the draw says about where a block lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DrawnHome {
+    /// The named tracked document's file holds it.
+    File(EntityUri),
+    /// The draw holds the block, and no file holds it.
+    Storeless,
+    /// The draw does not model this block at all, so it implies nothing about
+    /// it. Production may hold blocks the draw never described — a rule-minted
+    /// journal day among them.
+    Unmodelled,
 }
 
 /// Reference-side document mutation surface. Each method encapsulates the whole
@@ -2398,6 +2438,16 @@ pub trait RefDocumentsMut: RefDocuments {
         blocks: &[holon_api::block::Block],
         todo_keywords: Option<Vec<holon_api::TaskState>>,
     );
+    /// `RehomeEntity`: the block now lives in Holon's own storage — no file
+    /// carries it, and it is still ordinary content that every block oracle
+    /// compares. Its tree position is a separate fact, moved by
+    /// `RefBlockTreeMut::move_block`.
+    ///
+    /// Implementations MUST NOT express this as seed/scaffolding: a seed block
+    /// is subtracted from both sides of the `blocks-match-ref` family, which
+    /// would leave the re-homed block's existence and content asserted by
+    /// nothing.
+    fn rehome_to_native_storage(&mut self, block_id: &EntityUri);
 }
 
 /// Reference-side pre-startup boot read surface — the fixture counters and
@@ -3215,6 +3265,17 @@ pub trait RefEntitySchemesMut: RefEntitySchemes {
 #[holon_macros::capmap_adapter]
 pub trait SutBlockToPage {
     async fn convert_block_to_page(&self, target: &EntityUri, destination_path: &str);
+}
+
+/// SUT capability: move a LEAF block out of the file that holds it and into
+/// Holon's own storage, via the production `block.rehome_entity` op.
+///
+/// The block is re-parented to the no-parent root, which leaves it with no page
+/// ancestor and so no file — the home change is immediate, not deferred to a
+/// reprojection. Dispatched through the op-floor `DirectUserDriver`.
+#[holon_macros::capmap_adapter]
+pub trait SutRehomeEntity {
+    async fn rehome_entity(&self, target: &EntityUri, home: &str);
 }
 
 /// SUT capability: the two halves of the **page-identity lifecycle** — retitle

@@ -1,0 +1,21 @@
+derived home-profile lookup — file-backed Turso, per-lookup wall-clock
+profile: RELEASE · 200 runs per arm, arms alternated per iteration
+percentiles by nearest rank · budget under test: 200 ms p95
+NOTE: single-digit-ms operations need a QUIET machine; a run sharing the
+build slots with other lanes measures scheduler noise, not the lookup.
+
+  scale 32 blocks (4096 bytes on disk)
+    depth 1: derived warm min 0.187 p50 0.197 p95 0.233 max 0.415 ms · COLD first 0.851 ms
+              1 point read  min 0.092 p50 0.096 p95 0.107 max 0.211 ms
+    depth 2: derived warm min 0.250 p50 0.262 p95 0.307 max 0.537 ms · COLD first 0.293 ms
+              1 point read  min 0.082 p50 0.085 p95 0.103 max 0.834 ms
+    depth 4: derived warm min 0.408 p50 0.427 p95 0.528 max 1.119 ms · COLD first 0.424 ms
+              1 point read  min 0.081 p50 0.084 p95 0.103 max 0.202 ms
+
+  scale 320 blocks (638976 bytes on disk)
+    depth 1: derived warm min 0.164 p50 0.172 p95 0.197 max 0.353 ms · COLD first 0.377 ms
+              1 point read  min 0.080 p50 0.084 p95 0.094 max 0.139 ms
+    depth 2: derived warm min 0.245 p50 0.254 p95 0.273 max 0.414 ms · COLD first 0.268 ms
+              1 point read  min 0.080 p50 0.083 p95 0.094 max 0.192 ms
+    depth 4: derived warm min 0.407 p50 0.419 p95 0.446 max 0.629 ms · COLD first 0.471 ms
+              1 point read  min 0.080 p50 0.082 p95 0.089 max 0.110 ms

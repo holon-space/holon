@@ -58,6 +58,7 @@ use holon_pbt_core::capabilities::SutFocusWrite;
 use holon_pbt_core::capabilities::SutFsWrites;
 use holon_pbt_core::capabilities::SutHistory;
 use holon_pbt_core::capabilities::SutHistoryWrite;
+use holon_pbt_core::capabilities::SutHomeProfile;
 use holon_pbt_core::capabilities::SutMatviews;
 use holon_pbt_core::capabilities::SutMcpEmit;
 use holon_pbt_core::capabilities::SutMutate;
@@ -2176,6 +2177,80 @@ impl SutFsWrites for HeadlessFrontendComponent {
     }
 }
 
+/// The home-profile binding, read through PRODUCTION's resolver.
+///
+/// The capability deliberately reports what `profile_for` says, NOT what this
+/// harness believes: the invariant's job is to catch the resolver disagreeing
+/// with the reference, and a capability that computed the answer itself would
+/// be asserting the harness against the harness.
+#[async_trait::async_trait(?Send)]
+impl SutHomeProfile for HeadlessFrontendComponent {
+    async fn home_profiles(&self) -> Vec<(String, String)> {
+        use holon_api::live_data::home_by::Home;
+        use holon_app::turso_seams::CacheBlockReader;
+        use holon_capability::profile_for;
+        use holon_filesystem::BlockReader;
+
+        let block_cache = self
+            .injector
+            .resolve_async::<holon::core::queryable_cache::QueryableCache<Block>>()
+            .await;
+        let reader = CacheBlockReader::new(block_cache);
+
+        // Which blocks live under a document with a file, and where that file
+        // is. The doc set is the org readers' set: the boot-tracked documents
+        // PLUS the page-files write-back materialized after boot, which is
+        // where a rule-minted journal date lives.
+        let mut docs_snapshot = self.documents.lock().expect("documents lock").clone();
+        let tracked: std::collections::HashSet<PathBuf> =
+            docs_snapshot.iter().map(|(_, p)| p.clone()).collect();
+        docs_snapshot.extend(self.materialized_doc_files_absent_from(&tracked).await);
+
+        let mut file_home: std::collections::HashMap<String, PathBuf> =
+            std::collections::HashMap::new();
+        for (doc_id, path) in &docs_snapshot {
+            file_home.insert(doc_id.to_string(), path.clone());
+            for block in reader
+                .get_blocks(doc_id)
+                .await
+                .expect("SutHomeProfile: get_blocks failed")
+            {
+                file_home.insert(block.id.to_string(), path.clone());
+            }
+        }
+
+        let rows = self
+            .engine
+            .db_handle()
+            .query("SELECT id FROM block_raw", std::collections::HashMap::new())
+            .await
+            .expect("SutHomeProfile: block id query failed");
+        rows.into_iter()
+            .map(|row| {
+                row.get("id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        panic!("SutHomeProfile: a block_raw row carries no readable id: {row:?}")
+                    })
+            })
+            .map(|id| {
+                // `K = Option<PathBuf>`: a block under a tracked file has a
+                // file home, one that is not has none. The resolver decides
+                // what each MEANS — that is the binding under test.
+                let home = Home {
+                    doc: file_home.get(&id).cloned(),
+                    prev: None,
+                };
+                let profile = profile_for(&home).unwrap_or_else(|e| {
+                    panic!("SutHomeProfile: block `{id}` has no home profile: {e:#}")
+                });
+                (id, profile.to_string())
+            })
+            .collect()
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl SutOrgRender for HeadlessFrontendComponent {
     async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
@@ -4148,7 +4223,9 @@ impl HeadlessFrontendComponent {
         // differential runs on the same slice that maintains them.
         caps.insert(self.clone() as Arc<dyn SutMatviews>);
         caps.insert(self.clone() as Arc<dyn SutFsWrites>);
-        caps.insert(self as Arc<dyn SutOrgRender>);
+        caps.insert(self.clone() as Arc<dyn SutOrgRender>);
+        // The home-profile binding, read through production's resolver.
+        caps.insert(self as Arc<dyn SutHomeProfile>);
     }
 }
 

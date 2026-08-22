@@ -371,6 +371,79 @@ fn a_format_crate_never_links_holon_capability_outside_tests() {
     }
 }
 
+/// The paths allowed to hold a `holon_capability::CapabilityProfile` VALUE:
+/// the crate that owns the type, and the certification tests, which load one
+/// yaml and drive a format against it.
+const PROFILE_VALUE_HOLDERS: &[&str] = &[
+    "crates/holon-org-format/tests/profile_certification.rs",
+    "crates/holon-logseq-db/tests/profile_certification.rs",
+    "crates/holon/tests/capability_certification.rs",
+];
+
+/// The crate that owns the type; every file under it may name it.
+const PROFILE_OWNING_CRATE: &str = "crates/holon-capability/";
+
+/// Everywhere else a home is named by its `CapabilityProfileId`, and the
+/// profile is fetched per question through `ProfileRegistry::get`.
+///
+/// A consumer that keeps the profile value keeps answering for the home it
+/// loaded that value from, which survives the block re-homing.
+#[test]
+fn only_the_registry_hands_out_capability_profile_values() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    rust_sources(&root.join("crates"), &mut files);
+    rust_sources(&root.join("frontends"), &mut files);
+
+    let mut offenders = Vec::new();
+    for file in &files {
+        let rel = file
+            .strip_prefix(&root)
+            .expect("source under the repo root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        // Exact path match, not a prefix: a sibling whose name merely STARTS
+        // with a holder's would inherit the exemption.
+        if rel == file!()
+            || rel.starts_with(PROFILE_OWNING_CRATE)
+            || PROFILE_VALUE_HOLDERS.contains(&rel.as_str())
+        {
+            continue;
+        }
+        let src = std::fs::read_to_string(file).expect("readable rust source");
+        // `holon-api` ships an unrelated `CapabilityProfile` (storage
+        // degradation) that other crates re-export under that bare name, so
+        // naming THIS crate is what puts a file in scope. A file reaching the
+        // type through a second-hop alias that never mentions `holon_capability`
+        // would slip past; no such alias exists today, and widening the scan to
+        // any `pub use` of the bare name matches the holon-api type instead.
+        if !src.contains("holon_capability") {
+            continue;
+        }
+        for (i, line) in src.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            let holds_a_value = line
+                .match_indices("CapabilityProfile")
+                .any(|(at, m)| !line[at + m.len()..].starts_with("Id"));
+            if holds_a_value {
+                offenders.push(format!("{rel}:{}", i + 1));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these sites name the `CapabilityProfile` VALUE outside the registry:\n{}\n\nCarry a \
+         `CapabilityProfileId` and ask `ProfileRegistry::get` at each question instead. A site \
+         that genuinely owns a loaded profile — a certification test — belongs in \
+         PROFILE_VALUE_HOLDERS in {}.\n",
+        offenders.join("\n"),
+        file!(),
+    );
+}
+
 /// Regression guard for the hakari `traversal-excludes` on `gpui`
 /// (see `.config/hakari.toml`).
 ///

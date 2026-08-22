@@ -19,6 +19,7 @@ pub mod frontend_bounds_rendered;
 pub mod frontend_engine;
 pub mod frontend_no_error_widgets;
 pub mod frontend_root_not_error;
+pub mod home_profile_matches_derived;
 pub mod inline_row_mount_present;
 pub mod journal_one_per_day;
 pub mod live_block_shell_present;

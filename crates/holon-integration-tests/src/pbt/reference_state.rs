@@ -836,6 +836,15 @@ impl ReferenceState {
         // Sharing overlay keys are block/doc uris; remap into SUT id space so the
         // audience oracle reads SUT-keyed audiences. A no-op on the empty default.
         resolved.sharing = self.sharing.remapped(map);
+        // Tracked documents are keyed by doc uri, and `block_state` above is
+        // SUT-keyed: synthetic keys here would make a resolved block's document
+        // unreachable from the block itself (`RefDocuments::file_home_of`).
+        resolved.files.documents = self
+            .files
+            .documents
+            .iter()
+            .map(|(uri, name)| (resolve(uri), name.clone()))
+            .collect();
         Resolved(resolved)
     }
 
@@ -3406,6 +3415,7 @@ mod remap_tests {
         let bs = BlockState {
             blocks,
             block_documents,
+            native_homed: Default::default(),
             next_id: 3,
         };
 

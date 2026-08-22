@@ -45,6 +45,7 @@ use holon_pbt_core::capabilities::RefAdvice;
 use holon_pbt_core::capabilities::RefBackend;
 use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefClock;
+use holon_pbt_core::capabilities::RefDocuments;
 use holon_pbt_core::capabilities::RefEditorMirror;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefGlobalFocus;
@@ -131,6 +132,12 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
     fn register(self: Arc<Self>, caps: &mut holon_pbt_core::composition::CapMap) {
         caps.insert(self.clone() as Arc<dyn RefBackend>);
         caps.insert(self.clone() as Arc<dyn RefBlockTree>);
+        // `RefDocuments` carries the draw's own document bookkeeping, which is
+        // the ORACLE for `inv-home-profile-matches-derived` (2b.4): a block the
+        // reference placed in a document is org-homed. Harmless to existing
+        // slices — selection ANDs the SUT and ref cap sets, and only a slice
+        // supplying `SutHomeProfile` selects it.
+        caps.insert(self.clone() as Arc<dyn RefDocuments>);
         caps.insert(self.clone() as Arc<dyn RefEditorMirror>);
         // `RefLayout` carries the layout-block / document metadata the windowed
         // `inv-frontend-bounds-rendered` reads (`has_user_documents`,

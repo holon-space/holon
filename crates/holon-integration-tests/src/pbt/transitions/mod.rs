@@ -135,6 +135,7 @@ mod pin_block;
 mod press_key;
 mod redo;
 pub mod register_entity_scheme;
+mod rehome_entity;
 mod remove_watch;
 mod rename_document;
 pub(crate) mod rename_page;
@@ -216,6 +217,7 @@ pub use pin_block::PinBlock;
 pub use press_key::PressKey;
 pub use redo::Redo;
 pub use register_entity_scheme::RegisterEntityScheme;
+pub use rehome_entity::RehomeEntity;
 pub use remove_watch::RemoveWatch;
 pub use rename_document::RenameDocument;
 pub use rename_page::RenamePage;
@@ -293,6 +295,7 @@ crate::declare_e2e_transitions! {
         PressKey(PressKey),
         Redo(Redo),
         RegisterEntityScheme(RegisterEntityScheme),
+        RehomeEntity(RehomeEntity),
         SimulateRestart(SimulateRestart),
         RemoveWatch(RemoveWatch),
         SetEdgeField(SetEdgeField),

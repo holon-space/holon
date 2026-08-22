@@ -78,6 +78,10 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // `RefBlockTree`. Vacuously green on a draw modeling no non-seed page (the
         // default keystone), so it adds no false RED.
         invariants::every_page_has_its_own_file::wire(),
+        // The home-profile binding: production's resolved home profile must
+        // equal the one the DRAW implies. Needs `SutHomeProfile` +
+        // `RefDocuments`, so only the headless frontend slice selects it.
+        invariants::home_profile_matches_derived::wire(),
         // No-pages-under-non-pages ref-boundary tripwire (Fork B B1 / R8): a
         // non-seed page's structural ancestors up to a root must all be pages.
         // `RefBlockTree` only — the ref always provides it, so this selects on

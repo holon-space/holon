@@ -82,11 +82,58 @@ pub struct BlockState {
     /// `BTreeMap` for the same determinism reason as `blocks`.
     pub block_documents: BTreeMap<EntityUri, EntityUri>,
 
+    /// Blocks re-homed into Holon's own storage: still ORDINARY content the
+    /// store holds and every block oracle compares, but no longer written to
+    /// any org file.
+    ///
+    /// This is deliberately NOT the `block_documents[id] = no_parent` seed
+    /// spelling. A seed block is subtracted from BOTH sides of every
+    /// `blocks-match-ref` arm, so spelling "off disk" that way would stop the
+    /// block's existence, content, parent and sort_key being compared at all —
+    /// the keystone would stay green if the row were corrupted or dropped.
+    /// Three states, and only the middle one is new:
+    ///   in `block_documents` under a real doc → on disk, compared
+    ///   in `native_homed`                     → off disk, still compared
+    ///   `block_documents[id]` = the sentinel  → seed scaffolding, compared by
+    ///                                           nothing (pre-existing)
+    pub native_homed: std::collections::BTreeSet<EntityUri>,
+
     /// ID counter for generating unique block IDs
     pub next_id: usize,
 }
 
 impl BlockState {
+    /// Whether no org file carries this block.
+    ///
+    /// DERIVED ANCESTRALLY, because that is how production decides it: a block
+    /// is written to a file only if some ancestor is a page that owns one, so
+    /// re-homing a block takes its whole subtree off disk with it. Modelling
+    /// off-disk-ness as a per-block flag instead would need every create,
+    /// split and move to propagate it — and the one that forgot would put a
+    /// child back on disk in a file whose tree no longer contains it.
+    ///
+    /// Walking also makes the answer self-correcting: move a re-homed block
+    /// back under a document and it (and its subtree) are on disk again with
+    /// nothing to update.
+    pub fn is_off_disk(&self, id: &EntityUri) -> bool {
+        let mut cursor = id.clone();
+        // The block count bounds an acyclic walk; `inv-no-parent-cycles` owns
+        // the cyclic case, so stopping is enough here.
+        for _ in 0..=self.blocks.len() {
+            if self.native_homed.contains(&cursor) {
+                return true;
+            }
+            let Some(block) = self.blocks.get(&cursor) else {
+                return false;
+            };
+            if block.parent_id == cursor {
+                return false;
+            }
+            cursor = block.parent_id.clone();
+        }
+        false
+    }
+
     /// Return a clone with every block's `id`/`parent_id` and the
     /// `block_documents` keys remapped through `map` (synthetic doc URI →
     /// real SUT UUID). URIs absent from `map` (i.e. all content-block IDs,
@@ -131,6 +178,7 @@ impl BlockState {
         BlockState {
             blocks,
             block_documents,
+            native_homed: self.native_homed.iter().map(&resolve).collect(),
             next_id: self.next_id,
         }
     }

@@ -481,6 +481,14 @@ async fn compose_sut_seeded_impl(
             comp.engine(),
             resolver.clone(),
         )) as Arc<dyn SutBlockToPage>);
+        // Re-homing (`RehomeEntity`) at the same op-floor rung: moving a leaf
+        // out of its file is an engine op, with no keystroke or click that
+        // expresses it.
+        caps.insert(Arc::new(DirectUserDriver::with_resolver(
+            comp.engine(),
+            resolver.clone(),
+        ))
+            as Arc<dyn holon_pbt_core::capabilities::SutRehomeEntity>);
         // Page identity (`RenamePage` / `CreatePageAtFreedPath`) at the same
         // op-floor rung and for the same reason: retitling a page and lazily
         // creating one from a link are engine ops, not keystroke/click gestures,
@@ -621,6 +629,8 @@ async fn compose_sut_seeded_impl(
         caps.insert(floor.clone() as Arc<dyn SutTemplateInstantiate>);
         // Block→page transform (`BlockToPage`) at the same op-floor rung.
         caps.insert(floor.clone() as Arc<dyn SutBlockToPage>);
+        // Re-homing (`RehomeEntity`) at the same op-floor rung.
+        caps.insert(floor.clone() as Arc<dyn holon_pbt_core::capabilities::SutRehomeEntity>);
         // Page identity (`RenamePage` / `CreatePageAtFreedPath`) at the same
         // op-floor rung.
         caps.insert(floor as Arc<dyn holon_pbt_core::capabilities::SutPageIdentity>);

@@ -639,6 +639,13 @@ pub fn structural_ref_wired(
         .documents
         .insert(page.clone(), "structural-page.org".to_string());
 
+    // The journals page owns a file too: `boot_and_seed_wide` always seeds a
+    // `Journals.org` shell, so every block under the page is org-homed.
+    state.files.documents.insert(
+        EntityUri::parse(holon_frontend::JOURNALS_PAGE_ID).expect("journals id"),
+        "Journals.org".to_string(),
+    );
+
     // Re-root parent/c1/c2 as leaf siblings directly under the page.
     for (i, id) in [&ids.parent, &ids.c1, &ids.c2].into_iter().enumerate() {
         let b = state

@@ -98,6 +98,29 @@ impl ProfileRegistry {
     }
 }
 
+/// The profiles this build ships, embedded like the seed assets so a packaged
+/// binary carries them.
+///
+/// Every id [`crate::profile_of`] can return must parse, so a home that cannot
+/// be priced fails at startup rather than at the first move.
+pub fn shipped_profiles() -> Result<ProfileRegistry> {
+    const SHIPPED: &[(&str, &str)] = &[
+        (
+            "holon-native",
+            include_str!("../../../assets/default/capability/holon-native.yaml"),
+        ),
+        ("org", include_str!("../../holon-org-format/profile.yaml")),
+    ];
+    let mut profiles = Vec::new();
+    for (name, yaml) in SHIPPED {
+        profiles.push(
+            CapabilityProfile::from_yaml(yaml)
+                .map_err(|e| anyhow::anyhow!("parsing the shipped `{name}` profile: {e}"))?,
+        );
+    }
+    ProfileRegistry::new(profiles)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

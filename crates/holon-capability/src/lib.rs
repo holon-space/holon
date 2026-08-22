@@ -38,6 +38,7 @@ pub mod clause;
 pub mod diff;
 #[cfg(test)]
 pub(crate) mod fixture;
+pub mod home;
 pub mod profile;
 pub mod registry;
 pub mod supports;
@@ -111,6 +112,8 @@ pub use clause::EnforcementLayer;
 pub use clause::EnforcementMap;
 pub use clause::GapReason;
 pub use diff::CapabilityLoss;
+pub use home::profile_for;
+pub use home::profile_of;
 pub use profile::CapabilityProfile;
 pub use profile::CapabilityProfileId;
 pub use profile::FidelityAxes;

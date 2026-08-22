@@ -146,7 +146,7 @@ fn loss_for(
                 StructuredTree => 3,
             };
             let (a, b) = (from.content().representation, to.content().representation);
-            (rank(b) < rank(a)).then(|| ())?;
+            (rank(b) < rank(a)).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -177,7 +177,7 @@ fn loss_for(
                 Any => 3,
             };
             let (a, b) = (from.property_keys().charset, to.property_keys().charset);
-            (rank(b) < rank(a)).then(|| ())?;
+            (rank(b) < rank(a)).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -186,7 +186,7 @@ fn loss_for(
         }
         ClauseId::PropertyKeysCase => {
             let (a, b) = (from.property_keys().case, to.property_keys().case);
-            (a == KeyCase::Sensitive && b != KeyCase::Sensitive).then(|| ())?;
+            (a == KeyCase::Sensitive && b != KeyCase::Sensitive).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -213,7 +213,7 @@ fn loss_for(
         ),
         ClauseId::PropertyKeysCollision => {
             let (a, b) = (from.property_keys().collision, to.property_keys().collision);
-            (a == Collision::MultiValued && b != Collision::MultiValued).then(|| ())?;
+            (a == Collision::MultiValued && b != Collision::MultiValued).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -225,7 +225,7 @@ fn loss_for(
                 from.property_keys().schema_required,
                 to.property_keys().schema_required,
             );
-            (a == SchemaRequirement::Open && b == SchemaRequirement::Declared).then(|| ())?;
+            (a == SchemaRequirement::Open && b == SchemaRequirement::Declared).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -243,7 +243,7 @@ fn loss_for(
                 to.property_values().empty_string,
             );
             (a == Representability::Representable && b != Representability::Representable)
-                .then(|| ())?;
+                .then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -253,7 +253,7 @@ fn loss_for(
         ClauseId::PropertyValuesNull => {
             let (a, b) = (from.property_values().null, to.property_values().null);
             (a == Representability::Representable && b != Representability::Representable)
-                .then(|| ())?;
+                .then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -266,7 +266,7 @@ fn loss_for(
                 &to.property_values().multi_value,
             );
             let carries = |m: &MultiValue| !matches!(m, MultiValue::None);
-            (carries(a) && !carries(b)).then(|| ())?;
+            (carries(a) && !carries(b)).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -279,7 +279,7 @@ fn loss_for(
                 to.property_values().reference_values,
             );
             use crate::axes::ReferenceValues::None as NoRefs;
-            (a != NoRefs && b == NoRefs).then(|| ())?;
+            (a != NoRefs && b == NoRefs).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -289,7 +289,7 @@ fn loss_for(
 
         ClauseId::OrderingSiblingOrder => {
             let (a, b) = (from.ordering().sibling_order, to.ordering().sibling_order);
-            (a != SiblingOrder::Unordered && b == SiblingOrder::Unordered).then(|| ())?;
+            (a != SiblingOrder::Unordered && b == SiblingOrder::Unordered).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -300,7 +300,7 @@ fn loss_for(
         ClauseId::OrderingConcurrentInsert => None,
         ClauseId::OrderingPropertyOrder => {
             let (a, b) = (from.ordering().property_order, to.ordering().property_order);
-            (a == PropertyOrder::Preserved && b != PropertyOrder::Preserved).then(|| ())?;
+            (a == PropertyOrder::Preserved && b != PropertyOrder::Preserved).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -317,7 +317,7 @@ fn loss_for(
                 Dag => 3,
             };
             let (a, b) = (from.hierarchy().shape, to.hierarchy().shape);
-            (rank(b) < rank(a)).then(|| ())?;
+            (rank(b) < rank(a)).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -331,7 +331,7 @@ fn loss_for(
                 (MaxDepth::Limit(x), MaxDepth::Limit(y)) => y < x,
                 _ => false,
             };
-            deeper.then(|| ())?;
+            deeper.then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -346,7 +346,7 @@ fn loss_for(
                 Free => 2,
             };
             let (a, b) = (from.hierarchy().reparent, to.hierarchy().reparent);
-            (rank(b) < rank(a)).then(|| ())?;
+            (rank(b) < rank(a)).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -359,7 +359,7 @@ fn loss_for(
         ),
         ClauseId::HierarchyCycles => {
             let (a, b) = (from.hierarchy().cycles, to.hierarchy().cycles);
-            (a == Cycles::Representable && b == Cycles::Rejected).then(|| ())?;
+            (a == Cycles::Representable && b == Cycles::Rejected).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -397,7 +397,7 @@ fn loss_for(
                 Full => 2,
             };
             let (a, b) = (from.computed().computed_live, to.computed().computed_live);
-            (rank(b) < rank(a)).then(|| ())?;
+            (rank(b) < rank(a)).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -415,7 +415,7 @@ fn loss_for(
                 ComputedPersisted::TypedSubset { .. } => 2,
                 ComputedPersisted::FullAlgebra => 3,
             };
-            (rank(b) < rank(a)).then(|| ())?;
+            (rank(b) < rank(a)).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -433,7 +433,7 @@ fn loss_for(
                 from.computed().expression_closure,
                 to.computed().expression_closure,
             );
-            (rank(b) < rank(a)).then(|| ())?;
+            (rank(b) < rank(a)).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -443,7 +443,7 @@ fn loss_for(
 
         ClauseId::MutationWriteLeg => {
             let (a, b) = (from.mutation().write_leg, to.mutation().write_leg);
-            (a != WriteLeg::Absent && b == WriteLeg::Absent).then(|| ())?;
+            (a != WriteLeg::Absent && b == WriteLeg::Absent).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -459,7 +459,7 @@ fn loss_for(
                 Field => 3,
             };
             let (a, b) = (from.mutation().unit_of_write, to.mutation().unit_of_write);
-            (rank(b) < rank(a)).then(|| ())?;
+            (rank(b) < rank(a)).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -478,7 +478,7 @@ fn loss_for(
                 from.mutation().merge_granularity,
                 to.mutation().merge_granularity,
             );
-            (rank(b) < rank(a)).then(|| ())?;
+            (rank(b) < rank(a)).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -497,7 +497,7 @@ fn loss_for(
                 from.mutation().conflict_surface,
                 to.mutation().conflict_surface,
             );
-            (rank(b) < rank(a)).then(|| ())?;
+            (rank(b) < rank(a)).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -507,7 +507,7 @@ fn loss_for(
 
         ClauseId::AssetsAttachments => {
             let (a, b) = (from.assets().attachments, to.assets().attachments);
-            (a != Attachments::None && b == Attachments::None).then(|| ())?;
+            (a != Attachments::None && b == Attachments::None).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),
@@ -516,7 +516,7 @@ fn loss_for(
         }
         ClauseId::AssetsBinaryInline => {
             let (a, b) = (from.assets().binary_inline, to.assets().binary_inline);
-            (a != BinaryInline::None && b == BinaryInline::None).then(|| ())?;
+            (a != BinaryInline::None && b == BinaryInline::None).then_some(())?;
             loss(
                 format!("{a:?}"),
                 format!("{b:?}"),

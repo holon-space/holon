@@ -574,6 +574,12 @@ impl RefBackend for ReferenceState {
             .blocks
             .values()
             .filter(|b| !seed.contains(&b.id))
+            // Re-homed into Holon's own storage: still ordinary content, but
+            // no file carries it. Excluded HERE and nowhere else, so every
+            // other oracle keeps comparing it. Ancestral, so a child created
+            // under a re-homed block is off disk too, with nothing to
+            // propagate.
+            .filter(|b| !self.domain.block_state.is_off_disk(&b.id))
             .filter(|b| !b.is_page())
             .cloned()
             .map(|mut b| {

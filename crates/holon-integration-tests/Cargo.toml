@@ -29,6 +29,7 @@ test-infra = [
     "dep:holon-loro",
     "dep:holon-sharing",
     "dep:holon-api",
+    "dep:holon-capability",
     "dep:tokio",
     "dep:tokio-stream",
     "dep:tempfile",
@@ -112,7 +113,8 @@ holon-loro = { workspace = true, optional = true }
 # True sharing: the sans-IO acceptor + `sync_once` the two-instance slice drives.
 holon-sharing = { workspace = true, optional = true }
 holon-api = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "fs", "sync"], optional = true }
+holon-capability = { workspace = true, optional = true }
+tokio ={ workspace = true, features = ["rt-multi-thread", "macros", "time", "fs", "sync"], optional = true }
 tokio-stream = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }

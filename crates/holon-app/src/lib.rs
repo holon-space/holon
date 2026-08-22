@@ -39,6 +39,7 @@ pub mod no_turso;
 #[cfg(test)]
 mod no_turso_test;
 pub mod ordered_block_crud;
+pub mod rehome_entity;
 pub mod seed;
 pub mod session;
 pub mod turso_seams;

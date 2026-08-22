@@ -72,6 +72,7 @@ impl ReferenceDomainState {
             block_state: BlockState {
                 blocks: BTreeMap::new(),
                 block_documents: BTreeMap::new(),
+                native_homed: Default::default(),
                 next_id: 0,
             },
             layout_blocks: LayoutBlockInfo::default(),

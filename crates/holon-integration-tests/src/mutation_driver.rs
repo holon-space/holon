@@ -27,6 +27,7 @@ pub use holon_frontend::user_driver::UserDriver;
 use holon_pbt_core::capabilities::SutBlockCreate;
 use holon_pbt_core::capabilities::SutBlockToPage;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::SutRehomeEntity;
 use holon_pbt_core::capabilities::SutTemplateInstantiate;
 
 use crate::pbt::op_write_cap::IdResolver;
@@ -454,6 +455,28 @@ impl SutTemplateInstantiate for DirectUserDriver {
             .unwrap_or_else(|e| {
                 panic!("[DirectUserDriver floor] block/instantiate_template failed: {e:#}")
             });
+    }
+}
+
+/// Op-floor `SutRehomeEntity`: dispatch `block.rehome_entity` through the
+/// production engine. Any failure is a real defect — the transition's
+/// preconditions already exclude every case the op refuses by name (non-leaf,
+/// a block no document holds, a home that cannot receive an entity).
+#[async_trait::async_trait(?Send)]
+impl SutRehomeEntity for DirectUserDriver {
+    async fn rehome_entity(&self, target: &EntityUri, home: &str) {
+        let mut params: HashMap<String, Value> = HashMap::new();
+        params.insert(
+            "id".to_string(),
+            Value::String(self.resolve(target).to_string()),
+        );
+        params.insert("target".to_string(), Value::String(home.to_string()));
+        if let Err(e) = self
+            .synthetic_dispatch("block", "rehome_entity", params)
+            .await
+        {
+            panic!("[DirectUserDriver floor] block/rehome_entity failed: {e:#}");
+        }
     }
 }
 
