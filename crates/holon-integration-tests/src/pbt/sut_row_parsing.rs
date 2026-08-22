@@ -30,9 +30,11 @@ use holon_orgmode::OrgBlockExt;
 /// [`parse_block_row`], so the column list and its parser stay in lockstep and
 /// the SQL isn't duplicated across SUT impls.
 pub(super) const BLOCK_MATVIEW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, content_type, \
-                                                     source_language, properties, marks, tags, \
-                                                     requires, advice_suppressed, contributes_to \
-                                                     FROM block";
+                                                     source_language, source_name, \
+                                                     properties, marks, collapsed, \
+                                                     widget_only, tags, requires, \
+                                                     advice_suppressed, contributes_to FROM \
+                                                     block";
 
 /// Snapshot SQL for the write-side `block_raw` BASE TABLE. Native columns only
 /// — `block_raw` has no junction `tags`/`requires`, so [`parse_block_row`]
@@ -45,8 +47,54 @@ pub(super) const BLOCK_MATVIEW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, conte
 /// matview drops it the same way (`schema_modules.rs`: `WHERE b.id !=
 /// 'sentinel:no_parent'`).
 pub(super) const BLOCK_RAW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, content_type, \
-                                                 source_language, properties, marks FROM \
-                                                 block_raw WHERE id != 'sentinel:no_parent'";
+                                                 source_language, source_name, properties, \
+                                                 marks, collapsed, widget_only FROM block_raw \
+                                                 WHERE id != 'sentinel:no_parent'";
+
+/// Read a `NOT NULL DEFAULT 0` SQLite boolean column that the snapshot SQL is
+/// REQUIRED to select. Absent = the SQL lost the column, which would silently
+/// pin the field to `false` for every block and make the invariant vacuous on
+/// it — so that is a panic naming the constant to fix, not a default.
+fn required_sql_bool(row: &holon_core::storage::types::StorageEntity, col: &str) -> bool {
+    match row.get(col) {
+        Some(Value::Integer(i)) => *i != 0,
+        Some(Value::Boolean(b)) => *b,
+        Some(other) => panic!("block row {col:?} must be an INTEGER 0/1, got {other:?}"),
+        None => panic!(
+            "block row is missing the {col:?} column — add it to BLOCK_MATVIEW_SNAPSHOT_SQL / \
+             BLOCK_RAW_SNAPSHOT_SQL; without it every parsed Block reports {col}=false and \
+             inv-blocks-match-ref is vacuous on that field"
+        ),
+    }
+}
+
+/// Read a NULLABLE TEXT column that the snapshot SQL is REQUIRED to select.
+///
+/// The three cases are genuinely distinct and must stay so: an ABSENT column
+/// (`None`) means the SELECT lost it — a harness bug that would silently pin
+/// the field for every block, so it panics naming the constants to fix; SQL
+/// NULL (`Some(Value::Null)`) is a legitimate VALUE meaning "no source name"
+/// and maps to `None`; text maps to `Some`. `StorageEntity::get` distinguishes
+/// absent from NULL, which is the same distinction `required_sql_bool` above
+/// and `Block::try_from`'s `optional_bool` both rely on.
+fn required_sql_opt_string(
+    row: &holon_core::storage::types::StorageEntity,
+    col: &str,
+) -> Option<String> {
+    match row.get(col) {
+        Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_string()
+                .unwrap_or_else(|| panic!("block row {col:?} must be TEXT or NULL, got {v:?}"))
+                .to_string(),
+        ),
+        None => panic!(
+            "block row is missing the {col:?} column — add it to BLOCK_MATVIEW_SNAPSHOT_SQL / \
+             BLOCK_RAW_SNAPSHOT_SQL; without it every parsed Block reports {col}=None and \
+             inv-blocks-match-ref is vacuous on that field"
+        ),
+    }
+}
 
 /// Parse a batch of snapshot rows into typed [`Block`]s, fail-loud on any row
 /// that won't parse (a malformed row is a bug, never silently skipped).
@@ -126,12 +174,29 @@ pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -
             Some(other) => panic!("block row 'marks' must be a JSON string, got {other:?}"),
         };
 
+    // The typed FOLD scalars, for the same reason the edge fields above are
+    // hydrated: leaving one out does not merely lose it, it pins the SUT side to
+    // `false` for EVERY block, so `inv-blocks-match-ref` reports
+    // `collapsed: sut=false ref=true` on any folded block no matter what the
+    // store holds — and can never see a real fold regression either. Absent is
+    // a LOUD error rather than a default: the only way a column goes missing is
+    // that someone edited the snapshot SQL above, which is exactly the mistake
+    // this arm exists to stop from recurring silently.
+    block.collapsed = required_sql_bool(row, "collapsed");
+    block.widget_only = required_sql_bool(row, "widget_only");
+
     if let Some(content_type) = row.get("content_type").and_then(|v| v.as_string()) {
         block.content_type = content_type.parse::<ContentType>().unwrap();
     }
     if let Some(source_language) = row.get("source_language").and_then(|v| v.as_string()) {
         block.source_language = Some(source_language.parse::<SourceLanguage>().unwrap());
     }
+    // `source_name` is compared by `compare_block_fields` (`delta!(source_name)`)
+    // and both tables store it, so leaving it unread pins the SUT side to `None`
+    // and makes the comparison vacuous on it. Guarded like the fold scalars: a
+    // NULL here is a real value (no source name), but an ABSENT column is the
+    // SELECT having lost it, which is the failure this guard exists to catch.
+    block.source_name = required_sql_opt_string(row, "source_name");
 
     if let Some(props_val) = row.get("properties") {
         match props_val {

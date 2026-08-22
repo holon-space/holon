@@ -2079,8 +2079,8 @@ impl SutOrgRender for HeadlessFrontendComponent {
 
         // All block_raw rows by id — to resolve each file's doc (header) block.
         let header_sql = "SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
-             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.completed, \
-             b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
+             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
+             b.completed, b.block_type, b.created_at, b.updated_at, COALESCE((SELECT json_group_array(tag) \
              FROM block_tags WHERE block_id = b.id), '[]') AS tags, COALESCE((SELECT \
              json_group_array(required_id) FROM block_requires WHERE block_id = b.id), '[]') AS \
              requires, COALESCE((SELECT json_group_array(lesson_id) FROM advice_suppressed WHERE \

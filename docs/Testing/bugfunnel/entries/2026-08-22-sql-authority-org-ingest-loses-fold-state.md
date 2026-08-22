@@ -1,25 +1,24 @@
 ---
 id: 2026-08-22-sql-authority-org-ingest-loses-fold-state
 date: 2026-08-22
-gap: COVERAGE
+gap: ORACLE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
-  Under the shipped default Sql authority, ingesting an org file that carries
-  `:COLLAPSED: t` into a vault that already holds documents lands the block
-  unfolded in both block_raw and the matview — a real import-time data loss,
-  distinct from the two Loro-path drops fixed alongside it.
+  `inv-blocks-match-ref` was VACUOUS on `collapsed` / `widget_only` — neither SUT
+  snapshot SELECT carried the columns, so every parsed Block reported
+  `collapsed = false` and the parity scenario red on a store that was already
+  correct.
 ---
 
 ## Bug
 
-Un-`@wip`ing the `logseq-parity` log:4 ingest scenario on the train reds:
+Un-`@wip`ing the `logseq-parity` log:4 ingest scenario reds under the shipped
+default wiring:
 
 ```
 authority: block-CRUD=Sql(SqlOperationProvider); projection-sinks=Sql(block_raw,matview); org-writeback=on
-inv-blocks-match-ref/matview: 14 blocks, reference: 14 blocks
-  field deltas (1):
-    block:folded-parent: collapsed: sut=false ref=true
+inv-blocks-match-ref/matview: block:folded-parent  collapsed: sut=false ref=true
 ```
 
 Found in lane `collapsed-bug` while un-`@wip`ing that scenario as the
@@ -27,136 +26,151 @@ corpus-level proof of the two Loro-path drops recorded in
 [2026-08-22-org-ingest-drops-collapsed-into-property-bag](2026-08-22-org-ingest-drops-collapsed-into-property-bag.md)
 and
 [2026-08-22-loro-create-projection-drops-fold-state](2026-08-22-loro-create-projection-drops-fold-state.md).
-The scenario executed and red — on a DIFFERENT authority than either fix
-addresses. Evidence: `lane-logs/probe3.log`, `lane-logs/probe5.log`.
+
+**The store was never wrong.** This is a defect in the TEST HARNESS's readers,
+not in production. Recorded because it is the reason the two real drops above
+went undetected for so long, and because an invariant that silently cannot
+observe a field is worse than no invariant at all.
 
 ## Root cause
 
-NOT LOCALIZED to a line. It IS localized to a seam, and five hypotheses are
-dead by measurement — recorded so the next lane starts from the survivor rather
-than re-running them.
+`crates/holon-integration-tests/src/pbt/sut_row_parsing.rs` — neither snapshot
+SELECT carried the column:
 
-**Measured facts, in the order they were established.**
+* `BLOCK_MATVIEW_SNAPSHOT_SQL` (backs `SutBackend::live_block_snapshot`, the
+  `inv-blocks-match-ref/matview` reader)
+* `BLOCK_RAW_SNAPSHOT_SQL` (backs `SutBackend::block_raw_snapshot`)
 
-1. Cold-boot ingest is CORRECT. Booting from a `:COLLAPSED:` file gives
-   `block_raw.collapsed=1` and `matview.collapsed=1` (verifier's discriminator;
-   SCOPE: ingest-then-immediate-read, 3-block vault, no later transitions).
-2. The docstring→blocks→org-text round trip is CLEAN. `WriteOrgFile::parse_step`
-   yields `collapsed=true` on the parsed block and `render_step` re-emits
-   `:COLLAPSED: t`, so the SUT is handed a file that genuinely carries the
-   marker.
-3. Live-watcher ingest is ALSO correct — in the frontend_slice harness. Boot
-   empty, then `SutFixtureFs::write_org_file`, read at first appearance AND after
-   a settle: `block_raw=Some(Integer(1))`, `matview=Some(Integer(1))` at both
-   times (`lane-logs/probe5.log`, ARM A and ARM B).
-4. In the COMPOSED harness the same scenario gives, read as TYPED snapshots at
-   the moment the invariant fires: `block_raw.collapsed=Some(false)` and
-   `matview.collapsed=Some(false)`. **Both stores, not just the matview.**
-5. Per-TICK timeline in the composed harness: the block's FIRST appearance
-   already reads `block_raw=Some(false) matview=Some(false)`. It is never true
-   and later cleared — it is BORN unfolded.
+and `parse_block_row` never assigned `collapsed` / `widget_only`. So EVERY
+`Block` those readers produce carried `collapsed = false` **by construction**,
+for every block, on every wiring, regardless of the database. Comparing that
+hardcoded `false` against a reference that correctly holds `true` reds on any
+folded block — and, symmetrically, the invariant could never have caught a real
+fold regression either.
 
-6. The composed harness DOES write a real file, through the production path,
-   and the bytes CARRY the marker. Instrumenting `write_org_file` itself:
+MEASURED, in the composed harness under the failing scenario, each step a probe:
 
-   ```
-   PROBE@write_org_file impl=HeadlessFrontendComponent file=Folded.org has_COLLAPSED=true
-   content=<<<#+ID: ref-doc-0
-   * Folded parent
-   :PROPERTIES:
-   :ID: folded-parent
-   :COLLAPSED: t
-   :END:
-   …>>>
-   ```
+| where | value |
+|---|---|
+| `block_create_request` | `collapsed = true` |
+| `flush_pending_creates` | `persisted = false`, `params.collapsed = Some(Boolean(true))` |
+| batch op into the provider | `op = create`, `held = false`, `params.collapsed = Some(Boolean(true))` |
+| emitted SQL | `INSERT INTO block_raw (… "collapsed" …) VALUES (…, 1, …)` |
+| DB read immediately after commit | `collapsed = Some(Integer(1))`, rowcount 32 |
+| any single-op writer (`execute_operation`) | never fired |
+| the invariant's own reader, same tick | `collapsed = Some(false)`, rowcount 31 |
 
-**CLASS: PRODUCTION, not test infrastructure.** Fact 6 settles it. There is
-exactly ONE `SutFixtureFs` implementation in the tree
-(`frontend_slice/components.rs:3805`), the composed CapMap resolves to it (the
-probe fired from inside it), `WriteOrgFile`'s `cap_transition!` body has no
-alternative materialisation route, and the file that lands on disk carries
-`:COLLAPSED: t`. So the real `FileSyncController` ingests a correct file through
-the production path and still produces `collapsed = false`. The harness is not
-faking the write; the ingest is genuinely losing the field under this
-configuration.
+The rowcount moving 32 → 31 is what proved it was ONE database rather than two
+stores, which excluded "a writer downstream" and pointed at the reader. The
+after-commit read used an explicit `SELECT collapsed`; the invariant's read went
+through the snapshot SQL. Same row, same DB, opposite answers — the difference
+was the SELECT list.
 
-**Leading hypothesis for WHY this configuration and not the probes' — the file
-is an UPDATE to an EXISTING document, not a create.** The written header is
-`#+ID: ref-doc-0`, and `ref-doc-0` is already one of the composed harness's 14
-seeded blocks. Every green probe wrote a file for a NEW document. So the
-composed run plausibly takes `FileSyncController`'s diff-against-previous-parse
-arm (`build_block_params(block, …, Some(previous))` and the `old_blocks`
-branches) rather than the create arm — and the create arm is exactly what
-`BlockCreateRequest::of` fixed for the sibling entry. UNMEASURED: no probe has
-yet confirmed which arm runs, and a second candidate is live — the rendered
-drawer emits `:ID:` BEFORE `:COLLAPSED:`, whereas every green probe's fixture had
-`:COLLAPSED:` first, so a position-dependent parse or `_drawer_order` replay is
-not excluded. Both are one instrumented run away; neither should be asserted
-before that run.
+SEVEN hypotheses died by measurement before this one, all recorded so nobody
+re-runs them: the ingest seam; "block_raw green, matview stale"; the
+docstring→render round trip; cold-boot vs live-watcher ingest; a post-ingest
+clear; a document-UPDATE carrying a block-CREATE (probed with a matched control,
+both arms 1/1); and an alternative materialisation route (refuted at source —
+one `SutFixtureFs` impl, and `WriteOrgFile` has no branch).
 
-**A trap this bug sets, which cost this lane two wrong turns.** The failure names
-only `inv-blocks-match-ref/matview`, inviting "so block_raw is fine". It is not:
-`compare_block_raw_subset` (`holon-turso-testing/src/correspondences.rs:187-199`)
-compares only `{Content, Properties, Marks}`, so the `block_raw` arm CANNOT fire
-on `collapsed` whatever the row holds. Read the field directly, as a typed
-snapshot, before concluding anything about that arm's silence.
-
-**Dead hypotheses** (all refuted by measurement, do not re-run): the ingest seam;
-"block_raw green, matview stale"; the render round trip; cold-boot vs
-live-watcher as the discriminator; a post-ingest clear.
-
-**Product-vs-harness is SETTLED (fact 6): PRODUCT.** An earlier revision of this
-entry left it open; the `write_org_file` instrumentation closed it. This is
-user-visible data loss on the shipped default wiring — importing a folded block
-into a vault that already has documents silently unfolds it.
+A CLASS REVERSAL is recorded rather than quietly corrected: an earlier revision
+of this entry said **PRODUCT**, on the strength of the composed harness writing a
+real file whose bytes carried `:COLLAPSED: t` through the production path. That
+observation was correct and the conclusion drawn from it was not — "the write is
+correct AND the value reads wrong" has a third explanation beyond writer and
+store, namely the reader, and it was not enumerated until the row COUNT
+disagreed too. There is no import-time data loss.
 
 ## Missing piece
 
-COVERAGE. Applying the litmus questions:
+ORACLE, in the strict sense: the invariant exists, selects, runs, and is
+**vacuous** on these fields. `inv-blocks-match-ref` advertises a field-by-field
+`Block` comparison; two of those fields could not be observed by either store
+arm. Both real drops (the sibling entries) were found by a test that issues its
+own explicit `SELECT collapsed` — never by this invariant, which could not have
+seen them.
 
-1. "If a case had hit this state, would any invariant have gone red?" YES —
-   `inv-blocks-match-ref/matview` caught it on the scenario's FIRST execution. So
-   this is NOT an ORACLE gap, and `secondary` is null rather than a reflexive
-   second label.
-2. "Is there a transition sequence in the current catalog+wiring that reaches
-   this state?" YES — the parity corpus carries exactly that scenario, under the
-   DEFAULT wiring, and it reaches the state on the first try.
-
-Both yes makes this a latent red rather than a true generation gap: the sequence
-existed and the oracle worked, and the only thing between them was the `@wip`
-tag deselecting the scenario. Filed COVERAGE because a deselected scenario is
-operationally a sequence the suite cannot generate — but the remedy is not to
-write new coverage, it is to stop hiding the coverage that exists.
-
-The tag was applied for a legitimate reason (the scenario found a real bug and
-could not be left red), which is exactly how a second bug hid behind the first.
-The lesson generalises: a scenario parked `@wip` "because it found a bug" must be
-un-`@wip`ed as part of that bug's fix gate, so the tag cannot outlive its
-justification. So must the gate itself — the fix that preceded this entry gated
-only the wiring where its bug reproduced, never the shipped default, which is
-why this drop survived a CONFIRMED verification.
+Compounding it, the `/block_raw` arm compares only `{Content, Properties,
+Marks}` (`compare_block_raw_subset`, `holon-turso-testing/src/correspondences.rs`),
+so when the `/matview` arm fires on `collapsed` the silence of the `/block_raw`
+arm says nothing — a trap that cost this investigation two wrong turns.
 
 ## Remedy
 
-OPEN. Next job for lane `collapsed-bug`.
+FIXED in lane `collapsed-bug`, in the harness only — no production file changed.
 
-The red needs no construction: un-`@wip` the log:4 ingest scenario in
-`logseq-parity/outliner.feature` and the parity replay reds on this divergence
-under the default wiring.
+* `collapsed, widget_only` added to BOTH snapshot SELECTs.
+* `parse_block_row` assigns both, via `required_sql_bool`, which PANICS on an
+  absent column and names the two constants to fix. Deliberately fail-loud
+  instead of defaulting: defaulting is exactly how this stayed invisible, and a
+  silent `false` is the "silently degrades to look fine" outcome the repo's
+  error ladder forbids outright.
 
-Start by discriminating the two live hypotheses, in this order — each is one
-instrumented run, and the first is far cheaper to test:
+Red → green, and the shape of the green IS the proof: the parity replay goes
+from `2 replayed, 4 skipped` (scenario deselected) to `3 replayed, 3 skipped`
+with the whole replay passing, **with zero production changes**. A production fix
+could not have produced that; only the reader could.
 
-1. UPDATE-vs-CREATE arm. Write the same fixture twice into a
-   frontend_slice-style probe: once as a NEW document (known green) and once
-   under a `#+ID:` that already exists in the vault. If only the second reds, the
-   seam is `FileSyncController`'s diff-against-previous-parse arm, and the fix
-   is the update-path analogue of `BlockCreateRequest::of`.
-2. Drawer POSITION. Same probe, one fixture with `:COLLAPSED:` before `:ID:` and
-   one after. If only the second reds, the seam is a position-dependent parse or
-   `_drawer_order` replay.
+Neutrality measured, not assumed: `holon-integration-tests --lib` reports
+`377 passed; 9 failed` on the landed base AND with this change, with byte-identical
+failing test names — the 9 are the documented region-literal known-red family
+(`docs/Testing/KeystoneKnownReds.md:162-167,181`), untouched here.
 
-Then fix, then un-`@wip` for real — at which point the scenario becomes the
-standing gate for all three drops at once. Note for whoever picks this up: five
-path hypotheses are already dead above, and this bug has been mis-attributed
-four times by reasoning rather than measurement. Probe first.
+## Full-field audit
+
+Every typed field of `Block` against what the matview arm's comparator
+(`compare_block_fields`) compares, what each table stores, and what each of the
+THREE harness readers selects. Done because fixing one blind field is worth
+little if its siblings are blind too.
+
+| `Block` field | compared? | stored | matview reader | block_raw reader | `SutOrgRender` |
+|---|---|---|---|---|---|
+| `id` / `parent_id` / `content` / `content_type` / `source_language` | yes | yes | yes | yes | yes |
+| `properties` / `marks` | yes | yes | yes | yes | yes |
+| `source_name` | yes | yes | **ADDED** | **ADDED** | already |
+| `collapsed` | yes | yes | **ADDED** | **ADDED** | already |
+| `widget_only` | yes | yes | **ADDED** | **ADDED** | **ADDED** |
+| `created_at` / `updated_at` | normalized away | yes | no — declared | no — declared | already |
+| `tags` / `requires` / `advice_suppressed` / `contributes_to` | yes | junctions | yes | n/a | already |
+
+Three readers, not two — the third was found by the verifier:
+`SutOrgRender` (`frontend_slice/components.rs:2081-2089`) runs its OWN header
+SELECT and parses with `Block::try_from`, whose `optional_bool`
+(`holon-api/src/block.rs:817-826`) defaults an absent column to `false` BY
+DESIGN. It listed `b.collapsed`, `b.completed`, `b.block_type` but not
+`b.widget_only`, so it rendered every widget-only block as ordinary. Now added.
+Measured before AND after that widening, because it touches the very field the
+seed corpus differs on: `pbt::composed::live_mcp::tests::seed_wide_stays_aligned`
+passes in BOTH states (`lane-logs/seedwide-BEFORE.log`, `seedwide-AFTER.log`).
+
+SCOPE OF EACH ARM, so the widening is not over-read: the `/block_raw`
+correspondence arm compares only `{Content, Properties, Marks}`
+(`compare_block_raw_subset`, `holon-turso-testing/src/correspondences.rs:187-208`).
+Fold state is therefore observed by the `/matview` arm ALONE; widening the
+`block_raw` SELECT does not add a comparison, it only feeds `required_sql_bool`
+so that a future edit dropping the column fails loud instead of silently.
+
+DECLARED BLINDNESS, stated rather than silent:
+
+* `created_at` / `updated_at` — `normalize_block` (`block_compare.rs:75-76`)
+  zeroes BOTH sides before comparison, so selecting them is inert either way.
+* The `/block_raw` arm cannot see the junction edge fields because `block_raw`
+  does not store them — the documented subset, not a defect.
+
+CORRECTION to an earlier revision of this entry, which listed `task_state`,
+`priority`, `completed`, `block_type` and `sort_key` as further vacuities. That
+list was wrong, and the error was mine — it came from grepping the parser rather
+than reading the schema:
+
+* `task_state` is `FieldStorage::Property` (`holon-pattern/src/schema.rs:210-214`)
+  and `priority` is not in the schema at all. Both travel inside `properties`,
+  which IS selected and IS compared (`normalize_block` keeps `task_state`,
+  `block_compare.rs:113-126`). They are covered. `parse_block_row`'s
+  `row.get("task_state")` / `row.get("priority")` branches are simply DEAD CODE
+  against these SELECTs — worth deleting, but not a vacuity.
+* `completed`, `block_type`, `sort_key`, `write_seq` are stored COLUMNS but not
+  typed `Block` fields, so no `Block` comparison can involve them and they
+  cannot be vacuous in `inv-blocks-match-ref`.
+
+So `source_name` was the ONE genuine additional instance, and it is un-blinded
+here alongside `collapsed` / `widget_only`.
