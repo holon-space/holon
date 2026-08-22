@@ -92,6 +92,10 @@ web-time = "1"
 
 [dev-dependencies]
 holon-block-roundtrip-testing.workspace = true
+# TEST-ONLY, and it must stay that way: a production dep would make the
+# substrate read its own profile, and the profile would stop being an
+# independent statement ABOUT it (pinned by holon-architecture-tests).
+holon-capability.workspace = true
 holon-engine = { path = "../holon-engine" }
 holon-filesystem.workspace = true
 holon-loro = { workspace = true, features = ["test-helpers"] }
@@ -108,6 +112,10 @@ tracing-subscriber.workspace = true
 serial_test.workspace = true
 tempfile.workspace = true
 similar-asserts = "1.7.0"
+
+[[test]]
+name = "capability_certification"
+required-features = ["test-helpers"]
 
 [[test]]
 name = "e2e_backend_engine_test"

@@ -3,6 +3,7 @@
 //! Data, never a type parameter — datatypes are runtime-declared, so
 //! capability cannot be monomorphized (design Fork 2).
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ use crate::axes::PropertyKeysAxis;
 use crate::axes::PropertyValuesAxis;
 use crate::clause::ClauseId;
 use crate::clause::EnforcementMap;
+use crate::clause::Marker;
 
 /// The name of a durable format. Equality IS the profile's identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -98,8 +100,10 @@ struct ProfileDocument {
     /// DATA, not a `#`-comment, because the certifier gates on it: a clause
     /// that is neither probed nor listed here is itself a finding. A comment
     /// could never do that job, and 2b.1 proved a comment does not.
+    /// Each entry carries the REASON nothing drives it — a bare marker is the
+    /// same defect as a deferral with no site.
     #[serde(default)]
-    not_yet_certified: BTreeSet<ClauseId>,
+    not_yet_certified: Vec<Marker>,
     /// WHO enforces each clause. Required to cover every clause exactly once —
     /// a clause with no stated owner is a load error, because a defaulted
     /// owner is how the layer dimension would rot back into invisibility.
@@ -112,7 +116,7 @@ struct ProfileDocument {
 pub struct CapabilityProfile {
     id: CapabilityProfileId,
     revision: ProfileRevision,
-    not_yet_certified: BTreeSet<ClauseId>,
+    not_yet_certified: BTreeMap<ClauseId, String>,
     enforced_by: EnforcementMap,
     fidelity: FidelityAxes,
     /// Where the yaml came from, when it came from a file. Reported with every
@@ -158,10 +162,28 @@ impl CapabilityProfile {
                 doc.profile
             )
         })?;
+        let mut markers: BTreeMap<ClauseId, String> = BTreeMap::new();
+        for marker in doc.not_yet_certified {
+            if marker.reason.trim().is_empty() {
+                anyhow::bail!(
+                    "profile '{}': the `not_yet_certified` marker on {} has no reason — a bare \
+                     marker asserts nothing a reader can check",
+                    doc.profile,
+                    marker.clause
+                );
+            }
+            if markers.insert(marker.clause, marker.reason).is_some() {
+                anyhow::bail!(
+                    "profile '{}': {} is marked `not_yet_certified` twice",
+                    doc.profile,
+                    marker.clause
+                );
+            }
+        }
         Ok(Self {
             id: doc.profile,
             revision,
-            not_yet_certified: doc.not_yet_certified,
+            not_yet_certified: markers,
             enforced_by: doc.enforced_by,
             fidelity: doc.fidelity_axes,
             source: None,
@@ -181,10 +203,15 @@ impl CapabilityProfile {
         &self.revision
     }
 
-    /// Clauses this profile admits nothing drives. Excused from the coverage
-    /// law, and ONLY these.
-    pub fn not_yet_certified(&self) -> &BTreeSet<ClauseId> {
+    /// Clauses this profile admits nothing drives, each with its reason.
+    /// Excused from the coverage law, and ONLY these.
+    pub fn not_yet_certified(&self) -> &BTreeMap<ClauseId, String> {
         &self.not_yet_certified
+    }
+
+    /// Just the clause names, for the coverage law.
+    pub fn marked_clauses(&self) -> BTreeSet<ClauseId> {
+        self.not_yet_certified.keys().copied().collect()
     }
 
     /// Which layer enforces each clause.
@@ -262,6 +289,43 @@ mod tests {
         assert!(
             err.contains("capability-profile yaml"),
             "the refusal must name what failed; got: {err}"
+        );
+    }
+
+    /// The retired `vector_of_refs` must fail LOUDLY and say where the concept
+    /// went — a profile written against the old vocabulary must not load and
+    /// must not leave its author guessing.
+    #[test]
+    fn the_retired_vector_of_refs_names_the_axis_that_took_it_over() {
+        let old = minimal_with("reference_values: none", "reference_values: vector_of_refs");
+        // `{:#}` — the serde message is the CAUSE; the outer context only says
+        // which file failed to parse.
+        let err = format!(
+            "{:#}",
+            CapabilityProfile::from_yaml(&old)
+                .expect_err("a retired vocabulary value must not load")
+        );
+        assert!(
+            err.contains("multi_value"),
+            "the refusal must point at the axis that governs cardinality; got: {err}"
+        );
+    }
+
+    /// A marker with no reason is the same defect as a deferral with no site:
+    /// it excuses a clause from the coverage law while asserting nothing.
+    #[test]
+    fn a_not_yet_certified_marker_without_a_reason_is_a_load_error() {
+        let blank = minimal_with(
+            "  - clause: hosted_kinds\n    reason: no stub in this crate drives it; the org \
+             harness does",
+            "  - clause: hosted_kinds\n    reason: \"  \"",
+        );
+        let err = CapabilityProfile::from_yaml(&blank)
+            .expect_err("a marker with a blank reason must not load")
+            .to_string();
+        assert!(
+            err.contains("has no reason"),
+            "the refusal must say the marker carries no reason; got: {err}"
         );
     }
 

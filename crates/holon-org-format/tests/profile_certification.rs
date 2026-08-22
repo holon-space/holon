@@ -39,7 +39,9 @@ use holon_capability::Extension;
 use holon_capability::IdCarrier;
 use holon_capability::InlineConstruct;
 use holon_capability::Leg;
+use holon_capability::MultiValueReadback;
 use holon_capability::Readback;
+use holon_capability::ReferenceReadback;
 use holon_capability::WriteAttempt;
 use holon_capability::WriteLeg;
 use holon_capability::certify;
@@ -606,19 +608,28 @@ impl CertifiableFormat for OrgFormat {
         &self,
         values: &[&str],
         separator: &str,
-    ) -> anyhow::Result<Option<Vec<String>>> {
+    ) -> anyhow::Result<Option<MultiValueReadback>> {
         let joined = values.join(separator);
         let src = format!(
             "#+TITLE: Certify\n\n* {PROBE_HEADLINE}\n:PROPERTIES:\n:ID: \
              {BLOCK_ID}\n:REQUIRES: {joined}\n:END:\n"
         );
-        let parsed = parse_org_file(
+        // A field that did NOT split leaves one value, and one value that is
+        // not a bare id is REFUSED — the law's other legal branch, not a
+        // harness failure.
+        let parsed = match parse_org_file(
             Path::new(FILE),
             &src,
             &EntityUri::no_parent(),
             Path::new(ROOT),
-        )
-        .map_err(|e| anyhow::anyhow!("the multi-value fixture must parse: {e}"))?;
+        ) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                return Ok(Some(MultiValueReadback::Refused {
+                    reason: e.to_string(),
+                }));
+            }
+        };
         // FULL round trip, not parse-only: the claim is what survives to disk
         // and back. Reading `requires` straight off the parse would measure
         // the parser's order and miss the renderer's sort — an adjacent
@@ -641,9 +652,73 @@ impl CertifiableFormat for OrgFormat {
             .iter()
             .find(|b| b.org_title() == PROBE_HEADLINE)
             .ok_or_else(|| anyhow::anyhow!("the multi-value fixture must carry the probe block"))?;
-        Ok(Some(
+        Ok(Some(MultiValueReadback::Values(
             block.requires.iter().map(|u| u.id().to_string()).collect(),
-        ))
+        )))
+    }
+
+    /// Drives `reference_values` through `:REQUIRES:`, org's only
+    /// reference-typed drawer key (`parser.rs:1486-1496`).
+    ///
+    /// The typed readback is `block.requires: Vec<EntityUri>` — a value that
+    /// became a reference is IN it, one that did not is a flat string property,
+    /// and one the boundary rejected is an `Err`. Those are exactly the three
+    /// answers the clause turns on.
+    fn round_trip_reference(&self, value: &str) -> anyhow::Result<Option<ReferenceReadback>> {
+        let src = format!(
+            "#+TITLE: Certify\n\n* {PROBE_HEADLINE}\n:PROPERTIES:\n:ID: \
+             {BLOCK_ID}\n:REQUIRES: {value}\n:END:\n"
+        );
+        let parsed = match parse_org_file(
+            Path::new(FILE),
+            &src,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        ) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                return Ok(Some(ReferenceReadback::Refused {
+                    reason: e.to_string(),
+                }));
+            }
+        };
+        let rendered = OrgRenderer::render_document(
+            &parsed.document,
+            &parsed.blocks,
+            Path::new(FILE),
+            &parsed.document.id,
+        );
+        let back = match parse_org_file(
+            Path::new(FILE),
+            &rendered,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        ) {
+            Ok(back) => back,
+            Err(e) => {
+                return Ok(Some(ReferenceReadback::Refused {
+                    reason: e.to_string(),
+                }));
+            }
+        };
+        let block = back
+            .blocks
+            .iter()
+            .find(|b| b.org_title() == PROBE_HEADLINE)
+            .ok_or_else(|| anyhow::anyhow!("the reference fixture must carry the probe block"))?;
+        if block.requires.is_empty() {
+            return Ok(Some(ReferenceReadback::Plain(
+                block
+                    .properties
+                    .get("REQUIRES")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default()
+                    .to_string(),
+            )));
+        }
+        Ok(Some(ReferenceReadback::Refs(
+            block.requires.iter().map(|u| u.id().to_string()).collect(),
+        )))
     }
 
     /// Drives `identity.carriers` — each carrier in the CLOSED vocabulary.

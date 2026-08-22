@@ -324,7 +324,10 @@ fn loro_doc_escapes_match_the_allow_list() {
 
 /// Format crates whose capability profile must stay an INDEPENDENT statement
 /// about them. One entry per crate that ships a `profile.yaml`.
-const PROFILED_FORMAT_CRATES: &[&str] = &["holon-org-format"];
+// `holon` is here for the same reason a format crate is: it hosts the
+// holon-native profile, and a substrate that reads its own profile at runtime
+// would certify only that it agrees with itself.
+const PROFILED_FORMAT_CRATES: &[&str] = &["holon-org-format", "holon"];
 
 /// A capability profile describes a format from OUTSIDE it.
 ///

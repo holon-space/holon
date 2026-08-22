@@ -149,6 +149,13 @@ pub enum EnforcementLayer {
     /// The sync controller / consolidator: renames, merges, conflict
     /// surfacing, structural refusals that need vault context.
     Sync,
+    /// The OPERATION layer — `BlockOperations` and the block-op catalog, which
+    /// refuse an edit BEFORE it reaches a file. Distinct from `Sync`: a
+    /// pre-flight refusal leaves the tree untouched and never observes a
+    /// resolution. It exists because `hierarchy_reparent` was labelled `sync`
+    /// with a note admitting the label was approximate, and a label the
+    /// coverage law reads must not be approximate.
+    Operation,
     /// Type declaration: refused when the type is declared, not when a value
     /// is written (`declare_type`).
     Declaration,
@@ -174,6 +181,21 @@ pub struct DeferralSite {
     pub site: String,
 }
 
+/// A `not_yet_certified` marker must say WHY nothing drives the clause.
+///
+/// Same argument as `DeferralSite`: a bare marker reads like a considered
+/// decision while asserting nothing. The reason is what a later reader needs
+/// to know whether the obstacle still stands — "not discriminable, because the
+/// separator axis consumes the discriminating shape" is checkable; silence is
+/// not.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Marker {
+    pub clause: ClauseId,
+    /// What was measured, and why it did not settle the clause.
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnforcementMap {
@@ -181,6 +203,8 @@ pub struct EnforcementMap {
     pub format: BTreeSet<ClauseId>,
     #[serde(default)]
     pub sync: Vec<DeferralSite>,
+    #[serde(default)]
+    pub operation: Vec<DeferralSite>,
     #[serde(default)]
     pub declaration: Vec<DeferralSite>,
 }
@@ -192,7 +216,12 @@ impl EnforcementMap {
     /// back into invisibility.
     pub fn check_total(&self) -> Result<(), String> {
         // A blank site is the same failure as a missing one.
-        for d in self.sync.iter().chain(self.declaration.iter()) {
+        for d in self
+            .sync
+            .iter()
+            .chain(self.operation.iter())
+            .chain(self.declaration.iter())
+        {
             if d.site.trim().is_empty() {
                 return Err(format!(
                     "{} is deferred to another layer but names no enforcing site",
@@ -204,6 +233,7 @@ impl EnforcementMap {
         let mut seen: Vec<ClauseId> = Vec::new();
         seen.extend(self.format.iter().copied());
         seen.extend(self.sync.iter().map(|d| d.clause));
+        seen.extend(self.operation.iter().map(|d| d.clause));
         seen.extend(self.declaration.iter().map(|d| d.clause));
 
         let unique: BTreeSet<ClauseId> = seen.iter().copied().collect();
@@ -227,6 +257,8 @@ impl EnforcementMap {
     pub fn layer_of(&self, clause: ClauseId) -> EnforcementLayer {
         if self.sync.iter().any(|d| d.clause == clause) {
             EnforcementLayer::Sync
+        } else if self.operation.iter().any(|d| d.clause == clause) {
+            EnforcementLayer::Operation
         } else if self.declaration.iter().any(|d| d.clause == clause) {
             EnforcementLayer::Declaration
         } else {
@@ -238,6 +270,7 @@ impl EnforcementMap {
     pub fn site_of(&self, clause: ClauseId) -> Option<&str> {
         self.sync
             .iter()
+            .chain(self.operation.iter())
             .chain(self.declaration.iter())
             .find(|d| d.clause == clause)
             .map(|d| d.site.as_str())
@@ -443,6 +476,7 @@ mod tests {
         EnforcementMap {
             format: ALL_CLAUSES.iter().copied().collect(),
             sync: Vec::new(),
+            operation: Vec::new(),
             declaration: Vec::new(),
         }
     }
@@ -497,6 +531,43 @@ mod tests {
                 .any(|d| d.clause == ClauseId::HierarchyConstraints
                     && d.layer == EnforcementLayer::Sync),
             "it must be reported in its own category instead"
+        );
+    }
+
+    /// The falsifier for the OPERATION layer: a format probe driving a clause
+    /// the profile assigns to it is a category error, and the coverage law must
+    /// say so rather than count it as covered.
+    ///
+    /// Without this the new variant would ship unexercised — a layer label
+    /// nothing can contradict is the same defect as a citation nothing checks.
+    #[test]
+    fn a_format_probe_driving_an_operation_layer_clause_is_a_gap() {
+        let mut map = all_format();
+        map.format.remove(&ClauseId::HierarchyReparent);
+        map.operation.push(DeferralSite {
+            clause: ClauseId::HierarchyReparent,
+            site: "traits.rs:2429-2440".to_string(),
+        });
+        let driven: BTreeSet<ClauseId> = [ClauseId::HierarchyReparent].into_iter().collect();
+        let (gaps, deferred) = coverage_gaps(
+            &map,
+            &BTreeSet::new(),
+            &driven,
+            &MemberCoverage::new(),
+            &MemberCoverage::new(),
+        );
+        assert!(
+            gaps.iter().any(|g| g.clause == ClauseId::HierarchyReparent
+                && g.reason == GapReason::DrivenAtWrongLayer(EnforcementLayer::Operation)),
+            "a format probe must not certify an operation-layer clause: {gaps:?}"
+        );
+        assert!(
+            deferred
+                .iter()
+                .any(|d| d.clause == ClauseId::HierarchyReparent
+                    && d.layer == EnforcementLayer::Operation
+                    && d.site == "traits.rs:2429-2440"),
+            "and the deferral must still name its site: {deferred:?}"
         );
     }
 

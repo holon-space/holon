@@ -9,31 +9,56 @@
 pub const MINIMAL: &str = r#"
 profile: test
 not_yet_certified:
-  # No stub implements these probes; org drives them. Coverage is per-format.
-  - hosted_kinds
-  - content_representation
-  - content_inline_constructs
-  - content_block_constructs
-  - property_keys_charset
-  - property_keys_collision
-  - property_values_multi_value
-  - property_values_reference_values
-  - ordering_sibling_order
-  - ordering_order_key_durable
-  - ordering_property_order
-  - hierarchy_shape
-  - hierarchy_max_depth
-  - hierarchy_cycles
-  - identity_id_space
-  - identity_id_origin
-  - identity_id_constraints
-  - identity_carriers
-  - identity_carrier_disagreement
-  - mutation_write_leg
-  - mutation_unit_of_write
-  - assets_attachments
-  - assets_binary_inline
-  - assets_extensions
+  # No stub implements these probes; org drives them. Coverage is per-format,
+  # and every marker states its reason — a bare marker is a load error.
+  - clause: hosted_kinds
+    reason: no stub in this crate drives it; the org harness does
+  - clause: content_representation
+    reason: no stub in this crate drives it; the org harness does
+  - clause: content_inline_constructs
+    reason: no stub in this crate drives it; the org harness does
+  - clause: content_block_constructs
+    reason: no stub in this crate drives it; the org harness does
+  - clause: property_keys_charset
+    reason: no stub in this crate drives it; the org harness does
+  - clause: property_keys_collision
+    reason: no stub in this crate drives it; the org harness does
+  - clause: property_values_multi_value
+    reason: no stub in this crate drives it; the org harness does
+  - clause: property_values_reference_values
+    reason: no stub in this crate drives it; the org harness does
+  - clause: ordering_sibling_order
+    reason: no stub in this crate drives it; the org harness does
+  - clause: ordering_order_key_durable
+    reason: no stub in this crate drives it; the org harness does
+  - clause: ordering_property_order
+    reason: no stub in this crate drives it; the org harness does
+  - clause: hierarchy_shape
+    reason: no stub in this crate drives it; the org harness does
+  - clause: hierarchy_max_depth
+    reason: no stub in this crate drives it; the org harness does
+  - clause: hierarchy_cycles
+    reason: no stub in this crate drives it; the org harness does
+  - clause: identity_id_space
+    reason: no stub in this crate drives it; the org harness does
+  - clause: identity_id_origin
+    reason: no stub in this crate drives it; the org harness does
+  - clause: identity_id_constraints
+    reason: no stub in this crate drives it; the org harness does
+  - clause: identity_carriers
+    reason: no stub in this crate drives it; the org harness does
+  - clause: identity_carrier_disagreement
+    reason: no stub in this crate drives it; the org harness does
+  - clause: mutation_write_leg
+    reason: no stub in this crate drives it; the org harness does
+  - clause: mutation_unit_of_write
+    reason: no stub in this crate drives it; the org harness does
+  - clause: assets_attachments
+    reason: no stub in this crate drives it; the org harness does
+  - clause: assets_binary_inline
+    reason: no stub in this crate drives it; the org harness does
+  - clause: assets_extensions
+    reason: no stub in this crate drives it; the org harness does
 enforced_by:
   # The parse/render code of this crate — the only layer a format-crate
   # certification harness can reach, and therefore the only layer whose
@@ -81,12 +106,6 @@ enforced_by:
     # rather than at the moment of the edit.
     - clause: hierarchy_constraints
       site: "crates/holon-filesystem/src/sync_ports.rs:277-285 (name_chain ancestor-miss bail)"
-    # CORRECTED: the name_chain bail refuses a RESOLUTION with broken ancestry
-    # (it fires for an import, a delete or a bad seed too) and never observes a
-    # reparent. The operation-side refusal is its own site, pre-flight, and it
-    # leaves the tree untouched.
-    - clause: hierarchy_reparent
-      site: "crates/holon-core/src/traits.rs:2429-2440 (move_block page-under-non-page refusal; shared predicate block_op_catalog::page_under_non_page_prohibited; pinned by block_operations_tests.rs:1290, which asserts the tree is UNTOUCHED after the refusal)"
     # A rename is a filesystem event; the controller derives the new path from
     # the new title and retires the old one.
     - clause: identity_rename_stability
@@ -99,6 +118,11 @@ enforced_by:
     # Surfacing a conflict is a controller concern, above the format entirely.
     - clause: mutation_conflict_surface
       site: "crates/holon-filesystem/src/file_sync_controller.rs:1042 (3-way merger wiring, no-store conflict path)"
+  # The OPERATION layer: `BlockOperations` refuses the edit BEFORE it reaches a
+  # file — pre-flight, leaving the tree untouched.
+  operation:
+    - clause: hierarchy_reparent
+      site: "crates/holon-core/src/traits.rs:2429-2440 (move_block page-under-non-page refusal; shared predicate block_op_catalog::page_under_non_page_prohibited; pinned by block_operations_tests.rs:1290, which asserts the tree is UNTOUCHED after the refusal)"
   # Refused when the TYPE is declared, not when a value is written.
   declaration:
     - clause: computed_live

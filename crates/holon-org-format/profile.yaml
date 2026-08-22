@@ -30,8 +30,14 @@ profile: org
 # declared from a citation and driven by nothing. The certifier prints a
 # MARKER line per entry, so the report never reads like full coverage.
 not_yet_certified:
-  # Not DISCRIMINABLE by a format probe — see the note at `reference_values`.
-  - property_values_reference_values
+  - clause: property_values_reference_values
+    reason: >-
+      MEASURED, not assumed: only `none` is decidable from a round trip. org's
+      wire form is a bare slug for BOTH an id and a name, and every name shape
+      that differs from an id shape contains a separator, which multi_value
+      consumes first — probing "Some Page Title" reads back
+      Refs(["Page", "Some", "Title"]), i.e. the split, not the naming. by_id
+      vs by_name needs resolution, which belongs to the store.
 
 enforced_by:
   # The parse/render code of this crate — the only layer a format-crate
@@ -80,14 +86,6 @@ enforced_by:
     # rather than at the moment of the edit.
     - clause: hierarchy_constraints
       site: "crates/holon-filesystem/src/sync_ports.rs:277-285 (name_chain ancestor-miss bail)"
-    # CORRECTED: the name_chain bail refuses a RESOLUTION with broken ancestry
-    # (it fires for an import, a delete or a bad seed too) and never observes a
-    # reparent. The operation-side refusal is its own site, pre-flight, and it
-    # leaves the tree untouched. The `sync` label is APPROXIMATE for this one:
-    # the enforcer is holon-core's default BlockOperations impl, not the sync
-    # controller. `site:` is authoritative; the label only feeds `layer_of()`.
-    - clause: hierarchy_reparent
-      site: "crates/holon-core/src/traits.rs:2429-2440 (move_block page-under-non-page refusal; shared predicate block_op_catalog::page_under_non_page_prohibited; pinned by block_operations_tests.rs:1290, which asserts the tree is UNTOUCHED after the refusal)"
     # A rename is a filesystem event; the controller derives the new path from
     # the new title and retires the old one.
     - clause: identity_rename_stability
@@ -100,6 +98,13 @@ enforced_by:
     # Surfacing a conflict is a controller concern, above the format entirely.
     - clause: mutation_conflict_surface
       site: "crates/holon-filesystem/src/file_sync_controller.rs:1042 (3-way merger wiring, no-store conflict path)"
+  # The OPERATION layer: `BlockOperations` refuses the edit BEFORE it reaches a
+  # file. Not `sync` — a pre-flight refusal leaves the tree untouched and never
+  # observes a resolution, and labelling it `sync` meant the coverage law read
+  # an approximation.
+  operation:
+    - clause: hierarchy_reparent
+      site: "crates/holon-core/src/traits.rs:2429-2440 (move_block page-under-non-page refusal; shared predicate block_op_catalog::page_under_non_page_prohibited; pinned by block_operations_tests.rs:1290, which asserts the tree is UNTOUCHED after the refusal)"
   # Refused when the TYPE is declared, not when a value is written.
   declaration:
     - clause: computed_live
@@ -255,14 +260,15 @@ fidelity_axes:
     # NOT YET CERTIFIED (2b.2) — citations are evidence, not a gate.
     multi_value:
       kind: delimited
-      # MEASURED: org splits on WHITESPACE **or** COMMA (parser.rs:930-931
-      # accepts both), and `;` does not split. The vocabulary holds ONE
-      # separator, so this clause cannot state the truth — declaring "," is
-      # equally true and the certifier cannot tell them apart. `;` DOES red, so
-      # the clause is falsifiable; it just cannot discriminate between two
-      # values that both hold. Recorded as a 2b.3 vocabulary item
-      # (separator: one value vs a set).
-      separator: " "
+      # parser.rs:1493 — `c == ',' || c.is_whitespace()`, and `is_whitespace`
+      # is the Unicode property, not ASCII space. Every MEASURED delimiter is
+      # declared: comma, space, TAB and NBSP (U+00A0), each found by the
+      # certifier's negative arm rather than by reading the predicate.
+      # `\n`/`\r` are NOT delimiters here — they TERMINATE the drawer line, so
+      # the field is destroyed rather than split (measured: empty readback).
+      # Naming one of several true delimiters was a claim nothing could
+      # falsify.
+      separators: [",", " ", "\t", "\u00a0"]
       # models.rs:934-940 — REQUIRES is sorted on render, so order is not
       # semantic.
       semantics: set

@@ -5197,6 +5197,7 @@ dependencies = [
  "holon-advice",
  "holon-api",
  "holon-block-roundtrip-testing",
+ "holon-capability",
  "holon-core",
  "holon-engine",
  "holon-filesystem",

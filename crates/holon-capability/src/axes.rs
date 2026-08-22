@@ -166,13 +166,52 @@ pub enum Representability {
 pub enum MultiValue {
     None,
     Delimited {
-        separator: String,
+        /// EVERY delimiter that splits, not one of them. org's edge fields
+        /// split on a comma OR any whitespace
+        /// (`crates/holon-org-format/src/parser.rs:1493`), and a single string
+        /// cannot say that: declaring either value alone was true, so neither
+        /// could be falsified by flipping it to the other.
+        separators: BTreeSet<Separator>,
         semantics: MultiValueSemantics,
         scope: MultiValueScope,
     },
     NativeVector {
         semantics: MultiValueSemantics,
     },
+}
+
+/// One delimiter that splits a multi-valued field. Non-empty by construction —
+/// an empty separator would split every character and is never a real claim.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Separator(String);
+
+impl Separator {
+    pub fn new(sep: impl Into<String>) -> Result<Self, String> {
+        let sep = sep.into();
+        if sep.is_empty() {
+            return Err("a separator may not be empty".to_string());
+        }
+        Ok(Self(sep))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for Separator {
+    type Error = String;
+
+    fn try_from(sep: String) -> Result<Self, Self::Error> {
+        Self::new(sep)
+    }
+}
+
+impl From<Separator> for String {
+    fn from(sep: Separator) -> Self {
+        sep.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,14 +233,37 @@ pub enum MultiValueScope {
     EdgeFieldsOnly,
 }
 
-/// How a property refers to another entity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// How a property NAMES another entity. Naming only — how MANY references a
+/// property carries is `multi_value`'s question, and a value that answered
+/// both let one axis certify the other's observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReferenceValues {
     None,
     ByName,
     ById,
-    VectorOfRefs,
+}
+
+impl<'de> Deserialize<'de> for ReferenceValues {
+    /// Hand-written for ONE reason: the retired `vector_of_refs` must fail with
+    /// a message that says where the concept went. `unknown variant` would send
+    /// the reader looking for a typo.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(d)?;
+        match value.as_str() {
+            "none" => Ok(Self::None),
+            "by_name" => Ok(Self::ByName),
+            "by_id" => Ok(Self::ById),
+            "vector_of_refs" => Err(serde::de::Error::custom(
+                "`vector_of_refs` states a CARDINALITY, which the `multi_value` axis governs; \
+                 `reference_values` states NAMING only (none | by_id | by_name)",
+            )),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["none", "by_id", "by_name"],
+            )),
+        }
+    }
 }
 
 /// Axis 4 — what the format can carry as a property VALUE.

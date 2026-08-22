@@ -1,0 +1,201 @@
+# Capability profile for `holon-native` — Holon's OWN substrate.
+#
+# CV-B: a NORMAL certified yaml, never an implicit top. "The substrate carries
+# everything" is the kind of claim that goes untested because it sounds
+# obviously true; this profile is certified by
+# `crates/holon/tests/capability_certification.rs` against the production
+# operation provider and the production schema.
+#
+# Increment 2b.3 drives axes 3 and 4 through the real write → read round trip.
+# Every other clause is either marked `not_yet_certified` WITH ITS REASON or
+# deferred to the layer that enforces it — a clause that is neither is a
+# coverage GAP and fails the run.
+profile: holon-native
+
+not_yet_certified:
+  - clause: hosted_kinds
+    reason: >-
+      2b.3 drives the block write path only; the free-standing typed row the
+      block-generalization program adds is not in this tree yet.
+  - clause: content_representation
+    reason: 2b.3 drives properties, not block content; the content probes are 2b.4 work.
+  - clause: content_inline_constructs
+    reason: 2b.3 drives properties, not block content; the content probes are 2b.4 work.
+  - clause: content_block_constructs
+    reason: 2b.3 drives properties, not block content; the content probes are 2b.4 work.
+  - clause: property_keys_charset
+    reason: >-
+      the key vocabulary is whatever JSON accepts; a charset probe needs a key
+      the boundary REFUSES, and 2b.3 found none to drive the clause with.
+  - clause: property_keys_collision
+    reason: >-
+      one create carries one value per key, so a collision needs the update
+      path — 2b.3 drives create only.
+  - clause: property_values_multi_value
+    reason: >-
+      the substrate stores an Array as JSON rather than splitting a string, so
+      the delimited-vs-native question needs the edge-field seam, not the blob.
+  - clause: property_values_reference_values
+    reason: >-
+      same bound as org, one layer down: the blob holds a string, and whether
+      it NAMES an entity by id or by name is resolution, not storage.
+  - clause: ordering_sibling_order
+    reason: ordering needs sibling writes and a read of their order; 2b.3 writes one block.
+  - clause: ordering_order_key_durable
+    reason: ordering needs sibling writes and a read of their order; 2b.3 writes one block.
+  - clause: ordering_property_order
+    reason: >-
+      the blob is a serde_json::Map, whose order behaviour is a serialization
+      question the 2b.3 probe does not reach.
+  - clause: hierarchy_shape
+    reason: hierarchy needs a multi-block fixture; 2b.3 writes one block under the FK anchor.
+  - clause: hierarchy_max_depth
+    reason: hierarchy needs a multi-block fixture; 2b.3 writes one block under the FK anchor.
+  - clause: hierarchy_cycles
+    reason: hierarchy needs a multi-block fixture; 2b.3 writes one block under the FK anchor.
+  - clause: identity_id_space
+    reason: identity probes need the id-minting path, which 2b.3 supplies rather than observes.
+  - clause: identity_id_origin
+    reason: identity probes need the id-minting path, which 2b.3 supplies rather than observes.
+  - clause: identity_id_constraints
+    reason: identity probes need the id-minting path, which 2b.3 supplies rather than observes.
+  - clause: identity_carriers
+    reason: the substrate has ONE id carrier by construction; a probe would restate the schema.
+  - clause: identity_carrier_disagreement
+    reason: with one carrier there is nothing to disagree, so the clause has no observation here.
+  - clause: mutation_write_leg
+    reason: 2b.3 writes through the provider but does not yet compare it against the other legs.
+  - clause: mutation_unit_of_write
+    reason: 2b.3 writes through the provider but does not yet compare it against the other legs.
+  - clause: assets_attachments
+    reason: the substrate has no attachment path of its own; assets arrive through a format.
+  - clause: assets_binary_inline
+    reason: the substrate has no attachment path of its own; assets arrive through a format.
+  - clause: assets_extensions
+    reason: the substrate has no attachment path of its own; assets arrive through a format.
+
+enforced_by:
+  format:
+    - hosted_kinds
+    - content_representation
+    - content_inline_constructs
+    - content_block_constructs
+    - property_keys_charset
+    - property_keys_case
+    - property_keys_reserved_prefixes
+    - property_keys_collision
+    - property_keys_schema_required
+    - property_values_types
+    - property_values_empty_string
+    - property_values_null
+    - property_values_multi_value
+    - property_values_reference_values
+    - ordering_sibling_order
+    - ordering_order_key_durable
+    - ordering_property_order
+    - hierarchy_shape
+    - hierarchy_max_depth
+    - hierarchy_cycles
+    - identity_id_space
+    - identity_id_origin
+    - identity_id_constraints
+    - identity_carriers
+    - identity_carrier_disagreement
+    - mutation_write_leg
+    - mutation_unit_of_write
+    - assets_attachments
+    - assets_binary_inline
+    - assets_extensions
+  sync:
+    - clause: identity_rename_stability
+      site: "crates/holon-filesystem/src/file_sync_controller.rs:573-580 (page-rename path derivation)"
+    - clause: ordering_concurrent_insert
+      site: "crates/holon-loro/src/text_merge_provider.rs:126 (merge_text, 3-way merge path)"
+    - clause: mutation_merge_granularity
+      site: "crates/holon-loro/src/text_merge_provider.rs:126 (merge_text, 3-way merge path)"
+    - clause: mutation_conflict_surface
+      site: "crates/holon-filesystem/src/file_sync_controller.rs:1042 (3-way merger wiring, no-store conflict path)"
+    - clause: hierarchy_constraints
+      site: "crates/holon-filesystem/src/sync_ports.rs:277-285 (name_chain ancestor-miss bail)"
+  operation:
+    - clause: hierarchy_reparent
+      site: "crates/holon-core/src/traits.rs:2429-2440 (move_block page-under-non-page refusal; shared predicate block_op_catalog::page_under_non_page_prohibited)"
+  declaration:
+    - clause: computed_live
+      site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type)"
+    - clause: computed_persisted
+      site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type; CV-E lands in 2b.6)"
+    - clause: computed_expression_closure
+      site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type)"
+
+fidelity_axes:
+  hosted_kinds: [hierarchical]
+
+  content:
+    representation: marked_text
+    inline_constructs: []
+    block_constructs: [paragraph]
+
+  property_keys:
+    charset: any
+    case: sensitive
+    reserved_prefixes: []
+    reserved_keys: [id, content, parent_id]
+    collision: last_wins
+    schema_required: open
+
+  property_values:
+    # MEASURED against the production write path. The first draft claimed
+    # date_time and json as well, and the run said otherwise:
+    #   * DateTime came back String("2026-08-22T10:00:00Z") — JSON has no date
+    #     kind, so the substrate keeps the TEXT and loses the KIND.
+    #   * Json("{\"a\":1}") came back Object({"a": Integer(1)}) — it is parsed
+    #     into the blob rather than carried as an opaque document.
+    # Both are re-typings, not losses; the value survives and the KIND does not,
+    # which is exactly what this clause is about.
+    types: [string, integer, float, boolean, array, object]
+    empty_string: representable
+    # MEASURED: a Null param is DROPPED from the blob entirely, so the
+    # substrate cannot distinguish "explicitly null" from "absent".
+    null: dropped
+    multi_value:
+      kind: none
+    reference_values: none
+
+  ordering:
+    sibling_order: file_position
+    order_key_durable: derived
+    concurrent_insert: positional_conflict
+    property_order: preserved
+
+  hierarchy:
+    shape: tree
+    max_depth: unbounded
+    reparent: free
+    constraints: []
+    cycles: rejected
+
+  identity:
+    id_space: opaque_string
+    id_origin: authored
+    id_constraints: []
+    rename_stability: [file_rename, title_rename, move]
+    carriers: [block_uuid]
+    carrier_disagreement: error
+
+  computed:
+    computed_live: full
+    computed_persisted:
+      kind: full_algebra
+    expression_closure: computation_plus_script
+
+  mutation:
+    write_leg: in_process
+    unit_of_write: entity
+    merge_granularity: field
+    conflict_surface: log
+
+  assets:
+    attachments: none
+    binary_inline: none
+    extensions: []

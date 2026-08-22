@@ -13,6 +13,7 @@
 //!   Failing on that would make the suite red for GOOD news, and it is
 //!   inherently generator-dependent (CV-C).
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -253,7 +254,22 @@ pub trait CertifiableFormat {
     /// only place `semantics` is: an ordinary property never splits under
     /// `edge_fields_only`, so probing one certified every separator and both
     /// semantics alike (silent flips S1 and S2).
-    fn round_trip_multi_value(&self, _: &[&str], _: &str) -> anyhow::Result<Option<Vec<String>>> {
+    fn round_trip_multi_value(
+        &self,
+        _: &[&str],
+        _: &str,
+    ) -> anyhow::Result<Option<MultiValueReadback>> {
+        Ok(None)
+    }
+
+    /// Put `value` into a REFERENCE-typed property and report what the format
+    /// parsed it into.
+    ///
+    /// Driven with two shapes: one that is a legal ID and one that is a legal
+    /// NAME but not a legal id. A format that takes the first and refuses the
+    /// second refers `by_id`; one that takes both, or only the second, does
+    /// not.
+    fn round_trip_reference(&self, _: &str) -> anyhow::Result<Option<ReferenceReadback>> {
         Ok(None)
     }
 
@@ -266,6 +282,36 @@ pub trait CertifiableFormat {
     fn attempt_write(&self) -> anyhow::Result<Option<WriteAttempt>> {
         Ok(None)
     }
+}
+
+/// What a REFERENCE-valued property gave back, at the TYPE level.
+///
+/// The string coming back proves nothing about references — an ordinary
+/// property carries a string too. The discriminating question is what the
+/// format parsed the value INTO, which is why this reports the typed shape
+/// rather than the readback text.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReferenceReadback {
+    /// Parsed as typed references — the ids or names they resolved to.
+    Refs(Vec<String>),
+    /// Carried, but as an ordinary string: no reference typing happened.
+    Plain(String),
+    /// The boundary refused the value as a reference.
+    Refused { reason: String },
+}
+
+/// What a multi-valued field gave back.
+///
+/// `Refused` is not a harness failure: joining on a delimiter the format does
+/// not split leaves ONE value that may itself be illegal (org's `:REQUIRES:`
+/// takes bare ids, and `beta|alpha` is not one). That refusal is evidence the
+/// field did NOT split, so the negative arm must be able to read it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MultiValueReadback {
+    /// The values that came back, in order.
+    Values(Vec<String>),
+    /// The format rejected the joined field at its boundary.
+    Refused { reason: String },
 }
 
 /// What happened when the certifier tried to WRITE through the format.
@@ -331,7 +377,7 @@ pub struct CertificationReport {
     /// report so the escape hatch is VISIBLE in the run's output: a marker that
     /// only exists in the yaml reads, from the output, exactly like a clause a
     /// probe covers.
-    pub marked: BTreeSet<ClauseId>,
+    pub marked: BTreeMap<ClauseId, String>,
     /// The yaml this run certified. A stale `HOLON_CAPABILITY_PROFILE` points
     /// the harness at a DIFFERENT valid profile, whose report looks just as
     /// clean; printing the input is what tells the two apart.
@@ -382,7 +428,9 @@ impl CertificationReport {
             "clauses_marked_not_yet_certified": self
                 .marked
                 .iter()
-                .map(|c| c.to_string())
+                .map(|(clause, reason)| {
+                    serde_json::json!({"clause": clause.to_string(), "reason": reason})
+                })
                 .collect::<Vec<_>>(),
             "tightening_prompts": records,
         });
@@ -428,9 +476,9 @@ impl CertificationReport {
         for d in &self.deferred {
             out.push_str(&format!("DEFERRED   {d}\n"));
         }
-        for m in &self.marked {
+        for (clause, reason) in &self.marked {
             out.push_str(&format!(
-                "MARKER     {m} is NOT certified — declared from a citation, nothing drives it\n"
+                "MARKER     {clause} is NOT certified — {reason}\n"
             ));
         }
         out
@@ -562,6 +610,12 @@ pub fn certify(format: &dyn CertifiableFormat) -> anyhow::Result<CertificationRe
             .map(|e| e.as_str().to_string())
             .collect(),
     );
+    if let MultiValue::Delimited { separators, .. } = &profile.property_values().multi_value {
+        declared.insert(
+            ClauseId::PropertyValuesMultiValue,
+            separators.iter().map(|s| s.as_str().to_string()).collect(),
+        );
+    }
     declared.insert(
         ClauseId::IdentityCarriers,
         profile
@@ -583,7 +637,7 @@ pub fn certify(format: &dyn CertifiableFormat) -> anyhow::Result<CertificationRe
 
     let (gaps, deferred) = coverage_gaps(
         profile.enforced_by(),
-        profile.not_yet_certified(),
+        &profile.marked_clauses(),
         &report.probed,
         &declared,
         &report.probed_members,
@@ -1038,54 +1092,114 @@ fn certify_value_shape(
     // `edge_fields_only`, so probing one certified every separator and both
     // semantics alike (silent flips S1, S2).
     if let MultiValue::Delimited {
-        separator,
+        separators,
         semantics,
         ..
     } = &axis.multi_value
     {
         let authored = ["beta", "alpha"];
-        if let Some(back) = format.round_trip_multi_value(&authored, separator)? {
+        // EVERY declared delimiter is driven, and each is recorded as a MEMBER:
+        // a clause-level boolean let one working separator launder the rest.
+        for separator in separators {
+            let sep = separator.as_str();
+            let Some(readback) = format.round_trip_multi_value(&authored, sep)? else {
+                continue;
+            };
             report.probed.insert(ClauseId::PropertyValuesMultiValue);
+            report
+                .probed_members
+                .entry(ClauseId::PropertyValuesMultiValue)
+                .or_default()
+                .insert(sep.to_string());
+            let back = match readback {
+                MultiValueReadback::Values(values) => values,
+                // Declared to split, and the boundary rejected the joined field
+                // instead — the declaration is wrong about this delimiter.
+                MultiValueReadback::Refused { reason } => {
+                    report.violations.push(broken(
+                        Clause::MultiValue,
+                        Value::String(authored.join(sep)),
+                        Outcome::Refused { reason },
+                    ));
+                    continue;
+                }
+            };
             if back.len() != authored.len() {
                 // The declared separator did not split the field.
                 report.violations.push(broken(
                     Clause::MultiValue,
-                    Value::String(authored.join(separator)),
+                    Value::String(authored.join(sep)),
                     Outcome::Changed {
                         got: Value::String(back.join("|")),
                     },
                 ));
-            } else {
-                let order_kept = back == authored.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-                match (semantics, order_kept) {
-                    (MultiValueSemantics::List, true) => report.confirmed += 1,
-                    (MultiValueSemantics::List, false) => report.violations.push(broken(
-                        Clause::MultiValue,
-                        Value::String(authored.join(separator)),
-                        Outcome::Changed {
-                            got: Value::String(back.join(separator)),
-                        },
-                    )),
-                    (MultiValueSemantics::Set, false) => report.confirmed += 1,
-                    (MultiValueSemantics::Set, true) => report.prompts.push(TighteningPrompt {
-                        profile: profile.id().clone(),
-                        axis: Axis::PropertyValues,
-                        leg: carrier.leg,
-                        key: key.to_string(),
-                        sent: Value::String(authored.join(separator)),
-                        note: "declared a SET, but the authored order came back — the format \
-                               preserves an order the profile calls insignificant"
-                            .to_string(),
-                    }),
-                }
+                continue;
+            }
+            let order_kept = back == authored.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            match (semantics, order_kept) {
+                (MultiValueSemantics::List, true) => report.confirmed += 1,
+                (MultiValueSemantics::List, false) => report.violations.push(broken(
+                    Clause::MultiValue,
+                    Value::String(authored.join(sep)),
+                    Outcome::Changed {
+                        got: Value::String(back.join(sep)),
+                    },
+                )),
+                (MultiValueSemantics::Set, false) => report.confirmed += 1,
+                (MultiValueSemantics::Set, true) => report.prompts.push(TighteningPrompt {
+                    profile: profile.id().clone(),
+                    axis: Axis::PropertyValues,
+                    leg: carrier.leg,
+                    key: key.to_string(),
+                    sent: Value::String(authored.join(sep)),
+                    note: "declared a SET, but the authored order came back — the format \
+                           preserves an order the profile calls insignificant"
+                        .to_string(),
+                }),
+            }
+        }
+
+        // The NEGATIVE arm, and without it the set is unfalsifiable upward: a
+        // profile could name every delimiter in the world and each one that
+        // happened to work would confirm it. A delimiter the profile does NOT
+        // name must NOT split.
+        for candidate in DELIMITER_CANDIDATES {
+            if separators.iter().any(|s| s.as_str() == *candidate) {
+                continue;
+            }
+            let Some(MultiValueReadback::Values(back)) =
+                format.round_trip_multi_value(&authored, candidate)?
+            else {
+                // Not driveable, or REFUSED — and a refusal means the field did
+                // not split, which is what an undeclared delimiter should do.
+                continue;
+            };
+            if back.len() > 1 {
+                report.prompts.push(TighteningPrompt {
+                    profile: profile.id().clone(),
+                    axis: Axis::PropertyValues,
+                    leg: carrier.leg,
+                    key: key.to_string(),
+                    sent: Value::String(authored.join(candidate)),
+                    note: format!(
+                        "{candidate:?} splits the field but is NOT declared in \
+                         multi_value.separators — a reader joining on a declared separator \
+                         would produce a value this format silently splits"
+                    ),
+                });
             }
         }
     }
 
     if let MultiValue::Delimited {
-        separator, scope, ..
+        separators, scope, ..
     } = &axis.multi_value
     {
+        // `scope` is one question about the format, so one declared delimiter
+        // answers it; WHICH delimiters split is the `separators` clause above.
+        let Some(separator) = separators.iter().next().map(|s| s.as_str().to_string()) else {
+            return Ok(());
+        };
         report.probed.insert(ClauseId::PropertyValuesMultiValue);
         let joined = Value::String(format!("alpha{separator}beta"));
         let back = format.round_trip_property(carrier, key, &joined)?;
@@ -1110,12 +1224,55 @@ fn certify_value_shape(
         }
     }
 
-    // reference_values is NOT driven here, and must not be: a bare id coming
-    // back is only the string round trip, which `certify_property_keys`
-    // already covers. Whether that id is a REFERENCE — `by_id`, `by_name` or
-    // `vector_of_refs` — is a resolution question the format cannot answer, so
-    // the clause carries a `not_yet_certified` marker instead of a probe that
-    // would certify all three values identically.
+    certify_reference_values(format, profile, carrier, key, report)
+}
+
+/// An id-shaped value: legal as an id in every format the vocabulary models.
+const ID_SHAPED: &str = "certify-target";
+
+/// Axis 4 — `reference_values`, as far as a format probe can honestly go.
+///
+/// MEASURED, and the answer bounds the clause: only `none` is discriminable
+/// here. `by_id` versus `by_name` is not, because the wire form is the same
+/// bare slug for both and every name shape that DIFFERS from an id shape
+/// contains a separator, which the `multi_value` axis consumes first — the
+/// first version of this probe sent "Some Page Title" and read back
+/// `Refs(["Page", "Some", "Title"])`, i.e. it measured the split, not the
+/// naming. A profile declaring a naming mode therefore carries a
+/// `not_yet_certified` marker WITH that reason.
+fn certify_reference_values(
+    format: &dyn CertifiableFormat,
+    profile: &CapabilityProfile,
+    carrier: Carrier,
+    key: &str,
+    report: &mut CertificationReport,
+) -> anyhow::Result<()> {
+    // Only the `none` arm is decidable from a round trip: either the format
+    // parses a value into a typed reference or it does not.
+    if profile.property_values().reference_values != ReferenceValues::None {
+        return Ok(());
+    }
+    let Some(readback) = format.round_trip_reference(ID_SHAPED)? else {
+        return Ok(());
+    };
+    report
+        .probed
+        .insert(ClauseId::PropertyValuesReferenceValues);
+    if matches!(readback, ReferenceReadback::Refs(_)) {
+        report.prompts.push(TighteningPrompt {
+            profile: profile.id().clone(),
+            axis: Axis::PropertyValues,
+            leg: carrier.leg,
+            key: key.to_string(),
+            sent: Value::String(ID_SHAPED.to_string()),
+            note: format!(
+                "declared to carry no references, but the format parsed one into a typed \
+                 reference — the profile under-claims; got {readback:?}"
+            ),
+        });
+    } else {
+        report.confirmed += 1;
+    }
     Ok(())
 }
 
@@ -1699,6 +1856,19 @@ fn judge_construct(
 /// Extensions probed alongside whatever a profile declares — common enough
 /// that carrying one silently is a real under-declaration, and varied enough
 /// that a format carrying ALL of them is saying something too.
+/// Delimiters the negative arm tries against `multi_value.separators`.
+///
+/// The delimiters an author would plausibly reach for. Every one the profile
+/// does NOT declare must leave the field unsplit, so a real separator missing
+/// from the declaration shows up here rather than passing unnoticed.
+///
+/// `\n` and `\r` are deliberately ABSENT, by measurement rather than by
+/// assumption: a line-terminating character inside a one-line drawer value is
+/// not CONSTRUCTIBLE — the probe read back an EMPTY set, meaning the field was
+/// destroyed rather than split, which says nothing about delimiting. NBSP is
+/// present and it earns its place: it splits.
+pub(crate) const DELIMITER_CANDIDATES: &[&str] = &[" ", ",", ";", "|", "/", "+", "\t", "\u{a0}"];
+
 pub(crate) const NEIGHBOUR_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tiff", "tif", "pdf", "mp4", "exe",
 ];
@@ -2301,10 +2471,19 @@ mod tests {
     #[test]
     fn a_sibling_order_violation_still_leaves_the_later_clauses_probed() {
         let yaml = crate::fixture::MINIMAL
-            .replace("\n  - ordering_sibling_order", "")
-            .replace("\n  - hosted_kinds", "")
+            .replace(
+                "\n  - clause: ordering_sibling_order\n    reason: no stub in this crate drives it; the org harness does",
+                "",
+            )
+            .replace(
+                "\n  - clause: hosted_kinds\n    reason: no stub in this crate drives it; the org harness does",
+                "",
+            )
             // The order-key observation drives this one as a side effect.
-            .replace("\n  - ordering_order_key_durable", "")
+            .replace(
+                "\n  - clause: ordering_order_key_durable\n    reason: no stub in this crate drives it; the org harness does",
+                "",
+            )
             .replace(
                 "sibling_order: file_position",
                 "sibling_order: fractional_index",

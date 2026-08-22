@@ -9,6 +9,10 @@
 #
 # Three expectations, declared per flip in the table below:
 #   move  — a driven clause. Silence is a DEFECT and fails this script.
+#   prompt— a driven MEMBER whose removal must be NOTICED by name: the report
+#           must raise a TIGHTENING PROMPT, not merely move some counter. Used
+#           where "a counter moved" would pass while no finding names the
+#           member that went missing.
 #   still — a clause deferred to another layer, marked `not_yet_certified`, or
 #           a second value that is equally TRUE of the format. Movement is a
 #           SURPRISE and fails this script too: it means the classification is
@@ -75,7 +79,14 @@ run() {
     grep "confirmed:" "$RUN" | head -1 | tr -s ' ' | sed 's/^ *//'
 }
 
+# The prompts counter alone, so a `prompt` expectation can require a FINDING
+# rather than any movement at all.
+prompts_of() {
+    sed -n 's/.*tightening prompts: \([0-9]*\).*/\1/p' <<<"$1" | head -1
+}
+
 BASE=$(run)
+BASE_PROMPTS=$(prompts_of "$BASE")
 echo "BASELINE: $BASE"
 # A blank baseline means the parse below never matched, and every flip would
 # then compare empty to empty and read as silent. Fail loudly instead.
@@ -108,6 +119,18 @@ PY
     total=$((total + 1))
     local out
     out=$(run)
+    if [ "$expect" == "prompt" ]; then
+        local now
+        now=$(prompts_of "$out")
+        if [ -n "$now" ] && [ "$now" -gt "${BASE_PROMPTS:-0}" ]; then
+            echo "  prompted $from -> $to"
+        else
+            echo "  UNNAMED-DEFECT  $from -> $to (no tightening prompt: $BASE_PROMPTS -> ${now:-?})"
+            defects=$((defects + 1))
+        fi
+        cp "$HONEST" "$UNDER_TEST"
+        return
+    fi
     if [ "$out" == "$BASE" ]; then
         if [ "$expect" == "move" ]; then
             echo "  SILENT-DEFECT  $from -> $to"
@@ -152,10 +175,13 @@ null: dropped|null: representable|move
 null: dropped|null: error|move
 kind: delimited|kind: none|move
 scope: edge_fields_only|scope: all_properties|move
-separator: " "|separator: ","|still
-separator: " "|separator: ";"|move
+separators: [",", " ", "\t", "\u00a0"]|separators: [" ", "\t", "\u00a0"]|move
+separators: [",", " ", "\t", "\u00a0"]|separators: [",", "\t", "\u00a0"]|prompt
+separators: [",", " ", "\t", "\u00a0"]|separators: [",", " ", "\u00a0"]|move
+separators: [",", " ", "\t", "\u00a0"]|separators: [",", " ", "\t"]|move
+separators: [",", " ", "\t", "\u00a0"]|separators: [",", " ", "\t", "\u00a0", ";"]|move
 semantics: set|semantics: list|move
-reference_values: by_id|reference_values: none|still
+reference_values: by_id|reference_values: none|move
 reference_values: by_id|reference_values: by_name|still
 representation: marked_text|representation: opaque_text|move
 representation: marked_text|representation: structured_tree|move
