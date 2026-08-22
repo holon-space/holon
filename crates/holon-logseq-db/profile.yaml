@@ -1,0 +1,234 @@
+# Capability profile for `logseq-db` — a LogSeq DB graph, through HOLON'S
+# writer.
+#
+# Scope note that decides how to read every clause below: this profile
+# describes what Holon's own writer surface (`kvs_writer::push`) carries INTO a
+# LogSeq graph, certified by `tests/profile_certification.rs` with no LogSeq
+# oracle involved. The importer reads far more than the writer writes; a clause
+# here is about the WRITE unless it says otherwise.
+#
+# The write leg is title/content ONLY. Every other shape a diff can carry is
+# refused BY NAME (`src/kvs_writer.rs:1198-1232`) — creation, removal,
+# re-parent, re-order, tags, requires, contributes-to, advice-suppression,
+# properties. A refusal is the law's honest branch, and this profile states it.
+profile: logseq-db
+
+not_yet_certified:
+  - clause: hosted_kinds
+    reason: >-
+      the writer edits existing blocks; what the graph can HOST is an importer
+      question, and this harness drives the writer.
+  - clause: content_representation
+    reason: >-
+      push writes a title STRING; whether LogSeq models it as marked text is a
+      question about LogSeq's own renderer, not about what Holon writes.
+  - clause: content_inline_constructs
+    reason: >-
+      push writes a title STRING; whether LogSeq models it as marked text is a
+      question about LogSeq's own renderer, not about what Holon writes.
+  - clause: content_block_constructs
+    reason: >-
+      push writes a title STRING; whether LogSeq models it as marked text is a
+      question about LogSeq's own renderer, not about what Holon writes.
+  - clause: property_keys_charset
+    reason: a property write is refused outright, so no key SHAPE is discriminable here.
+  - clause: property_keys_case
+    reason: a property write is refused outright, so no key SHAPE is discriminable here.
+  - clause: property_keys_reserved_prefixes
+    reason: a property write is refused outright, so no key SHAPE is discriminable here.
+  - clause: property_keys_collision
+    reason: a property write is refused outright, so no key SHAPE is discriminable here.
+  - clause: property_keys_schema_required
+    reason: a property write is refused outright, so no key SHAPE is discriminable here.
+  - clause: property_values_types
+    reason: >-
+      MEASURED: push REFUSES a property change outright ("pushing a property
+      change is not in this increment's scope"), so the boundary never reaches
+      the value and no KIND is observable. Confirming a kind on a blanket
+      refusal would be a false witness — the refusal is about the operation,
+      not about the value.
+  - clause: property_values_empty_string
+    reason: >-
+      the empty INHABITANT is not reachable: the write is refused before any
+      value is inspected.
+  - clause: property_values_null
+    reason: >-
+      the null INHABITANT is not reachable: the write is refused before any
+      value is inspected.
+  - clause: property_values_multi_value
+    reason: >-
+      LogSeq's cardinality-many attributes are an importer observation; the
+      writer refuses the edge and property shapes that would show it.
+  - clause: property_values_reference_values
+    reason: >-
+      same bound as the other two profiles: naming an entity by id or by name
+      is resolution, and the write is refused before it gets there.
+  - clause: ordering_sibling_order
+    reason: a re-order is refused by name, so the ordering CLAUSE has no write to observe.
+  - clause: ordering_order_key_durable
+    reason: a re-order is refused by name, so the ordering CLAUSE has no write to observe.
+  - clause: ordering_property_order
+    reason: a property write is refused, so there is no authored property order to keep.
+  - clause: hierarchy_shape
+    reason: a re-parent is refused by name; the writer never changes structure.
+  - clause: hierarchy_max_depth
+    reason: a re-parent is refused by name; the writer never changes structure.
+  - clause: hierarchy_cycles
+    reason: a re-parent is refused by name; the writer never changes structure.
+  - clause: identity_id_space
+    reason: >-
+      push addresses blocks by the uuid the graph already holds; it mints no
+      identity, so the id clauses have nothing to observe on the write leg.
+  - clause: identity_id_origin
+    reason: >-
+      push addresses blocks by the uuid the graph already holds; it mints no
+      identity, so the id clauses have nothing to observe on the write leg.
+  - clause: identity_id_constraints
+    reason: >-
+      push addresses blocks by the uuid the graph already holds; it mints no
+      identity, so the id clauses have nothing to observe on the write leg.
+  - clause: identity_carriers
+    reason: one carrier by construction — the block's uuid; a probe would restate the schema.
+  - clause: identity_carrier_disagreement
+    reason: with one carrier there is nothing to disagree.
+  - clause: mutation_unit_of_write
+    reason: >-
+      push appends tail TRANSACTIONS per changed block; naming the unit needs a
+      partial-write falsifier this increment does not build.
+  - clause: assets_attachments
+    reason: the writer has no asset path at all; assets are an importer question.
+  - clause: assets_binary_inline
+    reason: the writer has no asset path at all; assets are an importer question.
+  - clause: assets_extensions
+    reason: the writer has no asset path at all; assets are an importer question.
+
+# The mutation axis is TEMPORARY BY DESIGN. LogSeq's datascript pin moved
+# between schema 65.12 and 65.33 and its script oracles became a compiled CLI,
+# so what the write leg does is a snapshot of a moving upstream, not a stable
+# fact about the format. This is not an excuse — the clause is DRIVEN — it is
+# an expiry date on the measurement.
+provisional:
+  - clause: mutation_write_leg
+    certified_against: "LogSeq DB schema 65.33 (the pinned fixture; the pin moved from 65.12)"
+
+enforced_by:
+  format:
+    - hosted_kinds
+    - content_representation
+    - content_inline_constructs
+    - content_block_constructs
+    - property_keys_charset
+    - property_keys_case
+    - property_keys_reserved_prefixes
+    - property_keys_collision
+    - property_keys_schema_required
+    - property_values_types
+    - property_values_empty_string
+    - property_values_null
+    - property_values_multi_value
+    - property_values_reference_values
+    - ordering_sibling_order
+    - ordering_order_key_durable
+    - ordering_property_order
+    - hierarchy_shape
+    - hierarchy_max_depth
+    - hierarchy_cycles
+    - identity_id_space
+    - identity_id_origin
+    - identity_id_constraints
+    - identity_carriers
+    - identity_carrier_disagreement
+    - mutation_write_leg
+    - mutation_unit_of_write
+    - assets_attachments
+    - assets_binary_inline
+    - assets_extensions
+  sync:
+    - clause: identity_rename_stability
+      site: "crates/holon-filesystem/src/file_sync_controller.rs:573-580 (page-rename path derivation)"
+    - clause: ordering_concurrent_insert
+      site: "crates/holon-loro/src/text_merge_provider.rs:126 (merge_text, 3-way merge path)"
+    - clause: mutation_merge_granularity
+      site: "crates/holon-loro/src/text_merge_provider.rs:126 (merge_text, 3-way merge path)"
+    - clause: mutation_conflict_surface
+      site: "crates/holon-filesystem/src/file_sync_controller.rs:1042 (3-way merger wiring, no-store conflict path)"
+    - clause: hierarchy_constraints
+      site: "crates/holon-filesystem/src/sync_ports.rs:277-285 (name_chain ancestor-miss bail)"
+  operation:
+    - clause: hierarchy_reparent
+      site: "crates/holon-logseq-db/src/kvs_writer.rs:1210-1212 (out_of_scope_shape refuses a re-parent BEFORE any datom is appended; the whole push is abandoned)"
+  declaration:
+    - clause: computed_live
+      site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type)"
+    - clause: computed_persisted
+      site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type; CV-E lands in 2b.6)"
+    - clause: computed_expression_closure
+      site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type)"
+
+fidelity_axes:
+  hosted_kinds: [hierarchical]
+
+  content:
+    representation: marked_text
+    inline_constructs: []
+    block_constructs: [paragraph]
+
+  property_keys:
+    charset: any
+    case: sensitive
+    reserved_prefixes: []
+    reserved_keys: []
+    collision: last_wins
+    schema_required: open
+
+  property_values:
+    # NOT CERTIFIED here, and the marker above says why: the write boundary is
+    # CLOSED to property changes, so no kind is observable. The value below is
+    # the importer's reading, carried as documentation only.
+    types: [string]
+    empty_string: dropped
+    null: dropped
+    multi_value:
+      kind: none
+    reference_values: none
+
+  ordering:
+    sibling_order: file_position
+    order_key_durable: derived
+    concurrent_insert: positional_conflict
+    property_order: unspecified
+
+  hierarchy:
+    shape: tree
+    max_depth: unbounded
+    # A re-parent is REFUSED, pre-flight, leaving the graph untouched.
+    reparent: none
+    constraints: []
+    cycles: rejected
+
+  identity:
+    id_space: uuid
+    id_origin: authored
+    id_constraints: []
+    rename_stability: [file_rename, title_rename, move]
+    carriers: [block_uuid]
+    carrier_disagreement: error
+
+  computed:
+    computed_live: none
+    computed_persisted:
+      kind: none
+    expression_closure: none
+
+  mutation:
+    # MEASURED by a real push: a title edit becomes tail datoms, the graph is
+    # written to a file and a re-import carries the pushed title.
+    write_leg: file
+    unit_of_write: entity
+    merge_granularity: file
+    conflict_surface: log
+
+  assets:
+    attachments: none
+    binary_inline: none
+    extensions: []

@@ -31,6 +31,9 @@ uuid.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+# TEST-ONLY, and the arch rule pins it there: a production edge would let the
+# importer read its own profile and certify only that it agrees with itself.
+holon-capability.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
 # The store-boundary test implements `BlockOrdering`, which is `#[async_trait]`.

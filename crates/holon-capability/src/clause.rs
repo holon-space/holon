@@ -196,6 +196,22 @@ pub struct Marker {
     pub reason: String,
 }
 
+/// A clause certified against a MOVING upstream.
+///
+/// LogSeq's datascript pin moved between schema 65.12 and 65.33 and its script
+/// oracles became a compiled CLI, so a clause certified there is a snapshot,
+/// not a stable fact. `certified_against` names the range the measurement
+/// holds for. This is NOT a second escape hatch: a provisional clause must
+/// still be DRIVEN — it is driven-with-expiry — and a provisional clause that
+/// nothing drives is a gap like any other.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Provisional {
+    pub clause: ClauseId,
+    /// The upstream range the measurement was taken against.
+    pub certified_against: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnforcementMap {

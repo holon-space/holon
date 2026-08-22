@@ -28,6 +28,7 @@ use crate::axes::PropertyValuesAxis;
 use crate::clause::ClauseId;
 use crate::clause::EnforcementMap;
 use crate::clause::Marker;
+use crate::clause::Provisional;
 
 /// The name of a durable format. Equality IS the profile's identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -104,6 +105,10 @@ struct ProfileDocument {
     /// same defect as a deferral with no site.
     #[serde(default)]
     not_yet_certified: Vec<Marker>,
+    /// Clauses whose measurement has a SHELF LIFE — each names the upstream
+    /// range it was certified against.
+    #[serde(default)]
+    provisional: Vec<Provisional>,
     /// WHO enforces each clause. Required to cover every clause exactly once —
     /// a clause with no stated owner is a load error, because a defaulted
     /// owner is how the layer dimension would rot back into invisibility.
@@ -117,6 +122,7 @@ pub struct CapabilityProfile {
     id: CapabilityProfileId,
     revision: ProfileRevision,
     not_yet_certified: BTreeMap<ClauseId, String>,
+    provisional: BTreeMap<ClauseId, String>,
     enforced_by: EnforcementMap,
     fidelity: FidelityAxes,
     /// Where the yaml came from, when it came from a file. Reported with every
@@ -180,10 +186,32 @@ impl CapabilityProfile {
                 );
             }
         }
+        let mut provisional: BTreeMap<ClauseId, String> = BTreeMap::new();
+        for entry in doc.provisional {
+            if entry.certified_against.trim().is_empty() {
+                anyhow::bail!(
+                    "profile '{}': the `provisional` entry on {} names no range — a measurement \
+                     with an unstated shelf life cannot be re-checked",
+                    doc.profile,
+                    entry.clause
+                );
+            }
+            if provisional
+                .insert(entry.clause, entry.certified_against)
+                .is_some()
+            {
+                anyhow::bail!(
+                    "profile '{}': {} is marked provisional twice",
+                    doc.profile,
+                    entry.clause
+                );
+            }
+        }
         Ok(Self {
             id: doc.profile,
             revision,
             not_yet_certified: markers,
+            provisional,
             enforced_by: doc.enforced_by,
             fidelity: doc.fidelity_axes,
             source: None,
@@ -207,6 +235,12 @@ impl CapabilityProfile {
     /// Excused from the coverage law, and ONLY these.
     pub fn not_yet_certified(&self) -> &BTreeMap<ClauseId, String> {
         &self.not_yet_certified
+    }
+
+    /// Clauses whose certification has a shelf life, with the range each was
+    /// measured against.
+    pub fn provisional(&self) -> &BTreeMap<ClauseId, String> {
+        &self.provisional
     }
 
     /// Just the clause names, for the coverage law.
@@ -308,6 +342,23 @@ mod tests {
         assert!(
             err.contains("multi_value"),
             "the refusal must point at the axis that governs cardinality; got: {err}"
+        );
+    }
+
+    /// A provisional clause with no range is a measurement with an unstated
+    /// shelf life — nothing can tell whether it has expired.
+    #[test]
+    fn a_provisional_clause_without_a_range_is_a_load_error() {
+        let blank = minimal_with(
+            "not_yet_certified:",
+            "provisional:\n  - clause: mutation_write_leg\n    certified_against: \"  \"\nnot_yet_certified:",
+        );
+        let err = CapabilityProfile::from_yaml(&blank)
+            .expect_err("a provisional entry with no range must not load")
+            .to_string();
+        assert!(
+            err.contains("names no range"),
+            "the refusal must say the range is missing; got: {err}"
         );
     }
 

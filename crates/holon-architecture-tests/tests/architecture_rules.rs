@@ -327,7 +327,7 @@ fn loro_doc_escapes_match_the_allow_list() {
 // `holon` is here for the same reason a format crate is: it hosts the
 // holon-native profile, and a substrate that reads its own profile at runtime
 // would certify only that it agrees with itself.
-const PROFILED_FORMAT_CRATES: &[&str] = &["holon-org-format", "holon"];
+const PROFILED_FORMAT_CRATES: &[&str] = &["holon-org-format", "holon", "holon-logseq-db"];
 
 /// A capability profile describes a format from OUTSIDE it.
 ///

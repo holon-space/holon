@@ -53,6 +53,7 @@ use crate::axes::WriteUnit;
 use crate::clause::ClauseId;
 use crate::clause::CoverageGap;
 use crate::clause::DeferredClause;
+use crate::clause::GapReason;
 use crate::clause::MemberCoverage;
 use crate::clause::coverage_gaps;
 use crate::profile::CapabilityProfile;
@@ -382,6 +383,9 @@ pub struct CertificationReport {
     /// the harness at a DIFFERENT valid profile, whose report looks just as
     /// clean; printing the input is what tells the two apart.
     pub profile_path: Option<PathBuf>,
+    /// Clauses certified against a MOVING upstream, with the range each was
+    /// measured against. Driven-with-expiry, never an excuse.
+    pub provisional: BTreeMap<ClauseId, String>,
     /// Cases that behaved exactly as declared. Counted so a run that generated
     /// NOTHING cannot masquerade as a pass.
     pub confirmed: usize,
@@ -425,6 +429,13 @@ impl CertificationReport {
             "violations": self.violations.len(),
             "coverage_gaps": self.gaps.len(),
             "clauses_driven": self.probed.len(),
+            "clauses_provisional": self
+                .provisional
+                .iter()
+                .map(|(clause, range)| {
+                    serde_json::json!({"clause": clause.to_string(), "certified_against": range})
+                })
+                .collect::<Vec<_>>(),
             "clauses_marked_not_yet_certified": self
                 .marked
                 .iter()
@@ -455,7 +466,8 @@ impl CertificationReport {
         ));
         out.push_str(&format!(
             "confirmed: {}  violations: {}  coverage gaps: {}  tightening prompts: {}  \
-             clauses driven: {}  deferred to another layer: {}  marked not-yet-certified: {}\n",
+             clauses driven: {}  deferred to another layer: {}  marked not-yet-certified: {}  \
+             provisional: {}\n",
             self.confirmed,
             self.violations.len(),
             self.gaps.len(),
@@ -463,6 +475,7 @@ impl CertificationReport {
             self.probed.len(),
             self.deferred.len(),
             self.marked.len(),
+            self.provisional.len(),
         ));
         for v in &self.violations {
             out.push_str(&format!("VIOLATION  {v}\n"));
@@ -475,6 +488,11 @@ impl CertificationReport {
         }
         for d in &self.deferred {
             out.push_str(&format!("DEFERRED   {d}\n"));
+        }
+        for (clause, range) in &self.provisional {
+            out.push_str(&format!(
+                "PROVISIONAL {clause} is certified against {range} — re-certify when that moves\n"
+            ));
         }
         for (clause, reason) in &self.marked {
             out.push_str(&format!(
@@ -646,6 +664,18 @@ pub fn certify(format: &dyn CertifiableFormat) -> anyhow::Result<CertificationRe
     report.deferred = deferred;
     report.marked = profile.not_yet_certified().clone();
     report.profile_path = profile.source().map(|p| p.to_path_buf());
+    report.provisional = profile.provisional().clone();
+    // Driven-with-expiry: `provisional` annotates a MEASURED clause. One that
+    // nothing drives is a citation with a date on it, which is the very thing
+    // the coverage law refuses.
+    for clause in report.provisional.keys() {
+        if !report.probed.contains(clause) && !report.marked.contains_key(clause) {
+            report.gaps.push(CoverageGap {
+                clause: *clause,
+                reason: GapReason::UnmarkedAndUndriven,
+            });
+        }
+    }
 
     Ok(report)
 }
@@ -653,6 +683,29 @@ pub fn certify(format: &dyn CertifiableFormat) -> anyhow::Result<CertificationRe
 /// Axis 3 — a key the profile does NOT reserve must survive with its value; a
 /// key it DOES reserve is expected not to, and its loss is honest rather than
 /// a violation.
+/// Is this carrier's property boundary closed to ORDINARY writes?
+///
+/// A format whose write path refuses every property change (LogSeq-DB's push
+/// is title-only) refuses the control too, and then NOTHING about key shape or
+/// value kind is observable through it: the refusal is about the operation,
+/// not about the key or the value. Confirming a clause on such a refusal is
+/// the false-witness pattern — `folded_lower` would "confirm" because two
+/// spellings both failed to arrive, and `empty_string: error` would "confirm"
+/// because the write never got as far as the value.
+///
+/// So the axis-3 and axis-4 clauses are NOT DRIVEN through a closed boundary,
+/// and the profile must MARK them with the reason instead.
+fn boundary_is_closed(
+    format: &dyn CertifiableFormat,
+    carrier: Carrier,
+) -> anyhow::Result<Option<String>> {
+    let control = format.round_trip_property(carrier, "Plain", &Value::String("carried".into()))?;
+    Ok(match control {
+        Readback::Refused { reason } => Some(reason),
+        _ => None,
+    })
+}
+
 fn certify_property_keys(
     format: &dyn CertifiableFormat,
     profile: &CapabilityProfile,
@@ -664,6 +717,9 @@ fn certify_property_keys(
     // control: it must survive under EVERY profile, including a lying one, so
     // a red that also kills the control is a broken harness, not a finding.
     // `ID` is here to be SKIPPED visibly — see the `is_owned` arm.
+    if boundary_is_closed(format, carrier)?.is_some() {
+        return Ok(());
+    }
     let probes = ["Plain", "_underscored", "ID"];
     let carried = Value::String("carried".to_string());
     report.probed.insert(ClauseId::PropertyKeysReservedPrefixes);
@@ -718,6 +774,9 @@ fn certify_property_values(
     let axis = profile.property_values();
     // A key the KEY axis does not reserve, so an axis-4 case can never fail
     // for an axis-3 reason.
+    if boundary_is_closed(format, carrier)?.is_some() {
+        return Ok(());
+    }
     let key = "Probe";
     report.probed.insert(ClauseId::PropertyValuesTypes);
     report.probed.insert(ClauseId::PropertyValuesEmptyString);
@@ -2212,6 +2271,13 @@ mod tests {
     /// Drives the `Representability::Error` arm and the declared-but-refused
     /// violation. Without it those branches would ship unexercised — the F1
     /// defect, repeated.
+    /// A format whose boundary refuses a VALUE, loudly — but not the operation.
+    ///
+    /// The control key must survive: a stub that refused everything would have
+    /// a CLOSED boundary, and `boundary_is_closed` correctly drives nothing
+    /// through one, because a blanket refusal is evidence about the operation
+    /// and not about the value. Selective refusal is the case this stub exists
+    /// to drive.
     struct RefusingStub {
         profile: CapabilityProfile,
     }
@@ -2229,8 +2295,11 @@ mod tests {
             &self,
             _: Carrier,
             key: &str,
-            _: &Value,
+            value: &Value,
         ) -> anyhow::Result<Readback> {
+            if key == "Plain" {
+                return Ok(Readback::Present(value.clone()));
+            }
             Ok(Readback::Refused {
                 reason: format!("stub refuses {key}"),
             })

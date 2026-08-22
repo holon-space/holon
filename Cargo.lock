@@ -5610,6 +5610,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "holon-api",
+ "holon-capability",
  "holon-core",
  "libsql",
  "proptest 1.11.0",

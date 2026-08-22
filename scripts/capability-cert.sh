@@ -10,4 +10,8 @@ cd "$ROOT" || exit 90
 export RUSTC_WRAPPER=""
 echo "profile:    ${HOLON_CAPABILITY_PROFILE:-$ROOT/crates/holon-org-format/profile.yaml}"
 echo "report dir: ${HOLON_CAPABILITY_REPORT_DIR:-$ROOT/target/capability-certification}"
-exec cargo nextest run -p holon-org-format -E 'binary(profile_certification)' --no-capture
+# `--no-fail-fast` is uniform across the certification scripts: a red in one
+# test must never PRE-EMPT another. Proven once on the logseq script, where
+# fail-fast skipped the day-29 boundary alarm; the hazard is milder here (a
+# cross-format assertion rather than an alarm) and the fix is the same.
+exec cargo nextest run -p holon-org-format -E 'binary(profile_certification)' --no-capture --no-fail-fast
