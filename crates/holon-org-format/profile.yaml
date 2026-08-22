@@ -1,0 +1,124 @@
+# Capability profile for the `org` durable format.
+#
+# What org can carry WITHOUT LOSS.
+#
+# READ THIS BEFORE TRUSTING A CLAUSE. Clauses come in two kinds and they carry
+# very different weight:
+#
+#   * CERTIFIED — driven by `tests/profile_certification.rs` against the real
+#     ingest → write-back → ingest loop. A certified clause that is not true is
+#     a RED. Increment 2b.1 certifies exactly three:
+#     `property_keys.reserved_prefixes`, `property_values.types`, and
+#     `property_values.empty_string`.
+#   * NOT YET CERTIFIED — declared from a `file:line` citation and marked
+#     `# NOT YET CERTIFIED (2b.2)`. **A citation is EVIDENCE, not a gate.**
+#     Nothing tests these; changing one to a false value today would keep the
+#     suite green. They are documentation until 2b.2 drives them.
+#
+# Increment 2b.1 declares axes 3 (`property_keys`) and 4 (`property_values`)
+# only. The other eight arrive in 2b.2; `deny_unknown_fields` means naming one
+# here is a load error, not a silent no-op — but that guards the AXIS names,
+# not the truth of a clause inside a modelled axis.
+profile: org
+
+fidelity_axes:
+  property_keys:
+    # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
+    # crates/holon-org-format/src/parser.rs:195-197 — a key that is empty or
+    # contains whitespace is not a property line at all.
+    charset: no_whitespace
+    # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
+    # parser.rs:201 — the key is stored as authored.
+    case: sensitive
+    # CERTIFIED (2b.1) — driven by tests/profile_certification.rs.
+    # crates/holon-org-format/src/models.rs:886, :894, :909 — `_`-prefixed keys
+    # are filtered out of the drawer. THE canonical pre-existing violation, and
+    # the reason the certifier exists.
+    #
+    # CERTIFIED NUANCE (2b.1): the erasure lives in `drawer_properties()`,
+    # which the renderer runs only when `org_properties` is absent
+    # (org_renderer.rs:393). A block whose `org_properties` JSON is already set
+    # renders its drawer verbatim (models.rs:169-206) and CARRIES the
+    # `_`-prefixed key. So the reservation is true of the flat leg and not of
+    # the JSON leg. Declared conservatively here — the certifier reports the
+    # JSON leg as a tightening prompt rather than pretending either leg
+    # speaks for the format.
+    reserved_prefixes: ["_"]
+    # NOT A CLAIM, AND NOT CERTIFIABLE AS ONE — this list is an INPUT that tells
+    # the certifier which keys to EXCLUDE from the ordinary-property law. A
+    # wrong entry here does not make a false statement; it silently shrinks
+    # coverage, which is the more dangerous failure because nothing goes red.
+    # Keep it minimal and justified per key. Axis 7 (`identity`) is what will
+    # certify `ID` positively; it arrives in 2b.2.
+    #
+    # models.rs:854-878 INTERNAL_KEYS, plus the edge fields the renderer
+    # reconstructs. These are keys the format OWNS — they survive and MEAN
+    # something, so the ordinary-property law says nothing about them.
+    reserved_keys: [ID, TAGS, SCHEDULED, DEADLINE, COLLAPSED, WIDGET_ONLY,
+                    REQUIRES, ADVICE_SUPPRESSED, CONTRIBUTES_TO]
+    # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
+    # docs/Reference/ORG_SYNTAX.md:118 — serde_json::Map insert; the first
+    # authored position is kept.
+    collision: last_wins
+    # NOT YET CERTIFIED (2b.2) — no citation, and none was found: org has no
+    # schema to declare a key against, so `open` is the only shape that makes
+    # sense. Certifying it needs a case that writes an undeclared key and shows
+    # it is NOT refused.
+    schema_required: open
+
+  property_values:
+    # CERTIFIED (2b.1) — every ValueKind is driven, declared or not.
+    #
+    # Org's property value space is `string` and NOTHING else.
+    #
+    # Both legs lose a non-string, and they lose it DIFFERENTLY — which is why
+    # a finding names its leg:
+    #   * flat leg — models.rs:910 gates on `Value::as_string()`, which is
+    #     `None` for every non-`String` variant
+    #     (crates/holon-pattern/src/value.rs:85-90), so the value is DROPPED;
+    #   * JSON leg — models.rs:186-189 and :199-202 stringify via
+    #     `_ => value.to_string()`, so an integer reaches disk as the text `42`
+    #     and returns as `Value::String("42")`.
+    #
+    # The JSON leg is why `integer` is NOT listed. It "survives" only by being
+    # re-typed, and an accepted-then-quietly-changed value is the one outcome
+    # the certification law always calls red. Declaring `integer` on the
+    # strength of that leg would be the subtlest lie in this file.
+    # (parser.rs:975,1018 close the loop: every drawer value is read back as
+    # Value::String.)
+    types: [string]
+    # CERTIFIED (2b.1), symmetrically: a false `dropped` is caught too — the
+    # certifier probes the empty value on BOTH arms and raises a tightening
+    # prompt if a leg carries it.
+    #
+    # MEASURED 2b.1, and it CORRECTS the draft's §0 correction: an empty value
+    # survives the RENDER leg exactly as documented (`:KEY: ` with the required
+    # trailing space — models.rs:202, docs/Reference/ORG_SYNTAX.md:103-106) but
+    # does NOT survive INGEST. orgize's `headline.properties()` does not yield
+    # the pair at all, with or without the trailing space, so
+    # `extract_properties` (parser.rs:1124-1141, which filters nothing) never
+    # sees it. Net over the full round trip: dropped.
+    #
+    # SCOPE: certified for the HEADLINE drawer, which is what 2b.1 probes. The
+    # file-level drawer has its own hand-rolled reader (`parse_drawer_line`,
+    # parser.rs:192-203) that does NOT drop an empty value, so it may well
+    # differ — 2b.2 adds that carrier and the certifier will say so.
+    empty_string: dropped
+    # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
+    # The `Null` KIND is driven by `types` above; this clause, which is about
+    # the null INHABITANT, is read by nothing today.
+    null: dropped
+    # NOT YET CERTIFIED (2b.2) — citations are evidence, not a gate.
+    multi_value:
+      kind: delimited
+      separator: " "
+      # models.rs:934-940 — REQUIRES is sorted on render, so order is not
+      # semantic.
+      semantics: set
+      # parser.rs:930-931 — only the edge fields split; an ordinary property
+      # containing spaces stays one string.
+      scope: edge_fields_only
+    # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
+    # docs/Reference/ORG_SYNTAX.md:139-141 — bare ids on disk, scheme added at
+    # the parse boundary and stripped at render.
+    reference_values: by_id

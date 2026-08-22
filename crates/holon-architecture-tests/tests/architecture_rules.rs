@@ -322,6 +322,52 @@ fn loro_doc_escapes_match_the_allow_list() {
     );
 }
 
+/// Format crates whose capability profile must stay an INDEPENDENT statement
+/// about them. One entry per crate that ships a `profile.yaml`.
+const PROFILED_FORMAT_CRATES: &[&str] = &["holon-org-format"];
+
+/// A capability profile describes a format from OUTSIDE it.
+///
+/// `holon-capability` may be a `[dev-dependencies]` entry of a format crate —
+/// that is where the `CertifiableFormat` impl and the certification test live
+/// — but never a `[dependencies]` one. The moment a format crate links it
+/// normally, the format can read its own profile at runtime and start
+/// BEHAVING according to it, at which point the certification test proves only
+/// that the crate agrees with itself. The profile has to be falsifiable
+/// against the format's real round trip, which requires the two to be
+/// independent.
+///
+/// The other direction (`holon-capability` depending on a format crate) is
+/// covered by the same rule read the other way: the assertion below would fail
+/// on the cycle.
+#[test]
+fn a_format_crate_never_links_holon_capability_outside_tests() {
+    let root = repo_root();
+    for pkg in PROFILED_FORMAT_CRATES {
+        let output = Command::new(env!("CARGO"))
+            .args(["tree", "-p", pkg, "-e", "normal", "-i", "holon-capability"])
+            .current_dir(&root)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn `cargo tree` for {pkg}: {e}"));
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Same presence/absence signals as `no_proptest_in_prod_graph`: an
+        // inverted tree rooted at the package, or cargo's ambiguity error.
+        let linked = stdout.contains("holon-capability v");
+        let ambiguous = stderr.contains("is ambiguous");
+        assert!(
+            !linked && !ambiguous,
+            "`{pkg}` links `holon-capability` in its PRODUCTION (`-e normal`) graph.\nA format \
+             crate must not read its own capability profile: the profile is a statement ABOUT \
+             the format,\nand a format that consults it can no longer be independently falsified \
+             by the certification test.\nMove the dependency to `[dev-dependencies]` and keep \
+             the `CertifiableFormat` impl in `tests/`.\n\n=== cargo tree -p {pkg} -e normal -i \
+             holon-capability ===\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n",
+        );
+    }
+}
+
 /// Regression guard for the hakari `traversal-excludes` on `gpui`
 /// (see `.config/hakari.toml`).
 ///

@@ -5330,6 +5330,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-capability"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "holon-api",
+ "serde",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-core"
 version = "0.1.0"
 dependencies = [
@@ -5859,6 +5872,7 @@ dependencies = [
  "hex",
  "holon-api",
  "holon-block-roundtrip-testing",
+ "holon-capability",
  "orgize",
  "proptest 1.11.0",
  "serde",
