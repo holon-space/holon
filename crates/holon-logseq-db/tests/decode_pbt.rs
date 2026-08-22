@@ -15,6 +15,7 @@
 use holon_logseq_db::F64Bits;
 use holon_logseq_db::TransitNode;
 use holon_logseq_db::decode;
+use holon_logseq_db::encode_document;
 use proptest::prelude::*;
 
 fn json_str(s: &str) -> String {
@@ -33,6 +34,7 @@ fn encode(n: &TransitNode) -> String {
         TransitNode::Symbol(s) => json_str(&format!("~${s}")),
         TransitNode::Uuid(u) => json_str(&format!("~u{u}")),
         TransitNode::Instant(t) => json_str(&format!("~t{t}")),
+        TransitNode::InstantMillis(t) => json_str(&format!("~m{t}")),
         TransitNode::List(xs) => {
             let inner: Vec<String> = xs.iter().map(encode).collect();
             format!("[{}]", inner.join(","))
@@ -64,6 +66,7 @@ fn node_strategy() -> impl Strategy<Value = TransitNode> {
         "[a-z][a-z0-9./-]{0,8}".prop_map(TransitNode::Symbol),
         "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}".prop_map(TransitNode::Uuid),
         "[0-9]{10,13}".prop_map(TransitNode::Instant),
+        "[0-9]{10,13}".prop_map(TransitNode::InstantMillis),
     ];
     leaf.prop_recursive(4, 32, 5, |inner| {
         prop_oneof![
@@ -79,6 +82,23 @@ proptest! {
     fn transit_decode_round_trips(node in node_strategy()) {
         let encoded = encode(&node);
         let decoded = decode(&encoded).expect("decode well-formed Transit");
+        prop_assert_eq!(decoded, node, "round-trip mismatch for: {}", encoded);
+    }
+}
+
+proptest! {
+    /// The property W0 rests on: the REAL encoder, cache and all, is the
+    /// inverse of the reader.
+    ///
+    /// Stronger than the fixture can be. The `^N` write cache only misbehaves
+    /// when a cacheable string REPEATS, and generated trees repeat keywords
+    /// far more densely than 456 hand-grown rows do — an off-by-one in cache
+    /// indexing resolves a back-reference to the wrong earlier value, which
+    /// still parses and is therefore invisible to anything but this equality.
+    #[test]
+    fn transit_encode_round_trips_through_the_write_cache(node in node_strategy()) {
+        let encoded = encode_document(&node);
+        let decoded = decode(&encoded).expect("the encoder emits well-formed Transit");
         prop_assert_eq!(decoded, node, "round-trip mismatch for: {}", encoded);
     }
 }

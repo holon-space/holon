@@ -245,7 +245,7 @@ fn node_value(node: &TransitNode) -> Value {
         TransitNode::Keyword(k) => Value::String(format!(":{k}")),
         TransitNode::Symbol(s) => Value::String(s.clone()),
         TransitNode::Uuid(u) => Value::String(u.clone()),
-        TransitNode::Instant(t) => Value::String(t.clone()),
+        TransitNode::Instant(t) | TransitNode::InstantMillis(t) => Value::String(t.clone()),
         TransitNode::List(items) => Value::Array(items.iter().map(node_value).collect()),
         TransitNode::Map(pairs) => Value::Object(
             pairs
@@ -297,7 +297,7 @@ fn link_marks(content: &str) -> Vec<MarkSpan> {
         // wrote (`((rate*(x)))` → a page named `rate*(x`).
         let (closing, names_only_nodes) = match (chars[i], chars[i + 1]) {
             ('[', '[') => ((']', ']'), false),
-            ('(', '(') => (((')', ')')), true),
+            ('(', '(') => ((')', ')'), true),
             _ => {
                 i += 1;
                 continue;

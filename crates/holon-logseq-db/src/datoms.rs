@@ -225,7 +225,7 @@ fn node_kind(node: &TransitNode) -> &'static str {
         TransitNode::Keyword(_) => "a keyword",
         TransitNode::Symbol(_) => "a symbol",
         TransitNode::Uuid(_) => "a uuid",
-        TransitNode::Instant(_) => "an instant",
+        TransitNode::Instant(_) | TransitNode::InstantMillis(_) => "an instant",
         TransitNode::List(_) => "a list",
         TransitNode::Map(_) => "a map",
         TransitNode::Tagged(..) => "a tagged value",

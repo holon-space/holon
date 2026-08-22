@@ -135,6 +135,23 @@ pbt name='general' cases='64' *FLAGS:
 keystone-smoke:
     just pbt general 1
 
+# LogSeq-DB write gate: the two round-trip legs that judge Holon's bytes with
+# LOGSEQ'S OWN validator and graph diff. They are `#[ignore]`d so a plain
+# `cargo test` can never report them as passing when the oracle is absent, and
+# this recipe is the only thing that runs them — a W-lane touching
+# holon-logseq-db is not green without it.
+#
+# HOLON_LOGSEQ_ORACLE must name a LogSeq checkout at the schema version the
+# graphs under test carry, with deps/db installed and LogSeq's two deleted
+# scripts restored. docs/Testing/LogseqDbOracle.md has the setup; the tests
+# assert those preconditions and fail loudly rather than skipping.
+lsqdb-oracle:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${HOLON_LOGSEQ_ORACLE:?set it to a prepared LogSeq checkout — see docs/Testing/LogseqDbOracle.md}"
+    cargo test -p holon-logseq-db --test kvs_round_trip -- --include-ignored --nocapture 2>&1 \
+        | tee /tmp/holon-lsqdb-oracle.log
+
 # Pattern-drift guard for the known-reds registry: replays the archived
 # 2026-07-31 full-depth corpus through the classifier and asserts its verdict is
 # unchanged. Cheap (no build) — run it after touching any assertion message that

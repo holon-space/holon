@@ -9,6 +9,8 @@
 //! corruption hazard for this import, hence the port is literal rather than
 //! idiomatic where the two disagree.
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use crate::F64Bits;
@@ -62,6 +64,13 @@ pub enum TransitError {
     /// `~#tag` outside the `["~#tag", value]` pair position — it tags nothing.
     #[error("Transit tag marker {tag:?} appears outside a tagged pair")]
     BareTagMarker { tag: String },
+    /// `~n` bigint / `~f` bigdec. Accepting them would silently narrow the
+    /// value on the way back out; see the reader's ground-type table.
+    #[error(
+        "Transit arbitrary-precision value ({text:?}) cannot be re-encoded without \
+         narrowing it; this build refuses to read a graph containing one"
+    )]
+    ArbitraryPrecisionUnsupported { text: String },
 }
 
 /// What decoding one JSON string yields. A `~#tag` marker is not a value —
@@ -164,11 +173,11 @@ impl Reader {
     fn decode_array(&mut self, items: &[Value]) -> Result<TransitNode, TransitError> {
         if items.first().and_then(Value::as_str) == Some(MAP_MARKER) {
             let entries = &items[1..];
-            if entries.len() % 2 != 0 {
+            if !entries.len().is_multiple_of(2) {
                 return Err(TransitError::UnpairedMap { len: entries.len() });
             }
             let mut pairs = Vec::with_capacity(entries.len() / 2);
-            for pair in entries.chunks_exact(2) {
+            for pair in entries.as_chunks::<2>().0 {
                 let key = self.decode(&pair[0], true)?.into_node()?;
                 let value = self.decode(&pair[1], false)?.into_node()?;
                 pairs.push((key, value));
@@ -216,21 +225,27 @@ fn decode_string(s: &str) -> Result<Scalar, TransitError> {
         ':' => TransitNode::Keyword(rest),
         '$' => TransitNode::Symbol(rest),
         'u' => TransitNode::Uuid(rest),
-        // `~i` integer, `~n` bigint — a bigint past i64 is a datom we cannot
-        // represent, so it stops the import rather than wrapping.
-        'i' | 'n' => TransitNode::Int(rest.parse().map_err(|source| TransitError::BadInt {
+        'i' => TransitNode::Int(rest.parse().map_err(|source| TransitError::BadInt {
             text: s.to_string(),
             source,
         })?),
-        // `~d` double, `~f` bigdec.
-        'd' | 'f' => TransitNode::Float(F64Bits::new(rest.parse().map_err(|source| {
+        'd' => TransitNode::Float(F64Bits::new(rest.parse().map_err(|source| {
             TransitError::BadFloat {
                 text: s.to_string(),
                 source,
             }
         })?)),
-        // `~t` instant string, `~m` instant millis.
-        't' | 'm' => TransitNode::Instant(rest),
+        't' => TransitNode::Instant(rest),
+        'm' => TransitNode::InstantMillis(rest),
+        // `~n` bigint and `~f` bigdec are arbitrary-precision. Reading them
+        // into `i64`/`f64` would round-trip back out as `~i`/`~d`, narrowing
+        // the value's type under LogSeq without a word — so they stop here
+        // instead, alongside `~b`. No LogSeq DB graph is known to write them.
+        'n' | 'f' => {
+            return Err(TransitError::ArbitraryPrecisionUnsupported {
+                text: s.to_string(),
+            });
+        }
         '#' => return Ok(Scalar::TagMarker(rest)),
         'b' => {
             return Err(TransitError::BytesUnsupported {
@@ -255,6 +270,114 @@ pub fn decode_document(doc: &str) -> Result<TransitNode, TransitError> {
     Reader::new().decode(&value, false)?.into_node()
 }
 
+/// `"^0".."^zz"` — the inverse of [`code_to_index`].
+fn index_to_code(index: usize) -> String {
+    let digit =
+        |v: usize| char::from_u32(BASE_CHAR_INDEX + v as u32).expect("cache digit is ASCII");
+    let base = CACHE_CODE_DIGITS as usize;
+    if index < base {
+        format!("{SUB}{}", digit(index))
+    } else {
+        format!("{SUB}{}{}", digit(index / base), digit(index % base))
+    }
+}
+
+/// One document's write state — the mirror image of [`Reader`].
+///
+/// The cache is the whole difficulty. A back-reference is positional, so the
+/// writer must append a string to its cache in exactly the places the reader
+/// would append it, or every `^N` after the first divergence resolves to the
+/// wrong value. Both sides therefore ask the same [`is_cacheable`] question
+/// about the same string in the same position, and nothing else decides.
+struct Writer {
+    cache: HashMap<String, usize>,
+}
+
+impl Writer {
+    fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+        }
+    }
+
+    /// Emit one already-encoded Transit string, as a cache code if the reader
+    /// will have it cached by the time it gets here.
+    fn scalar(&mut self, encoded: String, as_map_key: bool) -> Value {
+        if let Some(&index) = self.cache.get(&encoded) {
+            return Value::String(index_to_code(index));
+        }
+        if is_cacheable(&encoded, as_map_key) {
+            let next = self.cache.len();
+            self.cache.insert(encoded.clone(), next);
+        }
+        Value::String(encoded)
+    }
+
+    fn encode(&mut self, node: &TransitNode, as_map_key: bool) -> Value {
+        match node {
+            TransitNode::Nil => Value::Null,
+            TransitNode::Bool(b) => Value::Bool(*b),
+            // Transit stringifies map keys, so the same integer is `32` in
+            // value position and `"~i32"` as a key.
+            TransitNode::Int(i) => {
+                if as_map_key {
+                    self.scalar(format!("{ESC}i{i}"), true)
+                } else {
+                    Value::from(*i)
+                }
+            }
+            // Always the `~d` form, in both positions: a raw JSON `1` would
+            // read back as an integer, turning a float into an int silently.
+            TransitNode::Float(f) => self.scalar(format!("{ESC}d{}", f.get()), as_map_key),
+            // A string whose first character is a Transit marker is escaped by
+            // doubling the marker, which is what the reader's `~~`/`~^`/`` ~` ``
+            // arm undoes.
+            TransitNode::Str(s) => {
+                let encoded = match s.chars().next() {
+                    Some(ESC | SUB | RESERVED) => format!("{ESC}{s}"),
+                    _ => s.clone(),
+                };
+                self.scalar(encoded, as_map_key)
+            }
+            TransitNode::Keyword(k) => self.scalar(format!("{ESC}:{k}"), as_map_key),
+            TransitNode::Symbol(s) => self.scalar(format!("{ESC}${s}"), as_map_key),
+            TransitNode::Uuid(u) => self.scalar(format!("{ESC}u{u}"), as_map_key),
+            TransitNode::Instant(t) => self.scalar(format!("{ESC}t{t}"), as_map_key),
+            TransitNode::InstantMillis(t) => self.scalar(format!("{ESC}m{t}"), as_map_key),
+            TransitNode::List(items) => Value::Array(
+                items
+                    .iter()
+                    .map(|item| self.encode(item, false))
+                    .collect::<Vec<_>>(),
+            ),
+            TransitNode::Map(pairs) => {
+                let mut out = Vec::with_capacity(pairs.len() * 2 + 1);
+                out.push(Value::String(MAP_MARKER.to_string()));
+                for (k, v) in pairs {
+                    out.push(self.encode(k, true));
+                    out.push(self.encode(v, false));
+                }
+                Value::Array(out)
+            }
+            TransitNode::Tagged(tag, inner) => Value::Array(vec![
+                self.scalar(format!("{ESC}#{tag}"), false),
+                self.encode(inner, false),
+            ]),
+        }
+    }
+}
+
+/// Encode one [`TransitNode`] back to a Transit-JSON document.
+///
+/// `decode_document(&encode_document(x)) == x` for every node this crate can
+/// read. The bytes need not match LogSeq's own for the same value — the write
+/// cache is emission-order dependent — which is why the round-trip, not
+/// byte-equality, is what callers assert.
+pub fn encode_document(node: &TransitNode) -> String {
+    let value = Writer::new().encode(node, false);
+    serde_json::to_string(&value).expect("a serde_json::Value always serializes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,9 +398,15 @@ mod tests {
         );
         assert_eq!(dec(r#""~$sym""#), TransitNode::Symbol("sym".into()));
         assert_eq!(dec(r#""~uabc""#), TransitNode::Uuid("abc".into()));
+        // `~t` and `~m` are the same instant in two ground types, and stay
+        // apart so a re-encode cannot hand LogSeq the other one.
         assert_eq!(
             dec(r#""~m1787349600000""#),
-            TransitNode::Instant("1787349600000".into())
+            TransitNode::InstantMillis("1787349600000".into())
+        );
+        assert_eq!(
+            dec(r#""~t2026-08-22T09:00:00Z""#),
+            TransitNode::Instant("2026-08-22T09:00:00Z".into())
         );
         assert_eq!(dec(r#""plain""#), TransitNode::Str("plain".into()));
         // `~~x` is the escaped literal `~x`, not a ground type.

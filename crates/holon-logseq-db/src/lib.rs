@@ -20,6 +20,7 @@ use holon_api::EntityUri;
 pub mod base;
 mod datoms;
 pub mod ingest;
+pub mod kvs_writer;
 mod project;
 mod transit;
 
@@ -35,6 +36,7 @@ pub use project::Projection;
 pub use project::project;
 pub use transit::TransitError;
 pub use transit::decode_document;
+pub use transit::encode_document;
 
 /// An `f64` compared and hashed by its IEEE-754 bit pattern.
 ///
@@ -73,7 +75,15 @@ pub enum TransitNode {
     Keyword(String),
     Symbol(String),
     Uuid(String),
+    /// `~t` — an instant written as an ISO-8601 string.
     Instant(String),
+    /// `~m` — an instant written as milliseconds since the epoch.
+    ///
+    /// Distinct from [`Instant`](Self::Instant) because the two are the same
+    /// value in different ground types, and a writer that collapsed them would
+    /// re-emit `~m1787218309858` as `~t1787218309858` — silently handing
+    /// LogSeq an unparseable date string where a number stood.
+    InstantMillis(String),
     List(Vec<TransitNode>),
     /// Map as ordered key/value pairs (Transit `["^ ", k0, v0, …]`); order is
     /// preserved so datom-leaf and property drawers replay as authored.
