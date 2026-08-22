@@ -27,20 +27,23 @@ Feature: Outliner editing
     # `block::split-0`. Same-indent-level == same parent as `c1`, asserted against
     # the write-side store.
     #
-    # DROPPED FROM THE ORIGINAL (class-B gap, same kind as the three `@wip`
-    # scenarios below): sibling ORDER. The original asserted the new bullet
-    # "appears BELOW" `c1` and carries a `block/order`; nothing here — or anywhere
-    # in the corpus — asserts that `block::split-0` sorts AFTER `c1`. The whole
-    # `Then` vocabulary is ParentIs / WidgetContains / FocusOn
-    # (`src/pbt/fixtures/matchers.rs`), which has no ordering matcher. Parentage
-    # is asserted; position among siblings is NOT. A regression that re-parents
-    # correctly but slots the new block in the wrong place stays green here.
+    # The original's "appears BELOW `c1`" is the last `Then`: the split product
+    # sorts AFTER `c1` among the page's children. The oracle is
+    # `SutSqlProjection::sorted_children` (`sort_key`, the authoritative
+    # fractional index) — the same order source `inv-live-children-match-ref`
+    # compares. A regression that re-parents correctly but slots the new block
+    # in the wrong place reds here.
     When I focus block "block:structural-page" in region "main"
     And I split block "block:c1" at position 2
     And I type "Sibling 1"
     Then within 10 seconds block "block::split-0" contains "Sibling 1"
     And within 10 seconds block "block::split-0" is a top-level block of "block:structural-page"
     And within 10 seconds block "block:c1" contains "c1"
+    And within 10 seconds block "block::split-0" comes after block "block:c1"
+    # The wide seed's top-level order is `parent`, `c1`, `c2`, so `c1` is the
+    # SECOND child; the split product is slotted directly behind it.
+    And within 10 seconds block "block:c1" is child 2 of block "block:structural-page"
+    And within 10 seconds block "block::split-0" is child 3 of block "block:structural-page"
 
   @observed
   Scenario: Tab indents the current block under the preceding sibling   # log:3
@@ -48,27 +51,89 @@ Feature: Outliner editing
     # `When the caret is in "Sibling 2"`; here `c2` is never focused and no editor
     # is opened on it, so this scenario engages NO editor mirror — it is a pure
     # tree-shape assertion. Indent-while-editing is therefore still uncovered.
-    # Sibling order is likewise unasserted after the outdent (see the note above).
     When I focus block "block:structural-page" in region "main"
     And I indent block "block:c2"
     Then within 10 seconds block "block:c2" is a child of block "block:c1"
     When I outdent block "block:c2"
     Then within 10 seconds block "block:c2" is a top-level block of "block:structural-page"
     And within 10 seconds block "block:c2" contains "c2"
+    # Outdent puts `c2` back BEHIND the sibling it was indented under, not at
+    # the front of the page — without this the round trip could land it anywhere.
+    And within 10 seconds block "block:c2" comes after block "block:c1"
+    # Re-parenting is not folding: neither end of the indent/outdent round trip
+    # may leave the block that briefly gained a child marked collapsed.
+    And within 10 seconds block "block:c1" is not collapsed
+    And within 10 seconds block "block:c2" is not collapsed
 
+  # The third `Then` of log:4, "the collapsed state is persisted
+  # (block/collapsed? = true)". The ASSERTION vocabulary now exists —
+  # `block "<id>" is collapsed` (lane gv-vocab, oracle `block_raw.collapsed`) —
+  # and this scenario was written against it and RUN. It stays `@wip` because
+  # it found a PRODUCTION BUG, not because it cannot be expressed:
+  #
+  #   inv-blocks-match-ref/block_raw: block:folded-parent
+  #     SUT:       properties: {"COLLAPSED": String("t")}, collapsed: false
+  #     reference: properties: {},                        collapsed: true
+  #
+  # The parser is correct (`parser.rs:994`, test at ~2019: `:COLLAPSED: t` sets
+  # `block.collapsed = true`). The loss is in the ingest write leg:
+  # `holon-orgmode/src/block_params.rs` emits the typed `collapsed` param
+  # (line ~132) AND then re-emits the drawer key from
+  # `Block::drawer_properties()` (`holon-org-format/src/models.rs:976`), whose
+  # uppercase `"COLLAPSED"` is not recognised by the case-sensitive
+  # `is_storage_column_key` (block_params.rs:224) and so lands in the untyped
+  # `properties` JSON instead of being refused. `widget_only` has the identical
+  # shape. Un-`@wip` this once the ingest leg stops double-emitting the two
+  # typed fold fields — `drawer_properties()` serves BOTH org writeback (which
+  # needs the drawer keys) and ingest (which must not see them), and splitting
+  # that dual purpose is a design decision, not a vocabulary fix.
   @wip @observed
-  Scenario: Collapse hides a subtree and marks the parent   # log:4
-    # GAP (class B): the collapse ACTION exists (`I toggle collapse of {target_id}`,
-    # `I toggle the expander of block {block_id}`), but no `Then` vocabulary can
-    # observe the outcome: there is no negative widget matcher (`block X does not
-    # contain "…"` / `the subtree of X is hidden`) and no matcher for a persisted
-    # `collapsed` flag. The bullet's triangle + halo ring are GPUI-only pixels.
-    Given "Sibling 1" has a child "Sibling 2"
-    When I click the disclosure caret left of the "Sibling 1" bullet
-    Then the child subtree is hidden
-    And a right-pointing triangle and a halo ring appear on the "Sibling 1" bullet
-    And the collapsed state is persisted (block/collapsed? = true)
-    And clicking the caret again expands the subtree
+  Scenario: A folded block carries its collapsed mark into the store   # log:4
+    Given an org file "Folded.org":
+      """
+      * Folded parent
+      :PROPERTIES:
+      :COLLAPSED: t
+      :ID: folded-parent
+      :END:
+      ** Hidden child
+      :PROPERTIES:
+      :ID: hidden-child
+      :END:
+      * Open sibling
+      :PROPERTIES:
+      :ID: open-sibling
+      :END:
+      """
+    When I focus block "block:ref-doc-0" in region "main"
+    Then within 15 seconds block "block:folded-parent" is collapsed
+    And within 15 seconds block "block:open-sibling" is not collapsed
+    And within 15 seconds block "block:hidden-child" is a child of block "block:folded-parent"
+
+  # The gesture half of log:4. MEASURED 2026-08-22 (lane gv-vocab), with the
+  # steps below run for real: the assertion vocabulary is NO LONGER the gap —
+  # `block "<id>" is collapsed` exists and the scenario above uses it. The
+  # blocker is the ACTION. Driving `I toggle collapse of "block:c1"` headlessly
+  # unwraps the `expand_toggle::c1` geometry handle down to `block:c1` and
+  # dispatches a plain `click_entity` (`pbt/driver_input.rs`
+  # `click_at_element`), so the chevron-ness is thrown away: the reference model
+  # records the fold while the store never writes it, and the composed catalog
+  # reds with
+  #   inv-blocks-match-ref/{org,matview}: block:c1: collapsed: sut=false ref=true
+  # Two ways out, and picking one is a real decision, not a vocabulary fix:
+  # teach the headless driver to dispatch the chevron's own collapse operation,
+  # or accept that a bullet chevron is view-local and correct `ToggleCollapse`'s
+  # `apply_to_ref` (which sets the document field unconditionally, while
+  # `expand_toggle.rs` documents profile-driven toggles as view-local only).
+  @wip @observed
+  Scenario: Clicking the disclosure caret folds the subtree   # log:4
+    When I focus block "block:structural-page" in region "main"
+    And I indent block "block:c2"
+    Then within 10 seconds block "block:c2" is a child of block "block:c1"
+    When I toggle collapse of "block:c1"
+    Then within 10 seconds block "block:c1" is collapsed
+    When I toggle the expander of block "block:c1"
+    Then within 10 seconds block "block:c1" is not collapsed
 
   @wip @observed
   Scenario: Zoom-in re-roots the view to a block   # log:5

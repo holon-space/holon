@@ -279,6 +279,9 @@ impl SutSqlProjection for FixtureSqlProjection {
     async fn block_task_state(&self, id: &EntityUri) -> Option<String> {
         self.task_state.get(id).cloned()
     }
+    async fn block_link_targets(&self, _: &EntityUri) -> Vec<(String, Option<EntityUri>)> {
+        Vec::new()
+    }
 }
 
 impl CapProvider for FixtureSqlProjection {

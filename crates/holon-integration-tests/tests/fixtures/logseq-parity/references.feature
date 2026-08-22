@@ -26,15 +26,12 @@ Feature: References and backlinks
   # the marks the production parser had already extracted — see bugfunnel
   # 2026-08-22-ref-seed-org-file-drops-inline-marks.
   #
-  # SCOPE — what this pins and what it does NOT. It pins the MARK ROUND-TRIP:
-  # parser -> reference leg -> store -> renderer. It does NOT assert reference
-  # RESOLUTION — nothing here reads `block_links.resolved_id`, and no composed
-  # invariant covers link resolution, so a DANGLING `[[Project Alpha]]` would
-  # render identically. Consequently the `Project Alpha.org` file below is
-  # decorative for THIS assertion; it is kept because the still-`@wip` sibling
-  # needs it and removing it would make the scenario read as a dangling-link
-  # test. Asserting resolution needs a `resolved_id` assertion vocabulary,
-  # tracked in 2026-08-22-backlinks-section-not-observable-headless.
+  # SCOPE — what this pins. It pins the MARK ROUND-TRIP (parser -> reference
+  # leg -> store -> renderer) AND, since 2026-08-22 (lane gv-vocab), reference
+  # RESOLUTION: the last `Then` reads `block_links.resolved_id` directly, so a
+  # DANGLING `[[Project Alpha]]` — which renders identically and used to pass
+  # here — now reds. That makes the `Project Alpha.org` file below load-bearing
+  # rather than decorative: it is the block the link must resolve TO.
   #
   # `block:ref-doc-N` is the ORACLE's synthetic document id, minted one per
   # `an org file` step IN ORDER (reference_state.rs). So `ref-doc-0` is
@@ -59,6 +56,11 @@ Feature: References and backlinks
       """
     When I focus block "block:ref-doc-1" in region "main"
     Then within 15 seconds block "block:referencing-block" contains "Link to Project Alpha"
+    # A `[[Page]]` reference resolves BY NAME to the PAGE — `ref-doc-0`, the
+    # document `Project Alpha.org` mints — not to the `alpha-scope` headline
+    # inside it. That is what makes `Project Alpha.org` load-bearing: delete it
+    # and this link dangles.
+    And within 15 seconds block "block:referencing-block" resolves link "Project Alpha" to block "block:ref-doc-0"
 
   # log:12's second half. `I click block` clicks a BLOCK; there is no step for
   # clicking an inline link inside one, and no Recent list exists.
@@ -86,12 +88,42 @@ Feature: References and backlinks
   # `live_query` yields no row here when the same query yields one in prod —
   # most likely the `focus_roots`/`navigation_cursor` join this harness leaves
   # unsatisfied. Resolve that before un-`@wip`ing.
+  # RE-MEASURED 2026-08-22 (lane gv-vocab) with the steps below run for real.
+  # The OBSERVABILITY half of the blocker is CLOSED: `view_model_to_snapshot`
+  # (pbt/vm_snapshot.rs) now copies props for EVERY `ViewKind` — the match is
+  # exhaustive, so a generic widget's title and a `ViewKind::Error` message
+  # both reach the snapshot. The widget dump for this scenario now carries
+  # icons, drop-zone op names, tree-item depths and the view-mode switcher's
+  # modes, none of which were visible before.
+  #
+  # What that measurement then proves: the section is ABSENT, not invisible,
+  # and not degraded to an error widget — the dump contains no "Linked
+  # references" title and no error message anywhere. So the ONLY remaining
+  # blocker is the accordion's `live_query` yielding no row in this harness
+  # (piece 2 of the bugfunnel entry): its join of `backlinks` to `focus_roots`
+  # and `navigation_cursor` for region `main` (assets/default/index.org:23) is
+  # unsatisfied here, while the same query returns a row against the real
+  # ingest path. Un-`@wip` once that join is localized and fixed; the `Then`s
+  # below are ready and need no further vocabulary.
   @wip @observed
   Scenario: Linked references list the backlinks grouped by source   # log:13
-    Given the Project Alpha page is open
-    Then a "Linked references" panel shows the count and the referencing context
-    And the reference is grouped under its source page ("2026-08-20")
-    And the exact referencing block is shown
+    Given an org file "Alpha.org":
+      """
+      * Project Alpha
+      :PROPERTIES:
+      :ID: alpha-page
+      :END:
+      """
+    And an org file "Day.org":
+      """
+      * Link to [[Project Alpha]]
+      :PROPERTIES:
+      :ID: linking-block
+      :END:
+      """
+    When I focus block "block:ref-doc-0" in region "main"
+    Then within 15 seconds the widget contains "Linked references"
+    And within 15 seconds the widget contains "Link to Project Alpha"
 
   @wip @observed @power
   Scenario: The (( )) block-ref syntax is removed; use [[ ]] for all node refs   # log:19

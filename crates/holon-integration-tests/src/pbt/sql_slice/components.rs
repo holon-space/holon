@@ -290,6 +290,23 @@ impl SutSqlProjection for SqlProjectionComponent {
             .next()
             .and_then(|r| Self::cell(&r, "content"))
     }
+
+    async fn block_link_targets(&self, source: &EntityUri) -> Vec<(String, Option<EntityUri>)> {
+        let escaped = source.as_str().replace('\'', "''");
+        self.query(&format!(
+            "SELECT target, resolved_id FROM block_links WHERE source_block_id = '{escaped}'"
+        ))
+        .await
+        .into_iter()
+        .map(|r| {
+            let target = Self::cell(&r, "target").unwrap_or_else(|| {
+                panic!("block_links row for {source} has no `target` — the column is NOT NULL")
+            });
+            let resolved = Self::cell(&r, "resolved_id").map(|s| EntityUri::from_raw(&s));
+            (target, resolved)
+        })
+        .collect()
+    }
 }
 // No `SutFocus` impl: this slice drives no navigation, so the
 // focus/nav invariants (`inv-navigation-focus`/`inv-focus-roots`) DESELECT here

@@ -32,6 +32,84 @@ pub struct BlockIsTopLevelOf {
     pub page_id: EntityUri,
 }
 
+/// `block "<id>" is child <n> of block "<parent>"` — position among the
+/// parent's children, **1-based** (child 1 is the first). The ordinal the
+/// LogSeq corpus asserts as "the Nth bullet".
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("block {block_id} is child {index} of block {parent_id}")]
+pub struct BlockIsNthChild {
+    pub block_id: EntityUri,
+    pub index: usize,
+    pub parent_id: EntityUri,
+}
+
+/// `block "<id>" comes after block "<other>"` — relative sibling order. Both
+/// must share a parent; asserting across parents is a step-authoring error and
+/// fails loud rather than comparing incomparable positions.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("block {block_id} comes after block {other_id}")]
+pub struct BlockComesAfter {
+    pub block_id: EntityUri,
+    pub other_id: EntityUri,
+}
+
+/// `block "<id>" has task state "<state>"` — the org keyword in the block's
+/// `properties` bag. The renderer draws a GLYPH rather than the keyword, so no
+/// rendered-substring assertion can express this.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("block {block_id} has task state {state}")]
+pub struct BlockHasTaskState {
+    pub block_id: EntityUri,
+    pub state: String,
+}
+
+/// `block "<id>" has no task state` — the block is not a task. Both storage
+/// encodings of "not a task" satisfy it: the property absent, and the property
+/// present but empty (which is what clearing the state leaves behind).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("block {block_id} has no task state")]
+pub struct BlockHasNoTaskState {
+    pub block_id: EntityUri,
+}
+
+/// `block "<id>" is collapsed` — the persisted `block_raw.collapsed` flag,
+/// document state that survives restart (not per-device view state). Says
+/// nothing about whether the subtree is still painted.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("block {block_id} is collapsed")]
+pub struct BlockIsCollapsed {
+    pub block_id: EntityUri,
+}
+
+/// `block "<id>" is not collapsed` — the negative of [`BlockIsCollapsed`].
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("block {block_id} is not collapsed")]
+pub struct BlockIsNotCollapsed {
+    pub block_id: EntityUri,
+}
+
+/// `block "<src>" resolves link "<target>" to block "<dst>"` — the
+/// `block_links` row for `target` carries `resolved_id = dst`. A resolved and
+/// a dangling reference RENDER identically, so this is the only way to tell
+/// them apart.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("block {block_id} resolves link {target} to block {resolved_id}")]
+pub struct BlockResolvesLink {
+    pub block_id: EntityUri,
+    pub target: String,
+    pub resolved_id: EntityUri,
+}
+
+/// `block "<src>" has a dangling link "<target>"` — the row exists but
+/// `resolved_id` is NULL. The negative half, so a scenario can pin that a
+/// reference to a nonexistent page does NOT silently acquire a target.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("block {block_id} has a dangling link {target}")]
+pub struct BlockHasDanglingLink {
+    pub block_id: EntityUri,
+    pub target: String,
+}
+
 /// `(name, template)` for every assert-side step — the input to the
 /// registration-time ambiguity refusal, mirroring
 /// `E2ETransition::step_catalog`.
@@ -45,6 +123,38 @@ pub fn assert_step_catalog() -> Vec<(&'static str, &'static str)> {
         (
             "BlockIsTopLevelOf",
             <BlockIsTopLevelOf as StepVocabulary>::TEMPLATE,
+        ),
+        (
+            "BlockIsNthChild",
+            <BlockIsNthChild as StepVocabulary>::TEMPLATE,
+        ),
+        (
+            "BlockComesAfter",
+            <BlockComesAfter as StepVocabulary>::TEMPLATE,
+        ),
+        (
+            "BlockHasTaskState",
+            <BlockHasTaskState as StepVocabulary>::TEMPLATE,
+        ),
+        (
+            "BlockHasNoTaskState",
+            <BlockHasNoTaskState as StepVocabulary>::TEMPLATE,
+        ),
+        (
+            "BlockIsCollapsed",
+            <BlockIsCollapsed as StepVocabulary>::TEMPLATE,
+        ),
+        (
+            "BlockIsNotCollapsed",
+            <BlockIsNotCollapsed as StepVocabulary>::TEMPLATE,
+        ),
+        (
+            "BlockResolvesLink",
+            <BlockResolvesLink as StepVocabulary>::TEMPLATE,
+        ),
+        (
+            "BlockHasDanglingLink",
+            <BlockHasDanglingLink as StepVocabulary>::TEMPLATE,
         ),
     ]
 }

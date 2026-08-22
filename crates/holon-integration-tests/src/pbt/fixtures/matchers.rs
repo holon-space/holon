@@ -12,8 +12,16 @@ use holon_pbt_core::step_vocabulary::StepVocabulary;
 use regex::Regex;
 
 use super::assert::Assertion;
+use super::assert_steps::BlockComesAfter;
+use super::assert_steps::BlockHasDanglingLink;
+use super::assert_steps::BlockHasNoTaskState;
+use super::assert_steps::BlockHasTaskState;
 use super::assert_steps::BlockIsChildOf;
+use super::assert_steps::BlockIsCollapsed;
+use super::assert_steps::BlockIsNotCollapsed;
+use super::assert_steps::BlockIsNthChild;
 use super::assert_steps::BlockIsTopLevelOf;
+use super::assert_steps::BlockResolvesLink;
 
 /// Translate a single Gherkin `Then` step into an assertion. An optional
 /// `within <N> seconds ` prefix sets a retry budget on the assertion.
@@ -51,6 +59,85 @@ pub fn match_assertion(step: &Step) -> Result<Assertion, String> {
         return Ok(Assertion::ParentIs {
             child_id: v.block_id.to_string(),
             parent_id: v.page_id.to_string(),
+            within_secs,
+        });
+    }
+
+    if let Some(v) = BlockIsNthChild::parse_step(text, docstring)
+        .map_err(|e| format!("step {text:?} matches `is child N of` but its fields do not: {e}"))?
+    {
+        return Ok(Assertion::ChildIndex {
+            block_id: v.block_id.to_string(),
+            index: v.index,
+            parent_id: v.parent_id.to_string(),
+            within_secs,
+        });
+    }
+    if let Some(v) = BlockComesAfter::parse_step(text, docstring)
+        .map_err(|e| format!("step {text:?} matches `comes after` but its fields do not: {e}"))?
+    {
+        return Ok(Assertion::ComesAfter {
+            block_id: v.block_id.to_string(),
+            other_id: v.other_id.to_string(),
+            within_secs,
+        });
+    }
+
+    if let Some(v) = BlockHasTaskState::parse_step(text, docstring)
+        .map_err(|e| format!("step {text:?} matches `has task state` but its fields do not: {e}"))?
+    {
+        return Ok(Assertion::TaskState {
+            block_id: v.block_id.to_string(),
+            expected: Some(v.state),
+            within_secs,
+        });
+    }
+    if let Some(v) = BlockHasNoTaskState::parse_step(text, docstring).map_err(|e| {
+        format!("step {text:?} matches `has no task state` but its fields do not: {e}")
+    })? {
+        return Ok(Assertion::TaskState {
+            block_id: v.block_id.to_string(),
+            expected: None,
+            within_secs,
+        });
+    }
+
+    if let Some(v) = BlockIsCollapsed::parse_step(text, docstring)
+        .map_err(|e| format!("step {text:?} matches `is collapsed` but its fields do not: {e}"))?
+    {
+        return Ok(Assertion::Collapsed {
+            block_id: v.block_id.to_string(),
+            expected: true,
+            within_secs,
+        });
+    }
+    if let Some(v) = BlockIsNotCollapsed::parse_step(text, docstring).map_err(|e| {
+        format!("step {text:?} matches `is not collapsed` but its fields do not: {e}")
+    })? {
+        return Ok(Assertion::Collapsed {
+            block_id: v.block_id.to_string(),
+            expected: false,
+            within_secs,
+        });
+    }
+
+    if let Some(v) = BlockResolvesLink::parse_step(text, docstring)
+        .map_err(|e| format!("step {text:?} matches `resolves link` but its fields do not: {e}"))?
+    {
+        return Ok(Assertion::LinkResolves {
+            block_id: v.block_id.to_string(),
+            target: v.target,
+            resolved_id: Some(v.resolved_id.to_string()),
+            within_secs,
+        });
+    }
+    if let Some(v) = BlockHasDanglingLink::parse_step(text, docstring).map_err(|e| {
+        format!("step {text:?} matches `has a dangling link` but its fields do not: {e}")
+    })? {
+        return Ok(Assertion::LinkResolves {
+            block_id: v.block_id.to_string(),
+            target: v.target,
+            resolved_id: None,
             within_secs,
         });
     }

@@ -578,12 +578,22 @@ impl SutBlockInteract for DriverInputComponent {
             "main"
         };
         let target = match element_id.split_once("::") {
-            Some((kind, suffix)) if !kind.contains(':') && suffix.contains(':') => suffix,
+            Some((kind, suffix)) if !kind.contains(':') => suffix,
             _ => element_id,
         };
-        let element_uri = EntityUri::parse(target).unwrap_or_else(|e| {
-            panic!("[click_at_element] {element_id:?} (target {target:?}) is not an EntityUri: {e}")
-        });
+        // `geometry::bare_target` strips a `block:` scheme (and only that) when
+        // it builds a handle, so a scheme-less suffix IS a block id and this is
+        // its inverse. Without it every chevron/bullet handle — which is how
+        // `ToggleCollapse` addresses a row — fails to parse.
+        let element_uri = if target.contains(':') {
+            EntityUri::parse(target).unwrap_or_else(|e| {
+                panic!(
+                    "[click_at_element] {element_id:?} (target {target:?}) is not an EntityUri: {e}"
+                )
+            })
+        } else {
+            EntityUri::block(target)
+        };
         self.driver()
             .click_entity(&element_uri, region)
             .await

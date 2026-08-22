@@ -1,6 +1,7 @@
 //! Replay of `tests/fixtures/_gherkin_assert/parentage.feature` — the teeth for
 //! the structural `Then` vocabulary (`block X is a child of block Y` /
-//! `block X is a top-level block of Y`).
+//! `block X is a top-level block of Y`), plus the ambiguity gate over the WHOLE
+//! assert-step catalog (ordering, task state, fold state, link resolution).
 //!
 //! Same composed stack as the dogfood recordings (`ComposedSut<WideE2E>` born
 //! onto the wide seed), so the assertion reads the real store snapshot.
@@ -21,11 +22,14 @@ fn parentage_feature() -> PathBuf {
     path
 }
 
-/// The two templates are structurally distinct, so no step can resolve to both.
+/// Every assert-step template is structurally distinct, so no step can resolve
+/// to two of them. The catalog GROWS as `Then` vocabulary is added, so this
+/// gates the property rather than a template count — a count assertion would
+/// red on every legitimate addition while catching no ambiguity at all.
 #[test]
 fn parentage_templates_are_unambiguous() {
     let catalog = holon_integration_tests::pbt::fixtures::assert_steps::assert_step_catalog();
-    assert_eq!(catalog.len(), 2, "assert-step catalog: {catalog:?}");
+    assert!(!catalog.is_empty(), "assert-step catalog is empty");
     holon_pbt_core::step_vocabulary::check_template_ambiguity(&catalog)
         .expect("assert-step templates must not be structurally ambiguous");
 }

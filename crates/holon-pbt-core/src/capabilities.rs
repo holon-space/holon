@@ -1380,6 +1380,14 @@ pub trait SutSqlProjection {
     /// doesn't exist. Used by `inv-block-content/sql` (split-block
     /// content-routing slice).
     async fn block_content(&self, id: &EntityUri) -> Option<String>;
+
+    /// Outgoing rows of the `block_links` junction for `source`, as
+    /// `(target, resolved_id)` — the link's authored target text and the
+    /// entity it resolved to, `None` while it dangles. This is the ONLY
+    /// surface that separates a resolved reference from a dangling one: both
+    /// render identically, because the renderer draws the mark's label either
+    /// way.
+    async fn block_link_targets(&self, source: &EntityUri) -> Vec<(String, Option<EntityUri>)>;
 }
 
 // `SutFocus` is the SUT side of the focus read duality, single-sourced

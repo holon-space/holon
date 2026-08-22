@@ -2474,6 +2474,23 @@ impl SutSqlProjection for HeadlessFrontendComponent {
             .next()
             .and_then(|r| Self::cell(&r, "content"))
     }
+
+    async fn block_link_targets(&self, source: &EntityUri) -> Vec<(String, Option<EntityUri>)> {
+        let escaped = source.as_str().replace('\'', "''");
+        self.sql_query(&format!(
+            "SELECT target, resolved_id FROM block_links WHERE source_block_id = '{escaped}'"
+        ))
+        .await
+        .into_iter()
+        .map(|r| {
+            let target = Self::cell(&r, "target").unwrap_or_else(|| {
+                panic!("block_links row for {source} has no `target` — the column is NOT NULL")
+            });
+            let resolved = Self::cell(&r, "resolved_id").map(|s| EntityUri::from_raw(&s));
+            (target, resolved)
+        })
+        .collect()
+    }
 }
 
 /// `SutAdviceMatview` over the live Turso projection — the SQL-level twin

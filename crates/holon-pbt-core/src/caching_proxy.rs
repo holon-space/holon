@@ -217,6 +217,10 @@ impl<'a, S: SutSqlProjection> SutSqlProjection for CachingProxy<'a, S> {
     async fn block_content(&self, id: &EntityUri) -> Option<String> {
         self.inner.block_content(id).await
     }
+
+    async fn block_link_targets(&self, source: &EntityUri) -> Vec<(String, Option<EntityUri>)> {
+        self.inner.block_link_targets(source).await
+    }
 }
 
 // ─── SutFocus ───────────────────────────────────────────────

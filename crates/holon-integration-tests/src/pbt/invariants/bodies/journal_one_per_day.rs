@@ -186,6 +186,9 @@ mod tests {
                 .find(|(jid, _)| jid == id)
                 .map(|(_, d)| d.clone())
         }
+        async fn block_link_targets(&self, _: &EntityUri) -> Vec<(String, Option<EntityUri>)> {
+            Vec::new()
+        }
     }
 
     fn visited(days: &[&str]) -> BTreeSet<String> {

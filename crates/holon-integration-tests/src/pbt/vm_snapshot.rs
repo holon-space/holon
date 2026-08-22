@@ -103,7 +103,175 @@ pub(crate) fn view_model_to_snapshot(
             props.insert("open".into(), open.to_string());
             props.insert("width".into(), width.to_string());
         }
-        _ => {}
+
+        // Every remaining kind, spelled out. The match is EXHAUSTIVE on
+        // purpose: a new `ViewKind` must decide what a snapshot consumer can
+        // see of it, and the old `_ => {}` silently answered "nothing" — which
+        // is how a generic widget's title and an error message became
+        // unobservable to every fixture assertion (BugFunnel
+        // 2026-08-22-backlinks-section-not-observable-headless).
+        ViewKind::Error { message } => {
+            props.insert("message".into(), message.clone());
+        }
+        ViewKind::Icon { name, size } => {
+            props.insert("name".into(), name.clone());
+            props.insert("size".into(), size.to_string());
+        }
+        ViewKind::Checkbox { checked } => {
+            props.insert("checked".into(), checked.to_string());
+        }
+        ViewKind::Spacer {
+            width,
+            height,
+            color,
+        } => {
+            props.insert("width".into(), width.to_string());
+            props.insert("height".into(), height.to_string());
+            if let Some(color) = color {
+                props.insert("color".into(), color.clone());
+            }
+        }
+        ViewKind::Image {
+            path,
+            alt,
+            width,
+            height,
+        } => {
+            props.insert("path".into(), path.clone());
+            props.insert("alt".into(), alt.clone());
+            if let Some(width) = width {
+                props.insert("width".into(), width.to_string());
+            }
+            if let Some(height) = height {
+                props.insert("height".into(), height.to_string());
+            }
+        }
+        ViewKind::Section { title, .. } => {
+            props.insert("title".into(), title.clone());
+        }
+        ViewKind::Collapsible { header, icon, .. } => {
+            props.insert("header".into(), header.clone());
+            props.insert("icon".into(), icon.clone());
+        }
+        ViewKind::Card { accent, .. } => {
+            props.insert("accent".into(), accent.clone());
+        }
+        ViewKind::ChatBubble { sender, time, .. } => {
+            props.insert("sender".into(), sender.clone());
+            props.insert("time".into(), time.clone());
+        }
+        ViewKind::Board { lane_field, .. } => {
+            props.insert("lane_field".into(), lane_field.clone());
+        }
+        ViewKind::Row { gap, .. } | ViewKind::List { gap, .. } | ViewKind::Columns { gap, .. } => {
+            props.insert("gap".into(), gap.to_string());
+        }
+        ViewKind::Column { gap, .. } => {
+            props.insert("gap".into(), gap.to_string());
+        }
+        ViewKind::SourceBlock {
+            language,
+            content,
+            name,
+            editable,
+        } => {
+            props.insert("language".into(), language.clone());
+            props.insert("content".into(), content.clone());
+            props.insert("name".into(), name.clone());
+            props.insert("editable".into(), editable.to_string());
+        }
+        ViewKind::SourceEditor { language, content } => {
+            props.insert("language".into(), language.clone());
+            props.insert("content".into(), content.clone());
+        }
+        ViewKind::BlockOperations { operations } => {
+            props.insert("operations".into(), operations.clone());
+        }
+        ViewKind::PrefField {
+            key,
+            pref_type,
+            value,
+            requires_restart,
+            locked,
+            ..
+        } => {
+            props.insert("key".into(), key.clone());
+            props.insert("pref_type".into(), pref_type.clone());
+            props.insert("value".into(), format!("{value:?}"));
+            props.insert("requires_restart".into(), requires_restart.to_string());
+            props.insert("locked".into(), locked.to_string());
+        }
+        ViewKind::PieMenu { fields, .. } => {
+            props.insert("fields".into(), fields.clone());
+        }
+        ViewKind::DropZone { op_name } => {
+            props.insert("op_name".into(), op_name.clone());
+        }
+        ViewKind::ViewModeSwitcher {
+            entity_uri, modes, ..
+        } => {
+            props.insert("entity_uri".into(), entity_uri.to_string());
+            props.insert("modes".into(), modes.clone());
+        }
+        ViewKind::OpButton {
+            op_name,
+            target_id,
+            display_name,
+        } => {
+            props.insert("op_name".into(), op_name.clone());
+            props.insert("target_id".into(), target_id.clone());
+            props.insert("display_name".into(), display_name.clone());
+        }
+        ViewKind::LiveQuery {
+            query,
+            query_lang,
+            query_context_id,
+            ..
+        } => {
+            if let Some(query) = query {
+                props.insert("query".into(), query.clone());
+            }
+            if let Some(lang) = query_lang {
+                props.insert("query_lang".into(), lang.clone());
+            }
+            if let Some(context) = query_context_id {
+                props.insert("query_context_id".into(), context.clone());
+            }
+        }
+        ViewKind::Unevaluated { mechanism, reason } => {
+            props.insert("mechanism".into(), format!("{mechanism:?}"));
+            props.insert("reason".into(), reason.clone());
+        }
+        ViewKind::TreeItem {
+            depth,
+            has_children,
+            collapsed,
+            ..
+        } => {
+            props.insert("depth".into(), depth.to_string());
+            props.insert("has_children".into(), has_children.to_string());
+            props.insert("collapsed".into(), collapsed.to_string());
+        }
+        // The row payload is the collection's own data and is addressable
+        // through `entity_id`; copying it here would put every cell of every
+        // table into the `snapshot_text` haystack that substring assertions
+        // search.
+        ViewKind::TableRow { .. } => {}
+        // Structural kinds with no scalar field of their own.
+        ViewKind::Divider
+        | ViewKind::Tree { .. }
+        | ViewKind::Outline { .. }
+        | ViewKind::Table { .. }
+        | ViewKind::QueryResult { .. }
+        | ViewKind::Focusable { .. }
+        | ViewKind::Selectable { .. }
+        | ViewKind::Draggable { .. }
+        | ViewKind::OnHover { .. }
+        | ViewKind::BottomDock { .. }
+        | ViewKind::LiveBlock { .. }
+        | ViewKind::RenderBlock { .. }
+        | ViewKind::Empty
+        | ViewKind::Loading => {}
     }
 
     // Placed rows are identified in PBT snapshots by props["occurrence"] =

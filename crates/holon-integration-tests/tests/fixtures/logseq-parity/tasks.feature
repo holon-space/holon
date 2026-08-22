@@ -5,25 +5,37 @@ Feature: Tasks and TODO workflow (DB version)
   # Status / Deadline / Scheduled / Priority properties. This DIVERGES from the
   # file version's "TODO " text-marker model.
   #
-  # TRIAGE 2026-08-22 (lane gap-props). No scenario in this file is expressible
-  # in the current step registry, so all five stay @wip. Holon's task model is
-  # the org keyword in the block's `properties` bag (`task_state`), reachable
-  # through `I cycle block {id} to state {state}` and through keyword typing on
-  # the source-projection surface. Class per scenario below; the vocabulary the
-  # class-B ones need is listed once, at the bottom of this comment.
+  # TRIAGE 2026-08-22 (lane gap-props), CORRECTED 2026-08-22 (lane gv-vocab).
+  # No scenario in this file is expressible in the current step registry, so
+  # all five stay @wip. Holon's task model is the org keyword in the block's
+  # `properties` bag (`task_state`), reachable through
+  # `I cycle block {id} to state {state}` and through keyword typing on the
+  # source-projection surface.
   #
-  # MISSING VOCABULARY (blocks tasks 1-3, and already named as "THE ASSERTION
-  # IS THE GAP" by tests/fixtures/dogfood-recorded/task_state_cycle.feature and
-  # task_keyword_authoring.feature):
-  #   - Then `block "<id>" has task state "<state>"` — the read already exists
-  #     on the composed cap surface as `SutSqlProjection::block_task_state`.
+  # CORRECTION — `block "<id>" has task state "<state>"` NOW EXISTS (lane
+  # gv-vocab; oracle `SutSqlProjection::block_task_state`), and it unlocks
+  # NOTHING here. The earlier header claimed it blocked tasks 1-3; the
+  # per-scenario triage below is right and that claim was wrong:
+  #   - task 1 and task 5 are REJECTED DEVIATIONS that must never go green —
+  #     asserting the keyword would pin behaviour Holon deliberately does not
+  #     have.
+  #   - tasks 2 and 3 need an assertion over SLASH-MENU ITEMS, not over task
+  #     state. The popup lives in `EditorViewModel` and is rendered by GPUI
+  #     only; the headless widget tree the `the widget contains` matcher walks
+  #     never carries popup items.
+  #   - task 4 needs a deadline op, a date picker and a repeater — none exist.
+  # The matcher's real home is the DOGFOOD-RECORDED corpus, where the task
+  # model is actually driven: `dogfood-recorded/task_state_cycle.feature` and
+  # `task_keyword_authoring.feature` both use it now, and it is what tells
+  # "TODO milk" (promoted) apart from "TODOLIST" (plain text) — a distinction
+  # no rendered-substring assertion could make, because the renderer draws a
+  # glyph and never prints the keyword.
+  #
+  # STILL MISSING, and genuinely blocking here:
+  #   - Then an assertion over slash-menu items (tasks 2-3, above).
   #   - Then `block "<id>" is tagged "<tag>"` — `block_tags` is a real junction
   #     table, but the cap surface exposes only `block_tag_block_ids()`, not a
   #     per-block tag read.
-  #   - Then an assertion over slash-menu items. The popup lives in
-  #     `EditorViewModel` and is rendered by GPUI only; the headless widget tree
-  #     the `the widget contains` matcher walks never carries popup items, so
-  #     `the widget contains "…"` cannot see the menu.
 
   @observed
   Scenario: Typing a "TODO " prefix does NOT create a task

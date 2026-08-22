@@ -87,11 +87,26 @@ produced that evidence was a temporary fixture and is not in the tree.)
 
 ## Remedy
 
-OPEN. Three independent pieces:
+OPEN — one of three pieces done. The enabling half landed 2026-08-22 (lane
+`gv-vocab`) and its measurement narrows what is left.
 
-* Teach `view_model_to_snapshot` to carry generic widget props and the
-  `ViewKind::Error` message, so a fixture assertion can name a section header
-  and an error is loud rather than invisible. This is the enabling half.
+* ~~Teach `view_model_to_snapshot` to carry generic widget props and the
+  `ViewKind::Error` message.~~ **DONE.** The `_ => {}` arm is gone:
+  `crates/holon-integration-tests/src/pbt/vm_snapshot.rs` now matches
+  EXHAUSTIVELY over `ViewKind`, so a new variant must decide what a snapshot
+  consumer sees of it rather than silently contributing nothing.
+  `ViewKind::Error`'s `message` and a generic section's `title` both reach
+  `props`, and the widget dump for the log:13 scenario now carries icons, drop
+  zone op names, tree-item depths and view-mode switcher modes that were
+  invisible before.
+
+  What that buys the investigation: re-running the scenario with the richer
+  snapshot shows **no "Linked references" title and no error message anywhere
+  in the tree**. The section is therefore ABSENT, not invisible and not
+  degraded to an error widget — which retires the ambiguity this entry was
+  opened on and leaves piece 2 as the sole blocker. `references.feature`
+  log:13 carries the ready-to-run steps and the measurement; it stays `@wip`
+  on the `live_query` join alone, needing no further vocabulary.
 * Then localize why the section's `live_query` returns no row headlessly and
   fix that, and un-`@wip` the `Linked references list the backlinks grouped by
   source` scenario in

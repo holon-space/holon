@@ -173,6 +173,9 @@ impl SutSqlProjection for ToySut {
     async fn block_content(&self, _: &EntityUri) -> Option<String> {
         None
     }
+    async fn block_link_targets(&self, _: &EntityUri) -> Vec<(String, Option<EntityUri>)> {
+        Vec::new()
+    }
 }
 
 #[async_trait::async_trait(?Send)]

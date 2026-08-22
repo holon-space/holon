@@ -37,6 +37,7 @@ use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutFocus;
 use holon_pbt_core::capabilities::SutRenderer;
+use holon_pbt_core::capabilities::SutSqlProjection;
 use holon_pbt_core::capabilities::WidgetSnapshot;
 use holon_pbt_core::composition::CapMap;
 
@@ -65,6 +66,41 @@ pub enum Assertion {
         parent_id: String,
         within_secs: Option<u64>,
     },
+    /// `block_id` sits at 1-based position `index` among `parent_id`'s children
+    /// in `sort_key` order.
+    ChildIndex {
+        block_id: String,
+        index: usize,
+        parent_id: String,
+        within_secs: Option<u64>,
+    },
+    /// `block_id` sorts after `other_id` among their common parent's children.
+    ComesAfter {
+        block_id: String,
+        other_id: String,
+        within_secs: Option<u64>,
+    },
+    /// `block_id`'s stored task-state keyword. `expected = None` asserts the
+    /// block is not a task.
+    TaskState {
+        block_id: String,
+        expected: Option<String>,
+        within_secs: Option<u64>,
+    },
+    /// `block_id`'s persisted `collapsed` flag in the write-side store.
+    Collapsed {
+        block_id: String,
+        expected: bool,
+        within_secs: Option<u64>,
+    },
+    /// `block_id`'s `block_links` row for `target` resolves to `resolved_id`.
+    /// `resolved_id = None` asserts the link dangles.
+    LinkResolves {
+        block_id: String,
+        target: String,
+        resolved_id: Option<String>,
+        within_secs: Option<u64>,
+    },
 }
 
 impl Assertion {
@@ -73,6 +109,11 @@ impl Assertion {
             Assertion::WidgetContains { within_secs, .. } => *within_secs,
             Assertion::FocusOn { within_secs, .. } => *within_secs,
             Assertion::ParentIs { within_secs, .. } => *within_secs,
+            Assertion::ChildIndex { within_secs, .. } => *within_secs,
+            Assertion::ComesAfter { within_secs, .. } => *within_secs,
+            Assertion::TaskState { within_secs, .. } => *within_secs,
+            Assertion::Collapsed { within_secs, .. } => *within_secs,
+            Assertion::LinkResolves { within_secs, .. } => *within_secs,
         }
     }
 }
@@ -150,6 +191,27 @@ where
                 parent_id,
                 ..
             } => parent_is_caps(caps, resolver, child_id, parent_id).await,
+            Assertion::ChildIndex {
+                block_id,
+                index,
+                parent_id,
+                ..
+            } => child_index_caps(caps, resolver, block_id, *index, parent_id).await,
+            Assertion::ComesAfter {
+                block_id, other_id, ..
+            } => comes_after_caps(caps, resolver, block_id, other_id).await,
+            Assertion::TaskState {
+                block_id, expected, ..
+            } => task_state_caps(caps, resolver, block_id, expected.as_deref()).await,
+            Assertion::Collapsed {
+                block_id, expected, ..
+            } => collapsed_caps(caps, resolver, block_id, *expected).await,
+            Assertion::LinkResolves {
+                block_id,
+                target,
+                resolved_id,
+                ..
+            } => link_resolves_caps(caps, resolver, block_id, target, resolved_id.as_deref()).await,
         };
         match result {
             Ok(()) => return Ok(()),
@@ -254,6 +316,263 @@ async fn parent_is_caps(
          {parent_id:?} (resolved {parent:?}), but its store parent is {:?}",
         block.parent_id
     ))
+}
+
+/// Sibling-order oracle. Reads `SutSqlProjection::sorted_children` — the
+/// `sort_key`-ordered projection `inv-live-children-match-ref` compares against
+/// the reference model's `RefBlockTree::sorted_children`, so a fixture ordering
+/// assertion and the ordering invariant can never disagree.
+async fn sorted_children_of(
+    caps: &CapMap,
+    resolver: &IdResolver,
+    label: &str,
+    parent_id: &str,
+) -> Result<(EntityUri, Vec<EntityUri>), String> {
+    let parent_uri = EntityUri::parse(parent_id)
+        .map_err(|e| format!("[{label}] block id {parent_id:?} is not a valid EntityUri: {e}"))?;
+    let parent = resolve_via(resolver, &parent_uri);
+    let children = caps.sorted_children(&parent).await;
+    if children.is_empty() {
+        return Err(format!(
+            "[{label}] parent {parent_id:?} (resolved {parent:?}) has no children in the SQL \
+             projection — nothing to order"
+        ));
+    }
+    Ok((parent, children))
+}
+
+fn position_of(children: &[EntityUri], needle: &EntityUri) -> Option<usize> {
+    children.iter().position(|c| c == needle)
+}
+
+fn render_order(children: &[EntityUri]) -> String {
+    children
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{}:{c}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+async fn child_index_caps(
+    caps: &CapMap,
+    resolver: &IdResolver,
+    block_id: &str,
+    index: usize,
+    parent_id: &str,
+) -> Result<(), String> {
+    if index == 0 {
+        return Err(format!(
+            "[child-index] `child 0` is not a position: the ordinal is 1-based, so the first child \
+             is `child 1` (step named block {block_id:?})"
+        ));
+    }
+    let (_, children) = sorted_children_of(caps, resolver, "child-index", parent_id).await?;
+    let block_uri = EntityUri::parse(block_id).map_err(|e| {
+        format!("[child-index] block id {block_id:?} is not a valid EntityUri: {e}")
+    })?;
+    let block = resolve_via(resolver, &block_uri);
+
+    match position_of(&children, &block) {
+        Some(pos) if pos + 1 == index => Ok(()),
+        Some(pos) => Err(format!(
+            "[child-index] expected block {block_id:?} (resolved {block:?}) to be child {index} of \
+             {parent_id:?}, but it is child {} — order is [{}]",
+            pos + 1,
+            render_order(&children)
+        )),
+        None => Err(format!(
+            "[child-index] block {block_id:?} (resolved {block:?}) is not a child of \
+             {parent_id:?} — order is [{}]",
+            render_order(&children)
+        )),
+    }
+}
+
+async fn comes_after_caps(
+    caps: &CapMap,
+    resolver: &IdResolver,
+    block_id: &str,
+    other_id: &str,
+) -> Result<(), String> {
+    let block_uri = EntityUri::parse(block_id).map_err(|e| {
+        format!("[comes-after] block id {block_id:?} is not a valid EntityUri: {e}")
+    })?;
+    let other_uri = EntityUri::parse(other_id).map_err(|e| {
+        format!("[comes-after] block id {other_id:?} is not a valid EntityUri: {e}")
+    })?;
+    let block = resolve_via(resolver, &block_uri);
+    let other = resolve_via(resolver, &other_uri);
+
+    // The common parent comes from the write-side store (the same snapshot
+    // `parent_is_caps` reads); comparing positions under different parents
+    // would compare incomparable sort keys.
+    let blocks = caps.block_raw_snapshot().await;
+    let parent_of = |id: &EntityUri, label: &str, raw: &str| -> Result<EntityUri, String> {
+        blocks
+            .iter()
+            .find(|b| &b.id == id)
+            .map(|b| b.parent_id.clone())
+            .ok_or_else(|| {
+                format!(
+                    "[comes-after] {label} block {raw:?} (resolved {id:?}) does not exist in the \
+                     SUT store"
+                )
+            })
+    };
+    let block_parent = parent_of(&block, "left", block_id)?;
+    let other_parent = parent_of(&other, "right", other_id)?;
+    if block_parent != other_parent {
+        return Err(format!(
+            "[comes-after] {block_id:?} and {other_id:?} are not siblings — parents are \
+             {block_parent:?} and {other_parent:?}; sibling order is only defined within one parent"
+        ));
+    }
+
+    let children = caps.sorted_children(&block_parent).await;
+    let (Some(block_pos), Some(other_pos)) = (
+        position_of(&children, &block),
+        position_of(&children, &other),
+    ) else {
+        return Err(format!(
+            "[comes-after] {block_id:?} and/or {other_id:?} are missing from the SQL projection's \
+             children of {block_parent:?} — order is [{}]",
+            render_order(&children)
+        ));
+    };
+    if block_pos > other_pos {
+        return Ok(());
+    }
+    Err(format!(
+        "[comes-after] expected block {block_id:?} (resolved {block:?}, child {}) to come after \
+         {other_id:?} (resolved {other:?}, child {}) — order is [{}]",
+        block_pos + 1,
+        other_pos + 1,
+        render_order(&children)
+    ))
+}
+
+/// Task-state oracle. Reads `SutSqlProjection::block_task_state`
+/// (`json_extract(properties,'$.task_state')` on `block_raw`) — the same read
+/// `inv-task-state-storage-coherence` compares against the Loro projection.
+async fn task_state_caps(
+    caps: &CapMap,
+    resolver: &IdResolver,
+    block_id: &str,
+    expected: Option<&str>,
+) -> Result<(), String> {
+    let block_uri = EntityUri::parse(block_id)
+        .map_err(|e| format!("[task-state] block id {block_id:?} is not a valid EntityUri: {e}"))?;
+    let block = resolve_via(resolver, &block_uri);
+
+    // `block_task_state` answers `None` for both "no such block" and "no
+    // keyword"; without this the "has no task state" arm would pass vacuously
+    // against a typo'd id.
+    if !caps.all_block_ids().await.contains(&block) {
+        return Err(format!(
+            "[task-state] block {block_id:?} (resolved {block:?}) does not exist in the SQL \
+             projection"
+        ));
+    }
+
+    let actual = caps.block_task_state(&block).await;
+    match expected {
+        Some(want) if actual.as_deref() == Some(want) => Ok(()),
+        Some(want) => Err(format!(
+            "[task-state] expected block {block_id:?} (resolved {block:?}) to have task state \
+             {want:?}, but the store says {actual:?}"
+        )),
+        None if actual.as_deref().is_none_or(str::is_empty) => Ok(()),
+        None => Err(format!(
+            "[task-state] expected block {block_id:?} (resolved {block:?}) to have no task state, \
+             but the store says {actual:?}"
+        )),
+    }
+}
+
+/// Fold-state oracle. Reads the write-side `block_raw` snapshot, where
+/// `collapsed` is a real column — the same store `parent_is_caps` reads.
+async fn collapsed_caps(
+    caps: &CapMap,
+    resolver: &IdResolver,
+    block_id: &str,
+    expected: bool,
+) -> Result<(), String> {
+    let block_uri = EntityUri::parse(block_id)
+        .map_err(|e| format!("[collapsed] block id {block_id:?} is not a valid EntityUri: {e}"))?;
+    let block = resolve_via(resolver, &block_uri);
+
+    let blocks = caps.block_raw_snapshot().await;
+    let Some(found) = blocks.iter().find(|b| b.id == block) else {
+        return Err(format!(
+            "[collapsed] block {block_id:?} (resolved {block:?}) does not exist in the SUT store"
+        ));
+    };
+    if found.collapsed == expected {
+        return Ok(());
+    }
+    Err(format!(
+        "[collapsed] expected block {block_id:?} (resolved {block:?}) to be collapsed={expected}, \
+         but the store says collapsed={}",
+        found.collapsed
+    ))
+}
+
+/// Link-resolution oracle. Reads the `block_links` junction, which is the only
+/// place a resolved reference differs from a dangling one — the renderer draws
+/// the mark's label either way, so no widget assertion can tell them apart.
+async fn link_resolves_caps(
+    caps: &CapMap,
+    resolver: &IdResolver,
+    block_id: &str,
+    target: &str,
+    resolved_id: Option<&str>,
+) -> Result<(), String> {
+    let block_uri = EntityUri::parse(block_id).map_err(|e| {
+        format!("[link-resolves] block id {block_id:?} is not a valid EntityUri: {e}")
+    })?;
+    let source = resolve_via(resolver, &block_uri);
+
+    let links = caps.block_link_targets(&source).await;
+    let render_links = || {
+        links
+            .iter()
+            .map(|(t, r)| format!("{t:?}->{r:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let Some((_, actual)) = links.iter().find(|(t, _)| t == target) else {
+        return Err(format!(
+            "[link-resolves] block {block_id:?} (resolved {source:?}) has no link with target \
+             {target:?} — its links are [{}]",
+            render_links()
+        ));
+    };
+
+    match resolved_id {
+        None if actual.is_none() => Ok(()),
+        None => Err(format!(
+            "[link-resolves] expected block {block_id:?}'s link {target:?} to dangle, but it \
+             resolves to {actual:?}"
+        )),
+        Some(want) => {
+            let want_uri = EntityUri::parse(want).map_err(|e| {
+                format!("[link-resolves] block id {want:?} is not a valid EntityUri: {e}")
+            })?;
+            let expected = resolve_via(resolver, &want_uri);
+            match actual {
+                Some(got) if got == &expected => Ok(()),
+                Some(got) => Err(format!(
+                    "[link-resolves] expected block {block_id:?}'s link {target:?} to resolve to \
+                     {want:?} (resolved {expected:?}), but it resolves to {got:?}"
+                )),
+                None => Err(format!(
+                    "[link-resolves] expected block {block_id:?}'s link {target:?} to resolve to \
+                     {want:?} (resolved {expected:?}), but it DANGLES (resolved_id is NULL)"
+                )),
+            }
+        }
+    }
 }
 
 async fn focus_on_caps<R: RefFocus>(

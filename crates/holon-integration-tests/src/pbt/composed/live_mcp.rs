@@ -391,6 +391,27 @@ impl SutSqlProjection for LiveMcp {
             .and_then(|r| r.get("content"))
             .map(json_to_string)
     }
+
+    async fn block_link_targets(&self, source: &EntityUri) -> Vec<(String, Option<EntityUri>)> {
+        self.rows(&format!(
+            "SELECT target, resolved_id FROM block_links WHERE source_block_id = {}",
+            sql_lit(source)
+        ))
+        .await
+        .iter()
+        .map(|r| {
+            let target = r
+                .get("target")
+                .map(json_to_string)
+                .unwrap_or_else(|| panic!("block_links row for {source} has no `target`"));
+            let resolved = r
+                .get("resolved_id")
+                .filter(|v| !v.is_null())
+                .map(|v| EntityUri::from_raw(&json_to_string(v)));
+            (target, resolved)
+        })
+        .collect()
+    }
 }
 
 #[async_trait::async_trait(?Send)]
