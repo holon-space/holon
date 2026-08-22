@@ -1,18 +1,26 @@
+use holon_frontend::operations::state_toggle_intent;
+use holon_frontend::operations::state_toggle_intent_bool;
+use holon_frontend::view_model::StateToggleBinding;
 use holon_frontend::view_model::ViewKind;
 
 use super::prelude::*;
 
 /// Task-state pill. Left-click cycles the state and dispatches the same
-/// `set_field(task_state, <next>)` write the GPUI widget and the headless
-/// driver's `state_toggle_cycle_intent` produce (focus_path.rs) — op
-/// lookup via `find_set_field_op` on the node's own operation wiring,
-/// cycle math via the shared `cycle_state`.
+/// `set_field` write the GPUI widget and the headless driver's
+/// `state_toggle_cycle_intent` produce (focus_path.rs) — op lookup via
+/// `find_set_field_op` on the node's own operation wiring, cycle math via
+/// the shared `cycle_state`.
 pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     let ViewKind::StateToggle {
         field,
         current,
         label,
         states,
+        // GPUI paints `appearance` as a switch track vs. the task glyph;
+        // dioxus-web has only this one pill affordance, so both appearances
+        // render the same way here.
+        appearance: _,
+        binding,
     } = &node.kind
     else {
         return rsx! {};
@@ -29,14 +37,23 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
         return rsx! {};
     }
 
-    let intent = holon_frontend::operations::state_toggle_intent(
-        field,
-        current,
-        states,
-        &node.operations,
-        node.entity_name().as_ref(),
-        node.row_id().as_deref(),
-    );
+    let intent = match binding {
+        StateToggleBinding::Bool => state_toggle_intent_bool(
+            field,
+            current == "true",
+            &node.operations,
+            node.entity_name().as_ref(),
+            node.row_id().as_deref(),
+        ),
+        StateToggleBinding::Words => state_toggle_intent(
+            field,
+            current,
+            states,
+            &node.operations,
+            node.entity_name().as_ref(),
+            node.row_id().as_deref(),
+        ),
+    };
     if intent.is_none() {
         // Disclose the degraded (display-only) pill: without op wiring or
         // a row id a click can't dispatch — same nodes GPUI renders inert.
