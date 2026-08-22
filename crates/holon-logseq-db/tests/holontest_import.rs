@@ -15,8 +15,10 @@
 //! fracdex sequence — live in the increment-4 integration keystone under
 //! `crates/holon-integration-tests/`, where a real store exists.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use holon_api::Block;
 use holon_api::EntityUri;
 use holon_api::InlineMark;
 use holon_logseq_db::LogseqDbImporter;
@@ -39,6 +41,14 @@ mod fixture_facts {
     pub const LEAF_DATOMS: usize = 8210;
     pub const DISTINCT_ENTITIES: usize = 215;
     pub const BLOCKS_WITH_UUID: usize = 206;
+    /// Of the 206, the ones a person authored. The other 189 are LogSeq's own
+    /// property, class and system pages — 185 flagged or identified as
+    /// built-in, plus 4 per-view UI records that sit on the built-in
+    /// `$$$views` page. See LW-7.a and the bugfunnel entry
+    /// 2026-08-22-importer-materializes-logseq-built-ins-as-blocks.
+    pub const BLOCKS_PROJECTED: usize = 17;
+    /// Excluded by the PAGE leg rather than by evidence of their own.
+    pub const EXCLUDED_UNDER_BUILT_IN_PAGE: usize = 4;
     /// Uuid-less entities carrying `:db/ident :logseq.kv/*`.
     pub const KV_SINGLETONS: usize = 7;
     /// Uuid-less entities that are NOT config singletons: e197 (a bare
@@ -121,6 +131,22 @@ async fn holontest_db_imports_with_identity_gate() {
         result.stats.uuid_entities, BLOCKS_WITH_UUID,
         "uuid-bearing entities"
     );
+    // Of those, the ones a person authored. The rest are LogSeq's own
+    // property, class and system pages, read for schema knowledge and never
+    // materialized as blocks (LW-7.a).
+    assert_eq!(
+        result.stats.block_entities, BLOCKS_PROJECTED,
+        "uuid-bearing entities that become Holon blocks"
+    );
+    assert_eq!(
+        result.stats.built_in_entities + result.stats.block_entities,
+        result.stats.uuid_entities,
+        "PARTITION: every uuid-bearing entity is either LogSeq's or the user's"
+    );
+    assert_eq!(
+        result.stats.excluded_under_built_in_page, EXCLUDED_UNDER_BUILT_IN_PAGE,
+        "excluded because their containing PAGE is built-in, disclosed here"
+    );
     assert_eq!(
         result.stats.leaf_datoms, LEAF_DATOMS,
         "leaf tuples before dedup (index-tree redundancy)"
@@ -140,10 +166,22 @@ async fn holontest_db_imports_with_identity_gate() {
         result.stats.distinct_entities,
         "TOTALITY: every entity is a block, a config singleton, or a recorded orphan"
     );
+    // No silent loss: every uuid-bearing entity is accounted for as EITHER a
+    // projected block OR a disclosed built-in. The old form of this assertion
+    // said "every uuid-bearing entity projects to a Block", which stopped
+    // being true when LW-7.a excluded LogSeq's own pages — but "fewer blocks
+    // than uuids" must never be allowed to mean "some vanished", so the
+    // invariant is restated rather than relaxed.
     assert_eq!(
         result.blocks.len(),
+        BLOCKS_PROJECTED,
+        "every non-built-in uuid-bearing entity projects to exactly one Block"
+    );
+    assert_eq!(
+        result.blocks.len() + result.stats.built_in_entities,
         BLOCKS_WITH_UUID,
-        "every uuid-bearing entity projects to exactly one Block, no silent loss"
+        "NO SILENT LOSS: projected blocks plus disclosed built-ins account for \
+         every uuid-bearing entity"
     );
 
     // --- Spot-check 1: the Project Alpha page ---
@@ -205,20 +243,37 @@ async fn holontest_db_imports_with_identity_gate() {
          (its title is `Link to [[{PROJECT_ALPHA_UUID}]]`); got {targets:?}"
     );
 
-    // --- A9: the epoch-0 sentinel is a sentinel, not a fabricated time ---
-    // A block with no timestamp datom keeps 0 rather than the import time. A
-    // `now()` implementation passes every other assertion in this file.
+    // --- A9: those six are LogSeq's, and are gone from the base ---
+    // All six carried no timestamp datom, and all six are LogSeq's own:
+    // `:logseq.property/empty-placeholder` and the five shipped files
+    // (config.edn, custom.css, custom.js, publish.css, publish.js). Under
+    // LW-7.a none of them is a block any more, so this pins the exclusion at
+    // named entities rather than only at a count.
     for uuid in EPOCH_ZERO_UUIDS {
-        let block = result
-            .block_by_uuid(uuid)
-            .unwrap_or_else(|| panic!("timestamp-less block {uuid} present"));
-        assert_eq!(
-            (block.created_at, block.updated_at),
-            (0, 0),
-            "block {uuid} carries no timestamp datom, so both stamps must stay \
-             the visibly-absent epoch — never a fabricated import time"
+        assert!(
+            result.block_by_uuid(uuid).is_none(),
+            "{uuid} is one of LogSeq's own entities and must not be a block"
         );
     }
+
+    // COVERAGE LOST, recorded rather than quietly dropped: this loop used to
+    // guard the epoch-0 sentinel — a block with no timestamp datom keeps 0
+    // rather than a fabricated import time, which a `now()` implementation
+    // would violate while passing every other assertion in this file. Its
+    // only six subjects were exactly the entities just excluded, and MEASURED
+    // (probe, 2026-08-22) none of the 17 remaining blocks has a missing
+    // timestamp. So the sentinel path is no longer reachable from this
+    // fixture and nothing here drives it. Named in LogseqDbPush.md's W3 list;
+    // closing it needs a constructed datom set, not a fixture edit.
+    assert!(
+        result
+            .blocks
+            .iter()
+            .all(|b| b.created_at != 0 && b.updated_at != 0),
+        "every remaining block carries a real timestamp — the premise of the \
+         paragraph above; if this ever fails, the sentinel guard is reachable \
+         again and should be restored"
+    );
 
     // --- Sibling order keys are unambiguous on this corpus ---
     // The projection breaks equal `:block/order` keys by uuid, which is
@@ -248,5 +303,76 @@ async fn holontest_db_imports_with_identity_gate() {
     assert!(
         !result.ordered_children(&aug20).is_empty(),
         "the Aug-20 journal has ordered children"
+    );
+}
+
+/// Excluding LogSeq's own entities does NOT sever what the importer derives
+/// from them.
+///
+/// LW-7.a says built-ins are still READ — property definitions, class names —
+/// and only never MATERIALIZED as blocks. That distinction is the whole
+/// design, and until this test existed nothing asserted it: the datoms stay in
+/// the set and `class_index` walks every entity regardless of kind, so tags
+/// resolve to names by construction. But a plausible future refactor ("we only
+/// project Block-kind entities, so index only those") would break every tag,
+/// and before this test nothing named that as the property at stake.
+///
+/// The names below are LogSeq's own classes. Every one of them belongs to an
+/// entity that is NOT a block any more, so a green here is exactly the claim:
+/// knowledge survived the exclusion.
+///
+/// WHERE THIS TEST IS ACTUALLY LOAD-BEARING: the `import` call below, not the
+/// assertions. Measured by neutralising the class index: the projection
+/// refuses a tag reference it cannot resolve, so the import returns
+/// `DanglingReference` and `.expect("imports")` dies BEFORE any assertion
+/// runs. Losing built-in-derived knowledge is therefore a loud refusal, not a
+/// silent degradation to raw ids — which is the opposite of what I assumed
+/// when writing this. The assertions below are the secondary check: they
+/// would catch a future world where the import succeeds with degraded tags,
+/// which today's code cannot produce.
+#[tokio::test]
+async fn schema_knowledge_survives_the_exclusion() {
+    let result = LogseqDbImporter::new()
+        .import(&fixture_path())
+        .await
+        .expect("imports");
+
+    assert_eq!(
+        result.blocks.len(),
+        fixture_facts::BLOCKS_PROJECTED,
+        "the exclusion is in force for this test to mean anything"
+    );
+
+    let tagged: Vec<&Block> = result
+        .blocks
+        .iter()
+        .filter(|b| !b.tags.is_empty())
+        .collect();
+    assert_eq!(
+        tagged.len(),
+        7,
+        "7 of the surviving blocks carry tags; got {:?}",
+        tagged.iter().map(|b| &b.content).collect::<Vec<_>>()
+    );
+
+    let names: BTreeSet<&str> = tagged
+        .iter()
+        .flat_map(|b| b.tags.iter().map(String::as_str))
+        .collect();
+    assert_eq!(
+        names,
+        ["Journal", "Page", "Query", "Task"].into_iter().collect(),
+        "tags must resolve to LogSeq's CLASS NAMES, which live on entities the \
+         importer no longer materializes — a raw id or an empty set here means \
+         the class index stopped seeing built-ins"
+    );
+
+    // Property definitions are the other half of "still read": every surviving
+    // block carries properties, whose keys are resolved through the same
+    // built-in entities.
+    assert!(
+        result.blocks.iter().all(|b| !b.properties.is_empty()),
+        "every surviving block carries properties resolved via built-in \
+         property definitions"
     );
 }

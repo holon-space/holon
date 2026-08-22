@@ -40,12 +40,17 @@ async fn graph_with_a_full_tail() -> (kvs_writer::KvsGraph, Vec<String>) {
             base.get(u)
                 .is_some_and(|b| !b.content.is_empty() && !b.parent_id.starts_with("sentinel:"))
         })
-        .take(17)
         .map(str::to_string)
         .collect();
-    assert_eq!(targets.len(), 17, "need 17 editable blocks");
+    // Since LW-7.a the base holds only user-authored blocks, which is fewer
+    // than the 16 edits this helper needs, so the edits CYCLE over them. What
+    // fills the tail is the number of two-datom transactions, not the number
+    // of distinct blocks — each successive edit to the same block is still its
+    // own transaction, exactly as LogSeq writes them.
+    assert!(!targets.is_empty(), "need at least one editable block");
 
-    for (i, uuid) in targets.iter().take(16).enumerate() {
+    for i in 0..16 {
+        let uuid = &targets[i % targets.len()];
         let entity = kvs_writer::entity_by_uuid(&graph, uuid)
             .expect("read")
             .expect("entity");
@@ -155,17 +160,22 @@ async fn the_flushed_edits_survive_a_re_import() {
     let before = ImportBase::from_import(&importer.import(&fixture()).await.expect("fixture"));
     let after = ImportBase::from_import(&importer.import(&copy).await.expect("copy imports"));
 
+    // The 16 edits CYCLE over the base's editable blocks, so each block was
+    // retitled twice and only its LAST title survives — 8 changed blocks from
+    // 16 transactions. That the intermediate titles are gone is the point:
+    // it is what proves each edit's retract was flushed along with its assert.
     let diff = before.diff_against(&after);
     assert_eq!(
         (diff.created.len(), diff.changed.len(), diff.removed.len()),
-        (0, 16, 0),
-        "exactly the 16 edited blocks changed: {diff:?}"
+        (0, targets.len(), 0),
+        "exactly the {} edited blocks changed: {diff:?}",
+        targets.len()
     );
-    for (i, uuid) in targets.iter().take(16).enumerate() {
+    for (i, uuid) in targets.iter().enumerate() {
         assert_eq!(
             after.get(uuid).expect("still present").content,
-            title(i),
-            "block {uuid} did not come back with its flushed title"
+            title(i + targets.len()),
+            "block {uuid} did not come back with its LAST flushed title"
         );
     }
 }
@@ -281,7 +291,7 @@ async fn leg2_logseq_diff_shows_exactly_the_flushed_titles() {
         .collect();
     assert_eq!(
         entries.len(),
-        32,
+        16,
         "expected 16 datoms per side and nothing else; got {}:\n{out}",
         entries.len()
     );
@@ -292,7 +302,7 @@ async fn leg2_logseq_diff_shows_exactly_the_flushed_titles() {
              attribute: {entry}\n{out}"
         );
     }
-    for i in 0..16 {
+    for i in 8..16 {
         assert!(
             out.contains(&title(i)),
             "flushed title {i} is missing from the delta:\n{out}"

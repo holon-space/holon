@@ -97,6 +97,22 @@ pub enum TransitNode {
 /// being dropped.
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
+    /// A page-owned entity that would be excluded has children of its own.
+    ///
+    /// Excluding it silently would drop whatever hangs beneath it. Measured
+    /// zero on the committed fixture; if a graph ever grows one, the import
+    /// refuses rather than losing content.
+    #[error(
+        "entity {entity} sits on built-in page {page}, so it is LogSeq's own and would be \
+         excluded from the base — but it has {} child block(s) ({children:?}) which would be \
+         dropped with it. Refusing the import rather than losing them.",
+        children.len()
+    )]
+    BuiltInPageChildHasChildren {
+        entity: i64,
+        page: i64,
+        children: Vec<i64>,
+    },
     #[error("failed to open LogSeq db at {path}: {source}")]
     Open {
         path: PathBuf,
@@ -178,14 +194,30 @@ pub struct ImportStats {
     pub distinct_attrs: usize,
     /// `#(:block/uuid datoms)`.
     pub uuid_datoms: usize,
-    /// `#(entities carrying a :block/uuid)`.
+    /// `#(entities carrying a :block/uuid)` — INCLUDING the ones LogSeq owns.
+    ///
+    /// Deliberately still the whole uuid-bearing population, because the
+    /// identity gate (`uuid_datoms == uuid_entities`) is about dedup, not
+    /// about what gets projected. Splitting built-ins out of this number
+    /// would silently redefine that invariant; [`block_entities`](Self::
+    /// block_entities) is the projected count.
     pub uuid_entities: usize,
+    /// Of the uuid-bearing entities, the ones that become Holon blocks.
+    pub block_entities: usize,
     /// Uuid-less `:logseq.kv/*` config singletons (not blocks).
     pub kv_singletons: usize,
     /// Uuid-less entities that are not config singletons — LogSeq's own
     /// half-created remnants. Counted so the entity partition is provably
     /// total; see [`EntityKind::Orphan`].
     pub orphan_entities: usize,
+    /// Entities LogSeq owns, which are read for schema knowledge and never
+    /// materialized as blocks.
+    pub built_in_entities: usize,
+    /// Of those, how many were excluded because their containing PAGE is
+    /// built-in rather than by evidence of their own. Disclosed so that
+    /// dropping LogSeq's per-view UI state is a visible fact, not a count
+    /// somebody has to notice is lower than expected.
+    pub excluded_under_built_in_page: usize,
 }
 
 /// The result of a read-only import: projected blocks + the per-parent sibling
@@ -230,9 +262,13 @@ impl LogseqDbImporter {
             distinct_entities: datoms.entities.len(),
             distinct_attrs: datoms.distinct_attrs(),
             uuid_datoms: datoms.uuid_datoms(),
-            uuid_entities: datoms.count_kind(EntityKind::Block),
+            uuid_entities: datoms.count_kind(EntityKind::Block)
+                + datoms.count_kind(EntityKind::BuiltIn),
+            block_entities: datoms.count_kind(EntityKind::Block),
             kv_singletons: datoms.count_kind(EntityKind::KvSingleton),
             orphan_entities: datoms.count_kind(EntityKind::Orphan),
+            built_in_entities: datoms.count_kind(EntityKind::BuiltIn),
+            excluded_under_built_in_page: datoms.built_in_exclusions.under_built_in_page.len(),
         };
         Ok(ImportResult {
             blocks: projection.blocks,

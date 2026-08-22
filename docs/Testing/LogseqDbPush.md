@@ -98,6 +98,12 @@ entity in this graph also carries the flag, so leg 1 answers first — which
 makes the arm a guard against future reach rather than a live path. It is
 driven in tests by a constructed entity, never by fixture data.
 
+The four page-owned records were identified with `oracle/probe_panels.cljs`
+and `oracle/probe_views.cljs`, which dump what LogSeq actually stores for them
+(`:logseq.property.view/feature-type`, `:logseq.property/view-for`) and show
+that `$$$views` carries both `:logseq.property/built-in?` and
+`:logseq.property/hide?`.
+
 `internal-ident-reference.json` holds LogSeq's verdicts for all 191 idents,
 obtained by CALLING `internal-ident?`, and the test compares every one with no
 skips.
@@ -185,7 +191,7 @@ exactly why neither the two missing predicate legs nor the tail blindness
 could surface as a failure: two readers cannot disagree if only one of them is
 ever asserted about.
 
-## The fixture's shape, and why the overflow test needs two pushes
+## The fixture's shape, and why the overflow leg needed REDESIGNING
 
 Measured on `tests/fixtures/logseq-db/holontest.sqlite`, pinned by
 `the_fixtures_built_in_share_is_pinned`:
@@ -195,22 +201,32 @@ Measured on `tests/fixtures/logseq-db/holontest.sqlite`, pinned by
 | entities in the graph | 213 |
 | entities LogSeq calls built-in | 192 |
 | entities LogSeq does NOT call built-in | 21 |
-| blocks in the import base | 206 |
-| base blocks push may target (titled, non-sentinel, not built-in) | 12 |
-| of those, user-authored (not a LogSeq-minted `0000000N-` panel) | 8 |
+| of those, excluded because their containing PAGE is built-in | 4 |
+| blocks in the import base | 17 |
+| base blocks push may target (titled, non-sentinel) | 8 |
 
-Nearly all of the base is LogSeq's own property, class and kv pages, which the
-importer currently admits as blocks. That is a read-leg defect, ruled as LW-7.a
-(the importer will exclude built-ins) and handled in its own increment, not
-here. Push's refusal stays afterwards as a backstop.
+**Reconciling the three populations**, because they count different things
+and the differences are not a single set. `built_in_entities` = **189** =
+**185** predicate built-ins that carry a `:block/uuid` (the 7 `:logseq.kv/*`
+singletons are built-in but uuid-less, so they were never Block-kind and are
+not in this number) **+ 4** page-leg exclusions. The differential pin's
+**192** is a different population again: every entity LogSeq's
+`built-in-entity?` accepts, over all 213 eavt entities, uuid or not. There is
+no "set of 3" reconciling 192 to 189 — it is 185 + 4, and the test constants
+in `holontest_import.rs` say so.
 
-Related, measured for that increment: FOUR non-built-in entities have a
-built-in parent — 198, 208, 212 and 215, every one of them a LogSeq
-"Linked references" / "Unlinked references" panel with
-`:block/parent` = `:block/page` = 188. So an exclusion must say what becomes of
-a non-built-in child of an excluded parent. On this fixture no person-written
-block sits under a built-in parent, but the fixture's user content is shallow
-and that is not evidence the case cannot arise.
+Under LW-7.a the base holds only what a person authored. LogSeq's own
+property, class and kv pages are read for schema knowledge and never
+materialized; the four extra are its per-view UI records on the hidden
+`$$$views` page, and their exclusion is DISCLOSED as
+`stats.excluded_under_built_in_page`, not left to be inferred from a count
+that came out lower than expected.
+
+The "editable" and "user-authored" sets used to differ (12 vs 8) because a
+uuid-prefix heuristic had to filter LogSeq-minted panels out of the editable
+set. Under the page-leg exclusion they COINCIDE at 8 and the heuristic is
+deleted — two independently-derived sets landing on the same boundary is the
+evidence that the boundary is in the right place.
 
 ### A note on entity sets
 
@@ -221,11 +237,21 @@ still hold datoms. They are abandoned nodes, not deletions: the tail is empty,
 so nothing retracted them. Any census that walks rows rather than the tree
 counts garbage.
 
-The consequence for testing: 12 blocks are 24 datoms, under the branching
-factor of 32, so ONE push cannot overflow the tail. The overflow leg therefore
-drives two successive pushes. That is the harder case anyway — the second
-push crosses 32 on its fifth block, with the first push's transactions already
-sitting in the tail when the flush fires.
+### The overflow leg was REDESIGNED, not re-pinned
+
+8 blocks is 16 datoms. Push 1 reaches 16 and push 2 reaches exactly 32 —
+which does not EXCEED the branching factor and therefore does not flush. So
+the leg now drives THREE pushes, crossing to 34 on push 3's first block. The
+measured sequence is pinned exactly: flushes `[0, 0, 1]`, tail lengths
+`[16, 32, 14]`.
+
+Changing the numbers alone would have left a test that still looked like an
+overflow test while no longer exercising a flush at all — which is precisely
+what happened to the head-to-head and the bisect when the editable set shrank:
+at 16 edits both compared two tail-only files (456 rows, no split). Both now
+drive three pushes so a flush is genuinely in the comparison, and
+`three_pushes` asserts `flushes == 1` so it cannot regress to that state
+silently.
 
 ## What each oracle leg can and cannot see
 
@@ -264,6 +290,49 @@ out). It does mean the scenario was not one a person could produce.
 `head_to_head_with_logseq_applying_the_same_pushes` re-establishes the identity
 on the blocks push can actually reach, driven through the `push` entry point
 rather than a hand-picked entity list.
+
+## Carried to W3
+
+Named risks, neither a live defect, both open rather than closed:
+
+1. **`datoms_now` duplicates a REDUNDANT cardinality-many assert** — asserting
+   `:block/tags 5` twice leaves two copies. Unreachable from a real graph:
+   LogSeq drops a redundant add and writes an empty transaction instead
+   (measured). Open because "cannot arrive today" is a statement about
+   LogSeq's transactor, not about the reader.
+2. **Unify the built-in predicate over ONE datom representation.** The
+   three-leg rule now lives in two readers — `kvs_writer::is_built_in` over
+   `TreeDatom`s and the importer's classifier over `LogseqDatom`s — because
+   the two layers read different structures. Only `is_internal_ident` is
+   genuinely shared (called, not restated). The flip sweep covers every leg in
+   BOTH readers so the duplication cannot drift silently, but a sweep is a
+   tripwire, not a fix.
+3. **Build the reader ONCE per push — cost UNMEASURED, shape certain.** The
+   earlier 4.8x table recorded here is RETRACTED: those timings were taken
+   under machine-wide disk exhaustion with competing agent builds, isolated
+   re-runs showed run-to-run variance on ONE pin exceeding the pin delta, and
+   two of the extractions timed runs that never executed. What survives needs
+   no number: `datoms_now` loads the eavt tree on EVERY predicate call, and
+   `entity_by_uuid` is called once per uuid inside push's plan loop, so a push
+   over N blocks is O(N x tree) — and W3 adds predicate calls per attribute.
+   Done-criteria for the fix: re-measure ISOLATED on a healthy machine before
+   AND after (run count asserted per timing, A/B alternated, distribution
+   reported, disk checked, a no-subprocess test as the probe — the bisects
+   spawn 24 nbb processes and amplify machine noise), the two bisects
+   improved, and the nextest override REMOVED (it exists only to hide this).
+
+4. **The epoch-0 timestamp sentinel is no longer driven.** A block with no
+   timestamp datom must keep 0 rather than a fabricated import time — a
+   `now()` implementation would pass every other assertion. Its only six
+   subjects were LogSeq's own entities, now excluded, and MEASURED none of the
+   17 remaining blocks lacks a timestamp. Closing it needs a constructed datom
+   set, not a fixture edit.
+5. **An attribute ABSENT from `root.schema` takes the cardinality-ONE
+   supersede path** — silently dropping values if that attribute is really
+   cardinality-many. All 19 of this graph's many-attributes ARE declared in
+   the root (asserted), so the path is unreachable HERE. Nobody has
+   established whether a graph can carry a many-attribute its root omits, so
+   this is UNPROVEN, not refuted.
 
 ## W3 prerequisite: reference re-derivation
 

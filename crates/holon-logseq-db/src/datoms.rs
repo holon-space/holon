@@ -243,6 +243,18 @@ pub enum EntityKind {
     Block,
     /// A uuid-less `:logseq.kv/*` config singleton (`:db/ident` + `:kv/value`).
     KvSingleton,
+    /// Carries a uuid, but LogSeq calls the entity its OWN — a property
+    /// definition, a class page, a `$$$`-hidden system page, a shipped file.
+    ///
+    /// Deliberately a KIND rather than a filter applied later: the projection
+    /// emits a Block for every `Block`-kind entity, so making built-ins a
+    /// different kind is what makes "a built-in materialized as a user block"
+    /// unrepresentable instead of merely unwanted. They are still READ — the
+    /// datoms stay in the set, so property and class names still resolve.
+    ///
+    /// See docs/Testing/bugfunnel/entries/
+    /// 2026-08-22-importer-materializes-logseq-built-ins-as-blocks.md.
+    BuiltIn,
     /// Uuid-less and not a config singleton: LogSeq's own half-created
     /// remnants (a bare `:block/created-at`, sometimes an empty title). They
     /// carry no identity, so they cannot become Blocks — recorded, not
@@ -259,6 +271,9 @@ pub struct DatomSet {
     /// Leaf tuples seen before dedup (index-tree redundancy ≈ 3.1x).
     pub leaf_datoms: usize,
     pub entities: HashMap<Eid, EntityKind>,
+    /// What the PAGE leg of the built-in rule excluded — disclosed, never
+    /// inferred from a count.
+    pub built_in_exclusions: BuiltInExclusions,
     /// The graph's own attribute declarations — the authority the projection
     /// consults for cardinality rather than assuming per attribute.
     pub schema: Schema,
@@ -373,11 +388,12 @@ pub async fn read_datoms(path: &Path) -> Result<DatomSet, ImportError> {
     apply_tail(&mut deduped, &rows, &schema)?;
 
     let datoms: Vec<LogseqDatom> = deduped.into_iter().collect();
-    let entities = classify_entities(&datoms);
+    let (entities, built_in_exclusions) = classify_entities(&datoms)?;
     Ok(DatomSet {
         datoms,
         leaf_datoms,
         entities,
+        built_in_exclusions,
         schema,
     })
 }
@@ -530,9 +546,14 @@ fn parse_datom(
     })
 }
 
-fn classify_entities(datoms: &[LogseqDatom]) -> HashMap<Eid, EntityKind> {
+fn classify_entities(
+    datoms: &[LogseqDatom],
+) -> Result<(HashMap<Eid, EntityKind>, BuiltInExclusions), ImportError> {
     let mut has_uuid: HashSet<Eid> = HashSet::new();
     let mut kv_ident: HashSet<Eid> = HashSet::new();
+    let mut built_in: HashSet<Eid> = HashSet::new();
+    let mut page_of: HashMap<Eid, Eid> = HashMap::new();
+    let mut children_of: HashMap<Eid, Vec<Eid>> = HashMap::new();
     let mut all: HashSet<Eid> = HashSet::new();
     for datom in datoms {
         all.insert(datom.e);
@@ -544,14 +565,81 @@ fn classify_entities(datoms: &[LogseqDatom]) -> HashMap<Eid, EntityKind> {
                 if name.starts_with("logseq.kv/") =>
             {
                 kv_ident.insert(datom.e);
+                built_in.insert(datom.e);
+            }
+            // The same three legs as `kvs_writer::is_built_in`, read off
+            // LogSeq's datoms instead of the writer's trees. The namespace
+            // rule itself is NOT restated — it is called — so the two readers
+            // cannot drift on the part that was hardest to get right.
+            (LogseqAttr::DbIdent, DatomValue::Node(TransitNode::Keyword(name)))
+                if crate::kvs_writer::is_internal_ident(name) =>
+            {
+                built_in.insert(datom.e);
+            }
+            (LogseqAttr::Raw(ident), DatomValue::Node(TransitNode::Bool(true)))
+                if ident == ":logseq.property/built-in?" =>
+            {
+                built_in.insert(datom.e);
+            }
+            (LogseqAttr::Raw(ident), _) if ident == ":file/path" => {
+                built_in.insert(datom.e);
+            }
+            (LogseqAttr::Page, DatomValue::Ref(target)) => {
+                page_of.insert(datom.e, *target);
+            }
+            (LogseqAttr::Parent, DatomValue::Ref(target)) => {
+                children_of.entry(*target).or_default().push(datom.e);
             }
             _ => {}
         }
     }
-    all.into_iter()
+    // An entity whose containing PAGE is LogSeq's is LogSeq's too. Measured:
+    // the fixture's `$$$views` page holds four per-view UI records
+    // (`:logseq.property.view/feature-type :linked-references` and friends)
+    // that carry no built-in flag of their own — nobody authored a block
+    // called "Linked references", LogSeq minted one per view it rendered.
+    //
+    // This is also what keeps the importer's fail-loud parent rule intact:
+    // without it the projection cannot resolve those blocks' parent and
+    // refuses the whole import with a DanglingReference.
+    let mut excluded_under_built_in_page: Vec<Eid> = page_of
+        .iter()
+        .filter(|(e, page)| built_in.contains(page) && !built_in.contains(e))
+        .map(|(e, _)| *e)
+        .collect();
+    excluded_under_built_in_page.sort();
+
+    // Excluding a page-owned entity that has CHILDREN would drop whatever
+    // hangs beneath it. Zero such entities exist today (measured), and if a
+    // future graph grows one we refuse the import rather than lose content.
+    for e in &excluded_under_built_in_page {
+        if let Some(children) = children_of.get(e) {
+            if !children.is_empty() {
+                let mut children = children.clone();
+                children.sort();
+                return Err(ImportError::BuiltInPageChildHasChildren {
+                    entity: e.0,
+                    page: page_of[e].0,
+                    children: children.iter().map(|c| c.0).collect(),
+                });
+            }
+        }
+    }
+    built_in.extend(excluded_under_built_in_page.iter().copied());
+
+    let kinds: HashMap<Eid, EntityKind> = all
+        .into_iter()
         .map(|e| {
+            // BuiltIn outranks Block and ONLY Block: a uuid-bearing entity
+            // LogSeq owns never becomes a user block. KvSingleton and Orphan
+            // are untouched — they were already not projected, and folding
+            // them in here would lose a distinction the importer uses.
             let kind = if has_uuid.contains(&e) {
-                EntityKind::Block
+                if built_in.contains(&e) {
+                    EntityKind::BuiltIn
+                } else {
+                    EntityKind::Block
+                }
             } else if kv_ident.contains(&e) {
                 EntityKind::KvSingleton
             } else {
@@ -559,7 +647,23 @@ fn classify_entities(datoms: &[LogseqDatom]) -> HashMap<Eid, EntityKind> {
             };
             (e, kind)
         })
-        .collect()
+        .collect();
+    Ok((
+        kinds,
+        BuiltInExclusions {
+            under_built_in_page: excluded_under_built_in_page,
+        },
+    ))
+}
+
+/// Which entities the PAGE leg excluded, so the import can disclose it.
+///
+/// Disclosed rather than silent: dropping content is exactly the kind of
+/// thing that must be visible in the summary, not inferred from a count that
+/// came out lower than expected.
+#[derive(Debug, Clone, Default)]
+pub struct BuiltInExclusions {
+    pub under_built_in_page: Vec<Eid>,
 }
 
 #[cfg(test)]
@@ -708,7 +812,7 @@ mod tests {
                 tx: None,
             },
         ];
-        let kinds = classify_entities(&datoms);
+        let (kinds, _) = classify_entities(&datoms).expect("classifies");
         assert_eq!(kinds[&Eid(1)], EntityKind::Block);
         assert_eq!(kinds[&Eid(2)], EntityKind::KvSingleton);
         assert_eq!(kinds[&Eid(3)], EntityKind::Orphan);

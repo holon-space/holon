@@ -1162,7 +1162,7 @@ const BUILT_IN: &str = "logseq.property/built-in?";
 /// `:logseq_x/y`, `:logseqified/x`). 182 of 191 measured idents agree exactly.
 /// Pinned ident by ident, with the divergence set asserted as over-refusal, in
 /// `tests/fixtures/logseq-db/internal-ident-reference.json`.
-fn is_internal_ident(keyword: &str) -> bool {
+pub(crate) fn is_internal_ident(keyword: &str) -> bool {
     let namespace = keyword.split('/').next().unwrap_or("");
     namespace == "block" || namespace.starts_with("logseq")
 }

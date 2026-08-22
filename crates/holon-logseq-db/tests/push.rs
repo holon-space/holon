@@ -114,17 +114,59 @@ fn editable_uuids(graph: &KvsGraph, base: &ImportBase) -> Vec<String> {
     out
 }
 
-/// The editable blocks a person actually wrote.
-///
-/// LogSeq mints its own reference panels ("Linked references", "Unlinked
-/// references") and journal pages with synthetic `0000000N-` uuids. They are
-/// not built-in pages and push may legitimately write them, but they are not
-/// what push exists for, so the behaviour tests target the real ones.
-fn user_authored_uuids(graph: &KvsGraph, base: &ImportBase) -> Vec<String> {
-    editable_uuids(graph, base)
+/// The uuid LogSeq gave `entity`, read from the live graph.
+fn uuid_of(graph: &KvsGraph, entity: i64) -> String {
+    kvs_writer::datoms_now(graph)
+        .expect("read")
         .into_iter()
-        .filter(|u| !u.starts_with("0000000"))
-        .collect()
+        .find_map(|d| match (d.e == entity, d.a.as_str(), d.v) {
+            (true, "block/uuid", TransitNode::Uuid(u)) => Some(u),
+            _ => None,
+        })
+        .expect("the entity carries a uuid")
+}
+
+/// Add a base entry for an entity the importer deliberately does NOT
+/// materialize.
+///
+/// Push's built-in refusal is a BACKSTOP: since LW-7.a the base cannot
+/// normally carry a built-in block at all, so the only way to reach the guard
+/// is to hand push a base that claims one exists — which is exactly the
+/// Holon-side bug the backstop is there to stop. Constructing it is the point,
+/// not a workaround.
+fn base_claiming(graph: &KvsGraph, base: &ImportBase, entity: i64) -> (ImportBase, String) {
+    let uuid = uuid_of(graph, entity);
+    let mut next = base.clone();
+    next.witness_create(
+        &uuid,
+        BaseBlock {
+            content: kvs_writer::datoms_now(graph)
+                .expect("read")
+                .into_iter()
+                .find_map(|d| match (d.e == entity, d.a.as_str(), d.v) {
+                    (true, "block/title", TransitNode::Str(t)) => Some(t),
+                    _ => None,
+                })
+                .expect("the entity carries a title"),
+            ..BaseBlock::default()
+        },
+    )
+    .expect("a uuid the base does not hold");
+    (next, uuid)
+}
+
+/// A titled entity LogSeq owns, by its own evidence (not the page leg).
+fn a_titled_built_in(graph: &KvsGraph) -> i64 {
+    let datoms = kvs_writer::datoms_now(graph).expect("read");
+    let titled: BTreeSet<i64> = datoms
+        .iter()
+        .filter(|d| d.a == "block/title")
+        .map(|d| d.e)
+        .collect();
+    titled
+        .into_iter()
+        .find(|e| kvs_writer::is_built_in(graph, *e).expect("read"))
+        .expect("the fixture has 192 built-ins, many titled")
 }
 
 /// `base` with `uuid`'s content replaced.
@@ -208,28 +250,58 @@ async fn the_fixtures_built_in_share_is_pinned() {
     let graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
     let base = base_of(&fixture()).await;
 
-    assert_eq!(base.len(), 206, "the fixture's base holds 206 blocks");
+    // The base holds ONLY what a person authored. LogSeq's own property,
+    // class and kv pages are read for schema knowledge and never materialized
+    // as blocks (LW-7.a).
     assert_eq!(
         built_in_entities(&graph).len(),
         192,
-        "LogSeq counts 192 of the graph's 213 entities as built-in"
+        "LogSeq still counts 192 of the graph's 213 entities as built-in — the \
+         exclusion is about the BASE, not the graph"
+    );
+    let built_in = built_in_entities(&graph);
+    let in_base: Vec<&str> = base
+        .uuids()
+        .filter(|u| {
+            kvs_writer::entity_by_uuid(&graph, u)
+                .expect("read")
+                .is_some_and(|e| built_in.contains(&e))
+        })
+        .collect();
+    assert_eq!(
+        in_base,
+        Vec::<&str>::new(),
+        "no built-in entity may be materialized as a block in the base"
+    );
+    assert_eq!(
+        base.len(),
+        17,
+        "the base holds only what a person authored: 213 entities, 192 LogSeq \
+         built-ins, 4 more excluded because they sit on a built-in PAGE"
+    );
+
+    // The page-leg exclusion is DISCLOSED, not inferred from a count that
+    // came out lower than expected.
+    let importer = LogseqDbImporter::new();
+    let result = importer.import(&fixture()).await.expect("imports");
+    assert_eq!(
+        result.stats.excluded_under_built_in_page, 4,
+        "the four per-view UI records on $$$views, named in the import summary"
+    );
+    assert_eq!(
+        result.stats.built_in_entities, 189,
+        "185 built-in-by-own-evidence blocks plus the 4 page-owned ones"
     );
 
     let editable = editable_uuids(&graph, &base);
     assert_eq!(
         editable.len(),
-        12,
-        "12 blocks are titled, non-sentinel and not built-in; got {editable:?}"
+        8,
+        "8 blocks are titled, non-sentinel and pushable; got {editable:?}"
     );
     assert!(
         editable.len() * 2 <= 32,
-        "one push over every editable block cannot exceed the branching factor, \
-         so the overflow leg below must use two pushes"
-    );
-    assert_eq!(
-        user_authored_uuids(&graph, &base).len(),
-        8,
-        "8 of the 12 are user-authored; the other 4 are LogSeq's own reference panels"
+        "one push over every editable block cannot exceed the branching factor"
     );
 }
 
@@ -248,7 +320,7 @@ async fn a_push_of_two_title_edits_survives_a_re_import() {
 
     let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
     let before = base_of(&fixture()).await;
-    let targets = user_authored_uuids(&graph, &before);
+    let targets = editable_uuids(&graph, &before);
 
     let after = retitled(
         &retitled(&before, &targets[0], "pushed title one"),
@@ -347,7 +419,7 @@ async fn removing_a_block_is_refused_by_name() {
     let err = refused(|graph, base| {
         let mut after = base.clone();
         after
-            .retract(&user_authored_uuids(graph, base)[0])
+            .retract(&editable_uuids(graph, base)[0])
             .expect("a known uuid");
         (base.clone(), after)
     })
@@ -361,7 +433,7 @@ async fn removing_a_block_is_refused_by_name() {
 #[tokio::test]
 async fn re_parenting_a_block_is_refused_by_name() {
     let err = refused(|graph, base| {
-        let targets = user_authored_uuids(graph, base);
+        let targets = editable_uuids(graph, base);
         let mut after = base.clone();
         let moved = BaseBlock {
             parent_id: format!("block:{}", targets[1]),
@@ -380,7 +452,7 @@ async fn re_parenting_a_block_is_refused_by_name() {
 #[tokio::test]
 async fn re_ordering_a_block_is_refused_by_name() {
     let err = refused(|graph, base| {
-        let targets = user_authored_uuids(graph, base);
+        let targets = editable_uuids(graph, base);
         let mut after = base.clone();
         let current = base.get(&targets[0]).expect("present").clone();
         let moved = BaseBlock {
@@ -436,7 +508,7 @@ async fn changing_any_non_title_field_is_refused_by_its_own_name() {
 
     for (expected, perturb) in cases {
         let err = refused(|graph, base| {
-            let target = user_authored_uuids(graph, base)[0].clone();
+            let target = editable_uuids(graph, base)[0].clone();
             let mut after = base.clone();
             after
                 .advance(
@@ -460,20 +532,11 @@ async fn changing_any_non_title_field_is_refused_by_its_own_name() {
 #[tokio::test]
 async fn editing_one_of_logseqs_built_in_pages_is_refused() {
     let err = refused(|graph, base| {
-        let built_in = built_in_entities(graph);
-        let victim = base
-            .uuids()
-            .find(|u| {
-                kvs_writer::entity_by_uuid(graph, u)
-                    .expect("read")
-                    .is_some_and(|e| built_in.contains(&e))
-                    && !base.get(u).expect("present").content.is_empty()
-            })
-            .expect("the fixture has 192 of these")
-            .to_string();
+        let entity = a_titled_built_in(graph);
+        let (claimed, uuid) = base_claiming(graph, base, entity);
         (
-            base.clone(),
-            retitled(base, &victim, "Holon rewrote your schema"),
+            claimed.clone(),
+            retitled(&claimed, &uuid, "Holon rewrote your schema"),
         )
     })
     .await;
@@ -491,25 +554,31 @@ async fn editing_one_of_logseqs_built_in_pages_is_refused() {
 #[tokio::test]
 async fn a_push_of_nothing_but_built_ins_is_refused_rather_than_a_no_op() {
     let err = refused(|graph, base| {
-        let built_in = built_in_entities(graph);
-        let victims: Vec<String> = base
-            .uuids()
-            .filter(|u| {
-                kvs_writer::entity_by_uuid(graph, u)
-                    .expect("read")
-                    .is_some_and(|e| built_in.contains(&e))
-                    && !base.get(u).expect("present").content.is_empty()
-            })
+        let datoms = kvs_writer::datoms_now(graph).expect("read");
+        let titled: BTreeSet<i64> = datoms
+            .iter()
+            .filter(|d| d.a == "block/title")
+            .map(|d| d.e)
+            .collect();
+        let victims: Vec<i64> = titled
+            .into_iter()
+            .filter(|e| kvs_writer::is_built_in(graph, *e).expect("read"))
             .take(3)
-            .map(str::to_string)
             .collect();
         assert_eq!(victims.len(), 3, "need three titled built-ins");
 
-        let mut after = base.clone();
-        for (i, uuid) in victims.iter().enumerate() {
+        let mut before = base.clone();
+        let mut uuids = Vec::new();
+        for entity in victims {
+            let (next, uuid) = base_claiming(graph, &before, entity);
+            before = next;
+            uuids.push(uuid);
+        }
+        let mut after = before.clone();
+        for (i, uuid) in uuids.iter().enumerate() {
             after = retitled(&after, uuid, &format!("schema rewrite {i}"));
         }
-        (base.clone(), after)
+        (before, after)
     })
     .await;
     assert!(
@@ -532,7 +601,7 @@ async fn one_stale_block_refuses_the_whole_push_by_name() {
     let mut stale_uuid = String::new();
     let mut truth = String::new();
     let err = refused(|graph, base| {
-        let targets = user_authored_uuids(graph, base);
+        let targets = editable_uuids(graph, base);
         assert!(targets.len() >= 4, "need four user-authored blocks");
         // `diff.changed` follows the base's uuid order, so the last of these
         // four is the last push would reach.
@@ -604,59 +673,48 @@ async fn a_block_the_graph_does_not_have_is_refused() {
 
 // ----------------------------------------------------------------- overflow
 
-/// Two pushes over all 12 editable blocks cross the branching factor MID-push
-/// and flush through B.
+/// THREE pushes over the 8 editable blocks cross the branching factor
+/// MID-push and flush through B.
 ///
-/// 12 blocks are 24 datoms, so the first push cannot overflow (pinned by
-/// [`the_fixtures_built_in_share_is_pinned`]); the second crosses 32 on its
-/// fifth block. That is the harder case — the tail is already dirty with a
-/// previous push's transactions when the flush fires — and the re-import
-/// afterwards is what proves the flushed transactions were not lost.
+/// REDESIGNED, not re-pinned. Under LW-7.a the editable set is 8 blocks, not
+/// 12, and 8 blocks is 16 datoms — so push 1 reaches 16 and push 2 reaches
+/// exactly 32, which does NOT exceed the branching factor and therefore does
+/// NOT flush. Reaching an overflow at all now takes a THIRD push, which
+/// crosses on its very first block. Changing the numbers alone would have
+/// produced a test that no longer exercised a flush while still looking like
+/// it did.
 #[tokio::test]
-async fn a_second_push_overflows_the_tail_and_flushes_through_the_trees() {
+async fn a_third_push_overflows_the_tail_and_flushes_through_the_trees() {
     let dir = tempfile::tempdir().expect("tempdir");
     let copy = dir.path().join("overflowed.sqlite");
 
     let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
-    let first_base = base_of(&fixture()).await;
-    let targets = editable_uuids(&graph, &first_base);
+    let mut base = base_of(&fixture()).await;
+    let targets = editable_uuids(&graph, &base);
+    assert_eq!(targets.len(), 8, "the editable set this leg is sized for");
 
-    let mut second_base = first_base.clone();
-    for (i, uuid) in targets.iter().enumerate() {
-        second_base = retitled(&second_base, uuid, &format!("overflow round one {i:02}"));
+    let mut flushes = Vec::new();
+    let mut tails = Vec::new();
+    for round in 0..3 {
+        let mut next = base.clone();
+        for (i, uuid) in targets.iter().enumerate() {
+            next = retitled(&next, uuid, &format!("overflow round {round} {i:02}"));
+        }
+        let report = kvs_writer::push(&mut graph, &base, &next).expect("push");
+        assert_eq!(report.transactions, 8, "every editable block changed");
+        flushes.push(report.flushes);
+        tails.push(graph.tail().expect("tail").datom_count());
+        base = next;
     }
-    let first = kvs_writer::push(&mut graph, &first_base, &second_base).expect("push one");
-    assert_eq!(first.transactions, 12, "every editable block changed");
-    assert_eq!(
-        first.flushes, 0,
-        "24 datoms stay under the branching factor"
-    );
-    assert_eq!(
-        graph.tail().expect("tail").datom_count(),
-        24,
-        "the first push leaves the tail dirty, which is what makes the second interesting"
-    );
 
-    let mut third_base = second_base.clone();
-    for (i, uuid) in targets.iter().enumerate() {
-        third_base = retitled(&third_base, uuid, &format!("overflow round two {i:02}"));
-    }
-    let second = kvs_writer::push(&mut graph, &second_base, &third_base).expect("push two");
+    // MEASURED, not predicted: 16 after push 1, 32 after push 2 (at the limit
+    // and still not over it), and after push 3 the first block crosses to 34,
+    // flushes all of them, and the remaining seven leave 14 behind.
     assert_eq!(
-        second.transactions, 12,
-        "every editable block changed again"
-    );
-    assert_eq!(
-        second.flushes, 1,
-        "the 17th transaction crosses 32 datoms and flushes exactly once"
-    );
-    assert_eq!(
-        graph.tail().expect("tail").datom_count(),
-        14,
-        "the flush POINT is pinned, not merely the fact of one: 24 datoms plus \
-         four blocks reaches 32, the fifth block crosses it and flushes all 34, \
-         and the remaining seven blocks leave exactly 14 datoms behind. \
-         A `< 32` assertion would also pass a flush one block early."
+        (flushes.as_slice(), tails.as_slice()),
+        (&[0, 0, 1][..], &[16, 32, 14][..]),
+        "the flush must land on push THREE, and the tail lengths pin exactly \
+         where — a `< 32` style assertion would also pass a flush a push early"
     );
     assert!(
         graph.rows.len() > 456,
@@ -667,9 +725,10 @@ async fn a_second_push_overflows_the_tail_and_flushes_through_the_trees() {
     kvs_writer::write_graph(&graph, &copy).await.expect("write");
     let reimported = base_of(&copy).await;
     assert_eq!(
-        reimported.diff_against(&third_base),
+        reimported.diff_against(&base),
         Default::default(),
-        "the flushed transactions must survive into the trees, not be dropped by the flush"
+        "the flushed transactions must survive into the trees, not be dropped \
+         by the flush"
     );
 }
 
@@ -718,13 +777,14 @@ fn pushed_title(round: usize, i: usize) -> String {
 /// Drive the two-push sequence and hand back the graph plus the edits it made,
 /// as `(entity, title)` in push order — the exact list LogSeq is asked to
 /// apply in the head-to-head below.
-async fn two_pushes() -> (KvsGraph, Vec<(i64, String)>) {
+async fn three_pushes() -> (KvsGraph, Vec<(i64, String)>) {
     let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
     let mut base = base_of(&fixture()).await;
     let targets = editable_uuids(&graph, &base);
 
     let mut edits = Vec::new();
-    for round in 0..2 {
+    let mut flushes = 0;
+    for round in 0..3 {
         let mut next = base.clone();
         for (i, uuid) in targets.iter().enumerate() {
             next = retitled(&next, uuid, &pushed_title(round, i));
@@ -748,14 +808,19 @@ async fn two_pushes() -> (KvsGraph, Vec<(i64, String)>) {
         for (i, entity) in expected.iter().enumerate() {
             edits.push((*entity, pushed_title(round, i)));
         }
+        flushes += report.flushes;
         base = next;
     }
-    assert_eq!(edits.len(), 24, "12 blocks over two rounds");
+    assert_eq!(edits.len(), 24, "8 blocks over three rounds");
+    // THREE rounds, not two: 8 blocks is 16 datoms, so two pushes reach
+    // exactly 32 and never cross it. Without a third the legs below would
+    // compare two tail-only files and could not see a flush at all.
+    assert_eq!(flushes, 1, "the third push must have flushed");
     (graph, edits)
 }
 
 async fn pushed_copy(dir: &Path) -> Vec<(i64, String)> {
-    let (graph, edits) = two_pushes().await;
+    let (graph, edits) = three_pushes().await;
     std::fs::create_dir_all(dir).expect("dir");
     kvs_writer::write_graph(&graph, &dir.join("db.sqlite"))
         .await
@@ -789,10 +854,10 @@ async fn leg1_logseq_validator_accepts_a_pushed_graph() {
     );
 }
 
-/// LEG 2 — the delta LogSeq sees is exactly the 12 final titles, nothing else.
+/// LEG 2 — the delta LogSeq sees is exactly the 8 final titles, nothing else.
 ///
-/// Twelve, not twenty-four: the second round supersedes the first, so a
-/// correct push leaves no trace of the intermediate titles. A push that
+/// Eight, not twenty-four: each round supersedes the last, so a correct push
+/// leaves no trace of either set of intermediate titles. A push that
 /// asserted without retracting would show them, and this is where that shows.
 #[tokio::test]
 #[ignore = "needs HOLON_LOGSEQ_ORACLE — see docs/Testing/LogseqDbOracle.md"]
@@ -818,8 +883,8 @@ async fn leg2_logseq_diff_shows_exactly_the_pushed_titles() {
         .collect();
     assert_eq!(
         entries.len(),
-        24,
-        "expected 12 datoms per side and nothing else; got {}:\n{out}",
+        16,
+        "expected 8 datoms per side and nothing else; got {}:\n{out}",
         entries.len()
     );
     for entry in &entries {
@@ -829,16 +894,18 @@ async fn leg2_logseq_diff_shows_exactly_the_pushed_titles() {
              attribute: {entry}\n{out}"
         );
     }
-    for i in 0..12 {
+    for i in 0..8 {
         assert!(
-            out.contains(&pushed_title(1, i)),
+            out.contains(&pushed_title(2, i)),
             "final title {i} is missing from the delta:\n{out}"
         );
-        assert!(
-            !out.contains(&pushed_title(0, i)),
-            "round-one title {i} is still in the graph, so a retract was \
-             skipped:\n{out}"
-        );
+        for superseded in [0, 1] {
+            assert!(
+                !out.contains(&pushed_title(superseded, i)),
+                "round-{superseded} title {i} is still in the graph, so a \
+                 retract was skipped:\n{out}"
+            );
+        }
     }
 }
 
@@ -972,7 +1039,7 @@ async fn head_to_head_with_logseq_applying_the_same_pushes() {
 async fn bisect_the_pushed_edits_prefix_by_prefix() {
     let oracle = Oracle::find();
     let dir = tempfile::tempdir().expect("temp dir");
-    let (_, edits) = two_pushes().await;
+    let (_, edits) = three_pushes().await;
     assert_eq!(edits.len(), 24, "the bisect walks the same 24 edits");
 
     let pristine = base_of(&fixture()).await;
@@ -999,7 +1066,7 @@ async fn bisect_the_pushed_edits_prefix_by_prefix() {
         let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
         let mut base = pristine.clone();
         let mut applied = 0usize;
-        for round in 0..2 {
+        for round in 0..3 {
             if applied >= n {
                 break;
             }
@@ -1110,7 +1177,7 @@ fn retract_built_in_in_the_tail(graph: &mut KvsGraph, entity: i64) {
 async fn a_built_in_marker_that_is_still_in_the_tail_refuses_the_push() {
     let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
     let base = base_of(&fixture()).await;
-    let target = user_authored_uuids(&graph, &base)[0].clone();
+    let target = editable_uuids(&graph, &base)[0].clone();
     let entity = kvs_writer::entity_by_uuid(&graph, &target)
         .expect("read")
         .expect("entity");
@@ -1164,20 +1231,25 @@ async fn a_built_in_flag_retracted_in_the_tail_makes_the_block_pushable() {
     // The candidate is chosen by asking the production predicate whether the
     // retraction actually clears the verdict, rather than by hard-coding an
     // entity id that a fixture change could silently repurpose.
-    let built_in = built_in_entities(&graph);
-    let (target, entity) = base
-        .uuids()
-        .filter(|u| !base.get(u).expect("present").content.is_empty())
-        .filter_map(|u| {
-            let e = kvs_writer::entity_by_uuid(&graph, u).expect("read")?;
-            built_in.contains(&e).then(|| (u.to_string(), e))
-        })
-        .find(|(_, e)| {
+    //
+    // Since LW-7.a the base no longer carries built-ins, so the base entry is
+    // CONSTRUCTED — reaching push's backstop is the whole point of the test.
+    let datoms = kvs_writer::datoms_now(&graph).expect("read");
+    let titled: BTreeSet<i64> = datoms
+        .iter()
+        .filter(|d| d.a == "block/title")
+        .map(|d| d.e)
+        .collect();
+    let entity = titled
+        .into_iter()
+        .filter(|e| kvs_writer::is_built_in(&graph, *e).expect("read"))
+        .find(|e| {
             let mut probe = graph.clone();
             retract_built_in_in_the_tail(&mut probe, *e);
             !kvs_writer::is_built_in(&probe, *e).expect("read")
         })
         .expect("the fixture has 16 flag-only built-ins");
+    let (base, target) = base_claiming(&graph, &base, entity);
     assert!(
         kvs_writer::is_built_in(&graph, entity).expect("read"),
         "precondition: the block starts out built-in"
@@ -1205,7 +1277,7 @@ async fn a_built_in_flag_retracted_in_the_tail_makes_the_block_pushable() {
 async fn the_stale_base_guard_sees_a_title_that_is_only_in_the_tail() {
     let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
     let base = base_of(&fixture()).await;
-    let target = user_authored_uuids(&graph, &base)[0].clone();
+    let target = editable_uuids(&graph, &base)[0].clone();
     let entity = kvs_writer::entity_by_uuid(&graph, &target)
         .expect("read")
         .expect("entity");
@@ -1250,7 +1322,7 @@ async fn the_stale_base_guard_sees_a_title_that_is_only_in_the_tail() {
 async fn a_cardinality_many_title_refuses_the_push() {
     let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
     let base = base_of(&fixture()).await;
-    let target = user_authored_uuids(&graph, &base)[0].clone();
+    let target = editable_uuids(&graph, &base)[0].clone();
 
     // Redeclare :block/title as cardinality-many in the root schema, which is
     // where push reads the declaration from.
@@ -1304,7 +1376,7 @@ async fn a_cardinality_many_title_refuses_the_push() {
 async fn a_push_that_fails_mid_loop_leaves_the_graph_completely_untouched() {
     let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
     let base = base_of(&fixture()).await;
-    let targets = user_authored_uuids(&graph, &base);
+    let targets = editable_uuids(&graph, &base);
 
     // Fill the tail to exactly 32 datoms with edits to a block the push will
     // NOT touch, so the pushed block's title is still what the base recorded.
@@ -1365,7 +1437,7 @@ async fn a_push_that_fails_mid_loop_leaves_the_graph_completely_untouched() {
 async fn a_graph_at_an_unpinned_schema_version_refuses_the_push() {
     let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
     let base = base_of(&fixture()).await;
-    let target = user_authored_uuids(&graph, &base)[0].clone();
+    let target = editable_uuids(&graph, &base)[0].clone();
 
     // Bump the minor version wherever the graph declares it.
     let mut bumped = 0;
@@ -1722,7 +1794,7 @@ async fn a_cardinality_many_retract_removes_only_the_named_value() {
 async fn later_wins_when_two_tail_transactions_share_a_transaction_id() {
     let graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
     let base = base_of(&fixture()).await;
-    let target = user_authored_uuids(&graph, &base)[0].clone();
+    let target = editable_uuids(&graph, &base)[0].clone();
     let entity = kvs_writer::entity_by_uuid(&graph, &target)
         .expect("read")
         .expect("entity");
@@ -1850,7 +1922,7 @@ async fn an_empty_transaction_in_the_tail_reads_and_pushes_fine() {
         "and changes nothing about what the graph holds"
     );
 
-    let target = user_authored_uuids(&staged, &base)[0].clone();
+    let target = editable_uuids(&staged, &base)[0].clone();
     let report = kvs_writer::push(
         &mut staged,
         &base,
@@ -1964,7 +2036,7 @@ async fn datoms_stranded_in_unreferenced_rows_are_not_part_of_the_graph() {
 async fn a_bare_cardinality_one_assert_supersedes_rather_than_accumulating() {
     let graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
     let base = base_of(&fixture()).await;
-    let target = user_authored_uuids(&graph, &base)[0].clone();
+    let target = editable_uuids(&graph, &base)[0].clone();
     let entity = kvs_writer::entity_by_uuid(&graph, &target)
         .expect("read")
         .expect("entity");
@@ -1994,4 +2066,164 @@ async fn a_bare_cardinality_one_assert_supersedes_rather_than_accumulating() {
         "cardinality-one means at most one value survives; the old title must \
          be gone even though nothing retracted it"
     );
+}
+
+// ------------------------------- excluding a page-owned parent with children
+
+/// Excluding a page-owned entity that HAS CHILDREN refuses the import.
+///
+/// The page leg drops LogSeq's per-view UI records. Today every one of them is
+/// childless (measured), so nothing is lost. If a future LogSeq grows content
+/// beneath one, dropping the parent would silently take the children with it —
+/// so the importer refuses by name instead.
+///
+/// Constructed, because the fixture cannot supply the case: a child is added
+/// under `$$$views` panel e=198 through the tail, exactly as LogSeq's own
+/// transactor would, and the graph is written out and imported for real.
+#[tokio::test]
+async fn excluding_a_page_owned_parent_that_has_children_refuses_the_import() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let grown = dir.path().join("grown.sqlite");
+
+    let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+
+    // Precondition: e=198 is page-excluded and childless, so a refusal
+    // afterwards can only be the new child's doing.
+    let base_before = base_of(&fixture()).await;
+    assert!(
+        base_before
+            .uuids()
+            .all(|u| kvs_writer::entity_by_uuid(&graph, u).expect("read") != Some(198)),
+        "e=198 is excluded from the base to begin with"
+    );
+
+    const CHILD: i64 = 9_000_001;
+    let tx = graph.allocate_tx().expect("tx");
+    let mut tail = graph.tail().expect("tail");
+    tail.push_transaction(vec![
+        kvs_writer::TailDatom {
+            entity: CHILD,
+            attribute: "block/uuid".to_string(),
+            value: TransitNode::Uuid("00000009-0000-0000-0000-000000000001".to_string()),
+            tx,
+            op: kvs_writer::DatomOp::Assert,
+        },
+        kvs_writer::TailDatom {
+            entity: CHILD,
+            attribute: "block/title".to_string(),
+            value: TransitNode::Str("a note somebody wrote under a system page".to_string()),
+            tx,
+            op: kvs_writer::DatomOp::Assert,
+        },
+        kvs_writer::TailDatom {
+            entity: CHILD,
+            attribute: "block/parent".to_string(),
+            value: TransitNode::Int(198),
+            tx,
+            op: kvs_writer::DatomOp::Assert,
+        },
+    ])
+    .expect("room in the tail");
+    graph.set_tail(&tail).expect("stored");
+    kvs_writer::write_graph(&graph, &grown)
+        .await
+        .expect("write");
+
+    let err = LogseqDbImporter::new()
+        .import(&grown)
+        .await
+        .expect_err("a page-excluded parent with a child must refuse the import");
+    let message = err.to_string();
+    assert!(
+        message.contains("198") && message.contains("would be dropped"),
+        "the refusal must name the parent and say what would be lost; got: {message}"
+    );
+}
+
+/// The PARENT-leg shape: not built-in, page NOT built-in, but parent IS.
+///
+/// The page leg excludes an entity whose `:block/page` is LogSeq's. It says
+/// nothing about `:block/parent`, so an entity could in principle sit on a
+/// user page while its PARENT is a built-in — and be projected with a parent
+/// that is not a block. Zero such entities exist in the fixture, which makes
+/// it data-closed, and data-closed is the shape that has hidden two real
+/// defects in this lane already.
+///
+/// Constructed, and the answer is that it is CONSTRUCTION-closed after all:
+/// the importer already refuses any reference to a non-projectable entity
+/// (`DanglingReference`), so the shape cannot produce a dangling parent — it
+/// produces a loud refusal naming both entities and the attribute. This test
+/// pins that, so the guarantee survives a future change to either rule.
+#[tokio::test]
+async fn an_entity_whose_parent_is_built_in_refuses_the_import() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let grown = dir.path().join("parent-leg.sqlite");
+
+    let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    const CHILD: i64 = 9_000_001;
+    const BUILT_IN_PARENT: i64 = 22;
+    const USER_PAGE: i64 = 193;
+    assert!(
+        kvs_writer::is_built_in(&graph, BUILT_IN_PARENT).expect("read"),
+        "precondition: entity {BUILT_IN_PARENT} is one LogSeq owns"
+    );
+    assert!(
+        !kvs_writer::is_built_in(&graph, USER_PAGE).expect("read"),
+        "precondition: entity {USER_PAGE} is a user page, so the PAGE leg \
+         cannot be what refuses this"
+    );
+
+    let tx = graph.allocate_tx().expect("tx");
+    let mut tail = graph.tail().expect("tail");
+    tail.push_transaction(vec![
+        kvs_writer::TailDatom {
+            entity: CHILD,
+            attribute: "block/uuid".to_string(),
+            value: TransitNode::Uuid("00000009-0000-0000-0000-000000000002".to_string()),
+            tx,
+            op: kvs_writer::DatomOp::Assert,
+        },
+        kvs_writer::TailDatom {
+            entity: CHILD,
+            attribute: "block/title".to_string(),
+            value: TransitNode::Str("a user block under a built-in parent".to_string()),
+            tx,
+            op: kvs_writer::DatomOp::Assert,
+        },
+        kvs_writer::TailDatom {
+            entity: CHILD,
+            attribute: "block/parent".to_string(),
+            value: TransitNode::Int(BUILT_IN_PARENT),
+            tx,
+            op: kvs_writer::DatomOp::Assert,
+        },
+        kvs_writer::TailDatom {
+            entity: CHILD,
+            attribute: "block/page".to_string(),
+            value: TransitNode::Int(USER_PAGE),
+            tx,
+            op: kvs_writer::DatomOp::Assert,
+        },
+    ])
+    .expect("room in the tail");
+    graph.set_tail(&tail).expect("stored");
+    kvs_writer::write_graph(&graph, &grown)
+        .await
+        .expect("write");
+
+    let err = LogseqDbImporter::new()
+        .import(&grown)
+        .await
+        .expect_err("a parent that is not a block must refuse the import");
+    let message = err.to_string();
+    for expected in [
+        &CHILD.to_string()[..],
+        &BUILT_IN_PARENT.to_string()[..],
+        ":block/parent",
+    ] {
+        assert!(
+            message.contains(expected),
+            "the refusal must name {expected}; got: {message}"
+        );
+    }
 }

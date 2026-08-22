@@ -51,7 +51,10 @@ const AUG20_CHILDREN_IN_FRACDEX_ORDER: &[&str] = &[
     "6a86ce9d-9fe6-434e-b07f-bd629bb68ae9",
 ];
 
-const EXPECTED_BLOCKS: usize = 206;
+/// The blocks a person authored. LogSeq's own 189 uuid-bearing entities are
+/// read for schema knowledge and never materialized (LW-7.a), so the store
+/// receives only these.
+const EXPECTED_BLOCKS: usize = 17;
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/logseq-db/holontest.sqlite")

@@ -9,7 +9,6 @@
 
 use anyhow::Result;
 use holon_api::Block;
-use holon_api::BlockEdges;
 use holon_api::EntityUri;
 use holon_core::block_ordering::BlockCreateRequest;
 use holon_core::block_ordering::BlockOrdering;
