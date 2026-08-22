@@ -152,3 +152,62 @@ async fn a_missing_file_is_not_created() {
     );
     assert!(!path.exists(), "the importer must never create a db file");
 }
+
+/// A `kvs` row holding a JSON OBJECT must be an error naming the row, on BOTH
+/// read paths — never a panic.
+///
+/// Transit-JSON writes maps as arrays, so an object cannot come from LogSeq;
+/// it means the file is corrupt. `kvs` content is bytes on disk that no
+/// invariant of ours governs, so this is external input being wrong rather
+/// than an assumption of ours breaking, and the fail-loud rule says `Err`.
+/// Before W1 this reached an `unreachable!()` and took the process down.
+#[tokio::test]
+async fn a_row_holding_a_json_object_is_an_error_naming_the_row_not_a_panic() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let dst = dir.path().join("object-row.sqlite");
+    std::fs::copy(fixture_path(), &dst).expect("copy the fixture");
+
+    // Not length-preserving, so this is a direct write rather than the shared
+    // substitution harness. Addr 1000001 is a real tree row.
+    const VICTIM: i64 = 1_000_001;
+    let db = libsql::Builder::new_local(&dst)
+        .build()
+        .await
+        .expect("open copy");
+    let conn = db.connect().expect("connect");
+    conn.execute(
+        "UPDATE kvs SET content = ?1 WHERE addr = ?2",
+        libsql::params![r#"{"keys":[],"addresses":[]}"#, VICTIM],
+    )
+    .await
+    .expect("corrupt one row");
+    drop(conn);
+    drop(db);
+
+    let err = read_datoms(&dst)
+        .await
+        .expect_err("a JSON-object row must be refused");
+    let text = err.to_string();
+    assert!(
+        matches!(err, ImportError::Decode { addr, .. } if addr == VICTIM),
+        "the error must name the row it came from, got {err:?}"
+    );
+    assert!(
+        text.contains(&VICTIM.to_string()),
+        "the message must name addr {VICTIM}: {text}"
+    );
+
+    let writer_err = holon_logseq_db::kvs_writer::read_graph(&dst)
+        .await
+        .expect_err("the writer's read path must refuse it too");
+    assert!(
+        writer_err.to_string().contains(&VICTIM.to_string()),
+        "the writer's error must name addr {VICTIM}: {writer_err}"
+    );
+
+    // Printed, not just asserted: the whole point of replacing the panic was
+    // diagnosability, and an error less informative than the backtrace it
+    // replaced would be a regression that a boolean assertion cannot show.
+    println!("importer: {text}");
+    println!("writer:   {writer_err}");
+}

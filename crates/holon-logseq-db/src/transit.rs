@@ -64,6 +64,13 @@ pub enum TransitError {
     /// `~#tag` outside the `["~#tag", value]` pair position — it tags nothing.
     #[error("Transit tag marker {tag:?} appears outside a tagged pair")]
     BareTagMarker { tag: String },
+    /// A JSON object where a Transit value belongs. Transit-JSON writes maps
+    /// as arrays, so this is a row that is not a Transit document at all.
+    #[error(
+        "expected a Transit value but found a JSON object with {len} key(s) ({keys}); \
+         Transit-JSON writes maps as arrays, so this row is not a Transit document"
+    )]
+    JsonObject { keys: String, len: usize },
     /// `~n` bigint / `~f` bigdec. Accepting them would silently narrow the
     /// value on the way back out; see the reader's ground-type table.
     #[error(
@@ -166,7 +173,14 @@ impl Reader {
                 // f64 reading rather than refusing a well-formed document.
                 None => TransitNode::Float(F64Bits::new(n.as_f64().expect("json number is f64"))),
             })),
-            Value::Object(_) => unreachable!("Transit-JSON encodes maps as arrays, never objects"),
+            // Transit-JSON writes maps as `["^ ", k, v, …]`, so a JSON object
+            // means the row is not a Transit document. It arrives from a file
+            // on disk, which no invariant of ours governs, so it is an Err —
+            // a panic here would take the process down on a corrupt graph.
+            Value::Object(map) => Err(TransitError::JsonObject {
+                keys: map.keys().take(3).cloned().collect::<Vec<_>>().join(", "),
+                len: map.len(),
+            }),
         }
     }
 
@@ -560,6 +574,31 @@ mod tests {
             matches!(err, TransitError::UnknownGroundType { .. }),
             "got {err:?}"
         );
+    }
+
+    /// A corrupt row must not take the process down.
+    ///
+    /// `kvs` content is bytes on disk that no invariant of ours governs, so a
+    /// JSON object where a Transit value belongs is external input being wrong,
+    /// not a broken assumption of ours — an `Err`, never a panic.
+    #[test]
+    fn a_json_object_is_a_loud_error_not_a_panic() {
+        let err = decode_document(r#"{"a":1,"b":2}"#).expect_err("a JSON object is not Transit");
+        match &err {
+            TransitError::JsonObject { keys, len } => {
+                assert_eq!(*len, 2);
+                assert!(keys.contains('a') && keys.contains('b'), "{keys}");
+            }
+            other => panic!("got {other:?}"),
+        }
+        assert!(err.to_string().contains("not a Transit document"), "{err}");
+
+        // Nested, too: the panic sat in the shared scalar path, so an object
+        // inside an otherwise well-formed document hit it just as hard.
+        assert!(matches!(
+            decode_document(r#"["^ ","~:keys",{"a":1}]"#),
+            Err(TransitError::JsonObject { .. })
+        ));
     }
 
     #[test]

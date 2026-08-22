@@ -3,7 +3,7 @@ id: 2026-08-22-importbase-serialization-is-not-byte-stable
 date: 2026-08-22
 gap: ORACLE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   Importing the SAME LogSeq graph twice serializes to different bytes, because
   a `_logseq_raw/*` property holding a nested map lands in a `HashMap`-backed
@@ -83,20 +83,37 @@ drive the LogSeq-DB importer at all — so no keystone red is available or
 expected here.
 
 ## Remedy
-OPEN. Not fixed in the W0 lane: the fix touches `holon_api::Value`, which is
-flutter_rust_bridge-shaped and used across the tree, so the choice between
-ordering it (`IndexMap`/`BTreeMap`) and narrowing the import path to a
-serde_json value is an architecture call for the orchestrator, not a spike
-decision.
+FIXED at the SERIALIZATION BOUNDARY, in W1 item 0.
+`ImportBase::to_canonical_json` (`crates/holon-logseq-db/src/base.rs`) builds
+the value and sorts every object's keys recursively (`sort_keys`, arrays keep
+their order — a list's order is data, a map's is arbitrary), and `save` writes
+exactly that. `tests/kvs_round_trip.rs` leg 3 now compares through the same
+method rather than a duplicate local helper, so there is ONE canonicalizer.
 
-Interim, in the W0 lane: leg 3 of `tests/kvs_round_trip.rs` compares a
-CANONICAL serialization (recursively key-sorted) rather than raw bytes, and
-says so in a comment. That is a real assertion about content, and it weakens
-nothing about the round-trip — a re-encode that reordered a map's keys is
-still caught by `every_row_re_encodes_to_the_value_it_decoded_from` (whose
-`TransitNode` maps are ordered `Vec`s) and by leg 2's datom-level diff against
-LogSeq's own `diff_graphs`.
+DECISION FOR REVIEW (ratified by the orchestrator before implementation):
+`holon_api::Value` was deliberately NOT changed. Ordering it (`IndexMap` or
+`BTreeMap`) would be the more thorough fix, but `Value` is
+flutter_rust_bridge-shaped (`crates/holon-pattern/src/value.rs:35`) and
+reaches most of the tree, while only the PERSISTED form actually needs an
+order. Accepted cost: in-memory `Value`s stay unordered, so nothing may assume
+a nested map's key order survives a round trip through the base. Both the
+method's doc comment and this entry say so.
 
-Consequence to weigh when scheduling the fix: once W1 persists a base file
-next to the graph, writing it twice from unchanged data produces a different
-file, so every push would show a spurious VCS diff.
+Red → green evidence:
+- Red `.lane-logs/w1-item0-red-final.log` — `two_imports_of_one_graph_persist_to_identical_bytes`
+  FAILED, "the same graph persisted to different bytes, first differing at
+  char 14814", the two windows showing `_logseq_raw/logseq.property/icon`
+  emitting `:id`/`:type` in opposite orders. Red for the behaviour, not for a
+  missing symbol: `to_canonical_json` existed as a non-canonical stub so the
+  test compiled and failed on bytes.
+- Green `.lane-logs/w1-item0-green.log` — full crate suite, 80 tests, 0 failed.
+
+The regression pin is that test. It imports TWICE on purpose: serializing one
+base twice cannot see the bug, because a `HashMap` iterates consistently
+within its own lifetime.
+
+The two false claims are gone: `base.rs`'s comment now says the `BTreeMap`
+orders the outer map only and points at `to_canonical_json` for stability, and
+`Cargo.toml`'s `preserve_order` rationale is rewritten to the true one (the
+canonical form builds a `Value` in the order it wants, which a
+`BTreeMap`-backed `Value` would re-sort).

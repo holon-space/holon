@@ -20,8 +20,9 @@ holon-core.workspace = true
 # LogSeq DB graphs are standard on-disk SQLite; libsql opens them read-only to
 # read the `kvs` Transit-JSON node table.
 libsql.workspace = true
-# `preserve_order`: nested EDN carried opaque in `_logseq_raw/*` must round-trip
-# in author order, same rationale as holon-org-format's drawer ordering.
+# `preserve_order`: the base is persisted through `serde_json::Value`, and its
+# canonical form sorts keys by building that `Value` in the order it wants —
+# which a `BTreeMap`-backed `Value` would re-sort by its own rules instead.
 serde_json = { workspace = true, features = ["preserve_order"] }
 anyhow.workspace = true
 thiserror.workspace = true

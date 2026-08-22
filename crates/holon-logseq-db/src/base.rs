@@ -85,8 +85,13 @@ pub struct BaseBlock {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImportBase {
     version: u32,
-    /// Bare LogSeq uuid → last-observed state. Ordered so a serialized base is
-    /// byte-stable across runs and a diff of two base files is readable.
+    /// Bare LogSeq uuid → last-observed state. Ordered so a diff of two base
+    /// files is readable.
+    ///
+    /// This map's order is not on its own enough to make a saved base
+    /// byte-stable — the values reach nested `HashMap`s. Stability is
+    /// established by [`to_canonical_json`](Self::to_canonical_json), which is
+    /// what `save` writes.
     blocks: BTreeMap<String, BaseBlock>,
 }
 
@@ -236,9 +241,30 @@ impl ImportBase {
         diff
     }
 
+    /// The base's canonical bytes — the exact form [`save`](Self::save) writes.
+    ///
+    /// Every object's keys are sorted, recursively. That is not cosmetic: a
+    /// `_logseq_raw/*` property carrying a nested map arrives as
+    /// `holon_api::Value::Object`, a `HashMap`, whose iteration order follows
+    /// the process's hash seed — so two imports of one graph serialize
+    /// differently unless an order is imposed somewhere.
+    ///
+    /// Imposed HERE, at the serialization boundary, rather than by ordering
+    /// `Value` itself: `Value` is flutter_rust_bridge-shaped and reaches most
+    /// of the tree, and only the persisted form actually needs an order. The
+    /// cost of the choice is that in-memory `Value`s stay unordered, so
+    /// nothing may assume a nested map's key order survives a round trip
+    /// through the base.
+    pub fn to_canonical_json(&self) -> Result<String> {
+        let value = serde_json::to_value(self).context("serializing the import base")?;
+        serde_json::to_string_pretty(&sort_keys(value))
+            .context("re-serializing the import base in canonical form")
+    }
+
     /// Persist the base next to the graph it describes.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let json = serde_json::to_string_pretty(self)
+        let json = self
+            .to_canonical_json()
             .with_context(|| format!("serializing the import base for {}", path.display()))?;
         std::fs::write(path, json)
             .with_context(|| format!("writing the import base to {}", path.display()))
@@ -277,6 +303,23 @@ impl ImportBase {
         );
         serde_json::from_str(&json)
             .with_context(|| format!("parsing the import base at {}", path.display()))
+    }
+}
+
+/// `value` with every object's keys in sorted order, recursively.
+///
+/// Arrays keep their order: a list's order is data, only a map's is arbitrary.
+fn sort_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().map(|(k, v)| (k, sort_keys(v))).collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            serde_json::Value::Object(entries.into_iter().collect())
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(sort_keys).collect())
+        }
+        scalar => scalar,
     }
 }
 

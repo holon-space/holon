@@ -127,6 +127,14 @@ pub enum ImportError {
     /// A decode outside any `kvs` row (the standalone [`decode`] entry point).
     #[error("Transit decode error: {0}")]
     Transit(#[from] TransitError),
+    /// The transaction tail at addr 1 could not be read. Never skipped: the
+    /// tail holds the graph's most recent edits, so ignoring an unreadable one
+    /// would silently import a stale graph.
+    #[error("the transaction tail at kvs addr 1 cannot be read: {source}")]
+    Tail {
+        #[source]
+        source: crate::kvs_writer::RowError,
+    },
     #[error("unknown attribute {attr:?} is not declared in the schema node (addr 0)")]
     UnknownAttr { attr: String },
     /// The addr-0 root node is not the shape a DataScript schema node has.

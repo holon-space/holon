@@ -21,6 +21,20 @@ the restored scripts are gone, the tests **fail** with the reason and a pointer
 back here. An oracle leg that passes by not running would be worse than no
 oracle at all, which is the whole reason for the `#[ignore]` + recipe split.
 
+### Why leg 2 in particular is not optional
+
+LogSeq replays the transaction tail through `db-with-tail-datoms`, which wraps
+its transact in `(catch :default _ db)`. A tail transaction LogSeq cannot
+replay is therefore **dropped in silence** — the graph loads as though the edit
+never happened, with no error on LogSeq's side and none on Holon's.
+
+Holon refuses any tail entry not shaped `[e a v ±tx]` before writing it
+(`RowError::MalformedTailDatom`), which catches malformed output. It cannot
+catch output that is well-formed but wrong — a correct-looking datom naming the
+wrong entity, attribute, or transaction. The only check that does is
+`diff_graphs` asserting the delta is EXACTLY the intended change, which is leg
+2. Any increment that writes runs it.
+
 ## The rev the oracle must be at
 
 The oracle has to be the schema version the graph under test was written by,

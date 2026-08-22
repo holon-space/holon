@@ -18,6 +18,8 @@ use libsql::OpenFlags;
 use crate::Eid;
 use crate::ImportError;
 use crate::TransitNode;
+use crate::kvs_writer::DatomOp;
+use crate::kvs_writer::Tail;
 use crate::transit::decode_document;
 
 /// The transaction slot of a datom.
@@ -352,7 +354,12 @@ pub async fn read_datoms(path: &Path) -> Result<DatomSet, ImportError> {
 
     let mut deduped = BTreeSet::new();
     let mut leaf_datoms = 0usize;
-    for (addr, content) in rows.iter().filter(|(addr, _)| *addr > 0) {
+    // Addr 1 is the transaction tail, not a tree node — it is replayed OVER the
+    // trees below, so reading it here as well would double-count it.
+    for (addr, content) in rows
+        .iter()
+        .filter(|(addr, _)| *addr > 0 && *addr != TAIL_ADDR)
+    {
         let node = decode_document(content).map_err(|source| ImportError::Decode {
             addr: *addr,
             source,
@@ -363,6 +370,8 @@ pub async fn read_datoms(path: &Path) -> Result<DatomSet, ImportError> {
         }
     }
 
+    apply_tail(&mut deduped, &rows, &schema)?;
+
     let datoms: Vec<LogseqDatom> = deduped.into_iter().collect();
     let entities = classify_entities(&datoms);
     Ok(DatomSet {
@@ -371,6 +380,62 @@ pub async fn read_datoms(path: &Path) -> Result<DatomSet, ImportError> {
         entities,
         schema,
     })
+}
+
+/// The kvs address of the transaction tail. Fixed by DataScript.
+const TAIL_ADDR: i64 = 1;
+
+/// Replay the transaction tail over the datoms restored from the trees.
+///
+/// DataScript does not rewrite its index trees for a small transaction: the
+/// datoms go into a log at addr 1, and every reader — `restore-conn`, and
+/// therefore LogSeq itself — applies that log on top of the trees. A reader
+/// that skips it sees the graph as it was before the most recent edits, which
+/// is stale rather than wrong-looking, and so shows up as nothing at all.
+///
+/// The tail is ordered, and later entries win: a retraction removes the datom
+/// with that `(e, a, v)` whatever transaction first asserted it, and an
+/// assertion adds one under the tail's own transaction id.
+fn apply_tail(
+    deduped: &mut BTreeSet<LogseqDatom>,
+    rows: &[(i64, String)],
+    schema: &Schema,
+) -> Result<(), ImportError> {
+    let Some((_, content)) = rows.iter().find(|(addr, _)| *addr == TAIL_ADDR) else {
+        // No tail row at all is a graph LogSeq has never written through its
+        // storage layer; the trees are the whole story.
+        return Ok(());
+    };
+    let node = decode_document(content).map_err(|source| ImportError::Decode {
+        addr: TAIL_ADDR,
+        source,
+    })?;
+    let tail = Tail::parse(&node).map_err(|source| ImportError::Tail { source })?;
+
+    for transaction in tail.transactions() {
+        for entry in transaction {
+            // Rebuilt with a POSITIVE tx: the sign carried the operation, which
+            // `entry.op` now holds, and `parse_datom` wants the id itself.
+            let tuple = TransitNode::List(vec![
+                TransitNode::Int(entry.entity),
+                TransitNode::Keyword(entry.attribute.clone()),
+                entry.value.clone(),
+                TransitNode::Int(entry.tx.get()),
+            ]);
+            let datom = parse_datom(&tuple, schema, TAIL_ADDR)?;
+            match entry.op {
+                DatomOp::Assert => {
+                    deduped.insert(datom);
+                }
+                DatomOp::Retract => {
+                    deduped.retain(|held| {
+                        !(held.e == datom.e && held.a == datom.a && held.v == datom.v)
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The datom tuples of one tree node. A node without a `:keys` list is a

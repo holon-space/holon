@@ -375,3 +375,71 @@ async fn the_base_mirrors_the_projection_keyed_by_bare_uuid() {
         "no block carried a sibling position; a re-order would be invisible"
     );
 }
+
+// ------------------------------------------------- the persisted form is data
+
+/// Two imports of the SAME graph must persist to the SAME bytes.
+///
+/// The base is a file that lives next to the graph and gets re-written after
+/// every push. If re-importing unchanged data produces different bytes, every
+/// push shows a spurious VCS diff and the file stops being reviewable — which
+/// is exactly what `save`'s own contract promises it will not do.
+///
+/// Two SEPARATE imports are required to see it. Serializing one base twice
+/// cannot: a `HashMap` iterates consistently within its own lifetime, so the
+/// disorder only shows between two independently built maps.
+/// See bugfunnel 2026-08-22-importbase-serialization-is-not-byte-stable.
+#[tokio::test]
+async fn two_imports_of_one_graph_persist_to_identical_bytes() {
+    let importer = LogseqDbImporter::new();
+    let first = ImportBase::from_import(&importer.import(&fixture()).await.expect("first import"));
+    let second =
+        ImportBase::from_import(&importer.import(&fixture()).await.expect("second import"));
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = dir.path().join("a.json");
+    let b = dir.path().join("b.json");
+    first.save(&a).expect("first base saves");
+    second.save(&b).expect("second base saves");
+
+    let bytes_a = std::fs::read_to_string(&a).expect("read a");
+    let bytes_b = std::fs::read_to_string(&b).expect("read b");
+
+    if bytes_a != bytes_b {
+        let at = bytes_a
+            .chars()
+            .zip(bytes_b.chars())
+            .position(|(x, y)| x != y)
+            .expect("differing strings share no prefix only if one is empty");
+        let window = |s: &str| {
+            s.chars()
+                .skip(at.saturating_sub(80))
+                .take(200)
+                .collect::<String>()
+        };
+        panic!(
+            "the same graph persisted to different bytes, first differing at char {at}\n\
+             A: …{}…\nB: …{}…",
+            window(&bytes_a),
+            window(&bytes_b)
+        );
+    }
+}
+
+/// The canonical form is what `save` writes, so a caller can compare bases
+/// without going through the filesystem.
+#[tokio::test]
+async fn the_canonical_form_is_what_save_persists() {
+    let importer = LogseqDbImporter::new();
+    let base = ImportBase::from_import(&importer.import(&fixture()).await.expect("import"));
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("base.json");
+    base.save(&path).expect("saves");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        base.to_canonical_json().expect("canonical form"),
+        "save must write exactly the canonical form, or the two can drift apart"
+    );
+}

@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use holon_logseq_db::LogseqDbImporter;
+use holon_logseq_db::TransitNode;
 use holon_logseq_db::base::ImportBase;
 use holon_logseq_db::decode_document;
 use holon_logseq_db::encode_document;
@@ -158,38 +159,16 @@ async fn leg3_importer_reads_the_copy_to_an_identical_base() {
         "the two import bases must be equal, not merely diff-free"
     );
 
+    // The canonical form is the one the base is persisted in, so this is a
+    // statement about the artifact rather than about hash seeds. Nothing is
+    // weakened: a re-encode that reordered a nested map's keys is still caught
+    // by `every_row_re_encodes_to_the_value_it_decoded_from`, whose
+    // `TransitNode` maps are ordered, and by leg 2's datom-level diff.
     assert_eq!(
-        canonical_json(&base_original),
-        canonical_json(&base_copied),
-        "the serialized import bases must be byte-identical"
+        base_original.to_canonical_json().expect("canonical form"),
+        base_copied.to_canonical_json().expect("canonical form"),
+        "the persisted import bases must be byte-identical"
     );
-}
-
-/// `value` serialized with every object's keys in sorted order.
-///
-/// A plain `to_string` cannot be compared here: a `_logseq_raw/*` property
-/// holding a nested map reaches the base as `holon_api::Value::Object`, which
-/// is a `HashMap`, so its emission order varies between processes and even
-/// between two imports of the SAME file. Sorting makes the comparison a
-/// statement about content instead of about hash seeds. Nothing is weakened by
-/// it: a re-encode that reordered a map's keys is caught by
-/// [`every_row_re_encodes_to_the_value_it_decoded_from`], whose `TransitNode`
-/// maps are ordered, and by leg 2's datom-level diff.
-fn canonical_json<T: serde::Serialize>(value: &T) -> String {
-    fn sort(v: serde_json::Value) -> serde_json::Value {
-        match v {
-            serde_json::Value::Object(map) => {
-                let mut entries: Vec<_> = map.into_iter().map(|(k, v)| (k, sort(v))).collect();
-                entries.sort_by(|a, b| a.0.cmp(&b.0));
-                serde_json::Value::Object(entries.into_iter().collect())
-            }
-            serde_json::Value::Array(items) => {
-                serde_json::Value::Array(items.into_iter().map(sort).collect())
-            }
-            other => other,
-        }
-    }
-    sort(serde_json::to_value(value).expect("base serializes")).to_string()
 }
 
 /// The storage parameters this writer is pinned to, asserted on the real graph.
@@ -201,6 +180,17 @@ async fn fixture_declares_the_pinned_storage_parameters() {
 
     assert_eq!(graph.root.branching_factor, PINNED_BRANCHING_FACTOR);
     assert_eq!(graph.root.ref_type, PINNED_REF_TYPE);
+
+    // The version guard proven against a REAL graph, not only the synthetic
+    // rows its unit tests build. The fixture also carries
+    // `:logseq.kv/graph-initial-schema-version`, so reading the right one here
+    // is a genuine discrimination.
+    assert_eq!(
+        kvs_writer::schema_version(&graph.rows).expect("the fixture declares its schema version"),
+        kvs_writer::PINNED_SCHEMA_VERSION,
+        "the committed fixture must be the version this build is pinned to"
+    );
+    kvs_writer::assert_pinned_schema_version(&graph.rows).expect("the fixture is writable");
     assert_eq!(
         graph.rows.len(),
         456,
@@ -324,4 +314,228 @@ async fn leg2_logseq_diff_reports_no_datom_delta() {
         out.contains("The two graphs are equal!"),
         "LogSeq's diff found a datom delta between the fixture and Rust's copy:\n{out}"
     );
+}
+
+// ------------------------------------------------------- W1: one title edit
+
+const NEW_TITLE: &str = "W1 replaced this title";
+
+/// The block this increment edits.
+///
+/// A function of the fixture, not a uuid pasted into the test: the smallest
+/// uuid among blocks that have content AND a real parent. The parent condition
+/// matters — without it the smallest uuid is a journal DAY PAGE, whose title
+/// is date-derived and coupled to `:block/journal-day`. Editing an ordinary
+/// nested block is both more representative of what Holon will push and free of
+/// that coupling.
+async fn pick_target() -> (String, String) {
+    let importer = LogseqDbImporter::new();
+    let imported = importer.import(&fixture()).await.expect("fixture imports");
+    let base = ImportBase::from_import(&imported);
+    let uuid = base
+        .uuids()
+        .filter(|u| {
+            base.get(u)
+                .is_some_and(|b| !b.content.is_empty() && !b.parent_id.starts_with("sentinel:"))
+        })
+        .min()
+        .expect("the fixture has a titled block with a parent")
+        .to_string();
+    let content = base.get(&uuid).expect("just found it").content.clone();
+    (uuid, content)
+}
+
+/// Apply the W1 edit to a fresh copy of the fixture in `dir`.
+async fn write_edited_copy(dir: &Path) -> (kvs_writer::TitleEdit, kvs_writer::WriteReport, String) {
+    let (uuid, _) = pick_target().await;
+    let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let entity = kvs_writer::entity_by_uuid(&graph, &uuid).expect("the target block has an entity");
+
+    let edit = kvs_writer::replace_block_title(&mut graph, entity, NEW_TITLE).expect("title edit");
+    std::fs::create_dir_all(dir).expect("copy dir");
+    let report = kvs_writer::write_graph(&graph, &dir.join("db.sqlite"))
+        .await
+        .expect("writes");
+    (edit, report, uuid)
+}
+
+/// The edit touches EXACTLY the tail row — every other row is byte-identical.
+///
+/// This is the sharpest cheap signal that the tail path does what it claims:
+/// if any tree row or addr 0 moved, the write was not the edit we described.
+#[tokio::test]
+async fn the_title_edit_changes_only_the_tail_row() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (edit, report, _) = write_edited_copy(&dir.path().join("copy")).await;
+
+    assert_ne!(edit.old_title, NEW_TITLE, "the edit must be a real change");
+    assert_eq!(report.rows_written, 456);
+    assert_eq!(
+        report.rows_byte_identical, 455,
+        "exactly one row may differ: the tail at addr 1. Addr 0 must NOT move, because \
+         LogSeq's own `ldb/transact!` writes this same tail shape and leaves the root \
+         alone — rewriting it would be a divergence from LogSeq, not tidiness"
+    );
+}
+
+/// The tail says exactly "retract the old title, assert the new one", once.
+#[tokio::test]
+async fn the_tail_holds_one_retract_and_one_assert_under_a_new_tx() {
+    let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    assert_eq!(
+        graph.tail().expect("fixture tail parses").datom_count(),
+        0,
+        "the fixture starts with an empty tail"
+    );
+    let root_max_tx = graph.root.max_tx;
+
+    let (uuid, _) = pick_target().await;
+    let entity = kvs_writer::entity_by_uuid(&graph, &uuid).expect("entity");
+    let edit = kvs_writer::replace_block_title(&mut graph, entity, NEW_TITLE).expect("edit");
+
+    let tail = graph.tail().expect("edited tail parses");
+    assert_eq!(tail.transactions().len(), 1, "one transaction");
+    let tx = &tail.transactions()[0];
+    assert_eq!(tx.len(), 2, "one retract and one assert, nothing else");
+
+    assert_eq!(tx[0].op, kvs_writer::DatomOp::Retract);
+    assert_eq!(tx[0].value, TransitNode::Str(edit.old_title.clone()));
+    assert_eq!(tx[1].op, kvs_writer::DatomOp::Assert);
+    assert_eq!(tx[1].value, TransitNode::Str(NEW_TITLE.to_string()));
+
+    for datom in tx {
+        assert_eq!(datom.entity, entity);
+        assert_eq!(datom.attribute, "block/title");
+        assert_eq!(datom.tx, edit.tx, "both halves share ONE new transaction");
+    }
+    assert!(
+        edit.tx.get() > root_max_tx,
+        "the transaction id must be new: {} must exceed the root's max-tx {root_max_tx}",
+        edit.tx.get()
+    );
+}
+
+/// LEG 3 for the edit — Holon's importer sees exactly one changed block.
+#[tokio::test]
+async fn the_edit_shows_up_as_exactly_one_changed_block() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let copy_dir = dir.path().join("copy");
+    let (edit, _, uuid) = write_edited_copy(&copy_dir).await;
+
+    let importer = LogseqDbImporter::new();
+    let before = ImportBase::from_import(&importer.import(&fixture()).await.expect("fixture"));
+    let after = ImportBase::from_import(
+        &importer
+            .import(&copy_dir.join("db.sqlite"))
+            .await
+            .expect("the edited copy imports"),
+    );
+
+    let diff = before.diff_against(&after);
+    assert_eq!(
+        (diff.created.len(), diff.changed.len(), diff.removed.len()),
+        (0, 1, 0),
+        "exactly one block changed, none created or removed: {diff:?}"
+    );
+    assert_eq!(diff.changed[0], uuid, "and it is the block we edited");
+    assert_eq!(
+        after.get(&uuid).expect("still present").content,
+        NEW_TITLE,
+        "the new title must be what the importer reads back"
+    );
+    assert_eq!(
+        before.get(&uuid).expect("was present").content,
+        edit.old_title
+    );
+}
+
+/// LEG 1 for the edit — LogSeq's validator accepts the edited graph.
+#[tokio::test]
+#[ignore = "needs HOLON_LOGSEQ_ORACLE — see docs/Testing/LogseqDbOracle.md"]
+async fn leg1_logseq_validator_accepts_the_edited_copy() {
+    let oracle = Oracle::find();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let copy_dir = dir.path().join("copy");
+    write_edited_copy(&copy_dir).await;
+
+    let out = oracle.run(
+        "script/validate_db.cljs",
+        &[&copy_dir.join("db.sqlite")],
+        &["--closed-maps", "--group-errors"],
+    );
+    assert!(
+        out.contains("Valid!"),
+        "LogSeq's validator rejected the edited graph:\n{out}"
+    );
+}
+
+/// LEG 2 for the edit — the delta is one value change and nothing else.
+///
+/// Names the SIZE and SHAPE of what LogSeq sees, not which block it happened
+/// to; see the comment on the entry assertion.
+#[tokio::test]
+#[ignore = "needs HOLON_LOGSEQ_ORACLE — see docs/Testing/LogseqDbOracle.md"]
+async fn leg2_logseq_diff_reports_exactly_the_title_change() {
+    let oracle = Oracle::find();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let pristine_dir = dir.path().join("pristine");
+    let copy_dir = dir.path().join("copy");
+    std::fs::create_dir_all(&pristine_dir).expect("pristine dir");
+    std::fs::copy(fixture(), pristine_dir.join("db.sqlite")).expect("stage pristine");
+    let (edit, _, _) = write_edited_copy(&copy_dir).await;
+
+    let out = oracle.run(
+        "script/diff_graphs.cljs",
+        &[&pristine_dir.join("db.sqlite"), &copy_dir.join("db.sqlite")],
+        &["-T"],
+    );
+
+    assert!(
+        !out.contains("The two graphs are equal!"),
+        "the edit must be visible to LogSeq at all:\n{out}"
+    );
+
+    // `diff_graphs` prints a clojure.data/diff: a datom vector per side where
+    // every UNCHANGED slot is `nil`. So the only non-nil entries are the parts
+    // that actually differ, and "exactly the retract+assert pair" means exactly
+    // two of them — one per side.
+    //
+    // What this pins is the SHAPE of the delta: one datom per side, and a
+    // value-only change. It does NOT pin WHICH entity changed — editing a
+    // different block produces the identical `[nil nil …]` shape, because the
+    // entity slot is nil precisely when it is the same on both sides. Identity
+    // is leg 3's job (`the_edit_shows_up_as_exactly_one_changed_block` asserts
+    // the changed uuid), and the two legs are only jointly sufficient.
+    // A complete entry both opens and closes on one line; the pretty-printer
+    // also wraps the enclosing vector's own `[`, which is not an entry.
+    let entries: Vec<&str> = out
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('[') && line.contains(']'))
+        .collect();
+    assert_eq!(
+        entries.len(),
+        2,
+        "exactly one datom may differ on each side; got {:#?}\nfull diff:\n{out}",
+        entries
+    );
+    assert!(
+        entries.iter().any(|e| e.contains(&edit.old_title)),
+        "one side must hold the retracted title:\n{out}"
+    );
+    assert!(
+        entries.iter().any(|e| e.contains(NEW_TITLE)),
+        "the other side must hold the asserted title:\n{out}"
+    );
+    // `[nil nil "…"]` — the entity and attribute slots are nil, i.e. unchanged
+    // between the two sides, so the delta is a VALUE change rather than a
+    // different entity or a different attribute. Which entity it was is not
+    // observable here; leg 3 names it.
+    for entry in &entries {
+        assert!(
+            entry.starts_with("[nil nil "),
+            "the delta must be a value change, not a different entity or \
+             attribute: {entry}\nfull diff:\n{out}"
+        );
+    }
 }
