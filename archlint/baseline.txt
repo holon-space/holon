@@ -5,19 +5,18 @@
 # as debt-free. Ratchet DOWN: as violations are fixed, regenerate with
 #   ./archlint/archlint --update-baseline
 # See archlint/BURNDOWN.md for the category table and burn-down priority.
-# Snapshot total: 120 violation(s) across 12 rule(s).
+# Snapshot total: 114 violation(s) across 11 rule(s).
 #
 #   deleted_cell_symbol: 2
 #   entity_uri_from_raw: 9
 #   entity_uri_parse_default: 1
-#   fallback: 20
+#   fallback: 14
 #   frontend-provider-dep: 1
 #   frontend-raw-sql: 3
 #   loro_doc_escape: 36
-#   mcp-client-holon-dep: 1
-#   no-underscore-params: 35
+#   no-underscore-params: 38
 #   ok: 4
-#   raw_sql_in_frontend: 7
+#   raw_sql_in_frontend: 5
 #   sole_block_writer: 1
 
 deleted_cell_symbol	crates/holon-api/src/block_write_field.rs	"_expected_content".to_string()
@@ -32,23 +31,17 @@ entity_uri_from_raw	crates/holon-frontend/src/tour.rs	let block = AnchorSelector
 entity_uri_from_raw	crates/holon-frontend/src/tour.rs	let entity = AnchorSelector::Entity(EntityUri::from_raw("page-x"));
 entity_uri_from_raw	crates/holon-frontend/src/tour.rs	under: AnchorSelector::Block(EntityUri::from_raw("page-x")),
 entity_uri_parse_default	frontends/gpui/src/render/builders/live_block.rs	EntityUri::parse(&block_id_str).unwrap_or_else(|_| EntityUri::block(&block_id_str));
+fallback	crates/holon-core/src/boundary_enforcer.rs	/// It is deliberately NOT a silent fallback for a missing decision: there is no
 fallback	crates/holon-frontend/src/config.rs	/// `HOLON_LORO_PEER_ID` env / random fallback. Set it when more than one
-fallback	crates/holon-frontend/src/editor_view_model.rs	/// `target` is the SqlOnly authority text and doubles as the fallback the
 fallback	crates/holon-frontend/src/user_driver.rs	// Final fallback: if the router never saw the entity within the //
 fallback	crates/holon-frontend/src/user_driver.rs	/// This is NOT a fallback — it is the intended path for that feature. //
 fallback	crates/holon-frontend/src/user_driver.rs	/// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable. //
 fallback	crates/holon-frontend/src/user_driver.rs	/// `send_key_chord` uses for its router fallback. If the entity is //
+fallback	crates/holon-loro-wiring/src/loro_module.rs	/// env/random fallback. Injected by `SessionConfig::loro_peer_id` so two
 fallback	crates/holon-loro/src/loro_document_store.rs	/// Peer id to mint the global doc under. `None` = the env/random fallback
 fallback	crates/holon-orgmode/src/file_watcher.rs	/// fallback, see docs/Testing/BugFunnel.md 2026-07-27).
-fallback	crates/holon/src/api/loro_ui_watcher.rs	/// Turso arm's disclosed fallback); a broken pointer/perspective fails loud
-fallback	crates/holon/src/api/loro_ui_watcher.rs	/// fallback to the default layout.
-fallback	crates/holon/src/core/sql_block_operations.rs	"SQL delete fallback in Loro mode — block was unseeded. \
-fallback	crates/holon/src/core/sql_operation_provider.rs	// pre-existing comment-only mention; not a real fallback.
-fallback	crates/holon/src/sync/loro_module.rs	/// env/random fallback. Injected by `SessionConfig::loro_peer_id` so two
-fallback	frontends/dioxus-web/src/render/builders/live_block.rs	/// initial/fallback render before the cell's own subscription delivers. //
 fallback	frontends/dioxus-web/src/render/builders/mod.rs	// per file. Variants not covered by a file hit the fallback (empty element //
 fallback	frontends/dioxus-web/src/render/builders/mod.rs	/// Fallback arm emitted by `builder_registry!` when a `ViewKind` variant //
-fallback	frontends/gpui/src/render/builders/op_button.rs	/// Sighted-user fallback label sits underneath the icon because GPUI //
 fallback	frontends/gpui/src/user_driver.rs	/// (with a short poll fallback for idle windows, whose `changed()` may not
 fallback	frontends/gpui/src/user_driver.rs	/// Fallback (virtualized lists): if the wheel produced no visible movement
 fallback	frontends/gpui/src/user_driver.rs	/// unchanged (caller decides whether that is a fallback case or fails
@@ -92,9 +85,11 @@ loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab
 loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();
 loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let gdoc = global.doc();
 loro_doc_escape	crates/holon-sharing/src/registry_binding.rs	// registry.register_container("ledger", ledger.doc()) // no such method
-mcp-client-holon-dep	crates/holon-mcp-client/src/write_authorization.rs	/// panel (increment 4c). Mirrors `holon::sync::ShareDegraded` on the degraded
 no-underscore-params	crates/holon-api/src/identity_minting.rs	async fn mint(&self, _input: IdentityInput) -> Result<MintedId, BoxError> {
-no-underscore-params	crates/holon-core/src/block_ordering.rs	async fn reseed_content(&self, _blocks: &[(EntityUri, String)]) -> Result<usize> {
+no-underscore-params	crates/holon-core/src/boundary_enforcer.rs	_behavior: &BoundaryBehavior,
+no-underscore-params	crates/holon-core/src/boundary_enforcer.rs	_op_name: &str,
+no-underscore-params	crates/holon-core/src/boundary_enforcer.rs	_subject: &str,
+no-underscore-params	crates/holon-core/src/boundary_enforcer.rs	_target_parent: Option<&str>,
 no-underscore-params	crates/holon-core/src/cell_registry.rs	_field: &str,
 no-underscore-params	crates/holon-core/src/cell_registry.rs	_type_id: TypeId,
 no-underscore-params	crates/holon-core/src/cell_registry.rs	_uri: &EntityUri,
@@ -132,11 +127,9 @@ ok	crates/holon-frontend/src/advice_weaver.rs	let rows = query_engine
 ok	crates/holon-loro/src/multi_peer.rs	let meta = tree.get_meta(node).ok()?;
 ok	crates/holon-markdown/src/logseq.rs	path.strip_prefix(root)
 ok	frontends/gpui/src/render/builders/render_entity.rs	any.clone()
-raw_sql_in_frontend	frontends/dioxus-web/src/main.rs	"SELECT id FROM {BLOCK_READ_TABLE} WHERE id='block:root-layout' LIMIT 1"
 raw_sql_in_frontend	frontends/gpui/src/oracles_ui.rs	let sql = format!("SELECT id, content_type, source_language FROM {BLOCK_WRITE_TABLE}");
 raw_sql_in_frontend	frontends/gpui/src/oracles_ui.rs	let sql = format!("SELECT id, parent_id FROM {table}");
 raw_sql_in_frontend	frontends/gpui/src/tab_strip.rs	const CURSOR_SQL: &str = "SELECT history_id FROM navigation_cursor WHERE region = 'main'";
 raw_sql_in_frontend	frontends/gpui/src/tab_strip.rs	const OPEN_TABS_SQL: &str = "SELECT fr.history_id, fr.root_id, b.content \
-raw_sql_in_frontend	frontends/holon-worker/src/lib.rs	"SELECT id FROM {} ORDER BY id",
 raw_sql_in_frontend	frontends/holon-worker/src/seed.rs	"SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = \
 sole_block_writer	crates/holon/src/storage/turso_sink_reader.rs	"INSERT INTO block_raw (id, parent_id) VALUES ('sentinel:no_parent', \

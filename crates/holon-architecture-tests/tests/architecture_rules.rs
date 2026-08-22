@@ -185,7 +185,7 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
         4,
     ),
     (
-        "crates/holon-integration-tests/tests/loro_projection_atomic_advance.rs",
+        "crates/holon-integration-tests/tests/loro_suite/loro_projection_atomic_advance.rs",
         1,
     ),
     ("crates/holon-loro-testing/src/quiescence.rs", 1),
@@ -199,7 +199,7 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     ("crates/holon-loro/src/loro_share_backend.rs", 15),
     ("crates/holon-loro/src/loro_sync_controller.rs", 1),
     ("crates/holon-sharing/src/sync.rs", 1),
-    ("crates/holon/src/sync/loro_module.rs", 1),
+    ("crates/holon-loro-wiring/src/loro_module.rs", 1),
     ("crates/holon/tests/api_pbt/loro_backend_pbt.rs", 4),
     ("crates/holon/tests/api_suite/loro_backend_pbt.rs", 4),
     ("crates/holon/tests/sync_suite/sync_pbt.rs", 3),
