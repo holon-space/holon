@@ -3,6 +3,10 @@
 //! Data, never a type parameter — datatypes are runtime-declared, so
 //! capability cannot be monomorphized (design Fork 2).
 
+use std::collections::BTreeSet;
+use std::path::Path;
+use std::path::PathBuf;
+
 use anyhow::Context;
 use anyhow::Result;
 use serde::Deserialize;
@@ -10,8 +14,18 @@ use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 
+use crate::axes::AssetsAxis;
+use crate::axes::ComputedAxis;
+use crate::axes::ContentAxis;
+use crate::axes::HierarchyAxis;
+use crate::axes::HostedKind;
+use crate::axes::IdentityAxis;
+use crate::axes::MutationAxis;
+use crate::axes::OrderingAxis;
 use crate::axes::PropertyKeysAxis;
 use crate::axes::PropertyValuesAxis;
+use crate::clause::ClauseId;
+use crate::clause::EnforcementMap;
 
 /// The name of a durable format. Equality IS the profile's identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -58,12 +72,20 @@ impl std::fmt::Display for ProfileRevision {
     }
 }
 
-/// The ten fidelity axes. Increment 2b.1 carries two of them.
+/// The ten fidelity axes, in draft §1.2 order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FidelityAxes {
+    pub hosted_kinds: BTreeSet<HostedKind>,
+    pub content: ContentAxis,
     pub property_keys: PropertyKeysAxis,
     pub property_values: PropertyValuesAxis,
+    pub ordering: OrderingAxis,
+    pub hierarchy: HierarchyAxis,
+    pub identity: IdentityAxis,
+    pub computed: ComputedAxis,
+    pub mutation: MutationAxis,
+    pub assets: AssetsAxis,
 }
 
 /// The yaml shape, before the revision is derived.
@@ -71,6 +93,17 @@ pub struct FidelityAxes {
 #[serde(deny_unknown_fields)]
 struct ProfileDocument {
     profile: CapabilityProfileId,
+    /// Clauses this profile STATES that nothing drives yet.
+    ///
+    /// DATA, not a `#`-comment, because the certifier gates on it: a clause
+    /// that is neither probed nor listed here is itself a finding. A comment
+    /// could never do that job, and 2b.1 proved a comment does not.
+    #[serde(default)]
+    not_yet_certified: BTreeSet<ClauseId>,
+    /// WHO enforces each clause. Required to cover every clause exactly once —
+    /// a clause with no stated owner is a load error, because a defaulted
+    /// owner is how the layer dimension would rot back into invisibility.
+    enforced_by: EnforcementMap,
     fidelity_axes: FidelityAxes,
 }
 
@@ -79,10 +112,27 @@ struct ProfileDocument {
 pub struct CapabilityProfile {
     id: CapabilityProfileId,
     revision: ProfileRevision,
+    not_yet_certified: BTreeSet<ClauseId>,
+    enforced_by: EnforcementMap,
     fidelity: FidelityAxes,
+    /// Where the yaml came from, when it came from a file. Reported with every
+    /// run: two valid profiles produce two valid-looking reports, and without
+    /// the path nothing distinguishes them.
+    source: Option<PathBuf>,
 }
 
 impl CapabilityProfile {
+    /// Parse the profile at `path`, recording where it came from.
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let yaml = std::fs::read_to_string(path)
+            .with_context(|| format!("reading the capability profile {}", path.display()))?;
+        let mut profile = Self::from_yaml(&yaml)
+            .with_context(|| format!("parsing the capability profile {}", path.display()))?;
+        profile.source = Some(path.to_path_buf());
+        Ok(profile)
+    }
+
     /// Parse a profile yaml. The ONLY constructor.
     ///
     /// `deny_unknown_fields` throughout means an unrecognised key is an error
@@ -99,6 +149,9 @@ impl CapabilityProfile {
     pub fn from_yaml(yaml: &str) -> Result<Self> {
         let doc: ProfileDocument =
             serde_yaml::from_str(yaml).context("invalid capability-profile yaml")?;
+        doc.enforced_by.check_total().map_err(|e| {
+            anyhow::anyhow!("profile '{}': enforced_by is incomplete — {e}", doc.profile)
+        })?;
         let revision = revision_of(&doc.fidelity_axes).with_context(|| {
             format!(
                 "hashing the parsed axes of profile '{}' failed",
@@ -108,8 +161,16 @@ impl CapabilityProfile {
         Ok(Self {
             id: doc.profile,
             revision,
+            not_yet_certified: doc.not_yet_certified,
+            enforced_by: doc.enforced_by,
             fidelity: doc.fidelity_axes,
+            source: None,
         })
+    }
+
+    /// The file this profile was read from, if it was read from one.
+    pub fn source(&self) -> Option<&Path> {
+        self.source.as_deref()
     }
 
     pub fn id(&self) -> &CapabilityProfileId {
@@ -120,12 +181,55 @@ impl CapabilityProfile {
         &self.revision
     }
 
+    /// Clauses this profile admits nothing drives. Excused from the coverage
+    /// law, and ONLY these.
+    pub fn not_yet_certified(&self) -> &BTreeSet<ClauseId> {
+        &self.not_yet_certified
+    }
+
+    /// Which layer enforces each clause.
+    pub fn enforced_by(&self) -> &EnforcementMap {
+        &self.enforced_by
+    }
+
     pub fn property_keys(&self) -> &PropertyKeysAxis {
         &self.fidelity.property_keys
     }
 
     pub fn property_values(&self) -> &PropertyValuesAxis {
         &self.fidelity.property_values
+    }
+
+    pub fn hosted_kinds(&self) -> &BTreeSet<HostedKind> {
+        &self.fidelity.hosted_kinds
+    }
+
+    pub fn content(&self) -> &ContentAxis {
+        &self.fidelity.content
+    }
+
+    pub fn ordering(&self) -> &OrderingAxis {
+        &self.fidelity.ordering
+    }
+
+    pub fn hierarchy(&self) -> &HierarchyAxis {
+        &self.fidelity.hierarchy
+    }
+
+    pub fn identity(&self) -> &IdentityAxis {
+        &self.fidelity.identity
+    }
+
+    pub fn computed(&self) -> &ComputedAxis {
+        &self.fidelity.computed
+    }
+
+    pub fn mutation(&self) -> &MutationAxis {
+        &self.fidelity.mutation
+    }
+
+    pub fn assets(&self) -> &AssetsAxis {
+        &self.fidelity.assets
     }
 }
 
@@ -143,31 +247,14 @@ fn revision_of(fidelity: &FidelityAxes) -> Result<ProfileRevision> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const MINIMAL: &str = r#"
-profile: test
-fidelity_axes:
-  property_keys:
-    charset: no_whitespace
-    case: sensitive
-    reserved_prefixes: ["_"]
-    reserved_keys: [ID]
-    collision: last_wins
-    schema_required: open
-  property_values:
-    types: [string]
-    empty_string: representable
-    null: dropped
-    multi_value:
-      kind: none
-    reference_values: by_id
-"#;
+    use crate::fixture::MINIMAL;
+    use crate::fixture::minimal_with;
 
     #[test]
     fn a_yaml_key_the_vocabulary_does_not_know_is_a_load_error() {
-        let with_unknown_axis = MINIMAL.replace(
+        let with_unknown_axis = minimal_with(
             "  property_values:",
-            "  ordering:\n    sibling_order: file_position\n  property_values:",
+            "  nonexistent_axis:\n    whatever: 1\n  property_values:",
         );
         let err = CapabilityProfile::from_yaml(&with_unknown_axis)
             .expect_err("an axis the code does not check must not load")
@@ -192,7 +279,7 @@ fidelity_axes:
             "a comment is not a clause — it must not invalidate witnesses"
         );
 
-        let widened = MINIMAL.replace("types: [string]", "types: [string, integer]");
+        let widened = minimal_with("types: [string]", "types: [string, integer]");
         let other = CapabilityProfile::from_yaml(&widened).expect("widened profile parses");
         assert_ne!(
             base.revision(),

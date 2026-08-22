@@ -7,13 +7,18 @@
 #
 #   * CERTIFIED — driven by `tests/profile_certification.rs` against the real
 #     ingest → write-back → ingest loop. A certified clause that is not true is
-#     a RED. Increment 2b.1 certifies exactly three:
-#     `property_keys.reserved_prefixes`, `property_values.types`, and
-#     `property_values.empty_string`.
-#   * NOT YET CERTIFIED — declared from a `file:line` citation and marked
-#     `# NOT YET CERTIFIED (2b.2)`. **A citation is EVIDENCE, not a gate.**
-#     Nothing tests these; changing one to a false value today would keep the
-#     suite green. They are documentation until 2b.2 drives them.
+#     a RED. The certified set GROWS as probes land — read the run's
+#     `clauses driven` count rather than trusting a number written here, which
+#     is exactly the kind of prose that goes stale.
+#   * NOT YET CERTIFIED — declared from a `file:line` citation, and NAMED IN
+#     THE `not_yet_certified:` LIST BELOW. **A citation is EVIDENCE, not a
+#     gate.** Nothing tests these; changing one to a false value keeps the
+#     suite green. They are documentation until a probe drives them.
+#
+# The list is LOAD-BEARING DATA, not a comment: the certifier fails on any
+# clause that is neither driven by a probe nor named there, and reports a
+# marker that has gone stale because a probe now covers it. The `#` markers
+# beside each clause are prose for the reader; the list is what gates.
 #
 # Increment 2b.1 declares axes 3 (`property_keys`) and 4 (`property_values`)
 # only. The other eight arrive in 2b.2; `deny_unknown_fields` means naming one
@@ -21,7 +26,146 @@
 # not the truth of a clause inside a modelled axis.
 profile: org
 
+# The escape hatch, and the ONLY one: a format-layer clause named here is
+# declared from a citation and driven by nothing. The certifier prints a
+# MARKER line per entry, so the report never reads like full coverage.
+not_yet_certified:
+  # Not DISCRIMINABLE by a format probe — see the note at `reference_values`.
+  - property_values_reference_values
+
+enforced_by:
+  # The parse/render code of this crate — the only layer a format-crate
+  # certification harness can reach, and therefore the only layer whose
+  # clauses may be marked `not_yet_certified` here.
+  format:
+    - hosted_kinds
+    - content_representation
+    - content_inline_constructs
+    - content_block_constructs
+    - property_keys_charset
+    - property_keys_case
+    - property_keys_reserved_prefixes
+    - property_keys_collision
+    - property_keys_schema_required
+    - property_values_types
+    - property_values_empty_string
+    - property_values_null
+    - property_values_multi_value
+    - property_values_reference_values
+    - ordering_sibling_order
+    - ordering_order_key_durable
+    - ordering_property_order
+    - hierarchy_shape
+    - hierarchy_max_depth
+    - hierarchy_cycles
+    - identity_id_space
+    - identity_id_origin
+    - identity_id_constraints
+    - identity_carriers
+    - identity_carrier_disagreement
+    - mutation_write_leg
+    - mutation_unit_of_write
+    - assets_attachments
+    - assets_binary_inline
+    - assets_extensions
+  # The sync controller / consolidator. These are REAL rules that a
+  # format-crate probe structurally cannot see; they are not TODOs here.
+  # Each deferral NAMES the code that enforces it. A deferral without a site is
+  # indistinguishable from a clause nobody looked at, so the loader refuses one.
+  sync:
+    # MEASURED, and it CORRECTS my earlier citation: the refusal is real but it
+    # is not where I said. `name_chain` bails when an ANCESTOR of a page is
+    # absent from the page store — i.e. a page whose ancestor is not a page —
+    # which IS "a :Page: under a non-page is refused", at resolution time
+    # rather than at the moment of the edit.
+    - clause: hierarchy_constraints
+      site: "crates/holon-filesystem/src/sync_ports.rs:277-285 (name_chain ancestor-miss bail)"
+    # CORRECTED: the name_chain bail refuses a RESOLUTION with broken ancestry
+    # (it fires for an import, a delete or a bad seed too) and never observes a
+    # reparent. The operation-side refusal is its own site, pre-flight, and it
+    # leaves the tree untouched. The `sync` label is APPROXIMATE for this one:
+    # the enforcer is holon-core's default BlockOperations impl, not the sync
+    # controller. `site:` is authoritative; the label only feeds `layer_of()`.
+    - clause: hierarchy_reparent
+      site: "crates/holon-core/src/traits.rs:2429-2440 (move_block page-under-non-page refusal; shared predicate block_op_catalog::page_under_non_page_prohibited; pinned by block_operations_tests.rs:1290, which asserts the tree is UNTOUCHED after the refusal)"
+    # A rename is a filesystem event; the controller derives the new path from
+    # the new title and retires the old one.
+    - clause: identity_rename_stability
+      site: "crates/holon-filesystem/src/file_sync_controller.rs:573-580 (page-rename path derivation)"
+    # Concurrency and merge belong to the consolidator (Model.md layer 2).
+    - clause: ordering_concurrent_insert
+      site: "crates/holon-loro/src/text_merge_provider.rs:126 (merge_text, 3-way merge path)"
+    - clause: mutation_merge_granularity
+      site: "crates/holon-loro/src/text_merge_provider.rs:126 (merge_text, 3-way merge path)"
+    # Surfacing a conflict is a controller concern, above the format entirely.
+    - clause: mutation_conflict_surface
+      site: "crates/holon-filesystem/src/file_sync_controller.rs:1042 (3-way merger wiring, no-store conflict path)"
+  # Refused when the TYPE is declared, not when a value is written.
+  declaration:
+    - clause: computed_live
+      site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type)"
+    - clause: computed_persisted
+      site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type; CV-E lands in 2b.6)"
+    - clause: computed_expression_closure
+      site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type)"
+
 fidelity_axes:
+  # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
+  # crates/holon-core/src/file_format.rs:26-35 — FileFormatParseResult carries
+  # Block only, so a free-standing typed row has no org representation.
+  hosted_kinds: [hierarchical]
+
+  content:
+    # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
+    # crates/holon-org-format/src/inline_marks.rs — orgize-extracted MarkSpans
+    # with Unicode scalar offsets, so marks are parsed and re-emitted rather
+    # than carried as an opaque string.
+    representation: marked_text
+    # NOT YET CERTIFIED (2b.2) — the certifier drives these in the content-axis
+    # pass; UNKNOWN entries are resolved there, never left as guesses.
+    inline_constructs:
+      - bold
+      - italic
+      - verbatim
+      - subscript
+      - superscript
+      - link_by_id
+      - link_by_name
+      - link_external
+      - tag
+      # PROMOTED 2b.2 by measurement — each was undeclared and round-tripped
+      # intact, so the profile was narrower than the format.
+      - underline
+      - strikethrough
+      - code
+      # escape_sequence stays ABSENT and stays MARKED. The claim is that
+      # backslash escapes are not HONOURED (a semantic question); the content
+      # probe only sees whether the bytes return, so it cannot settle it. See
+      # the note in tests/profile_certification.rs.
+    block_constructs:
+      - heading
+      - paragraph
+      - source_block        # parser.rs:1203-1206, ContentType::Source
+      - image               # parser.rs:1314-1334, extension-detected [[file:…]]
+      - planning_timestamp  # models.rs:795-822, SCHEDULED/DEADLINE
+      - todo_keyword
+      - priority
+      # UNKNOWN RESOLVED 2b.2, and the draft was WRONG: recon found no parser
+      # support for `table` or `logbook` and declared them absent. Both
+      # round-trip intact through the real write-back, so both are PROMOTED —
+      # along with `quote` and `list`, which the draft never mentioned. This
+      # discharges the obligation that blocks 2b.5, by measurement rather than
+      # by inheriting a guess.
+      #
+      # NUANCE: survival here is byte-level CARRIAGE — org keeps the lines. It
+      # is NOT a claim that Holon models a table or a logbook; nothing parses
+      # them into structure. Carriage is what this axis is about, and a
+      # consumer must not read more into it.
+      - table
+      - logbook
+      - quote
+      - list
+
   property_keys:
     # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
     # crates/holon-org-format/src/parser.rs:195-197 — a key that is empty or
@@ -111,6 +255,13 @@ fidelity_axes:
     # NOT YET CERTIFIED (2b.2) — citations are evidence, not a gate.
     multi_value:
       kind: delimited
+      # MEASURED: org splits on WHITESPACE **or** COMMA (parser.rs:930-931
+      # accepts both), and `;` does not split. The vocabulary holds ONE
+      # separator, so this clause cannot state the truth — declaring "," is
+      # equally true and the certifier cannot tell them apart. `;` DOES red, so
+      # the clause is falsifiable; it just cannot discriminate between two
+      # values that both hold. Recorded as a 2b.3 vocabulary item
+      # (separator: one value vs a set).
       separator: " "
       # models.rs:934-940 — REQUIRES is sorted on render, so order is not
       # semantic.
@@ -118,7 +269,112 @@ fidelity_axes:
       # parser.rs:930-931 — only the edge fields split; an ordinary property
       # containing spaces stays one string.
       scope: edge_fields_only
-    # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
+    # NOT DRIVEN, and the reason is that it is not DISCRIMINABLE here. A bare
+    # id coming back proves the STRING survived; whether the format means it
+    # `by_id`, `by_name` or as a `vector_of_refs` is a question about
+    # RESOLUTION, which belongs to the store. The earlier probe gated on
+    # `!= none` and so certified all three non-none values identically. The
+    # marker is DATA in `not_yet_certified:` above, not this comment.
     # docs/Reference/ORG_SYNTAX.md:139-141 — bare ids on disk, scheme added at
     # the parse boundary and stripped at render.
     reference_values: by_id
+
+  ordering:
+    # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
+    # parser.rs:791-792 — a sequence counter in iteration order; order IS
+    # position in the file and there is no key on disk.
+    sibling_order: file_position
+    order_key_durable: derived
+    concurrent_insert: positional_conflict
+    # models.rs:40-43 — the `_drawer_order` carrier records the author's key
+    # order and the renderer replays it. Note the carrier is itself
+    # `_`-prefixed, so it lives in the STORED properties bag and never in the
+    # drawer; that is deliberate and not a violation of reserved_prefixes.
+    property_order: preserved
+
+  hierarchy:
+    # NOT YET CERTIFIED (2b.2) — citations are evidence, not a gate.
+    shape: forest
+    max_depth: unbounded          # parser.rs:1067-1069, recursion with no check
+    reparent: constrained
+    constraints:
+      # docs/Reference/ORG_SYNTAX.md:186-191 — a `:Page:` tag under a non-page
+      # heading is refused at ingest.
+      - page_tag_requires_page_ancestor
+    cycles: rejected              # parser.rs:514-549 reject_id_cycles
+
+  identity:
+    # NOT YET CERTIFIED (2b.2) — citations are evidence, not a gate.
+    id_space: opaque_string
+    id_origin: authored
+    # MEASURED 2b.2: the draft named this and my first yaml dropped it. An id
+    # carrying control characters is REFUSED — by a PANIC inside
+    # `EntityUri::new` (crates/holon-api/src/entity_uri.rs:57-59), not by a
+    # recoverable Err. The constraint is real; the refusal mechanism is a
+    # defect, filed in the bug funnel.
+    id_constraints: [valid_uri_path]
+    # docs/Reference/ORG_SYNTAX.md:78 — the bare :ID: in the drawer is what
+    # makes the file rename-safe.
+    rename_stability: [file_rename, title_rename, move]
+    # docs/Reference/ORG_SYNTAX.md:79-84 — precedence order.
+    # MEASURED, and my earlier removal was WRONG. I deleted a carrier to clear a
+    # gap; the verifier then drove it in five lines. With no `:ID:` and no
+    # `#+ID:`, the document id IS derived from the file path plus the vault root
+    # — both of which the parser already receives — and `#+ID:` overrides it.
+    # That is a third carrier, fully format-visible, and the carriers law now
+    # ranges over the CLOSED vocabulary so a deletion can never satisfy it
+    # again.
+    #
+    # Named `path_derived` rather than `name_chain`: the latter is reserved for
+    # LogSeq's page-NAME sense, and conflating the two would hide a real
+    # difference when the two profiles are diffed.
+    #
+    # Order is PRECEDENCE order (docs/Reference/ORG_SYNTAX.md:79-84).
+    carriers: [drawer_id, file_keyword_id, path_derived]
+    # Two carriers that DISAGREE are a parse error, not a silent pick.
+    # MEASURED, and POSITION-DEPENDENT — the qualifier is load-bearing:
+    #   drawer FIRST + #+ID:      -> REFUSED (the declared behaviour)
+    #   #+ID: first + drawer      -> ACCEPTED, keyword id wins
+    #   #+TITLE: first + drawer   -> ACCEPTED, keyword id wins
+    # The last two are not a silent pick between two carriers: a drawer that is
+    # not the file's FIRST element is ordinary text by org's own grammar
+    # (docs/Reference/ORG_SYNTAX.md:72-75), so only one carrier exists and the
+    # keyword rightly wins. The authored `:ID:` line is nonetheless silently
+    # INERT, which is worth a reader knowing — it is the same shape as the other
+    # hand-authored-org losses found this increment, but it is correct
+    # behaviour rather than a defect, so it is declared here and not filed.
+    carrier_disagreement: error
+
+  computed:
+    # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
+    computed_live: full           # served by the substrate, never by org
+    # A direct consequence of property_values.types: [string]. Certifying this
+    # needs the declaration-time rejection, which is 2b.6.
+    computed_persisted:
+      kind: string_only
+    # crates/holon-api/src/computation.rs:162 — one AST, eval + compile_sql;
+    # Script is the disclosed SqlUnsupported escape hatch.
+    expression_closure: computation_plus_script
+
+  mutation:
+    # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
+    write_leg: file
+    # crates/holon-core/src/file_format.rs render_document emits whole-file
+    # bytes, so the unit is the FILE even when one field changed.
+    unit_of_write: file
+    merge_granularity: file
+    conflict_surface: log
+
+  assets:
+    # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
+    # parser.rs:1314-1334 — extension-detected [[file:…]] becomes an Image
+    # child block. No attachment directory and no ATTACH drawer support was
+    # found; the assets pass resolves whether that is truly absent.
+    attachments: inline_reference
+    binary_inline: none
+    # `tif` PROMOTED 2b.2 by measurement: the draft's list omitted it while
+    # `IMAGE_EXTENSIONS` (parser.rs:1310-1312) carries it, so an authored
+    # `[[file:x.tif]]` became an image block that the profile denied. Found by
+    # probing plausible NEIGHBOUR extensions — the declared set alone can never
+    # reveal an under-declaration.
+    extensions: [png, jpg, jpeg, gif, webp, svg, bmp, ico, tiff, tif]

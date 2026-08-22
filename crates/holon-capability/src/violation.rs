@@ -9,15 +9,27 @@ use crate::profile::ProfileRevision;
 /// Which fidelity axis the failing declaration belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
+    Content,
     PropertyKeys,
     PropertyValues,
+    Ordering,
+    Identity,
+    Hierarchy,
+    Mutation,
+    Assets,
 }
 
 impl std::fmt::Display for Axis {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::Content => "content",
             Self::PropertyKeys => "property_keys",
             Self::PropertyValues => "property_values",
+            Self::Ordering => "ordering",
+            Self::Identity => "identity",
+            Self::Hierarchy => "hierarchy",
+            Self::Mutation => "mutation",
+            Self::Assets => "assets",
         })
     }
 }
@@ -32,6 +44,58 @@ pub enum Clause {
     TypeDeclared(ValueKind),
     /// `property_values.empty_string` says this.
     EmptyString,
+    /// `ordering.property_order` says this.
+    PropertyOrder,
+    /// `identity.carrier_disagreement` says this.
+    CarrierDisagreement,
+    /// `content.block_constructs` lists this.
+    BlockConstruct(crate::axes::BlockConstruct),
+    /// `content.inline_constructs` lists this.
+    InlineConstruct(crate::axes::InlineConstruct),
+    /// `hierarchy.max_depth` says this.
+    MaxDepth,
+    /// `hierarchy.constraints` names this rule.
+    HierarchyConstraint(crate::axes::ConstraintId),
+    /// `hierarchy.cycles` says this.
+    Cycles,
+    /// `mutation.write_leg` says this.
+    WriteLeg,
+    /// `assets.extensions` lists this.
+    AssetExtension,
+    /// `property_keys.case` says this.
+    KeyCase,
+    /// `property_keys.schema_required` says this.
+    SchemaRequired,
+    /// `property_values.null` says this.
+    Null,
+    /// `property_values.multi_value` says this.
+    MultiValue,
+    /// `property_values.reference_values` says this.
+    ReferenceValues,
+    /// `property_keys.collision` says this.
+    Collision,
+    /// `identity.id_origin` says this.
+    IdOrigin,
+    /// `identity.carriers` lists this.
+    Carriers,
+    /// `ordering.sibling_order` says this.
+    SiblingOrder,
+    /// `hosted_kinds` lists this.
+    HostedKinds,
+    /// `content.representation` says this.
+    Representation,
+    /// `ordering.order_key_durable` says this.
+    OrderKeyDurable,
+    /// `hierarchy.shape` says this.
+    Shape,
+    /// `mutation.unit_of_write` says this.
+    UnitOfWrite,
+    /// `assets.attachments` / `assets.binary_inline` say this.
+    Attachments,
+    /// `identity.id_constraints` names this rule.
+    IdConstraint(crate::axes::ConstraintId),
+    /// `identity.id_space` says this.
+    IdSpace,
 }
 
 impl std::fmt::Display for Clause {
@@ -40,6 +104,32 @@ impl std::fmt::Display for Clause {
             Self::KeyNotReserved => write!(f, "the key is not declared reserved"),
             Self::TypeDeclared(kind) => write!(f, "property_values.types lists {kind:?}"),
             Self::EmptyString => write!(f, "property_values.empty_string"),
+            Self::PropertyOrder => write!(f, "ordering.property_order"),
+            Self::CarrierDisagreement => write!(f, "identity.carrier_disagreement"),
+            Self::BlockConstruct(c) => write!(f, "content.block_constructs lists {c:?}"),
+            Self::InlineConstruct(c) => write!(f, "content.inline_constructs lists {c:?}"),
+            Self::MaxDepth => write!(f, "hierarchy.max_depth"),
+            Self::HierarchyConstraint(c) => write!(f, "hierarchy.constraints names {c:?}"),
+            Self::Cycles => write!(f, "hierarchy.cycles"),
+            Self::WriteLeg => write!(f, "mutation.write_leg"),
+            Self::AssetExtension => write!(f, "assets.extensions"),
+            Self::KeyCase => write!(f, "property_keys.case"),
+            Self::SchemaRequired => write!(f, "property_keys.schema_required"),
+            Self::Null => write!(f, "property_values.null"),
+            Self::MultiValue => write!(f, "property_values.multi_value"),
+            Self::ReferenceValues => write!(f, "property_values.reference_values"),
+            Self::Collision => write!(f, "property_keys.collision"),
+            Self::IdOrigin => write!(f, "identity.id_origin"),
+            Self::Carriers => write!(f, "identity.carriers"),
+            Self::SiblingOrder => write!(f, "ordering.sibling_order"),
+            Self::HostedKinds => write!(f, "hosted_kinds"),
+            Self::Representation => write!(f, "content.representation"),
+            Self::OrderKeyDurable => write!(f, "ordering.order_key_durable"),
+            Self::Shape => write!(f, "hierarchy.shape"),
+            Self::UnitOfWrite => write!(f, "mutation.unit_of_write"),
+            Self::Attachments => write!(f, "assets.attachments"),
+            Self::IdConstraint(c) => write!(f, "identity.id_constraints names {c:?}"),
+            Self::IdSpace => write!(f, "identity.id_space"),
         }
     }
 }
@@ -67,6 +157,14 @@ pub enum Outcome {
     /// The value came back as something else — the accept-then-quietly-change
     /// outcome that is always red.
     Changed { got: Value },
+    /// The boundary REFUSED the value. Only a violation when the profile
+    /// claimed the value is carried; a refusal of something undeclared is the
+    /// law's other legal branch, not a defect.
+    Refused { reason: String },
+    /// The profile declared the boundary REFUSES this, and it did not — it
+    /// took the value and lost it, which is the silent loss the declaration
+    /// denies.
+    NotRefused,
 }
 
 impl std::fmt::Display for Outcome {
@@ -74,6 +172,8 @@ impl std::fmt::Display for Outcome {
         match self {
             Self::Dropped => write!(f, "DROPPED"),
             Self::Changed { got } => write!(f, "CHANGED to {got:?}"),
+            Self::Refused { reason } => write!(f, "REFUSED ({reason})"),
+            Self::NotRefused => write!(f, "NOT REFUSED (declared an error, but taken and lost)"),
         }
     }
 }

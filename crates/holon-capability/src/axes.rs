@@ -217,3 +217,414 @@ pub struct PropertyValuesAxis {
     pub multi_value: MultiValue,
     pub reference_values: ReferenceValues,
 }
+
+// =============================================================================
+// Axis 1 — hosted_kinds
+// =============================================================================
+
+/// What SHAPE of entity a format can home at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostedKind {
+    /// A block in a tree — it has a parent and a position among siblings.
+    Hierarchical,
+    /// A typed row that belongs to no tree.
+    FreeStanding,
+}
+
+// =============================================================================
+// Axis 2 — content
+// =============================================================================
+
+/// How much of the content the format actually MODELS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentRepresentation {
+    /// A string carried through without being parsed.
+    OpaqueText,
+    /// Parsed into marks and re-emitted.
+    MarkedText,
+    StructuredTree,
+    None,
+}
+
+/// Inline marks, from a CLOSED vocabulary — a format cannot invent one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InlineConstruct {
+    Bold,
+    Italic,
+    Underline,
+    Strikethrough,
+    Verbatim,
+    Code,
+    Subscript,
+    Superscript,
+    LinkByName,
+    LinkById,
+    LinkExternal,
+    Tag,
+    EscapeSequence,
+}
+
+/// Block-level constructs, likewise closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockConstruct {
+    Heading,
+    Paragraph,
+    SourceBlock,
+    Quote,
+    Table,
+    List,
+    Image,
+    Logbook,
+    PlanningTimestamp,
+    TodoKeyword,
+    Priority,
+}
+
+/// Axis 2 — what the format can carry as CONTENT.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentAxis {
+    pub representation: ContentRepresentation,
+    #[serde(default)]
+    pub inline_constructs: BTreeSet<InlineConstruct>,
+    #[serde(default)]
+    pub block_constructs: BTreeSet<BlockConstruct>,
+}
+
+// =============================================================================
+// Axis 5 — ordering
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SiblingOrder {
+    /// Order IS position in the file; there is no key.
+    FilePosition,
+    FractionalIndex,
+    ExplicitInteger,
+    LinkedList,
+    Unordered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderKeyDurability {
+    /// The authored key comes back byte-identical.
+    Authored,
+    Carried,
+    /// Read to recover the sequence, then RE-MINTED — a declared fidelity gap.
+    CarriedButReminted,
+    /// No key on disk; order is derived from something else.
+    Derived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConcurrentInsert {
+    Stable,
+    PositionalConflict,
+    #[serde(rename = "n_a")]
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PropertyOrder {
+    /// The author's key order comes back.
+    Preserved,
+    /// Deterministic, but not the author's.
+    Canonical,
+    Unspecified,
+}
+
+/// Axis 5 — who owns ORDER, and whether it survives.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrderingAxis {
+    pub sibling_order: SiblingOrder,
+    pub order_key_durable: OrderKeyDurability,
+    pub concurrent_insert: ConcurrentInsert,
+    pub property_order: PropertyOrder,
+}
+
+// =============================================================================
+// Axis 6 — hierarchy
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HierarchyShape {
+    Flat,
+    Tree,
+    Forest,
+    Dag,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaxDepth {
+    Unbounded,
+    Limit(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reparent {
+    Free,
+    Constrained,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cycles {
+    Rejected,
+    Representable,
+}
+
+/// A named structural rule the format enforces on reparenting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstraintId {
+    /// A `:Page:`-tagged heading may not sit under a non-page ancestor.
+    PageTagRequiresPageAncestor,
+    /// A page name containing `/` is refused rather than imported wrong.
+    NoSlashInPageName,
+    /// The id must form a valid URI path (`EntityUri::from_raw` parses via
+    /// fluent_uri). MEASURED to be enforced by PANIC, not by `Err`.
+    ValidUriPath,
+}
+
+/// Axis 6 — the SHAPE the format can hold.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HierarchyAxis {
+    pub shape: HierarchyShape,
+    pub max_depth: MaxDepth,
+    pub reparent: Reparent,
+    #[serde(default)]
+    pub constraints: Vec<ConstraintId>,
+    pub cycles: Cycles,
+}
+
+// =============================================================================
+// Axis 7 — identity
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdSpace {
+    Uuid,
+    OpaqueString,
+    PathDerived,
+    NameDerived,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdOrigin {
+    Authored,
+    MintedOnWrite,
+    DerivedFromPosition,
+}
+
+/// A rename the identity must SURVIVE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenameKind {
+    FileRename,
+    TitleRename,
+    Move,
+}
+
+/// One place identity can live. Order in the profile is PRECEDENCE order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdCarrier {
+    DrawerId,
+    FileKeywordId,
+    /// Identity derived from the file's PATH plus the vault root. Distinct from
+    /// `NameChain`, which is LogSeq's page-name sense.
+    PathDerived,
+    NameChain,
+    BlockUuid,
+    BlockName,
+}
+
+/// Every carrier the vocabulary knows.
+///
+/// The carriers law ranges over THIS, not over what a profile declares:
+/// ranging over the declared set makes a DELETION always satisfy the law, so a
+/// profile could drop a real carrier and stay green — measured as silent flip
+/// S8.
+pub const ALL_ID_CARRIERS: &[IdCarrier] = &[
+    IdCarrier::DrawerId,
+    IdCarrier::FileKeywordId,
+    IdCarrier::PathDerived,
+    IdCarrier::NameChain,
+    IdCarrier::BlockUuid,
+    IdCarrier::BlockName,
+];
+
+/// What happens when two carriers name DIFFERENT identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CarrierDisagreement {
+    /// A loud parse error — never a silent pick.
+    Error,
+    /// The first carrier in precedence order wins, silently.
+    PrecedenceWins,
+}
+
+/// Axis 7 — identity, and what it survives.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityAxis {
+    pub id_space: IdSpace,
+    pub id_origin: IdOrigin,
+    #[serde(default)]
+    pub id_constraints: Vec<ConstraintId>,
+    pub rename_stability: BTreeSet<RenameKind>,
+    pub carriers: Vec<IdCarrier>,
+    pub carrier_disagreement: CarrierDisagreement,
+}
+
+// =============================================================================
+// Axis 8 — computed
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputedLive {
+    Full,
+    ScriptOnly,
+    None,
+}
+
+/// What a format can DURABLY store as a computed result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComputedPersisted {
+    FullAlgebra,
+    TypedSubset { types: BTreeSet<ValueKind> },
+    StringOnly,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpressionClosure {
+    ComputationAlgebra,
+    ComputationPlusScript,
+    None,
+}
+
+/// Axis 8 — the computed tiers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputedAxis {
+    pub computed_live: ComputedLive,
+    pub computed_persisted: ComputedPersisted,
+    pub expression_closure: ExpressionClosure,
+}
+
+// =============================================================================
+// Axis 9 — mutation
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteLeg {
+    /// No code path writes this format. Every mutating action is un-offered.
+    Absent,
+    File,
+    Api,
+    InProcess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteUnit {
+    Field,
+    Entity,
+    Container,
+    File,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeGranularity {
+    Character,
+    Field,
+    Entity,
+    File,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictSurface {
+    None,
+    PropertyBanner,
+    Log,
+    Ui,
+}
+
+/// Axis 9 — whether and how the format is WRITTEN.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MutationAxis {
+    pub write_leg: WriteLeg,
+    pub unit_of_write: WriteUnit,
+    pub merge_granularity: MergeGranularity,
+    pub conflict_surface: ConflictSurface,
+}
+
+// =============================================================================
+// Axis 10 — assets
+// =============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Attachments {
+    None,
+    InlineReference,
+    ManagedStore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BinaryInline {
+    None,
+    DataUri,
+    Native,
+}
+
+/// A permitted attachment file extension, lowercase and without the dot.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Extension(String);
+
+impl Extension {
+    pub fn new(ext: impl Into<String>) -> Self {
+        Self(ext.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Axis 10 — what the format can carry as an ATTACHMENT.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetsAxis {
+    pub attachments: Attachments,
+    pub binary_inline: BinaryInline,
+    #[serde(default)]
+    pub extensions: BTreeSet<Extension>,
+}

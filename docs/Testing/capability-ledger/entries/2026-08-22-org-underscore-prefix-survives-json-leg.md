@@ -5,6 +5,7 @@ profile: org
 axis: property_keys
 clause: reserved_prefixes
 leg: org_properties_json
+construct: _underscored
 status: OPEN
 summary: >-
   org declares `_` a reserved prefix, but the org_properties JSON leg carries

@@ -160,6 +160,14 @@ lsqdb-oracle:
     cargo test -p holon-logseq-db --all-targets -- --include-ignored --nocapture 2>&1 \
         | tee target/gate-logs/holon-lsqdb-oracle.log
 
+# Certify the org format against its capability profile (real round trip)
+capability-cert:
+    scripts/capability-cert.sh
+
+# Falsify every clause of the org profile — a clause that cannot go red is decoration
+capability-sweep:
+    scripts/capability-flip-sweep.sh
+
 # Pattern-drift guard for the known-reds registry: replays the archived
 # 2026-07-31 full-depth corpus through the classifier and asserts its verdict is
 # unchanged. Cheap (no build) — run it after touching any assertion message that

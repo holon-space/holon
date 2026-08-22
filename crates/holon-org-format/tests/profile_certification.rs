@@ -28,11 +28,20 @@ use std::path::Path;
 
 use holon_api::EntityUri;
 use holon_api::Value;
+use holon_capability::BlockConstruct;
 use holon_capability::CapabilityProfile;
 use holon_capability::Carrier;
 use holon_capability::CertifiableFormat;
+use holon_capability::ConstraintId;
+use holon_capability::ConstructOutcome;
+use holon_capability::DisagreementOutcome;
+use holon_capability::Extension;
+use holon_capability::IdCarrier;
+use holon_capability::InlineConstruct;
 use holon_capability::Leg;
 use holon_capability::Readback;
+use holon_capability::WriteAttempt;
+use holon_capability::WriteLeg;
 use holon_capability::certify;
 use holon_org_format::OrgBlockExt;
 use holon_org_format::OrgRenderer;
@@ -63,11 +72,102 @@ struct OrgFormat {
 }
 
 impl OrgFormat {
+    /// The crate's own profile, or the one `HOLON_CAPABILITY_PROFILE` names.
+    ///
+    /// Read at RUNTIME rather than `include_str!`-ed so
+    /// `scripts/capability-flip-sweep.sh` can certify a mutated COPY under
+    /// `target/`: a sweep that edited `profile.yaml` in place would be writing
+    /// into the source tree on every flip.
     fn load() -> Self {
-        let yaml = include_str!("../profile.yaml");
+        let path = std::env::var_os("HOLON_CAPABILITY_PROFILE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("profile.yaml"));
         Self {
-            profile: CapabilityProfile::from_yaml(yaml).expect("the org profile yaml must parse"),
+            profile: CapabilityProfile::from_path(&path)
+                .unwrap_or_else(|e| panic!("the org profile must load: {e:#}")),
         }
+    }
+
+    /// Round-trip a WHOLE authored file and report whether `markers` returned.
+    ///
+    /// Used by the structural probes, where the fixture is the file itself
+    /// rather than a body under a fixed headline. A parse `Err` is `Refused` —
+    /// the law's other legal branch — not a harness failure.
+    fn survives_in_place(&self, src: &str, markers: &[&str]) -> anyhow::Result<ConstructOutcome> {
+        let path = Path::new(FILE);
+        let parsed = match parse_org_file(path, src, &EntityUri::no_parent(), Path::new(ROOT)) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(ConstructOutcome::Refused {
+                    reason: e.to_string(),
+                });
+            }
+        };
+        let rendered = OrgRenderer::render_document(
+            &parsed.document,
+            &parsed.blocks,
+            path,
+            &parsed.document.id,
+        )
+        .to_lowercase();
+        let present = markers
+            .iter()
+            .filter(|m| rendered.contains(&m.to_lowercase()))
+            .count();
+        Ok(if present == markers.len() {
+            ConstructOutcome::Survived
+        } else if present > 0 {
+            ConstructOutcome::Changed { got: rendered }
+        } else {
+            ConstructOutcome::Lost
+        })
+    }
+
+    /// Author `body` under a headline, write it back, and report whether the
+    /// construct returned.
+    ///
+    /// `markers` is what must still be present, case-insensitively, for the
+    /// construct to count as survived. Deliberately NOT a byte-equality check
+    /// on the whole body: the renderer legitimately canonicalises
+    /// (`#+begin_src` → `#+BEGIN_SRC`) and adds its own source id, and calling
+    /// that a loss would report the format's disclosed normalisation as a
+    /// defect. Each marker names the part of the construct that MUST survive.
+    fn body_survives(&self, body: &str, markers: &[&str]) -> anyhow::Result<ConstructOutcome> {
+        let path = Path::new(FILE);
+        let src = format!(
+            "#+TITLE: Certify\n\n* {PROBE_HEADLINE}\n:PROPERTIES:\n:ID: {BLOCK_ID}\n:END:\n{body}\n"
+        );
+        let parsed = match parse_org_file(path, &src, &EntityUri::no_parent(), Path::new(ROOT)) {
+            Ok(p) => p,
+            // A construct the parser REFUSES is the law's other legal branch,
+            // not a harness failure.
+            Err(e) => {
+                return Ok(ConstructOutcome::Refused {
+                    reason: e.to_string(),
+                });
+            }
+        };
+        let rendered = OrgRenderer::render_document(
+            &parsed.document,
+            &parsed.blocks,
+            path,
+            &parsed.document.id,
+        )
+        .to_lowercase();
+
+        let present = markers
+            .iter()
+            .filter(|m| rendered.contains(&m.to_lowercase()))
+            .count();
+        Ok(if present == markers.len() {
+            ConstructOutcome::Survived
+        } else if present > 0 {
+            // Some of the construct came back and some did not — the
+            // accept-then-alter outcome, distinct from losing it outright.
+            ConstructOutcome::Changed { got: rendered }
+        } else {
+            ConstructOutcome::Lost
+        })
     }
 }
 
@@ -154,6 +254,740 @@ impl CertifiableFormat for OrgFormat {
             None => Readback::Absent,
         })
     }
+
+    /// Drives `ordering.property_order` through the REAL write-back path.
+    ///
+    /// The fixture is authored in a deliberately UNSORTED order, so a format
+    /// that alphabetizes cannot pass by accident. What is under test is the
+    /// `_drawer_order` carrier (`models.rs:40-43`): it records the author's key
+    /// order in the STORED properties bag and the renderer replays it — which
+    /// is why the claim survives despite `_` being a reserved prefix in this
+    /// same profile.
+    fn round_trip_property_order(&self, authored: &[&str]) -> anyhow::Result<Option<Vec<String>>> {
+        let path = Path::new(FILE);
+        let drawer: String = authored
+            .iter()
+            .map(|k| format!(":{k}: v-{k}\n"))
+            .collect::<Vec<_>>()
+            .join("");
+        let src = format!(
+            "#+TITLE: Certify\n\n* {PROBE_HEADLINE}\n:PROPERTIES:\n:ID: {BLOCK_ID}\n{drawer}:END:\n"
+        );
+
+        let parsed = parse_org_file(path, &src, &EntityUri::no_parent(), Path::new(ROOT))
+            .map_err(|e| anyhow::anyhow!("the ordering fixture must parse: {e}"))?;
+        let block = parsed
+            .blocks
+            .iter()
+            .find(|b| b.org_title() == PROBE_HEADLINE)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("the ordering fixture must carry the probe block"))?;
+        let rendered =
+            OrgRenderer::render_document(&parsed.document, &[block], path, &parsed.document.id);
+
+        // Read the ORDER off the rendered drawer, not off a map: the claim is
+        // about what reaches disk, and a HashMap read-back would hide a
+        // renderer that reorders.
+        let order: Vec<String> = rendered
+            .lines()
+            .filter_map(|l| {
+                let rest = l.trim().strip_prefix(':')?;
+                let (key, _) = rest.split_once(':')?;
+                let key = key.trim();
+                (!key.is_empty()
+                    && !key.eq_ignore_ascii_case("PROPERTIES")
+                    && !key.eq_ignore_ascii_case("END")
+                    && !key.eq_ignore_ascii_case("ID")
+                    && authored.contains(&key))
+                .then(|| key.to_string())
+            })
+            .collect();
+        Ok(Some(order))
+    }
+
+    /// Drives `content.block_constructs` — EVERY construct in the closed
+    /// vocabulary, declared or not.
+    ///
+    /// Driving the undeclared ones is how the draft's UNKNOWNs get resolved:
+    /// `table` and `logbook` were declared absent because recon found no parser
+    /// support, and 2b.5 may not refuse content on a clause nobody drove. If
+    /// either round-trips, the certifier raises a prompt and the profile was
+    /// too narrow; if it does not, "absent" is now MEASURED rather than
+    /// assumed.
+    fn round_trip_block_construct(
+        &self,
+        construct: BlockConstruct,
+    ) -> anyhow::Result<Option<ConstructOutcome>> {
+        // One authored specimen per construct, as a whole file. `None` for the
+        // constructs whose specimen would be the fixture itself.
+        let (body, markers): (&str, &[&str]) = match construct {
+            BlockConstruct::Table => (
+                "| a | b |\n|---+---|\n| 1 | 2 |",
+                &["| a | b |", "| 1 | 2 |"],
+            ),
+            BlockConstruct::Logbook => (
+                ":LOGBOOK:\nCLOCK: [2026-08-22 Fri 10:00]\n:END:",
+                &[":logbook:", "clock: [2026-08-22 fri 10:00]"],
+            ),
+            BlockConstruct::Quote => (
+                "#+begin_quote\nquoted\n#+end_quote",
+                &["begin_quote", "quoted", "end_quote"],
+            ),
+            BlockConstruct::List => ("- one\n- two", &["- one", "- two"]),
+            // The renderer canonicalises the keyword case and adds its own
+            // `:id` param — disclosed normalisation, so the markers ask for the
+            // keyword and the PAYLOAD, not the authored header verbatim.
+            BlockConstruct::SourceBlock => (
+                "#+begin_src prql\nfrom x\n#+end_src",
+                &["begin_src", "from x", "end_src"],
+            ),
+            BlockConstruct::Paragraph => ("just a paragraph", &["just a paragraph"]),
+            // The five the per-member law exposed as declared-but-undriven.
+            // Each is HEADLINE-level, so the specimen is a whole file rather
+            // than a body — see `headline_survives`.
+            BlockConstruct::Heading
+            | BlockConstruct::Image
+            | BlockConstruct::PlanningTimestamp
+            | BlockConstruct::TodoKeyword
+            | BlockConstruct::Priority => {
+                let (src, markers): (&str, &[&str]) = match construct {
+                    BlockConstruct::Heading => (
+                        "#+TITLE: Certify\n\n* A heading\n:PROPERTIES:\n:ID: h-1\n:END:\n",
+                        &["* a heading"],
+                    ),
+                    BlockConstruct::Image => (
+                        "#+TITLE: Certify\n\n* Head\n:PROPERTIES:\n:ID: \
+                         h-1\n:END:\n[[file:pic.png]]\n",
+                        &["[[file:pic.png]]"],
+                    ),
+                    BlockConstruct::PlanningTimestamp => (
+                        "#+TITLE: Certify\n\n* Head\nSCHEDULED: <2026-08-22 \
+                         Fri>\n:PROPERTIES:\n:ID: h-1\n:END:\n",
+                        &["scheduled: <2026-08-22 fri>"],
+                    ),
+                    BlockConstruct::TodoKeyword => (
+                        "#+TITLE: Certify\n\n* TODO Head\n:PROPERTIES:\n:ID: h-1\n:END:\n",
+                        &["* todo head"],
+                    ),
+                    BlockConstruct::Priority => (
+                        "#+TITLE: Certify\n\n* [#A] Head\n:PROPERTIES:\n:ID: h-1\n:END:\n",
+                        &["[#a]"],
+                    ),
+                    _ => unreachable!("the arm above lists exactly these five"),
+                };
+                return Ok(Some(self.survives_in_place(src, markers)?));
+            }
+            // Heading / Image / PlanningTimestamp / TodoKeyword / Priority are
+            // headline-level, not body content: they need their own fixture
+            // shapes, which the headline pass covers. Reporting `None` is
+            // honest — the coverage law then requires the marker rather than
+            // letting a silent skip look like a pass.
+            _ => return Ok(None),
+        };
+        Ok(Some(self.body_survives(body, markers)?))
+    }
+
+    /// Drives `content.inline_constructs` the same way, through the headline.
+    fn round_trip_inline_construct(
+        &self,
+        construct: InlineConstruct,
+    ) -> anyhow::Result<Option<ConstructOutcome>> {
+        let body = match construct {
+            InlineConstruct::Bold => "*bold*",
+            InlineConstruct::Italic => "/italic/",
+            InlineConstruct::Underline => "_underline_",
+            InlineConstruct::Strikethrough => "+struck+",
+            InlineConstruct::Verbatim => "=verbatim=",
+            InlineConstruct::Code => "~code~",
+            InlineConstruct::Subscript => "a_{sub}",
+            InlineConstruct::Superscript => "a^{sup}",
+            InlineConstruct::LinkExternal => "[[https://example.com][site]]",
+            InlineConstruct::LinkByName => "[[Some Page]]",
+            // `[[id]]` naming a block, and an org tag — each needs a context a
+            // plain body cannot supply, so each gets a whole file.
+            InlineConstruct::LinkById => {
+                return Ok(Some(self.survives_in_place(
+                    "#+TITLE: Certify\n\n* Target\n:PROPERTIES:\n:ID: \
+                     tgt-1\n:END:\n* Head\n:PROPERTIES:\n:ID: h-1\n:END:\nsee \
+                     [[tgt-1]]\n",
+                    &["[[tgt-1]]"],
+                )?));
+            }
+            InlineConstruct::Tag => {
+                return Ok(Some(self.survives_in_place(
+                    "#+TITLE: Certify\n\n* Head    :sometag:\n:PROPERTIES:\n:ID: \
+                     h-1\n:END:\n",
+                    &[":sometag:"],
+                )?));
+            }
+            // escape_sequence is NOT driven, and the honest reason matters: the
+            // draft's claim is that backslash escapes are not HONOURED
+            // (semantic), while this probe only sees whether the bytes come
+            // back. A file whose `\\*` survives verbatim proves nothing about
+            // escaping. Certifying it needs an oracle that asks whether the
+            // marked-up region was suppressed, which the mark extractor can
+            // answer — that is its own piece of work, so the clause stays
+            // marked rather than being falsely promoted.
+            // link_by_id and tag need an id/tag context the body cannot supply.
+            _ => return Ok(None),
+        };
+        Ok(Some(self.body_survives(body, &[body])?))
+    }
+
+    /// Drives `hierarchy.max_depth` — a six-level headline tree.
+    fn round_trip_depth(&self, depth: u32) -> anyhow::Result<Option<ConstructOutcome>> {
+        let mut src = String::from("#+TITLE: Certify\n\n");
+        for level in 1..=depth {
+            src.push_str(&format!(
+                "{} Level {level}\n:PROPERTIES:\n:ID: lvl-{level}\n:END:\n",
+                "*".repeat(level as usize)
+            ));
+        }
+        let deepest = format!("Level {depth}");
+        Ok(Some(self.survives_in_place(&src, &[&deepest])?))
+    }
+
+    /// Drives `hierarchy.constraints` — each NAMED rule must actually refuse.
+    fn violate_constraint(
+        &self,
+        constraint: ConstraintId,
+    ) -> anyhow::Result<Option<ConstructOutcome>> {
+        match constraint {
+            // NOT DRIVEABLE FROM THIS CRATE, and the reason is structural
+            // rather than incidental. The rule is real, but it is enforced ONE
+            // LAYER UP: `docs/Reference/ORG_SYNTAX.md:186-191` names the
+            // refusal site as `DocumentManager::name_chain`
+            // (`crates/holon-filesystem/src/sync_ports.rs`), while this harness
+            // calls `parse_org_file` — the FORMAT layer, which never reaches
+            // it. A probe here parses the file happily and would report the
+            // constraint unenforced, which is false.
+            //
+            // Reporting `None` is the honest answer: the clause stays MARKED
+            // and the coverage law keeps demanding it, rather than a
+            // format-layer probe manufacturing a violation against a rule that
+            // lives in the sync layer.
+            ConstraintId::PageTagRequiresPageAncestor => Ok(None),
+            // Not an org rule at all — that one belongs to logseq-db.
+            ConstraintId::NoSlashInPageName => Ok(None),
+            // Violated by an id carrying a SPACE — the likeliest real typo, and
+            // measured to be refused (by panic; see the bug-funnel entry).
+            ConstraintId::ValidUriPath => {
+                let src = "#+TITLE: Certify\n\n* Head\n:PROPERTIES:\n:ID: has \
+                           space\n:END:\n";
+                let attempt = std::panic::catch_unwind(|| {
+                    parse_org_file(
+                        Path::new(FILE),
+                        src,
+                        &EntityUri::no_parent(),
+                        Path::new(ROOT),
+                    )
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+                });
+                Ok(Some(match attempt {
+                    Ok(Ok(())) => ConstructOutcome::Survived,
+                    Ok(Err(reason)) => ConstructOutcome::Refused { reason },
+                    Err(_) => ConstructOutcome::Refused {
+                        reason: "PANIC (not a recoverable Err)".to_string(),
+                    },
+                }))
+            }
+        }
+    }
+
+    /// Drives `hierarchy.cycles` — two blocks each claiming the other as parent
+    /// via the `:ID:`/ordering the parser reconstructs.
+    fn introduce_cycle(&self) -> anyhow::Result<Option<ConstructOutcome>> {
+        // Two headlines sharing ONE id: the parser's cycle/duplicate guard
+        // (parser.rs:514-549 reject_id_cycles) is what must speak.
+        let src = "#+TITLE: Certify\n\n* First\n:PROPERTIES:\n:ID: same-id\n:END:\n* \
+                   Second\n:PROPERTIES:\n:ID: same-id\n:END:\n";
+        Ok(Some(self.survives_in_place(src, &["first", "second"])?))
+    }
+
+    /// Drives `assets.extensions` — a declared extension must survive, and one
+    /// outside the set must not be silently accepted.
+    fn round_trip_attachment(&self, ext: &Extension) -> anyhow::Result<Option<ConstructOutcome>> {
+        let path = format!("pic.{}", ext.as_str());
+        let src = format!(
+            "#+TITLE: Certify\n\n* {PROBE_HEADLINE}\n:PROPERTIES:\n:ID: \
+             {BLOCK_ID}\n:END:\n[[file:{path}]]\n"
+        );
+        let parsed = match parse_org_file(
+            Path::new(FILE),
+            &src,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(Some(ConstructOutcome::Refused {
+                    reason: e.to_string(),
+                }));
+            }
+        };
+
+        // The question is whether the link became an ATTACHMENT, not whether
+        // its text survived. Every `[[file:…]]` line survives as ordinary body
+        // text whatever its extension (`parser.rs:1322-1334` only lifts the
+        // ones `is_image_path` recognises), so a text-survival check would
+        // report every extension as carried and the clause would certify
+        // nothing.
+        let became_image = parsed
+            .blocks
+            .iter()
+            .any(|b| b.is_image_block() && b.content == path);
+        Ok(Some(if became_image {
+            ConstructOutcome::Survived
+        } else {
+            ConstructOutcome::Lost
+        }))
+    }
+
+    /// Drives `property_keys.collision` — the SAME key twice in one drawer.
+    fn collide_key(&self, first: &Value, second: &Value) -> anyhow::Result<Option<Readback>> {
+        let (a, b) = (
+            first.as_string().unwrap_or_default(),
+            second.as_string().unwrap_or_default(),
+        );
+        let src = format!(
+            "#+TITLE: Certify\n\n* {PROBE_HEADLINE}\n:PROPERTIES:\n:ID: \
+             {BLOCK_ID}\n:Dup: {a}\n:Dup: {b}\n:END:\n"
+        );
+        let parsed = match parse_org_file(
+            Path::new(FILE),
+            &src,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(Some(Readback::Refused {
+                    reason: e.to_string(),
+                }));
+            }
+        };
+        let block = parsed
+            .blocks
+            .iter()
+            .find(|b| b.org_title() == PROBE_HEADLINE)
+            .ok_or_else(|| anyhow::anyhow!("the collision fixture must carry the probe block"))?;
+        Ok(Some(match block.get_property("Dup") {
+            Some(v) => Readback::Present(v),
+            None => Readback::Absent,
+        }))
+    }
+
+    /// Drives `identity.id_origin` — an AUTHORED id must survive ingest, or
+    /// every inbound link silently detaches.
+    fn id_after_ingest(&self, authored_id: &str) -> anyhow::Result<Option<String>> {
+        let src = format!(
+            "#+TITLE: Certify\n\n* {PROBE_HEADLINE}\n:PROPERTIES:\n:ID: \
+             {authored_id}\n:END:\n"
+        );
+        let parsed = parse_org_file(
+            Path::new(FILE),
+            &src,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| anyhow::anyhow!("the id fixture must parse: {e}"))?;
+        let block = parsed
+            .blocks
+            .iter()
+            .find(|b| b.org_title() == PROBE_HEADLINE)
+            .ok_or_else(|| anyhow::anyhow!("the id fixture must carry the probe block"))?;
+        Ok(Some(block.id.id().to_string()))
+    }
+
+    /// Drives `multi_value.separator` AND `.semantics` through the REQUIRES
+    /// edge field — the only place org splits at all.
+    fn round_trip_multi_value(
+        &self,
+        values: &[&str],
+        separator: &str,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        let joined = values.join(separator);
+        let src = format!(
+            "#+TITLE: Certify\n\n* {PROBE_HEADLINE}\n:PROPERTIES:\n:ID: \
+             {BLOCK_ID}\n:REQUIRES: {joined}\n:END:\n"
+        );
+        let parsed = parse_org_file(
+            Path::new(FILE),
+            &src,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| anyhow::anyhow!("the multi-value fixture must parse: {e}"))?;
+        // FULL round trip, not parse-only: the claim is what survives to disk
+        // and back. Reading `requires` straight off the parse would measure
+        // the parser's order and miss the renderer's sort — an adjacent
+        // measurement wearing the clause's name.
+        let rendered = OrgRenderer::render_document(
+            &parsed.document,
+            &parsed.blocks,
+            Path::new(FILE),
+            &parsed.document.id,
+        );
+        let back = parse_org_file(
+            Path::new(FILE),
+            &rendered,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| anyhow::anyhow!("the written multi-value must parse back: {e}"))?;
+        let block = back
+            .blocks
+            .iter()
+            .find(|b| b.org_title() == PROBE_HEADLINE)
+            .ok_or_else(|| anyhow::anyhow!("the multi-value fixture must carry the probe block"))?;
+        Ok(Some(
+            block.requires.iter().map(|u| u.id().to_string()).collect(),
+        ))
+    }
+
+    /// Drives `identity.carriers` — each carrier in the CLOSED vocabulary.
+    fn identity_via(&self, carrier: IdCarrier) -> anyhow::Result<Option<bool>> {
+        let (src, wanted): (String, &str) = match carrier {
+            IdCarrier::DrawerId => (
+                format!(
+                    "#+TITLE: Certify\n\n* {PROBE_HEADLINE}\n:PROPERTIES:\n:ID: \
+                     drawer-carried\n:END:\n"
+                ),
+                "drawer-carried",
+            ),
+            IdCarrier::FileKeywordId => (
+                "#+ID: keyword-carried\n#+TITLE: Certify\n\n* Probe headline\n".to_string(),
+                "keyword-carried",
+            ),
+            // MEASURED, and it REFUTES my earlier removal: with NO `:ID:` and no
+            // `#+ID:`, the document id is derived from the FILE PATH plus the
+            // vault root — both of which this probe already receives. It is a
+            // real, format-visible carrier, and deleting it to clear a gap was
+            // the wrong move.
+            IdCarrier::PathDerived => (
+                "#+TITLE: Certify\n\n* Probe headline\n".to_string(),
+                "profile",
+            ),
+            // LogSeq's carriers; not org's at all.
+            IdCarrier::NameChain | IdCarrier::BlockUuid | IdCarrier::BlockName => {
+                return Ok(None);
+            }
+        };
+        let parsed = parse_org_file(
+            Path::new(FILE),
+            &src,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| anyhow::anyhow!("the carrier fixture must parse: {e}"))?;
+        let found = match carrier {
+            IdCarrier::DrawerId => parsed.blocks.iter().any(|b| b.id.id().contains(wanted)),
+            _ => parsed.document.id.id().contains(wanted),
+        };
+        Ok(Some(found))
+    }
+
+    /// Drives `identity.carrier_disagreement`: a file whose `#+ID:` keyword and
+
+    /// Drives `ordering.sibling_order` — authored file order must come back.
+    fn round_trip_sibling_order(&self, authored: &[&str]) -> anyhow::Result<Option<Vec<String>>> {
+        let mut src = String::from("#+TITLE: Certify\n\n");
+        for (i, title) in authored.iter().enumerate() {
+            src.push_str(&format!("* {title}\n:PROPERTIES:\n:ID: sib-{i}\n:END:\n"));
+        }
+        let parsed = parse_org_file(
+            Path::new(FILE),
+            &src,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| anyhow::anyhow!("the sibling fixture must parse: {e}"))?;
+        Ok(Some(
+            parsed
+                .blocks
+                .iter()
+                .map(|b| b.org_title())
+                .filter(|t| authored.contains(&t.as_str()))
+                .collect(),
+        ))
+    }
+
+    /// Drives `hosted_kinds` from what ingest YIELDS. Org's parse result is
+    /// Block-only (`crates/holon-core/src/file_format.rs:26-35`), so every
+    /// entity it produces has a place in a tree and a free-standing typed row
+    /// has no org representation at all.
+    fn all_entities_hierarchical(&self) -> anyhow::Result<Option<bool>> {
+        let parsed = parse_org_file(
+            Path::new(FILE),
+            BASE_FIXTURE,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| anyhow::anyhow!("the base fixture must parse: {e}"))?;
+        // Every parsed block names a parent; nothing free-standing can come out.
+        Ok(Some(
+            parsed.blocks.iter().all(|b| !b.parent_id.id().is_empty()),
+        ))
+    }
+
+    /// Drives `content.representation` — a marked span must yield MARK DATA.
+    fn marks_are_parsed(&self) -> anyhow::Result<Option<bool>> {
+        let src = format!(
+            "#+TITLE: Certify\n\n* {PROBE_HEADLINE}\n:PROPERTIES:\n:ID: \
+             {BLOCK_ID}\n:END:\nsome *bold* text\n"
+        );
+        let parsed = parse_org_file(
+            Path::new(FILE),
+            &src,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| anyhow::anyhow!("the marks fixture must parse: {e}"))?;
+        // Marks anywhere in the document: the claim is that the format PARSES
+        // markup, not that a particular block carries it.
+        Ok(Some(parsed.blocks.iter().any(|b| b.marks.is_some())))
+    }
+
+    /// Drives `ordering.order_key_durable` — `derived` claims NO explicit order
+    /// key reaches disk.
+    fn writes_explicit_order_key(&self) -> anyhow::Result<Option<bool>> {
+        let mut src = String::from("#+TITLE: Certify\n\n");
+        for i in 0..3 {
+            src.push_str(&format!("* Sib {i}\n:PROPERTIES:\n:ID: k-{i}\n:END:\n"));
+        }
+        let parsed = parse_org_file(
+            Path::new(FILE),
+            &src,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| anyhow::anyhow!("the order-key fixture must parse: {e}"))?;
+        let rendered = OrgRenderer::render_document(
+            &parsed.document,
+            &parsed.blocks,
+            Path::new(FILE),
+            &parsed.document.id,
+        )
+        .to_lowercase();
+        // Any of the shapes an explicit key could take on disk.
+        Ok(Some(
+            rendered.contains(":order:")
+                || rendered.contains(":sort_key:")
+                || rendered.contains(":sequence:"),
+        ))
+    }
+
+    /// Drives `hierarchy.shape` — `forest` claims several roots coexist.
+    fn holds_multiple_roots(&self) -> anyhow::Result<Option<bool>> {
+        let src = "#+TITLE: Certify\n\n* Root A\n:PROPERTIES:\n:ID: r-a\n:END:\n* Root \
+                   B\n:PROPERTIES:\n:ID: r-b\n:END:\n";
+        let parsed = parse_org_file(
+            Path::new(FILE),
+            src,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| anyhow::anyhow!("the forest fixture must parse: {e}"))?;
+        let roots = parsed
+            .blocks
+            .iter()
+            .filter(|b| b.parent_id == parsed.document.id)
+            .count();
+        Ok(Some(roots >= 2))
+    }
+
+    /// Drives `identity.id_space` / `identity.id_constraints` with HOSTILE ids.
+    /// An empty constraint list is a claim that NONE of these is refused.
+    fn id_refused(&self, id: &str) -> anyhow::Result<Option<Option<String>>> {
+        let src =
+            format!("#+TITLE: Certify\n\n* {PROBE_HEADLINE}\n:PROPERTIES:\n:ID: {id}\n:END:\n");
+        // `catch_unwind` because a refusal here may arrive as a PANIC rather
+        // than an `Err`: `EntityUri::from_raw` parses via fluent_uri and
+        // panics on a path it cannot form. A panic IS a refusal in effect, but
+        // an unrecoverable one — the distinction is reported, not smoothed
+        // over, because crashing on a hand-authored file is a different
+        // severity from refusing it.
+        let attempt = std::panic::catch_unwind(|| {
+            parse_org_file(
+                Path::new(FILE),
+                &src,
+                &EntityUri::no_parent(),
+                Path::new(ROOT),
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        });
+        Ok(Some(match attempt {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e),
+            Err(_) => Some("PANIC (not a recoverable Err)".to_string()),
+        }))
+    }
+
+    /// Drives `mutation.unit_of_write` — the falsifier is a PARTIAL write.
+    ///
+    /// The previous version rendered the SAME argument twice and asserted the
+    /// results equal, which is X==X and cannot fail. The real question is
+    /// whether a one-block change produces the WHOLE document: render after
+    /// touching one block, then render ONLY that block via `render_blocks`
+    /// (the fragment API that exists), and require that the write path's output
+    /// is the whole-document form — strictly longer than the fragment, and
+    /// carrying the UNTOUCHED sibling's bytes.
+    fn single_change_emits_whole_document(&self) -> anyhow::Result<Option<bool>> {
+        let src = "#+TITLE: Certify\n\n* Alpha\n:PROPERTIES:\n:ID: w-a\n:END:\n* \
+                   Beta\n:PROPERTIES:\n:ID: w-b\n:END:\n";
+        let parsed = parse_org_file(
+            Path::new(FILE),
+            src,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| anyhow::anyhow!("the write-unit fixture must parse: {e}"))?;
+
+        let mut changed = parsed.blocks.clone();
+        let target = changed
+            .iter_mut()
+            .find(|b| b.org_title() == "Alpha")
+            .ok_or_else(|| anyhow::anyhow!("the write-unit fixture must carry Alpha"))?;
+        target.set_property("Touched", Value::String("yes".to_string()));
+
+        let whole = OrgRenderer::render_document(
+            &parsed.document,
+            &changed,
+            Path::new(FILE),
+            &parsed.document.id,
+        );
+        // The FRAGMENT form: just the block that changed.
+        let only_changed: Vec<_> = changed
+            .iter()
+            .filter(|b| b.org_title() == "Alpha")
+            .cloned()
+            .collect();
+        // `render_entitys` is the fragment API that exists: blocks only, no
+        // document header.
+        let fragment =
+            OrgRenderer::render_entitys(&only_changed, Path::new(FILE), &parsed.document.id);
+
+        Ok(Some(
+            // whole-document: carries the UNTOUCHED sibling, carries the
+            // document header, and is strictly bigger than the fragment.
+            whole.contains("Beta")
+                && whole.contains("#+TITLE:")
+                && whole.len() > fragment.len()
+                && !fragment.contains("Beta"),
+        ))
+    }
+
+    /// Drives `mutation.write_leg` by ATTEMPTING A WRITE through the real path.
+    ///
+    /// Asked of the FORMAT: the old probe compared `write_leg` against
+    /// `supports()`, which derives from `write_leg`, so it passed for any
+    /// declaration — including declaring this writable format read-only.
+    fn attempt_write(&self) -> anyhow::Result<Option<WriteAttempt>> {
+        let parsed = parse_org_file(
+            Path::new(FILE),
+            BASE_FIXTURE,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| anyhow::anyhow!("the write fixture must parse: {e}"))?;
+        let mut blocks = parsed.blocks.clone();
+        let target = blocks
+            .iter_mut()
+            .find(|b| b.org_title() == PROBE_HEADLINE)
+            .ok_or_else(|| anyhow::anyhow!("the write fixture must carry the probe block"))?;
+        target.set_property("WrittenBy", Value::String("certifier".to_string()));
+
+        let rendered = OrgRenderer::render_document(
+            &parsed.document,
+            &blocks,
+            Path::new(FILE),
+            &parsed.document.id,
+        );
+        // A write COUNTS only if it round-trips: bytes produced AND read back.
+        let back = parse_org_file(
+            Path::new(FILE),
+            &rendered,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| anyhow::anyhow!("the written bytes must parse back: {e}"))?;
+        let survived = back
+            .blocks
+            .iter()
+            .any(|b| b.get_property("WrittenBy").is_some());
+        Ok(Some(if survived {
+            // The mechanism is FILE bytes: `render_document` returns the whole
+            // file's text, which is what the caller writes to disk. Naming the
+            // leg is what lets `write_leg` answer "which", not just "whether".
+            WriteAttempt::Wrote {
+                leg: WriteLeg::File,
+            }
+        } else {
+            WriteAttempt::Refused {
+                reason: "the write produced bytes but the value did not return".to_string(),
+            }
+        }))
+    }
+
+    /// Drives `assets.attachments` / `assets.binary_inline` — an attachment is
+    /// carried as a PATH REFERENCE, never as embedded bytes.
+    fn attachment_is_reference(&self) -> anyhow::Result<Option<bool>> {
+        let src = format!(
+            "#+TITLE: Certify\n\n* {PROBE_HEADLINE}\n:PROPERTIES:\n:ID: \
+             {BLOCK_ID}\n:END:\n[[file:pic.png]]\n"
+        );
+        let parsed = parse_org_file(
+            Path::new(FILE),
+            &src,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| anyhow::anyhow!("the attachment fixture must parse: {e}"))?;
+        let image = parsed.blocks.iter().find(|b| b.is_image_block());
+        Ok(Some(match image {
+            // A reference: the block carries the PATH, short and pointing
+            // outward. Embedded bytes would be neither.
+            Some(b) => b.content == "pic.png",
+            None => false,
+        }))
+    }
+
+    /// Drives `identity.carrier_disagreement`: a file whose `#+ID:` keyword and
+    /// whose file-level `:ID:` drawer name DIFFERENT identities
+    /// (`docs/Reference/ORG_SYNTAX.md:79-84`).
+    fn carriers_disagree(&self) -> anyhow::Result<Option<DisagreementOutcome>> {
+        let path = Path::new(FILE);
+        // POSITION IS PART OF THE GRAMMAR: a file-level drawer is only
+        // recognised as the FIRST element of the file
+        // (`docs/Reference/ORG_SYNTAX.md:72-75`). Putting `#+TITLE:` above it
+        // makes the drawer ordinary text, and then the two carriers never
+        // actually disagree — the probe would be measuring nothing while
+        // looking like a finding.
+        let src = ":PROPERTIES:\n:ID: drawer-identity\n:END:\n#+ID: keyword-identity\n#+TITLE: \
+                   Certify\n\n* Probe headline\n";
+
+        Ok(Some(
+            match parse_org_file(path, src, &EntityUri::no_parent(), Path::new(ROOT)) {
+                Err(e) => DisagreementOutcome::Refused {
+                    reason: e.to_string(),
+                },
+                // Parsed anyway: SOMETHING was chosen, and which carrier won is
+                // what the profile must then declare.
+                Ok(parsed) => {
+                    let id = parsed.document.id.id().to_string();
+                    DisagreementOutcome::Picked {
+                        carrier: if id.contains("drawer-identity") {
+                            IdCarrier::DrawerId
+                        } else {
+                            IdCarrier::FileKeywordId
+                        },
+                    }
+                }
+            },
+        ))
+    }
 }
 
 /// The whole increment in one assertion: every clause the org profile declares
@@ -168,6 +1002,24 @@ fn the_org_profile_declares_only_restrictions_that_are_real() {
     let report = certify(&format).expect("the certification harness must run");
 
     println!("{}", report.render());
+
+    // The run's machine-readable half. Written under `target/` — never under
+    // `docs/` — so a test can never dirty the source tree. A human turns it
+    // into ledger entries with `scripts/capability-ledger.py sync`.
+    //
+    // `HOLON_CAPABILITY_REPORT_DIR` sends it elsewhere. The flip sweep uses
+    // that: a sweep run writing here would leave the ledger's input describing
+    // a deliberately broken profile, and `capability-ledger.py diff` would then
+    // accuse the honest profile of a prompt no honest run raises.
+    let dir = std::env::var_os("HOLON_CAPABILITY_REPORT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/capability-certification")
+        });
+    let written = report
+        .write_report(format.profile().id(), &dir)
+        .expect("the certification report must be writable");
+    println!("report: {}", written.display());
 
     assert!(
         report.confirmed > 0,
