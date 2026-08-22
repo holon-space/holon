@@ -23,6 +23,7 @@ pub mod ingest;
 pub mod kvs_writer;
 mod project;
 mod transit;
+pub mod tree;
 
 pub use datoms::DatomSet;
 pub use datoms::DatomValue;

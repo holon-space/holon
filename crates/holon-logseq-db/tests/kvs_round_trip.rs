@@ -408,10 +408,16 @@ async fn the_tail_holds_one_retract_and_one_assert_under_a_new_tx() {
         assert_eq!(datom.attribute, "block/title");
         assert_eq!(datom.tx, edit.tx, "both halves share ONE new transaction");
     }
-    assert!(
-        edit.tx.get() > root_max_tx,
-        "the transaction id must be new: {} must exceed the root's max-tx {root_max_tx}",
-        edit.tx.get()
+    // root + 2, not merely "greater than root": RESTORING a graph spends one
+    // transaction id before any edit, so LogSeq's first edit on a pristine
+    // graph takes root + 2 and so must this one. Measured on a copy at root
+    // 536871022, where both take 536871024. Asserting only ">" would let the
+    // seeding drift back to root + 1 — which it once was — without a red here.
+    assert_eq!(
+        edit.tx.get(),
+        root_max_tx + 2,
+        "the first edit on a pristine graph must take the id LogSeq would give \
+         it (root {root_max_tx} + 2), not merely a larger one"
     );
 }
 

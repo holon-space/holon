@@ -41,6 +41,8 @@ use libsql::OpenFlags;
 
 use crate::TransitNode;
 use crate::transit::decode_document;
+use crate::tree::EditableTree;
+use crate::tree::Index;
 
 /// The LogSeq schema version this writer is pinned to, EXACTLY.
 ///
@@ -206,6 +208,21 @@ pub enum RowError {
          operation as replacing a cardinality-one value and is out of this increment's scope"
     )]
     NotCardinalityOne { attribute: String },
+    #[error("kvs addr {addr} is not a tree node: {detail}")]
+    MalformedTreeNode { addr: i64, detail: String },
+    #[error("kvs addr {addr} is referenced as a child but no such row exists")]
+    MissingNode { addr: i64 },
+    /// Two values met that only ClojureScript's `hash` could order.
+    ///
+    /// Reachable ONLY if Holon wrote a value of a type it cannot order — see
+    /// docs/Testing/LogseqDbTreeOrder.md, "RULED: refuse rather than reproduce
+    /// the hash". Existing such datoms are carried unchanged, and comparing one
+    /// against a value of ANY other type is decided by the type group alone.
+    #[error(
+        "ordering two {kind} values requires reproducing ClojureScript's hash, which this \
+         build does not implement; Holon must not write a datom whose value is {kind}"
+    )]
+    ValueNotOrderable { kind: &'static str },
     /// The tail cannot hold the new transaction.
     #[error(
         "the tail already holds {existing} datom(s) and this change adds {adding}, which \
@@ -466,9 +483,24 @@ pub struct KvsGraph {
     pub root: RootNode,
     /// Every row including addr 0, ordered by address.
     pub rows: Vec<KvsRow>,
+    /// The highest transaction id considered spent.
+    ///
+    /// Seeded at load to `root.max_tx + 1` because RESTORING a graph spends
+    /// one id before any edit — measured: LogSeq's first edit on a pristine
+    /// graph at root 536871022 takes 536871024, not 536871023. It is state on
+    /// the graph rather than a function of `root.max_tx` precisely because a
+    /// flush REWRITES `root.max_tx`; recomputing per edit would spend a second
+    /// id after every flush, which LogSeq does not do.
+    next_tx: i64,
 }
 
 impl KvsGraph {
+    /// Take the next transaction id, as LogSeq's transactor would.
+    pub fn allocate_tx(&mut self) -> Result<TxId, RowError> {
+        self.next_tx += 1;
+        TxId::new(self.next_tx)
+    }
+
     fn tail_row(&self) -> Result<usize, RowError> {
         self.rows
             .iter()
@@ -943,21 +975,19 @@ fn current_title(graph: &KvsGraph, entity: i64) -> Result<String, RowError> {
 /// does: its `ldb/transact!` writes the same tail shape and leaves addr 0
 /// alone, so rewriting the root would be a divergence, not tidiness.
 ///
-/// The root's `:max-tx` is therefore left stale on disk. On restore LogSeq
-/// does NOT read `:max-tx` out of the tail: measured across four graphs, the
-/// restored `max-tx` is always `root + 1` whatever ids the tail carries.
+/// The root's `:max-tx` is left stale on disk while the tail holds the edit.
+/// On restore LogSeq does NOT read `:max-tx` out of the tail: measured across
+/// four graphs, the restored `max-tx` is always `root + 1` whatever ids the
+/// tail carries.
 ///
-/// This writer's id and LogSeq's DIFFER, measured on a pristine empty-tail
-/// copy at root 536871022: LogSeq's next edit takes 536871024 (`root + 2`),
-/// this writer takes 536871023 (`root + 1`). The mechanism is that restore
-/// consumes `root + 1`, so the next transaction takes the one after it — which
-/// means the id chosen here is one LogSeq considers already spent. `+ 2` is
-/// not conditional on the tail being non-empty: three consecutive LogSeq edits
-/// each took `+ 2`.
+/// The id comes from [`KvsGraph::allocate_tx`], which models that restore as
+/// having spent one, so the first edit on a pristine graph takes `root + 2` —
+/// the same id LogSeq gives it, measured on a copy at root 536871022 where
+/// both take 536871024.
 ///
-/// Left as is, because a transaction id in the tail is NOT a uniqueness
-/// guarantee — LogSeq reuses one across consecutive tail edits — and nothing
-/// here may treat one as if it were.
+/// A transaction id in the tail is NOT a uniqueness guarantee: LogSeq reuses
+/// one across consecutive tail edits, so nothing here may treat one as if it
+/// were.
 pub fn replace_block_title(
     graph: &mut KvsGraph,
     entity: i64,
@@ -971,14 +1001,8 @@ pub fn replace_block_title(
     }
 
     let old_title = current_title(graph, entity)?;
+    let tx = graph.allocate_tx()?;
     let mut tail = graph.tail()?;
-    let tx = TxId::new(
-        graph
-            .root
-            .max_tx
-            .max(tail.max_tx().map_or(0, TxId::get))
-            .saturating_add(1),
-    )?;
 
     let datom = |value: &str, op| TailDatom {
         entity,
@@ -987,11 +1011,24 @@ pub fn replace_block_title(
         tx,
         op,
     };
-    tail.push_transaction(vec![
+    // APPEND FIRST, then flush if that put the tail over the branching factor
+    // — the order `store-after-transact!` uses. It matters: LogSeq's
+    // overflowing transaction is flushed WITH the ones before it, so after the
+    // edit that crosses the line the tail is empty and the trees hold
+    // everything. Flushing first and then appending would leave that
+    // transaction sitting alone in the tail, which is a different file.
+    //
+    // `Tail::push_transaction`'s refusal stays for callers that cannot flush;
+    // this path can, so it does not consult it.
+    tail.transactions.push(vec![
         datom(&old_title, DatomOp::Retract),
         datom(new_title, DatomOp::Assert),
-    ])?;
+    ]);
+    let overflowed = tail.datom_count() > PINNED_BRANCHING_FACTOR as usize;
     graph.set_tail(&tail)?;
+    if overflowed {
+        flush_tail(graph)?;
+    }
 
     Ok(TitleEdit {
         entity,
@@ -1048,7 +1085,14 @@ pub async fn read_graph(path: &Path) -> Result<KvsGraph, RowError> {
         .filter(|r| r.addr == 0)
         .ok_or(RowError::NoRoot)?;
     let root = RootNode::parse(&root_row.node)?;
-    Ok(KvsGraph { root, rows })
+    let mut graph = KvsGraph {
+        root,
+        rows,
+        next_tx: 0,
+    };
+    // Restore spends one id; a tail left by LogSeq may already be past that.
+    graph.next_tx = (graph.root.max_tx + 1).max(graph.tail()?.max_tx().map_or(0, TxId::get));
+    Ok(graph)
 }
 
 /// Write `graph` to a new SQLite file at `dest`.
@@ -1485,4 +1529,200 @@ mod tests {
         let without = decode_document(r#"["^ ","~:keys",[]]"#).expect("decodes");
         assert!(!carries_addresses(&without));
     }
+}
+
+/// What a tail flush did.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FlushReport {
+    /// Transactions moved out of the tail and into the trees.
+    pub transactions: usize,
+    pub datoms_asserted: usize,
+    pub datoms_retracted: usize,
+    /// Rows created for nodes a split produced.
+    pub rows_added: usize,
+    /// Existing rows rewritten in place.
+    pub rows_modified: usize,
+    /// Rows no tree references, before and after. Never shrinks: LogSeq
+    /// discards its delete list, so a merged-away node stays as garbage.
+    pub orphans_before: usize,
+    pub orphans_after: usize,
+    /// The `:max-tx` addr 0 now carries.
+    pub max_tx: i64,
+}
+
+/// Whether the root schema indexes `attribute`, i.e. whether avet carries it.
+fn is_indexed(schema: &TransitNode, attribute: &str) -> bool {
+    let TransitNode::Map(attrs) = schema else {
+        return false;
+    };
+    attrs
+        .iter()
+        .find(|(k, _)| keyword(k) == Some(attribute))
+        .is_some_and(|(_, definition)| match definition {
+            TransitNode::Map(fields) => fields.iter().any(|(k, v)| {
+                matches!(keyword(k), Some("db/index")) && matches!(v, TransitNode::Bool(true))
+                    || matches!(keyword(k), Some("db/unique"))
+            }),
+            _ => false,
+        })
+}
+
+/// How many rows no tree references.
+fn orphan_count(graph: &KvsGraph, reachable: &BTreeSet<i64>) -> usize {
+    graph
+        .rows
+        .iter()
+        .filter(|r| r.addr > TAIL_ADDR && !reachable.contains(&r.addr))
+        .count()
+}
+
+fn reachable_addrs(graph: &KvsGraph) -> Result<BTreeSet<i64>, RowError> {
+    let mut out = BTreeSet::new();
+    for index in [Index::Eavt, Index::Aevt, Index::Avet] {
+        let tree = EditableTree::load(graph, index)?;
+        for node in tree.serialize(graph.root.max_addr)?.nodes {
+            out.insert(node.addr);
+        }
+    }
+    Ok(out)
+}
+
+/// Move every transaction in the tail into the three index trees.
+///
+/// This is what LogSeq's storage layer does when a transaction would push the
+/// tail past the branching factor, and the shape is copied from a measured
+/// flush: modified nodes are upserted AT THEIR EXISTING ADDRESSES, only
+/// split-new nodes take addresses above `:max-addr`, merged-away nodes are
+/// abandoned rather than deleted, addr 1 is reset to `[]`, and addr 0 is
+/// rewritten last with the new roots, counts, depths, `:max-addr` and
+/// `:max-tx`.
+///
+/// `:max-tx` becomes the highest `|tx|` among the transactions ACTUALLY
+/// FLUSHED. For LogSeq that includes the transaction that triggered the
+/// overflow, which is why its root ends one past the tail it had a moment
+/// earlier; here the tail is the whole of what is being flushed, so it is the
+/// tail's own highest.
+pub fn flush_tail(graph: &mut KvsGraph) -> Result<FlushReport, RowError> {
+    assert_pinned_schema_version(&graph.rows)?;
+    let tail = graph.tail()?;
+    let orphans_before = orphan_count(graph, &reachable_addrs(graph)?);
+
+    if tail.datom_count() == 0 {
+        // Nothing to flush, and the report must SAY nothing happened rather
+        // than leave its counters at their defaults: an `orphans_after` of 0
+        // beside a real `orphans_before` reads as a graph that just lost every
+        // unreferenced row, which is both false and the opposite of the
+        // "never shrinks" contract this type documents.
+        return Ok(FlushReport {
+            transactions: 0,
+            max_tx: graph.root.max_tx,
+            orphans_before,
+            orphans_after: orphans_before,
+            ..FlushReport::default()
+        });
+    }
+
+    let mut report = FlushReport {
+        transactions: tail.transactions().len(),
+        max_tx: graph.root.max_tx,
+        orphans_before,
+        ..FlushReport::default()
+    };
+
+    let mut trees = Vec::new();
+    for index in [Index::Eavt, Index::Aevt, Index::Avet] {
+        trees.push((index, EditableTree::load(graph, index)?));
+    }
+
+    for transaction in tail.transactions() {
+        for entry in transaction {
+            // Invariant (1): a value this build cannot ORDER must not be
+            // written, asserted or retracted — a retraction has to be located,
+            // which is an ordering operation too.
+            let datom = crate::tree::TreeDatom {
+                e: entry.entity,
+                a: entry.attribute.clone(),
+                v: entry.value.clone(),
+                tx: entry.tx.get(),
+            };
+            report.max_tx = report.max_tx.max(entry.tx.get());
+            match entry.op {
+                DatomOp::Assert => report.datoms_asserted += 1,
+                DatomOp::Retract => report.datoms_retracted += 1,
+            }
+            for (index, tree) in &mut trees {
+                if *index == Index::Avet && !is_indexed(&graph.root.schema, &entry.attribute) {
+                    continue;
+                }
+                match entry.op {
+                    DatomOp::Assert => {
+                        tree.insert(&datom)?;
+                    }
+                    // By (e, a, v): the retraction carries the NEW transaction
+                    // id while the stored datom still carries the one that
+                    // asserted it, so matching the full key would retract
+                    // nothing at all.
+                    DatomOp::Retract => {
+                        if let Some(stored) = tree.find_ignoring_tx(&datom)? {
+                            tree.remove(&stored)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Serialize all three before touching the graph, so a failure part-way
+    // leaves the caller's graph as it was.
+    let mut max_addr = graph.root.max_addr;
+    let mut written = Vec::new();
+    for (index, tree) in &trees {
+        tree.check_invariants()?;
+        let out = tree.serialize(max_addr)?;
+        max_addr = out.max_addr;
+        written.push((*index, out, tree.datoms().len(), tree.depth()?));
+    }
+
+    let mut reachable = BTreeSet::new();
+    for (index, out, count, depth) in written {
+        for node in out.nodes {
+            reachable.insert(node.addr);
+            let content = crate::transit::encode_document(&node.node);
+            match graph.rows.iter_mut().find(|r| r.addr == node.addr) {
+                Some(row) => {
+                    if row.original_content != content || row.addresses != node.addresses {
+                        report.rows_modified += 1;
+                    }
+                    row.node = node.node;
+                    row.addresses = node.addresses;
+                    row.original_content = content;
+                }
+                None => {
+                    report.rows_added += 1;
+                    graph.rows.push(KvsRow {
+                        addr: node.addr,
+                        node: node.node,
+                        addresses: node.addresses,
+                        original_content: content,
+                    });
+                }
+            }
+        }
+        let meta = IndexMeta {
+            count: count as i64,
+            shift: depth as i64 - 1,
+        };
+        match index {
+            Index::Eavt => (graph.root.eavt, graph.root.eavt_metadata) = (out.root_addr, meta),
+            Index::Aevt => (graph.root.aevt, graph.root.aevt_metadata) = (out.root_addr, meta),
+            Index::Avet => (graph.root.avet, graph.root.avet_metadata) = (out.root_addr, meta),
+        }
+    }
+
+    graph.root.max_addr = max_addr;
+    graph.root.max_tx = report.max_tx;
+    graph.set_tail(&Tail::default())?;
+    graph.rows.sort_by_key(|r| r.addr);
+    report.orphans_after = orphan_count(graph, &reachable);
+    Ok(report)
 }

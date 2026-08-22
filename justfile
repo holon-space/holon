@@ -149,7 +149,7 @@ lsqdb-oracle:
     #!/usr/bin/env bash
     set -euo pipefail
     : "${HOLON_LOGSEQ_ORACLE:?set it to a prepared LogSeq checkout — see docs/Testing/LogseqDbOracle.md}"
-    cargo test -p holon-logseq-db --test kvs_round_trip -- --include-ignored --nocapture 2>&1 \
+    cargo test -p holon-logseq-db --all-targets -- --include-ignored --nocapture 2>&1 \
         | tee /tmp/holon-lsqdb-oracle.log
 
 # Pattern-drift guard for the known-reds registry: replays the archived
