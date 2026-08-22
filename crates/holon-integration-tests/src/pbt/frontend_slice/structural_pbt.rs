@@ -1477,6 +1477,98 @@ mod teeth {
         );
     }
 
+    /// **Org-ingest FOLD gate.** `collapsed` is document state (Martin ruling
+    /// 2026-07-11) — shared, synced, surviving a restart — so a vault file that
+    /// declares `:COLLAPSED: t` must land in the typed `block_raw.collapsed`
+    /// column, and the uppercase drawer key the parser already consumed must
+    /// NOT also ride along in the untyped `properties` blob.
+    ///
+    /// This boots the COMPOSED SUT (Loro block-CRUD authority + org writeback),
+    /// which is the wiring the parity scenario runs on and the one that loses
+    /// the field: the org ingest hands its creates to the ordering authority as
+    /// a `BlockCreateRequest`, and everything the ingest param builder computed
+    /// is discarded once that authority persists the block.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn org_ingest_collapsed_marker_reaches_block_raw() {
+        const FOLD_ORG: &str = "#+ID: fold-page\n* Folded parent\n:PROPERTIES:\n:COLLAPSED: \
+                                t\n:ID: folded-parent\n:END:\n** Hidden child\n:PROPERTIES:\n:ID: \
+                                hidden-child\n:END:\n* Open sibling\n:PROPERTIES:\n:ID: \
+                                open-sibling\n:END:\n";
+
+        // `loro_enabled = true`: block CRUD routes through the Loro ordering
+        // authority, which is the wiring the parity scenario runs on and the
+        // one that loses the field. With Loro OFF the ingest falls back to the
+        // param builder, which carries `collapsed` correctly — so a
+        // Turso-only boot cannot see this bug at all.
+        let comp = HeadlessFrontendComponent::new_with_clock(
+            &[("fold-page.org", FOLD_ORG)],
+            Duration::from_millis(300),
+            true,
+            crate::pbt::frontend_slice::components::keystone_boot_clock(),
+        )
+        .await;
+
+        // Ingest is async off the file scan; poll until the folded headline's
+        // row exists, then read it once.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let row = loop {
+            let rows = comp
+                .sql_query(
+                    "SELECT collapsed, properties FROM block_raw WHERE id = 'block:folded-parent'",
+                )
+                .await;
+            if let Some(row) = rows.into_iter().next() {
+                break row;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[org-collapsed] block:folded-parent never reached block_raw"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        let collapsed = row
+            .get("collapsed")
+            .unwrap_or_else(|| panic!("block_raw must expose a `collapsed` column, got {row:?}"));
+        // `properties` is a jsonb column, so it arrives as a structured Value.
+        // The check below must look at the KEY SET, not at the rendered blob:
+        // `_drawer_order` legitimately records `COLLAPSED` inside its VALUE (it
+        // replays the authored drawer position on write-back), so a substring
+        // test over the whole map reports a stray key that is not there.
+        let properties = match row.get("properties") {
+            Some(holon_api::Value::Object(map)) => map.clone(),
+            other => panic!("block_raw.properties must be a jsonb object, got {other:?}"),
+        };
+
+        assert_eq!(
+            collapsed,
+            &holon_api::Value::Integer(1),
+            "an authored `:COLLAPSED: t` must reach block_raw.collapsed — got {collapsed:?} \
+             (properties: {properties:?})"
+        );
+        assert!(
+            !properties.contains_key("COLLAPSED"),
+            "`COLLAPSED` is consumed at the parse boundary into the typed field — it must not \
+             ALSO ride along as an untyped property: {properties:?}"
+        );
+        assert!(
+            !properties.contains_key("collapsed"),
+            "the Loro-side property spelling must be lifted into the typed column, not projected \
+             into the untyped bag: {properties:?}"
+        );
+
+        let open = comp
+            .sql_query("SELECT collapsed FROM block_raw WHERE id = 'block:open-sibling'")
+            .await
+            .into_iter()
+            .next()
+            .expect("the open sibling must reach block_raw too");
+        assert_eq!(
+            open.get("collapsed"),
+            Some(&holon_api::Value::Integer(0)),
+            "negative control: a headline with no `:COLLAPSED:` must stay open"
+        );
+    }
+
     /// **Org-ingest MARKS gate (dogfood 2026-07-10 link-destruction class).**
     /// Boot the composed headless SUT from an org file whose `c2` headline
     /// carries a `[[Linked Page]]` wiki link, and run the full catalog

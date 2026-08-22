@@ -27,8 +27,45 @@ pub struct BlockCreateRequest {
     pub parent_id: EntityUri,
     pub id: EntityUri,
     pub content: BlockContent,
+    /// The authority's property map for the new node, NOT the org drawer: the
+    /// Loro registry writes it into the node's meta verbatim, and
+    /// `read_block_from_tree` lifts the typed scalars back out of it. Build it
+    /// with [`BlockCreateRequest::of`] rather than by hand — a field this map
+    /// forgets is a field the block is born without.
     pub properties: std::collections::HashMap<String, holon_api::Value>,
     pub edges: holon_api::BlockEdges,
+}
+
+impl BlockCreateRequest {
+    /// Pack `block` as a create intent under `parent_id`.
+    ///
+    /// Every ingest (org files, LogSeq-DB import) goes through here, so the
+    /// typed scalars the authority stores in its property map are carried in
+    /// ONE place. `collapsed` and `widget_only` are exactly those: they are
+    /// typed `Block` fields, but the Loro authority keeps them in the node's
+    /// property map (that is where `set_field("collapsed")` writes them, and
+    /// `read_block_from_tree` lifts them into the typed slots on the way out).
+    /// Reconstructing this struct field-by-field at a call site is what dropped
+    /// a vault's fold state on import.
+    ///
+    /// Written only when set, matching `drawer_properties()`'s convention — a
+    /// create has no prior value to clear.
+    pub fn of(block: &holon_api::block::Block, parent_id: &EntityUri) -> Self {
+        let mut properties = block.properties.clone();
+        if block.collapsed {
+            properties.insert("collapsed".to_string(), holon_api::Value::Boolean(true));
+        }
+        if block.widget_only {
+            properties.insert("widget_only".to_string(), holon_api::Value::Boolean(true));
+        }
+        Self {
+            parent_id: parent_id.clone(),
+            id: block.id.clone(),
+            content: block.to_block_content(),
+            properties,
+            edges: holon_api::BlockEdges::of(block),
+        }
+    }
 }
 
 /// Provider of positional-intent writes for block aggregates.

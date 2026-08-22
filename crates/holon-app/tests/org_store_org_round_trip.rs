@@ -105,6 +105,15 @@ enum WriteLeg {
     OrgIngest,
 }
 
+impl WriteLeg {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Loro => "loro",
+            Self::OrgIngest => "org-ingest",
+        }
+    }
+}
+
 /// Write `doc` + `blocks` through the production write path (`leg`'s param
 /// builder → `SqlOperationProvider`) and read the document's blocks back
 /// through the production read path (`CacheBlockReader::get_blocks`).
@@ -305,6 +314,64 @@ async fn non_alphabetical_drawer_order_survives_the_ingest_leg() {
         "a non-alphabetically authored drawer must round-trip org → ingest → store → org \
          byte-identical"
     );
+}
+
+/// `:COLLAPSED: t` is the fold marker, and `collapsed` is DOCUMENT state
+/// (Martin ruling 2026-07-11) — it is shared, synced, and survives a restart.
+/// So an org file that declares it must come back out of the store with the
+/// typed field set, on BOTH write legs, and must NOT leave the uppercase drawer
+/// key behind in the untyped properties bag (the parser already consumed it).
+#[tokio::test(flavor = "multi_thread")]
+async fn collapsed_drawer_marker_survives_both_write_legs() {
+    const SOURCE: &str = "#+ID: fold-page\n* Folded parent\n:PROPERTIES:\n:ID: \
+                          folded-parent\n:COLLAPSED: t\n:END:\n* Open sibling\n:PROPERTIES:\n:ID: \
+                          open-sibling\n:END:\n";
+
+    let path = Path::new(FILE);
+    let parsed = parse_org_file(path, SOURCE, &EntityUri::no_parent(), Path::new(ROOT))
+        .expect("the fixture must parse");
+
+    let folded = parsed
+        .blocks
+        .iter()
+        .find(|b| b.id.id() == "folded-parent")
+        .expect("the fixture must parse a folded headline");
+    assert!(
+        folded.collapsed,
+        "control: the PARSER must already lift `:COLLAPSED: t` into the typed field — if this \
+         fails the store leg is not what broke"
+    );
+
+    for leg in [WriteLeg::OrgIngest, WriteLeg::Loro] {
+        let restored = through_the_store(&parsed.document, &parsed.blocks, leg).await;
+        let folded = restored
+            .iter()
+            .find(|b| b.id.id() == "folded-parent")
+            .expect("the folded headline must come back from the store");
+        let open = restored
+            .iter()
+            .find(|b| b.id.id() == "open-sibling")
+            .expect("the open headline must come back from the store");
+
+        assert!(
+            folded.collapsed,
+            "leg {}: an authored `:COLLAPSED: t` must reach the typed `collapsed` column, not be \
+             lost on import",
+            leg.name()
+        );
+        assert!(
+            !open.collapsed,
+            "leg {}: negative control — a headline with no `:COLLAPSED:` must come back open",
+            leg.name()
+        );
+        assert!(
+            !folded.properties.contains_key("COLLAPSED"),
+            "leg {}: `COLLAPSED` is consumed at the parse boundary into the typed field — it must \
+             not ALSO ride along as an untyped property: {:?}",
+            leg.name(),
+            folded.properties
+        );
+    }
 }
 
 /// `:contributes-to:` and `:REQUIRES:` are the two arc directions of the same

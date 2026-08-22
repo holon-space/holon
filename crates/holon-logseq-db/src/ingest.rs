@@ -80,13 +80,7 @@ pub async fn enter_store(
 }
 
 fn create_request(block: &Block) -> BlockCreateRequest {
-    BlockCreateRequest {
-        parent_id: block.parent_id.clone(),
-        id: block.id.clone(),
-        content: block.to_block_content(),
-        properties: block.properties.clone(),
-        edges: BlockEdges::of(block),
-    }
+    BlockCreateRequest::of(block, &block.parent_id)
 }
 
 /// Order the blocks so every block follows its parent.

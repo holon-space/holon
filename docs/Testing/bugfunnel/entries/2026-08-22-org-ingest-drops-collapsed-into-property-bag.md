@@ -1,9 +1,9 @@
 ---
 id: 2026-08-22-org-ingest-drops-collapsed-into-property-bag
 date: 2026-08-22
-gap: ORACLE
-secondary: COVERAGE
-status: OPEN
+gap: COVERAGE
+secondary: null
+status: FIXED
 summary: >-
   An org file carrying `:COLLAPSED: t` ingests with the typed `collapsed`
   column left false and a stray uppercase `COLLAPSED` string in the untyped
@@ -36,87 +36,149 @@ nicety. Found by agent exploration (lane `gv-vocab`) while giving the new
 `block "<id>" is collapsed` matcher a live home in the parity corpus.
 
 Red log: `lane-logs/item3-green3.log` (the composed catalog divergence above).
-Localization log: `lane-logs/probe-collapsed.log`.
+Localization logs (lane `collapsed-bug`): `lane-logs/red-collapsed.log`,
+`lane-logs/red-composed.log`, `lane-logs/red-composed-loro.log`.
+
+A SECOND, independent drop sits underneath this one on the same path and is
+recorded separately:
+[2026-08-22-loro-create-projection-drops-fold-state](2026-08-22-loro-create-projection-drops-fold-state.md).
+Fixing this entry's cause alone left the composed test still red at
+`Integer(0)`, which is how that one surfaced. This entry is scoped to the ingest
+side; that one to the Loro→SQL projection.
 
 ## Root cause
 
-PARTIALLY LOCALIZED — and the obvious hypothesis is REFUTED. Recording both
-so the next lane does not re-run the same dead end.
+Two defects on the org-ingest leg, one per observed symptom.
 
-`Block::drawer_properties()` (`holon-org-format/src/models.rs:972-984`)
-deliberately re-inserts `COLLAPSED` / `WIDGET_ONLY` AFTER its `INTERNAL_KEYS`
-filter (models.rs:855-878) has removed them, because org WRITEBACK needs those
-keys to recreate the drawer. `build_block_params`
-(`holon-orgmode/src/block_params.rs:153-162`) iterates the same function on
-the INGEST leg, and `is_storage_column_key` (block_params.rs:224) matches
-case-sensitively, so uppercase `COLLAPSED` is not refused and rides along as
-an ordinary property.
+**The false column — the ingest→ordering-authority seam drops the typed field.**
+`FileSyncController::block_create_request`
+(`holon-filesystem/src/file_sync_controller.rs`) packed a parsed block for the
+ordering authority as a `BlockCreateRequest` of `{parent_id, id, content,
+properties, edges}`. That struct had no slot for the typed `collapsed` /
+`widget_only`, and the parser consumes `:COLLAPSED:` into `block.collapsed`
+(`parser.rs:994`) rather than leaving it in `block.properties` — so the fold
+state was dropped at the pack.
 
-That much is confirmed. What it does NOT explain is the false column, and a
-direct probe of the boundary shows the params are CORRECT there:
+The correct `collapsed=Boolean(true)` param that `build_block_params` DOES emit
+never rescues it: in `flush_pending_creates` those params are used only in the
+`else` arm, when the authority did NOT persist the block. Under Loro block-CRUD
+authority `create_in_tree_batch` returns `persisted = true` and the params are
+discarded wholesale. Under the SqlOnly default `persisted = false` and the
+params ARE used — which is why the SQL-only ingest leg is green on `collapsed`
+and only a Loro-authority boot loses it. That asymmetry is the bug's whole
+shape, and the discriminator that proves it: the same composed test with
+`loro_enabled = false` PASSES the collapsed assertion.
 
-```
-PROBE block.collapsed    = true
-PROBE drawer_properties  = {"COLLAPSED": "t"}
-PROBE param "collapsed"  = Boolean(true)     <-- typed param IS emitted
-PROBE param "COLLAPSED"  = String("t")       <-- stray property rides along
-```
+`holon-logseq-db/src/ingest.rs::create_request` carried a byte-identical copy of
+the same five-field construction, so a LogSeq-DB import lost fold state the same
+way. Not filed separately: it is the same defect at a second call site, closed
+by the same constructor, and it never escaped — it was found by reading during
+this fix, not by anyone hitting it.
 
-`SqlOperationProvider::partition_params`
-(`holon/src/core/sql_operation_provider.rs:502-562`) matches columns
-case-sensitively too (`write_schema.is_column`), so the two keys should
-COEXIST: `collapsed` → the SQL column, `COLLAPSED` → `extra_props`. Both are
-present and correctly typed when they leave `build_block_params`.
+**The stray property — the ingest leg re-ingests its own writeback spelling.**
+`Block::drawer_properties()` deliberately re-serializes `COLLAPSED` /
+`WIDGET_ONLY` from the typed fields because org writeback needs them to recreate
+the drawer; `build_block_params` iterates the same function on the INGEST leg,
+where they are not properties at all.
 
-**Therefore the column is lost DOWNSTREAM of `build_block_params`, and making
-`is_storage_column_key` case-insensitive would remove only the stray property
-— it would not restore the column.** That fix alone cannot close this bug.
-Note also that the case-sensitivity is deliberate and documented
-(block_params.rs:220-222): matching case-insensitively would over-refuse an
-ordinary user property such as `:Sort_Key:`, and would fire
-`warn_unrepresentable_drawer_key`'s "Rename the drawer key" advice on every
-`:COLLAPSED:` file Holon itself writes.
-
-Still to localize: what consumes the correct `collapsed=Boolean(true)` param
-between `partition_params` and the `block_raw` row. Prime suspects, untested:
-the org-writeback round trip (`org-writeback=on` in the failing wiring)
-re-ingesting its own rendered file, and `value_to_sql` / `optional_bool`
-handling of the boolean.
+REFUTED, recorded so it is not re-run: making `is_storage_column_key`
+case-insensitive. It is case-sensitive on purpose (`:Sort_Key:` must stay an
+ordinary property), and measurement showed it would not have restored the column
+anyway — `crates/holon-app/tests/org_store_org_round_trip.rs` drives
+parse → `build_block_params` → `SqlOperationProvider` → `CacheBlockReader` and
+that leg writes `collapsed` CORRECTLY. So `value_to_sql` / `optional_bool` and
+the org-writeback round trip — the two prime suspects the first localization
+pass named — are both refuted.
 
 ## Missing piece
 
-Two, one per gap.
+COVERAGE (primary). No transition sequence in the catalog could reach a
+`:COLLAPSED:` ingest: nothing ever drove an org file carrying the marker into
+the composed slice, and — compounding it — the one boot flag that decides
+whether this bug is reachable at all, `loro_enabled`, was `false` in every
+existing org-ingest gate, so even a scenario seeding `:COLLAPSED:` would have
+passed on a Turso-only boot. The generator, not the assertion, was the binding
+constraint: `inv-blocks-match-ref/*` compares `Block` field-by-field and DOES
+cover `collapsed`, so an invariant WOULD have fired the moment a case reached
+this state.
 
-ORACLE (primary): no invariant covered the fold field on the ingest leg.
-`inv-blocks-match-ref/*` compares `Block` field-by-field and DOES cover
-`collapsed` — but nothing ever drove an org file carrying `:COLLAPSED:` into
-the composed slice, so the invariant never had a case to fire on. The field
-had storage, a parser, a renderer and a round-trip test
-(`holon-org-format/src/parser.rs:2019`) at the UNIT level, and no
-end-to-end ingest coverage at all.
+NOT dual — and an earlier revision of this entry claimed `secondary: ORACLE` on
+reasoning that does not survive checking, so the retraction is recorded rather
+than quietly dropped. That claim was that the stray property "reached that state
+constantly and nothing flagged it". It cannot have: under the keystone's DEFAULT
+Sql authority the stray `COLLAPSED` DOES reach `block_raw.properties`, and
+`inv-blocks-match-ref` compares the properties map — so any case reaching it
+would have gone RED, not passed unflagged. An assertion that would have fired is
+not an oracle gap.
 
-COVERAGE (secondary): the parity corpus had no scenario seeding a folded
-block, and until this lane there was no `block "<id>" is collapsed` matcher
-to write one with.
+What is established: no catalog seed carries `:COLLAPSED:` (grepped), so the only
+route to a folded block is a toggle at runtime — `ExpandToggle` / `ToggleCollapse`,
+both routing through `RefToggleMut::set_expanded`, which mirrors the typed field
+on the ref (`ref_caps/toggle.rs`). For the STRAY half to appear, that runtime
+fold must then round-trip through an org FILE (write-back re-rendering
+`:COLLAPSED:`, then a re-ingest re-parsing it), because `build_block_params` only
+sees drawer keys on the ingest leg.
+
+OPEN, and deliberately not asserted either way: whether the composed catalog ever
+actually draws that write-back-then-re-ingest sequence on a folded block under Sql
+authority. Both transitions exist in the headless alphabet and `SimulateRestart`
+is exactly a touch-and-re-parse, so it looks reachable in principle — but whether
+write-back fires for a fold-only change, and whether the pair is ever co-drawn,
+was not measured. If it IS reachable, this was a latent red rather than a
+coverage gap and the classification should be revisited; the new
+`block_params` unit test now pins the behaviour regardless of which it turns out
+to be.
 
 ## Remedy
 
-OPEN — deliberately not fixed in lane `gv-vocab`, because the scoped one-line
-fix is refuted above and the real fix needs the downstream localization first.
+FIXED in lane `collapsed-bug`.
 
-The gap half IS closed, so the bug is now caught automatically the moment
-someone works on it:
+* `BlockCreateRequest::of(block, parent_id)` (`holon-core/src/block_ordering.rs`)
+  is now the ONE way an ingest packs a create intent, and it carries the typed
+  fold scalars into the authority's property map — where `set_field("collapsed")`
+  already writes them and `read_block_from_tree` lifts them back into the typed
+  slots. Both duplicated construction sites (`file_sync_controller.rs`,
+  `holon-logseq-db/src/ingest.rs`) now delegate to it, and the hand-rolled
+  five-field constructions are deleted so the pattern cannot recur.
+* `is_typed_field_drawer_key` (`holon-orgmode/src/block_params.rs`) refuses
+  `COLLAPSED` / `WIDGET_ONLY` on the ingest leg — in the emit loop AND the
+  previous-key removal loop. It is the exact sibling of the existing
+  `is_edge_drawer_key` guard, which already refuses the drawer keys
+  `drawer_properties()` reconstructs from typed EDGE fields (`REQUIRES`,
+  `ADVICE_SUPPRESSED`, `contributes-to`); these two were the only non-edge typed
+  fields lacking it. A narrow allowlist of the two keys Holon itself serializes,
+  NOT a case-insensitive schema match.
 
-* `block "<id>" is collapsed` / `is not collapsed` exist
-  (`pbt/fixtures/assert_steps.rs`, oracle `block_raw.collapsed`).
-* `logseq-parity/outliner.feature` carries a written, runnable scenario ("A
-  folded block carries its collapsed mark into the store") that reds on
-  exactly this divergence. It is `@wip` ONLY because of this bug — un-`@wip`
-  it as the red-for-the-right-reason proof when the fix lands.
+Red → green evidence:
 
-What remains: localize the downstream consumer, fix it, un-`@wip` that
-scenario. Do NOT touch `drawer_properties()` — org writeback depends on it
-emitting these keys. If the stray uppercase property is also to be refused on
-the ingest leg, prefer a narrow allowlist of the typed fields Holon itself
-serializes into the drawer over a blanket case-insensitive match, so
-`:Sort_Key:` and friends keep working.
+* `structural_pbt.rs::org_ingest_collapsed_marker_reaches_block_raw` — boots the
+  composed SUT with `loro_enabled = true` from the `:COLLAPSED: t` file and reads
+  `block_raw` directly. RED for the right reason before the fix:
+  `an authored ':COLLAPSED: t' must reach block_raw.collapsed — got Integer(0)`.
+* `org_store_org_round_trip.rs::collapsed_drawer_marker_survives_both_write_legs`
+  — pins the OTHER leg (org-ingest and Loro param builders through the real
+  store). RED before the fix on the stray property, and it is what refuted the
+  false-column-in-SQL hypothesis.
+* `block_params.rs::typed_field_drawer_keys_are_refused_but_case_variant_user_keys_survive`
+  — pins the allowlist's narrowness: `:Sort_Key:` still survives as an ordinary
+  property, which a case-insensitive match would have swallowed.
+
+CAVEAT on what covers what, stated as a revert test so it cannot rot into a
+vague claim: reverting `is_typed_field_drawer_key` alone leaves
+`org_ingest_collapsed_marker_reaches_block_raw` GREEN (under Loro authority
+`flush_pending_creates` discards the ingest param builder's output); the guard is
+pinned ONLY by
+`block_params::typed_field_drawer_keys_are_refused_but_case_variant_user_keys_survive`
+and `org_store_org_round_trip::collapsed_drawer_marker_survives_both_write_legs`.
+Conversely those two never reach the Loro create path and so cannot see either
+drop. Deleting either group silently un-covers half of this entry.
+* `logseq-parity/outliner.feature` — the scenario "A folded block carries its
+  collapsed mark into the store" is the corpus-level proof, and its un-`@wip`
+  lands as a SEPARATE rev on top of this one, PENDING the rebase onto
+  `gv-vocab`. It could not ride along here: that scenario and the
+  `block "<id>" is collapsed` matcher it needs both live in lane `gv-vocab` and
+  neither is on main, so un-`@wip`ing it in this rev reds the parity replay on
+  an unrelated scenario (`log:2` uses GV's `comes after` matcher, which main
+  also lacks) — the feature file and its matchers are one indivisible GV unit.
+  Splitting it into its own rev also keeps the fix and the scenario activation
+  separately attributable.

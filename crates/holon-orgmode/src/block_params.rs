@@ -151,7 +151,7 @@ pub fn build_block_params(
     params.insert("ID".into(), Value::String(id));
 
     for (k, v) in block.drawer_properties() {
-        if is_edge_drawer_key(&k) {
+        if is_edge_drawer_key(&k) || is_typed_field_drawer_key(&k) {
             continue;
         }
         if is_storage_column_key(&k) {
@@ -180,7 +180,11 @@ pub fn build_block_params(
             // and a removal is not a loss of authored data — it is a refusal to
             // write `SET <column> = NULL` over row state this builder does not
             // own (`sort_key` is the consolidator's order key).
-            if is_edge_drawer_key(&k) || is_storage_column_key(&k) || params.contains_key(&*k) {
+            if is_edge_drawer_key(&k)
+                || is_typed_field_drawer_key(&k)
+                || is_storage_column_key(&k)
+                || params.contains_key(&*k)
+            {
                 continue;
             }
             params.insert(k.into(), Value::Null);
@@ -202,6 +206,20 @@ fn is_edge_drawer_key(key: &str) -> bool {
         let column = f.column();
         key.eq_ignore_ascii_case(column) || key.eq_ignore_ascii_case(&column.replace('_', "-"))
     })
+}
+
+/// True for the drawer keys `drawer_properties()` reconstructs from a typed
+/// SCALAR `Block` field, the way [`is_edge_drawer_key`] covers the ones it
+/// reconstructs from a typed EDGE field. Both are already carried as typed
+/// params (`collapsed` / `widget_only`, emitted above); re-ingesting the drawer
+/// spelling would ALSO park a stray uppercase string in `block.properties`,
+/// which the reference model never has.
+///
+/// This is a narrow allowlist of the two keys Holon itself serializes, NOT a
+/// case-insensitive match against the schema: matching case-insensitively would
+/// over-refuse an ordinary user property such as `:Sort_Key:`.
+fn is_typed_field_drawer_key(key: &str) -> bool {
+    matches!(key, "COLLAPSED" | "WIDGET_ONLY")
 }
 
 /// The `block_raw` storage columns, as one set built once.
@@ -297,6 +315,60 @@ mod tests {
                 "wrong task_state_category for keyword {task_state:?}"
             );
         }
+    }
+
+    /// `:COLLAPSED:` / `:WIDGET_ONLY:` are the drawer spellings
+    /// `drawer_properties()` reconstructs from typed SCALAR `Block` fields for
+    /// org WRITEBACK. The ingest leg must refuse them — they are already
+    /// carried as typed params, so re-ingesting the drawer key parks a
+    /// stray uppercase string in `properties` that the reference model
+    /// never has.
+    ///
+    /// The refusal is a NARROW allowlist, and this test pins that: `:Sort_Key:`
+    /// — an ordinary user property that differs from the `sort_key` storage
+    /// column only in case — must SURVIVE. A case-insensitive match against the
+    /// schema (the tempting one-liner) would swallow it, which is why the
+    /// allowlist names the two keys Holon itself serializes instead.
+    #[test]
+    fn typed_field_drawer_keys_are_refused_but_case_variant_user_keys_survive() {
+        let org = "* Folded\n:PROPERTIES:\n:ID: f1\n:COLLAPSED: t\n:WIDGET_ONLY: t\n:Sort_Key: \
+                   zzz\n:END:\n";
+        let parent_dir_id = EntityUri::no_parent();
+        let path = std::path::Path::new("/vault/fold.org");
+        let root = std::path::Path::new("/vault");
+        let parsed = parse_org_file(path, org, &parent_dir_id, root).expect("parse org fixture");
+        let block = parsed
+            .blocks
+            .iter()
+            .find(|b| b.id.id() == "f1")
+            .expect("the fixture must parse one headline");
+        assert!(
+            block.collapsed && block.widget_only,
+            "control: the parser must lift both fold markers into their typed fields"
+        );
+
+        let params = build_block_params(block, &parsed.document.id, &parsed.document.id, None);
+
+        assert_eq!(
+            params.get("collapsed"),
+            Some(&Value::Boolean(true)),
+            "the typed param is what carries the fold state"
+        );
+        assert_eq!(
+            params.get("widget_only"),
+            Some(&Value::Boolean(true)),
+            "same for the widget-only flag"
+        );
+        assert!(
+            !params.contains_key("COLLAPSED") && !params.contains_key("WIDGET_ONLY"),
+            "the drawer spellings must NOT also ride along as untyped properties: {params:?}"
+        );
+        assert_eq!(
+            params.get("Sort_Key"),
+            Some(&Value::String("zzz".to_string())),
+            "`:Sort_Key:` is an ordinary user property — the refusal must be a narrow allowlist, \
+             not a case-insensitive schema match that over-refuses it: {params:?}"
+        );
     }
 
     /// Regression (dogfood 2026-07-10, on-disk data loss): org ingest extracts
@@ -580,6 +652,16 @@ mod tests {
     /// `SpanCollector::global()` discipline: that collector lives in
     /// `holon-integration-tests`, which this crate cannot depend on. A local
     /// subscriber needs no touch-before-SUT ordering and leaks no global state.
+    ///
+    /// KNOWN INTERMITTENT under parallel test threads (measured 2/12 and 4/20;
+    /// 15/15 in isolation) — `tracing` caches callsite interest
+    /// PROCESS-globally, so a sibling thread running without a subscriber
+    /// can re-cache this WARN as "never" and the capture buffer comes back
+    /// empty. Pre-existing and not closed by the `rebuild_interest_cache()`
+    /// below. Run with `--test-threads=1` to confirm the LOGIC this test is
+    /// about. Real fix (a process-global test subscriber, or serializing
+    /// the capture tests) is tracked as an orchestrator follow-up,
+    /// IMPROVEMENTS 2026-08-22 "tracing interest-cache flake".
     #[test]
     fn the_refusal_is_disclosed_exactly_once_per_key() {
         let parent = EntityUri::no_parent();
@@ -592,6 +674,9 @@ mod tests {
             .without_time()
             .finish();
         tracing::subscriber::with_default(subscriber, || {
+            // Does not fix the race; a sibling thread with no subscriber can
+            // re-cache the callsite as `never` between the rebuild and the call.
+            tracing::callsite::rebuild_interest_cache();
             build_block_params(&block, &parent, &parent, Some(&block));
         });
 

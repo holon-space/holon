@@ -1688,6 +1688,16 @@ pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
         // underscore key) the only canonical reader.
     }
 
+    // `collapsed` and `widget_only` are typed Block fields that live in the
+    // Loro property map, and `read_block_from_tree` has already LIFTED them out
+    // of `block.properties` into their typed slots — so the flatten below can
+    // never carry them and they must be emitted explicitly. Always emitted (as
+    // in `build_block_params`) so unfolding a block clears the column rather
+    // than leaving the last `true` pinned. `block_diff_params` emits the same
+    // pair on change.
+    params.insert("collapsed".into(), Value::Boolean(block.collapsed));
+    params.insert("widget_only".into(), Value::Boolean(block.widget_only));
+
     // Flatten all raw block properties onto the top-level params map. The
     // downstream `OperationProvider` (e.g. `SqlOperationProvider`) partitions
     // them into SQL columns vs. the `properties` JSON column based on its own
@@ -1960,6 +1970,52 @@ mod marks_outbound_tests {
         assert!(
             !params.contains_key("marks"),
             "marks key should be absent when Block.marks=None"
+        );
+    }
+
+    /// The CREATE half of the fold-state projection, pinned independently of
+    /// org ingest.
+    ///
+    /// `collapsed` and `widget_only` are typed `Block` fields that the Loro
+    /// authority stores in the node's property map, and `read_block_from_tree`
+    /// LIFTS them out of `properties` into the typed slots before this function
+    /// ever sees the block. So the generic `block.properties` flatten below
+    /// cannot carry them and they must be emitted explicitly — a block born
+    /// folded reached `block_raw` with `collapsed = 0` when they were not.
+    ///
+    /// The asymmetry that hid this: `block_diff_params` (the UPDATE path) DID
+    /// emit the pair, so toggling a fold in the UI persisted correctly and only
+    /// a block CREATED already-folded lost it.
+    #[test]
+    fn block_to_params_emits_the_typed_fold_fields_on_create() {
+        let mut folded = block_with_marks("folded parent", None);
+        folded.block.collapsed = true;
+        folded.block.widget_only = true;
+        let params = block_to_params(&folded);
+        assert_eq!(
+            params.get("collapsed"),
+            Some(&Value::Boolean(true)),
+            "a block born folded must project its fold state to the typed column: {params:?}"
+        );
+        assert_eq!(
+            params.get("widget_only"),
+            Some(&Value::Boolean(true)),
+            "widget_only mirrors collapsed: {params:?}"
+        );
+
+        // Always emitted, not only when set — otherwise an unfold would leave
+        // the last `true` pinned in the column instead of clearing it.
+        let open = block_with_marks("open parent", None);
+        let params = block_to_params(&open);
+        assert_eq!(
+            params.get("collapsed"),
+            Some(&Value::Boolean(false)),
+            "an unfolded block must emit `false`, not omit the key: {params:?}"
+        );
+        assert_eq!(
+            params.get("widget_only"),
+            Some(&Value::Boolean(false)),
+            "same for widget_only: {params:?}"
         );
     }
 

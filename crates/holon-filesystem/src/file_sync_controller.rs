@@ -268,13 +268,7 @@ fn block_create_request(
     block: &Block,
     parent_uri: &EntityUri,
 ) -> holon_core::block_ordering::BlockCreateRequest {
-    holon_core::block_ordering::BlockCreateRequest {
-        parent_id: parent_uri.clone(),
-        id: block.id.clone(),
-        content: block.to_block_content(),
-        properties: block.properties.clone(),
-        edges: holon_api::BlockEdges::of(block),
-    }
+    holon_core::block_ordering::BlockCreateRequest::of(block, parent_uri)
 }
 
 /// Hand one buffered chunk of creates to the ordering authority and apply the
