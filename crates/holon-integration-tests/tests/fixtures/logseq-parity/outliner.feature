@@ -66,27 +66,20 @@ Feature: Outliner editing
     And within 10 seconds block "block:c2" is not collapsed
 
   # The third `Then` of log:4, "the collapsed state is persisted
-  # (block/collapsed? = true)". The ASSERTION vocabulary now exists —
-  # `block "<id>" is collapsed` (lane gv-vocab, oracle `block_raw.collapsed`) —
-  # and this scenario was written against it and RUN. It stays `@wip` because
-  # it found a PRODUCTION BUG, not because it cannot be expressed:
+  # (block/collapsed? = true)". The two LORO-path drops this scenario originally
+  # found are FIXED (lane collapsed-bug): the ingest packed its create intent
+  # into a `BlockCreateRequest` with no slot for the typed fold fields, and the
+  # Loro→SQL create projection never emitted them either. See
+  # docs/Testing/bugfunnel/entries/2026-08-22-org-ingest-drops-collapsed-into-property-bag.md
+  # and 2026-08-22-loro-create-projection-drops-fold-state.md.
   #
-  #   inv-blocks-match-ref/block_raw: block:folded-parent
-  #     SUT:       properties: {"COLLAPSED": String("t")}, collapsed: false
-  #     reference: properties: {},                        collapsed: true
-  #
-  # The parser is correct (`parser.rs:994`, test at ~2019: `:COLLAPSED: t` sets
-  # `block.collapsed = true`). The loss is in the ingest write leg:
-  # `holon-orgmode/src/block_params.rs` emits the typed `collapsed` param
-  # (line ~132) AND then re-emits the drawer key from
-  # `Block::drawer_properties()` (`holon-org-format/src/models.rs:976`), whose
-  # uppercase `"COLLAPSED"` is not recognised by the case-sensitive
-  # `is_storage_column_key` (block_params.rs:224) and so lands in the untyped
-  # `properties` JSON instead of being refused. `widget_only` has the identical
-  # shape. Un-`@wip` this once the ingest leg stops double-emitting the two
-  # typed fold fields — `drawer_properties()` serves BOTH org writeback (which
-  # needs the drawer keys) and ingest (which must not see them), and splitting
-  # that dual purpose is a design decision, not a vocabulary fix.
+  # STILL `@wip`, for a DIFFERENT and still-open bug: un-`@wip`ed, this scenario
+  # EXECUTES and REDS under the shipped default Sql authority —
+  #   inv-blocks-match-ref/matview: block:folded-parent collapsed sut=false ref=true
+  #   authority: block-CRUD=Sql(SqlOperationProvider); org-writeback=on
+  # — see 2026-08-22-sql-authority-org-ingest-loses-fold-state.md. Un-`@wip` this
+  # when THAT drop is fixed; the tag is now the only thing hiding it, so do not
+  # let it sit here quietly.
   @wip @observed
   Scenario: A folded block carries its collapsed mark into the store   # log:4
     Given an org file "Folded.org":

@@ -131,7 +131,14 @@ to be.
 
 ## Remedy
 
-FIXED in lane `collapsed-bug`.
+FIXED in lane `collapsed-bug` — with a SCOPE LIMIT, stated first because the
+headline above is only established for one of the two authorities:
+
+**Loro-authority path FIXED (both drops). Separately, the log:4 parity scenario
+(runtime `WriteOrgFile` under default Sql authority, in the COMPOSED harness)
+still loses the fold; BOTH cold-boot and live-watcher ingest of the same fixture
+are measured correct on both tables, so the loss is not in the ingest — OPEN, see
+[2026-08-22-sql-authority-org-ingest-loses-fold-state](2026-08-22-sql-authority-org-ingest-loses-fold-state.md).**
 
 * `BlockCreateRequest::of(block, parent_id)` (`holon-core/src/block_ordering.rs`)
   is now the ONE way an ingest packs a create intent, and it carries the typed
@@ -170,15 +177,13 @@ vague claim: reverting `is_typed_field_drawer_key` alone leaves
 pinned ONLY by
 `block_params::typed_field_drawer_keys_are_refused_but_case_variant_user_keys_survive`
 and `org_store_org_round_trip::collapsed_drawer_marker_survives_both_write_legs`.
-Conversely those two never reach the Loro create path and so cannot see either
-drop. Deleting either group silently un-covers half of this entry.
+Of those two, only the `block_params` unit test is confined to the ingest leg;
+`collapsed_drawer_marker_survives_both_write_legs` drives `block_to_params`
+directly in its `Loro` arm and reds on drop 2 as well (measured). Deleting it
+un-covers both halves at once.
 * `logseq-parity/outliner.feature` — the scenario "A folded block carries its
-  collapsed mark into the store" is the corpus-level proof, and its un-`@wip`
-  lands as a SEPARATE rev on top of this one, PENDING the rebase onto
-  `gv-vocab`. It could not ride along here: that scenario and the
-  `block "<id>" is collapsed` matcher it needs both live in lane `gv-vocab` and
-  neither is on main, so un-`@wip`ing it in this rev reds the parity replay on
-  an unrelated scenario (`log:2` uses GV's `comes after` matcher, which main
-  also lacks) — the feature file and its matchers are one indivisible GV unit.
-  Splitting it into its own rev also keeps the fix and the scenario activation
-  separately attributable.
+  collapsed mark into the store" STAYS `@wip`, and not for this entry's bug.
+  Un-`@wip`ed on the train it executes and REDS on the third drop above, under
+  the shipped default Sql authority. Its comment now names that drop and its
+  entry, so the tag is documented rather than silently re-parking a known loss.
+  This entry's two drops are proven by the tests above, not by the corpus.
