@@ -6087,6 +6087,7 @@ dependencies = [
  "gql-transform",
  "holon-api",
  "holon-core",
+ "holon-turso",
  "proptest 1.11.0",
  "serde_json",
  "sqlparser 0.61.0",

@@ -835,6 +835,76 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
+    // `query` is write-capable, and it is the write leg the removed
+    // quoted-identifier guard never covered: that guard sat on
+    // `execute`/`transaction`, so a quoted write submitted through `query` was
+    // neither screened nor pinned. Its removal is engine-fix-backed (the fork
+    // pin maintains quoted-identifier writes), and this pins the leg the guard
+    // left open.
+    //
+    // The oracle is a RECOMPUTE of the matview's defining SELECT, not a row
+    // count: a count agrees even when the maintained rows carry stale column
+    // values, which is exactly what a half-maintained UPDATE looks like.
+    #[tokio::test]
+    async fn a_quoted_write_through_query_keeps_the_matview_equal_to_its_recompute() {
+        use std::collections::HashMap;
+
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory backend");
+        let td = person_td();
+        TursoAdapter::register(&td, &handle)
+            .await
+            .expect("register");
+
+        for sql in [
+            "INSERT INTO \"person_raw\" (id, email, role) VALUES ('q-0', 'a', 'x')",
+            "INSERT INTO\"person_raw\" (id, email, role) VALUES ('q-1', 'b', 'y')",
+            "INSERT INTO \"person_raw\" (id, email, role) VALUES ('q-2', 'c', 'z')",
+            "UPDATE \"person_raw\" SET email = 'updated' WHERE id = 'q-0'",
+            "DELETE FROM \"person_raw\" WHERE id = 'q-1'",
+        ] {
+            handle.query(sql, HashMap::new()).await.expect(sql);
+        }
+
+        let projected = |sql: String| {
+            let handle = handle.clone();
+            async move {
+                let mut rows: Vec<Vec<Option<holon_api::Value>>> = handle
+                    .query(&sql, HashMap::new())
+                    .await
+                    .expect("query")
+                    .iter()
+                    .map(|row| {
+                        ["id", "email", "role"]
+                            .iter()
+                            .map(|c| row.get(*c).cloned())
+                            .collect()
+                    })
+                    .collect();
+                rows.sort_by_key(|r| format!("{:?}", r[0]));
+                rows
+            }
+        };
+
+        let maintained = projected("SELECT id, email, role FROM person".to_string()).await;
+        let recomputed = projected(TursoAdapter::matview_select(&td)).await;
+        assert_eq!(
+            maintained.len(),
+            2,
+            "the quoted writes through query() must have landed"
+        );
+        assert_eq!(
+            maintained, recomputed,
+            "after quoted-identifier writes through query(), the matview must equal a recompute \
+             of its defining SELECT"
+        );
+
+        handle.shutdown().await.expect("shutdown");
+    }
+
     // The batch path is the highest-volume writer — QueryableCache's
     // change-stream submits through `transaction`, not `execute` — so the
     // quoted spelling has to maintain the matview here too, not only on the

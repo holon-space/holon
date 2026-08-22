@@ -1478,8 +1478,13 @@ mod tests {
         engine
             .db_handle()
             .execute(
-                "INSERT OR REPLACE INTO navigation_history (id, region, block_id) VALUES (1, \
-                 'main', 'block:p')",
+                // Plain INSERT, not INSERT OR REPLACE: `navigation_history` is a
+                // rowid-alias table (`id INTEGER PRIMARY KEY AUTOINCREMENT`) and
+                // the base of the `focus_roots` / `current_focus` matviews, which
+                // is the one shape the fork's IVM corrupts on a REPLACE — so the
+                // DbHandle guard refuses it. The row is fresh here anyway.
+                "INSERT INTO navigation_history (id, region, block_id) VALUES (1, 'main', \
+                 'block:p')",
                 vec![],
             )
             .await

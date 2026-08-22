@@ -1144,11 +1144,12 @@ pub fn backlinks_view_select() -> String {
     )
 }
 
-/// Link schema module providing the block_link table.
+/// Link schema module providing the block_links junction and the `backlinks`
+/// materialized view.
 ///
-/// Indexes wiki-style `[[...]]` links extracted from block content.
-/// Backlink queries use the `target_id` index directly — no materialized view
-/// needed.
+/// Indexes wiki-style `[[...]]` links extracted from block content. `backlinks`
+/// is IVM-maintained (see `ensure_schema`), so `block_links` is a matview base:
+/// writes to it must keep IVM able to maintain the view.
 pub struct LinkSchemaModule;
 
 #[async_trait]

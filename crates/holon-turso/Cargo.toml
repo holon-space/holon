@@ -43,7 +43,17 @@ tokio = { workspace = true, default-features = false, features = ["sync", "macro
 wasm-bindgen-futures = "0.4"
 web-time = "1"
 
+[features]
+# Opens `DbHandle::execute_unguarded` so a test can still drive the engine
+# defects the write guards exist for. Never enable outside tests: it is the one
+# door around the quoted-identifier and REPLACE-into-rowid-matview-base checks.
+unguarded-writes = []
+
+# Self-dev-dependency so THIS crate's integration tests (tests/*.rs, which do not
+# get the lib's `cfg(test)`) can reach `execute_unguarded`. Downstream crates are
+# unaffected — they never see the feature unless they ask for it.
 [dev-dependencies]
+holon-turso = { path = ".", features = ["unguarded-writes"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile.workspace = true
 proptest.workspace = true

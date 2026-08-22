@@ -158,6 +158,24 @@ pub enum DbCommand {
         response: oneshot::Sender<Result<u64>>,
     },
 
+    /// Execute a statement WITHOUT the REPLACE screening point.
+    ///
+    /// EXISTS ONLY so tests can still drive the engine defects the guard exists
+    /// for. Reachable solely through `DbHandle::execute_unguarded`, which is
+    /// gated behind `cfg(test)` / the `unguarded-writes` feature.
+    ExecuteUnscreened {
+        sql: String,
+        params: Vec<turso::Value>,
+        response: oneshot::Sender<Result<u64>>,
+    },
+
+    /// Execute DDL WITHOUT the `ON CONFLICT REPLACE` screen. Test-only door,
+    /// reachable solely through `DbHandle::execute_ddl_unguarded`.
+    ExecuteDdlUnscreened {
+        sql: String,
+        response: oneshot::Sender<Result<()>>,
+    },
+
     /// Execute DDL (CREATE TABLE, CREATE VIEW, etc.) immediately
     ExecuteDdl {
         sql: String,
@@ -345,6 +363,368 @@ fn named_params_fingerprint(params: &HashMap<String, Value>) -> String {
 /// one bucket over-subtract their combined excess — so a truncated fingerprint
 /// carries a hash of the FULL text, making it injective in the SQL while the
 /// readable head/tail survives for the reader.
+/// Split SQL into identifier-ish tokens. A double-quoted identifier keeps its
+/// quotes and stays ONE token even when it abuts the previous word
+/// (`INSERT INTO"t"`); every other punctuation character is a separator.
+///
+/// Deliberately not a SQL parser — just enough to find the token sitting in a
+/// write statement's TABLE position.
+fn identifier_tokens(sql: &str) -> Vec<&str> {
+    // char_indices, never raw byte indexing: SQL carries arbitrary text in its
+    // literals (an em dash in a block's content is enough), and slicing on a
+    // byte offset inside a multi-byte character panics.
+    let mut out = Vec::new();
+    let mut it = sql.char_indices().peekable();
+    while let Some(&(idx, c)) = it.peek() {
+        if c == '"' {
+            it.next();
+            let mut end = sql.len();
+            while let Some((j, d)) = it.next() {
+                if d == '"' {
+                    // `""` is an escaped quote INSIDE the identifier.
+                    if it.peek().map(|&(_, e)| e) == Some('"') {
+                        it.next();
+                        continue;
+                    }
+                    end = j + d.len_utf8();
+                    break;
+                }
+            }
+            out.push(&sql[idx..end]);
+        } else if c.is_alphanumeric() || c == '_' {
+            let mut end = sql.len();
+            while let Some(&(j, d)) = it.peek() {
+                if d.is_alphanumeric() || d == '_' {
+                    it.next();
+                } else {
+                    end = j;
+                    break;
+                }
+            }
+            out.push(&sql[idx..end]);
+        } else {
+            it.next();
+        }
+    }
+    out
+}
+
+/// Does `haystack` contain `needle` (lowercase ASCII), ignoring case, without
+/// allocating? `str::to_lowercase` on every statement would allocate on the
+/// read path, which is what this exists to avoid.
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.is_empty() || h.len() < n.len() {
+        return n.is_empty();
+    }
+    h.windows(n.len())
+        .any(|w| w.iter().zip(n).all(|(a, b)| a.eq_ignore_ascii_case(b)))
+}
+
+/// `sql` with comment text AND single-quoted string-literal text blanked out,
+/// so only SQL *code* remains readable.
+///
+/// Both erasures are load-bearing for the guard:
+/// - Comments: production SQL files lead with a comment block
+///   (`crates/holon/sql/navigation/set_cursor_to_history.sql` opens with five
+///   `--` lines), and a tokenizer that sees comment words reads the first of
+///   them as the statement's verb, silently disarming the guard.
+/// - String literals: a literal is DATA, never the target. One containing
+///   `INTO` ahead of the real target aims the guard at the wrong identifier (`…
+///   (SELECT 'INTO decoy') INSERT OR REPLACE INTO q2 …` resolved to `decoy`),
+///   and one containing the verb can turn the guard on for a statement that
+///   writes nothing.
+///
+/// Double-quoted and backticked spans are IDENTIFIERS, not literals, and are
+/// deliberately left intact — the target may be spelled that way.
+///
+/// Text is replaced by spaces rather than removed so byte offsets are preserved
+/// for anything reading positions out of the result.
+fn blank_comments_and_string_literals(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut out: Vec<u8> = bytes.to_vec();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            // Single quotes delimit a string LITERAL: blank its contents.
+            b'\'' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\'' {
+                        // A doubled quote is an escape, not the end.
+                        if bytes.get(i + 1) == Some(&b'\'') {
+                            out[i] = b' ';
+                            out[i + 1] = b' ';
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    if bytes[i] != b'\n' {
+                        out[i] = b' ';
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            // Double quotes and backticks delimit an IDENTIFIER: skip intact.
+            b'"' | b'`' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == quote {
+                        if bytes.get(i + 1) == Some(&quote) {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    out[i] = b' ';
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let end = sql[i..].find("*/").map_or(bytes.len(), |o| i + o + 2);
+                for slot in out.iter_mut().take(end).skip(i) {
+                    // Keep newlines so line numbers survive.
+                    if *slot != b'\n' {
+                        *slot = b' ';
+                    }
+                }
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    // Only whole ASCII bytes were overwritten with spaces, so this stays valid
+    // UTF-8: multi-byte characters live inside literals or are skipped intact.
+    String::from_utf8(out).expect("blanking ASCII comment bytes preserves UTF-8")
+}
+
+/// The bare table name from a possibly schema-qualified, possibly quoted
+/// identifier: `main.sq` and `"main"."sq"` both yield `sq`.
+///
+/// Taking the token after `INTO` verbatim would yield `main` for a qualified
+/// target, which matches no table and turns the guard off.
+fn bare_table_name(identifier: &str) -> &str {
+    identifier
+        .rsplit('.')
+        .next()
+        .unwrap_or(identifier)
+        .trim_matches('"')
+        .trim_matches('`')
+}
+
+/// The table a REPLACE-flavoured write targets: `REPLACE INTO t` or
+/// `INSERT OR REPLACE INTO t`, including behind a `WITH` clause, behind leading
+/// comments, and through a schema qualifier.
+///
+/// `INSERT OR IGNORE` / `INSERT OR ABORT` and friends are NOT REPLACE and
+/// return `None` — only the conflict action that DELETES the old row reaches
+/// the defective engine path.
+fn replace_write_target(sql: &str) -> Option<String> {
+    // Fast path, and the reason this guard is affordable on the READ path: a
+    // statement that does not contain the word "replace" at all cannot be a
+    // REPLACE, and every SELECT takes this branch without allocating. Only
+    // candidates pay for comment-stripping and tokenizing.
+    if !contains_ascii_case_insensitive(sql, "replace") {
+        return None;
+    }
+    let sql = blank_comments_and_string_literals(sql);
+    let tokens = identifier_tokens(&sql);
+    let verb_at = if tokens.first()?.eq_ignore_ascii_case("WITH") {
+        tokens.iter().position(|t| {
+            ["INSERT", "REPLACE"]
+                .iter()
+                .any(|v| t.eq_ignore_ascii_case(v))
+        })?
+    } else {
+        0
+    };
+    let rest = &tokens[verb_at..];
+    match rest.first()?.to_ascii_uppercase().as_str() {
+        "REPLACE" => {}
+        // Only `INSERT OR REPLACE`, never the other OR-actions.
+        "INSERT" => {
+            if !(rest.get(1).is_some_and(|t| t.eq_ignore_ascii_case("OR"))
+                && rest
+                    .get(2)
+                    .is_some_and(|t| t.eq_ignore_ascii_case("REPLACE")))
+            {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    // The target is read from the TEXT, not from `rest`: `identifier_tokens` drops
+    // the `.` separator, so a qualified `main.navigation_cursor` arrives as two
+    // tokens and taking the one after `INTO` yields the SCHEMA (`main`) — a name
+    // that matches no table, which turns the guard off.
+    target_after_into(&sql)
+}
+
+/// The table named after the `INTO` keyword, as a bare name.
+///
+/// Reads the identifier chain (`a`, `a.b`, `"a"."b"`) out of the text and keeps
+/// the LAST segment, which is the table.
+fn target_after_into(sql: &str) -> Option<String> {
+    let upper = sql.to_ascii_uppercase();
+    let bytes = upper.as_bytes();
+    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut at = 0usize;
+    let after_into = loop {
+        let found = upper[at..].find("INTO")? + at;
+        let before_ok = found == 0 || !is_ident(bytes[found - 1]);
+        let after = found + 4;
+        let after_ok = after >= bytes.len() || !is_ident(bytes[after]);
+        if before_ok && after_ok {
+            break after;
+        }
+        at = found + 4;
+    };
+
+    let raw = sql.as_bytes();
+    let mut i = after_into;
+    let mut last = String::new();
+    loop {
+        while i < raw.len() && (raw[i] as char).is_whitespace() {
+            i += 1;
+        }
+        if i >= raw.len() {
+            break;
+        }
+        let segment_start = i;
+        if raw[i] == b'"' || raw[i] == b'`' {
+            let quote = raw[i];
+            i += 1;
+            while i < raw.len() {
+                if raw[i] == quote {
+                    if raw.get(i + 1) == Some(&quote) {
+                        i += 2;
+                        continue;
+                    }
+                    break;
+                }
+                i += 1;
+            }
+            i += 1;
+        } else {
+            while i < raw.len() && is_ident(raw[i]) {
+                i += 1;
+            }
+        }
+        if i == segment_start {
+            break;
+        }
+        last = sql[segment_start..i]
+            .trim_matches('"')
+            .trim_matches('`')
+            .to_string();
+        // Another segment follows only across a `.`.
+        let mut probe = i;
+        while probe < raw.len() && (raw[probe] as char).is_whitespace() {
+            probe += 1;
+        }
+        if probe < raw.len() && raw[probe] == b'.' {
+            i = probe + 1;
+            continue;
+        }
+        break;
+    }
+    (!last.is_empty()).then_some(last)
+}
+
+/// Is this table a rowid alias, judged from `PRAGMA table_info` rows?
+///
+/// `rows` are `(name, declared_type, is_pk)` straight from the pragma. A table
+/// is a rowid alias when EXACTLY ONE column is the primary key and its declared
+/// type is exactly `INTEGER` — which is true of both spellings SQLite accepts:
+/// the column constraint `id INTEGER PRIMARY KEY` and the single-column table
+/// constraint `id INTEGER, … , PRIMARY KEY (id)`.
+///
+/// Reading the DDL string instead misses the table-constraint spelling
+/// entirely, which is under-approximation — the unsafe direction for a guard.
+/// `INT PRIMARY KEY` does not alias (SQLite requires the exact word `INTEGER`),
+/// and a composite `PRIMARY KEY (a, b)` never does.
+fn is_rowid_alias_from_pragma(rows: &[(String, String, bool)]) -> bool {
+    let pks: Vec<&(String, String, bool)> = rows.iter().filter(|(_, _, pk)| *pk).collect();
+    match pks.as_slice() {
+        [(_, declared_type, _)] => declared_type.trim().eq_ignore_ascii_case("INTEGER"),
+        _ => false,
+    }
+}
+
+/// Does this DDL declare `ON CONFLICT REPLACE`?
+///
+/// SQLite lets a table declare the conflict action in its schema — on a column
+/// constraint (`id INTEGER PRIMARY KEY ON CONFLICT REPLACE`) or a table
+/// constraint (`UNIQUE(val) ON CONFLICT REPLACE`). Every later plain `INSERT`
+/// then carries REPLACE semantics, so the corrupting write contains no
+/// "replace" text at all and NO amount of statement inspection can see it.
+///
+/// Comments and string literals are blanked first: the phrase inside a column
+/// DEFAULT is data, not a conflict clause.
+pub(crate) fn declares_on_conflict_replace(ddl: &str) -> bool {
+    if !contains_ascii_case_insensitive(ddl, "conflict") {
+        return false;
+    }
+    let code = blank_comments_and_string_literals(ddl);
+    let tokens = identifier_tokens(&code);
+    tokens.windows(3).any(|w| {
+        w[0].eq_ignore_ascii_case("ON")
+            && w[1].eq_ignore_ascii_case("CONFLICT")
+            && w[2].eq_ignore_ascii_case("REPLACE")
+    })
+}
+
+/// The loud rejection for schema-declared REPLACE semantics.
+fn reject_on_conflict_replace(what: &str, sql: &str) -> StorageError {
+    StorageError::DatabaseError(format!(
+        "refusing {what}: it declares ON CONFLICT REPLACE. A table with that clause gives every \
+         later PLAIN INSERT full REPLACE semantics — the corrupting write then contains no \
+         \"replace\" text at all, so no statement-level check can catch it, which is why this is \
+         refused at the schema seam instead. On our Turso fork a REPLACE against a rowid-alias \
+         matview base silently drops rows from every view over the table (see \
+         crates/holon-turso/tests/replace_into_matview_base.rs; engine fix: fork bookmark \
+         `ivm-replace-double-old-row-capture`, PR #8463). Nothing in production declares this \
+         clause. Use a statement-level `INSERT ... ON CONFLICT(key) DO UPDATE SET ...` instead, \
+         which is measured correct on this shape. Statement: {sql}"
+    ))
+}
+
+/// The loud rejection for a REPLACE aimed at a rowid-alias matview base.
+fn reject_replace_into_rowid_matview_base(
+    sql: &str,
+    table: &str,
+    views: &[String],
+    position: Option<usize>,
+) -> StorageError {
+    let where_ = match position {
+        Some(i) => format!(" (statement {i} of the transaction batch)"),
+        None => String::new(),
+    };
+    StorageError::DatabaseError(format!(
+        "refusing a REPLACE into `{table}`{where_}: it is a rowid-alias table (a lone INTEGER \
+         PRIMARY KEY, either spelling) AND the base of materialized view(s) {views:?}. On our \
+         Turso fork that conjunction corrupts IVM: the REPLACE path captures the old row TWICE \
+         (Insn::Delete plus the Insn::Insert REQUIRE_SEEK branch), the row's weight falls to -1 \
+         and it SILENTLY DISAPPEARS from the view — the read does not even error. An UNCHANGED \
+         value corrupts EVERY view shape (projection, filter, aggregate, INNER and LEFT JOIN); a \
+         CHANGED value additionally corrupts AGGREGATE views as soon as it moves the row back \
+         into a group that existed before. Measured in \
+         crates/holon-turso/tests/replace_into_matview_base.rs. Engine fix: fork \
+         bookmark `ivm-replace-double-old-row-capture` (PR #8463) — this guard stays after it \
+         lands, to keep the pattern out of the tree. Use `INSERT ... ON CONFLICT(key) DO UPDATE \
+         SET ...`, which is measured correct on this exact shape. Statement: {sql}"
+    ))
+}
+
 fn sql_fingerprint(sql: &str) -> String {
     use std::hash::Hash;
     use std::hash::Hasher;
@@ -473,6 +853,27 @@ impl DbHandle {
             .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
     }
 
+    /// Execute DDL WITHOUT the `ON CONFLICT REPLACE` screen.
+    ///
+    /// EXISTS ONLY so tests can BUILD the pre-existing-table case the
+    /// registration check defends against, and drive the engine defect that
+    /// clause reaches. Same contract as [`Self::execute_unguarded`]: delete it
+    /// with the guards when the fork ships the REPLACE fix.
+    #[cfg(any(test, feature = "unguarded-writes"))]
+    pub async fn execute_ddl_unguarded(&self, sql: &str) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::ExecuteDdlUnscreened {
+                sql: sql.to_string(),
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+        response_rx
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
+    }
+
     /// Execute DDL (CREATE TABLE, CREATE VIEW, etc.)
     #[tracing::instrument(skip(self), fields(sql = %sql_fingerprint(sql)))]
     pub async fn execute_ddl(&self, sql: &str) -> Result<()> {
@@ -517,6 +918,35 @@ impl DbHandle {
             .await
             .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
 
+        response_rx
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
+    }
+
+    /// Execute a write WITHOUT the REPLACE screen.
+    ///
+    /// EXISTS ONLY to keep the engine defect the guard exists for
+    /// demonstrable. With the guard armed, nothing in the suite can reach the
+    /// broken engine path any more, so a fork that fixed it — or a careless
+    /// removal of the guard — would go unnoticed. The rowid-alias REPLACE
+    /// witnesses in `tests/replace_into_matview_base.rs` drive their A/B legs
+    /// through here.
+    ///
+    /// DELETE THIS, with the guard and the witnesses, when the fork ships the
+    /// REPLACE double-capture fix (`ivm-replace-double-old-row-capture`,
+    /// PR #8463).
+    #[cfg(any(test, feature = "unguarded-writes"))]
+    pub async fn execute_unguarded(&self, sql: &str, params: Vec<holon_api::Value>) -> Result<u64> {
+        let params = params.iter().map(value_to_turso_param).collect();
+        let (response_tx, response_rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::ExecuteUnscreened {
+                sql: sql.to_string(),
+                params,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
         response_rx
             .await
             .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
@@ -2057,7 +2487,10 @@ impl TursoBackend {
                 response,
             } => {
                 trace_sql_named("actor_query", &sql, &params);
-                let result = Self::handle_query(conn, &sql, params).await;
+                let result = match Self::screen_replace_statement(conn, &sql, None).await {
+                    Ok(()) => Self::handle_query(conn, &sql, params).await,
+                    Err(e) => Err(e),
+                };
                 let _ = response.send(result);
             }
 
@@ -2067,7 +2500,10 @@ impl TursoBackend {
                 response,
             } => {
                 trace_sql_positional("actor_query", &sql, &params);
-                let result = Self::handle_query_positional(conn, &sql, params).await;
+                let result = match Self::screen_replace_statement(conn, &sql, None).await {
+                    Ok(()) => Self::handle_query_positional(conn, &sql, params).await,
+                    Err(e) => Err(e),
+                };
                 let _ = response.send(result);
             }
 
@@ -2077,12 +2513,33 @@ impl TursoBackend {
                 response,
             } => {
                 trace_sql_positional("actor_exec", &sql, &params);
+                let result = match Self::screen_replace_statement(conn, &sql, None).await {
+                    Ok(()) => Self::handle_execute(conn, &sql, params).await,
+                    Err(e) => Err(e),
+                };
+                let _ = response.send(result);
+            }
+
+            DbCommand::ExecuteUnscreened {
+                sql,
+                params,
+                response,
+            } => {
+                trace_sql_positional("actor_exec_unscreened", &sql, &params);
                 let result = Self::handle_execute(conn, &sql, params).await;
                 let _ = response.send(result);
             }
 
-            DbCommand::ExecuteDdl { sql, response } => {
+            DbCommand::ExecuteDdlUnscreened { sql, response } => {
                 let result = Self::handle_ddl(conn, &sql).await;
+                let _ = response.send(result);
+            }
+
+            DbCommand::ExecuteDdl { sql, response } => {
+                let result = match Self::screen_conflict_replace_ddl(&sql) {
+                    Ok(()) => Self::handle_ddl(conn, &sql).await,
+                    Err(e) => Err(e),
+                };
                 if result.is_ok()
                     && let Ok(stmts) = parse_sql(&sql)
                 {
@@ -2151,7 +2608,20 @@ impl TursoBackend {
                 statements,
                 response,
             } => {
-                let result = Self::handle_transaction(conn, statements).await;
+                let mut screened = Ok(());
+                for (i, (stmt_sql, _)) in statements.iter().enumerate() {
+                    // Screen EVERY statement before ANY of them runs, so one
+                    // offender rejects the whole batch rather than letting a
+                    // prefix through.
+                    if let Err(e) = Self::screen_replace_statement(conn, stmt_sql, Some(i)).await {
+                        screened = Err(e);
+                        break;
+                    }
+                }
+                let result = match screened {
+                    Ok(()) => Self::handle_transaction(conn, statements).await,
+                    Err(e) => Err(e),
+                };
                 let _ = response.send(result);
             }
 
@@ -2365,6 +2835,118 @@ impl TursoBackend {
         })?;
 
         Ok(rows_affected)
+    }
+
+    /// THE screening point. Every statement the actor is about to run passes
+    /// through here, whatever DbHandle method submitted it.
+    ///
+    /// It lives in the actor rather than on the DbHandle methods for one
+    /// reason: `query` and `query_positional` are write-capable, and every
+    /// production REPLACE in the tree is written through `query()` (the four
+    /// navigation call sites in `crates/holon/src/navigation/provider.rs`).
+    /// A guard installed on `execute`/`transaction` alone is inert against
+    /// exactly the statements it exists to stop.
+    ///
+    /// Rejects a REPLACE aimed at a rowid-alias table that some materialized
+    /// view is built on — see [`reject_replace_into_rowid_matview_base`] for
+    /// why that conjunction and no other.
+    ///
+    /// Cost: the schema lookups run ONLY once `replace_write_target` says the
+    /// statement is a REPLACE. No production statement is, so the steady-state
+    /// price is one comment strip plus one token scan per statement.
+    async fn screen_replace_statement(
+        conn: &turso::Connection,
+        sql: &str,
+        position: Option<usize>,
+    ) -> Result<()> {
+        let Some(target) = replace_write_target(sql) else {
+            return Ok(());
+        };
+
+        // `PRAGMA table_info` is the authority on the key shape — the DDL
+        // string cannot distinguish the two spellings of a rowid alias.
+        let mut pragma = conn
+            .prepare(&format!("PRAGMA table_info({target})"))
+            .await
+            .map_err(|e| {
+                StorageError::DatabaseError(format!("guard: PRAGMA table_info({target}): {e}"))
+            })?;
+        let mut rows = pragma.query(()).await.map_err(|e| {
+            StorageError::DatabaseError(format!("guard: PRAGMA table_info({target}): {e}"))
+        })?;
+        let mut columns: Vec<(String, String, bool)> = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| {
+            StorageError::DatabaseError(format!("guard: reading table_info({target}): {e}"))
+        })? {
+            let text = |i: usize| match row.get_value(i) {
+                Ok(turso::Value::Text(s)) => s,
+                _ => String::new(),
+            };
+            let pk = matches!(row.get_value(5), Ok(turso::Value::Integer(n)) if n != 0);
+            columns.push((text(1), text(2), pk));
+        }
+        // Unknown table (or a virtual/foreign table with no pragma rows): there
+        // is nothing to corrupt yet, and refusing would break table creation
+        // order. The engine reports a genuinely missing table itself.
+        if columns.is_empty() || !is_rowid_alias_from_pragma(&columns) {
+            return Ok(());
+        }
+
+        let mut views_stmt = conn
+            .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'view'")
+            .await
+            .map_err(|e| StorageError::DatabaseError(format!("guard: listing views: {e}")))?;
+        let mut view_rows = views_stmt
+            .query(())
+            .await
+            .map_err(|e| StorageError::DatabaseError(format!("guard: listing views: {e}")))?;
+        let mut dependent = Vec::new();
+        while let Some(row) = view_rows
+            .next()
+            .await
+            .map_err(|e| StorageError::DatabaseError(format!("guard: reading views: {e}")))?
+        {
+            let text = |i: usize| match row.get_value(i) {
+                Ok(turso::Value::Text(s)) => s,
+                _ => String::new(),
+            };
+            let (name, view_sql) = (text(0), text(1));
+            if !view_sql
+                .trim_start()
+                .to_ascii_uppercase()
+                .starts_with("CREATE MATERIALIZED VIEW")
+            {
+                continue;
+            }
+            // Token scan rather than a parse: it over-approximates toward
+            // REJECTING, the safe direction for a guard.
+            if identifier_tokens(&blank_comments_and_string_literals(&view_sql))
+                .iter()
+                .any(|t| bare_table_name(t).eq_ignore_ascii_case(&target))
+            {
+                dependent.push(name);
+            }
+        }
+
+        if dependent.is_empty() {
+            return Ok(());
+        }
+        Err(reject_replace_into_rowid_matview_base(
+            sql, &target, &dependent, position,
+        ))
+    }
+
+    /// The DDL half of the guard: refuse schema-declared REPLACE semantics.
+    ///
+    /// Statement screening cannot cover this class — see
+    /// [`reject_on_conflict_replace`] — so the clause is refused where it is
+    /// declared. Fail-closed: nothing in production declares it (measured), so
+    /// the rejection costs nothing today and keeps the trap out of the tree.
+    fn screen_conflict_replace_ddl(sql: &str) -> Result<()> {
+        if declares_on_conflict_replace(sql) {
+            return Err(reject_on_conflict_replace("this DDL", sql));
+        }
+        Ok(())
     }
 
     /// Handle a DDL command
@@ -3239,6 +3821,180 @@ mod tests {
         assert_eq!(phase, DatabasePhase::SchemaInit);
     }
 
+    /// Both halves of the guard's predicate, each pinned in BOTH directions so
+    /// flipping either one reds this test.
+    #[test]
+    fn replace_write_target_flags_only_the_replace_conflict_action() {
+        for sql in [
+            "REPLACE INTO navigation_history (id) VALUES (1)",
+            "INSERT OR REPLACE INTO navigation_history (id) VALUES (1)",
+            "insert or replace into navigation_history (id) values (1)",
+            "INSERT OR REPLACE INTO\"navigation_history\"(id) VALUES (1)",
+            "WITH src AS (SELECT 1) INSERT OR REPLACE INTO navigation_history (id) VALUES (1)",
+        ] {
+            assert!(
+                replace_write_target(sql)
+                    .is_some_and(|t| t.trim_matches('"') == "navigation_history"),
+                "must flag the REPLACE target in: {sql}"
+            );
+        }
+
+        for sql in [
+            // Other conflict actions never delete the old row.
+            "INSERT OR IGNORE INTO navigation_history (id) VALUES (1)",
+            "INSERT OR ABORT INTO navigation_history (id) VALUES (1)",
+            "INSERT OR ROLLBACK INTO navigation_history (id) VALUES (1)",
+            // The safe upsert this guard steers callers toward.
+            "INSERT INTO navigation_history (id) VALUES (1) ON CONFLICT(id) DO UPDATE SET id = \
+             excluded.id",
+            "INSERT INTO navigation_history (id) VALUES (1)",
+            // `UPDATE OR REPLACE` is an UPDATE, not the INSERT-side REPLACE path.
+            "UPDATE OR REPLACE navigation_history SET region = 'main'",
+            "DELETE FROM navigation_history WHERE id = 1",
+            "SELECT * FROM navigation_history",
+        ] {
+            assert_eq!(replace_write_target(sql), None, "must not flag: {sql}");
+        }
+    }
+
+    /// `PRAGMA table_info` rows as `(name, declared_type, is_pk)`.
+    fn pragma(rows: &[(&str, &str, bool)]) -> Vec<(String, String, bool)> {
+        rows.iter()
+            .map(|(n, t, pk)| (n.to_string(), t.to_string(), *pk))
+            .collect()
+    }
+
+    #[test]
+    fn rowid_alias_detection_covers_both_spellings_sqlite_accepts() {
+        // Column-constraint spelling: `id INTEGER PRIMARY KEY`.
+        assert!(is_rowid_alias_from_pragma(&pragma(&[
+            ("id", "INTEGER", true),
+            ("val", "TEXT", false),
+        ])));
+        // Table-constraint spelling: `id INTEGER, ..., PRIMARY KEY (id)`.
+        // Identical pragma output, and it IS a rowid alias — reading the DDL
+        // string instead misses this one, which is the unsafe direction.
+        assert!(is_rowid_alias_from_pragma(&pragma(&[
+            ("val", "TEXT", false),
+            ("id", "INTEGER", true),
+        ])));
+        // Case and padding come from whatever the author typed.
+        assert!(is_rowid_alias_from_pragma(&pragma(&[(
+            "id",
+            " integer ",
+            true
+        )])));
+
+        // TEXT keys — what every exposed holon table actually uses.
+        assert!(!is_rowid_alias_from_pragma(&pragma(&[
+            ("region", "TEXT", true),
+            ("history_id", "INTEGER", false),
+        ])));
+        // `INT` is not `INTEGER`; SQLite does not alias the rowid for it.
+        assert!(!is_rowid_alias_from_pragma(&pragma(&[("id", "INT", true)])));
+        // A composite key never aliases the rowid, even with an INTEGER member.
+        assert!(!is_rowid_alias_from_pragma(&pragma(&[
+            ("a", "TEXT", true),
+            ("b", "INTEGER", true),
+        ])));
+        // No primary key at all.
+        assert!(!is_rowid_alias_from_pragma(&pragma(&[
+            ("id", "INTEGER", false),
+            ("name", "TEXT", false),
+        ])));
+    }
+
+    /// Comments must never be tokenized as SQL. A production file opens with a
+    /// five-line comment block above its `INSERT OR REPLACE`.
+    #[test]
+    fn replace_write_target_sees_through_comments_and_schema_qualifiers() {
+        for sql in [
+            "-- upsert the cursor row\nINSERT OR REPLACE INTO navigation_cursor (region) VALUES \
+             ('main')",
+            "-- one\n-- two\n-- three\nREPLACE INTO navigation_cursor (region) VALUES ('main')",
+            "/* block\n   comment */ INSERT OR REPLACE INTO navigation_cursor (region) VALUES ('m')",
+            "INSERT OR REPLACE INTO main.navigation_cursor (region) VALUES ('main')",
+            "INSERT OR REPLACE INTO \"main\".\"navigation_cursor\" (region) VALUES ('main')",
+            "INSERT OR REPLACE INTO \"navigation_cursor\" (region) VALUES ('main')",
+        ] {
+            assert_eq!(
+                replace_write_target(sql).as_deref(),
+                Some("navigation_cursor"),
+                "must resolve the real target in: {sql}"
+            );
+        }
+
+        // A `--` INSIDE a string literal is data, not a comment: blanking it
+        // would corrupt the statement and could hide the verb.
+        assert_eq!(
+            replace_write_target(
+                "INSERT OR REPLACE INTO navigation_cursor (region) VALUES ('a -- b')"
+            )
+            .as_deref(),
+            Some("navigation_cursor")
+        );
+        // A comment must not manufacture a REPLACE that is not there.
+        assert_eq!(
+            replace_write_target("-- INSERT OR REPLACE INTO t\nSELECT 1"),
+            None
+        );
+    }
+
+    /// A string LITERAL containing `INTO` (or the REPLACE verb) must not aim
+    /// the guard at the wrong identifier — or turn it on when there is no
+    /// REPLACE at all. Literals are data; only code names the target.
+    #[test]
+    fn a_string_literal_cannot_misaim_the_target() {
+        // The verifier's case: a CTE whose literal carries `INTO` ahead of the
+        // real target. Scanning for the first `INTO` finds the one in the
+        // literal and reads `decoy` as the table.
+        assert_eq!(
+            replace_write_target(
+                "WITH s AS (SELECT 'INTO decoy' AS c) INSERT OR REPLACE INTO q2 (id) VALUES (1)"
+            )
+            .as_deref(),
+            Some("q2"),
+            "a literal containing INTO must not steal the target"
+        );
+        // Same shape, literal placed inside the VALUES list.
+        assert_eq!(
+            replace_write_target("INSERT OR REPLACE INTO q3 (id, note) VALUES (1, 'INTO other')")
+                .as_deref(),
+            Some("q3")
+        );
+        // A literal carrying the VERB must not manufacture a REPLACE.
+        assert_eq!(
+            replace_write_target(
+                "WITH s AS (SELECT 'INSERT OR REPLACE INTO victim' AS c) SELECT 1"
+            ),
+            None,
+            "a literal containing the verb must not turn the guard on"
+        );
+        // Escaped quotes inside a literal must not end it early.
+        assert_eq!(
+            replace_write_target(
+                "INSERT OR REPLACE INTO q4 (id, note) VALUES (1, 'it''s INTO decoy')"
+            )
+            .as_deref(),
+            Some("q4")
+        );
+    }
+
+    /// The PRODUCTION file that D3 showed the first guard was inert on.
+    #[test]
+    fn the_production_cursor_statements_are_seen_as_replaces() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../holon/sql/navigation");
+        for file in ["set_cursor_to_history.sql", "upsert_cursor.sql"] {
+            let sql = std::fs::read_to_string(dir.join(file))
+                .unwrap_or_else(|e| panic!("read production SQL {file}: {e}"));
+            assert_eq!(
+                replace_write_target(&sql).as_deref(),
+                Some("navigation_cursor"),
+                "the guard must see the REPLACE in the production file {file}"
+            );
+        }
+    }
+
     #[test]
     fn named_params_fingerprint_empty_is_dash_and_discriminates() {
         assert_eq!(named_params_fingerprint(&HashMap::new()), "-");
@@ -4101,5 +4857,71 @@ mod integration_tests {
         assert_eq!(results.len(), 2, "Should have 2 rows after transaction");
 
         handle.shutdown().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod guard_cost_tests {
+    use super::*;
+
+    /// The read path must not pay for the guard: a statement with no "replace"
+    /// anywhere exits before any allocation.
+    ///
+    /// Asserted behaviourally, not by wall clock — a timing assertion in the
+    /// gate is flaky on a loaded machine. The cost was MEASURED once at 80
+    /// ns/statement for a realistic block SELECT (200k iterations, release);
+    /// what this test protects is the property that makes it cheap, plus the
+    /// correctness the fast path must not trade away.
+    #[test]
+    fn the_screening_fast_path_is_correct_on_read_and_write_statements() {
+        // No "replace" anywhere: the fast path, and by far the common case.
+        for sql in [
+            "SELECT b.id, b.content FROM widget_row b WHERE b.parent_id = 'w:root'",
+            "INSERT INTO widget_row (id) VALUES ('w:a')",
+            "UPDATE widget_row SET content = 'x' WHERE id = 'w:a'",
+            "DELETE FROM widget_row WHERE id = 'w:a'",
+        ] {
+            assert_eq!(replace_write_target(sql), None, "must not flag: {sql}");
+        }
+
+        // Contains "replace" but is NOT a REPLACE statement — the fast path
+        // lets these through to the real parse, which must still say no.
+        for sql in [
+            "SELECT 'replace me' FROM widget_row",
+            "SELECT replace(content, 'a', 'b') FROM widget_row",
+            "UPDATE OR REPLACE widget_row SET content = 'x'",
+            "-- INSERT OR REPLACE INTO widget_row (id) VALUES (1)\nSELECT 1",
+        ] {
+            assert_eq!(
+                replace_write_target(sql),
+                None,
+                "the word 'replace' alone must not trip the guard: {sql}"
+            );
+        }
+
+        // And the real thing still resolves.
+        assert_eq!(
+            replace_write_target("INSERT OR REPLACE INTO t (id) VALUES (1)").as_deref(),
+            Some("t")
+        );
+    }
+
+    /// `contains_ascii_case_insensitive` is the fast path's gate, so a bug in
+    /// it silently disarms the whole guard.
+    #[test]
+    fn case_insensitive_contains_matches_every_casing() {
+        for h in [
+            "INSERT OR REPLACE INTO t",
+            "insert or replace into t",
+            "InSeRt Or RePlAcE iNtO t",
+        ] {
+            assert!(contains_ascii_case_insensitive(h, "replace"), "{h}");
+        }
+        assert!(!contains_ascii_case_insensitive(
+            "SELECT 1 FROM t",
+            "replace"
+        ));
+        // Needle longer than the haystack must not panic on the window.
+        assert!(!contains_ascii_case_insensitive("ab", "replace"));
     }
 }
