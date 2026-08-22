@@ -64,6 +64,10 @@ futures = { version = "0.3", default-features = false, features = ["alloc"] }
 holon-api = { path = "../../crates/holon-api" }
 holon-core = { path = "../../crates/holon-core" }
 holon = { path = "../../crates/holon", default-features = false }
+# EventInfraModule, registered during engine_init (see lib.rs). Same
+# `default-features = false` rationale as `holon`: its default `iroh-sync`
+# feature turns on holon-loro/iroh-sync, which is QUIC- and native-only.
+holon-loro-wiring = { path = "../../crates/holon-loro-wiring", default-features = false }
 # holon-frontend: wasi-safe subset. default-features = false ensures no
 # heap-profile / chrome-trace / otel features that pull native-only transitive
 # deps. The wasi cfg gates in holon-frontend/Cargo.toml strip the rest.

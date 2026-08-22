@@ -215,7 +215,7 @@ This drives the REAL pipeline through the headless composed keystone
 -> Turso/matview CDC -> reactive rows`. It measures everything EXCEPT final GPU
 paint (headless — no window). Output is a per-action `count / p50 / p95 / max /
 mean` table plus per-stage cost (dispatch, projection, CDC rows) and a dominator
-line. Raw log: `/tmp/holon-latency.log`.
+line. Raw log: `target/gate-logs/holon-latency.log`.
 
 Each stage emits one greppable line under `target="holon_latency"`:
 

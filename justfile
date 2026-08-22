@@ -8,6 +8,12 @@ set dotenv-load
 # here so every checkout inherits it. `export` puts it in recipes' environment.
 export RUST_FONTCONFIG_DLOPEN := "on"
 
+# Gate/check recipes write their logs to `target/gate-logs/<name>.log`, never to
+# a fixed /tmp path: `target/` is per jj workspace, so parallel lanes no longer
+# overwrite one another's verdict in a shared file (a lane was once observed
+# reading another workspace's build result as its own). Basenames are unchanged,
+# so `holon-build.log`, `pbt-general.log` etc. stay recognizable.
+
 # List available recipes
 default:
     @just --list
@@ -88,6 +94,7 @@ arch-docs: arch-compile
 pbt name='general' cases='64' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     # inv-sql-budget, inherited by `keystone-smoke` and `keystone-full` (both
     # delegate here) — this is the one place to disarm the keystone's read
     # budget. Armed by default: budgets are checked against the DEDUPLICATED
@@ -98,12 +105,12 @@ pbt name='general' cases='64' *FLAGS:
         general)
             PROPTEST_CASES={{cases}} cargo test \
                 -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
-                -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-general.log
+                -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-general.log
             ;;
         petri)
             PROPTEST_CASES={{cases}} cargo test \
                 -p holon --test petri_e2e_pbt \
-                -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-petri.log
+                -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-petri.log
             ;;
         orgmode)
             # BOTH org round-trip binaries. `org_block_round_trip_pbt` drives the
@@ -113,15 +120,15 @@ pbt name='general' cases='64' *FLAGS:
             # a green report.
             PROPTEST_CASES={{cases}} cargo test \
                 -p holon-orgmode --test round_trip_pbt \
-                -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-orgmode.log
+                -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-orgmode.log
             PROPTEST_CASES={{cases}} cargo test \
                 -p holon-orgmode --test org_block_round_trip_pbt \
-                -- --nocapture {{FLAGS}} 2>&1 | tee -a /tmp/pbt-orgmode.log
+                -- --nocapture {{FLAGS}} 2>&1 | tee -a target/gate-logs/pbt-orgmode.log
             ;;
         loro)
             PROPTEST_CASES={{cases}} cargo test \
                 -p holon --test api_suite loro_backend_pbt \
-                -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-loro.log
+                -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-loro.log
             ;;
         *)
             echo "Unknown PBT: {{name}}. Available: general, petri, orgmode, loro"
@@ -148,9 +155,10 @@ keystone-smoke:
 lsqdb-oracle:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     : "${HOLON_LOGSEQ_ORACLE:?set it to a prepared LogSeq checkout — see docs/Testing/LogseqDbOracle.md}"
     cargo test -p holon-logseq-db --all-targets -- --include-ignored --nocapture 2>&1 \
-        | tee /tmp/holon-lsqdb-oracle.log
+        | tee target/gate-logs/holon-lsqdb-oracle.log
 
 # Pattern-drift guard for the known-reds registry: replays the archived
 # 2026-07-31 full-depth corpus through the classifier and asserts its verdict is
@@ -168,12 +176,13 @@ hand-authored *FLAGS:
     # failing suite exited 0 and every weave/land gate using this recipe was a
     # silent false green (observed 2026-07-25).
     set -euo pipefail
+    mkdir -p target/gate-logs
     # See `pbt` for why the budget is armed by default.
     export HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1}
     export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-}
     cargo test \
         -p holon-integration-tests --features pbt --test hand_authored_regressions \
-        -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-hand-authored.log
+        -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-hand-authored.log
 
 # Weave-time full keystone sweep (orchestrator-run, typically in background)
 keystone-full cases='16':
@@ -202,10 +211,11 @@ keystone-nightly runs='2' cases='64':
     # pipefail is REQUIRED: `just pbt` pipes through tee, so without it this
     # recipe's status would be tee's and every red run would read as green.
     set -euo pipefail
+    mkdir -p target/gate-logs
     stamp=$(date +%Y%m%d-%H%M%S)
     failed_logs=()
     for i in $(seq 1 {{runs}}); do
-        log="/tmp/keystone-nightly-${stamp}-run${i}.log"
+        log="target/gate-logs/keystone-nightly-${stamp}-run${i}.log"
         echo "== keystone-nightly run ${i}/{{runs}} (cases={{cases}}) -> $log =="
         rc=0
         just pbt general {{cases}} 2>&1 | tee "$log" || rc=$?
@@ -247,8 +257,9 @@ keystone-scale size='25000' cases='1' settle_ms='900000' per_doc='200' *FLAGS:
     # failing suite exits 0 and every gate using this recipe is a silent false
     # green (observed 2026-07-25).
     set -euo pipefail
+    mkdir -p target/gate-logs
     stamp="$(date +%Y%m%d-%H%M%S)"
-    log="/tmp/pbt-keystone-scale-${stamp}.log"
+    log="target/gate-logs/pbt-keystone-scale-${stamp}.log"
     echo "keystone-scale: HOLON_SOAK_SEED_BLOCKS={{size}} cases={{cases}} settle={{settle_ms}}ms"
     echo "log: $log"
     HOLON_SOAK_SEED_BLOCKS={{size}} HOLON_SOAK_SETTLE_MS={{settle_ms}} \
@@ -271,6 +282,7 @@ keystone-scale size='25000' cases='1' settle_ms='900000' per_doc='200' *FLAGS:
 keystone-mcp port='8710' cases='8' weights='':
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     if ! curl -sf "http://127.0.0.1:{{port}}/health" > /dev/null; then
         echo "no app serving http://127.0.0.1:{{port}} — start one first, e.g.:"
         echo "  HOLON_MCP_ALLOW_RESET=1 just live-verify {{port}}"
@@ -280,7 +292,7 @@ keystone-mcp port='8710' cases='8' weights='':
         HOLON_PBT_WEIGHTS="{{weights}}" cargo test \
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
         general_e2e_composed_pbt_live_mcp \
-        -- --nocapture 2>&1 | tee /tmp/pbt-keystone-mcp.log
+        -- --nocapture 2>&1 | tee target/gate-logs/pbt-keystone-mcp.log
 
 # Launch the app for live MCP-driven verification: throwaway config+vault, own
 # MCP port (registry: 8710/8720/8730/... — pick one per verifier). Leaves the
@@ -322,9 +334,10 @@ pbt-all cases='32':
 pbt-extended-gen cases='64' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     PROPTEST_CASES={{cases}} HOLON_PBT_EXTENDED_GEN=1 cargo test \
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
-        -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-extended-gen.log
+        -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-extended-gen.log
 
 # Layout-override sweep — the ONE keystone with the index.org override arms (prql/gql/sql
 # layouts + profile file); HOLON_PBT_LAYOUT_OVERRIDE gates them in write_org_file.rs.
@@ -335,9 +348,10 @@ pbt-extended-gen cases='64' *FLAGS:
 pbt-layout-override cases='64' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     PROPTEST_CASES={{cases}} HOLON_PBT_LAYOUT_OVERRIDE=1 cargo test \
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
-        -- --nocapture {{FLAGS}} 2>&1 | tee /tmp/pbt-layout-override.log
+        -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-layout-override.log
 
 # Measure end-to-end UI action latency (indent / outdent / cycle-state / split / ...).
 # Drives the REAL pipeline (dispatch -> Loro commit -> LoroProjection resample ->
@@ -348,12 +362,13 @@ pbt-layout-override cases='64' *FLAGS:
 measure-latency cases='16' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     RUST_LOG="holon_latency=debug" PROPTEST_CASES={{cases}} \
         cargo test -p holon-integration-tests --features pbt \
         --test general_e2e_composed_pbt -- --nocapture {{FLAGS}} \
-        > /tmp/holon-latency.log 2>&1 || true
-    echo "raw log: /tmp/holon-latency.log ($(grep -c holon_latency /tmp/holon-latency.log || true) events)"
-    python3 scripts/measure_latency.py /tmp/holon-latency.log --max-contention-ms 30
+        > target/gate-logs/holon-latency.log 2>&1 || true
+    echo "raw log: target/gate-logs/holon-latency.log ($(grep -c holon_latency target/gate-logs/holon-latency.log || true) events)"
+    python3 scripts/measure_latency.py target/gate-logs/holon-latency.log --max-contention-ms 30
 
 # Latency RATCHET gate — per-rung interaction->visible ceilings over two stages:
 # the PROD `stage=e2e` measurement (the exact quantity the runtime
@@ -434,10 +449,11 @@ latency-gate ceilings='docs/Testing/latency-ceilings.txt':
 soak size='5000' actions='320' settle_ms='30000' per_doc='200' soften='':
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     mkdir -p docs/Testing/soak
     stamp="$(date +%Y%m%d-%H%M%S)"
-    log="/tmp/holon-soak-${stamp}.log"
-    rss="/tmp/holon-soak-rss-${stamp}.csv"
+    log="target/gate-logs/holon-soak-${stamp}.log"
+    rss="target/gate-logs/holon-soak-rss-${stamp}.csv"
     out="docs/Testing/soak/soak-{{size}}-blocks-${stamp}.txt"
     # ~20 actions per proptest case (draws 1..40); derive case count from target actions.
     cases=$(( ({{actions}} + 19) / 20 )); [ "$cases" -lt 1 ] && cases=1
@@ -513,8 +529,9 @@ tokio-console-app:
 pbt-lib-slices:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     cargo nextest run -p holon-integration-tests --lib --features pbt \
-        2>&1 | tee /tmp/pbt-lib-slices.log
+        2>&1 | tee target/gate-logs/pbt-lib-slices.log
 
 # --- Mutation Testing -------------------------------------------------------
 
@@ -522,15 +539,16 @@ pbt-lib-slices:
 mutants file='crates/holon/src/petri.rs' timeout='300':
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     cargo mutants \
         --manifest-path crates/holon/Cargo.toml \
         --file {{file}} \
         --timeout {{timeout}} \
-        --output /tmp/mutants-out 2>&1 | tee /tmp/mutants.log
+        --output target/gate-logs/mutants-out 2>&1 | tee target/gate-logs/mutants.log
 
 # Show last mutants results
 mutants-results:
-    @cat /tmp/mutants-out/outcomes.json 2>/dev/null | python3 -m json.tool || echo "No results found. Run 'just mutants' first."
+    @cat target/gate-logs/mutants-out/outcomes.json 2>/dev/null | python3 -m json.tool || echo "No results found. Run 'just mutants' first."
 
 # --- Assets ----------------------------------------------------------------
 
@@ -544,19 +562,22 @@ icons *FLAGS:
 build *FLAGS: icons
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --workspace {{FLAGS}} 2>&1 | tee /tmp/holon-build.log
+    mkdir -p target/gate-logs
+    cargo build --workspace {{FLAGS}} 2>&1 | tee target/gate-logs/holon-build.log
 
 # Clippy across workspace
 clippy:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo clippy --workspace --all-targets 2>&1 | tee /tmp/holon-clippy.log
+    mkdir -p target/gate-logs
+    cargo clippy --workspace --all-targets 2>&1 | tee target/gate-logs/holon-clippy.log
 
 # Run all workspace tests (not PBTs — those are slow)
 test:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo nextest run --workspace 2>&1 | tee /tmp/holon-test.log
+    mkdir -p target/gate-logs
+    cargo nextest run --workspace 2>&1 | tee target/gate-logs/holon-test.log
 
 # Rot guard for the out-of-workspace wasi worker: `cargo check --workspace`
 # cannot see it, so an API change in holon-api compiles clean and breaks the
@@ -569,6 +590,7 @@ test:
 check-worker-wasm:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     # Install only when missing: `rustup target add` reaches the network even for
     # an already-installed target, and this recipe runs at every commit.
     if ! rustup target list --installed | grep -qx wasm32-wasip1-threads; then
@@ -577,11 +599,11 @@ check-worker-wasm:
     EMNAPI_LINK_DIR="$(mktemp -d)" cargo check \
         --manifest-path frontends/holon-worker/Cargo.toml \
         --target wasm32-wasip1-threads --features browser \
-        2>&1 | tee /tmp/holon-worker-wasm-check.log
+        2>&1 | tee target/gate-logs/holon-worker-wasm-check.log
     cargo test \
         --manifest-path frontends/holon-worker/Cargo.toml \
         --lib --no-default-features \
-        2>&1 | tee /tmp/holon-worker-native-test.log
+        2>&1 | tee target/gate-logs/holon-worker-native-test.log
 
 # Rot guard for the BROWSER target. `check-worker-wasm` above covers only
 # wasm32-wasip1-threads, so a crate that compiles native and wasi but not
@@ -594,13 +616,14 @@ check-worker-wasm:
 check-frontend-wasm:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     # Install only when missing — see check-worker-wasm: `rustup target add` is a
     # network touch even when the target is already there.
     if ! rustup target list --installed | grep -qx wasm32-unknown-unknown; then
         rustup target add wasm32-unknown-unknown
     fi
     cargo check -p holon-frontend --target wasm32-unknown-unknown \
-        2>&1 | tee /tmp/holon-frontend-wasm-check.log
+        2>&1 | tee target/gate-logs/holon-frontend-wasm-check.log
 
 # Rot guard for the browser FRONTEND crate. `check-frontend-wasm` above covers
 # holon-frontend, the shared library; dioxus-web is the app that consumes it and
@@ -611,12 +634,13 @@ check-frontend-wasm:
 check-dioxus-web-wasm:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     if ! rustup target list --installed | grep -qx wasm32-unknown-unknown; then
         rustup target add wasm32-unknown-unknown
     fi
     cargo check --manifest-path frontends/dioxus-web/Cargo.toml \
         --target wasm32-unknown-unknown \
-        2>&1 | tee /tmp/holon-dioxus-web-wasm-check.log
+        2>&1 | tee target/gate-logs/holon-dioxus-web-wasm-check.log
 
 # Rot guard for the ANDROID target, via holon-turso — the crate whose graph
 # actually drives the NDK C toolchain (ring + turso compile .S/.c through
@@ -630,13 +654,14 @@ check-dioxus-web-wasm:
 check-android:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     # Install only when missing — see check-worker-wasm: `rustup target add` is a
     # network touch even when the target is already there.
     if ! rustup target list --installed | grep -qx aarch64-linux-android; then
         rustup target add aarch64-linux-android
     fi
     cargo ndk -t arm64-v8a -P 33 check -p holon-turso \
-        2>&1 | tee /tmp/holon-android-check.log
+        2>&1 | tee target/gate-logs/holon-android-check.log
 
 # --- Code Quality -----------------------------------------------------------
 
@@ -648,39 +673,43 @@ fmt-check:
 deny:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo deny check 2>&1 | tee /tmp/holon-deny.log
+    mkdir -p target/gate-logs
+    cargo deny check 2>&1 | tee target/gate-logs/holon-deny.log
 
 # Find unused dependencies
 machete:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo machete 2>&1 | tee /tmp/holon-machete.log
+    mkdir -p target/gate-logs
+    cargo machete 2>&1 | tee target/gate-logs/holon-machete.log
 
 # Detect copy-pasted code (requires: npx or npm i -g jscpd)
 duplication:
     #!/usr/bin/env bash
     set -euo pipefail
-    npx jscpd . 2>&1 | tee /tmp/holon-duplication.log
+    mkdir -p target/gate-logs
+    npx jscpd . 2>&1 | tee target/gate-logs/holon-duplication.log
 
 # Run all lints and quality checks locally
 lint:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     failed=0
     echo "=== cargo fmt ==="
     cargo fmt --check || { echo "FAIL: formatting"; failed=1; }
     echo ""
     echo "=== cargo clippy ==="
-    cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee /tmp/holon-clippy.log || { echo "FAIL: clippy"; failed=1; }
+    cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee target/gate-logs/holon-clippy.log || { echo "FAIL: clippy"; failed=1; }
     echo ""
     echo "=== cargo deny ==="
-    cargo deny check 2>&1 | tee /tmp/holon-deny.log || { echo "FAIL: deny"; failed=1; }
+    cargo deny check 2>&1 | tee target/gate-logs/holon-deny.log || { echo "FAIL: deny"; failed=1; }
     echo ""
     echo "=== cargo machete ==="
-    cargo machete 2>&1 | tee /tmp/holon-machete.log || { echo "FAIL: machete"; failed=1; }
+    cargo machete 2>&1 | tee target/gate-logs/holon-machete.log || { echo "FAIL: machete"; failed=1; }
     echo ""
     echo "=== jscpd (duplication) ==="
-    npx jscpd . 2>&1 | tee /tmp/holon-duplication.log || { echo "FAIL: duplication"; failed=1; }
+    npx jscpd . 2>&1 | tee target/gate-logs/holon-duplication.log || { echo "FAIL: duplication"; failed=1; }
     echo ""
     if [ "$failed" -ne 0 ]; then
         echo "Some checks failed. See output above."
@@ -689,12 +718,14 @@ lint:
     echo "All checks passed."
 
 # --- Code Analysis ----------------------------------------------------------
-# Individual analyzers write logs to /tmp/holon-analyze-*.log so CI can collect.
+# Individual analyzers write logs to target/gate-logs/holon-analyze-*.log. These are
+# per-workspace developer logs — nothing collects them; CI reads only exit codes.
 
 # CRAP metric (complexity × inverse coverage). Requires lcov.info.
 analyze-crap:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     if [ ! -f lcov.info ] || [ $(find lcov.info -mmin -60 2>/dev/null | wc -l) -eq 0 ]; then
         echo "Generating fresh lcov.info via cargo-llvm-cov..."
         # Coverage runs the whole test suite. Use nextest so .config/nextest.toml
@@ -710,12 +741,12 @@ analyze-crap:
         cargo llvm-cov nextest --workspace --lcov --output-path lcov.info \
             --ignore-run-fail \
             -E 'not (binary(cucumber) + binary(tui_ui_pbt))' 2>&1 \
-            | tee /tmp/holon-analyze-coverage.log
+            | tee target/gate-logs/holon-analyze-coverage.log
     fi
     # Threshold / examples-exclude / missing-coverage policy live in
     # .cargo-crap.toml and are picked up automatically from the repo root.
     # Human report — every function over threshold, for visibility.
-    cargo crap --lcov lcov.info 2>&1 | tee /tmp/holon-analyze-crap.log
+    cargo crap --lcov lcov.info 2>&1 | tee target/gate-logs/holon-analyze-crap.log
     # Regression gate — fail ONLY when a function's CRAP score rose vs the
     # recorded baseline. New code can't make the pre-existing hotspots worse;
     # the backlog (Phase 5) is paid down incrementally, not blocked. We compare
@@ -724,13 +755,13 @@ analyze-crap:
     # duplicate-named functions in this repo (see the script's docstring).
     # Regenerate the baseline with `just crap-baseline` after intentional changes.
     if [ -f crap-baseline.json ]; then
-        cargo crap --lcov lcov.info --format json --output /tmp/holon-crap-current.json
+        cargo crap --lcov lcov.info --format json --output target/gate-logs/holon-crap-current.json
         python3 tools/crap_check_regression.py \
-            --baseline crap-baseline.json --current /tmp/holon-crap-current.json \
-            2>&1 | tee -a /tmp/holon-analyze-crap.log
+            --baseline crap-baseline.json --current target/gate-logs/holon-crap-current.json \
+            2>&1 | tee -a target/gate-logs/holon-analyze-crap.log
     else
         echo "No crap-baseline.json — skipping regression gate. Run 'just crap-baseline'." \
-            | tee -a /tmp/holon-analyze-crap.log
+            | tee -a target/gate-logs/holon-analyze-crap.log
     fi
 
 # Record the current CRAP scores as the regression baseline (crap-baseline.json).
@@ -750,13 +781,15 @@ crap-baseline:
 analyze-deny:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo deny check 2>&1 | tee /tmp/holon-analyze-deny.log
+    mkdir -p target/gate-logs
+    cargo deny check 2>&1 | tee target/gate-logs/holon-analyze-deny.log
 
 # Unused dependency detection.
 analyze-machete:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo machete 2>&1 | tee /tmp/holon-analyze-machete.log
+    mkdir -p target/gate-logs
+    cargo machete 2>&1 | tee target/gate-logs/holon-analyze-machete.log
 
 # Lint with clippy at the workspace level.
 # Report-only: clippy findings are surfaced but don't fail the recipe. Phase 6
@@ -765,20 +798,23 @@ analyze-machete:
 analyze-clippy:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     cargo clippy --workspace --all-targets 2>&1 \
-        | tee /tmp/holon-analyze-clippy.log
+        | tee target/gate-logs/holon-analyze-clippy.log
 
 # Copy-paste / duplication detection via polydup.
 analyze-duplication:
     #!/usr/bin/env bash
     set -euo pipefail
-    polydup scan . 2>&1 | tee /tmp/holon-analyze-duplication.log
+    mkdir -p target/gate-logs
+    polydup scan . 2>&1 | tee target/gate-logs/holon-analyze-duplication.log
 
 # Architecture lints (cycles, banned imports, etc.).
 analyze-arch:
     #!/usr/bin/env bash
     set -euo pipefail
-    ./archlint/archlint --all 2>&1 | tee /tmp/holon-analyze-arch.log
+    mkdir -p target/gate-logs
+    ./archlint/archlint --all 2>&1 | tee target/gate-logs/holon-analyze-arch.log
 
 # Run every analyzer. Continues on failure; reports a summary at the end.
 analyze:
@@ -805,6 +841,7 @@ analyze:
 watch ui='gpui' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     UI="{{ui}}"
     EXTRA_FLAGS="{{FLAGS}}"
     BIN="target/debug/holon-${UI}"
@@ -829,11 +866,11 @@ watch ui='gpui' *FLAGS:
     trap restart_app USR1
 
     # Initial build and run
-    cargo build -p "holon-${UI}" --features chrome-trace 2>&1 | tee /tmp/holon-build.log
+    cargo build -p "holon-${UI}" --features chrome-trace 2>&1 | tee target/gate-logs/holon-build.log
     restart_app
 
     # cargo-watch only builds; signals outer script on success
-    cargo watch -s "cargo build -p holon-${UI} --features chrome-trace 2>&1 | tee /tmp/holon-build.log && kill -USR1 ${OUTER_PID} || echo '>>> Build failed — keeping old instance running <<<'" &
+    cargo watch -s "cargo build -p holon-${UI} --features chrome-trace 2>&1 | tee target/gate-logs/holon-build.log && kill -USR1 ${OUTER_PID} || echo '>>> Build failed — keeping old instance running <<<'" &
     WATCH_PID=$!
 
     # Block until cargo-watch exits; USR1 interrupts wait to trigger restart_app
@@ -861,6 +898,7 @@ profile name='petri' cases='4' *FLAGS:
 sample-pbt name='general' cases='1' duration='5':
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     case "{{name}}" in
         general)  pkg="holon-integration-tests"; test="general_e2e_composed_pbt"; feat="--features pbt" ;;
         petri)    pkg="holon"; test="petri_e2e_pbt"; feat="" ;;
@@ -872,7 +910,7 @@ sample-pbt name='general' cases='1' duration='5':
     binary_name=$(basename "$bin")
     echo "Binary: $bin"
     echo "Starting PBT in background..."
-    PROPTEST_CASES={{cases}} "$bin" --nocapture > /tmp/pbt-sample-out.log 2>&1 &
+    PROPTEST_CASES={{cases}} "$bin" --nocapture > target/gate-logs/pbt-sample-out.log 2>&1 &
     root_pid=$!
     echo "Root PID: $root_pid"
     echo "Waiting for child processes to spawn..."
@@ -886,20 +924,20 @@ sample-pbt name='general' cases='1' duration='5':
         | head -1 | awk '{print $1}')
     if [ -z "$leaf_pid" ]; then
         echo "No child process found. Test may have finished. Output:"
-        cat /tmp/pbt-sample-out.log
+        cat target/gate-logs/pbt-sample-out.log
         exit 1
     fi
     echo "Sampling PID $leaf_pid for {{duration}}s..."
-    sample "$leaf_pid" {{duration}} -f /tmp/pbt-sample.txt
+    sample "$leaf_pid" {{duration}} -f target/gate-logs/pbt-sample.txt
     kill "$root_pid" 2>/dev/null || true
     pkill -P "$root_pid" 2>/dev/null || true
-    echo "Stack trace saved to /tmp/pbt-sample.txt"
+    echo "Stack trace saved to target/gate-logs/pbt-sample.txt"
     echo ""
     echo "=== Top of stack (where time is spent) ==="
-    grep -E '^\s+\d+\s' /tmp/pbt-sample.txt | sort -rn | head -20
+    grep -E '^\s+\d+\s' target/gate-logs/pbt-sample.txt | sort -rn | head -20
     echo ""
     echo "=== Test output ==="
-    tail -30 /tmp/pbt-sample-out.log
+    tail -30 target/gate-logs/pbt-sample-out.log
 
 # Profile an arbitrary binary with samply
 profile-bin *ARGS:
@@ -936,9 +974,10 @@ gate-compile:
     # shebang `just` runs the body under `sh -cu`, the exit status is `tee`'s,
     # and the recipe passes however red the compile is.
     set -euo pipefail
+    mkdir -p target/gate-logs
     cargo check --workspace --all-targets \
         --features holon-integration-tests/pbt,holon-gpui/pbt \
-        2>&1 | tee /tmp/gate-compile.log
+        2>&1 | tee target/gate-logs/gate-compile.log
     just check-web-arm
 
 # Web arm (dioxus-web under test) typecheck. `gate-compile` above resolves
@@ -957,9 +996,10 @@ check-web-arm:
     # pipefail is REQUIRED, exactly as in gate-compile above: without it the
     # exit status is `tee`'s and the recipe passes however red the compile is.
     set -euo pipefail
+    mkdir -p target/gate-logs
     cargo check -p holon-integration-tests --all-targets \
         --features web-arm,pbt \
-        2>&1 | tee /tmp/check-web-arm.log
+        2>&1 | tee target/gate-logs/check-web-arm.log
 
 # Architecture rules (archlint + the Rust-side structural tests). Its own
 # package, so `cargo nextest run --workspace` was the only thing that ran it and
@@ -968,7 +1008,8 @@ check-web-arm:
 gate-arch:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo nextest run -p holon-architecture-tests 2>&1 | tee /tmp/gate-arch.log
+    mkdir -p target/gate-logs
+    cargo nextest run -p holon-architecture-tests 2>&1 | tee target/gate-logs/gate-arch.log
 
 # Tier 1 pre-commit gate: gate-integrity lints, defensive-code ratchet, typecheck.
 # The justfile guard runs FIRST and costs ~10ms: a never-fail recipe invalidates
@@ -1006,6 +1047,7 @@ precommit:
 prepush:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target/gate-logs
     echo "== Tier 2 [1/4]: architecture rules =="
     just gate-arch
     echo "== Tier 2 [2/4]: browser-target typecheck =="
@@ -1015,7 +1057,7 @@ prepush:
     echo "== Tier 2 [4/4]: full keystone (PROPTEST_CASES=16) =="
     PROPTEST_CASES=16 cargo test \
         -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
-        2>&1 | tee /tmp/prepush-keystone.log
+        2>&1 | tee target/gate-logs/prepush-keystone.log
     echo "== Tier 2 PASS =="
 
 # The composed landing gate: what a lane runs before reporting done and what the
@@ -1025,19 +1067,21 @@ prepush:
 landing-gate:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== landing [1/7]: fmt =="
+    echo "== landing [1/8]: fmt =="
     cargo fmt --all -- --check
-    echo "== landing [2/7]: typecheck incl. every test target =="
+    echo "== landing [2/8]: typecheck incl. every test target =="
     just gate-compile
-    echo "== landing [3/7]: browser-target typecheck =="
+    echo "== landing [3/8]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== landing [4/7]: out-of-workspace browser frontend =="
+    echo "== landing [4/8]: out-of-workspace browser frontend =="
     just check-dioxus-web-wasm
-    echo "== landing [5/7]: architecture rules =="
+    echo "== landing [5/8]: out-of-workspace wasi worker =="
+    just check-worker-wasm
+    echo "== landing [6/8]: architecture rules =="
     just gate-arch
-    echo "== landing [6/7]: keystone smoke =="
+    echo "== landing [7/8]: keystone smoke =="
     just keystone-smoke
-    echo "== landing [7/7]: hand-authored regressions =="
+    echo "== landing [8/8]: hand-authored regressions =="
     just hand-authored
     echo "== landing gate PASS =="
 
