@@ -1,8 +1,8 @@
 ---
 id: 2026-08-22-org-file-step-drops-declared-todo-ring
 date: 2026-08-22
-gap: ORACLE
-secondary: COVERAGE
+gap: COVERAGE
+secondary: ORACLE
 status: FIXED
 summary: >-
   The `Given an org file "x":` step silently dropped a docstring's `#+TODO:`
@@ -78,7 +78,16 @@ the parser consumed the header — and only the ring itself is `Null`. That is
 the corruption in one frame: the state survives, its vocabulary does not.
 
 ## Missing piece
-ORACLE (primary). The law that exists to catch a lossy step vocabulary —
+COVERAGE (primary). No sequence could reach the exposing state on either route
+into `WriteOrgFile`: the keystone generator builds `keyword_set` directly from
+`todo_keyword_set_strategy` and never calls `from_org_text`, and the law that
+does exercise that path draws from a fixed `step_examples()` list that excluded
+the exposing shape — a narrowed alphabet. The assertion itself was already
+general (`parse(render(t)) == t` compares the whole serde value, `keyword_set`
+included); the fix un-narrowed the alphabet and changed no assertion, which is
+the COVERAGE remedy by definition.
+
+ORACLE (secondary). The law that exists to catch a lossy step vocabulary —
 `parse(render(t)) == t` over `step_catalog_examples()` — was deliberately
 made vacuous for this exact field. `WriteOrgFile::step_examples()` carried:
 
@@ -94,10 +103,15 @@ The neighbouring test `a_stray_docstring_is_a_loud_refusal` states the intended
 contract — "author intent the vocabulary cannot honour — refused, never
 dropped" — which this exemption quietly suspended.
 
-COVERAGE (secondary). No fixture ever seeded a declaring document, so nothing
-replayed the corrupt file. The generator-side property
+The oracle-side residue is the real follow-up: the meta-guard that should have
+refused the exemption, `check_field_coverage`
+(crates/holon-pbt-core/src/step_vocabulary.rs:340), compares KEY SETS only and
+is fed `examples.first()` alone — a field that is declared, serialized and
+permanently `None` across every example satisfies it. Follow-up: make it
+iterate ALL examples and require every declared field to take a non-default
+value somewhere in the set. (The generator-side property
 `keyword_set_survives_sut_serialize_parse` covers only generator-produced
-values, never the `from_org_text` path an author reaches.
+values, never the `from_org_text` path an author reaches.)
 
 ## Remedy
 FIXED, in `write_org_file.rs`.
