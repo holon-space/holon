@@ -311,6 +311,11 @@ pub enum ContentRepresentation {
 }
 
 /// Inline marks, from a CLOSED vocabulary — a format cannot invent one.
+///
+/// [`InlineConstruct::Tag`] is about the tag SYNTAX surviving inside the
+/// content string — the bytes `#tag` or `:tag:` coming back. Whether the
+/// format carries a structured tag SET is [`TagsAxis`], and a format can do
+/// either without the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InlineConstruct {
@@ -689,4 +694,83 @@ pub struct AssetsAxis {
     pub binary_inline: BinaryInline,
     #[serde(default)]
     pub extensions: BTreeSet<Extension>,
+}
+
+// =============================================================================
+// Axis 11 — tags
+// =============================================================================
+
+/// Whether the write leg can attach or detach a reference to a tag that
+/// already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TagWrite {
+    /// The write leg makes the change and it survives a round trip.
+    Carried,
+    /// The boundary REFUSES the change, loudly and by name.
+    Refused,
+    /// The format has no structured tag set to change.
+    Unsupported,
+}
+
+/// What happens to a tag name the format cannot resolve to a tag entity.
+///
+/// The three answers are not degrees of the same thing. `Refused` costs the
+/// caller an edit; `Dangling` writes a reference to nothing, which reads as
+/// success and surfaces later as someone else's broken invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnknownTagReference {
+    /// Refused before anything is written.
+    Refused,
+    /// Written, leaving a reference to no entity.
+    Dangling,
+    /// The tag is created to satisfy the reference. Distinct from
+    /// [`TagMinting::Supported`], which is about minting a tag DELIBERATELY:
+    /// a format can offer one and not the other.
+    Minted,
+}
+
+/// Whether the write leg can create a tag that does not exist yet.
+///
+/// DECLARATION-ONLY: no probe drives this. `certify_tags` has no arm for it,
+/// so a profile can state either value and nothing will contradict it — the
+/// clause can only ever be marked, never confirmed or violated. The other
+/// three tag clauses are falsifiable; this one waits on a minting probe, which
+/// needs a measurement of what creating a tag actually writes. Recorded here
+/// so the asymmetry is read rather than rediscovered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TagMinting {
+    Supported,
+    None,
+}
+
+/// Axis 11 — structured TAG references.
+///
+/// A tag here is a REFERENCE from an entity to a tag entity, carried as
+/// structured data on the entity rather than as text inside its content.
+///
+/// Deliberately NOT [`InlineConstruct::Tag`], which asks whether tag SYNTAX
+/// (`#tag`, `:tag:`) survives inside the content string. The two come apart in
+/// both directions: a format can carry the syntax as text and model no set at
+/// all, and a format can model the set while refusing the syntax — the LogSeq
+/// DB writer does the latter, since a title carrying reference syntax is
+/// refused outright. Nor is this `property_values.reference_values`, which
+/// states how a PROPERTY VALUE names an entity; a tag set is a field of its
+/// own beside the properties, not a value inside them.
+///
+/// THERE IS NO ORDERING CLAUSE HERE AND THERE CANNOT BE ONE. `holon_api::Tags`
+/// is a `BTreeSet<String>`, so a tag set is sorted and deduplicated at the
+/// MODEL layer before any format sees it: authored order cannot survive to be
+/// measured, and a duplicate cannot arrive. A format that enforces the same
+/// shape at its write boundary is enforcing this invariant, not a quirk of its
+/// own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TagsAxis {
+    pub attach_existing: TagWrite,
+    pub detach_existing: TagWrite,
+    pub unknown_reference: UnknownTagReference,
+    pub mint_new: TagMinting,
 }

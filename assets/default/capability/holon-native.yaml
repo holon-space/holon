@@ -13,6 +13,24 @@
 profile: holon-native
 
 not_yet_certified:
+  - clause: tags_attach_existing
+    reason: >-
+      the substrate stores `block.tags` as a set of strings; the value is READ
+      off that and not measured — no probe writes a tag through the native
+      writer and reads it back yet.
+  - clause: tags_detach_existing
+    reason: >-
+      same source and same gap as `tags_attach_existing`: removing a tag from
+      the set and writing it back is not driven by any probe here.
+  - clause: tags_resolution_refuses_unknown
+    reason: >-
+      a native tag is a bare string with no entity behind it, so
+      "unresolvable" has no inhabitant to drive. Declared `minted` from that
+      reading.
+  - clause: tags_mint_new
+    reason: >-
+      same as the clause above — writing a name IS creating the tag, and
+      nothing here drives it.
   - clause: hosted_kinds
     reason: >-
       2b.3 drives the block write path only; the free-standing typed row the
@@ -106,6 +124,10 @@ enforced_by:
     - assets_attachments
     - assets_binary_inline
     - assets_extensions
+    - tags_attach_existing
+    - tags_detach_existing
+    - tags_resolution_refuses_unknown
+    - tags_mint_new
   sync:
     - clause: identity_rename_stability
       site: "crates/holon-filesystem/src/file_sync_controller.rs:573-580 (page-rename path derivation)"
@@ -199,3 +221,13 @@ fidelity_axes:
     attachments: none
     binary_inline: none
     extensions: []
+
+  # The substrate stores `block.tags` as a set of strings. Like org and unlike
+  # the LogSeq DB graph, a tag is a bare name rather than a reference to a tag
+  # entity, so writing an unused name creates it and there is nothing to
+  # refuse.
+  tags:
+    attach_existing: carried
+    detach_existing: carried
+    unknown_reference: minted
+    mint_new: supported

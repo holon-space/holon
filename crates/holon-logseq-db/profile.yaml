@@ -14,14 +14,15 @@
 # — creation, removal, re-parent, re-order, requires, contributes-to,
 # advice-suppression, properties. A refusal is the law's honest branch, and
 # this profile states it.
-#
-# NOTE, and it is a gap rather than a claim: no clause in the vocabulary names
-# a tag or class reference, so nothing below describes the tag write at all.
-# The clauses here are accurate; the profile as a whole understates the writer
-# until the vocabulary grows an axis for it.
 profile: logseq-db
 
 not_yet_certified:
+  - clause: tags_mint_new
+    reason: >-
+      push attaches classes the graph already has; creating one is what
+      LogSeq's outliner does in `save-block!` (a `:db/ident` minted, possibly
+      a `:block/tags :logseq.class/Page` retracted), and that layer is not
+      drivable under nbb, so nothing here can measure what minting writes.
   - clause: hosted_kinds
     reason: >-
       the writer edits existing blocks; what the graph can HOST is an importer
@@ -151,6 +152,10 @@ enforced_by:
     - assets_attachments
     - assets_binary_inline
     - assets_extensions
+    - tags_attach_existing
+    - tags_detach_existing
+    - tags_resolution_refuses_unknown
+    - tags_mint_new
   sync:
     - clause: identity_rename_stability
       site: "crates/holon-filesystem/src/file_sync_controller.rs:573-580 (page-rename path derivation)"
@@ -240,3 +245,17 @@ fidelity_axes:
     attachments: none
     binary_inline: none
     extensions: []
+
+  # A tag is a REFERENCE to a `:logseq.class/<Name>` entity, written as one
+  # datom per attach/detach. Not the same thing as the `tag` inline construct,
+  # which is about `#tag` syntax inside the title — push REFUSES a title
+  # carrying reference syntax outright.
+  tags:
+    attach_existing: carried
+    detach_existing: carried
+    # MEASURED (oracle/probe_tag_edits.cljs): LogSeq's own transactor ACCEPTS
+    # a tag whose entity does not exist and leaves a dangling reference, which
+    # surfaces one import later as the importer's DanglingReference. Push
+    # refuses it first, by name.
+    unknown_reference: refused
+    mint_new: none

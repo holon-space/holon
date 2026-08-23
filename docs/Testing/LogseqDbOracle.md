@@ -13,7 +13,7 @@ as *ignored*, never as passing.
 
 ```sh
 cargo test -p holon-logseq-db --all-targets   # legs 1 and 2 show as ignored
-HOLON_LOGSEQ_ORACLE=/path/to/logseq-oracle just lsqdb-oracle   # runs all 5
+HOLON_LOGSEQ_ORACLE=~/.cache/holon/logseq-oracle-fab27740 just lsqdb-oracle  # runs all 5
 ```
 
 There is no skip-when-absent path. If the checkout is missing, incomplete, or
@@ -78,8 +78,12 @@ Holon wrote instead of silently upgrading them first.
 Needs `node`, plus `pnpm` and `babashka` — `nbb-logseq` shells out to `bb` to
 build its dependency jar. Neither has to be installed globally.
 
+The prepared checkout lives at `~/.cache/holon/logseq-oracle-fab27740` —
+rev `fab27740`, schema 65.33. Use that path; the steps below are what built it
+and what to repeat if it is gone.
+
 ```sh
-ORACLE=/path/to/logseq-oracle          # a checkout or git worktree
+ORACLE=~/.cache/holon/logseq-oracle-fab27740   # a checkout or git worktree
 git -C /path/to/logseq fetch upstream  # logseq/logseq, not a fork
 git -C /path/to/logseq worktree add "$ORACLE" fab27740975dcda1e93dbca718d1f620eda543c7 --detach
 
@@ -87,9 +91,13 @@ git -C /path/to/logseq worktree add "$ORACLE" fab27740975dcda1e93dbca718d1f620ed
 git -C "$ORACLE" show ef96a8d0^:deps/db/script/validate_db.cljs > "$ORACLE/deps/db/script/validate_db.cljs"
 git -C "$ORACLE" show f28e001b^:deps/db/script/diff_graphs.cljs  > "$ORACLE/deps/db/script/diff_graphs.cljs"
 
-# Holon's own scripts. apply_edits.cljs drives the head-to-head legs and the
-# bisect; without it those tests cannot run at all. The probes back the
-# built-in predicate's pins.
+# Holon's own scripts. apply_edits.cljs drives the title head-to-head and the
+# bisect and apply_tag_edits.cljs the tag head-to-head; without them those
+# tests cannot run at all. The probes back the built-in predicate's pins and
+# the cardinality and tag measurements.
+#
+# The in-repo copies are the source of truth: re-copy after any change to
+# crates/holon-logseq-db/oracle/, or the legs measure a stale script.
 cp crates/holon-logseq-db/oracle/*.cljs "$ORACLE/deps/db/script/"
 
 pnpm --dir "$ORACLE/deps/db" install --frozen-lockfile --ignore-workspace
@@ -106,6 +114,11 @@ Then run the legs:
 ```sh
 HOLON_LOGSEQ_ORACLE="$ORACLE" just lsqdb-oracle
 ```
+
+A checkout under a session scratchpad or `/tmp` is not durable — it is
+garbage-collected out from under the gate, and the legs then fail loudly with
+a pointer back here rather than skipping. That is why the path above is under
+`~/.cache`.
 
 Expect the whole crate green with 0 ignored. `Oracle::find` asserts that
 `node_modules` exists before anything runs, so a graph-less setup fails with

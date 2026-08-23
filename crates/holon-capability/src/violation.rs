@@ -10,6 +10,7 @@ use crate::profile::ProfileRevision;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
     Content,
+    Tags,
     PropertyKeys,
     PropertyValues,
     Ordering,
@@ -28,6 +29,7 @@ impl std::fmt::Display for Axis {
             Self::Ordering => "ordering",
             Self::Identity => "identity",
             Self::Hierarchy => "hierarchy",
+            Self::Tags => "tags",
             Self::Mutation => "mutation",
             Self::Assets => "assets",
         })
@@ -82,6 +84,12 @@ pub enum Clause {
     SiblingOrder,
     /// `hosted_kinds` lists this.
     HostedKinds,
+    /// `tags.attach_existing` says this.
+    TagAttach,
+    /// `tags.detach_existing` says this.
+    TagDetach,
+    /// `tags.unknown_reference` says this.
+    TagUnknownReference,
     /// `content.representation` says this.
     Representation,
     /// `ordering.order_key_durable` says this.
@@ -130,6 +138,9 @@ impl std::fmt::Display for Clause {
             Self::Attachments => write!(f, "assets.attachments"),
             Self::IdConstraint(c) => write!(f, "identity.id_constraints names {c:?}"),
             Self::IdSpace => write!(f, "identity.id_space"),
+            Self::TagAttach => write!(f, "tags.attach_existing"),
+            Self::TagDetach => write!(f, "tags.detach_existing"),
+            Self::TagUnknownReference => write!(f, "tags.unknown_reference"),
         }
     }
 }

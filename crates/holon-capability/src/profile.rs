@@ -25,6 +25,7 @@ use crate::axes::MutationAxis;
 use crate::axes::OrderingAxis;
 use crate::axes::PropertyKeysAxis;
 use crate::axes::PropertyValuesAxis;
+use crate::axes::TagsAxis;
 use crate::clause::ClauseId;
 use crate::clause::EnforcementMap;
 use crate::clause::Marker;
@@ -89,6 +90,7 @@ pub struct FidelityAxes {
     pub computed: ComputedAxis,
     pub mutation: MutationAxis,
     pub assets: AssetsAxis,
+    pub tags: TagsAxis,
 }
 
 /// The yaml shape, before the revision is derived.
@@ -291,6 +293,10 @@ impl CapabilityProfile {
 
     pub fn assets(&self) -> &AssetsAxis {
         &self.fidelity.assets
+    }
+
+    pub fn tags(&self) -> &TagsAxis {
+        &self.fidelity.tags
     }
 }
 

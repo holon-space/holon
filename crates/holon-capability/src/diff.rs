@@ -30,6 +30,9 @@ use crate::axes::Reparent;
 use crate::axes::Representability;
 use crate::axes::SchemaRequirement;
 use crate::axes::SiblingOrder;
+use crate::axes::TagMinting;
+use crate::axes::TagWrite;
+use crate::axes::UnknownTagReference;
 use crate::axes::WriteLeg;
 use crate::axes::WriteUnit;
 use crate::clause::ALL_CLAUSES;
@@ -513,6 +516,50 @@ fn loss_for(
             missing(&from.assets().extensions, &to.assets().extensions),
             "an attachment of this type is not recognised by the target",
         ),
+
+        // A tag the source can attach and the target cannot is content the
+        // move drops silently: the entity arrives, its classification does
+        // not.
+        ClauseId::TagsAttachExisting => {
+            let (a, b) = (from.tags().attach_existing, to.tags().attach_existing);
+            (a == TagWrite::Carried && b != TagWrite::Carried).then_some(())?;
+            loss(
+                format!("{a:?}"),
+                format!("{b:?}"),
+                "a tag cannot be attached in the target, so classification does not move",
+            )
+        }
+        ClauseId::TagsDetachExisting => {
+            let (a, b) = (from.tags().detach_existing, to.tags().detach_existing);
+            (a == TagWrite::Carried && b != TagWrite::Carried).then_some(())?;
+            loss(
+                format!("{a:?}"),
+                format!("{b:?}"),
+                "a tag cannot be removed in the target, so a classification becomes permanent",
+            )
+        }
+        // Losing a REFUSAL is a loss even though it removes a restriction:
+        // the target accepts what the source turned away, and writes a
+        // reference to nothing instead of saying no.
+        ClauseId::TagsResolutionRefusesUnknown => {
+            let (a, b) = (from.tags().unknown_reference, to.tags().unknown_reference);
+            (a == UnknownTagReference::Refused && b == UnknownTagReference::Dangling)
+                .then_some(())?;
+            loss(
+                format!("{a:?}"),
+                format!("{b:?}"),
+                "an unresolvable tag is written as a dangling reference instead of refused",
+            )
+        }
+        ClauseId::TagsMintNew => {
+            let (a, b) = (from.tags().mint_new, to.tags().mint_new);
+            (a == TagMinting::Supported && b == TagMinting::None).then_some(())?;
+            loss(
+                format!("{a:?}"),
+                format!("{b:?}"),
+                "a tag that does not exist yet cannot be created in the target",
+            )
+        }
     }
 }
 

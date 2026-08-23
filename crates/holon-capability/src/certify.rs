@@ -47,6 +47,8 @@ use crate::axes::ReferenceValues;
 use crate::axes::Representability;
 use crate::axes::SchemaRequirement;
 use crate::axes::SiblingOrder;
+use crate::axes::TagWrite;
+use crate::axes::UnknownTagReference;
 use crate::axes::ValueKind;
 use crate::axes::WriteLeg;
 use crate::axes::WriteUnit;
@@ -194,6 +196,28 @@ pub trait CertifiableFormat {
 
     /// Whether an entity written through `carrier` keeps its identity.
     fn identity_via(&self, _: crate::axes::IdCarrier) -> anyhow::Result<Option<bool>> {
+        Ok(None)
+    }
+
+    /// Attach a reference to a tag the format ALREADY has, through the real
+    /// write leg, and report whether the entity comes back carrying it. Same
+    /// `Ok(None)` contract as the probes above.
+    fn attach_existing_tag(&self) -> anyhow::Result<Option<ConstructOutcome>> {
+        Ok(None)
+    }
+
+    /// Detach a tag the entity currently carries, and report whether it comes
+    /// back without it. `Survived` means the DETACH survived, not the tag.
+    fn detach_existing_tag(&self) -> anyhow::Result<Option<ConstructOutcome>> {
+        Ok(None)
+    }
+
+    /// Reference a tag name the format has no entity for.
+    ///
+    /// `Refused` is the answer a profile declaring `refused` needs; `Survived`
+    /// means the write went through, which for an unresolvable name is a
+    /// reference to nothing.
+    fn reference_unknown_tag(&self) -> anyhow::Result<Option<ConstructOutcome>> {
         Ok(None)
     }
 
@@ -592,6 +616,7 @@ pub fn certify(format: &dyn CertifiableFormat) -> anyhow::Result<CertificationRe
     certify_hierarchy(format, profile, &mut report)?;
     certify_mutation(format, profile, &mut report)?;
     certify_assets(format, profile, &mut report)?;
+    certify_tags(format, profile, &mut report)?;
     certify_ordering(format, profile, &mut report)?;
     certify_identity(format, profile, &mut report)?;
 
@@ -2170,6 +2195,110 @@ fn certify_assets(
     if drove {
         report.probed.insert(ClauseId::AssetsExtensions);
     }
+    Ok(())
+}
+
+/// Axis 11 — the structured tag set.
+///
+/// Every clause here is about the WRITE leg, so a format with no write leg
+/// drives none of them and must mark them; that is the coverage law doing its
+/// job, not a gap in this function.
+fn certify_tags(
+    format: &dyn CertifiableFormat,
+    profile: &CapabilityProfile,
+    report: &mut CertificationReport,
+) -> anyhow::Result<()> {
+    let axis = profile.tags();
+
+    for (clause_id, clause, declared, outcome, subject) in [
+        (
+            ClauseId::TagsAttachExisting,
+            Clause::TagAttach,
+            axis.attach_existing,
+            format.attach_existing_tag()?,
+            "attach an existing tag",
+        ),
+        (
+            ClauseId::TagsDetachExisting,
+            Clause::TagDetach,
+            axis.detach_existing,
+            format.detach_existing_tag()?,
+            "detach an existing tag",
+        ),
+    ] {
+        let Some(outcome) = outcome else {
+            continue;
+        };
+        report.probed.insert(clause_id);
+        let broken = |o: Outcome| Violation {
+            profile: profile.id().clone(),
+            rev: profile.revision().clone(),
+            axis: Axis::Tags,
+            clause: clause.clone(),
+            leg: Leg("tags"),
+            key: subject.to_string(),
+            sent: Value::String(subject.to_string()),
+            outcome: o,
+        };
+        match (declared, &outcome) {
+            (TagWrite::Carried, ConstructOutcome::Survived) => report.confirmed += 1,
+            (TagWrite::Carried, ConstructOutcome::Refused { reason }) => {
+                report.violations.push(broken(Outcome::Refused {
+                    reason: reason.clone(),
+                }))
+            }
+            (TagWrite::Carried, _) => report.violations.push(broken(Outcome::Dropped)),
+            (TagWrite::Refused, ConstructOutcome::Refused { .. }) => report.confirmed += 1,
+            (TagWrite::Refused, _) => report.violations.push(broken(Outcome::NotRefused)),
+            // Declared to have no tag set at all, yet the write went through:
+            // an under-declaration, which is the tightening direction rather
+            // than a lie about what survives.
+            (TagWrite::Unsupported, ConstructOutcome::Survived) => {
+                report.prompts.push(TighteningPrompt {
+                    profile: profile.id().clone(),
+                    axis: Axis::Tags,
+                    leg: Leg("tags"),
+                    key: subject.to_string(),
+                    sent: Value::String(subject.to_string()),
+                    note: format!(
+                        "the profile declares no structured tag set, but `{subject}` went \
+                         through and came back — the writer carries more than the profile claims"
+                    ),
+                })
+            }
+            (TagWrite::Unsupported, _) => report.confirmed += 1,
+        }
+    }
+
+    if let Some(outcome) = format.reference_unknown_tag()? {
+        report.probed.insert(ClauseId::TagsResolutionRefusesUnknown);
+        let broken = |o: Outcome| Violation {
+            profile: profile.id().clone(),
+            rev: profile.revision().clone(),
+            axis: Axis::Tags,
+            clause: Clause::TagUnknownReference,
+            leg: Leg("tags"),
+            key: "a tag name with no entity".to_string(),
+            sent: Value::String("a tag name with no entity".to_string()),
+            outcome: o,
+        };
+        match (axis.unknown_reference, &outcome) {
+            (UnknownTagReference::Refused, ConstructOutcome::Refused { .. }) => {
+                report.confirmed += 1
+            }
+            // The declaration a caller acts on: told the boundary refuses an
+            // unresolvable name, a caller stops checking. A write that goes
+            // through instead leaves a reference to nothing.
+            (UnknownTagReference::Refused, _) => {
+                report.violations.push(broken(Outcome::NotRefused))
+            }
+            (UnknownTagReference::Dangling, ConstructOutcome::Survived) => report.confirmed += 1,
+            (UnknownTagReference::Dangling, _) => report.violations.push(broken(Outcome::Dropped)),
+            (UnknownTagReference::Minted, ConstructOutcome::Survived) => report.confirmed += 1,
+            (UnknownTagReference::Minted, _) => report.violations.push(broken(Outcome::Dropped)),
+        }
+    }
+
     Ok(())
 }
 

@@ -9,6 +9,14 @@
 pub const MINIMAL: &str = r#"
 profile: test
 not_yet_certified:
+  - clause: tags_attach_existing
+    reason: no stub drives the tag probes; the format harnesses do.
+  - clause: tags_detach_existing
+    reason: no stub drives the tag probes; the format harnesses do.
+  - clause: tags_resolution_refuses_unknown
+    reason: no stub drives the tag probes; the format harnesses do.
+  - clause: tags_mint_new
+    reason: no stub drives the tag probes; the format harnesses do.
   # No stub implements these probes; org drives them. Coverage is per-format,
   # and every marker states its reason — a bare marker is a load error.
   - clause: hosted_kinds
@@ -94,6 +102,10 @@ enforced_by:
     - assets_attachments
     - assets_binary_inline
     - assets_extensions
+    - tags_attach_existing
+    - tags_detach_existing
+    - tags_resolution_refuses_unknown
+    - tags_mint_new
   # The sync controller / consolidator. These are REAL rules that a
   # format-crate probe structurally cannot see; they are not TODOs here.
   # Each deferral NAMES the code that enforces it. A deferral without a site is
@@ -184,6 +196,12 @@ fidelity_axes:
     attachments: none
     binary_inline: none
     extensions: []
+
+  tags:
+    attach_existing: unsupported
+    detach_existing: unsupported
+    unknown_reference: refused
+    mint_new: none
 "#;
 
 /// `MINIMAL` with one `old` substring swapped for `new` — the way every test

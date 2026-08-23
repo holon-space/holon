@@ -20,6 +20,7 @@ use holon_api::Value;
 use holon_capability::CapabilityProfile;
 use holon_capability::Carrier;
 use holon_capability::CertifiableFormat;
+use holon_capability::ConstructOutcome;
 use holon_capability::Leg;
 use holon_capability::Readback;
 use holon_capability::WriteAttempt;
@@ -94,6 +95,97 @@ impl LogseqDb {
             .map(str::to_string)
             .context("the fixture must carry at least one editable block")?;
         Ok((graph, base, target))
+    }
+
+    /// A class this graph HAS that `target` does not already carry.
+    ///
+    /// Derived from the tags the fixture's own blocks carry, not from a name
+    /// list: a hard-coded name rots the day the fixture changes, and the probe
+    /// would then measure a refusal for the wrong reason.
+    fn spare_class(
+        &self,
+        graph: &KvsGraph,
+        base: &ImportBase,
+        target: &str,
+    ) -> anyhow::Result<String> {
+        let held = &base.get(target).context("the target is in the base")?.tags;
+        let candidates: std::collections::BTreeSet<String> = base
+            .uuids()
+            .flat_map(|u| base.get(u).expect("present").tags.iter().cloned())
+            .collect();
+        for name in candidates {
+            if held.contains(&name) {
+                continue;
+            }
+            // A read error is the harness failing, not an absent class: it
+            // must arrive with its own cause rather than as "the fixture has
+            // no spare class", which would send the reader to the fixture.
+            if kvs_writer::class_entity_by_name(graph, &name)
+                .map_err(|e| anyhow::anyhow!("reading the graph must work: {e}"))?
+                .is_some()
+            {
+                return Ok(name);
+            }
+        }
+        anyhow::bail!("the fixture must carry a class the target does not already have")
+    }
+
+    /// Push a base change and report what the RE-IMPORTED graph says.
+    ///
+    /// `carried` is asked of the block that came back, never of push's own
+    /// report: a probe that trusted the return value would confirm a write
+    /// that never reached the file.
+    async fn tag_outcome(
+        &self,
+        mut graph: KvsGraph,
+        before: &ImportBase,
+        after: &ImportBase,
+        target: &str,
+        carried: impl Fn(&BaseBlock) -> bool,
+    ) -> anyhow::Result<ConstructOutcome> {
+        if let Err(error) = kvs_writer::push(&mut graph, before, after) {
+            return Ok(ConstructOutcome::Refused {
+                reason: error.to_string(),
+            });
+        }
+        let dir = tempfile::tempdir().context("temp dir")?;
+        let copy = dir.path().join("certified.sqlite");
+        kvs_writer::write_graph(&graph, &copy)
+            .await
+            .map_err(|e| anyhow::anyhow!("writing the graph must work: {e}"))?;
+        let back = ImportBase::from_import(
+            &LogseqDbImporter::new()
+                .import(&copy)
+                .await
+                .map_err(|e| anyhow::anyhow!("re-import must work: {e}"))?,
+        );
+        let block = back
+            .get(target)
+            .context("the pushed block must survive the round trip")?;
+        Ok(if carried(block) {
+            ConstructOutcome::Survived
+        } else {
+            ConstructOutcome::Lost
+        })
+    }
+
+    /// `base` with `target`'s tags replaced, kept in the sorted-set shape a
+    /// base carries.
+    fn with_tags(
+        base: &ImportBase,
+        target: &str,
+        mut tags: Vec<String>,
+    ) -> anyhow::Result<ImportBase> {
+        tags.sort();
+        tags.dedup();
+        let mut next = base.clone();
+        let block = BaseBlock {
+            tags,
+            ..base.get(target).expect("present").clone()
+        };
+        next.advance(target, block)
+            .map_err(|e| anyhow::anyhow!("advancing the base must work: {e}"))?;
+        Ok(next)
     }
 }
 
@@ -201,6 +293,72 @@ impl CertifiableFormat for LogseqDb {
             Ok(Some(WriteAttempt::Wrote {
                 leg: WriteLeg::File,
             }))
+        })
+    }
+
+    /// Attach a class the graph already has, through the REAL push path.
+    fn attach_existing_tag(&self) -> anyhow::Result<Option<ConstructOutcome>> {
+        self.blocking(async {
+            let (graph, before, target) = self.scene().await?;
+            let name = self.spare_class(&graph, &before, &target)?;
+            let mut tags = before.get(&target).expect("present").tags.clone();
+            tags.push(name.clone());
+            let after = Self::with_tags(&before, &target, tags)?;
+            Ok(Some(
+                self.tag_outcome(graph, &before, &after, &target, |b| b.tags.contains(&name))
+                    .await?,
+            ))
+        })
+    }
+
+    /// Detach a class the block carries. `Survived` means the DETACH survived.
+    fn detach_existing_tag(&self) -> anyhow::Result<Option<ConstructOutcome>> {
+        self.blocking(async {
+            let (graph, before, target) = self.scene().await?;
+            let name = self.spare_class(&graph, &before, &target)?;
+
+            // Attach it first, so the detach has a real subject rather than a
+            // block that never carried the tag — where "gone" would be true
+            // before the push and prove nothing.
+            let mut tags = before.get(&target).expect("present").tags.clone();
+            tags.push(name.clone());
+            let attached = Self::with_tags(&before, &target, tags)?;
+            let mut graph = graph;
+            kvs_writer::push(&mut graph, &before, &attached)
+                .map_err(|e| anyhow::anyhow!("the setup attach must succeed: {e}"))?;
+
+            let detached = Self::with_tags(
+                &attached,
+                &target,
+                before.get(&target).expect("present").tags.clone(),
+            )?;
+            Ok(Some(
+                self.tag_outcome(graph, &attached, &detached, &target, |b| {
+                    !b.tags.contains(&name)
+                })
+                .await?,
+            ))
+        })
+    }
+
+    /// Reference a class name this graph has no entity for.
+    fn reference_unknown_tag(&self) -> anyhow::Result<Option<ConstructOutcome>> {
+        self.blocking(async {
+            let (graph, before, target) = self.scene().await?;
+            let name = "NoSuchClassExistsInThisGraph".to_string();
+            anyhow::ensure!(
+                kvs_writer::class_entity_by_name(&graph, &name)
+                    .map_err(|e| anyhow::anyhow!("reading the graph must work: {e}"))?
+                    .is_none(),
+                "the probe's name must really be absent, or it measures nothing"
+            );
+            let mut tags = before.get(&target).expect("present").tags.clone();
+            tags.push(name.clone());
+            let after = Self::with_tags(&before, &target, tags)?;
+            Ok(Some(
+                self.tag_outcome(graph, &before, &after, &target, |b| b.tags.contains(&name))
+                    .await?,
+            ))
         })
     }
 }

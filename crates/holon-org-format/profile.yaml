@@ -30,6 +30,26 @@ profile: org
 # declared from a citation and driven by nothing. The certifier prints a
 # MARKER line per entry, so the report never reads like full coverage.
 not_yet_certified:
+  - clause: tags_attach_existing
+    reason: >-
+      the value is READ off the code (parser.rs:578 lifts headline tags into
+      `block.tags`; models.rs:1353-1358 renders them back), not measured — the
+      structured round-trip probe is not written yet. The `tag` inline
+      construct measures the `:sometag:` BYTES surviving, which is a different
+      claim.
+  - clause: tags_detach_existing
+    reason: >-
+      same source and same gap as `tags_attach_existing`: removing a tag from
+      the set and re-rendering is not driven by any probe here.
+  - clause: tags_resolution_refuses_unknown
+    reason: >-
+      an org tag is a bare string with no entity behind it, so "unresolvable"
+      has no inhabitant to drive. Declared `minted` from that reading; a probe
+      showing a name created by writing it would settle it.
+  - clause: tags_mint_new
+    reason: >-
+      same as the clause above — writing a name IS creating the tag, and
+      nothing here drives it.
   - clause: property_values_reference_values
     reason: >-
       MEASURED, not assumed: only `none` is decidable from a round trip. org's
@@ -74,6 +94,10 @@ enforced_by:
     - assets_attachments
     - assets_binary_inline
     - assets_extensions
+    - tags_attach_existing
+    - tags_detach_existing
+    - tags_resolution_refuses_unknown
+    - tags_mint_new
   # The sync controller / consolidator. These are REAL rules that a
   # format-crate probe structurally cannot see; they are not TODOs here.
   # Each deferral NAMES the code that enforces it. A deferral without a site is
@@ -384,3 +408,19 @@ fidelity_axes:
     # probing plausible NEIGHBOUR extensions — the declared set alone can never
     # reveal an under-declaration.
     extensions: [png, jpg, jpeg, gif, webp, svg, bmp, ico, tiff, tif]
+
+  # Org carries a structured tag set on the headline: the parser lifts
+  # `headline.tags()` into `block.tags` (parser.rs:578) and the renderer emits
+  # `tags.to_org()` back onto it (models.rs:1353-1358). Distinct from the `tag`
+  # inline construct above, which measures the `:sometag:` BYTES surviving in
+  # the content string.
+  #
+  # An org tag is a bare STRING, not a reference to a tag entity — so a name
+  # nothing else uses is created by writing it, and there is nothing to refuse.
+  # That is a real capability difference from a format whose tags are entity
+  # references, which is what makes the two answers worth distinguishing.
+  tags:
+    attach_existing: carried
+    detach_existing: carried
+    unknown_reference: minted
+    mint_new: supported

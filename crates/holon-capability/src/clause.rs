@@ -76,6 +76,11 @@ pub enum ClauseId {
     AssetsAttachments,
     AssetsBinaryInline,
     AssetsExtensions,
+    // axis 11
+    TagsAttachExisting,
+    TagsDetachExisting,
+    TagsResolutionRefusesUnknown,
+    TagsMintNew,
 }
 
 impl std::fmt::Display for ClauseId {
@@ -129,6 +134,10 @@ pub const ALL_CLAUSES: &[ClauseId] = &[
     ClauseId::AssetsAttachments,
     ClauseId::AssetsBinaryInline,
     ClauseId::AssetsExtensions,
+    ClauseId::TagsAttachExisting,
+    ClauseId::TagsDetachExisting,
+    ClauseId::TagsResolutionRefusesUnknown,
+    ClauseId::TagsMintNew,
 ];
 
 /// WHO enforces a clause.
@@ -480,7 +489,7 @@ mod tests {
         );
         assert_eq!(
             listed.len(),
-            39,
+            43,
             "a clause was added to the vocabulary without adding it to ALL_CLAUSES, which \
              would exempt it from the driven-or-marked law"
         );
