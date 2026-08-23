@@ -2401,11 +2401,21 @@ where
         };
 
         // The destination's page-ness — the only fact the move needs about it.
+        //
+        // The root sentinel is a legal destination that no read can resolve: it
+        // is the FK anchor row, deliberately excluded from the `block` matview
+        // `get_by_id` reads, so looking it up would search the one relation that
+        // hides it. Its page-ness is a fact, not a lookup — the anchor is not a
+        // page — so it is supplied directly and the guard below still runs on
+        // it. The skip is keyed on that exact id: any other unresolvable
+        // destination must still fail.
         let parent_is_page = match prefetch.new_parent {
             Some(is_page) => is_page,
+            None if *parent_id == EntityUri::no_parent() => false,
             None => {
                 let maybe_parent: Option<T> = self.get_by_id(parent_id.as_str()).await?;
-                let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
+                let parent: T =
+                    maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found: {parent_id}"))?;
                 parent.is_page()
             }
         };
