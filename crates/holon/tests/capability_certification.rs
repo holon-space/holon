@@ -28,6 +28,7 @@ use holon_api::block::Block;
 use holon_capability::CapabilityProfile;
 use holon_capability::Carrier;
 use holon_capability::CertifiableFormat;
+use holon_capability::ConstructOutcome;
 use holon_capability::Leg;
 use holon_capability::Readback;
 use holon_capability::certify;
@@ -96,6 +97,86 @@ impl HolonNative {
     /// runtime; a bare `block_on` on a runtime thread would panic.
     fn blocking<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
         tokio::task::block_in_place(|| Handle::current().block_on(fut))
+    }
+
+    /// Write a block carrying `tags`, then read the set back out of
+    /// `block_tags` — the junction the substrate actually stores them in.
+    ///
+    /// Not `block_raw`: `tags` is an EDGE field with no column there
+    /// (undo.rs:611 records the same fact), so a probe reading the blob would
+    /// report every tag lost and blame the substrate for looking in the wrong
+    /// place.
+    async fn tags_after_write(&self, id: &str, tags: &[&str]) -> anyhow::Result<Vec<String>> {
+        let mut params: holon_api::StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("content".into(), Value::String("certify".to_string()));
+        params.insert("parent_id".into(), Value::String(ROOT_PARENT.to_string()));
+        // An ARRAY, not a CSV string: `tags` is an edge field and the provider
+        // panics by name on any other shape (sql_operation_provider.rs:532).
+        params.insert(
+            "tags".into(),
+            Value::Array(
+                tags.iter()
+                    .map(|t| Value::String((*t).to_string()))
+                    .collect(),
+            ),
+        );
+        self.ctx
+            .execute_op("block", "create", params)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("the create must land for the probe to mean anything: {e:#}")
+            })?;
+
+        self.tags_now(id).await
+    }
+
+    /// Replace an existing block's tag set through the production update path.
+    async fn tags_after_update(&self, id: &str, tags: &[&str]) -> anyhow::Result<Vec<String>> {
+        let mut params: holon_api::StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(format!("block:{id}")));
+        params.insert(
+            "tags".into(),
+            Value::Array(
+                tags.iter()
+                    .map(|t| Value::String((*t).to_string()))
+                    .collect(),
+            ),
+        );
+        self.ctx
+            .execute_op("block", "update", params)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("the update must land for the probe to mean anything: {e:#}")
+            })?;
+        self.tags_now(id).await
+    }
+
+    /// The tag set the junction currently holds for `id`.
+    async fn tags_now(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        let sql = format!(
+            "SELECT tag FROM block_tags WHERE block_id = 'block:{}'",
+            id.replace('\'', "''")
+        );
+        let rows = self
+            .ctx
+            .engine()
+            .db_handle()
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("reading block_tags failed: {e}"))?;
+        // A non-string tag row is a named error, not a skip: dropping one
+        // would under-report the set and read as a lost tag.
+        let mut tags = Vec::new();
+        for row in &rows {
+            match row.get("tag") {
+                Some(Value::String(tag)) => tags.push(tag.clone()),
+                other => anyhow::bail!(
+                    "block_tags.tag for {id} came back as {other:?}, which is not a tag name"
+                ),
+            }
+        }
+        Ok(tags)
     }
 
     /// Write one property through the production create path and read the
@@ -270,6 +351,74 @@ impl CertifiableFormat for HolonNative {
     ) -> anyhow::Result<Readback> {
         let id = probe_id(key, value);
         self.blocking(self.write_then_read(&id, key, value))
+    }
+
+    /// Attach: write a block carrying a tag and read the junction back.
+    fn attach_existing_tag(&self) -> anyhow::Result<Option<ConstructOutcome>> {
+        self.blocking(async {
+            let back = self
+                .tags_after_write("certify-tags-attach", &["keep", "added"])
+                .await?;
+            Ok(Some(
+                if back.iter().any(|t| t == "added") && back.iter().any(|t| t == "keep") {
+                    ConstructOutcome::Survived
+                } else if back.iter().any(|t| t == "added") {
+                    ConstructOutcome::Changed {
+                        got: format!("{back:?}"),
+                    }
+                } else {
+                    ConstructOutcome::Lost
+                },
+            ))
+        })
+    }
+
+    /// Detach: write BOTH tags, then update to one, and require the junction
+    /// to hold the survivor and not the dropped name.
+    ///
+    /// The tag really is present first. A probe that created the block with
+    /// the smaller set would find the name absent — but it was never there,
+    /// so "gone" would be true before the write and the clause would confirm
+    /// on nothing.
+    fn detach_existing_tag(&self) -> anyhow::Result<Option<ConstructOutcome>> {
+        self.blocking(async {
+            let id = "certify-tags-detach";
+            let staged = self.tags_after_write(id, &["keep", "drop"]).await?;
+            anyhow::ensure!(
+                staged.iter().any(|t| t == "drop"),
+                "the setup must really attach the tag it then removes; got {staged:?}"
+            );
+            let back = self.tags_after_update(id, &["keep"]).await?;
+            Ok(Some(
+                if !back.iter().any(|t| t == "drop") && back.iter().any(|t| t == "keep") {
+                    ConstructOutcome::Survived
+                } else if !back.iter().any(|t| t == "keep") {
+                    ConstructOutcome::Lost
+                } else {
+                    ConstructOutcome::Changed {
+                        got: format!("{back:?}"),
+                    }
+                },
+            ))
+        })
+    }
+
+    /// A tag name nothing has used before.
+    ///
+    /// The substrate stores tags as strings in a junction, so there is no
+    /// entity for a name to fail to resolve to: the two observable answers are
+    /// REFUSED and carried-into-existence.
+    fn reference_unknown_tag(&self) -> anyhow::Result<Option<ConstructOutcome>> {
+        self.blocking(async {
+            let back = self
+                .tags_after_write("certify-tags-unknown", &["neverseenbefore"])
+                .await?;
+            Ok(Some(if back.iter().any(|t| t == "neverseenbefore") {
+                ConstructOutcome::Survived
+            } else {
+                ConstructOutcome::Lost
+            }))
+        })
     }
 }
 

@@ -27,6 +27,7 @@
 use std::path::Path;
 
 use holon_api::EntityUri;
+use holon_api::Tags;
 use holon_api::Value;
 use holon_capability::BlockConstruct;
 use holon_capability::CapabilityProfile;
@@ -123,6 +124,90 @@ impl OrgFormat {
         } else {
             ConstructOutcome::Lost
         })
+    }
+
+    /// Set a block's STRUCTURED tag set, render, parse back, and report what
+    /// the RE-PARSED block carries.
+    ///
+    /// This reads `block.tags` on the far side rather than scanning the
+    /// rendered bytes, so it measures the set the model holds — the leg from
+    /// `tags.to_org()` (models.rs:1353-1358) to the headline tag lift
+    /// (parser.rs:823). MEASURED which of the two `headline.tags()` calls that
+    /// is: neutering :823 empties the staged set and trips the carried-assert
+    /// below, while neutering :578 changes the run not at all — so :823 is the
+    /// path a certified block travels and :578 serves something else.
+    ///
+    /// WHAT THIS DOES NOT GIVE ORG, stated so nobody reads more into it: for
+    /// org the structured set and the `:sometag:` syntax are ONE observable —
+    /// both readbacks come from the same headline tag lift, and no break
+    /// separates them. Org's structure IS its syntax. The value of the tags
+    /// clauses here is cross-format COMPARABILITY (org `carried` against
+    /// logseq-db `refused` against native `carried`), not an org-local fact
+    /// that `content.inline_constructs: tag` was missing.
+    fn tags_round_trip(&self, authored: &[&str], wanted: &[&str]) -> anyhow::Result<Tags> {
+        let path = Path::new(FILE);
+        let base = parse_org_file(path, BASE_FIXTURE, &EntityUri::no_parent(), Path::new(ROOT))
+            .map_err(|e| anyhow::anyhow!("the base fixture must parse: {e}"))?;
+        let doc = base.document.clone();
+        let mut block = base
+            .blocks
+            .iter()
+            .find(|b| b.org_title() == PROBE_HEADLINE)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("the base fixture must carry the probe block"))?;
+
+        // Author a starting set, so a detach has a subject that really was
+        // there — "gone" must not be true before the write.
+        block.tags = Tags::from_tag_iter(authored.iter().map(|t| (*t).to_string()));
+        let authored_src = OrgRenderer::render_document(&doc, &[block.clone()], path, &doc.id);
+        let staged = parse_org_file(
+            path,
+            &authored_src,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .map_err(|e| {
+            anyhow::anyhow!("the authored fixture must parse back: {e}\n{authored_src}")
+        })?;
+        let mut block = staged
+            .blocks
+            .iter()
+            .find(|b| b.org_title() == PROBE_HEADLINE)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("the probe block vanished while staging:\n{authored_src}")
+            })?;
+
+        // The staged set must REALLY have carried before the transition is
+        // measured. Without this the staging is decorative: `wanted` is
+        // written over whatever came back, so a detach would assert a name
+        // absent that was never in the measured input — vacuous however the
+        // staging behaved.
+        for tag in authored {
+            anyhow::ensure!(
+                block.tags.contains(tag),
+                "the staged attach must really carry `{tag}` before the transition is measured; \
+                 got {:?} from\n{authored_src}",
+                block.tags
+            );
+        }
+
+        block.tags = Tags::from_tag_iter(wanted.iter().map(|t| (*t).to_string()));
+        let rendered =
+            OrgRenderer::render_document(&staged.document, &[block], path, &staged.document.id);
+        let parsed = parse_org_file(path, &rendered, &EntityUri::no_parent(), Path::new(ROOT))
+            .map_err(|e| {
+                anyhow::anyhow!("the rendered fixture must parse back: {e}\n{rendered}")
+            })?;
+        Ok(parsed
+            .blocks
+            .iter()
+            .find(|b| b.org_title() == PROBE_HEADLINE)
+            .ok_or_else(|| {
+                anyhow::anyhow!("the probe block vanished from the round trip:\n{rendered}")
+            })?
+            .tags
+            .clone())
     }
 
     /// Author `body` under a headline, write it back, and report whether the
@@ -1062,6 +1147,53 @@ impl CertifiableFormat for OrgFormat {
                 }
             },
         ))
+    }
+
+    /// Attach a tag to the structured set and read it back off the RE-PARSED
+    /// block.
+    fn attach_existing_tag(&self) -> anyhow::Result<Option<ConstructOutcome>> {
+        let back = self.tags_round_trip(&["keep"], &["keep", "added"])?;
+        Ok(Some(if back.contains("added") && back.contains("keep") {
+            ConstructOutcome::Survived
+        } else if back.contains("added") {
+            ConstructOutcome::Changed {
+                got: format!("{back:?}"),
+            }
+        } else {
+            ConstructOutcome::Lost
+        }))
+    }
+
+    /// Remove one tag of two and require the removal — and only it — to land.
+    fn detach_existing_tag(&self) -> anyhow::Result<Option<ConstructOutcome>> {
+        let back = self.tags_round_trip(&["keep", "drop"], &["keep"])?;
+        Ok(Some(if !back.contains("drop") && back.contains("keep") {
+            ConstructOutcome::Survived
+        } else if !back.contains("drop") {
+            // The tag went, and so did the one that should have stayed: a
+            // detach that empties the set is not a detach.
+            ConstructOutcome::Changed {
+                got: format!("{back:?}"),
+            }
+        } else {
+            ConstructOutcome::Lost
+        }))
+    }
+
+    /// Write a tag name nothing in the file has used before.
+    ///
+    /// Org has no tag ENTITY, so there is nothing for a name to fail to
+    /// resolve to and nothing to dangle: the two observable answers are
+    /// REFUSED and carried-into-existence, and this probe distinguishes them.
+    /// `minted` is the honest reading of the second — the reference is what
+    /// brings the tag into being.
+    fn reference_unknown_tag(&self) -> anyhow::Result<Option<ConstructOutcome>> {
+        let back = self.tags_round_trip(&["keep"], &["keep", "neverseenbefore"])?;
+        Ok(Some(if back.contains("neverseenbefore") {
+            ConstructOutcome::Survived
+        } else {
+            ConstructOutcome::Lost
+        }))
     }
 }
 

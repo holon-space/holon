@@ -18,10 +18,11 @@
 #           SURPRISE and fails this script too: it means the classification is
 #           wrong, in either direction.
 #
-# The four `tags` clauses are `still` because org marks them: no probe drives
-# them here, so a flip that moved a counter would mean something is certifying
-# them behind the marker. They become `move` when org's structured tag probe
-# lands.
+# Three of the four `tags` clauses are `move`: org's structured probe drives
+# them through the real render -> parse leg. `mint_new` stays `still` and
+# always will — `certify_tags` has no arm for it, so nothing can contradict
+# either value (see `TagMinting`); it is marked, and movement would mean a
+# probe appeared that the vocabulary does not have.
 #
 # The profile under test is a COPY under target/. This script never writes into
 # the source tree.
@@ -277,9 +278,9 @@ svg, bmp, ico|svg, ico|move
 bmp, ico, tiff|bmp, tiff|move
 ico, tiff, tif]|ico, tif]|move
 , tif]|]|move
-attach_existing: carried|attach_existing: unsupported|still
-detach_existing: carried|detach_existing: unsupported|still
-unknown_reference: minted|unknown_reference: refused|still
+attach_existing: carried|attach_existing: unsupported|move
+detach_existing: carried|detach_existing: unsupported|move
+unknown_reference: minted|unknown_reference: refused|move
 mint_new: supported|mint_new: none|still
 FLIPS
 
