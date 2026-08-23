@@ -30,6 +30,19 @@ use crate::Value;
 /// convention as `_source_header_args`).
 pub const PROVENANCE_PROPERTY: &str = "_provenance";
 
+/// Property keys the ENGINE mints, so an authored one is refused rather than
+/// overwritten (ruling D5.a).
+///
+/// An EXACT-spelling list, deliberately not the `_` prefix: `_drawer_order`
+/// (`holon-org-format` `models.rs:43`) is an authored carrier the org ingest
+/// path legitimately puts into create/update params
+/// (`holon-orgmode/src/block_params.rs:167`), and banning the prefix would
+/// refuse the vault's own write leg. `_proposal`/`_proposed_by` are NOT here
+/// either: the engine re-dispatches `_proposed_by` through its own operation
+/// boundary when promoting a proposal, so reserving it would refuse
+/// `accept_proposal`.
+pub const ENGINE_OWNED_PARAM_KEYS: &[&str] = &[PROVENANCE_PROPERTY];
+
 // Field keys inside the nested `_provenance` object. Named constants so the
 // SQL/JSON query surface (`json_extract(properties, '$._provenance.origin')`)
 // and the Rust (de)serialization agree on one spelling.

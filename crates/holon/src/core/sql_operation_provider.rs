@@ -211,14 +211,18 @@ fn blocks_known_columns() -> Vec<&'static str> {
 /// therefore gets none of that behaviour, rather than inheriting block's shape
 /// and writing SQL against columns its table does not have.
 #[derive(Clone, Debug)]
-struct WriteSchema {
+pub(crate) struct WriteSchema {
     columns: HashSet<String>,
 }
 
 impl WriteSchema {
     /// The JSON column that absorbs params outside [`Self::columns`]. An entity
     /// whose table lacks it has NO overflow, so an unknown param is an error.
-    const OVERFLOW_COLUMN: &'static str = "properties";
+    ///
+    /// `pub(crate)` because the engine's reserved-key refusal must know which
+    /// param carries a whole property BAG, and deriving that from the schema is
+    /// what keeps the refusal from being a hand-list of operation names.
+    pub(crate) const OVERFLOW_COLUMN: &'static str = "properties";
 
     fn new(columns: impl IntoIterator<Item = String>) -> Self {
         Self {

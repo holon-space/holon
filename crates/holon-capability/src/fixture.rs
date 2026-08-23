@@ -79,6 +79,7 @@ enforced_by:
     - property_keys_charset
     - property_keys_case
     - property_keys_reserved_prefixes
+    - property_keys_engine_owned_keys
     - property_keys_collision
     - property_keys_schema_required
     - property_values_types
@@ -155,6 +156,7 @@ fidelity_axes:
     case: sensitive
     reserved_prefixes: []
     reserved_keys: []
+    engine_owned_keys: []
     collision: last_wins
     schema_required: open
   property_values:

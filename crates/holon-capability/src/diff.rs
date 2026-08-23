@@ -200,6 +200,17 @@ fn loss_for(
             ),
             "the target RESERVES this prefix, so a key carrying it is not the author's any more",
         ),
+        // Losing a REFUSAL is a loss, same argument as `tags_resolution`
+        // below: the target takes the key the source turned away, and the
+        // author's value is overwritten instead of being rejected.
+        ClauseId::PropertyKeysEngineOwnedKeys => lost_members(
+            missing(
+                &from.property_keys().engine_owned_keys,
+                &to.property_keys().engine_owned_keys,
+            ),
+            "the target ACCEPTS this key instead of refusing it, so an authored value is \
+             silently replaced",
+        ),
         ClauseId::PropertyKeysCollision => {
             let (a, b) = (from.property_keys().collision, to.property_keys().collision);
             (a == Collision::MultiValued && b != Collision::MultiValued).then(|| ())?;

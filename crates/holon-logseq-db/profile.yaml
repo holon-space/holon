@@ -45,6 +45,9 @@ not_yet_certified:
     reason: a property write is refused outright, so no key SHAPE is discriminable here.
   - clause: property_keys_reserved_prefixes
     reason: a property write is refused outright, so no key SHAPE is discriminable here.
+  - clause: property_keys_engine_owned_keys
+    reason: a property write is refused outright, so a key-specific refusal is not
+      discriminable from the blanket one.
   - clause: property_keys_collision
     reason: a property write is refused outright, so no key SHAPE is discriminable here.
   - clause: property_keys_schema_required
@@ -129,6 +132,7 @@ enforced_by:
     - property_keys_charset
     - property_keys_case
     - property_keys_reserved_prefixes
+    - property_keys_engine_owned_keys
     - property_keys_collision
     - property_keys_schema_required
     - property_values_types
@@ -191,6 +195,9 @@ fidelity_axes:
     case: sensitive
     reserved_prefixes: []
     reserved_keys: []
+    # EMPTY: the importer mints no key — and nothing here can show it
+    # either way, which the marker above says.
+    engine_owned_keys: []
     collision: last_wins
     schema_required: open
 

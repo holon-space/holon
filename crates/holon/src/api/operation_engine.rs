@@ -20,6 +20,7 @@ use anyhow::Result;
 use anyhow::bail;
 use async_trait::async_trait;
 use holon_api::ACCEPT_PROPOSAL_OP;
+use holon_api::ENGINE_OWNED_PARAM_KEYS;
 use holon_api::EntityName;
 use holon_api::HistoryEvent;
 use holon_api::HistoryStore;
@@ -60,6 +61,7 @@ use tokio::sync::RwLock;
 use crate::api::BackendEngine;
 use crate::api::operation_dispatcher::AuthoredInput;
 use crate::api::operation_dispatcher::OperationDispatcher;
+use crate::core::sql_operation_provider::WriteSchema;
 
 #[async_trait]
 impl OperationEngine for BackendEngine {
@@ -295,6 +297,120 @@ fn convert_page_uri(page_id: &str) -> EntityUri {
 /// not by this property stamp.
 const PROVENANCE_STAMPED_OPS: &[&str] = &["create", "update"];
 
+/// Param PAIRS where one param NAMES a field and the other carries its value.
+///
+/// `set_field`'s `(field, value)` is the whole vocabulary today, verified by
+/// enumerating every declared `OperationParam` name — an op that lets the
+/// caller choose which field to write declares that choice as a param, and this
+/// is the spelling the descriptors use. Adding a second spelling means adding
+/// it HERE, which is the one place [`reject_engine_owned_keys`] reads.
+const FIELD_NAMING_PARAMS: &[(&str, &str)] = &[("field", "value")];
+
+/// The property keys a whole-BAG value carries.
+///
+/// Two encodings reach this boundary and both must be read: a decoded `Object`,
+/// and the JSON STRING live callers pass (`sql_operation_provider.rs` accepts
+/// both when it merges the overflow column). A bag whose shape we cannot read
+/// is REFUSED rather than waved through — "I could not tell whether this
+/// carries a reserved key" is not evidence that it does not.
+fn bag_keys(op_name: &str, value: &Value) -> Result<Vec<String>> {
+    match value {
+        Value::Object(map) => Ok(map.keys().map(|k| k.to_string()).collect()),
+        Value::String(json) => {
+            let parsed: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+                anyhow::anyhow!(
+                    "'{op_name}' carries a '{bag}' bag that is not readable as JSON ({e}), so it \
+                     cannot be shown free of the engine-owned keys {ENGINE_OWNED_PARAM_KEYS:?} — \
+                     the write is REFUSED rather than trusted unread.",
+                    bag = WriteSchema::OVERFLOW_COLUMN,
+                )
+            })?;
+            match parsed {
+                serde_json::Value::Object(map) => Ok(map.keys().cloned().collect()),
+                other => anyhow::bail!(
+                    "'{op_name}' carries a '{bag}' bag that is JSON but not an object (got \
+                     {kind}), so it has no property keys to check — the write is REFUSED rather \
+                     than trusted unread.",
+                    bag = WriteSchema::OVERFLOW_COLUMN,
+                    kind = match other {
+                        serde_json::Value::Null => "null",
+                        serde_json::Value::Bool(_) => "a boolean",
+                        serde_json::Value::Number(_) => "a number",
+                        serde_json::Value::String(_) => "a string",
+                        serde_json::Value::Array(_) => "an array",
+                        serde_json::Value::Object(_) => unreachable!("matched above"),
+                    },
+                ),
+            }
+        }
+        other => anyhow::bail!(
+            "'{op_name}' carries a '{bag}' bag of an unreadable shape ({other:?}), so it cannot \
+             be shown free of the engine-owned keys {ENGINE_OWNED_PARAM_KEYS:?} — the write is \
+             REFUSED rather than trusted unread.",
+            bag = WriteSchema::OVERFLOW_COLUMN,
+        ),
+    }
+}
+
+/// Every property key `params` would write, whichever route names it.
+///
+/// THREE routes, differing only in how deep the key sits: `create`/`update` put
+/// it in the param KEYS; `set_field` puts it in the VALUE of a field-naming
+/// param; and either shape can instead hand over the whole property BAG, one
+/// level deeper again. Reading all three, for every op, is what makes the
+/// refusal route-agnostic — an op allowlist has to be extended per route and
+/// silently admits the ones nobody remembered (measured twice: `set_field`,
+/// then the bag).
+///
+/// Which param carries a bag comes from the SCHEMA
+/// ([`WriteSchema::OVERFLOW_COLUMN`]), not from a list of operations, so a
+/// fourth route cannot be opened by inventing another op name.
+fn authored_property_keys(op_name: &str, params: &StorageEntity) -> Result<Vec<String>> {
+    let bag = WriteSchema::OVERFLOW_COLUMN;
+    let mut keys: Vec<String> = params.keys().map(|k| k.to_string()).collect();
+
+    for (name_param, value_param) in FIELD_NAMING_PARAMS {
+        let Some(named) = params.get(*name_param).and_then(|v| v.as_string()) else {
+            continue;
+        };
+        keys.push(named.to_string());
+        // The named field IS the overflow column, so `value` is the whole bag.
+        if named == bag
+            && let Some(v) = params.get(*value_param)
+        {
+            keys.extend(bag_keys(op_name, v)?);
+        }
+    }
+
+    // The bag handed over directly as a param (`create`/`update`).
+    if let Some(v) = params.get(bag) {
+        keys.extend(bag_keys(op_name, v)?);
+    }
+    Ok(keys)
+}
+
+/// Refuse ANY op that would write a key the ENGINE mints (ruling D5.a).
+///
+/// Two distinct silent failures, one refusal: on `create`/`update` the stamp
+/// below is an `insert`, which REPLACES the authored value; through `set_field`
+/// the authored value would instead be taken as authoritative by the
+/// substrate-rebuild read (`history_store.rs`) and the trust supervision view.
+/// Reserved by EXACT spelling, never by the `_` prefix: see
+/// [`ENGINE_OWNED_PARAM_KEYS`].
+fn reject_engine_owned_keys(op_name: &str, params: &StorageEntity) -> Result<()> {
+    for key in authored_property_keys(op_name, params)? {
+        if let Some(owned) = ENGINE_OWNED_PARAM_KEYS.iter().find(|k| **k == key) {
+            anyhow::bail!(
+                "'{op_name}' would write the engine-owned property key '{owned}', which the \
+                 engine mints itself — the write is REFUSED rather than silently overwriting or \
+                 forging the stamp. Remove '{owned}' from the operation; the stamp is derived \
+                 from the operation's origin."
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Inject the `_provenance` property into an authoring op's params. Pure and
 /// clock-free (the timestamp is passed in) so it is directly unit-testable.
 fn stamp_params(
@@ -302,12 +418,13 @@ fn stamp_params(
     mut params: StorageEntity,
     origin: &OpOrigin,
     now_millis: i64,
-) -> StorageEntity {
+) -> Result<StorageEntity> {
+    reject_engine_owned_keys(op_name, &params)?;
     if PROVENANCE_STAMPED_OPS.contains(&op_name) {
         let stamp = ProvenanceStamp::from_origin(origin, now_millis);
         params.insert(Arc::from(PROVENANCE_PROPERTY), stamp.to_value());
     }
-    params
+    Ok(params)
 }
 
 /// Build the history events for one completed op — one per field delta, with
@@ -554,7 +671,7 @@ impl DispatchingOperationEngine {
         op_name: &str,
         params: StorageEntity,
         origin: &OpOrigin,
-    ) -> StorageEntity {
+    ) -> Result<StorageEntity> {
         stamp_params(op_name, params, origin, self.clock.now_millis())
     }
 
@@ -918,7 +1035,7 @@ impl DispatchingOperationEngine {
             p.insert("content".into(), Value::String(seg.name.clone()));
             p.insert("parent_id".into(), Value::String(seg.parent_id.clone()));
             p.insert("tags".into(), page_tag());
-            let p = self.stamp_provenance("create", p, origin);
+            let p = self.stamp_provenance("create", p, origin)?;
             let (fwd, inv, ch) = self.dispatch_constituent("create", p).await?;
             forwards.push(fwd);
             seg_invs.push(inv);
@@ -942,7 +1059,7 @@ impl DispatchingOperationEngine {
         {
             pc.insert("marks".into(), Value::String(marks.clone()));
         }
-        let pc = self.stamp_provenance("create", pc, origin);
+        let pc = self.stamp_provenance("create", pc, origin)?;
         let (fwd, p_inv, ch) = self.dispatch_constituent("create", pc).await?;
         forwards.push(fwd);
         all_changes.extend(ch);
@@ -1681,7 +1798,7 @@ impl DispatchingOperationEngine {
             );
             cp.insert("parent_id".into(), Value::String(plan.canonical_id.clone()));
             cp.insert("after_block_id".into(), Value::Null);
-            let cp = self.stamp_provenance("create", cp, origin);
+            let cp = self.stamp_provenance("create", cp, origin)?;
             let (fwd, inv, ch) = self.dispatch_merge_constituent("create", cp).await?;
             forwards.push(fwd);
             field_invs.push(inv);
@@ -2178,7 +2295,7 @@ impl DispatchingOperationEngine {
         create.insert(Arc::from(PROPOSAL_PROPERTY), record.to_value());
         // The proposal block's `_provenance` names the PROPOSER — that is the
         // fact the supervision view groups by.
-        let create = self.stamp_provenance("create", create, origin);
+        let create = self.stamp_provenance("create", create, origin)?;
 
         let result = self
             .dispatcher
@@ -2223,7 +2340,7 @@ impl DispatchingOperationEngine {
             Value::String(EntityUri::no_parent().as_str().to_string()),
         );
         create.insert("content".into(), Value::String("Proposals".to_string()));
-        let create = self.stamp_provenance("create", create, origin);
+        let create = self.stamp_provenance("create", create, origin)?;
         self.dispatcher
             .execute_operation(&EntityName::new("block"), "create", create)
             .await
@@ -2387,6 +2504,12 @@ impl OperationEngine for DispatchingOperationEngine {
         params: StorageEntity,
         origin: OpOrigin,
     ) -> Result<OpOutcome> {
+        // Ruling D5.a, and it runs before the trust gate for that reason: a
+        // sub-threshold op is captured into a proposal record VERBATIM, so a
+        // refusal further down would store the reserved key and only reject it
+        // at accept time, an operation the author never performed.
+        reject_engine_owned_keys(op_name, &params)?;
+
         // Trust gate (VisionGapAnalysis C5): a sub-threshold (origin, entity,
         // op) never reaches canonical state — it is coerced into a proposal
         // emission under `block:proposals`. This runs FIRST so every shape
@@ -2493,7 +2616,7 @@ impl OperationEngine for DispatchingOperationEngine {
         // ops we inject a `_provenance` property into the params; it travels as
         // ordinary block-field data down the existing write path and lands in
         // `block_raw.properties`, with no provider edits.
-        let params = self.stamp_provenance(op_name, params, &origin);
+        let params = self.stamp_provenance(op_name, params, &origin)?;
 
         // Keyword convergence (ruling 2026-08-10): a write that would leave the
         // block as keyword-headed plain text is rewritten to the task it
@@ -3543,7 +3666,8 @@ mod provenance_stamp_tests {
         let origin = OpOrigin::Rule {
             transition_id: "rule:journal".into(),
         };
-        let stamped = stamp_params("create", params, &origin, 1234);
+        let stamped =
+            stamp_params("create", params, &origin, 1234).expect("a plain create is stamped");
 
         let prov = stamped
             .get(PROVENANCE_PROPERTY)
@@ -3562,7 +3686,8 @@ mod provenance_stamp_tests {
             session_id: "mcp-session:s".into(),
             tool_call_id: "tool-call:c".into(),
         };
-        let stamped = stamp_params("update", StorageEntity::default(), &origin, 7);
+        let stamped = stamp_params("update", StorageEntity::default(), &origin, 7)
+            .expect("a plain update is stamped");
         let parsed =
             ProvenanceStamp::from_value(stamped.get(PROVENANCE_PROPERTY).unwrap()).unwrap();
         assert_eq!(parsed.origin, "agent");
@@ -3570,10 +3695,161 @@ mod provenance_stamp_tests {
         assert_eq!(parsed.tool_call_id.as_deref(), Some("tool-call:c"));
     }
 
+    /// Ruling D5.a: the engine mints `_provenance`, so an authored one is a
+    /// NAMED refusal at the write boundary — never a silent replacement, which
+    /// would tell the author their attribution landed when it did not.
+    #[test]
+    fn an_authored_provenance_is_refused_by_name() {
+        for op in PROVENANCE_STAMPED_OPS {
+            let params = params_with(&[
+                ("content", Value::String("hi".into())),
+                (
+                    PROVENANCE_PROPERTY,
+                    Value::String("authored-by-hand".into()),
+                ),
+            ]);
+            let err = stamp_params(op, params, &OpOrigin::User, 1)
+                .expect_err("an authored _provenance must be REFUSED, not replaced");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(PROVENANCE_PROPERTY) && msg.contains(op),
+                "the refusal must name the offending key and the operation, got: {msg}"
+            );
+        }
+    }
+
+    /// The SECOND route: `set_field` names the key in a param VALUE, so a
+    /// refusal reading only param KEYS lets a FORGED stamp through — and a
+    /// forged stamp is worse than a replaced one, because
+    /// `history_store.rs` and the trust supervision view read it as
+    /// authoritative.
+    #[test]
+    fn an_authored_provenance_via_set_field_is_refused_by_name() {
+        let params = params_with(&[
+            ("id", Value::String("block:x".into())),
+            ("field", Value::String(PROVENANCE_PROPERTY.into())),
+            ("value", Value::String("forged".into())),
+        ]);
+        let err = reject_engine_owned_keys("set_field", &params)
+            .expect_err("set_field naming an engine-owned key must be REFUSED");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(PROVENANCE_PROPERTY) && msg.contains("set_field"),
+            "the refusal must name the offending key and the operation, got: {msg}"
+        );
+    }
+
+    /// THIRD route, sub-shape (a): the key sits one level deeper, inside the
+    /// property BAG named by `set_field("properties")`. `properties` IS a
+    /// `block_raw` column, so this takes the direct-column branch and replaces
+    /// the WHOLE blob — forged stamp included.
+    #[test]
+    fn a_provenance_inside_a_set_field_properties_bag_is_refused_by_name() {
+        let params = params_with(&[
+            ("id", Value::String("block:x".into())),
+            ("field", Value::String("properties".into())),
+            (
+                "value",
+                Value::String(r#"{"_provenance":{"origin":"forged"},"keep":"me"}"#.into()),
+            ),
+        ]);
+        let err = reject_engine_owned_keys("set_field", &params)
+            .expect_err("a reserved key inside the properties bag must be REFUSED");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(PROVENANCE_PROPERTY) && msg.contains("set_field"),
+            "the refusal must name the offending key and the operation, got: {msg}"
+        );
+    }
+
+    /// THIRD route, sub-shape (b): a nested `properties` bag on `create`. The
+    /// engine stamp wins the `or_insert_with` merge, so the authored key is
+    /// SILENTLY DISCARDED — told-success-while-discarding, the exact shape
+    /// D5.a refuses.
+    #[test]
+    fn a_provenance_inside_a_create_properties_bag_is_refused_by_name() {
+        let mut bag = std::collections::HashMap::new();
+        bag.insert(
+            PROVENANCE_PROPERTY.to_string(),
+            Value::String("forged".into()),
+        );
+        bag.insert("keep".to_string(), Value::String("me".into()));
+        let params = params_with(&[
+            ("content", Value::String("hi".into())),
+            ("properties", Value::Object(bag)),
+        ]);
+        let err = reject_engine_owned_keys("create", &params)
+            .expect_err("a reserved key inside a nested properties bag must be REFUSED");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(PROVENANCE_PROPERTY) && msg.contains("create"),
+            "the refusal must name the offending key and the operation, got: {msg}"
+        );
+    }
+
+    /// An ordinary bag still passes — the refusal reads the bag's keys, it does
+    /// not reject bags.
+    #[test]
+    fn an_ordinary_properties_bag_still_passes_the_boundary() {
+        let params = params_with(&[
+            ("content", Value::String("hi".into())),
+            (
+                "properties",
+                Value::String(r#"{"COLLAPSED":"true","_drawer_order":"ID"}"#.into()),
+            ),
+        ]);
+        reject_engine_owned_keys("create", &params)
+            .expect("a bag naming no engine-owned key is an ordinary write");
+    }
+
+    /// A bag we cannot READ is refused, not waved through: "I could not tell"
+    /// is not evidence of absence.
+    #[test]
+    fn an_unreadable_properties_bag_is_refused_rather_than_trusted() {
+        let params = params_with(&[
+            ("content", Value::String("hi".into())),
+            ("properties", Value::String("not json at all {{{".into())),
+        ]);
+        let err = reject_engine_owned_keys("create", &params)
+            .expect_err("an unreadable bag must be REFUSED");
+        assert!(
+            format!("{err:#}").contains("REFUSED"),
+            "the refusal must say so plainly: {err:#}"
+        );
+    }
+
+    /// The refusal is keyed on the EXACT spelling, not the `_` prefix: the org
+    /// ingest path puts `_drawer_order` into create params
+    /// (`holon-orgmode/src/block_params.rs:167`), so a prefix ban would refuse
+    /// the vault's own write leg. Both routes, since both now read keys.
+    #[test]
+    fn other_underscored_keys_still_pass_the_boundary_on_both_routes() {
+        let via_set_field = params_with(&[
+            ("id", Value::String("block:x".into())),
+            ("field", Value::String("_drawer_order".into())),
+            ("value", Value::String("ID,COLLAPSED".into())),
+        ]);
+        reject_engine_owned_keys("set_field", &via_set_field)
+            .expect("only engine-minted keys are reserved, whichever route names them");
+    }
+
+    #[test]
+    fn other_underscored_keys_still_pass_the_boundary() {
+        let params = params_with(&[
+            ("_drawer_order", Value::String("ID,COLLAPSED".into())),
+            ("_proposed_by", Value::String("agent".into())),
+        ]);
+        let stamped = stamp_params("create", params, &OpOrigin::User, 1)
+            .expect("only engine-minted keys are reserved");
+        assert!(stamped.contains_key("_drawer_order"));
+        assert!(stamped.contains_key("_proposed_by"));
+    }
+
     #[test]
     fn non_authoring_ops_are_not_stamped() {
         for op in ["set_field", "move_block", "split_block", "delete", "focus"] {
-            let stamped = stamp_params(op, StorageEntity::default(), &OpOrigin::User, 1);
+            let stamped = stamp_params(op, StorageEntity::default(), &OpOrigin::User, 1)
+                .expect("a non-authoring op is passed through");
             assert!(
                 !stamped.contains_key(PROVENANCE_PROPERTY),
                 "op '{op}' must not be provenance-stamped (covered by the history relation)"

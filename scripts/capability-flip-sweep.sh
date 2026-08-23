@@ -173,6 +173,7 @@ reserved_prefixes: ["_"]|reserved_prefixes: []|move
 reserved_prefixes: ["_"]|reserved_prefixes: ["__"]|move
 reserved_keys: [ID, TAGS,|reserved_keys: [TAGS,|move
 reserved_keys: [ID,|reserved_keys: [Plain, ID,|move
+engine_owned_keys: []|engine_owned_keys: [Plain]|move
 types: [string]|types: [string, integer]|move
 types: [string]|types: [integer]|move
 empty_string: dropped|empty_string: representable|move

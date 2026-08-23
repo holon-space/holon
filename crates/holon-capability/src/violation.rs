@@ -42,6 +42,10 @@ pub enum Clause {
     /// The key was not covered by `reserved_prefixes`/`reserved_keys`, so the
     /// profile claims it survives as an ordinary property.
     KeyNotReserved,
+    /// `property_keys.engine_owned_keys` lists this key, so authoring it must
+    /// be refused by a message that names it — on EVERY author-reachable write
+    /// route into the leg, which is why the route is part of the finding.
+    EngineOwnedKey { route: &'static str },
     /// `property_values.types` lists this kind.
     TypeDeclared(ValueKind),
     /// `property_values.empty_string` says this.
@@ -110,6 +114,10 @@ impl std::fmt::Display for Clause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::KeyNotReserved => write!(f, "the key is not declared reserved"),
+            Self::EngineOwnedKey { route } => write!(
+                f,
+                "property_keys.engine_owned_keys lists the key (write route: {route})"
+            ),
             Self::TypeDeclared(kind) => write!(f, "property_values.types lists {kind:?}"),
             Self::EmptyString => write!(f, "property_values.empty_string"),
             Self::PropertyOrder => write!(f, "ordering.property_order"),

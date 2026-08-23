@@ -68,6 +68,16 @@ use crate::violation::Outcome;
 use crate::violation::TighteningPrompt;
 use crate::violation::Violation;
 
+/// What ONE extra write route answered for the probed key.
+///
+/// `route` is the author-facing name of the route (an operation name), because
+/// that is what a reader must change to act on the finding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteReadback {
+    pub route: &'static str,
+    pub readback: Readback,
+}
+
 /// One property carrier of a format — a distinct code path a property can
 /// travel. Formats have more than one, and they fail differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +133,26 @@ pub trait CertifiableFormat {
         key: &str,
         value: &Value,
     ) -> anyhow::Result<Readback>;
+
+    /// Every ADDITIONAL author-reachable write route into `carrier`'s property
+    /// leg, beyond the one [`Self::round_trip_property`] drives, each tried
+    /// with `key`.
+    ///
+    /// This exists because a declaration names a LEG, not a route: a format
+    /// whose leg has two authored write routes and refuses on only one is
+    /// declaring more than it enforces, and a single-route probe reports it
+    /// clean. (Measured: `set_field` was a second route into
+    /// `block_properties_json` that no probe drove.) `Ok(None)` means "one
+    /// route only" — the honest answer for a format with a single write
+    /// path, and a claim the author is making, not a skip.
+    fn extra_property_write_routes(
+        &self,
+        _: Carrier,
+        _: &str,
+        _: &Value,
+    ) -> anyhow::Result<Option<Vec<RouteReadback>>> {
+        Ok(None)
+    }
 
     /// Write properties in `authored` key order, read them back, and report the
     /// order that returned.
@@ -645,6 +675,15 @@ pub fn certify(format: &dyn CertifiableFormat) -> anyhow::Result<CertificationRe
             .collect(),
     );
     declared.insert(
+        ClauseId::PropertyKeysEngineOwnedKeys,
+        profile
+            .property_keys()
+            .engine_owned_keys
+            .iter()
+            .map(|k| k.as_str().to_string())
+            .collect(),
+    );
+    declared.insert(
         ClauseId::AssetsExtensions,
         profile
             .assets()
@@ -749,6 +788,7 @@ fn certify_property_keys(
     let carried = Value::String("carried".to_string());
     report.probed.insert(ClauseId::PropertyKeysReservedPrefixes);
     certify_key_shape(format, profile, carrier, report, &carried)?;
+    certify_engine_owned_keys(format, profile, carrier, report, &carried)?;
 
     for key in probes {
         // A key the format OWNS is outside the ordinary-property law entirely:
@@ -782,6 +822,72 @@ fn certify_property_keys(
                        erasure is not a property of the format, only of this leg"
                     .to_string(),
             }),
+        }
+    }
+    Ok(())
+}
+
+/// Axis 3 — a key the carrier MINTS must be REFUSED when authored, by a
+/// message that names it.
+///
+/// The naming requirement is the whole point: a boundary that refuses for some
+/// other reason (a missing parent, a malformed value) would otherwise confirm
+/// this clause by accident, and the author would be told nothing useful about
+/// which key was the problem.
+fn certify_engine_owned_keys(
+    format: &dyn CertifiableFormat,
+    profile: &CapabilityProfile,
+    carrier: Carrier,
+    report: &mut CertificationReport,
+    carried: &Value,
+) -> anyhow::Result<()> {
+    // Registered before the loop, so an EMPTY declaration is driven too: the
+    // caller's probe loop requires `Plain`/`ID`/`_underscored` to be carried,
+    // which is what "this carrier mints nothing" predicts.
+    report.probed.insert(ClauseId::PropertyKeysEngineOwnedKeys);
+    for key in &profile.property_keys().engine_owned_keys {
+        report
+            .probed_members
+            .entry(ClauseId::PropertyKeysEngineOwnedKeys)
+            .or_default()
+            .insert(key.as_str().to_string());
+
+        // EVERY author-reachable route, not just the primary one: the
+        // declaration names a LEG, and a leg refused on one route and open on
+        // another is a declaration the format does not keep.
+        let mut routes = vec![RouteReadback {
+            route: "create",
+            readback: format.round_trip_property(carrier, key.as_str(), carried)?,
+        }];
+        routes.extend(
+            format
+                .extra_property_write_routes(carrier, key.as_str(), carried)?
+                .unwrap_or_default(),
+        );
+
+        for RouteReadback { route, readback } in routes {
+            let outcome = match readback {
+                // A refusal naming the key is the only PASS. A route that
+                // silently does nothing answers `Absent`, never this, so
+                // silence cannot be mistaken for enforcement.
+                Readback::Refused { reason } if reason.contains(key.as_str()) => {
+                    report.confirmed += 1;
+                    continue;
+                }
+                // Refused, but the author cannot tell WHICH key did it.
+                Readback::Refused { reason } => Outcome::Refused { reason },
+                _ => Outcome::NotRefused,
+            };
+            report.violations.push(Violation {
+                profile: profile.id().clone(),
+                rev: profile.revision().clone(),
+                axis: Axis::PropertyKeys,
+                clause: Clause::EngineOwnedKey { route },
+                leg: carrier.leg,
+                key: key.as_str().to_string(),
+                sent: carried.clone(),
+                outcome,
+            });
         }
     }
     Ok(())

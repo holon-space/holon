@@ -100,6 +100,7 @@ pub use certify::DisagreementOutcome;
 pub use certify::MultiValueReadback;
 pub use certify::Readback;
 pub use certify::ReferenceReadback;
+pub use certify::RouteReadback;
 pub use certify::WriteAttempt;
 pub use certify::certify;
 pub use clause::ClauseId;

@@ -37,6 +37,7 @@ pub enum ClauseId {
     PropertyKeysCharset,
     PropertyKeysCase,
     PropertyKeysReservedPrefixes,
+    PropertyKeysEngineOwnedKeys,
     PropertyKeysCollision,
     PropertyKeysSchemaRequired,
     // axis 4
@@ -102,6 +103,7 @@ pub const ALL_CLAUSES: &[ClauseId] = &[
     ClauseId::PropertyKeysCharset,
     ClauseId::PropertyKeysCase,
     ClauseId::PropertyKeysReservedPrefixes,
+    ClauseId::PropertyKeysEngineOwnedKeys,
     ClauseId::PropertyKeysCollision,
     ClauseId::PropertyKeysSchemaRequired,
     ClauseId::PropertyValuesTypes,
@@ -489,7 +491,7 @@ mod tests {
         );
         assert_eq!(
             listed.len(),
-            43,
+            44,
             "a clause was added to the vocabulary without adding it to ALL_CLAUSES, which \
              would exempt it from the driven-or-marked law"
         );

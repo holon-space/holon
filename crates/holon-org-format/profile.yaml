@@ -58,6 +58,7 @@ enforced_by:
     - property_keys_charset
     - property_keys_case
     - property_keys_reserved_prefixes
+    - property_keys_engine_owned_keys
     - property_keys_collision
     - property_keys_schema_required
     - property_values_types
@@ -216,6 +217,13 @@ fidelity_axes:
     # something, so the ordinary-property law says nothing about them.
     reserved_keys: [ID, TAGS, SCHEDULED, DEADLINE, COLLAPSED, WIDGET_ONLY,
                     REQUIRES, ADVICE_SUPPRESSED, CONTRIBUTES_TO]
+    # EMPTY, and not by omission: org itself mints no property key and refuses
+    # none. Its `_`-key handling is a render-time STRIP already stated by
+    # `reserved_prefixes` above — a loss, not a refusal, and a different fact.
+    # DRIVEN as an empty claim: the probe loop sends `Plain`, `ID` and
+    # `_underscored` and requires each to be CARRIED, so a key org refused
+    # would already be red there.
+    engine_owned_keys: []
     # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
     # docs/Reference/ORG_SYNTAX.md:118 — serde_json::Map insert; the first
     # authored position is kept.

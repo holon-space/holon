@@ -90,6 +90,7 @@ enforced_by:
     - property_keys_charset
     - property_keys_case
     - property_keys_reserved_prefixes
+    - property_keys_engine_owned_keys
     - property_keys_collision
     - property_keys_schema_required
     - property_values_types
@@ -152,6 +153,13 @@ fidelity_axes:
     case: sensitive
     reserved_prefixes: []
     reserved_keys: [id, content, parent_id]
+    # Keys the ENGINE mints, so authoring one is REFUSED (ruling D5.a) rather
+    # than accepted and overwritten. EXACT spellings, never the `_` prefix:
+    # `_drawer_order` is an authored carrier the org ingest path puts into
+    # create params, and banning the prefix would refuse the vault's own write
+    # leg. Enforced by `reject_engine_owned_keys`
+    # (crates/holon/src/api/operation_engine.rs) and DRIVEN below.
+    engine_owned_keys: [_provenance]
     collision: last_wins
     schema_required: open
 

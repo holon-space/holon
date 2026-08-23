@@ -88,6 +88,16 @@ pub struct PropertyKeysAxis {
     pub reserved_prefixes: Vec<ReservedPrefix>,
     #[serde(default)]
     pub reserved_keys: Vec<PropertyKey>,
+    /// Keys the carrier MINTS, so an authored one is REFUSED at the write
+    /// boundary rather than accepted and overwritten.
+    ///
+    /// A claim, unlike [`Self::reserved_keys`], and driven as one: the
+    /// certifier sends each member and requires a refusal that names it. The
+    /// two lists mean different things — `id` is OWNED and authored freely,
+    /// `_provenance` is owned and authoring it is an ERROR — so a key belongs
+    /// to at most one of them.
+    #[serde(default)]
+    pub engine_owned_keys: Vec<PropertyKey>,
     pub collision: Collision,
     pub schema_required: SchemaRequirement,
 }
@@ -113,6 +123,11 @@ impl PropertyKeysAxis {
     /// axis arrives in 2b.2.
     pub fn is_owned(&self, key: &str) -> bool {
         self.reserved_keys.iter().any(|k| k.as_str() == key)
+    }
+
+    /// Whether `key` is one the carrier MINTS, so authoring it is refused.
+    pub fn is_engine_owned(&self, key: &str) -> bool {
+        self.engine_owned_keys.iter().any(|k| k.as_str() == key)
     }
 }
 
