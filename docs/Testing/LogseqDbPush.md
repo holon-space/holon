@@ -402,25 +402,29 @@ real application once. Treat it as a W3 prerequisite, not a W3 finding.
 
 Ruling W3-1.a extends push from titles to TAGS before properties. This is what
 a tag edit IS, measured through LogSeq's own transactor and storage layer on
-2026-08-23 (`oracle/probe_tag_edits.cljs`, schema 65.33, fixture
-`holontest.sqlite`). Everything below that is not marked UNMEASURED came out of
-that run.
+2026-08-23 against schema 65.33 on the `holontest.sqlite` fixture. Two probes,
+and which one produced a row matters: `oracle/probe_tag_edits.cljs` for the
+tag-specific rows, `oracle/probe_w3_cardinality.cljs` (Q1) for the redundant
+add, whose subject is `:block/tags` but whose question — what a redundant
+cardinality-many assert does — is the same one the reader models. Everything
+below that is not marked UNMEASURED came out of one of those two runs.
 
 ### The shape of the edit
 
 `:block/tags` is declared cardinality-MANY and reference-typed, so a tag edit
 is not the retract+assert pair a title edit is:
 
-| edit | tail transaction |
-|---|---|
-| add tag `T` to block `e` | ONE datom, `[e :block/tags T tx]` |
-| remove tag `T` from `e` | ONE datom, `[e :block/tags T -tx]` |
-| add a tag `e` already carries | EMPTY transaction |
-| remove a tag `e` does not carry | EMPTY transaction |
+| edit | tail transaction | measured by |
+|---|---|---|
+| add tag `T` to block `e` | ONE datom, `[e :block/tags T tx]` | `probe_tag_edits` |
+| remove tag `T` from `e` | ONE datom, `[e :block/tags T -tx]` | `probe_tag_edits` |
+| add a tag `e` already carries | EMPTY transaction | `probe_w3_cardinality` Q1 |
+| remove a tag `e` does not carry | EMPTY transaction | `probe_tag_edits` |
 
 Nothing else moves. `:block/updated-at`, `:block/refs` and `:block/title` were
-byte-identical before and after each of the four, so an implementation that
-also stamps an updated-at is writing something LogSeq's transactor does not.
+byte-identical before and after each of the three `probe_tag_edits` rows, so an
+implementation that also stamps an updated-at is writing something LogSeq's
+transactor does not.
 
 The tags are ENTITY IDS, not names. Holon's base carries tag NAMES (the
 importer resolves them through the class index), so Inc 1 needs the reverse
@@ -479,3 +483,116 @@ an implementation detail:
     what creating a class writes, exactly as the reference prerequisite does.
 
 Scope (a) is what the measurements above support today.
+
+### Inc 1 as BUILT (ruling D2.a: existing tags only)
+
+Scope (a) was ruled and is implemented. `push` now carries `:block/tags`
+alongside the title; `out_of_scope_shape` no longer has a tag arm, and the
+ways a tag edit is refused are more specific than "out of scope":
+
+| refusal | when |
+|---|---|
+| `PushUnknownTag { uuid, tag }` | the name resolves to no `:logseq.class/<Name>` entity |
+| `PushBaseStaleTags { uuid, expected, found }` | the graph's tags are not the ones the base observed |
+| `PushDuplicateTag { uuid, tag }` | the base names one tag twice |
+| `PushUnsortedTags { uuid, found }` | the base's tags are not sorted |
+
+All four are decided in the plan phase, before any datom is appended, so a push
+that refuses one block still leaves the graph exactly as it found it.
+
+Two consequences of WHERE the shape checks sit, both measured:
+
+- **A malformed tag list blocks a TITLE edit on the same block.** The checks
+  run before the edit is planned, so a block whose tags are unsorted or
+  doubled is refused whatever else the push wanted to do to it. That is the
+  intended direction — a base this writer cannot read is not a base it should
+  act on half of — but it means the refusal a caller sees may name tags when
+  the edit they cared about was the title.
+- **A push of nothing is a legitimate 0-transaction no-op**, not a refusal:
+  `a_no_op_push_touches_nothing` pushes a base against itself and pins
+  `transactions`, `datoms` and `flushes` all 0 with every row byte-identical.
+  The `datom_count() > 0` assertion is about a block the diff REPORTED as
+  changed, not about a push with nothing in it.
+
+The last two refusals are about the SHAPE of the list rather than its content,
+and they exist because both shapes CANCEL inside the plan: a name twice is filtered by
+the attach side (the block already carries it) and by the detach side (it is
+still wanted), and two orderings of one set are a difference to `BaseDiff` and
+none at all to the writer. Either would leave a block the diff reported as
+changed with nothing to write. `push` is public, so its input is whatever the
+caller built — the check runs on the observed list AND the wanted one, before
+the staleness comparison, so a malformed list is named as malformed rather than
+reported as a graph disagreement.
+
+Both sides are load-bearing and they fail DIFFERENTLY, which is why each has
+its own test and its own sweep flip. Drop the observed-side check and the
+block still refuses — as `PushBaseStaleTags`, because a list the graph cannot
+equal reads as a graph disagreement. That is the wrong story told convincingly:
+the graph is fine, the base is not, and a caller told its observation is stale
+goes and re-imports instead of fixing the list it built.
+
+**One transaction per BLOCK, not per attribute.** A block whose title and tags
+both moved writes them together, because LogSeq's transactor writes a
+transaction per `transact!` call and a save carries everything that edit
+changed.
+
+**THE ORACLE DOES NOT CERTIFY THE ORDER INSIDE A TRANSACTION, by design.** The
+order — title retract, title assert, detaches, attaches — is Holon's own
+choice and is NOT measured: `save-block` is unreachable under nbb, so nothing
+can say what LogSeq would emit. The head-to-head deliberately drives ONE datom
+per transaction, which makes the two writers' grouping coincide by construction
+and therefore makes the byte comparison silent about ordering — a green oracle
+leg is not evidence about it and must not be quoted as such. What the order
+rests on is that it mirrors the retract-before-assert shape that IS measured
+for a title, and `a_simultaneous_attach_and_detach_is_one_transaction_detach_first`
+pins it so the choice stays visible rather than incidental. Attacking it means
+attacking that pin, not asking the oracle.
+
+**One thing the spec above got wrong.** It said Inc 1 must decide whether
+Holon emits the empty transaction LogSeq emits for a redundant add, and that
+the head-to-head would settle it. It does not, because the case is
+UNREACHABLE through `push`: a base asking for a tag the block already carries
+is a stale base, and the tag staleness guard refuses the whole push before any
+grouping question arises. The empty-transaction shape stays a fact about
+LogSeq's transactor that `datoms_now` models on the READING side (W3 Inc 0d);
+it becomes a writing question only for a future writer that bypasses the base,
+and there is no such writer.
+
+**Evidence.** `head_to_head_with_logseq_applying_the_same_tag_pushes` drives
+six rounds of tag-only pushes — 6 blocks x 6 rounds = 36 datoms, which crosses
+the branching factor exactly once — and compares every row of the two files
+byte for byte including the `addresses` column. Six rounds rather than two so
+the leg forces a FLUSH of reference-valued datoms into the trees: a tag's value
+is an integer, and this is the first time the index comparator has to order
+numbers against the strings and uuids already there. Each block's transaction
+holds exactly one datom, so the two writers' grouping coincides by construction
+and the comparison cannot be confounded by an ordering neither side measured.
+`logseqs_validator_accepts_a_tag_pushed_graph` then runs LogSeq's own validator
+over the result: `Valid!`, with `:datoms 2609` read back so a truncated read
+cannot pass as approval.
+
+### A capability-profile finding, NOT acted on
+
+`bash scripts/capability-cert-logseq.sh` passes 4/4 with the tag write in the
+tree. Three findings came out of running it:
+
+1. **The 2b.3 alarm does NOT go stale.**
+   `the_write_boundary_is_still_closed_to_property_changes` probes a PROPERTY
+   write and requires a refusal whose reason contains "property change". Inc 1
+   leaves that arm of `out_of_scope_shape` untouched and its wording verbatim,
+   so the alarm still fires as designed. Tags are not properties, and the alarm
+   agrees.
+2. **The profile's header prose was false and is corrected.** It described the
+   write leg as title/content only and listed tags among the shapes refused by
+   name, citing a line range that had moved. Nothing red-flagged it, because a
+   yaml comment is invisible to the certifier — the same class of stale
+   citation the `boundary_is_closed` law exists to catch, one level up from
+   where it looks. The prose now describes the tag write and names the two
+   refusals; no clause VALUE changed, so certification is unaffected.
+3. **The vocabulary has no clause for tags at all.** None of the 39 clause ids
+   covers attaching a class reference, so Inc 1 opens a write capability the
+   profile cannot express: certification will keep reporting this writer as
+   title-only, with nothing going red. That is a gap in the profile, not in
+   the writer, and closing it is a decision for whoever owns 2b. The profile
+   header now says so in place, so a reader of the yaml is not misled by its
+   silence.

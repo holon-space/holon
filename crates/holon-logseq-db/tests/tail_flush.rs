@@ -1,8 +1,9 @@
 //! Flushing the tail into the index trees.
 //!
 //! The tail holds at most `PINNED_BRANCHING_FACTOR` datoms; the edit that
-//! would exceed that is the one LogSeq flushes on. This is the same boundary
-//! W1's guard refused at — B is what makes crossing it possible.
+//! would exceed that is the one LogSeq flushes on. `Tail::push_transaction`
+//! refuses at that boundary for callers that cannot flush; flushing is what
+//! makes crossing it possible.
 //!
 //! Measured shape of one LogSeq flush, which these tests hold Holon to:
 //! 456 rows -> 458, exactly 2 added (from a split, at max-addr+1 and +2),
@@ -239,8 +240,9 @@ async fn flushed_copy(dir: &Path) -> Vec<String> {
 
 /// LEG 1 — LogSeq's validator accepts a graph whose TREES Holon rewrote.
 ///
-/// The sharpest thing this increment can be asked: W1 only ever appended to a
-/// log LogSeq replays, whereas this graph's B+-trees were rebuilt by Holon.
+/// The strongest question the validator can be asked about this writer: a
+/// tail-only edit leaves a log LogSeq replays for itself, whereas this
+/// graph's B+-trees were rebuilt by Holon.
 #[tokio::test]
 #[ignore = "needs HOLON_LOGSEQ_ORACLE — see docs/Testing/LogseqDbOracle.md"]
 async fn leg1_logseq_validator_accepts_the_flushed_copy() {

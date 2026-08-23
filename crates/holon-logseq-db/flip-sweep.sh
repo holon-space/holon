@@ -61,6 +61,25 @@ cat > "$WORK/flips.txt" <<'TABLE'
 --new
                     let cardinality = declared_cardinality(&graph.root.schema, &entry.attribute)
                         .unwrap_or(Cardinality::One);
+@@ malformed-cardinality-value-refused W
+--old
+        _ => Err(RowError::MalformedAttributeDeclaration {
+            attribute: attribute.to_string(),
+            detail: format!(
+                ":db/cardinality is {}, expected :db.cardinality/one or :db.cardinality/many",
+                keyword(value).map_or_else(|| node_kind(value).to_string(), |k| format!(":{k}"))
+            ),
+        }),
+--new
+        _ => Ok(Cardinality::One),
+@@ malformed-declaration-refused W
+--old
+        return Err(RowError::MalformedAttributeDeclaration {
+            attribute: attribute.to_string(),
+            detail: format!("its declaration is {}, expected a map", node_kind(definition)),
+        });
+--new
+        return Ok(Cardinality::One);
 @@ db-meta-vocabulary-admitted W
 --old
         if crate::datoms::is_self_describing(attribute) {
@@ -164,10 +183,10 @@ cat > "$WORK/flips.txt" <<'TABLE'
             None => Ok(String::new()),
 @@ atomic-copy-and-swap W
 --old
-        let flushed = edit_title(&mut staged, entity, &old_title, &new_title)?.1;
+        let (_, flushed) = edit_block(&mut staged, &edit)?;
 --new
-        let flushed = match edit_title(&mut staged, entity, &old_title, &new_title) {
-            Ok(edit) => edit.1,
+        let (_, flushed) = match edit_block(&mut staged, &edit) {
+            Ok(outcome) => outcome,
             Err(error) => {
                 *graph = staged;
                 return Err(error);
@@ -193,11 +212,82 @@ cat > "$WORK/flips.txt" <<'TABLE'
     if *position != after.position {
 --new
     if false {
-@@ tags-arm W
+@@ duplicate-tag-refusal W
 --old
-    if *tags != after.tags {
+        if pair[0] == pair[1] {
+            return Err(RowError::PushDuplicateTag {
 --new
-    if false {
+        if false {
+            return Err(RowError::PushDuplicateTag {
+@@ unsorted-tags-refusal W
+--old
+        if pair[0] > pair[1] {
+            return Err(RowError::PushUnsortedTags {
+--new
+        if false {
+            return Err(RowError::PushUnsortedTags {
+@@ tag-list-checked-observed-side W
+--old
+        check_tag_list(uuid, &observed.tags)?;
+        check_tag_list(uuid, &wanted.tags)?;
+--new
+        check_tag_list(uuid, &wanted.tags)?;
+@@ tag-list-checked-wanted-side W
+--old
+        check_tag_list(uuid, &observed.tags)?;
+        check_tag_list(uuid, &wanted.tags)?;
+--new
+        check_tag_list(uuid, &observed.tags)?;
+@@ unknown-tag-refusal W
+--old
+            view.class_by_name(name)
+                .ok_or_else(|| RowError::PushUnknownTag {
+--new
+            view.class_by_name(name)
+                .or(Some(1))
+                .ok_or_else(|| RowError::PushUnknownTag {
+@@ stale-tags-guard W
+--old
+        if held != observed.tags {
+--new
+        if false {
+@@ tag-attach-datom W
+--old
+        let attach = wanted
+            .tags
+            .iter()
+            .filter(|name| !held.contains(name))
+--new
+        let attach = wanted
+            .tags
+            .iter()
+            .filter(|name| !held.contains(name) && false)
+@@ tag-detach-datom W
+--old
+        let detach = held
+            .iter()
+            .filter(|name| !wanted.tags.contains(name))
+--new
+        let detach = held
+            .iter()
+            .filter(|name| !wanted.tags.contains(name) && false)
+@@ tag-value-is-a-reference W
+--old
+                attribute: TAGS.to_string(),
+                value: TransitNode::Int(*target),
+--new
+                attribute: TAGS.to_string(),
+                value: TransitNode::Str(target.to_string()),
+@@ tag-datom-order-detach-first W
+--old
+    for (targets, op) in [(&edit.detach, DatomOp::Retract), (&edit.attach, DatomOp::Assert)] {
+--new
+    for (targets, op) in [(&edit.attach, DatomOp::Assert), (&edit.detach, DatomOp::Retract)] {
+@@ title-datoms-only-when-the-title-moved W
+--old
+        let title = (stored != wanted.content).then(|| (stored, wanted.content.clone()));
+--new
+        let title = Some((stored, wanted.content.clone()));
 @@ requires-arm W
 --old
     if *requires != after.requires {

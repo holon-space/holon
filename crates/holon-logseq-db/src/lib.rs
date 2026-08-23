@@ -1,11 +1,16 @@
-//! Read-only import of a LogSeq DB-version graph into Holon.
+//! Reading a LogSeq DB-version graph into Holon, and pushing edits back.
 //!
 //! A LogSeq DB graph is a standard SQLite file whose `kvs` table holds a
 //! persistent DataScript B+-tree, each node a self-contained Transit-JSON
 //! document. This crate decodes that tree into deduped datoms, projects the
-//! datoms into Holon [`Block`]s, and (via the `ingest` boundary, stage-1
-//! increment 4) enters them through `BlockOrdering`. It is **read-only**: no
-//! code path here writes a LogSeq db file.
+//! datoms into Holon [`Block`]s, and enters them through `BlockOrdering` via
+//! the `ingest` boundary.
+//!
+//! It also WRITES: [`kvs_writer::push`] turns the difference between two
+//! observed bases into the tail transactions LogSeq's own transactor would
+//! write, flushing them through the B+-trees when the tail overflows. The
+//! write scope is the title and `:block/tags`; every other shape is refused by
+//! name. See docs/Testing/LogseqDbPush.md.
 //!
 //! Stage 1 scope and the identity-based acceptance gate are described in
 //! `plan-lsqdb-import.md`; the fixture-driven amendments are its §9b.

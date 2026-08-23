@@ -1,8 +1,8 @@
-//! The import base (Inc 1): what LogSeq last looked like, per block, per field.
+//! The import base: what LogSeq last looked like, per block, per field.
 //!
-//! The base is transport-independent — it is the third side of every later
-//! three-way merge and the whole of echo suppression — so it survived the
-//! 2026-08-22 reversal from the HTTP API to a closed-file writer intact.
+//! The base is transport-independent — it is the third side of every
+//! three-way merge and the whole of echo suppression — so it says nothing
+//! about how the graph is written.
 //!
 //! The headline test is deliberately a perturbation round trip rather than a
 //! plain "importing twice changes nothing": the latter asserts only
@@ -65,9 +65,9 @@ fn a_new_block_is_created_and_a_gone_block_is_removed() {
     assert!(diff.changed.is_empty(), "diff was {diff:?}");
 }
 
-/// H1: a LogSeq-side re-parent must be visible. A base that stores only content
-/// reports nothing here, and Inc 5 would then keep Holon's stale parent without
-/// ever surfacing a conflict.
+/// A LogSeq-side re-parent must be visible. A base that stores only content
+/// reports nothing here, and a merge would then keep Holon's stale parent
+/// without ever surfacing a conflict.
 #[test]
 fn a_reparent_is_a_diff() {
     let before = seeded(&[("u1", "hello")]);
@@ -291,7 +291,7 @@ fn an_old_content_only_base_is_refused_not_silently_defaulted() {
 
 // ------------------------------------------------------- the done-criterion
 
-/// Inc 1's done-criterion, stated so it can actually go red.
+/// The base's done-criterion, stated so it can actually go red.
 ///
 /// A plain "import twice reports nothing" asserts only `diff.is_empty()`, which
 /// a diff that always returns nothing satisfies. This drives the full cycle

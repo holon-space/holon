@@ -1,4 +1,4 @@
-//! W0: pure round-trip identity of a LogSeq DB graph through Rust.
+//! Pure round-trip identity of a LogSeq DB graph through Rust.
 //!
 //! Holon opens the committed fixture read-only, decodes every `kvs` row,
 //! re-encodes it, and writes a COPY. The copy must be the same graph by three
@@ -123,7 +123,7 @@ async fn leg3_importer_reads_the_copy_to_an_identical_base() {
         graph.rows.len(),
         "every row must reach the copy"
     );
-    // The headline W0 result, pinned rather than merely printed: writing the
+    // The headline result, pinned rather than merely printed: writing the
     // graph back unchanged reproduces LogSeq's own bytes for EVERY row. It
     // holds because the Transit write cache is invertible, so any drop here is
     // a real divergence in the encoder, not expected noise.
@@ -316,11 +316,11 @@ async fn leg2_logseq_diff_reports_no_datom_delta() {
     );
 }
 
-// ------------------------------------------------------- W1: one title edit
+// ----------------------------------------------------------- one title edit
 
 const NEW_TITLE: &str = "W1 replaced this title";
 
-/// The block this increment edits.
+/// The block these tests edit.
 ///
 /// A function of the fixture, not a uuid pasted into the test: the smallest
 /// uuid among blocks that have content AND a real parent. The parent condition
@@ -345,7 +345,7 @@ async fn pick_target() -> (String, String) {
     (uuid, content)
 }
 
-/// Apply the W1 edit to a fresh copy of the fixture in `dir`.
+/// Apply the title edit to a fresh copy of the fixture in `dir`.
 async fn write_edited_copy(dir: &Path) -> (kvs_writer::TitleEdit, kvs_writer::WriteReport, String) {
     let (uuid, _) = pick_target().await;
     let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");

@@ -172,7 +172,7 @@ fn a_titled_built_in(graph: &KvsGraph) -> i64 {
 /// The editable blocks push will actually accept today.
 ///
 /// `editable_uuids` is the census fact — what the base holds that carries a
-/// title. This is the subset push can WRITE, which since W3 Inc 0(e) excludes
+/// title. This is the subset push can WRITE, which excludes
 /// titles carrying ref syntax: 8 editable, 2 ref-bearing, 6 pushable. Kept as
 /// a separate helper rather than folded into `editable_uuids` so the cost of
 /// the fail-closed ruling stays visible as a number, not hidden in a filter.
@@ -486,24 +486,22 @@ async fn re_ordering_a_block_is_refused_by_name() {
     );
 }
 
-/// EVERY field that is neither the title nor the block's place in the tree is
-/// refused, each by its own name.
+/// EVERY field push cannot write is refused, each by its own name.
 ///
-/// One test per field rather than one for tags: all 206 of the fixture's
-/// blocks carry empty `requires`, `contributes_to`, `advice_suppressed` and
-/// `properties`, so those four arms are unreachable from fixture data alone
-/// and would sit in the source undriven. Each case below perturbs the field
-/// directly, which is the only way to reach them.
+/// All 206 of the fixture's blocks carry empty `requires`, `contributes_to`,
+/// `advice_suppressed` and `properties`, so these four arms are unreachable
+/// from fixture data alone and would sit in the source undriven. Each case
+/// below perturbs the field directly, which is the only way to reach them.
+///
+/// TAGS are not here: push writes them, and the ways a tag edit is refused
+/// are more specific than "out of scope" — an unresolvable class name and a
+/// stale observation, each with its own test.
 #[tokio::test]
 async fn changing_any_non_title_field_is_refused_by_its_own_name() {
     /// The perturbation one case applies to a block.
     type Perturb = fn(BaseBlock) -> BaseBlock;
 
     let cases: Vec<(&str, Perturb)> = vec![
-        ("tag change", |b| BaseBlock {
-            tags: vec!["Invented".to_string()],
-            ..b
-        }),
         ("requires-edge change", |b| BaseBlock {
             requires: vec!["block:11111111-2222-3333-4444-555555555555".to_string()],
             ..b
@@ -2252,10 +2250,10 @@ async fn an_entity_whose_parent_is_built_in_refuses_the_import() {
 
 // ------------------------------------------- ref-bearing titles, fail-closed
 
-/// A title carrying ref syntax is REFUSED until Inc 1 measures who maintains
-/// `:block/refs`.
+/// A title carrying ref syntax is REFUSED, because who maintains
+/// `:block/refs` on an edit is unmeasured.
 ///
-/// W2's byte-identity was proven on titles WITHOUT refs. LogSeq may derive
+/// Byte-identity is established on titles WITHOUT refs. LogSeq may derive
 /// `:block/refs` from a title at edit time; `db_pipeline` documents that IT
 /// does not, and `save-block!` — the layer that might — is not drivable under
 /// nbb. So whether a ref-bearing edit leaves the graph internally consistent
@@ -2263,9 +2261,8 @@ async fn an_entity_whose_parent_is_built_in_refuses_the_import() {
 /// and the failure would be invisible: the title would be right and the
 /// backlinks silently wrong.
 ///
-/// Fail closed until Inc 1 answers it. Both directions are refused — a title
-/// that HAD a ref and a title that GAINS one — because either changes what
-/// refs should exist.
+/// Fail closed. Both directions are refused — a title that HAD a ref and a
+/// title that GAINS one — because either changes what refs should exist.
 #[tokio::test]
 async fn a_ref_bearing_title_is_refused_until_refs_are_measured() {
     let graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
@@ -2430,11 +2427,10 @@ async fn an_attribute_the_root_schema_does_not_declare_refuses_the_read() {
 /// schema and so is never listed inside it.
 ///
 /// `:db/cardinality` is the subject rather than `:db/ident` because the root
-/// DOES declare `:db/ident` — measured, flipping the namespace admission left
-/// an ident-driven version of this test green, so it was testing nothing. The
-/// meta-attributes proper appear as datoms on property-definition entities
-/// and nowhere in the schema map, which is exactly the case the admission
-/// exists for.
+/// DOES declare `:db/ident`, which would reach the schema lookup and never
+/// exercise the namespace admission at all. The meta-attributes proper appear
+/// as datoms on property-definition entities and nowhere in the schema map,
+/// which is exactly the case the admission exists for.
 #[tokio::test]
 async fn the_db_meta_vocabulary_is_admitted_though_the_schema_never_lists_it() {
     let graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
@@ -2455,4 +2451,729 @@ async fn the_db_meta_vocabulary_is_admitted_though_the_schema_never_lists_it() {
             .any(|d| d.e == 8_000_001 && d.a == "db/cardinality"),
         "the constructed :db/cardinality datom must reach the reading"
     );
+}
+
+// ----------------------------------------------------------- pushing tags
+
+/// The classes this graph has, in the order the tag legs prefer them.
+const TAG_CANDIDATES: &[&str] = &["Task", "Query", "Page", "Journal"];
+
+/// `base` with `uuid`'s tags replaced.
+fn retagged(base: &ImportBase, uuid: &str, tags: Vec<String>) -> ImportBase {
+    let mut next = base.clone();
+    let mut tags = tags;
+    tags.sort();
+    let block = BaseBlock {
+        tags,
+        ..base.get(uuid).expect("present").clone()
+    };
+    next.advance(uuid, block).expect("a known uuid");
+    next
+}
+
+/// Six rounds of TAG-ONLY pushes, and the edit list they made.
+///
+/// Each round attaches (even) or detaches (odd) ONE class per block, so every
+/// block's transaction holds exactly one datom — which is what lets the
+/// head-to-head compare bytes without either side having to guess an order
+/// LogSeq's own save path would use for a multi-datom transaction. That path
+/// (`outliner-core/save-block`) is unreachable under nbb, so the order INSIDE
+/// a transaction is Holon's own choice and is pinned by a unit test, not by
+/// the oracle.
+///
+/// Six rounds rather than two because 6 blocks x 6 rounds is 36 datoms, which
+/// crosses the branching factor and makes the leg exercise a FLUSH of
+/// reference-valued datoms into the trees — the one thing tags bring that
+/// titles never did, since a tag's value is an integer and the index
+/// comparator orders numbers against the strings already there.
+async fn tag_pushes() -> (KvsGraph, Vec<(i64, String, i64)>) {
+    let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let mut base = base_of(&fixture()).await;
+    let targets = pushable_uuids(&graph, &base);
+
+    // Per block, a class it does NOT already carry, so round 0 is a real add.
+    let chosen: Vec<(String, String, i64)> = targets
+        .iter()
+        .map(|uuid| {
+            let held = &base.get(uuid).expect("present").tags;
+            let name = TAG_CANDIDATES
+                .iter()
+                .find(|c| !held.contains(&c.to_string()))
+                .unwrap_or_else(|| panic!("{uuid} already carries every candidate class"));
+            let entity = kvs_writer::class_entity_by_name(&graph, name)
+                .expect("read")
+                .unwrap_or_else(|| panic!("the fixture has no class called {name}"));
+            (uuid.clone(), (*name).to_string(), entity)
+        })
+        .collect();
+
+    let mut edits = Vec::new();
+    let mut flushes = 0;
+    for round in 0..6 {
+        let attaching = round % 2 == 0;
+        let mut next = base.clone();
+        for (uuid, name, _) in &chosen {
+            let mut tags = base.get(uuid).expect("present").tags.clone();
+            if attaching {
+                tags.push(name.clone());
+            } else {
+                tags.retain(|t| t != name);
+            }
+            next = retagged(&next, uuid, tags);
+        }
+        let report = kvs_writer::push(&mut graph, &base, &next).expect("push");
+        let expected: Vec<i64> = chosen
+            .iter()
+            .map(|(uuid, _, _)| {
+                kvs_writer::entity_by_uuid(&graph, uuid)
+                    .expect("read")
+                    .expect("entity")
+            })
+            .collect();
+        assert_eq!(
+            report.blocks, expected,
+            "push must edit blocks in the base's uuid order"
+        );
+        for (entity, (_, _, tag)) in expected.iter().zip(&chosen) {
+            edits.push((
+                *entity,
+                if attaching { "add" } else { "retract" }.to_string(),
+                *tag,
+            ));
+        }
+        flushes += report.flushes;
+        base = next;
+    }
+    assert_eq!(edits.len(), 36, "6 blocks over six rounds");
+    assert_eq!(
+        flushes, 1,
+        "36 datoms must cross the branching factor exactly once"
+    );
+    (graph, edits)
+}
+
+/// HEAD TO HEAD — the same 36 tag edits, applied by LogSeq and by `push`.
+///
+/// The claim the title leg makes, re-made for reference-valued datoms. It is
+/// a different claim: a tag's value is an entity id, so the index comparator
+/// has to order integers against the strings and uuids already in the trees,
+/// and the flush this leg forces is where that happens.
+#[tokio::test]
+#[ignore = "needs HOLON_LOGSEQ_ORACLE — see docs/Testing/LogseqDbOracle.md"]
+async fn head_to_head_with_logseq_applying_the_same_tag_pushes() {
+    let oracle = Oracle::find();
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    let holon_dir = dir.path().join("holon");
+    let (graph, edits) = tag_pushes().await;
+    std::fs::create_dir_all(&holon_dir).expect("dir");
+    let holon_db = holon_dir.join("db.sqlite");
+    kvs_writer::write_graph(&graph, &holon_db)
+        .await
+        .expect("write");
+
+    let edits_json = dir.path().join("tag-edits.json");
+    std::fs::write(
+        &edits_json,
+        serde_json::to_string(&edits).expect("edits serialize"),
+    )
+    .expect("write edits");
+
+    let logseq_dir = dir.path().join("logseq");
+    std::fs::create_dir_all(&logseq_dir).expect("dir");
+    let logseq_db = logseq_dir.join("db.sqlite");
+    std::fs::copy(fixture(), &logseq_db).expect("stage");
+    let out = oracle.run(
+        "script/apply_tag_edits.cljs",
+        &[&logseq_db, &edits_json],
+        &[],
+    );
+    assert!(
+        out.contains("applied 36 tag edits"),
+        "LogSeq did not apply the tag edits:\n{out}"
+    );
+
+    let theirs = kvs_writer::read_graph(&logseq_db)
+        .await
+        .expect("logseq reads");
+    let ours = kvs_writer::read_graph(&holon_db)
+        .await
+        .expect("holon reads");
+
+    let addrs: BTreeSet<i64> = theirs
+        .rows
+        .iter()
+        .chain(ours.rows.iter())
+        .map(|r| r.addr)
+        .collect();
+    let (mut identical, mut differing, mut only_theirs, mut only_ours) = (0, 0, 0, 0);
+    let mut first_differences: Vec<String> = Vec::new();
+    for addr in &addrs {
+        let t = theirs.rows.iter().find(|r| r.addr == *addr);
+        let o = ours.rows.iter().find(|r| r.addr == *addr);
+        match (t, o) {
+            (Some(t), Some(o)) => {
+                if t.original_content == o.original_content && t.addresses == o.addresses {
+                    identical += 1;
+                } else {
+                    differing += 1;
+                    if first_differences.len() < 4 {
+                        let at = t
+                            .original_content
+                            .chars()
+                            .zip(o.original_content.chars())
+                            .position(|(a, b)| a != b)
+                            .unwrap_or(0);
+                        let from = at.saturating_sub(60);
+                        let slice = |s: &str| s.chars().skip(from).take(160).collect::<String>();
+                        first_differences.push(format!(
+                            "addr {addr} diverges at char {at}\n  logseq: {}\n  holon:  {}\n  \
+                             addresses: {:?} vs {:?}",
+                            slice(&t.original_content),
+                            slice(&o.original_content),
+                            t.addresses,
+                            o.addresses
+                        ));
+                    }
+                }
+            }
+            (Some(_), None) => only_theirs += 1,
+            (None, Some(_)) => only_ours += 1,
+            (None, None) => unreachable!("addr came from one of the two"),
+        }
+    }
+
+    assert_eq!(
+        (differing, only_theirs, only_ours),
+        (0, 0, 0),
+        "the two writers disagree on tag edits: {identical} identical, \
+         {differing} differing, {only_theirs} only LogSeq's, {only_ours} only \
+         Holon's\n{}",
+        first_differences.join("\n")
+    );
+    assert_eq!(
+        identical,
+        addrs.len(),
+        "every row must have been compared, not skipped"
+    );
+    assert!(
+        ours.rows.len() >= 456,
+        "the pushed graph must still hold the fixture's rows; got {}",
+        ours.rows.len()
+    );
+}
+
+/// LogSeq's validator accepts a graph Holon pushed TAGS into.
+#[tokio::test]
+#[ignore = "needs HOLON_LOGSEQ_ORACLE — see docs/Testing/LogseqDbOracle.md"]
+async fn logseqs_validator_accepts_a_tag_pushed_graph() {
+    let oracle = Oracle::find();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let copy_dir = dir.path().join("tagged");
+    std::fs::create_dir_all(&copy_dir).expect("dir");
+    let (graph, _) = tag_pushes().await;
+    kvs_writer::write_graph(&graph, &copy_dir.join("db.sqlite"))
+        .await
+        .expect("write");
+
+    let out = oracle.run(
+        "script/validate_db.cljs",
+        &[&copy_dir.join("db.sqlite")],
+        &["--closed-maps", "--group-errors"],
+    );
+    assert!(
+        out.contains("Valid!"),
+        "LogSeq's validator rejected a graph Holon pushed tags into:\n{out}"
+    );
+    assert!(
+        out.contains(":datoms 2609"),
+        "the validator must have read the whole graph back:\n{out}"
+    );
+}
+
+/// A tag naming no class in this graph is refused BY NAME.
+///
+/// The hazard is measured, not imagined: `[:db/add e :block/tags 987654]` is
+/// ACCEPTED by LogSeq's transactor and leaves a dangling reference
+/// (`oracle/probe_tag_edits.cljs`). Nothing downstream would complain until
+/// the importer read the graph back and refused the whole import.
+#[tokio::test]
+async fn a_tag_naming_no_class_is_refused_by_name() {
+    let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let base = base_of(&fixture()).await;
+    let uuid = pushable_uuids(&graph, &base)
+        .first()
+        .expect("a pushable block")
+        .clone();
+
+    let mut tags = base.get(&uuid).expect("present").tags.clone();
+    tags.push("NoSuchClassExists".to_string());
+    let next = retagged(&base, &uuid, tags);
+
+    let error = kvs_writer::push(&mut graph, &base, &next)
+        .expect_err("a tag naming no class must be refused");
+    assert!(
+        matches!(
+            &error,
+            kvs_writer::RowError::PushUnknownTag { uuid: u, tag } if *u == uuid && tag == "NoSuchClassExists"
+        ),
+        "the refusal must name the block and the tag; got {error:?}"
+    );
+}
+
+/// A base whose tags no longer match the graph refuses the whole push.
+///
+/// The tag counterpart of `PushBaseStale`, and it is what makes a redundant
+/// add unreachable through `push`: LogSeq's transactor treats one as a no-op
+/// (measured), but a base that asks for a tag the block already carries is a
+/// base describing a state that exists nowhere, and applying half of it is
+/// the failure this layer exists to prevent.
+#[tokio::test]
+async fn a_base_whose_tags_are_stale_refuses_the_whole_push() {
+    let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let base = base_of(&fixture()).await;
+    let uuid = pushable_uuids(&graph, &base)
+        .first()
+        .expect("a pushable block")
+        .clone();
+
+    // Claim the block was observed carrying a class it does not carry, then
+    // ask for it to be dropped — a REMOVE of a tag that is not there.
+    let absent = TAG_CANDIDATES
+        .iter()
+        .find(|c| {
+            !base
+                .get(&uuid)
+                .expect("present")
+                .tags
+                .contains(&c.to_string())
+        })
+        .expect("some class the block lacks");
+    let mut observed_tags = base.get(&uuid).expect("present").tags.clone();
+    observed_tags.push((*absent).to_string());
+    let stale = retagged(&base, &uuid, observed_tags);
+    let wanted = retagged(&base, &uuid, base.get(&uuid).expect("present").tags.clone());
+
+    let error = kvs_writer::push(&mut graph, &stale, &wanted)
+        .expect_err("a stale tag observation must refuse the push");
+    assert!(
+        matches!(&error, kvs_writer::RowError::PushBaseStaleTags { uuid: u, .. } if *u == uuid),
+        "the refusal must name the block; got {error:?}"
+    );
+}
+
+/// One datom per attach, one per detach, and nothing else moves.
+#[tokio::test]
+async fn a_tag_change_writes_one_datom_and_touches_nothing_else() {
+    let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let base = base_of(&fixture()).await;
+    let uuid = pushable_uuids(&graph, &base)
+        .first()
+        .expect("a pushable block")
+        .clone();
+    let entity = kvs_writer::entity_by_uuid(&graph, &uuid)
+        .expect("read")
+        .expect("entity");
+    let name = TAG_CANDIDATES
+        .iter()
+        .find(|c| {
+            !base
+                .get(&uuid)
+                .expect("present")
+                .tags
+                .contains(&c.to_string())
+        })
+        .expect("some class the block lacks");
+    let tag = kvs_writer::class_entity_by_name(&graph, name)
+        .expect("read")
+        .expect("the class exists");
+
+    let untouched = |g: &KvsGraph| -> Vec<(String, TransitNode)> {
+        kvs_writer::datoms_now(g)
+            .expect("read")
+            .into_iter()
+            .filter(|d| {
+                d.e == entity
+                    && matches!(
+                        d.a.as_str(),
+                        "block/title" | "block/updated-at" | "block/refs" | "block/created-at"
+                    )
+            })
+            .map(|d| (d.a, d.v))
+            .collect()
+    };
+    let before = untouched(&graph);
+
+    let mut tags = base.get(&uuid).expect("present").tags.clone();
+    tags.push((*name).to_string());
+    let attached = retagged(&base, &uuid, tags);
+    let report = kvs_writer::push(&mut graph, &base, &attached).expect("push attaches the tag");
+    assert_eq!(
+        (report.transactions, report.datoms),
+        (1, 1),
+        "attaching one tag is ONE datom in ONE transaction"
+    );
+    assert!(
+        kvs_writer::datoms_now(&graph)
+            .expect("read")
+            .iter()
+            .any(|d| d.e == entity && d.a == "block/tags" && d.v == TransitNode::Int(tag)),
+        "the tag datom must be in the graph, and its value must be the class ENTITY"
+    );
+    assert_eq!(
+        untouched(&graph),
+        before,
+        "a tag edit must leave title, refs and both timestamps exactly as they were"
+    );
+
+    let report = kvs_writer::push(&mut graph, &attached, &base).expect("push detaches the tag");
+    assert_eq!(
+        (report.transactions, report.datoms),
+        (1, 1),
+        "detaching one tag is ONE datom in ONE transaction"
+    );
+    assert!(
+        !kvs_writer::datoms_now(&graph)
+            .expect("read")
+            .iter()
+            .any(|d| d.e == entity && d.a == "block/tags" && d.v == TransitNode::Int(tag)),
+        "the detach must have removed exactly that reference"
+    );
+    assert_eq!(
+        untouched(&graph),
+        before,
+        "and the detach must leave the same four attributes alone"
+    );
+}
+
+/// A block that gains one tag and loses another does BOTH in one transaction,
+/// detach first.
+///
+/// The order is Holon's choice and is NOT measured: LogSeq's own save path is
+/// unreachable under nbb, so nothing here can say what it would emit. It
+/// mirrors the title leg's measured retract-then-assert shape, and it is
+/// pinned so the choice is visible rather than incidental.
+#[tokio::test]
+async fn a_simultaneous_attach_and_detach_is_one_transaction_detach_first() {
+    let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let base = base_of(&fixture()).await;
+    let uuid = pushable_uuids(&graph, &base)
+        .first()
+        .expect("a pushable block")
+        .clone();
+    let entity = kvs_writer::entity_by_uuid(&graph, &uuid)
+        .expect("read")
+        .expect("entity");
+
+    let absent: Vec<&str> = TAG_CANDIDATES
+        .iter()
+        .filter(|c| {
+            !base
+                .get(&uuid)
+                .expect("present")
+                .tags
+                .contains(&c.to_string())
+        })
+        .take(2)
+        .copied()
+        .collect();
+    assert_eq!(absent.len(), 2, "need two classes the block lacks");
+    let (first, second) = (absent[0], absent[1]);
+
+    let mut with_first = base.get(&uuid).expect("present").tags.clone();
+    with_first.push(first.to_string());
+    let attached = retagged(&base, &uuid, with_first.clone());
+    kvs_writer::push(&mut graph, &base, &attached).expect("attach the first");
+
+    let mut swapped = with_first.clone();
+    swapped.retain(|t| t != first);
+    swapped.push(second.to_string());
+    let next = retagged(&attached, &uuid, swapped);
+
+    let report = kvs_writer::push(&mut graph, &attached, &next).expect("swap the tags");
+    assert_eq!(
+        (report.transactions, report.datoms),
+        (1, 2),
+        "one transaction, two datoms"
+    );
+
+    let tail = graph.tail().expect("tail");
+    let last = tail
+        .transactions()
+        .last()
+        .expect("the swap is the last transaction")
+        .clone();
+    let ops: Vec<(i64, kvs_writer::DatomOp)> = last
+        .iter()
+        .map(|d| match d.value {
+            TransitNode::Int(target) => (target, d.op),
+            ref other => panic!("a tag datom's value must be a reference; got {other:?}"),
+        })
+        .collect();
+    let dropped = kvs_writer::class_entity_by_name(&graph, first)
+        .expect("read")
+        .expect("class");
+    let gained = kvs_writer::class_entity_by_name(&graph, second)
+        .expect("read")
+        .expect("class");
+    assert_eq!(
+        ops,
+        vec![
+            (dropped, kvs_writer::DatomOp::Retract),
+            (gained, kvs_writer::DatomOp::Assert)
+        ],
+        "detach before attach, both under one transaction, for entity {entity}"
+    );
+}
+
+/// A DECLARED attribute whose cardinality cannot be read is refused by name.
+///
+/// The dangerous case is not the missing declaration — that one is already
+/// refused — but the present-and-unreadable one, which a default would send
+/// down the cardinality-ONE supersede path and drop a value with nothing to
+/// show for it. Driven by rewriting the root schema, because no real graph
+/// offers a broken declaration.
+#[tokio::test]
+async fn a_declaration_whose_cardinality_cannot_be_read_is_refused_by_name() {
+    let base_graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+
+    let redeclared = |cardinality: Option<TransitNode>| {
+        let mut graph = base_graph.clone();
+        let TransitNode::Map(attrs) = &mut graph.root.schema else {
+            panic!("the fixture's root schema is a map");
+        };
+        let definition = match cardinality {
+            Some(value) => TransitNode::Map(vec![(
+                TransitNode::Keyword("db/cardinality".to_string()),
+                value,
+            )]),
+            None => TransitNode::Str("not a declaration at all".to_string()),
+        };
+        attrs.push((
+            TransitNode::Keyword("probe/attribute".to_string()),
+            definition,
+        ));
+        with_tail_transaction(
+            &graph,
+            vec![tail_datom(
+                1,
+                "probe/attribute",
+                TransitNode::Str("a".to_string()),
+                536_871_024,
+                kvs_writer::DatomOp::Assert,
+            )],
+        )
+    };
+
+    for (case, cardinality) in [
+        (
+            "an unrecognised cardinality keyword",
+            Some(TransitNode::Keyword("db.cardinality/plenty".to_string())),
+        ),
+        (
+            "a cardinality that is not a keyword",
+            Some(TransitNode::Str("many".to_string())),
+        ),
+        ("a declaration that is not a map", None),
+    ] {
+        let graph = redeclared(cardinality);
+        let error = kvs_writer::datoms_now(&graph)
+            .expect_err(&format!("{case} must be refused, not defaulted to one"));
+        assert!(
+            matches!(
+                &error,
+                kvs_writer::RowError::MalformedAttributeDeclaration { attribute, .. }
+                    if attribute == "probe/attribute"
+            ),
+            "{case}: the refusal must name the attribute; got {error:?}"
+        );
+    }
+}
+
+/// A base naming one tag twice is refused, not panicked on.
+///
+/// `push` is public, so its input is whatever the caller built. A list holding
+/// `Task` twice cancels out — the attach side filters it because the block
+/// already carries it, the detach side because it is still wanted — leaving a
+/// block the diff reported as changed with nothing to write.
+#[tokio::test]
+async fn a_base_naming_one_tag_twice_is_refused_by_name() {
+    let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let base = base_of(&fixture()).await;
+    let uuid = pushable_uuids(&graph, &base)
+        .first()
+        .expect("a pushable block")
+        .clone();
+
+    // Attach a class legitimately first, so the duplicate names a tag the
+    // block really carries — the case that cancels on both sides.
+    let name = TAG_CANDIDATES
+        .iter()
+        .find(|c| {
+            !base
+                .get(&uuid)
+                .expect("present")
+                .tags
+                .contains(&c.to_string())
+        })
+        .expect("some class the block lacks");
+    let mut tags = base.get(&uuid).expect("present").tags.clone();
+    tags.push((*name).to_string());
+    let attached = retagged(&base, &uuid, tags.clone());
+    kvs_writer::push(&mut graph, &base, &attached).expect("the honest attach succeeds");
+
+    let mut doubled = tags.clone();
+    doubled.push((*name).to_string());
+    doubled.sort();
+    let next = retagged(&attached, &uuid, doubled);
+
+    let error = kvs_writer::push(&mut graph, &attached, &next)
+        .expect_err("a duplicate tag name must be refused, not asserted on");
+    assert!(
+        matches!(
+            &error,
+            kvs_writer::RowError::PushDuplicateTag { uuid: u, tag } if *u == uuid && tag == name
+        ),
+        "the refusal must name the block and the tag; got {error:?}"
+    );
+}
+
+/// A base whose tags are not in the order the graph reports them is refused.
+///
+/// The same cancellation as a duplicate, reached differently: two lists
+/// holding the same names in a different order are a diff to `BaseDiff` and no
+/// change at all to the writer. A base carries tags SORTED — that is what
+/// `ImportBase::observe` produces and what the graph is compared against — so
+/// an unsorted one is not an observation this graph ever made.
+#[tokio::test]
+async fn a_base_whose_tags_are_unsorted_is_refused_by_name() {
+    let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let base = base_of(&fixture()).await;
+    let uuid = pushable_uuids(&graph, &base)
+        .first()
+        .expect("a pushable block")
+        .clone();
+
+    let absent: Vec<&str> = TAG_CANDIDATES
+        .iter()
+        .filter(|c| {
+            !base
+                .get(&uuid)
+                .expect("present")
+                .tags
+                .contains(&c.to_string())
+        })
+        .take(2)
+        .copied()
+        .collect();
+    assert_eq!(absent.len(), 2, "need two classes the block lacks");
+
+    let mut sorted = base.get(&uuid).expect("present").tags.clone();
+    sorted.push(absent[0].to_string());
+    sorted.push(absent[1].to_string());
+    sorted.sort();
+    let attached = retagged(&base, &uuid, sorted.clone());
+    kvs_writer::push(&mut graph, &base, &attached).expect("the honest attach succeeds");
+
+    // Same set, reversed. `retagged` sorts, so build the block by hand.
+    let mut reversed = sorted.clone();
+    reversed.reverse();
+    assert_ne!(reversed, sorted, "the reversal must actually differ");
+    let mut next = attached.clone();
+    next.advance(
+        &uuid,
+        BaseBlock {
+            tags: reversed,
+            ..attached.get(&uuid).expect("present").clone()
+        },
+    )
+    .expect("a known uuid");
+
+    let error = kvs_writer::push(&mut graph, &attached, &next)
+        .expect_err("an unsorted tag list must be refused, not asserted on");
+    assert!(
+        matches!(&error, kvs_writer::RowError::PushUnsortedTags { uuid: u, .. } if *u == uuid),
+        "the refusal must name the block; got {error:?}"
+    );
+}
+
+/// A malformed list is named as malformed on the OBSERVED side too.
+///
+/// Both checks are load-bearing and they fail differently. Without the
+/// observed-side one the block still refuses — but as `PushBaseStaleTags`,
+/// because a list the graph cannot equal reads as a graph disagreement. That
+/// is the wrong story: the graph is fine and the base is not, and a caller
+/// told its observation is stale will go re-import instead of fixing the list
+/// it built. So this asserts the VARIANT, not merely that something failed.
+#[tokio::test]
+async fn a_malformed_observed_list_is_named_malformed_not_stale() {
+    let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let base = base_of(&fixture()).await;
+    let uuid = pushable_uuids(&graph, &base)
+        .first()
+        .expect("a pushable block")
+        .clone();
+
+    let absent: Vec<&str> = TAG_CANDIDATES
+        .iter()
+        .filter(|c| {
+            !base
+                .get(&uuid)
+                .expect("present")
+                .tags
+                .contains(&c.to_string())
+        })
+        .take(2)
+        .copied()
+        .collect();
+    assert_eq!(absent.len(), 2, "need two classes the block lacks");
+
+    // Attach both honestly, so the graph really holds the sorted pair.
+    let mut held = base.get(&uuid).expect("present").tags.clone();
+    held.push(absent[0].to_string());
+    held.push(absent[1].to_string());
+    held.sort();
+    let attached = retagged(&base, &uuid, held.clone());
+    kvs_writer::push(&mut graph, &base, &attached).expect("the honest attach succeeds");
+
+    // `retagged` sorts and dedupes nothing, so build the malformed OBSERVED
+    // sides by hand.
+    let malformed = |tags: Vec<String>| {
+        let mut before = attached.clone();
+        before
+            .advance(
+                &uuid,
+                BaseBlock {
+                    tags,
+                    ..attached.get(&uuid).expect("present").clone()
+                },
+            )
+            .expect("a known uuid");
+        before
+    };
+
+    let mut reversed = held.clone();
+    reversed.reverse();
+    let mut doubled = held.clone();
+    doubled.push(held[0].clone());
+    doubled.sort();
+
+    for (case, before) in [
+        ("unsorted", malformed(reversed)),
+        ("duplicated", malformed(doubled)),
+    ] {
+        // `after` is the list the graph actually holds, so the ONLY thing
+        // wrong with this push is the observation it starts from.
+        let error = kvs_writer::push(&mut graph, &before, &attached)
+            .expect_err("a malformed observed list must be refused");
+        assert!(
+            matches!(
+                &error,
+                kvs_writer::RowError::PushUnsortedTags { uuid: u, .. }
+                    | kvs_writer::RowError::PushDuplicateTag { uuid: u, .. } if *u == uuid
+            ),
+            "a malformed OBSERVED list ({case}) must be named malformed, not reported as a \
+             stale observation; got {error:?}"
+        );
+    }
 }

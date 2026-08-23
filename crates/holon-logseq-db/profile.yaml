@@ -7,10 +7,18 @@
 # oracle involved. The importer reads far more than the writer writes; a clause
 # here is about the WRITE unless it says otherwise.
 #
-# The write leg is title/content ONLY. Every other shape a diff can carry is
-# refused BY NAME (`src/kvs_writer.rs:1198-1232`) — creation, removal,
-# re-parent, re-order, tags, requires, contributes-to, advice-suppression,
-# properties. A refusal is the law's honest branch, and this profile states it.
+# The write leg carries title/content and `:block/tags`. A tag attaches or
+# detaches an EXISTING class entity; a name resolving to no class, and a base
+# whose tags no longer match the graph, are each refused by their own name.
+# Every other shape a diff can carry is refused by name in `out_of_scope_shape`
+# — creation, removal, re-parent, re-order, requires, contributes-to,
+# advice-suppression, properties. A refusal is the law's honest branch, and
+# this profile states it.
+#
+# NOTE, and it is a gap rather than a claim: no clause in the vocabulary names
+# a tag or class reference, so nothing below describes the tag write at all.
+# The clauses here are accurate; the profile as a whole understates the writer
+# until the vocabulary grows an axis for it.
 profile: logseq-db
 
 not_yet_certified:

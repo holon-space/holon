@@ -207,9 +207,64 @@ pub enum RowError {
     /// exact value and the caller must mean "remove this one".
     #[error(
         "attribute :{attribute} is cardinality-many; replacing a value there is not the same \
-         operation as replacing a cardinality-one value and is out of this increment's scope"
+         operation as replacing a cardinality-one value; push writes the cardinality-one \
+         replacement only"
     )]
     NotCardinalityOne { attribute: String },
+    /// A tag names a class this graph does not have.
+    ///
+    /// Push attaches existing classes; it does not mint one. Inventing an
+    /// entity id instead would write a DANGLING reference, which LogSeq's
+    /// storage layer accepts in silence (measured,
+    /// `oracle/probe_tag_edits.cljs`).
+    #[error(
+        "block {uuid} wants the tag `{tag}`, which names no class in this graph; push attaches \
+         existing classes and does not create one, and writing the reference anyway would \
+         leave a tag pointing at nothing"
+    )]
+    PushUnknownTag { uuid: String, tag: String },
+    /// A base names one tag twice.
+    ///
+    /// The two sides cancel — the attach filters it because the block already
+    /// carries the name, the detach because it is still wanted — so the block
+    /// arrives as a change with nothing to write. A tag list is a SET, and a
+    /// caller who spelled one twice does not agree with this graph about what
+    /// the block holds.
+    #[error(
+        "block {uuid}'s tags name `{tag}` twice; a tag list is a set, so this base does not \
+         describe a state any graph can be in"
+    )]
+    PushDuplicateTag { uuid: String, tag: String },
+    /// A base's tags are not in the order a base carries them.
+    ///
+    /// `ImportBase::observe` sorts, and the graph's own tags are compared
+    /// sorted, so an unsorted list is not an observation this graph ever made
+    /// — and two orderings of one set are a difference to `BaseDiff` and no
+    /// difference at all to the writer.
+    #[error(
+        "block {uuid}'s tags are {found:?}, which is not sorted; a base carries tags sorted, \
+         so this is not a state observed from a graph"
+    )]
+    PushUnsortedTags { uuid: String, found: Vec<String> },
+    /// The graph's tags for a block are not the ones the base observed.
+    #[error(
+        "block {uuid} was observed carrying tags {expected:?} but the graph holds {found:?}; \
+         the base describes a state that no longer exists, so the whole push is refused"
+    )]
+    PushBaseStaleTags {
+        uuid: String,
+        expected: Vec<String>,
+        found: Vec<String>,
+    },
+    /// `:block/tags` is reference-typed; a non-reference value means the graph
+    /// disagrees with its own schema.
+    #[error("entity {entity} has a :block/tags value that is {found}, not a reference")]
+    TagNotAReference { entity: i64, found: &'static str },
+    #[error(
+        "entity {entity} is tagged with entity {target}, which carries no \
+         :db/ident in the {CLASS_NAMESPACE} namespace and so cannot be named"
+    )]
+    TagIsNotAClass { entity: i64, target: i64 },
     /// A datom names an attribute the graph's own root schema does not
     /// declare. Cardinality-one would be the right guess — measured, that is
     /// what LogSeq's transactor assumes — but guessing here decides whether a
@@ -221,6 +276,9 @@ pub enum RowError {
     UndeclaredAttribute { attribute: String },
     #[error("the root node's :schema is {found}, expected a map of attribute declarations")]
     SchemaNotAMap { found: &'static str },
+    /// The root DECLARES the attribute, but its declaration cannot be read.
+    #[error("the root schema declares :{attribute} but {detail}")]
+    MalformedAttributeDeclaration { attribute: String, detail: String },
     #[error("kvs addr {addr} is not a tree node: {detail}")]
     MalformedTreeNode { addr: i64, detail: String },
     #[error("kvs addr {addr} is referenced as a child but no such row exists")]
@@ -251,14 +309,13 @@ pub enum RowError {
     /// A block the diff names is not in the graph at all.
     #[error("no block with uuid {uuid} exists in this graph, so its change cannot be pushed")]
     PushUnknownBlock { uuid: String },
-    /// The diff asks for structure this increment does not write.
+    /// The diff asks for a shape push does not write.
     ///
     /// One variant carrying the shape's name rather than four near-identical
-    /// ones: the caller's recovery is the same in every case (drop the change
-    /// or wait for the increment that writes it), and the message already
-    /// says which shape it was.
+    /// ones: the caller's recovery is the same in every case — drop the
+    /// change — and the message already says which shape it was.
     #[error(
-        "pushing a {shape} is not in this increment's scope; block {uuid} was left untouched \
+        "pushing a {shape} is not something push writes; block {uuid} was left untouched \
          and so was every other block in this push"
     )]
     PushOutOfScope { shape: &'static str, uuid: String },
@@ -275,18 +332,18 @@ pub enum RowError {
     /// The title carries LogSeq reference syntax, and who maintains
     /// `:block/refs` on an edit is UNMEASURED.
     ///
-    /// W2 proved byte-identity for titles WITHOUT refs. `db_pipeline`
+    /// Byte-identity is established for titles WITHOUT refs. `db_pipeline`
     /// documents that it does not rebuild refs on an edit, and `save-block!`
-    /// — the layer that might — is not drivable under nbb, so nobody has
-    /// established whether LogSeq derives refs from a title at edit time. If
-    /// it does and Holon does not, a pushed ref-bearing title leaves a graph
-    /// LogSeq considers internally inconsistent: the title reads correctly
-    /// while the backlinks are silently wrong. That is invisible damage, so
-    /// this fails closed until W3 Inc 1 measures it.
+    /// — the layer that might — is not drivable under nbb, so whether LogSeq
+    /// derives refs from a title at edit time is unknown. If it does and
+    /// Holon does not, a pushed ref-bearing title leaves a graph LogSeq
+    /// considers internally inconsistent: the title reads correctly while the
+    /// backlinks are silently wrong. That is invisible damage, so this fails
+    /// closed. See docs/Testing/LogseqDbPush.md.
     #[error(
         "block {uuid}'s {side} title carries LogSeq reference syntax ({syntax}), and whether \
-         LogSeq re-derives :block/refs on an edit is not yet measured; pushing it could leave \
-         the graph's backlinks silently wrong. Refusing until that is settled (W3 Inc 1)"
+         LogSeq re-derives :block/refs on an edit is unmeasured; pushing it could leave the \
+         graph's backlinks silently wrong, so it is refused"
     )]
     PushRefBearingTitle {
         uuid: String,
@@ -936,8 +993,13 @@ pub fn assert_pinned_schema_version(rows: &[KvsRow]) -> Result<SchemaVersion, Ro
     }
 }
 
-/// The attribute this increment can edit.
+/// The two attributes push writes.
 const TITLE: &str = "block/title";
+const TAGS: &str = "block/tags";
+
+/// The namespace LogSeq gives every class entity's `:db/ident`. The importer
+/// strips the same prefix to name a tag.
+const CLASS_NAMESPACE: &str = "logseq.class/";
 
 /// How many values an attribute may hold at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -978,17 +1040,38 @@ fn declared_cardinality(schema: &TransitNode, attribute: &str) -> Result<Cardina
             attribute: attribute.to_string(),
         });
     };
-    let cardinality = match definition {
-        TransitNode::Map(fields) => fields
-            .iter()
-            .find_map(|(k, v)| (keyword(k) == Some("db/cardinality")).then_some(keyword(v)))
-            .flatten(),
-        _ => None,
+    let TransitNode::Map(fields) = definition else {
+        return Err(RowError::MalformedAttributeDeclaration {
+            attribute: attribute.to_string(),
+            detail: format!(
+                "its declaration is {}, expected a map",
+                node_kind(definition)
+            ),
+        });
     };
-    Ok(match cardinality {
-        Some("db.cardinality/many") => Cardinality::Many,
-        _ => Cardinality::One,
-    })
+    let Some((_, value)) = fields
+        .iter()
+        .find(|(k, _)| keyword(k) == Some("db/cardinality"))
+    else {
+        // DataScript's default: an attribute that states no cardinality holds
+        // one value.
+        return Ok(Cardinality::One);
+    };
+    match keyword(value) {
+        Some("db.cardinality/many") => Ok(Cardinality::Many),
+        Some("db.cardinality/one") => Ok(Cardinality::One),
+        // A declared attribute whose cardinality is unreadable is refused for
+        // the same reason an undeclared one is: the two answers decide whether
+        // an existing value is kept or superseded away, and picking one would
+        // drop a value with nothing to show for it.
+        _ => Err(RowError::MalformedAttributeDeclaration {
+            attribute: attribute.to_string(),
+            detail: format!(
+                ":db/cardinality is {}, expected :db.cardinality/one or :db.cardinality/many",
+                keyword(value).map_or_else(|| node_kind(value).to_string(), |k| format!(":{k}"))
+            ),
+        }),
+    }
 }
 
 /// Every datom the graph CURRENTLY holds.
@@ -998,16 +1081,10 @@ fn declared_cardinality(schema: &TransitNode, attribute: &str) -> Result<Cardina
 /// importer replays a tail by, stated once.
 ///
 /// This is the only place any predicate in this module may learn what the
-/// graph says, and it exists because the alternative was measured to be
-/// wrong. `is_built_in` used to scan `graph.rows` through `datom_tuples`,
-/// which returns `&[]` for the tail row (a list of transactions, not a node
-/// map) — so a built-in marker that LogSeq had transacted but not yet flushed
-/// was invisible, and push happily rewrote a built-in page. Meanwhile
-/// `current_title` replayed the tail on purpose. Two readers, two answers,
-/// and the disagreement resolved in the direction that WRITES.
-///
-/// Reachable, not `graph.rows`: the fixture carries 17 unreferenced rows that
-/// still hold datoms, and a row scan reports their entities as live.
+/// graph says. A predicate reading the trees alone would miss a marker LogSeq
+/// has transacted but not yet flushed, and one reading `graph.rows` would see
+/// the 17 unreferenced rows the fixture carries and report their entities as
+/// live.
 ///
 /// Both halves are measured against LogSeq (`oracle/probe_tail_builtin.cljs`,
 /// `oracle/probe_mirror.cljs`): a flag asserted in the tail makes an entity
@@ -1096,6 +1173,55 @@ impl GraphView {
         })
     }
 
+    /// The entity LogSeq identifies as the class called `name`.
+    ///
+    /// A tag is a REFERENCE to a class entity, but Holon's base carries tag
+    /// NAMES — the importer resolves them through the same `:db/ident`. This
+    /// is that resolution run backwards, and it is deliberately the only way
+    /// a tag reaches a datom: an unresolvable name must become a refusal, not
+    /// an invented entity id.
+    fn class_by_name(&self, name: &str) -> Option<i64> {
+        let ident = TransitNode::Keyword(format!("{CLASS_NAMESPACE}{name}"));
+        self.datoms
+            .iter()
+            .find_map(|d| (d.a == "db/ident" && d.v == ident).then_some(d.e))
+    }
+
+    /// The class names `entity` currently carries, sorted, as the base spells
+    /// them.
+    ///
+    /// A tag target that is not a class is an ERROR rather than a skip: the
+    /// importer already refuses such a graph (its projection cannot name the
+    /// tag), so silently dropping one here would let push write a base the
+    /// importer would then reject.
+    fn tag_names(&self, entity: i64) -> Result<Vec<String>, RowError> {
+        let mut names = Vec::new();
+        for datom in &self.datoms {
+            if datom.e != entity || datom.a != TAGS {
+                continue;
+            }
+            let TransitNode::Int(target) = datom.v else {
+                return Err(RowError::TagNotAReference {
+                    entity,
+                    found: node_kind(&datom.v),
+                });
+            };
+            let name = self
+                .datoms
+                .iter()
+                .find_map(|d| match (&d.a[..], &d.v) {
+                    ("db/ident", TransitNode::Keyword(ident)) if d.e == target => {
+                        ident.strip_prefix(CLASS_NAMESPACE)
+                    }
+                    _ => None,
+                })
+                .ok_or(RowError::TagIsNotAClass { entity, target })?;
+            names.push(name.to_string());
+        }
+        names.sort();
+        Ok(names)
+    }
+
     fn is_built_in(&self, entity: i64) -> bool {
         self.datoms
             .iter()
@@ -1128,6 +1254,15 @@ impl GraphView {
 /// because "no such block" is a question a caller may legitimately ask.
 pub fn entity_by_uuid(graph: &KvsGraph, uuid: &str) -> Result<Option<i64>, RowError> {
     Ok(GraphView::read(graph)?.entity_by_uuid(uuid))
+}
+
+/// The entity LogSeq identifies as the class called `name`, if it has one.
+///
+/// `None` rather than an error: "this graph has no such class" is a question
+/// a caller may legitimately ask, and push turns the answer into a refusal
+/// that names the block as well as the tag.
+pub fn class_entity_by_name(graph: &KvsGraph, name: &str) -> Result<Option<i64>, RowError> {
+    Ok(GraphView::read(graph)?.class_by_name(name))
 }
 
 /// What one title replacement did.
@@ -1193,23 +1328,68 @@ pub fn replace_block_title(
 /// tail shape could drift from the measured one.
 ///
 /// The caller has already checked the schema version and the cardinality.
-fn edit_title(
-    graph: &mut KvsGraph,
+/// Everything one block's push changes, decided before anything is written.
+#[derive(Debug, Clone)]
+struct PlannedEdit {
     entity: i64,
-    old_title: &str,
-    new_title: &str,
-) -> Result<(TitleEdit, bool), RowError> {
-    let old_title = old_title.to_string();
+    /// `(stored, wanted)`. `None` when only the tags moved.
+    title: Option<(String, String)>,
+    /// Class entities to detach and to attach, each in the base's tag order.
+    detach: Vec<i64>,
+    attach: Vec<i64>,
+}
+
+impl PlannedEdit {
+    fn datom_count(&self) -> usize {
+        usize::from(self.title.is_some()) * 2 + self.detach.len() + self.attach.len()
+    }
+}
+
+/// Apply one planned edit as ONE tail transaction, flushing if it overflows.
+///
+/// One transaction per BLOCK, not per attribute: LogSeq's transactor writes a
+/// transaction per `transact!` call, and a save carries everything that block's
+/// edit changed. The ORDER inside it — title retract, title assert, detaches,
+/// attaches — is Holon's own and is NOT measured: `outliner-core/save-block`
+/// is unreachable under nbb, so nothing can say what LogSeq would emit. It
+/// mirrors the retract-before-assert shape that IS measured for a title, and
+/// `a_simultaneous_attach_and_detach_is_one_transaction_detach_first` pins it
+/// so the choice stays visible.
+fn edit_block(graph: &mut KvsGraph, edit: &PlannedEdit) -> Result<(TxId, bool), RowError> {
     let tx = graph.allocate_tx()?;
     let mut tail = graph.tail()?;
 
-    let datom = |value: &str, op| TailDatom {
-        entity,
-        attribute: TITLE.to_string(),
-        value: TransitNode::Str(value.to_string()),
-        tx,
-        op,
-    };
+    let mut datoms = Vec::with_capacity(edit.datom_count());
+    if let Some((old_title, new_title)) = &edit.title {
+        for (value, op) in [(old_title, DatomOp::Retract), (new_title, DatomOp::Assert)] {
+            datoms.push(TailDatom {
+                entity: edit.entity,
+                attribute: TITLE.to_string(),
+                value: TransitNode::Str(value.clone()),
+                tx,
+                op,
+            });
+        }
+    }
+    for (targets, op) in [
+        (&edit.detach, DatomOp::Retract),
+        (&edit.attach, DatomOp::Assert),
+    ] {
+        for target in targets {
+            datoms.push(TailDatom {
+                entity: edit.entity,
+                attribute: TAGS.to_string(),
+                value: TransitNode::Int(*target),
+                tx,
+                op,
+            });
+        }
+    }
+    assert!(
+        !datoms.is_empty(),
+        "a planned edit that changes nothing must never have been planned"
+    );
+
     // APPEND FIRST, then flush if that put the tail over the branching factor
     // — the order `store-after-transact!` uses. It matters: LogSeq's
     // overflowing transaction is flushed WITH the ones before it, so after the
@@ -1219,20 +1399,32 @@ fn edit_title(
     //
     // `Tail::push_transaction`'s refusal stays for callers that cannot flush;
     // this path can, so it does not consult it.
-    tail.transactions.push(vec![
-        datom(&old_title, DatomOp::Retract),
-        datom(new_title, DatomOp::Assert),
-    ]);
+    tail.transactions.push(datoms);
     let overflowed = tail.datom_count() > PINNED_BRANCHING_FACTOR as usize;
     graph.set_tail(&tail)?;
     if overflowed {
         flush_tail(graph)?;
     }
+    Ok((tx, overflowed))
+}
 
+fn edit_title(
+    graph: &mut KvsGraph,
+    entity: i64,
+    old_title: &str,
+    new_title: &str,
+) -> Result<(TitleEdit, bool), RowError> {
+    let edit = PlannedEdit {
+        entity,
+        title: Some((old_title.to_string(), new_title.to_string())),
+        detach: Vec::new(),
+        attach: Vec::new(),
+    };
+    let (tx, overflowed) = edit_block(graph, &edit)?;
     Ok((
         TitleEdit {
             entity,
-            old_title,
+            old_title: old_title.to_string(),
             new_title: new_title.to_string(),
             tx,
         },
@@ -1278,12 +1470,38 @@ fn ref_syntax(title: &str) -> Option<&'static str> {
 /// `BaseBlock` is destructured exhaustively on purpose: a field added to the
 /// base must fail to compile here rather than become a difference this
 /// function cannot see and therefore silently declines to refuse.
+/// Check a base's tag list is what a base carries: sorted, no name twice.
+///
+/// Both shapes cancel inside the plan — a name twice is filtered by the attach
+/// side (the block already carries it) AND by the detach side (it is still
+/// wanted), and two orderings of one set are a difference to `BaseDiff` and
+/// none at all here — so either would leave a block reported as changed with
+/// nothing to write.
+fn check_tag_list(uuid: &str, tags: &[String]) -> Result<(), RowError> {
+    for pair in tags.windows(2) {
+        if pair[0] == pair[1] {
+            return Err(RowError::PushDuplicateTag {
+                uuid: uuid.to_string(),
+                tag: pair[0].clone(),
+            });
+        }
+        if pair[0] > pair[1] {
+            return Err(RowError::PushUnsortedTags {
+                uuid: uuid.to_string(),
+                found: tags.to_vec(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn out_of_scope_shape(before: &BaseBlock, after: &BaseBlock) -> Option<&'static str> {
     let BaseBlock {
         content: _,
         parent_id,
         position,
-        tags,
+        // Tags are planned below, not refused here.
+        tags: _,
         requires,
         contributes_to,
         advice_suppressed,
@@ -1295,9 +1513,6 @@ fn out_of_scope_shape(before: &BaseBlock, after: &BaseBlock) -> Option<&'static 
     }
     if *position != after.position {
         return Some("re-order");
-    }
-    if *tags != after.tags {
-        return Some("tag change");
     }
     if *requires != after.requires {
         return Some("requires-edge change");
@@ -1331,16 +1546,18 @@ pub struct PushReport {
 /// Write the difference between two bases into the graph as tail transactions.
 ///
 /// `before` is the base Holon last observed from this graph; `after` is what
-/// Holon now wants it to hold. Every changed block becomes ONE transaction of
-/// two datoms — the retract of the stored title and the assert of the new one
-/// — which is the shape LogSeq's own transactor writes and the shape B proved
-/// byte-identical through a flush.
+/// Holon now wants it to hold. Every changed block becomes ONE transaction,
+/// holding the retract and assert of the title when the title moved plus one
+/// datom per tag detached or attached. A transaction per changed block is the
+/// shape LogSeq's own transactor writes, and it is byte-identical to LogSeq's
+/// through a flush.
 ///
 /// EVERY refusal is decided before any datom is appended, so a push either
 /// applies in full or leaves the graph exactly as it found it. A partially
 /// applied push would leave the base describing a state that exists nowhere.
 ///
-/// Scope is the title only. Creation, removal, re-parent, re-order, edges and
+/// Scope is the title and `:block/tags`, where a tag attaches or detaches an
+/// EXISTING class entity. Creation, removal, re-parent, re-order, edges and
 /// properties are refused by name; so are LogSeq's built-in pages, whose
 /// storage layer would accept an edit that its outliner refuses.
 pub fn push(
@@ -1372,7 +1589,7 @@ pub fn push(
     // ONE reading for the whole plan phase — nothing mutates the graph while
     // the plan is built, and the alternative was ~30 tree walks per push.
     let view = GraphView::read(graph)?;
-    let mut plan: Vec<(i64, String, String)> = Vec::with_capacity(diff.changed.len());
+    let mut plan: Vec<PlannedEdit> = Vec::with_capacity(diff.changed.len());
     for uuid in &diff.changed {
         let observed = before.get(uuid).expect("changed uuids are in both bases");
         let wanted = after.get(uuid).expect("changed uuids are in both bases");
@@ -1409,7 +1626,63 @@ pub fn push(
                 found: stored,
             });
         }
-        plan.push((entity, stored, wanted.content.clone()));
+
+        // Checked before the staleness comparison so a malformed list is
+        // named as malformed rather than reported as a graph disagreement.
+        check_tag_list(uuid, &observed.tags)?;
+        check_tag_list(uuid, &wanted.tags)?;
+
+        // The same staleness rule the title has, for tags. It is also what
+        // makes a redundant add unreachable through push: LogSeq's transactor
+        // treats one as a no-op (measured), but a base asking for a tag the
+        // block already carries describes a state that exists nowhere, and
+        // acting on half of such a base is the failure this layer prevents.
+        let held = view.tag_names(entity)?;
+        if held != observed.tags {
+            return Err(RowError::PushBaseStaleTags {
+                uuid: uuid.clone(),
+                expected: observed.tags.clone(),
+                found: held,
+            });
+        }
+        let resolve = |name: &String| {
+            view.class_by_name(name)
+                .ok_or_else(|| RowError::PushUnknownTag {
+                    uuid: uuid.clone(),
+                    tag: name.clone(),
+                })
+        };
+        // Detached names need no resolution beyond the one the graph already
+        // made: they came OUT of `tag_names`, so their class exists.
+        let detach = held
+            .iter()
+            .filter(|name| !wanted.tags.contains(name))
+            .map(&resolve)
+            .collect::<Result<Vec<i64>, RowError>>()?;
+        let attach = wanted
+            .tags
+            .iter()
+            .filter(|name| !held.contains(name))
+            .map(&resolve)
+            .collect::<Result<Vec<i64>, RowError>>()?;
+
+        let title = (stored != wanted.content).then(|| (stored, wanted.content.clone()));
+        let edit = PlannedEdit {
+            entity,
+            title,
+            detach,
+            attach,
+        };
+        // Unreachable by construction: the tag lists are sorted sets and the
+        // stale guards have equated both of them and the title with the graph,
+        // so a block reaching here with nothing to write would have to differ
+        // in a field `out_of_scope_shape` already refused.
+        assert!(
+            edit.datom_count() > 0,
+            "a block the diff reported as changed must change the title or the \
+             tags, or an arm above should have refused it: {uuid}"
+        );
+        plan.push(edit);
     }
 
     // Every edit lands on a COPY, which replaces the caller's graph only once
@@ -1425,15 +1698,15 @@ pub fn push(
     // the shape rather than of an argument about which errors are reachable.
     let mut staged = graph.clone();
     let mut report = PushReport::default();
-    for (entity, old_title, new_title) in plan {
+    for edit in plan {
         // The old title comes from the PLAN, not from a fresh read: a flush
         // moves datoms between tail and trees but never changes a value, so
-        // the planned title stays correct even across one.
-        let flushed = edit_title(&mut staged, entity, &old_title, &new_title)?.1;
+        // the planned edit stays correct even across one.
+        let (_, flushed) = edit_block(&mut staged, &edit)?;
         report.transactions += 1;
-        report.datoms += 2;
+        report.datoms += edit.datom_count();
         report.flushes += usize::from(flushed);
-        report.blocks.push(entity);
+        report.blocks.push(edit.entity);
     }
     *graph = staged;
     Ok(report)
