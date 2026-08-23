@@ -120,14 +120,21 @@ tools:
     undo:
       tool: update-projects
       capture: [name, color, isFavorite, viewStyle]
+  # Query tools. `find-tasks` and `find-projects` are the two `sync.list_tool`
+  # calls declared above, so their read-ness is what the sync leg already relies
+  # on; the other two are the same query family and carry no write metadata.
   find-tasks:
     entity: todoist_tasks
+    effect: read
   find-tasks-by-date:
     entity: todoist_tasks
+    effect: read
   find-completed-tasks:
     entity: todoist_tasks
+    effect: read
   find-projects:
     entity: todoist_projects
+    effect: read
   add-sections:
     entity: todoist_projects
     display_name: Create Section

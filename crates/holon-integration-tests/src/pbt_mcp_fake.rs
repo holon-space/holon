@@ -257,7 +257,7 @@ impl PbtMcpIntegration {
         let entity = sidecar.prefixed_name(ENTITY_NAME);
         let table_name = entity.table_name();
         let td = entity_config
-            .to_type_definition(&table_name)
+            .to_type_definition(&table_name, "pbt-mcp", sidecar.write_ownership(ENTITY_NAME))
             .expect("EntityConfig with schema must produce a TypeDefinition");
         let cache = QueryableCache::<DynamicEntity>::new(db_handle.clone(), td)
             .await

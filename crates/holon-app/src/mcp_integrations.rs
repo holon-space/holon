@@ -497,7 +497,16 @@ impl Module for McpIntegrationsModule {
                             integration.set_pending_store(pending_writes.clone());
 
                             // Register MCP entity types in TypeRegistry for GQL graph
-                            integration.register_entity_types(&type_registry);
+                            integration
+                                .register_entity_types(&type_registry)
+                                .unwrap_or_else(|e| {
+                                    panic!(
+                                        "[McpIntegrationsModule] provider '{name}' could not \
+                                         register its entity types ({e:#}) — continuing would \
+                                         leave the registry holding someone else's definition \
+                                         under that name, and every reader of it wrong."
+                                    )
+                                });
 
                             // Enqueue the initial sync through the integration's
                             // serialized sync event loop (same consumer as

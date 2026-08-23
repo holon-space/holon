@@ -34,7 +34,11 @@ fn registry_with_sidecar_entities(yaml: &str) -> Arc<TypeRegistry> {
     for (entity_name, entity_config) in &sidecar.entities {
         let table_name = sidecar.prefixed_name(entity_name).table_name();
         let td = entity_config
-            .to_type_definition(&table_name)
+            .to_type_definition(
+                &table_name,
+                "test-provider",
+                sidecar.write_ownership(entity_name),
+            )
             .expect("entity with a schema yields a TypeDefinition");
         registry.register(td).expect("registration succeeds");
     }

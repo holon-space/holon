@@ -80,7 +80,9 @@ async fn fresh_db() -> DbHandle {
 async fn create_all_cache_tables(file: &str, sidecar: &McpSidecar, db: &DbHandle) {
     for (entity_name, entity) in &sidecar.entities {
         let table = sidecar.prefixed_name(entity_name).table_name();
-        let Some(td) = entity.to_type_definition(&table) else {
+        let Some(td) =
+            entity.to_type_definition(&table, file, sidecar.write_ownership(entity_name))
+        else {
             continue; // schema-less entity: nothing to create
         };
         let ddl = td.to_create_table_sql();

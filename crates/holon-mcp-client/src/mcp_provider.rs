@@ -922,6 +922,7 @@ tools:
       reversible: false
   find-tasks:
     entity: todoist_tasks
+    effect: read
 "#;
         McpSidecar::from_yaml(yaml).unwrap()
     }

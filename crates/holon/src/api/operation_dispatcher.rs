@@ -209,31 +209,37 @@ impl OperationDispatcher {
 
     /// Give a type declared at runtime its write authority.
     ///
-    /// Refuses a provider whose entity is already routable: two authorities for
-    /// one entity means writes land in whichever the routing scan reaches
-    /// first, which is exactly the silent misroute this increment exists to
-    /// remove.
+    /// Refuses a provider that would make an already-routable operation
+    /// ambiguous. Dispatch selects by the (entity, op) PAIR, so that pair is
+    /// the unit of ambiguity: a second provider offering one the registry
+    /// already answers means the dispatch lands in whichever the routing scan
+    /// reaches first. Providers that share an entity but no op — a connector's
+    /// own vocabulary alongside the CRUD derived from the mirror's columns —
+    /// route unambiguously and are allowed.
     ///
-    /// The refusal is TERMINAL for that entity in this increment. This registry
+    /// The refusal is TERMINAL for that pair in this increment. This registry
     /// is append-only — nothing removes a declared authority — so re-declaring
     /// a type is not a recoverable path, and the error says so rather than
     /// naming a teardown that would not help.
     pub fn register_provider(&self, provider: Arc<dyn OperationProvider>) -> Result<()> {
-        let entities: HashSet<EntityName> = provider
+        let registered: HashSet<(EntityName, String)> = self
             .operations()
             .into_iter()
-            .map(|op| op.entity_name)
+            .map(|op| (op.entity_name, op.name))
             .collect();
-        for entity in &entities {
-            if self.has_provider(entity.as_str()) {
+        for op in provider.operations() {
+            if registered.contains(&(op.entity_name.clone(), op.name.clone())) {
+                let entity = &op.entity_name;
+                let name = &op.name;
                 return Err(format!(
-                    "[OperationDispatcher] entity '{entity}' already has a write authority; \
-                     registering a second one would make the routing scan decide which of the \
-                     two a write lands in. Re-declaring a live type is NOT SUPPORTED in this \
-                     increment: this registry is append-only, and `TursoAdapter::teardown` drops \
-                     only the SQL artifacts, so no sequence of calls frees the name. Declaring \
-                     over a live type arrives with the migrate primitive (OQ-5), which retires \
-                     this error. Until then, use a name that is not yet declared."
+                    "[OperationDispatcher] operation '{name}' on entity '{entity}' already has a \
+                     write authority; registering a second one would make the routing scan decide \
+                     which of the two a dispatch lands in. Re-declaring a live type is NOT \
+                     SUPPORTED in this increment: this registry is append-only, and \
+                     `TursoAdapter::teardown` drops only the SQL artifacts, so no sequence of \
+                     calls frees the name. Declaring over a live type arrives with the migrate \
+                     primitive (OQ-5), which retires this error. Until then, use a name that is \
+                     not yet declared."
                 )
                 .into());
             }
@@ -1384,6 +1390,30 @@ impl Module for OperationModule {
             let type_registry = r.resolve_async::<holon_profiles::TypeRegistry>().await;
             for type_def in type_registry.all() {
                 if !crate::di::schema_providers::is_free_standing(&type_def) {
+                    continue;
+                }
+                // A type that mirrors a connector's data is written by that
+                // connector, not by a provider derived from its columns. Its
+                // authority is already registered whenever the connector
+                // declares tools for the entity; deriving a second one over the
+                // mirror table would both be refused here and, if it won a
+                // routing scan, write where the system of record cannot see it.
+                //
+                // TODO(bugfunnel:2026-08-23-todoist-projects-second-write-authority-boot-panic,
+                // "Adjacent hazards"): a sidecar with an `entity_prefix` names
+                // its type `{prefix}{entity}` while its tool descriptors name
+                // the bare entity, so this check does not recognise the pair
+                // and the prefixed mirror keeps a derived SQL authority no
+                // connector serves.
+                let entity = EntityName::new(type_def.name.clone());
+                if let Some(provider) = type_def.owning_integration()
+                    && dispatcher.has_provider(entity.as_str())
+                {
+                    info!(
+                        "[OperationModule] '{}' mirrors integration '{provider}', which already \
+                         holds its write authority — deriving none",
+                        type_def.name
+                    );
                     continue;
                 }
                 crate::core::type_declaration::register_write_authority(

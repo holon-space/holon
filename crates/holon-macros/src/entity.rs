@@ -206,6 +206,7 @@ pub fn derive_entity_impl(input: DeriveInput) -> TokenStream {
                     graph_label: #graph_label_expr,
                     source: #api_path::TypeSource::BuiltIn,
                     profile_variants: Vec::new(),
+                    write_authority: #api_path::WriteAuthority::Local,
                 }
             }
 

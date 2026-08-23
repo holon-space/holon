@@ -293,6 +293,26 @@ pub struct TypeDefinition {
     /// (CompiledExpr custom deserialize).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profile_variants: Vec<ProfileVariant>,
+    /// Who serves writes to this type. Separate from [`Self::source`], which
+    /// records where the DEFINITION came from: an integration can mirror an
+    /// entity it only ever reads, and such a type still needs local write
+    /// machinery derived from its columns.
+    #[serde(default)]
+    pub write_authority: WriteAuthority,
+}
+
+/// Who serves writes to a type.
+///
+/// An integration owns them only when it offers operations that mutate the
+/// system of record. A mirror of a read-only feed does NOT: its rows live in a
+/// local table, and writes to that table are the only writes it can have.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WriteAuthority {
+    /// Derived from the type's own columns, by whoever serializes it.
+    #[default]
+    Local,
+    /// The named integration, through the operations its connector advertises.
+    Integration(String),
 }
 
 /// A runtime entity type answers the same place question as an in-tree
@@ -323,6 +343,27 @@ impl TypeDefinition {
             graph_label: None,
             source: TypeSource::default(),
             profile_variants: Vec::new(),
+            write_authority: WriteAuthority::Local,
+        }
+    }
+
+    /// The integration whose sidecar declared this type, if any. Answers "whose
+    /// definition is this?" — not who writes it, which is
+    /// [`Self::owning_integration`].
+    pub fn declaring_integration(&self) -> Option<&str> {
+        match &self.source {
+            TypeSource::McpProvider(provider) => Some(provider),
+            TypeSource::BuiltIn | TypeSource::PreConfigured | TypeSource::UserDefined => None,
+        }
+    }
+
+    /// The integration that serves this type's writes, if any. Local write
+    /// machinery derived from the schema would write to the mirror table and
+    /// never reach that integration's system of record.
+    pub fn owning_integration(&self) -> Option<&str> {
+        match &self.write_authority {
+            WriteAuthority::Integration(provider) => Some(provider),
+            WriteAuthority::Local => None,
         }
     }
 
@@ -415,6 +456,7 @@ impl TypeDefinition {
             graph_label: None,
             profile_variants: Vec::new(),
             source: TypeSource::default(),
+            write_authority: WriteAuthority::Local,
         }
     }
 
@@ -685,6 +727,7 @@ mod create_table_sql_tests {
             ],
             id_references: None,
             profile_variants: vec![],
+            write_authority: WriteAuthority::Local,
             default_lifetime: FieldLifetime::default(),
             source: TypeSource::default(),
         };
@@ -714,6 +757,7 @@ mod create_table_sql_tests {
             ],
             id_references: None,
             profile_variants: vec![],
+            write_authority: WriteAuthority::Local,
             default_lifetime: FieldLifetime::default(),
             source: TypeSource::default(),
         };

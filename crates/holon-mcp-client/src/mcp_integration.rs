@@ -9,6 +9,7 @@ use holon_core::CacheFactory;
 use holon_core::EntityCache;
 use holon_core::SyncGate;
 use holon_core::SyncTokenStore;
+use holon_core::SyncableProvider;
 use holon_turso::turso::DbHandle;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -172,20 +173,73 @@ impl McpIntegration {
     /// Register all entity types from the sidecar config into the TypeRegistry.
     /// Called by frontends after building the integration so GQL graph includes
     /// MCP entities.
-    pub fn register_entity_types(&self, type_registry: &holon_profiles::TypeRegistry) {
-        let sidecar = self.sync_engine.sidecar();
-        for (entity_name, entity_config) in &sidecar.entities {
-            let table_name = sidecar.prefixed_name(entity_name).table_name();
-            if let Some(td) = entity_config.to_type_definition(&table_name)
-                && let Err(e) = type_registry.register(td)
-            {
-                tracing::warn!(
-                    "[McpIntegration] Failed to register type '{}': {e}",
-                    table_name
-                );
+    pub fn register_entity_types(
+        &self,
+        type_registry: &holon_profiles::TypeRegistry,
+    ) -> anyhow::Result<()> {
+        register_sidecar_entity_types(
+            self.sync_engine.sidecar(),
+            self.sync_engine.provider_name(),
+            type_registry,
+        )
+    }
+}
+
+/// Register every entity a sidecar declares as a type in `type_registry`.
+///
+/// Free-standing so a test harness standing in for a connector seeds the
+/// registry through the very same code the connected integration runs — a
+/// second copy would let the two drift, and the drift is invisible until a
+/// registry consumer behaves differently under test than in the app.
+///
+/// A name another owner already holds is an ERROR, not a warning:
+/// `TypeRegistry::register` inserts over whatever is there, so a sidecar
+/// entity colliding with `block` — or with a second connector's entity —
+/// would silently replace that type's definition and every consumer reading
+/// the registry would quietly change shape. Re-registering the SAME
+/// provider's entity is a no-op, so a reconnect is not an error.
+pub fn register_sidecar_entity_types(
+    sidecar: &McpSidecar,
+    provider_name: &str,
+    type_registry: &holon_profiles::TypeRegistry,
+) -> anyhow::Result<()> {
+    for (entity_name, entity_config) in &sidecar.entities {
+        let table_name = sidecar.prefixed_name(entity_name).table_name();
+        let Some(td) = entity_config.to_type_definition(
+            &table_name,
+            provider_name,
+            sidecar.write_ownership(entity_name),
+        ) else {
+            continue; // schema-less entity: nothing to register
+        };
+        if let Some(existing) = type_registry.get(&table_name) {
+            // By ORIGIN, not by write authority: a mirror of a feed the
+            // connector only reads is still that connector's definition.
+            match existing.declaring_integration() {
+                Some(owner) if owner == provider_name => continue,
+                Some(owner) => anyhow::bail!(
+                    "provider '{provider_name}': entity '{entity_name}' registers type \
+                     '{table_name}', which integration '{owner}' already owns. Registering it \
+                     would replace that integration's definition and silently change the shape \
+                     every reader sees. Give one of the two an `entity_prefix` or a distinct \
+                     entity name."
+                ),
+                None => anyhow::bail!(
+                    "provider '{provider_name}': entity '{entity_name}' registers type \
+                     '{table_name}', which is already a built-in or user-defined type. \
+                     Registering it would replace that definition and silently change the shape \
+                     every reader sees. Give the sidecar an `entity_prefix` or rename the entity."
+                ),
             }
         }
+        // The name is free — the collision check above is what decides that,
+        // and it is the only guard, because `register` itself inserts over
+        // whatever it finds and reports success either way.
+        type_registry
+            .register(td)
+            .expect("TypeRegistry::register accepts every definition");
     }
+    Ok(())
 }
 
 /// State parked between `build_mcp_integration` returning `NeedsAuth` and
@@ -625,7 +679,8 @@ async fn finish_integration(
     }
 
     // Build caches and strategies.
-    let (caches, entity_readers) = build_entity_caches(&sidecar, &cache_factory).await?;
+    let (caches, entity_readers) =
+        build_entity_caches(&sidecar, &provider_name, &cache_factory).await?;
 
     // Build sync strategies with disclosed degradation: one entity whose
     // `SyncConfig` cannot form a strategy is skipped and reported loudly, so a
@@ -834,6 +889,7 @@ async fn finish_integration(
 /// and `rest` finalizers.
 async fn build_entity_caches(
     sidecar: &McpSidecar,
+    provider_name: &str,
     cache_factory: &Arc<dyn CacheFactory>,
 ) -> anyhow::Result<(
     HashMap<String, Arc<dyn EntityCache<DynamicEntity>>>,
@@ -845,7 +901,11 @@ async fn build_entity_caches(
     for (entity_name, entity_config) in &sidecar.entities {
         let entity = sidecar.prefixed_name(entity_name);
         let table_name = entity.table_name();
-        if let Some(td) = entity_config.to_type_definition(&table_name) {
+        if let Some(td) = entity_config.to_type_definition(
+            &table_name,
+            provider_name,
+            sidecar.write_ownership(entity_name),
+        ) {
             let cache = cache_factory
                 .create_dynamic_cache(td)
                 .await
@@ -1103,7 +1163,8 @@ async fn finish_rest_integration(
 
     // Build caches + readers, then strategies (disclosed degradation on a bad
     // entity, same as the MCP path).
-    let (caches, entity_readers) = build_entity_caches(&sidecar, &cache_factory).await?;
+    let (caches, entity_readers) =
+        build_entity_caches(&sidecar, &provider_name, &cache_factory).await?;
     let (strategies, strategy_failures) = build_entity_strategies(&sidecar.entities);
     for (entity_name, err) in &strategy_failures {
         error!(
@@ -1433,6 +1494,88 @@ impl EntityFieldReader for DynamicEntityFieldReader {
             let entity: Option<DynamicEntity> = self.0.get_by_id(&id).await?;
             Ok(entity.map(|e| e.to_entity().fields.into_iter().collect()))
         })
+    }
+}
+
+#[cfg(test)]
+mod entity_type_registration_tests {
+    use holon_api::entity::FieldSchema;
+    use holon_profiles::TypeRegistry;
+
+    use super::*;
+
+    fn sidecar_declaring(entity: &str) -> McpSidecar {
+        let yaml = format!(
+            "entities:\n  {entity}:\n    id_column: id\n    schema:\n      - name: id\n        \
+             sql_type: TEXT\n        primary_key: true\n"
+        );
+        McpSidecar::from_yaml(&yaml).expect("sidecar yaml parses")
+    }
+
+    #[test]
+    fn an_entity_colliding_with_a_local_type_is_refused_by_name() {
+        let registry = TypeRegistry::new();
+        registry
+            .register(holon_api::TypeDefinition::new(
+                "block",
+                vec![FieldSchema {
+                    name: "id".to_string(),
+                    sql_type: "TEXT".to_string(),
+                    primary_key: true,
+                    ..Default::default()
+                }],
+            ))
+            .expect("seed the local type");
+
+        let err = register_sidecar_entity_types(&sidecar_declaring("block"), "todoist", &registry)
+            .expect_err("a sidecar may not take over a local type's name");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("todoist") && msg.contains("block"),
+            "the refusal must name the provider and the entity, got: {msg}"
+        );
+        assert_eq!(
+            registry
+                .get("block")
+                .expect("local type survives")
+                .fields
+                .len(),
+            1,
+            "the refused registration must leave the existing definition untouched"
+        );
+    }
+
+    #[test]
+    fn two_providers_claiming_one_name_is_refused() {
+        let registry = TypeRegistry::new();
+        let sidecar = sidecar_declaring("tasks");
+        register_sidecar_entity_types(&sidecar, "todoist", &registry).expect("first provider wins");
+
+        let err = register_sidecar_entity_types(&sidecar, "asana", &registry)
+            .expect_err("the second provider must not silently replace the first");
+        assert!(
+            err.to_string().contains("todoist"),
+            "the refusal must name the owner it collided with, got: {err}"
+        );
+        assert_eq!(
+            registry
+                .get("tasks")
+                .expect("type survives")
+                .declaring_integration(),
+            Some("todoist"),
+            "the definition still belongs to the provider that registered it first"
+        );
+    }
+
+    /// A reconnect re-runs registration with the same definition. That is the
+    /// one repeat that must not be an error.
+    #[test]
+    fn the_same_provider_registering_twice_is_a_no_op() {
+        let registry = TypeRegistry::new();
+        let sidecar = sidecar_declaring("tasks");
+        register_sidecar_entity_types(&sidecar, "todoist", &registry).expect("first registration");
+        register_sidecar_entity_types(&sidecar, "todoist", &registry)
+            .expect("re-registering the same provider's own entity is not an error");
     }
 }
 

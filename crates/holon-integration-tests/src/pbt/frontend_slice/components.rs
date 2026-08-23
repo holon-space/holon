@@ -772,15 +772,12 @@ impl HeadlessFrontendComponent {
                     let registry = injector
                         .try_resolve::<holon_profiles::TypeRegistry>()
                         .expect("TypeRegistry must be provided before the test DI hook runs");
-                    for (name, cfg) in &sidecar.entities {
-                        let table = sidecar.prefixed_name(name).table_name();
-                        registry
-                            .register(
-                                cfg.to_type_definition(&table)
-                                    .expect("entity with a schema yields a TypeDefinition"),
-                            )
-                            .expect("sidecar entity registers");
-                    }
+                    holon_mcp_client::register_sidecar_entity_types(
+                        &sidecar,
+                        "frontend-slice",
+                        &registry,
+                    )
+                    .expect("sidecar entities register");
                 }
                 Ok(())
             },

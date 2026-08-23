@@ -28,6 +28,8 @@ use holon_core::SyncableProvider;
 use holon_mcp_client::mcp_sidecar::EntityConfig;
 use holon_mcp_client::mcp_sidecar::McpSidecar;
 use holon_mcp_client::mcp_sidecar::SyncConfig;
+use holon_mcp_client::mcp_sidecar::ToolConfig;
+use holon_mcp_client::mcp_sidecar::ToolEffect;
 use holon_mcp_client::mcp_sync_engine::McpSyncEngine;
 use rmcp::RoleClient;
 use rmcp::RoleServer;
@@ -40,6 +42,11 @@ use tokio::sync::RwLock;
 
 const ENTITY_NAME: &str = "fake_probe";
 const RESOURCE_URI: &str = "fake://probe/items";
+const TOOLLESS_ENTITY: &str = "fake_shadow";
+const READONLY_ENTITY: &str = "fake_readonly";
+const WRITE_TOOL: &str = "update-probe";
+const READ_TOOL: &str = "find-readonly";
+const PROVIDER_NAME: &str = "fake-mcp";
 
 // ── In-memory MCP server ──────────────────────────────────────────
 
@@ -54,6 +61,7 @@ impl ServerHandler for FakeMcpServer {
             capabilities: ServerCapabilities::builder()
                 .enable_resources()
                 .enable_resources_subscribe()
+                .enable_tools()
                 .build(),
             server_info: Implementation {
                 name: "fake-mcp-server".into(),
@@ -116,6 +124,31 @@ impl ServerHandler for FakeMcpServer {
     ) -> impl std::future::Future<Output = Result<(), ErrorData>> + Send + '_ {
         std::future::ready(Ok(()))
     }
+
+    /// The tool the sidecar classifies as `fake_probe`'s write. Its presence is
+    /// what gives the connector an operation descriptor on that entity, which
+    /// is what makes the connector — not a derived SQL provider — the entity's
+    /// write authority.
+    fn list_tools(
+        &self,
+        _: Option<PaginatedRequestParam>,
+        _: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListToolsResult, ErrorData>> + Send + '_ {
+        let tool = |name: &str, description: &str| Tool {
+            name: name.to_string().into(),
+            title: None,
+            description: Some(description.to_string().into()),
+            input_schema: Arc::new(serde_json::Map::new()),
+            output_schema: None,
+            annotations: None,
+            icons: None,
+            meta: None,
+        };
+        std::future::ready(Ok(ListToolsResult::with_all_items(vec![
+            tool(WRITE_TOOL, "Update a fake probe item"),
+            tool(READ_TOOL, "List fake read-only items"),
+        ])))
+    }
 }
 
 // ── In-memory SyncTokenStore ──────────────────────────────────────
@@ -148,29 +181,44 @@ impl SyncTokenStore for InMemorySyncTokenStore {
 /// Keeps the in-memory MCP pipeline alive for the lifetime of the session.
 pub struct FakeMcpHandle {
     sync_engine: Arc<McpSyncEngine>,
+    operation_provider: holon_mcp_client::McpOperationProvider,
     _server_peer: Peer<RoleServer>,
     _items: Arc<RwLock<Vec<serde_json::Value>>>,
 }
 
-/// No-op operation provider; exists only to (a) force the handle to build at
-/// startup when the dispatcher resolves the provider set, and (b) keep the
-/// pipeline alive. The fake serves no dispatched operations.
-struct FakeOperationProvider {
-    _handle: Arc<FakeMcpHandle>,
+impl FakeMcpHandle {
+    /// Seed the registry with the sidecar's entity types, the step
+    /// `McpIntegrationsModule` runs on every connected integration. Without it
+    /// a mirrored entity is invisible to everything that reasons over the
+    /// registry, so no test could see what a real connector does to it.
+    fn register_entity_types(&self, type_registry: &holon_profiles::TypeRegistry) {
+        holon_mcp_client::register_sidecar_entity_types(
+            self.sync_engine.sidecar(),
+            PROVIDER_NAME,
+            type_registry,
+        )
+        .expect("[FakeMcp] sidecar entity types register");
+    }
 }
 
+/// The connector's own operations, exactly as `McpIntegrationsModule` publishes
+/// them: descriptors derived from the server's tool list crossed with the
+/// sidecar's `tools:` classification. Registering the handle itself as the
+/// provider is also what keeps the pipeline alive for the session.
 #[async_trait::async_trait]
-impl OperationProvider for FakeOperationProvider {
+impl OperationProvider for FakeMcpHandle {
     fn operations(&self) -> Vec<holon_api::OperationDescriptor> {
-        vec![]
+        self.operation_provider.operations()
     }
     async fn execute_operation(
         &self,
-        _: &holon_api::EntityName,
-        _: &str,
-        _: holon_core::storage::types::StorageEntity,
+        entity: &holon_api::EntityName,
+        op: &str,
+        params: holon_core::storage::types::StorageEntity,
     ) -> holon::core::traits::Result<holon_core::OperationResult> {
-        Err("fake MCP provider serves no operations".into())
+        self.operation_provider
+            .execute_operation(entity, op, params)
+            .await
     }
 }
 
@@ -246,13 +294,62 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
             profile_variants: vec![],
         },
     );
+    // Two mirrored entities the connector does NOT write: one it declares no
+    // tool for at all, one it declares only a READ tool for. Neither has an
+    // authority of its own, so the boot sequence must still derive one from
+    // their columns.
+    for entity in [TOOLLESS_ENTITY, READONLY_ENTITY] {
+        entities.insert(
+            entity.to_string(),
+            EntityConfig {
+                short_name: None,
+                source_name: None,
+                id_column: Some("id".to_string()),
+                schema: vec![
+                    FieldSchema {
+                        name: "id".to_string(),
+                        sql_type: "TEXT".to_string(),
+                        primary_key: true,
+                        ..Default::default()
+                    },
+                    FieldSchema {
+                        name: "data".to_string(),
+                        sql_type: "TEXT".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                sync: None,
+                vtable: None,
+                profile_variants: vec![],
+            },
+        );
+    }
+
+    let mut tools = HashMap::new();
+    tools.insert(
+        WRITE_TOOL.to_string(),
+        ToolConfig {
+            entity: Some(ENTITY_NAME.to_string()),
+            affected_fields: Some(vec!["data".to_string()]),
+            effect: Some(ToolEffect::Idempotent),
+            ..Default::default()
+        },
+    );
+    tools.insert(
+        READ_TOOL.to_string(),
+        ToolConfig {
+            entity: Some(READONLY_ENTITY.to_string()),
+            effect: Some(ToolEffect::Read),
+            ..Default::default()
+        },
+    );
 
     let sidecar = McpSidecar {
-        entity_prefix: Some("fake_".to_string()),
+        entity_prefix: None,
         entities,
         writes: Default::default(),
         once_only: Default::default(),
-        tools: HashMap::new(),
+        tools,
         views: vec![],
     };
 
@@ -260,7 +357,11 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
     let entity = sidecar.prefixed_name(ENTITY_NAME);
     let table_name = entity.table_name();
     let td = entity_config
-        .to_type_definition(&table_name)
+        .to_type_definition(
+            &table_name,
+            PROVIDER_NAME,
+            sidecar.write_ownership(ENTITY_NAME),
+        )
         .expect("EntityConfig with schema must produce a TypeDefinition");
     let cache = QueryableCache::<DynamicEntity>::new(db_handle.clone(), td)
         .await
@@ -278,13 +379,21 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
         tokens: tokio::sync::Mutex::new(HashMap::new()),
     });
 
+    let operation_provider = holon_mcp_client::McpOperationProvider::from_peer_shared(
+        client_peer.clone(),
+        sidecar.clone(),
+        HashMap::new(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to build the fake MCP operation provider: {e}"))?;
+
     let sync_engine = Arc::new(McpSyncEngine::new(
         Arc::new(client_peer.clone()),
         Some(client_peer),
         strategies,
         caches,
         token_store,
-        "fake-mcp".to_string(),
+        PROVIDER_NAME.to_string(),
         sidecar,
         vec![],
         Some(db_handle),
@@ -313,6 +422,7 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
 
     Ok(FakeMcpHandle {
         sync_engine,
+        operation_provider,
         _server_peer: server_peer,
         _items: server_items,
     })
@@ -330,11 +440,11 @@ pub fn register_fake_mcp(injector: &Injector) {
             .resolve_async::<dyn holon::di::DbHandleProvider>()
             .await
             .handle();
-        Shared::new(
-            build_handle(db_handle)
-                .await
-                .expect("[FakeMcp] failed to build in-memory MCP integration"),
-        )
+        let handle = build_handle(db_handle)
+            .await
+            .expect("[FakeMcp] failed to build in-memory MCP integration");
+        handle.register_entity_types(&resolver.resolve::<holon_profiles::TypeRegistry>());
+        Shared::new(handle)
     }));
 
     injector.provide_into_set::<dyn SyncableProvider>(Provider::root_async(
@@ -346,10 +456,7 @@ pub fn register_fake_mcp(injector: &Injector) {
 
     injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
         |resolver| async move {
-            let handle = resolver.resolve_async::<FakeMcpHandle>().await;
-            Arc::new(FakeOperationProvider {
-                _handle: handle.clone(),
-            }) as Arc<dyn OperationProvider>
+            resolver.resolve_async::<FakeMcpHandle>().await as Arc<dyn OperationProvider>
         },
     ));
 }

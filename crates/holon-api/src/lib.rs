@@ -199,6 +199,7 @@ pub use edge_field::{BlockEdges, EdgeField, EdgeFieldUpdate};
 pub use entity::{
     DynamicEntity, FieldLifetime, FieldSchema, IntoEntity, POSITION_AFTER_BLOCK_ID_PARAM,
     ProfileVariant, ROUTING_DOC_URI_KEY, StorageEntity, TryFromEntity, TypeDefinition, TypeSource,
+    WriteAuthority,
 };
 // Re-export entity URI type
 pub use entity_uri::EntityUri;

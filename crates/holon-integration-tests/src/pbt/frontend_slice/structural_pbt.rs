@@ -1978,12 +1978,8 @@ entities:
         let sidecar =
             holon_mcp_client::mcp_sidecar::McpSidecar::from_yaml(SIDECAR_YAML).expect("yaml");
         let registry = comp.type_registry().await;
-        for (name, cfg) in &sidecar.entities {
-            let table = sidecar.prefixed_name(name).table_name();
-            registry
-                .register(cfg.to_type_definition(&table).expect("type definition"))
-                .expect("register");
-        }
+        holon_mcp_client::register_sidecar_entity_types(&sidecar, "structural-pbt", &registry)
+            .expect("sidecar entities register");
 
         // Author the link the way a live editor commit does: create the block,
         // then `set_field(content)` with RAW org markup. That is the gesture the
@@ -2154,12 +2150,8 @@ entities:
         let sidecar =
             holon_mcp_client::mcp_sidecar::McpSidecar::from_yaml(SIDECAR_YAML).expect("yaml");
         let registry = comp.type_registry().await;
-        for (name, cfg) in &sidecar.entities {
-            let table = sidecar.prefixed_name(name).table_name();
-            registry
-                .register(cfg.to_type_definition(&table).expect("type definition"))
-                .expect("register");
-        }
+        holon_mcp_client::register_sidecar_entity_types(&sidecar, "structural-pbt", &registry)
+            .expect("sidecar entities register");
         tokio::time::sleep(SETTLE).await;
 
         let rows = engine

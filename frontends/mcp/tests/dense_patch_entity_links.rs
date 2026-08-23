@@ -38,12 +38,8 @@ entities:
 fn registry_with_t_widget() -> Arc<TypeRegistry> {
     let sidecar = McpSidecar::from_yaml(SIDECAR_YAML).expect("sidecar YAML parses");
     let registry = Arc::new(TypeRegistry::new());
-    for (name, cfg) in &sidecar.entities {
-        let table = sidecar.prefixed_name(name).table_name();
-        registry
-            .register(cfg.to_type_definition(&table).expect("type definition"))
-            .expect("register");
-    }
+    holon_mcp_client::register_sidecar_entity_types(&sidecar, "dense-patch-test", &registry)
+        .expect("sidecar entities register");
     registry
 }
 

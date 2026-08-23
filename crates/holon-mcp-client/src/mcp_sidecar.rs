@@ -457,6 +457,21 @@ impl ToolConfig {
     fn is_write_shaped(&self) -> bool {
         self.affected_fields.is_some() || self.undo.is_some()
     }
+
+    /// Whether this tool mutates the provider's system of record. An absent
+    /// `effect` means [`ToolEffect::Read`] — the parse-time validation refuses
+    /// a write-shaped tool that omits it, so absence here is a real read.
+    fn mutates(&self) -> bool {
+        !matches!(self.effect, None | Some(ToolEffect::Read))
+    }
+}
+
+/// Whether a connector serves an entity's writes, or the entity is a local
+/// mirror of a feed the connector only reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOwnership {
+    Connector,
+    LocalMirror,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -533,7 +548,21 @@ impl EntityConfig {
     /// key is carried by the fields' `primary_key` flags, which the DDL
     /// generator reads; [`Self::identity_columns`] is the authority for row
     /// identity. Do not read this scalar as the table key.
-    pub fn to_type_definition(&self, table_name: &str) -> Option<TypeDefinition> {
+    /// `provider` names the connector whose sidecar declared this entity, and
+    /// `writes` says whether that connector serves the entity's writes.
+    ///
+    /// The two are separate on purpose. Origin is always the connector; write
+    /// authority is the connector's ONLY when it offers tools that mutate the
+    /// system of record. A consumer that cannot tell those apart either derives
+    /// local write machinery over a remotely-owned mirror (colliding with the
+    /// connector's authority) or withholds it from a read-only mirror that has
+    /// no other writer.
+    pub fn to_type_definition(
+        &self,
+        table_name: &str,
+        provider: &str,
+        writes: WriteOwnership,
+    ) -> Option<TypeDefinition> {
         if self.schema.is_empty() {
             return None;
         }
@@ -541,6 +570,13 @@ impl EntityConfig {
         td.graph_label = Some(pascal_case(table_name));
         td.primary_key = self.id_column_or_default();
         td.profile_variants = self.profile_variants.clone();
+        td.source = holon_api::TypeSource::McpProvider(provider.to_string());
+        td.write_authority = match writes {
+            WriteOwnership::Connector => {
+                holon_api::WriteAuthority::Integration(provider.to_string())
+            }
+            WriteOwnership::LocalMirror => holon_api::WriteAuthority::Local,
+        };
         Some(td)
     }
 }
@@ -597,8 +633,9 @@ impl McpSidecar {
     }
 
     pub fn load(path: &Path) -> anyhow::Result<Self> {
+        use anyhow::Context;
         let content = std::fs::read_to_string(path)?;
-        Self::from_yaml(&content)
+        Self::from_yaml(&content).with_context(|| format!("sidecar '{}'", path.display()))
     }
 
     pub fn from_yaml(yaml: &str) -> anyhow::Result<Self> {
@@ -617,6 +654,22 @@ impl McpSidecar {
                 None if tool.is_write_shaped() => anyhow::bail!(
                     "sidecar tool '{name}' declares write metadata (affected_fields/undo) but no \
                      `effect:` — classify it as read|idempotent|keyed|once_only"
+                ),
+                // Silence cannot mean `read`. Whether a tool mutates the
+                // provider's system of record decides who holds the entity's
+                // write authority, and a tool that mutates but says nothing
+                // would hand that authority to a local table the provider
+                // never sees.
+                None => anyhow::bail!(
+                    "sidecar tool '{name}' declares no `effect:` — every tool must classify \
+                     itself as read|idempotent|keyed|once_only. A tool left unclassified is \
+                     read by default, and if it in fact writes, the entity gets a LOCAL write \
+                     authority and those writes land in the mirror table instead of reaching \
+                     the provider."
+                ),
+                Some(ToolEffect::Read) if tool.is_write_shaped() => anyhow::bail!(
+                    "sidecar tool '{name}' is `effect: read` but declares write metadata \
+                     (affected_fields/undo) — one of the two is wrong"
                 ),
                 Some(ToolEffect::Keyed) if tool.key_param.is_none() => anyhow::bail!(
                     "sidecar tool '{name}' is `effect: keyed` but declares no `key_param:` — name \
@@ -640,6 +693,26 @@ impl McpSidecar {
             }
         }
         Ok(())
+    }
+
+    /// Who serves writes for `entity_key`: the connector when it declares a
+    /// mutating tool against that entity, otherwise the local mirror table.
+    ///
+    /// Tool→entity resolution mirrors `McpOperationProvider`'s: an explicit
+    /// `entity:` on the tool, else the sidecar's default entity.
+    pub fn write_ownership(&self, entity_key: &str) -> WriteOwnership {
+        let claimed = self.tools.values().any(|tool| {
+            let target = tool
+                .entity
+                .as_deref()
+                .unwrap_or_else(|| self.default_entity());
+            target == entity_key && tool.mutates()
+        });
+        if claimed {
+            WriteOwnership::Connector
+        } else {
+            WriteOwnership::LocalMirror
+        }
     }
 
     pub fn default_entity(&self) -> &str {
@@ -1049,7 +1122,7 @@ entities:
 "#;
         let sidecar: McpSidecar = serde_yaml::from_str(yaml).unwrap();
         let td = sidecar.entities["email"]
-            .to_type_definition("email")
+            .to_type_definition("email", "test-provider", WriteOwnership::Connector)
             .expect("should produce TypeDefinition");
         assert_eq!(td.name, "email");
         assert_eq!(td.primary_key, "msg_id");
@@ -1060,6 +1133,54 @@ entities:
         assert_eq!(td.fields[0].name, "msg_id");
         assert!(!td.fields[0].nullable);
         assert!(td.fields[2].nullable);
+
+        // The connector is named ON the definition: consumers decide whether a
+        // type's writes are theirs to serve from this, and a type that lost the
+        // name reads as locally owned.
+        assert_eq!(td.owning_integration(), Some("test-provider"));
+    }
+
+    /// The classification decides who holds the entity's write authority, so an
+    /// undeclared tool cannot be quietly read: a tool that in fact writes would
+    /// leave the entity with a LOCAL authority and send its writes to the
+    /// mirror table.
+    #[test]
+    fn a_tool_without_an_effect_declaration_is_refused_at_load() {
+        let yaml = "entities:\n  x:\n    short_name: x\ntools:\n  do-something:\n    entity: x\n";
+        let err = McpSidecar::from_yaml(yaml)
+            .expect_err("a tool that classifies nothing must not load silently");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("do-something") && msg.contains("read|idempotent|keyed|once_only"),
+            "the refusal must name the tool and the vocabulary, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_read_tool_carrying_write_metadata_is_refused_at_load() {
+        let yaml = "entities:\n  x:\n    short_name: x\ntools:\n  do-something:\n    entity: x\n    \
+                    effect: read\n    affected_fields: [a]\n";
+        let err = McpSidecar::from_yaml(yaml)
+            .expect_err("`effect: read` and write metadata contradict each other");
+        assert!(
+            err.to_string().contains("do-something"),
+            "the refusal must name the tool, got: {err}"
+        );
+    }
+
+    /// Every sidecar the app bundles must survive its own validation — a
+    /// shipped file that cannot load is an integration that silently never
+    /// connects.
+    #[test]
+    fn every_bundled_sidecar_loads() {
+        for bundled in crate::BUNDLED_SIDECARS {
+            McpSidecar::from_yaml(bundled.yaml).unwrap_or_else(|e| {
+                panic!(
+                    "bundled sidecar '{}' does not load: {e:#}",
+                    bundled.provider
+                )
+            });
+        }
     }
 
     #[test]
