@@ -2054,7 +2054,10 @@ impl TursoBackend {
                     batch.inner.items.len() as u64,
                 );
             }
-            if !batch.inner.items.is_empty() {
+            // A batch that carries only a degraded disclosure still has to go
+            // out: every one of its changes failed to parse, which is exactly
+            // when consumers most need to be told.
+            if !batch.inner.items.is_empty() || batch.metadata.degraded.is_some() {
                 let next = cdc_seq_for_callback.fetch_add(1, Ordering::SeqCst) + 1;
                 batch.metadata.seq = next;
                 let _ = cdc_tx_for_callback.send(batch);
@@ -2305,6 +2308,35 @@ impl TursoBackend {
             .map(|c| Arc::from(c.as_str()))
             .collect();
 
+        // A change whose record does not parse is a row this batch cannot
+        // carry. Silently dropping it desynchronises every consumer from the
+        // relation, so each failure is named here and disclosed on the batch.
+        let mut parse_failures: Vec<String> = Vec::new();
+        // What an unparseable change costs depends on its kind, and the
+        // disclosure has to say which: an Insert/Update row cannot be built at
+        // all, while a Delete still ships keyed by rowid.
+        fn note_parse_failure(
+            failures: &mut Vec<String>,
+            relation: &str,
+            kind: &str,
+            rowid: i64,
+            columns: usize,
+            consequence: &str,
+        ) {
+            tracing::error!(
+                relation = %relation,
+                rowid = rowid,
+                change_kind = kind,
+                columns = columns,
+                consequence = consequence,
+                "CDC change record failed to parse, so consumers of this relation are now out \
+                 of sync with it. DISCLOSED on the batch's `degraded` field."
+            );
+            failures.push(format!(
+                "{kind} on '{relation}' rowid={rowid} ({columns}-column schema): {consequence}"
+            ));
+        }
+
         for change in event.changes.iter() {
             let change_data = match &change.change {
                 DatabaseChangeType::Insert { .. } => {
@@ -2316,6 +2348,14 @@ impl TursoBackend {
                         record(&mut origins, &origin);
                         ChangeData::Created { data, origin }
                     } else {
+                        note_parse_failure(
+                            &mut parse_failures,
+                            &event.relation_name,
+                            "Insert",
+                            change.id,
+                            columns.len(),
+                            "row omitted from this batch entirely",
+                        );
                         continue;
                     }
                 }
@@ -2339,6 +2379,14 @@ impl TursoBackend {
                             origin,
                         }
                     } else {
+                        note_parse_failure(
+                            &mut parse_failures,
+                            &event.relation_name,
+                            "Update",
+                            change.id,
+                            columns.len(),
+                            "row omitted from this batch entirely",
+                        );
                         continue;
                     }
                 }
@@ -2361,6 +2409,18 @@ impl TursoBackend {
                             origin,
                         }
                     } else {
+                        // The delete still has to go out — withholding it leaves
+                        // a deleted row on screen — but keyed by rowid it matches
+                        // no widget, so the batch is disclosed as degraded.
+                        note_parse_failure(
+                            &mut parse_failures,
+                            &event.relation_name,
+                            "Delete",
+                            change.id,
+                            columns.len(),
+                            "delete IS in this batch but keyed by rowid, which matches no \
+                             widget — the row stays on screen",
+                        );
                         ChangeData::Deleted {
                             id: change.id.to_string(),
                             origin: ChangeOrigin::Remote {
@@ -2390,7 +2450,13 @@ impl TursoBackend {
             // Filled in by `set_change_callback` in `new_with_options` after
             // `process_cdc_event` returns — process-wide monotonic counter.
             seq: 0,
-            degraded: None,
+            degraded: (!parse_failures.is_empty()).then(|| {
+                format!(
+                    "{} CDC change record(s) failed to parse; per-change consequence follows: {}",
+                    parse_failures.len(),
+                    parse_failures.join("; ")
+                )
+            }),
         };
 
         BatchWithMetadata {

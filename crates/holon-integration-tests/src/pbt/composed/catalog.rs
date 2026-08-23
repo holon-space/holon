@@ -264,6 +264,14 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // guard the advice `No id found` background-worker panic slipped past).
         #[cfg(feature = "otel-testing")]
         invariants::observed_errors::wire(),
+        // No subscription delivered rows short of the declared columns its
+        // entity profile's computed fields require (the eight chronic
+        // "DECLARED column absent" warnings). WARN-level, so
+        // `inv-no-observed-errors` above is blind to it. Observe-only (never
+        // RED) until D7 rules what counts as a violation and
+        // `HOLON_PBT_DECLARED_COLUMN_ORACLE=enforce` flips it.
+        #[cfg(feature = "otel-testing")]
+        invariants::declared_column_gaps::wire(),
         // No interactive transition triggered an O(N) full reseed at steady
         // state (BugFunnel row 71, reseed-latency Inc 0). Needs the composed
         // `ReseedAttribution` cap the `wide_e2e` slice registers; observe-only

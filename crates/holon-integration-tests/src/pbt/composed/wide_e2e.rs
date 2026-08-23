@@ -1011,6 +1011,16 @@ pub async fn boot_and_seed_wide_with_peer_id(
         caps.insert(std::sync::Arc::new(ComposedObservedErrors::new())
             as std::sync::Arc<dyn ObservedProblems>);
 
+        // Declared-column-gap pin: the read cap plus a per-case reset of the
+        // process-global dedup behind `warn_missing_declared_column`, which
+        // warns once per (context, column) per PROCESS and would otherwise let
+        // the first case swallow every later case's signal.
+        use crate::pbt::composed::declared_column_gaps::ComposedDeclaredColumnGaps;
+        use crate::pbt::composed::declared_column_gaps::DeclaredColumnGaps;
+        holon_api::computed::reset_missing_declared_warnings();
+        caps.insert(std::sync::Arc::new(ComposedDeclaredColumnGaps::new())
+            as std::sync::Arc<dyn DeclaredColumnGaps>);
+
         // Reseed-attribution pin (Inc 0): the read cap + a per-case reset of the
         // process-global observer, so each case's full-reseed attribution starts
         // clean (mirrors the `SpanCollector::reset` in the harness).

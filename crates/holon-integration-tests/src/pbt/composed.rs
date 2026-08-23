@@ -52,6 +52,10 @@ pub mod complexity_trend;
 /// `inv-no-observed-errors`.
 pub mod observed_errors;
 
+/// Process-global declared-column-gap capture surface for
+/// `inv-no-declared-column-absent`.
+pub mod declared_column_gaps;
+
 /// Process-global LoroProjection full-reseed attribution surface for
 /// `inv-no-steady-reseed-leak` (Inc 0 of the reseed-latency workstream). The
 /// tracing layer that feeds it is wired in [`crate::test_tracing`].

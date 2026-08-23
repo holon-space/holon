@@ -29,6 +29,16 @@ fn warned_missing_declared() -> &'static Mutex<HashSet<(String, String)>> {
     SEEN.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Clear the once-per-`(context, column)` dedup.
+///
+/// A parity oracle asserts the ABSENCE of these warnings, so it must start from
+/// an empty set: the dedup is process-global, and a boot that ran earlier in
+/// the same process would otherwise suppress exactly the signal being asserted
+/// on.
+pub fn reset_missing_declared_warnings() {
+    warned_missing_declared().lock().unwrap().clear();
+}
+
 /// Surface a "should-be-present-but-missing" declared column ONCE.
 ///
 /// `context` names the seat (computed field name or condition source); `column`

@@ -32,6 +32,7 @@ pub mod companion_has_no_child_page_headings;
 /// `sql_budget` is: its host is the span-metrics collector.
 #[cfg(feature = "otel-testing")]
 pub mod complexity_trend;
+pub mod declared_column_gaps;
 pub mod display_placement_canonical_inert;
 pub mod displayed_text;
 pub mod drawer_open_matches_ref;
