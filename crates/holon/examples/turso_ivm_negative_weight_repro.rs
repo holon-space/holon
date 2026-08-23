@@ -47,6 +47,8 @@ fn open_db(path: &str) -> turso::Connection {
         vfs: turso_sdk_kit::IoBackend::Default,
         io: None,
         db_file: None,
+        page_codec: None,
+        open_flags: OpenFlags::default(),
     };
     let turso_conn = TursoConnection::new(&config, conn_core);
     turso::Connection::create(turso_conn, None)

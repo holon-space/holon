@@ -411,11 +411,6 @@ async fn bare_replace_into_with_unchanged_value_keeps_a_filter_matview_correct()
 /// Ignored because it is a KNOWN engine defect: un-ignore it to check whether
 /// the turso fork has been fixed.
 #[tokio::test]
-#[ignore = "A/B witness for the turso-fork IVM defect: REPLACE with an unchanged value on a \
-            rowid-alias table double-captures the old row (weight -1) and it silently vanishes \
-            from the view. No holon production table has this shape. Engine fix: fork bookmark \
-            `ivm-replace-double-old-row-capture`, PR #8463. The repin lane un-ignores this after \
-            the pin bump: RED before, GREEN after."]
 async fn replace_with_unchanged_value_keeps_a_rowid_table_matview_correct() {
     let handle = setup().await;
     handle
@@ -811,9 +806,6 @@ async fn rowid_replace_probe(
 
 /// The peer's projection/filter repro, verbatim in shape.
 #[tokio::test]
-#[ignore = "A/B witness for the turso-fork IVM defect (rowid-alias base + unchanged value). Engine \
-            fix: fork bookmark `ivm-replace-double-old-row-capture`, PR #8463. The repin lane \
-            un-ignores this after the pin bump: RED before, GREEN after."]
 async fn peer_repro_projection_filter_over_a_rowid_table() {
     let outcome = rowid_replace_probe(
         "v7",
@@ -830,9 +822,6 @@ async fn peer_repro_projection_filter_over_a_rowid_table() {
 
 /// The peer's aggregate twin.
 #[tokio::test]
-#[ignore = "A/B witness for the turso-fork IVM defect (rowid-alias base + unchanged value). Engine \
-            fix: fork bookmark `ivm-replace-double-old-row-capture`, PR #8463. The repin lane \
-            un-ignores this after the pin bump: RED before, GREEN after."]
 async fn peer_repro_aggregate_over_a_rowid_table() {
     let outcome = rowid_replace_probe(
         "m7",
@@ -852,9 +841,6 @@ async fn peer_repro_aggregate_over_a_rowid_table() {
 /// whether the defect reaches joins at all decides how much of holon could ever
 /// be affected — independent of today's key types.
 #[tokio::test]
-#[ignore = "A/B witness for the turso-fork IVM defect (rowid-alias base + unchanged value). Engine \
-            fix: fork bookmark `ivm-replace-double-old-row-capture`, PR #8463. The repin lane \
-            un-ignores this after the pin bump: RED before, GREEN after."]
 async fn peer_gap_inner_join_over_a_rowid_table() {
     let handle = setup().await;
     handle
@@ -904,9 +890,6 @@ async fn peer_gap_inner_join_over_a_rowid_table() {
 /// base `block_raw` is TEXT-keyed (crates/holon-turso/sql/schema/blocks.sql:6),
 /// so this probes the engine dimension rather than a live holon exposure.
 #[tokio::test]
-#[ignore = "A/B witness for the turso-fork IVM defect (rowid-alias base + unchanged value). Engine \
-            fix: fork bookmark `ivm-replace-double-old-row-capture`, PR #8463. The repin lane \
-            un-ignores this after the pin bump: RED before, GREEN after."]
 async fn peer_gap_left_join_over_a_rowid_table() {
     let handle = setup().await;
     handle
@@ -1208,9 +1191,6 @@ async fn the_guard_is_not_fooled_by_comments_qualifiers_or_the_table_constraint_
 /// premise the guard's new detection rests on. Without this, the test above
 /// could be asserting a rejection the engine never needed.
 #[tokio::test]
-#[ignore = "A/B witness for the turso-fork IVM defect, table-constraint rowid-alias spelling \
-            (`id INTEGER, PRIMARY KEY (id)`). Engine fix: fork bookmark \
-            `ivm-replace-double-old-row-capture`, PR #8463. RED before the pin bump, GREEN after."]
 async fn table_constraint_rowid_alias_corrupts_like_the_column_constraint_form() {
     let handle = setup().await;
     handle
@@ -1259,9 +1239,6 @@ async fn table_constraint_rowid_alias_corrupts_like_the_column_constraint_form()
 /// survives — which is exactly what would happen if the engine fix addressed
 /// only the unchanged-value path.
 #[tokio::test]
-#[ignore = "A/B witness for the turso-fork IVM defect, CHANGED values revisiting a group under an \
-            aggregate view on a rowid-alias base. Engine fix: fork bookmark \
-            `ivm-replace-double-old-row-capture`, PR #8463. RED before the pin bump, GREEN after."]
 async fn replace_with_changed_values_revisiting_a_group_keeps_an_aggregate_correct() {
     let handle = setup().await;
     handle
@@ -1495,9 +1472,6 @@ async fn a_matview_over_an_on_conflict_replace_base_is_refused_at_registration()
 /// a plain INSERT with no "replace" anywhere diverges the matview exactly as an
 /// explicit REPLACE does.
 #[tokio::test]
-#[ignore = "A/B witness for the turso-fork IVM defect reached via `ON CONFLICT REPLACE` DDL — a \
-            PLAIN INSERT carrying REPLACE semantics. Engine fix: fork bookmark \
-            `ivm-replace-double-old-row-capture`, PR #8463. RED before the pin bump, GREEN after."]
 async fn a_plain_insert_into_an_on_conflict_replace_table_corrupts_the_matview() {
     let handle = setup().await;
     handle

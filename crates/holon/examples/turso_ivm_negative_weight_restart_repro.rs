@@ -43,6 +43,8 @@ fn open_db(path: &str) -> (Arc<Database>, turso::Connection) {
         vfs: turso_sdk_kit::IoBackend::Default,
         io: None,
         db_file: None,
+        page_codec: None,
+        open_flags: OpenFlags::default(),
     };
     let turso_conn = turso_sdk_kit::rsapi::TursoConnection::new(&config, conn_core);
     let conn = turso::Connection::create(turso_conn, None);

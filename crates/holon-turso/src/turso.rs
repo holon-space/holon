@@ -1574,6 +1574,8 @@ pub(crate) fn default_turso_config() -> TursoDatabaseConfig {
         vfs: turso_sdk_kit::IoBackend::Default,
         io: None,
         db_file: None,
+        page_codec: None,
+        open_flags: OpenFlags::default(),
     }
 }
 

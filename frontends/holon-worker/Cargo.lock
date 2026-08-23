@@ -190,7 +190,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -201,7 +201,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -628,7 +628,7 @@ dependencies = [
  "bitflags 2.13.0",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.11.0",
  "lazy_static",
  "lazycell",
  "log",
@@ -1989,7 +1989,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3612,7 +3612,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4531,7 +4531,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "serde",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5189,7 +5189,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -5906,7 +5906,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5965,7 +5965,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6460,7 +6460,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6543,7 +6543,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6967,7 +6967,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6977,7 +6977,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7490,20 +7490,20 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "turso"
-version = "0.8.0-pre.3"
-source = "git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65#a95f1a81b56b587d1b23a419a09468c8034b1a65"
+version = "0.8.0-pre.7"
+source = "git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede#ecdbdae12b937a9b5ec635064260c06bc8a2fede"
 dependencies = [
  "thiserror 2.0.18",
  "turso_core",
  "turso_sdk_kit",
  "turso_sync_sdk_kit",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede)",
 ]
 
 [[package]]
 name = "turso_core"
-version = "0.8.0-pre.3"
-source = "git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65#a95f1a81b56b587d1b23a419a09468c8034b1a65"
+version = "0.8.0-pre.7"
+source = "git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede#ecdbdae12b937a9b5ec635064260c06bc8a2fede"
 dependencies = [
  "aegis",
  "aes",
@@ -7571,35 +7571,35 @@ dependencies = [
  "uncased",
  "uuid",
  "windows-sys 0.61.2",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede)",
 ]
 
 [[package]]
 name = "turso_ext"
-version = "0.8.0-pre.3"
-source = "git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65#a95f1a81b56b587d1b23a419a09468c8034b1a65"
+version = "0.8.0-pre.7"
+source = "git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede#ecdbdae12b937a9b5ec635064260c06bc8a2fede"
 dependencies = [
  "chrono",
  "getrandom 0.4.3",
  "turso_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede)",
 ]
 
 [[package]]
 name = "turso_macros"
-version = "0.8.0-pre.3"
-source = "git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65#a95f1a81b56b587d1b23a419a09468c8034b1a65"
+version = "0.8.0-pre.7"
+source = "git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede#ecdbdae12b937a9b5ec635064260c06bc8a2fede"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede)",
 ]
 
 [[package]]
 name = "turso_parser"
-version = "0.8.0-pre.3"
-source = "git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65#a95f1a81b56b587d1b23a419a09468c8034b1a65"
+version = "0.8.0-pre.7"
+source = "git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede#ecdbdae12b937a9b5ec635064260c06bc8a2fede"
 dependencies = [
  "bitflags 2.13.0",
  "memchr",
@@ -7608,13 +7608,13 @@ dependencies = [
  "strum_macros 0.26.4",
  "thiserror 2.0.18",
  "turso_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede)",
 ]
 
 [[package]]
 name = "turso_sdk_kit"
-version = "0.8.0-pre.3"
-source = "git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65#a95f1a81b56b587d1b23a419a09468c8034b1a65"
+version = "0.8.0-pre.7"
+source = "git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede#ecdbdae12b937a9b5ec635064260c06bc8a2fede"
 dependencies = [
  "bindgen",
  "env_logger",
@@ -7625,24 +7625,24 @@ dependencies = [
  "turso_core",
  "turso_ext",
  "turso_sdk_kit_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede)",
 ]
 
 [[package]]
 name = "turso_sdk_kit_macros"
-version = "0.8.0-pre.3"
-source = "git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65#a95f1a81b56b587d1b23a419a09468c8034b1a65"
+version = "0.8.0-pre.7"
+source = "git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede#ecdbdae12b937a9b5ec635064260c06bc8a2fede"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede)",
 ]
 
 [[package]]
 name = "turso_sync_engine"
-version = "0.8.0-pre.3"
-source = "git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65#a95f1a81b56b587d1b23a419a09468c8034b1a65"
+version = "0.8.0-pre.7"
+source = "git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede#ecdbdae12b937a9b5ec635064260c06bc8a2fede"
 dependencies = [
  "base64",
  "bytes",
@@ -7659,13 +7659,13 @@ dependencies = [
  "turso_core",
  "turso_parser",
  "uuid",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede)",
 ]
 
 [[package]]
 name = "turso_sync_sdk_kit"
-version = "0.8.0-pre.3"
-source = "git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65#a95f1a81b56b587d1b23a419a09468c8034b1a65"
+version = "0.8.0-pre.7"
+source = "git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede#ecdbdae12b937a9b5ec635064260c06bc8a2fede"
 dependencies = [
  "bindgen",
  "env_logger",
@@ -7677,7 +7677,7 @@ dependencies = [
  "turso_sdk_kit",
  "turso_sdk_kit_macros",
  "turso_sync_engine",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede)",
 ]
 
 [[package]]
@@ -7739,7 +7739,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8165,7 +8165,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8690,7 +8690,7 @@ dependencies = [
 [[package]]
 name = "workspace-hack"
 version = "0.1.0"
-source = "git+https://github.com/nightscape/turso.git?rev=a95f1a81b56b587d1b23a419a09468c8034b1a65#a95f1a81b56b587d1b23a419a09468c8034b1a65"
+source = "git+https://github.com/nightscape/turso.git?rev=ecdbdae12b937a9b5ec635064260c06bc8a2fede#ecdbdae12b937a9b5ec635064260c06bc8a2fede"
 dependencies = [
  "aho-corasick",
  "anstream 0.6.21",
