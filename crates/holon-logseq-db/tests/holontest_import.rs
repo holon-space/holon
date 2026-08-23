@@ -22,6 +22,8 @@ use holon_api::Block;
 use holon_api::EntityUri;
 use holon_api::InlineMark;
 use holon_logseq_db::LogseqDbImporter;
+use holon_logseq_db::TransitNode;
+use holon_logseq_db::kvs_writer;
 
 /// Constants derived from the committed fixture. ONE place (amendment A3).
 ///
@@ -256,23 +258,16 @@ async fn holontest_db_imports_with_identity_gate() {
         );
     }
 
-    // COVERAGE LOST, recorded rather than quietly dropped: this loop used to
-    // guard the epoch-0 sentinel — a block with no timestamp datom keeps 0
-    // rather than a fabricated import time, which a `now()` implementation
-    // would violate while passing every other assertion in this file. Its
-    // only six subjects were exactly the entities just excluded, and MEASURED
-    // (probe, 2026-08-22) none of the 17 remaining blocks has a missing
-    // timestamp. So the sentinel path is no longer reachable from this
-    // fixture and nothing here drives it. Named in LogseqDbPush.md's W3 list;
-    // closing it needs a constructed datom set, not a fixture edit.
+    // No block of THIS fixture reaches the epoch-0 sentinel, which is why
+    // [`a_block_with_no_timestamp_datom_keeps_the_epoch`] constructs one.
+    // Asserted rather than assumed: if a future fixture grows a timeless
+    // block, the sentinel is reachable from here too and this says so.
     assert!(
         result
             .blocks
             .iter()
             .all(|b| b.created_at != 0 && b.updated_at != 0),
-        "every remaining block carries a real timestamp — the premise of the \
-         paragraph above; if this ever fails, the sentinel guard is reachable \
-         again and should be restored"
+        "every block of this fixture carries a real timestamp"
     );
 
     // --- Sibling order keys are unambiguous on this corpus ---
@@ -374,5 +369,91 @@ async fn schema_knowledge_survives_the_exclusion() {
         result.blocks.iter().all(|b| !b.properties.is_empty()),
         "every surviving block carries properties resolved via built-in \
          property definitions"
+    );
+}
+
+/// A block LogSeq never stamped keeps the EPOCH, not the import time.
+///
+/// A `now()` implementation of the two timestamp fields passes every other
+/// assertion in this file: nothing else here reads a value it could have
+/// fabricated. What makes 0 the right answer is that it is visibly absent —
+/// a plausible-looking 2026 timestamp on a block that has none is
+/// indistinguishable from a real one for as long as the graph exists.
+///
+/// Driven by a CONSTRUCTED entity because the fixture no longer offers a
+/// subject: its six timeless entities were all LogSeq's own and the importer
+/// excludes them. The entity is appended as a tail transaction, which is the
+/// same path LogSeq's own unflushed edits arrive by — so this is a graph the
+/// importer could really be handed, not a hand-built `DatomSet` that skips
+/// the decoder.
+#[tokio::test]
+async fn a_block_with_no_timestamp_datom_keeps_the_epoch() {
+    /// Above the fixture's `:max-eid`, so it collides with nothing.
+    const TIMELESS_ENTITY: i64 = 900_001;
+    const TIMELESS_UUID: &str = "00000009-0000-0000-0000-000000000001";
+
+    let mut graph = kvs_writer::read_graph(&fixture_path())
+        .await
+        .expect("the committed fixture reads");
+    let parent = kvs_writer::entity_by_uuid(&graph, fixture_facts::PROBE_TASK_UUID)
+        .expect("read")
+        .expect("the probe task is one of the fixture's blocks");
+
+    let tx = graph.allocate_tx().expect("a transaction id");
+    let mut tail = graph.tail().expect("the tail parses");
+    let datom = |attribute: &str, value: TransitNode| kvs_writer::TailDatom {
+        entity: TIMELESS_ENTITY,
+        attribute: attribute.to_string(),
+        value,
+        tx,
+        op: kvs_writer::DatomOp::Assert,
+    };
+    // Everything a block needs to project, and nothing that carries a time.
+    tail.push_transaction(vec![
+        datom("block/uuid", TransitNode::Uuid(TIMELESS_UUID.to_string())),
+        datom(
+            "block/title",
+            TransitNode::Str("a block LogSeq never stamped".to_string()),
+        ),
+        datom("block/parent", TransitNode::Int(parent)),
+        datom("block/page", TransitNode::Int(parent)),
+        datom("block/order", TransitNode::Str("zzz".to_string())),
+    ])
+    .expect("room in the tail");
+    graph.set_tail(&tail).expect("the tail stores");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("db.sqlite");
+    kvs_writer::write_graph(&graph, &path)
+        .await
+        .expect("the constructed graph writes");
+
+    let result = LogseqDbImporter::new()
+        .import(&path)
+        .await
+        .expect("the constructed graph imports");
+
+    let block = result
+        .block_by_uuid(TIMELESS_UUID)
+        .expect("the constructed block must reach the base — otherwise nothing below is tested");
+    assert_eq!(
+        block.created_at, 0,
+        "a block with no :block/created-at datom keeps the epoch"
+    );
+    assert_eq!(
+        block.updated_at, 0,
+        "a block with no :block/updated-at datom keeps the epoch"
+    );
+
+    // The other direction, so a projection that zeroed EVERY timestamp could
+    // not pass by agreeing with the sentinel.
+    let stamped = result
+        .block_by_uuid(fixture_facts::PROBE_TASK_UUID)
+        .expect("the probe task is still a block");
+    assert!(
+        stamped.created_at != 0 && stamped.updated_at != 0,
+        "a block LogSeq DID stamp keeps its real timestamps; got {} / {}",
+        stamped.created_at,
+        stamped.updated_at
     );
 }

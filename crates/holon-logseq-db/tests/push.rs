@@ -169,6 +169,23 @@ fn a_titled_built_in(graph: &KvsGraph) -> i64 {
         .expect("the fixture has 192 built-ins, many titled")
 }
 
+/// The editable blocks push will actually accept today.
+///
+/// `editable_uuids` is the census fact — what the base holds that carries a
+/// title. This is the subset push can WRITE, which since W3 Inc 0(e) excludes
+/// titles carrying ref syntax: 8 editable, 2 ref-bearing, 6 pushable. Kept as
+/// a separate helper rather than folded into `editable_uuids` so the cost of
+/// the fail-closed ruling stays visible as a number, not hidden in a filter.
+fn pushable_uuids(graph: &KvsGraph, base: &ImportBase) -> Vec<String> {
+    editable_uuids(graph, base)
+        .into_iter()
+        .filter(|u| {
+            let c = &base.get(u).expect("present").content;
+            !(c.contains("[[") || c.contains("((") || c.contains('#'))
+        })
+        .collect()
+}
+
 /// `base` with `uuid`'s content replaced.
 fn retitled(base: &ImportBase, uuid: &str, content: &str) -> ImportBase {
     let mut next = base.clone();
@@ -690,8 +707,8 @@ async fn a_third_push_overflows_the_tail_and_flushes_through_the_trees() {
 
     let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
     let mut base = base_of(&fixture()).await;
-    let targets = editable_uuids(&graph, &base);
-    assert_eq!(targets.len(), 8, "the editable set this leg is sized for");
+    let targets = pushable_uuids(&graph, &base);
+    assert_eq!(targets.len(), 6, "the PUSHABLE set this leg is sized for");
 
     let mut flushes = Vec::new();
     let mut tails = Vec::new();
@@ -701,7 +718,7 @@ async fn a_third_push_overflows_the_tail_and_flushes_through_the_trees() {
             next = retitled(&next, uuid, &format!("overflow round {round} {i:02}"));
         }
         let report = kvs_writer::push(&mut graph, &base, &next).expect("push");
-        assert_eq!(report.transactions, 8, "every editable block changed");
+        assert_eq!(report.transactions, 6, "every pushable block changed");
         flushes.push(report.flushes);
         tails.push(graph.tail().expect("tail").datom_count());
         base = next;
@@ -710,9 +727,12 @@ async fn a_third_push_overflows_the_tail_and_flushes_through_the_trees() {
     // MEASURED, not predicted: 16 after push 1, 32 after push 2 (at the limit
     // and still not over it), and after push 3 the first block crosses to 34,
     // flushes all of them, and the remaining seven leave 14 behind.
+    // MEASURED at 6 pushable blocks (12 datoms per push): 12, then 24, then
+    // push 3 crosses on its FIFTH block (24+10=34), flushes all 34, and the
+    // sixth block leaves 2 behind.
     assert_eq!(
         (flushes.as_slice(), tails.as_slice()),
-        (&[0, 0, 1][..], &[16, 32, 14][..]),
+        (&[0, 0, 1][..], &[12, 24, 2][..]),
         "the flush must land on push THREE, and the tail lengths pin exactly \
          where — a `< 32` style assertion would also pass a flush a push early"
     );
@@ -780,7 +800,7 @@ fn pushed_title(round: usize, i: usize) -> String {
 async fn three_pushes() -> (KvsGraph, Vec<(i64, String)>) {
     let mut graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
     let mut base = base_of(&fixture()).await;
-    let targets = editable_uuids(&graph, &base);
+    let targets = pushable_uuids(&graph, &base);
 
     let mut edits = Vec::new();
     let mut flushes = 0;
@@ -811,7 +831,7 @@ async fn three_pushes() -> (KvsGraph, Vec<(i64, String)>) {
         flushes += report.flushes;
         base = next;
     }
-    assert_eq!(edits.len(), 24, "8 blocks over three rounds");
+    assert_eq!(edits.len(), 18, "6 blocks over three rounds");
     // THREE rounds, not two: 8 blocks is 16 datoms, so two pushes reach
     // exactly 32 and never cross it. Without a third the legs below would
     // compare two tail-only files and could not see a flush at all.
@@ -854,9 +874,9 @@ async fn leg1_logseq_validator_accepts_a_pushed_graph() {
     );
 }
 
-/// LEG 2 — the delta LogSeq sees is exactly the 8 final titles, nothing else.
+/// LEG 2 — the delta LogSeq sees is exactly the 6 final titles, nothing else.
 ///
-/// Eight, not twenty-four: each round supersedes the last, so a correct push
+/// Six, not eighteen: each round supersedes the last, so a correct push
 /// leaves no trace of either set of intermediate titles. A push that
 /// asserted without retracting would show them, and this is where that shows.
 #[tokio::test]
@@ -883,8 +903,8 @@ async fn leg2_logseq_diff_shows_exactly_the_pushed_titles() {
         .collect();
     assert_eq!(
         entries.len(),
-        16,
-        "expected 8 datoms per side and nothing else; got {}:\n{out}",
+        12,
+        "expected 6 datoms per side and nothing else; got {}:\n{out}",
         entries.len()
     );
     for entry in &entries {
@@ -894,7 +914,7 @@ async fn leg2_logseq_diff_shows_exactly_the_pushed_titles() {
              attribute: {entry}\n{out}"
         );
     }
-    for i in 0..8 {
+    for i in 0..6 {
         assert!(
             out.contains(&pushed_title(2, i)),
             "final title {i} is missing from the delta:\n{out}"
@@ -909,7 +929,7 @@ async fn leg2_logseq_diff_shows_exactly_the_pushed_titles() {
     }
 }
 
-/// HEAD TO HEAD — the same 24 edits, applied by LogSeq and by Holon's `push`,
+/// HEAD TO HEAD — the same 18 edits, applied by LogSeq and by Holon's `push`,
 /// compared row by row.
 ///
 /// B established byte identity for the tail-and-flush machinery, but every one
@@ -944,7 +964,7 @@ async fn head_to_head_with_logseq_applying_the_same_pushes() {
     std::fs::copy(fixture(), &logseq_db).expect("stage");
     let out = oracle.run("script/apply_edits.cljs", &[&logseq_db, &edits_json], &[]);
     assert!(
-        out.contains("applied 24 edits"),
+        out.contains("applied 18 edits"),
         "LogSeq did not apply the edits:\n{out}"
     );
 
@@ -1013,9 +1033,11 @@ async fn head_to_head_with_logseq_applying_the_same_pushes() {
     );
     assert_eq!(
         (identical, addrs.len(), ours.rows.len(), theirs.rows.len()),
-        (458, 458, 458, 458),
-        "both writers grow the fixture's 456 rows to 458 — one split, two new \
-         nodes — and every row must have been compared, not skipped"
+        (459, 459, 459, 459),
+        "both writers grow the fixture's 456 rows to 459 for these 18 edits — \
+         and every row must have been compared, not skipped. The count is \
+         MEASURED per edit-set, not a constant: at 24 edits both writers \
+         produced 458. What is invariant is that they AGREE, not the number."
     );
 }
 
@@ -1040,11 +1062,11 @@ async fn bisect_the_pushed_edits_prefix_by_prefix() {
     let oracle = Oracle::find();
     let dir = tempfile::tempdir().expect("temp dir");
     let (_, edits) = three_pushes().await;
-    assert_eq!(edits.len(), 24, "the bisect walks the same 24 edits");
+    assert_eq!(edits.len(), 18, "the bisect walks the same 18 edits");
 
     let pristine = base_of(&fixture()).await;
     let base_graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
-    let targets = editable_uuids(&base_graph, &pristine);
+    let targets = pushable_uuids(&base_graph, &pristine);
 
     let mut first_divergence: Option<(usize, usize)> = None;
     let mut agreed = 0usize;
@@ -1122,7 +1144,7 @@ async fn bisect_the_pushed_edits_prefix_by_prefix() {
         "the writers first disagree at (N, differing rows); {agreed} of {} prefixes agreed",
         edits.len()
     );
-    assert_eq!(agreed, 24, "every prefix must have been compared");
+    assert_eq!(agreed, 18, "every prefix must have been compared");
     // Non-vacuity: if neither side ever flushed, this compared 24 tail-only
     // files and would stay green under a writer that cannot flush at all.
     assert!(
@@ -2226,4 +2248,211 @@ async fn an_entity_whose_parent_is_built_in_refuses_the_import() {
             "the refusal must name {expected}; got: {message}"
         );
     }
+}
+
+// ------------------------------------------- ref-bearing titles, fail-closed
+
+/// A title carrying ref syntax is REFUSED until Inc 1 measures who maintains
+/// `:block/refs`.
+///
+/// W2's byte-identity was proven on titles WITHOUT refs. LogSeq may derive
+/// `:block/refs` from a title at edit time; `db_pipeline` documents that IT
+/// does not, and `save-block!` — the layer that might — is not drivable under
+/// nbb. So whether a ref-bearing edit leaves the graph internally consistent
+/// is UNMEASURED. Writing one anyway would be guessing with the user's data,
+/// and the failure would be invisible: the title would be right and the
+/// backlinks silently wrong.
+///
+/// Fail closed until Inc 1 answers it. Both directions are refused — a title
+/// that HAD a ref and a title that GAINS one — because either changes what
+/// refs should exist.
+#[tokio::test]
+async fn a_ref_bearing_title_is_refused_until_refs_are_measured() {
+    let graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let base = base_of(&fixture()).await;
+
+    // The fixture carries exactly two, both `[[...]]`, measured.
+    let existing: Vec<String> = base
+        .uuids()
+        .filter(|u| base.get(u).expect("present").content.contains("[["))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(existing.len(), 2, "the fixture's ref-bearing blocks");
+
+    // (a) the OLD title carries a ref: editing it away is still refused.
+    let mut g = graph.clone();
+    let err = kvs_writer::push(&mut g, &base, &retitled(&base, &existing[0], "plain now"))
+        .expect_err("an existing ref-bearing title must be refused");
+    assert!(
+        matches!(&err, kvs_writer::RowError::PushRefBearingTitle { .. }),
+        "got {err}"
+    );
+
+    // (b) the NEW title GAINS a ref, on a block that had none.
+    let clean = editable_uuids(&graph, &base)
+        .into_iter()
+        .find(|u| !base.get(u).expect("present").content.contains("[["))
+        .expect("a ref-free editable block");
+    for gaining in [
+        "see [[Project Alpha]]",
+        "a #tag appears",
+        "a ((block-ref)) appears",
+    ] {
+        let mut g = graph.clone();
+        let err = kvs_writer::push(&mut g, &base, &retitled(&base, &clean, gaining))
+            .expect_err("a title gaining ref syntax must be refused");
+        assert!(
+            matches!(&err, kvs_writer::RowError::PushRefBearingTitle { .. }),
+            "{gaining:?} was not refused; got {err}"
+        );
+    }
+
+    // Non-vacuity: a plain-to-plain edit on that same block still works.
+    let mut g = graph.clone();
+    kvs_writer::push(&mut g, &base, &retitled(&base, &clean, "still plain"))
+        .expect("a title with no ref syntax on either side is unaffected");
+}
+
+// ------------------------------------------ what the root schema decides
+
+/// Re-asserting a cardinality-MANY value the graph already holds changes
+/// nothing — not even the datom's transaction id.
+///
+/// MEASURED (`oracle/probe_w3_cardinality.cljs`): LogSeq's own transactor
+/// drops the redundant add, writes an EMPTY transaction into the tail, and
+/// leaves the held datom at its original tx. A reader that appended a second
+/// copy would report a graph LogSeq never restores — and for a many-attribute
+/// nothing else would notice, because two identical tags read like one.
+#[tokio::test]
+async fn a_redundant_cardinality_many_assert_in_the_tail_changes_nothing() {
+    let graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let held = kvs_writer::datoms_now(&graph)
+        .expect("read")
+        .into_iter()
+        .find(|d| d.a == "block/tags")
+        .expect("the fixture carries tags");
+
+    let next = with_tail_transaction(
+        &graph,
+        vec![tail_datom(
+            held.e,
+            "block/tags",
+            held.v.clone(),
+            held.tx + 1,
+            kvs_writer::DatomOp::Assert,
+        )],
+    );
+
+    let copies: Vec<i64> = kvs_writer::datoms_now(&next)
+        .expect("read")
+        .into_iter()
+        .filter(|d| d.e == held.e && d.a == "block/tags" && d.v == held.v)
+        .map(|d| d.tx)
+        .collect();
+    assert_eq!(
+        copies,
+        vec![held.tx],
+        "one copy at its original tx; a second copy or a bumped tx is a \
+         reading LogSeq's transactor never produces"
+    );
+}
+
+/// The same for cardinality-ONE, where a superseding reader would keep one
+/// datom but move it to the tail's transaction id.
+#[tokio::test]
+async fn a_redundant_cardinality_one_assert_in_the_tail_changes_nothing() {
+    let graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let held = kvs_writer::datoms_now(&graph)
+        .expect("read")
+        .into_iter()
+        .find(|d| d.a == "block/title")
+        .expect("the fixture carries titles");
+
+    let next = with_tail_transaction(
+        &graph,
+        vec![tail_datom(
+            held.e,
+            "block/title",
+            held.v.clone(),
+            held.tx + 1,
+            kvs_writer::DatomOp::Assert,
+        )],
+    );
+
+    let copies: Vec<i64> = kvs_writer::datoms_now(&next)
+        .expect("read")
+        .into_iter()
+        .filter(|d| d.e == held.e && d.a == "block/title" && d.v == held.v)
+        .map(|d| d.tx)
+        .collect();
+    assert_eq!(
+        copies,
+        vec![held.tx],
+        "re-asserting the value already held leaves the datom untouched"
+    );
+}
+
+/// An attribute the ROOT SCHEMA does not declare is refused by name.
+///
+/// Reading its cardinality is what decides whether an existing value is kept
+/// or superseded away, and the root is the authority on that: MEASURED, LogSeq
+/// restores its connection from the schema stored at addr 0, so a graph whose
+/// root omits an attribute is a graph whose transactor never treated that
+/// attribute as many either. Defaulting to cardinality-one would therefore be
+/// RIGHT and still wrong to do quietly — the datom names a vocabulary the
+/// graph does not have, and the value it drops would leave no trace.
+#[tokio::test]
+async fn an_attribute_the_root_schema_does_not_declare_refuses_the_read() {
+    let graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let next = with_tail_transaction(
+        &graph,
+        vec![tail_datom(
+            1,
+            "my.test/undeclared",
+            TransitNode::Str("a".to_string()),
+            536_871_024,
+            kvs_writer::DatomOp::Assert,
+        )],
+    );
+
+    let error = kvs_writer::datoms_now(&next)
+        .expect_err("an undeclared attribute must not be read as cardinality-one in silence");
+    assert!(
+        matches!(
+            &error,
+            kvs_writer::RowError::UndeclaredAttribute { attribute } if attribute == "my.test/undeclared"
+        ),
+        "the refusal must name the attribute; got {error:?}"
+    );
+}
+
+/// DataScript's own meta-vocabulary is admitted, because it describes the
+/// schema and so is never listed inside it.
+///
+/// `:db/cardinality` is the subject rather than `:db/ident` because the root
+/// DOES declare `:db/ident` — measured, flipping the namespace admission left
+/// an ident-driven version of this test green, so it was testing nothing. The
+/// meta-attributes proper appear as datoms on property-definition entities
+/// and nowhere in the schema map, which is exactly the case the admission
+/// exists for.
+#[tokio::test]
+async fn the_db_meta_vocabulary_is_admitted_though_the_schema_never_lists_it() {
+    let graph = kvs_writer::read_graph(&fixture()).await.expect("reads");
+    let next = with_tail_transaction(
+        &graph,
+        vec![tail_datom(
+            8_000_001,
+            "db/cardinality",
+            TransitNode::Keyword("db.cardinality/one".to_string()),
+            536_871_024,
+            kvs_writer::DatomOp::Assert,
+        )],
+    );
+    assert!(
+        kvs_writer::datoms_now(&next)
+            .expect("a :db/* meta-attribute reads")
+            .iter()
+            .any(|d| d.e == 8_000_001 && d.a == "db/cardinality"),
+        "the constructed :db/cardinality datom must reach the reading"
+    );
 }

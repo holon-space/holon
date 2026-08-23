@@ -18,6 +18,7 @@ use holon_api::Block;
 use holon_api::EntityUri;
 
 pub mod base;
+mod built_in;
 mod datoms;
 pub mod ingest;
 pub mod kvs_writer;

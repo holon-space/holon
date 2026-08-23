@@ -210,6 +210,17 @@ pub enum RowError {
          operation as replacing a cardinality-one value and is out of this increment's scope"
     )]
     NotCardinalityOne { attribute: String },
+    /// A datom names an attribute the graph's own root schema does not
+    /// declare. Cardinality-one would be the right guess — measured, that is
+    /// what LogSeq's transactor assumes — but guessing here decides whether a
+    /// value survives, so the disagreement is reported instead.
+    #[error(
+        "attribute :{attribute} is not declared in the graph's root schema, so its cardinality \
+         is unknown and a value could be dropped without trace"
+    )]
+    UndeclaredAttribute { attribute: String },
+    #[error("the root node's :schema is {found}, expected a map of attribute declarations")]
+    SchemaNotAMap { found: &'static str },
     #[error("kvs addr {addr} is not a tree node: {detail}")]
     MalformedTreeNode { addr: i64, detail: String },
     #[error("kvs addr {addr} is referenced as a child but no such row exists")]
@@ -261,6 +272,29 @@ pub enum RowError {
          (:logseq.property/built-in? true); Holon does not rewrite LogSeq's own schema"
     )]
     PushBuiltIn { uuid: String, entity: i64 },
+    /// The title carries LogSeq reference syntax, and who maintains
+    /// `:block/refs` on an edit is UNMEASURED.
+    ///
+    /// W2 proved byte-identity for titles WITHOUT refs. `db_pipeline`
+    /// documents that it does not rebuild refs on an edit, and `save-block!`
+    /// — the layer that might — is not drivable under nbb, so nobody has
+    /// established whether LogSeq derives refs from a title at edit time. If
+    /// it does and Holon does not, a pushed ref-bearing title leaves a graph
+    /// LogSeq considers internally inconsistent: the title reads correctly
+    /// while the backlinks are silently wrong. That is invisible damage, so
+    /// this fails closed until W3 Inc 1 measures it.
+    #[error(
+        "block {uuid}'s {side} title carries LogSeq reference syntax ({syntax}), and whether \
+         LogSeq re-derives :block/refs on an edit is not yet measured; pushing it could leave \
+         the graph's backlinks silently wrong. Refusing until that is settled (W3 Inc 1)"
+    )]
+    PushRefBearingTitle {
+        uuid: String,
+        /// `old` or `new` — which side carried it.
+        side: &'static str,
+        syntax: &'static str,
+    },
+
     /// The graph moved under the base.
     ///
     /// The retract half of a title replacement names the value it supersedes,
@@ -905,22 +939,56 @@ pub fn assert_pinned_schema_version(rows: &[KvsRow]) -> Result<SchemaVersion, Ro
 /// The attribute this increment can edit.
 const TITLE: &str = "block/title";
 
-/// Whether the root schema declares `attribute` as cardinality-many.
-fn is_cardinality_many(schema: &TransitNode, attribute: &str) -> bool {
+/// How many values an attribute may hold at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cardinality {
+    One,
+    Many,
+}
+
+/// What the ROOT SCHEMA declares `attribute` to be.
+///
+/// The root is the authority, not a copy of one: LogSeq restores its
+/// DataScript connection from the schema stored at addr 0. MEASURED
+/// (`oracle/probe_w3_cardinality.cljs`) — a graph whose stored schema declares
+/// an attribute LogSeq never compiled in still enforces that declaration after
+/// reopening through LogSeq's own entry point, and the restored schema differs
+/// from LogSeq's compiled one. So reading the root reads exactly what the
+/// transactor reads.
+///
+/// Undeclared is a named ERROR rather than a cardinality-one default. The
+/// default would be RIGHT — measured, LogSeq's transactor treats an undeclared
+/// attribute as cardinality-one and keeps only the last value — which is
+/// precisely why it must not be silent: a datom naming an attribute the
+/// graph's own schema does not know means whoever wrote it disagrees with the
+/// graph, and the value it drops would disappear with no trace.
+fn declared_cardinality(schema: &TransitNode, attribute: &str) -> Result<Cardinality, RowError> {
     let TransitNode::Map(attrs) = schema else {
-        return false;
+        return Err(RowError::SchemaNotAMap {
+            found: node_kind(schema),
+        });
     };
-    attrs
-        .iter()
-        .find(|(k, _)| keyword(k) == Some(attribute))
-        .and_then(|(_, definition)| match definition {
-            TransitNode::Map(fields) => fields
-                .iter()
-                .find_map(|(k, v)| (keyword(k) == Some("db/cardinality")).then_some(keyword(v))),
-            _ => None,
-        })
-        .flatten()
-        == Some("db.cardinality/many")
+    let Some((_, definition)) = attrs.iter().find(|(k, _)| keyword(k) == Some(attribute)) else {
+        // DataScript's meta-vocabulary describes the schema and so is never
+        // listed inside it; the importer admits it by the same namespace rule.
+        if crate::datoms::is_self_describing(attribute) {
+            return Ok(Cardinality::One);
+        }
+        return Err(RowError::UndeclaredAttribute {
+            attribute: attribute.to_string(),
+        });
+    };
+    let cardinality = match definition {
+        TransitNode::Map(fields) => fields
+            .iter()
+            .find_map(|(k, v)| (keyword(k) == Some("db/cardinality")).then_some(keyword(v)))
+            .flatten(),
+        _ => None,
+    };
+    Ok(match cardinality {
+        Some("db.cardinality/many") => Cardinality::Many,
+        _ => Cardinality::One,
+    })
 }
 
 /// Every datom the graph CURRENTLY holds.
@@ -951,7 +1019,24 @@ pub fn datoms_now(graph: &KvsGraph) -> Result<Vec<crate::tree::TreeDatom>, RowEr
         for entry in transaction {
             match entry.op {
                 DatomOp::Assert => {
-                    if !is_cardinality_many(&graph.root.schema, &entry.attribute) {
+                    // Asked FIRST and unconditionally, so an attribute the
+                    // root does not declare is refused whatever the graph
+                    // happens to hold for it.
+                    let cardinality = declared_cardinality(&graph.root.schema, &entry.attribute)?;
+                    // A REDUNDANT add is a no-op for LogSeq's transactor, at
+                    // either cardinality: measured
+                    // (`oracle/probe_w3_cardinality.cljs`), re-asserting a
+                    // value the graph already holds leaves the datom's
+                    // ORIGINAL tx in place and writes an EMPTY transaction to
+                    // the tail. Appending a second copy would make Holon's
+                    // reading disagree with the graph LogSeq restores.
+                    let already_held = datoms.iter().any(|held| {
+                        held.e == entry.entity && held.a == entry.attribute && held.v == entry.value
+                    });
+                    if already_held {
+                        continue;
+                    }
+                    if cardinality == Cardinality::One {
                         // Cardinality-ONE supersedes, and it supersedes BY
                         // POSITION. Resolving by tx magnitude would be wrong:
                         // two tail transactions can legitimately carry the
@@ -987,15 +1072,62 @@ pub fn datoms_now(graph: &KvsGraph) -> Result<Vec<crate::tree::TreeDatom>, RowEr
     Ok(datoms)
 }
 
+/// One reading of the graph, reused across a whole plan phase.
+///
+/// `datoms_now` walks the eavt tree and replays the tail — measured at ~120us
+/// on the committed fixture. Calling it per predicate per block made a push
+/// O(N x tree): a 6-block push cost ~3.5ms doing ~30 of those reads. Nothing
+/// mutates the graph while the plan is being built, so ONE reading answers
+/// every question in it.
+struct GraphView {
+    datoms: Vec<crate::tree::TreeDatom>,
+}
+
+impl GraphView {
+    fn read(graph: &KvsGraph) -> Result<Self, RowError> {
+        Ok(Self {
+            datoms: datoms_now(graph)?,
+        })
+    }
+
+    fn entity_by_uuid(&self, uuid: &str) -> Option<i64> {
+        self.datoms.iter().find_map(|d| {
+            (d.a == "block/uuid" && d.v == TransitNode::Uuid(uuid.to_string())).then_some(d.e)
+        })
+    }
+
+    fn is_built_in(&self, entity: i64) -> bool {
+        self.datoms
+            .iter()
+            .any(|d| d.e == entity && crate::built_in::marks_built_in(d.into()))
+    }
+
+    /// Last by position, matching [`current_title`].
+    fn title(&self, entity: i64) -> Result<String, RowError> {
+        let mut best: Option<&TransitNode> = None;
+        for datom in &self.datoms {
+            if datom.e == entity && datom.a == TITLE {
+                best = Some(&datom.v);
+            }
+        }
+        match best {
+            Some(TransitNode::Str(s)) => Ok(s.clone()),
+            Some(other) => Err(RowError::TitleNotAString {
+                entity,
+                found: node_kind(other),
+            }),
+            None => Err(RowError::NoTitle { entity }),
+        }
+    }
+}
+
 /// The entity id LogSeq gave the block with this uuid.
 ///
 /// Holon addresses blocks by uuid and the tail addresses them by entity id, so
 /// something has to bridge the two; this is that. `None` rather than an error
 /// because "no such block" is a question a caller may legitimately ask.
 pub fn entity_by_uuid(graph: &KvsGraph, uuid: &str) -> Result<Option<i64>, RowError> {
-    Ok(datoms_now(graph)?.into_iter().find_map(|d| {
-        (d.a == "block/uuid" && d.v == TransitNode::Uuid(uuid.to_string())).then_some(d.e)
-    }))
+    Ok(GraphView::read(graph)?.entity_by_uuid(uuid))
 }
 
 /// What one title replacement did.
@@ -1013,24 +1145,7 @@ pub struct TitleEdit {
 /// separators, so the same datom is seen several times, and a tail assert
 /// carries a newer tx than the tree value it supersedes.
 fn current_title(graph: &KvsGraph, entity: i64) -> Result<String, RowError> {
-    // LAST by position, not highest tx. `datoms_now` already superseded
-    // cardinality-one values in tail order, so at most one survives from the
-    // tail; taking the last is what keeps later-wins true when two tail
-    // transactions share a tx id, which LogSeq does produce.
-    let mut best: Option<TransitNode> = None;
-    for datom in datoms_now(graph)? {
-        if datom.e == entity && datom.a == TITLE {
-            best = Some(datom.v);
-        }
-    }
-    match best {
-        Some(TransitNode::Str(s)) => Ok(s),
-        Some(other) => Err(RowError::TitleNotAString {
-            entity,
-            found: node_kind(&other),
-        }),
-        None => Err(RowError::NoTitle { entity }),
-    }
+    GraphView::read(graph)?.title(entity)
 }
 
 /// Replace one existing block's `:block/title`, as a tail transaction.
@@ -1061,12 +1176,13 @@ pub fn replace_block_title(
     new_title: &str,
 ) -> Result<TitleEdit, RowError> {
     assert_pinned_schema_version(&graph.rows)?;
-    if is_cardinality_many(&graph.root.schema, TITLE) {
+    if declared_cardinality(&graph.root.schema, TITLE)? == Cardinality::Many {
         return Err(RowError::NotCardinalityOne {
             attribute: TITLE.to_string(),
         });
     }
-    edit_title(graph, entity, new_title).map(|(edit, _)| edit)
+    let old_title = current_title(graph, entity)?;
+    edit_title(graph, entity, &old_title, new_title).map(|(edit, _)| edit)
 }
 
 /// One title replacement, and whether appending it overflowed the tail.
@@ -1080,9 +1196,10 @@ pub fn replace_block_title(
 fn edit_title(
     graph: &mut KvsGraph,
     entity: i64,
+    old_title: &str,
     new_title: &str,
 ) -> Result<(TitleEdit, bool), RowError> {
-    let old_title = current_title(graph, entity)?;
+    let old_title = old_title.to_string();
     let tx = graph.allocate_tx()?;
     let mut tail = graph.tail()?;
 
@@ -1123,70 +1240,36 @@ fn edit_title(
     ))
 }
 
-/// LogSeq's marker for the property and class pages it ships with.
-const BUILT_IN: &str = "logseq.property/built-in?";
-
-/// Whether `keyword` is an ident LogSeq minted for itself.
-///
-/// A MEASURED APPROXIMATION of LogSeq's `internal-ident?`, not a restatement
-/// of it. LogSeq's is a MEMBERSHIP test over the idents it declares plus the
-/// ones it creates at runtime — same namespace, opposite verdicts:
-/// `:block/title` is internal, `:block/uuid` is not; `:logseq.kv/*` is,
-/// `:logseq/foo` is not.
-///
-/// Exact membership was tried and REJECTED by measurement: LogSeq's DECLARED
-/// schema set (146 idents) misses 35 of this graph's 171 — every
-/// `:logseq.kv/*` and every closed-value ident, all created at runtime —
-/// including all eight entities that are built-in by this leg alone. Matching
-/// on the declared set would make those PUSHABLE, which is the under-refusing
-/// direction and the one that loses data.
-///
-/// So a namespace rule stays, and BOTH namespaces are here because the
-/// alternative is worse in the direction that matters. LogSeq calls 13 of the
-/// 16 declared `block/*` idents internal; this arm over-refuses the other
-/// three (`:block/name`, `:block/tx-id`, `:block/uuid`). Dropping the arm to
-/// avoid those three would instead UNDER-refuse the 13 — and this function is
-/// `pub`, so a caller reaching an entity push cannot reach would get the
-/// permissive answer with nothing to warn them. Fail closed: over-refusing an
-/// edit is visible, under-refusing one rewrites LogSeq's schema silently.
-///
-/// No base-reachable entity is built-in by a `block/*` ident ALONE (measured —
-/// every such entity in this graph also carries the flag, so leg 1 answers
-/// first), so push does not exercise this arm today. That makes it a guard
-/// against future reach, not a live code path, and it is drivable only by a
-/// constructed entity — which is exactly how the tests drive it.
-///
-/// All nine divergences are OVER-refusals: the three `block/*` above and six
-/// third-party namespaces merely beginning with "logseq" (`:logseq/foo`,
-/// `:logseqfoo/bar`, `:logseq-plugin/x`, `:logseq.thirdparty/x`,
-/// `:logseq_x/y`, `:logseqified/x`). 182 of 191 measured idents agree exactly.
-/// Pinned ident by ident, with the divergence set asserted as over-refusal, in
-/// `tests/fixtures/logseq-db/internal-ident-reference.json`.
-pub(crate) fn is_internal_ident(keyword: &str) -> bool {
-    let namespace = keyword.split('/').next().unwrap_or("");
-    namespace == "block" || namespace.starts_with("logseq")
-}
-
 /// Whether `entity` is one of LogSeq's own built-in nodes.
 ///
-/// Three legs, because LogSeq's `outliner-validate/built-in-entity?` has
-/// three and says in its own docstring that the flag alone is not enough:
-/// the flag, OR a `:file/path` (config.edn, custom.css and friends carry no
-/// flag at all), OR an internal `:db/ident` (the `:logseq.kv/*` entries).
+/// The rule itself is [`crate::built_in::marks_built_in`], which the importer
+/// calls too; this adds the two things only the writer knows — which datoms
+/// the graph currently holds, and that an entity is built-in when ANY of its
+/// datoms says so.
 ///
 /// Reads [`datoms_now`], so a marker LogSeq has transacted but not yet
 /// flushed counts, and one retracted in the tail stops counting. Both
 /// directions are measured against LogSeq, and both were wrong before.
 pub fn is_built_in(graph: &KvsGraph, entity: i64) -> Result<bool, RowError> {
-    Ok(datoms_now(graph)?.iter().any(|d| {
-        d.e == entity
-            && match (d.a.as_str(), &d.v) {
-                (BUILT_IN, TransitNode::Bool(true)) => true,
-                ("file/path", _) => true,
-                ("db/ident", TransitNode::Keyword(k)) => is_internal_ident(k),
-                _ => false,
-            }
-    }))
+    Ok(GraphView::read(graph)?.is_built_in(entity))
+}
+
+/// The LogSeq reference syntax a title carries, if any.
+///
+/// Three forms, all of which make LogSeq record a `:block/refs` edge:
+/// `[[page]]`, `#tag`, and `((block-uuid))`. Deliberately a coarse scan
+/// rather than a parser — this decides whether to REFUSE, so over-matching
+/// costs a declined edit while under-matching costs silent graph damage.
+fn ref_syntax(title: &str) -> Option<&'static str> {
+    if title.contains("[[") {
+        Some("[[…]]")
+    } else if title.contains("((") {
+        Some("((…))")
+    } else if title.contains('#') {
+        Some("#tag")
+    } else {
+        None
+    }
 }
 
 /// The name of the change `before` -> `after` asks for beyond a title edit, if
@@ -1266,7 +1349,7 @@ pub fn push(
     after: &ImportBase,
 ) -> Result<PushReport, RowError> {
     assert_pinned_schema_version(&graph.rows)?;
-    if is_cardinality_many(&graph.root.schema, TITLE) {
+    if declared_cardinality(&graph.root.schema, TITLE)? == Cardinality::Many {
         return Err(RowError::NotCardinalityOne {
             attribute: TITLE.to_string(),
         });
@@ -1286,7 +1369,10 @@ pub fn push(
         });
     }
 
-    let mut plan: Vec<(i64, String)> = Vec::with_capacity(diff.changed.len());
+    // ONE reading for the whole plan phase — nothing mutates the graph while
+    // the plan is built, and the alternative was ~30 tree walks per push.
+    let view = GraphView::read(graph)?;
+    let mut plan: Vec<(i64, String, String)> = Vec::with_capacity(diff.changed.len());
     for uuid in &diff.changed {
         let observed = before.get(uuid).expect("changed uuids are in both bases");
         let wanted = after.get(uuid).expect("changed uuids are in both bases");
@@ -1297,15 +1383,25 @@ pub fn push(
                 uuid: uuid.clone(),
             });
         }
-        let entity = entity_by_uuid(graph, uuid)?
+        let entity = view
+            .entity_by_uuid(uuid)
             .ok_or_else(|| RowError::PushUnknownBlock { uuid: uuid.clone() })?;
-        if is_built_in(graph, entity)? {
+        if view.is_built_in(entity) {
             return Err(RowError::PushBuiltIn {
                 uuid: uuid.clone(),
                 entity,
             });
         }
-        let stored = current_title(graph, entity)?;
+        for (side, title) in [("old", &observed.content), ("new", &wanted.content)] {
+            if let Some(syntax) = ref_syntax(title) {
+                return Err(RowError::PushRefBearingTitle {
+                    uuid: uuid.clone(),
+                    side,
+                    syntax,
+                });
+            }
+        }
+        let stored = view.title(entity)?;
         if stored != observed.content {
             return Err(RowError::PushBaseStale {
                 uuid: uuid.clone(),
@@ -1313,7 +1409,7 @@ pub fn push(
                 found: stored,
             });
         }
-        plan.push((entity, wanted.content.clone()));
+        plan.push((entity, stored, wanted.content.clone()));
     }
 
     // Every edit lands on a COPY, which replaces the caller's graph only once
@@ -1329,8 +1425,11 @@ pub fn push(
     // the shape rather than of an argument about which errors are reachable.
     let mut staged = graph.clone();
     let mut report = PushReport::default();
-    for (entity, new_title) in plan {
-        let flushed = edit_title(&mut staged, entity, &new_title)?.1;
+    for (entity, old_title, new_title) in plan {
+        // The old title comes from the PLAN, not from a fresh read: a flush
+        // moves datoms between tail and trees but never changes a value, so
+        // the planned title stays correct even across one.
+        let flushed = edit_title(&mut staged, entity, &old_title, &new_title)?.1;
         report.transactions += 1;
         report.datoms += 2;
         report.flushes += usize::from(flushed);

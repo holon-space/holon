@@ -239,11 +239,18 @@ counts garbage.
 
 ### The overflow leg was REDESIGNED, not re-pinned
 
-8 blocks is 16 datoms. Push 1 reaches 16 and push 2 reaches exactly 32 —
-which does not EXCEED the branching factor and therefore does not flush. So
-the leg now drives THREE pushes, crossing to 34 on push 3's first block. The
-measured sequence is pinned exactly: flushes `[0, 0, 1]`, tail lengths
-`[16, 32, 14]`.
+The leg drives THREE pushes, because with the pushable set as small as it now
+is two pushes cannot reach the branching factor at all. The sizing has moved
+twice, each time re-MEASURED rather than re-derived:
+
+| pushable blocks | datoms/push | flushes | tail after each push |
+|---|---|---|---|
+| 8 (W-builtins) | 16 | `[0, 0, 1]` | `[16, 32, 14]` |
+| **6 (W3 Inc 0e)** | **12** | **`[0, 0, 1]`** | **`[12, 24, 2]`** |
+
+W3 Inc 0(e) refuses ref-bearing titles, and 2 of the 8 editable blocks carry
+`[[…]]`, so push accepts 6. At 12 datoms per push the third crosses on its
+FIFTH block (24+10=34), flushes all 34, and the sixth leaves 2 behind.
 
 Changing the numbers alone would have left a test that still looked like an
 overflow test while no longer exercising a flush at all — which is precisely
@@ -275,9 +282,16 @@ comparison against LogSeq's own writer can tell. That is why the head-to-head
 exists and why a green leg 1 and leg 2 are not sufficient evidence that the
 writer is right.
 
-Both writers take the fixture's 456 rows to 458 for these 24 edits — one
-split, two new nodes — and all 458 rows match byte for byte including the
-`addresses` column.
+Both writers take the fixture's 456 rows to **459** for the current 18 edits,
+and all 459 match byte for byte including the `addresses` column.
+
+**That number is NOT a property of the writer.** It is a function of the edit
+SET, and it has already moved: 24 edits produced 458, 18 produce 459. The
+invariant this leg asserts is that the two writers AGREE — same rows, same
+bytes, same child pointers — never that they produce any particular count. A
+row count that changes when the edit set changes is not a regression, and the
+assertion message says so, because the previous wording invited exactly that
+misreading.
 
 ## Note on B's evidence
 
@@ -293,20 +307,10 @@ rather than a hand-picked entity list.
 
 ## Carried to W3
 
-Named risks, neither a live defect, both open rather than closed:
+Item 3 is still open. Items 1, 2, 4 and 5 were closed by W3 Inc 0(b)-(d) and
+are recorded below with what closed them, because a risk that is merely
+deleted from a list leaves nothing to check the closure against.
 
-1. **`datoms_now` duplicates a REDUNDANT cardinality-many assert** — asserting
-   `:block/tags 5` twice leaves two copies. Unreachable from a real graph:
-   LogSeq drops a redundant add and writes an empty transaction instead
-   (measured). Open because "cannot arrive today" is a statement about
-   LogSeq's transactor, not about the reader.
-2. **Unify the built-in predicate over ONE datom representation.** The
-   three-leg rule now lives in two readers — `kvs_writer::is_built_in` over
-   `TreeDatom`s and the importer's classifier over `LogseqDatom`s — because
-   the two layers read different structures. Only `is_internal_ident` is
-   genuinely shared (called, not restated). The flip sweep covers every leg in
-   BOTH readers so the duplication cannot drift silently, but a sweep is a
-   tripwire, not a fix.
 3. **Build the reader ONCE per push — cost UNMEASURED, shape certain.** The
    earlier 4.8x table recorded here is RETRACTED: those timings were taken
    under machine-wide disk exhaustion with competing agent builds, isolated
@@ -321,18 +325,68 @@ Named risks, neither a live defect, both open rather than closed:
    spawn 24 nbb processes and amplify machine noise), the two bisects
    improved, and the nextest override REMOVED (it exists only to hide this).
 
-4. **The epoch-0 timestamp sentinel is no longer driven.** A block with no
-   timestamp datom must keep 0 rather than a fabricated import time — a
-   `now()` implementation would pass every other assertion. Its only six
-   subjects were LogSeq's own entities, now excluded, and MEASURED none of the
-   17 remaining blocks lacks a timestamp. Closing it needs a constructed datom
-   set, not a fixture edit.
-5. **An attribute ABSENT from `root.schema` takes the cardinality-ONE
-   supersede path** — silently dropping values if that attribute is really
-   cardinality-many. All 19 of this graph's many-attributes ARE declared in
-   the root (asserted), so the path is unreachable HERE. Nobody has
-   established whether a graph can carry a many-attribute its root omits, so
-   this is UNPROVEN, not refuted.
+### Closed by W3 Inc 0(b): ONE built-in predicate
+
+The three-leg rule lived in two readers — `kvs_writer::is_built_in` over
+`TreeDatom`s and the importer's classifier over `LogseqDatom`s. It now lives
+in `src/built_in.rs`, over a `Marker`: the two facts about a datom the rule
+reads, an attribute ident WITHOUT its leading colon and a value reduced to
+`True` / `Keyword` / `Other`. Each reader contributes only its own conversion,
+and a unit test pins that the two conversions agree datom for datom.
+
+The sweep is what says this is a fix rather than a rename. Flipping any ONE
+leg now reds tests in BOTH readers at once — `push::logseqs_own_built_in_verdict_matches_ours`
+(the writer) together with `holontest_import::holontest_db_imports_with_identity_gate`
+and `push::the_fixtures_built_in_share_is_pinned` (the classifier) — which is
+exactly what the duplicated version could not do: there, each leg had its own
+site, and flipping one left the other reader's tests green.
+
+The classifier keeps ONE arm of its own, and it is not a built-in leg: a
+`:logseq.kv/*` ident also makes an entity a `KvSingleton`, a kind the writer
+has no notion of.
+
+### Closed by W3 Inc 0(c): the epoch-0 sentinel is driven again
+
+`holontest_import::a_block_with_no_timestamp_datom_keeps_the_epoch` constructs
+a block that carries `:block/uuid`, `:block/title`, `:block/parent`,
+`:block/page` and `:block/order` and NO timestamp datom, appends it as a tail
+transaction, writes the graph and imports it — so the subject arrives through
+the real decoder rather than as a hand-built `DatomSet`. It asserts 0 for both
+timestamps AND that a neighbouring real block still carries its own, so a
+projection that zeroed everything could not pass by agreeing with the sentinel.
+
+RED first: with `unwrap_or(0)` changed to a plausible 2026 millisecond value
+the test is the only thing in 150 that fails.
+
+### Closed by W3 Inc 0(d): what the root schema decides
+
+Both items turned on the same question — is the stored root schema the
+authority, or a stale copy of one? MEASURED
+(`oracle/probe_w3_cardinality.cljs`, 2026-08-23):
+
+- A graph whose stored schema declares an attribute LogSeq never compiled in
+  still enforces that declaration after reopening through LogSeq's OWN entry
+  point, and the restored schema is NOT equal to LogSeq's compiled one. So
+  `restore-conn` takes the schema off the DISK: reading `root.schema` reads
+  exactly what the transactor reads.
+- An attribute the schema does not declare is cardinality-ONE for LogSeq too —
+  adding two values under one leaves the last.
+
+So item 5's premise is REFUTED: a graph cannot carry a many-attribute its root
+omits, and Holon's supersede path agrees with LogSeq rather than diverging from
+it. The refusal stays anyway, as `RowError::UndeclaredAttribute`: the guess
+would be right and must still not be silent, because a datom naming a
+vocabulary the graph does not have is a disagreement, and the value it drops
+would leave no trace. DataScript's own `:db/*` meta-vocabulary is admitted by
+namespace — it describes the schema and so is never listed inside it.
+
+Item 1 is now a measured rule rather than an accepted duplication, and it is
+ONE rule for both cardinalities: **a tail assert of an `(e, a, v)` the set
+already holds is a no-op.** Measured — re-asserting a held value leaves the
+datom's ORIGINAL tx in place and writes an EMPTY transaction to the tail, at
+cardinality-many and cardinality-one alike. The cardinality-one case is the one
+nothing would have caught: a superseding reader keeps a single datom, so only
+the transaction id gives it away.
 
 ## W3 prerequisite: reference re-derivation
 
@@ -343,3 +397,85 @@ move `:block/refs`, and what LogSeq does there is UNMEASURED:
 (`No protocol method ICollection.-conj`). So the comparison W3 needs is against
 LogSeq's FRONTEND, and if nbb still cannot drive it, that measurement needs the
 real application once. Treat it as a W3 prerequisite, not a W3 finding.
+
+## W3 Inc 1 — pushing `:block/tags`, specified from measurement
+
+Ruling W3-1.a extends push from titles to TAGS before properties. This is what
+a tag edit IS, measured through LogSeq's own transactor and storage layer on
+2026-08-23 (`oracle/probe_tag_edits.cljs`, schema 65.33, fixture
+`holontest.sqlite`). Everything below that is not marked UNMEASURED came out of
+that run.
+
+### The shape of the edit
+
+`:block/tags` is declared cardinality-MANY and reference-typed, so a tag edit
+is not the retract+assert pair a title edit is:
+
+| edit | tail transaction |
+|---|---|
+| add tag `T` to block `e` | ONE datom, `[e :block/tags T tx]` |
+| remove tag `T` from `e` | ONE datom, `[e :block/tags T -tx]` |
+| add a tag `e` already carries | EMPTY transaction |
+| remove a tag `e` does not carry | EMPTY transaction |
+
+Nothing else moves. `:block/updated-at`, `:block/refs` and `:block/title` were
+byte-identical before and after each of the four, so an implementation that
+also stamps an updated-at is writing something LogSeq's transactor does not.
+
+The tags are ENTITY IDS, not names. Holon's base carries tag NAMES (the
+importer resolves them through the class index), so Inc 1 needs the reverse
+resolution — name to the class entity that `:db/ident :logseq.class/<Name>`
+identifies — and that resolution is where the whole increment's failure modes
+live.
+
+### The refusals Inc 1 owes, and why the storage layer will not supply them
+
+**A tag whose entity does not exist is ACCEPTED.** `[:db/add e :block/tags
+987654]` transacted without complaint and left the block holding a DANGLING
+reference (`tags now (167 nil)`). Nothing in the storage layer refuses it, and
+the graph LogSeq restores afterwards is one whose tag resolves to nothing —
+which Holon's own importer would then reject with `DanglingReference`, so the
+damage surfaces one import later, on a graph Holon wrote. Inc 1 must therefore
+refuse a tag name it cannot resolve to an existing class entity, by name, the
+way `PushUnknownBlock` refuses an unknown uuid.
+
+**A built-in subject must stay refused.** `push` already refuses one, and the
+predicate now lives in `built_in.rs`; the tag leg inherits it unchanged. The
+outliner's own `save-block` refuses built-ins too, so this is agreement rather
+than a Holon-specific rule.
+
+**Redundant edits must be no-ops, not empty pushes.** Both redundant cases
+write an EMPTY transaction rather than nothing at all — the tail grows by one
+empty entry. `datoms_now` already models the reading side of this (W3 Inc 0d);
+the WRITING side is unspecified, and Inc 1 must decide whether Holon emits the
+empty transaction LogSeq emits or skips the edit entirely. The head-to-head
+oracle leg is what settles it, because the two produce different files.
+
+### What is NOT measured, and must not be guessed
+
+`logseq.outliner.core/save-block` — the layer where LogSeq's tag semantics
+actually live — is UNREACHABLE under nbb. It calls `(merge entity block)` and
+nbb's bundled DataScript entity is not conj-able (`No protocol method
+ICollection.-conj`), the same wall the reference re-derivation prerequisite
+above hit. So everything the outliner does AROUND a tag edit is unmeasured:
+
+- minting a `:db/ident` for a brand-new tag and extending it from
+  `:logseq.class/Root` (`add-missing-tag-idents`),
+- retracting `:block/tags :logseq.class/Page` when a page becomes a class,
+- the coupling between inline `#tag` syntax in the title and the `:block/tags`
+  datoms (`remove-tags-when-title-changed`), which is the same title/refs
+  coupling W3's reference prerequisite is about.
+
+Inc 1 therefore has two honest scopes, and the choice is a ruling rather than
+an implementation detail:
+
+(a) **Existing tags only** — refuse any tag name that does not already resolve
+    to a class entity, and refuse any block whose title carries inline `#tag`
+    syntax (push already refuses ref-bearing titles, which covers `#tag`). This
+    needs nothing that is unmeasured, and it is the direct analogue of the
+    title leg's scope.
+
+(b) **New tags too** — which requires driving LogSeq's frontend once to measure
+    what creating a class writes, exactly as the reference prerequisite does.
+
+Scope (a) is what the measurements above support today.

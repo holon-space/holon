@@ -132,14 +132,21 @@ pub struct Schema {
     cardinality_many: HashSet<String>,
 }
 
-/// DataScript's meta-attributes describe the schema itself and so are never
-/// listed inside it. They appear as datoms on property-definition entities, so
-/// the vocabulary check must admit them or a healthy graph fails to import.
-const SELF_DESCRIBING_NAMESPACE: &str = ":db/";
+/// Whether `ident` belongs to DataScript's meta-vocabulary.
+///
+/// These attributes describe the schema itself and so are never listed inside
+/// it. They appear as datoms on property-definition entities, so any check
+/// against the declared vocabulary must admit them or a healthy graph fails.
+///
+/// Takes the ident WITHOUT its leading colon, which is how the writer's trees
+/// spell it; the importer strips one.
+pub(crate) fn is_self_describing(ident: &str) -> bool {
+    ident.starts_with("db/")
+}
 
 impl Schema {
     fn declares(&self, ident: &str) -> bool {
-        self.declared.contains(ident) || ident.starts_with(SELF_DESCRIBING_NAMESPACE)
+        self.declared.contains(ident) || is_self_describing(ident.trim_start_matches(':'))
     }
 
     fn is_ref(&self, ident: &str) -> bool {
@@ -557,32 +564,22 @@ fn classify_entities(
     let mut all: HashSet<Eid> = HashSet::new();
     for datom in datoms {
         all.insert(datom.e);
+        // The three-leg rule is CALLED, never restated: the importer's only
+        // job here is to reduce its datom to the marker the rule reads.
+        if crate::built_in::marks_built_in(datom.into()) {
+            built_in.insert(datom.e);
+        }
         match (&datom.a, &datom.v) {
             (LogseqAttr::Uuid, _) => {
                 has_uuid.insert(datom.e);
             }
+            // A `:logseq.kv/*` ident is already built-in by the ident leg;
+            // this arm exists for the KvSingleton kind, which is a
+            // distinction the importer uses and the writer has no notion of.
             (LogseqAttr::DbIdent, DatomValue::Node(TransitNode::Keyword(name)))
                 if name.starts_with("logseq.kv/") =>
             {
                 kv_ident.insert(datom.e);
-                built_in.insert(datom.e);
-            }
-            // The same three legs as `kvs_writer::is_built_in`, read off
-            // LogSeq's datoms instead of the writer's trees. The namespace
-            // rule itself is NOT restated — it is called — so the two readers
-            // cannot drift on the part that was hardest to get right.
-            (LogseqAttr::DbIdent, DatomValue::Node(TransitNode::Keyword(name)))
-                if crate::kvs_writer::is_internal_ident(name) =>
-            {
-                built_in.insert(datom.e);
-            }
-            (LogseqAttr::Raw(ident), DatomValue::Node(TransitNode::Bool(true)))
-                if ident == ":logseq.property/built-in?" =>
-            {
-                built_in.insert(datom.e);
-            }
-            (LogseqAttr::Raw(ident), _) if ident == ":file/path" => {
-                built_in.insert(datom.e);
             }
             (LogseqAttr::Page, DatomValue::Ref(target)) => {
                 page_of.insert(datom.e, *target);
