@@ -1,0 +1,835 @@
+# The authored half of docs/Architecture/FeatureMap.md.
+#
+# Everything a human judges lives here: which features exist, how they group
+# into areas, the one-clause descriptions, the "ruled by" links, the mode axes,
+# the entry points, and the free-form notes. Everything a source of truth can
+# answer is derived at render time by scripts/featuremap.py — the transition
+# alphabet, the invariant id universe, the known-red statuses, and which of
+# those nothing here claims. Edit this file, then run:
+#
+#   python3 scripts/featuremap.py generate
+#
+# SCHEMA
+#   title, generated_banner, lead, unpinned_lead, unclaimed_lead,
+#   sources_lead, sources_closing  — scalars rendered verbatim.
+#   keystone_note   — a scalar with {transitions} / {invariants} / {families}
+#                     placeholders filled from the sources.
+#   sections[]      — {heading, body}: prose between the lead and the legend.
+#   legend[]        — {column, holds}: the legend table.
+#   source_table[]  — {content, source}: the "Sources" table.
+#   areas[]         — {name, rows[], open_reds[]?, note?}. `open_reds` names
+#                     keys from docs/Testing/KeystoneKnownReds.md; only rows
+#                     still at status `known-red` render.
+#   areas[].rows[]  — {feature, what, ruled_by, mode_axes, entry} required;
+#                     {transitions[], invariants[], pin_prefix, pin_note}
+#                     build the "Pinned by" cell; a row with no transitions and
+#                     no invariants MUST carry `unpinned` (a clause for the
+#                     Unpinned section) or `unpinned_exempt` (why it needs no
+#                     keystone pin). A pinned row may still carry `unpinned`
+#                     when only part of it is observed.
+#
+# The generator FAILS on a transition, invariant id, or known-red key that the
+# sources no longer declare — a rename is an error here, never a silent drop.
+#
+# FORMAT: a strict YAML subset (block mappings, `- ` sequences, `[a, b]` flow
+# sequences, plain and "quoted" scalars, `>` folded and `|` literal blocks).
+# Comments get their own line. Quote any value starting with `[`, `*` or `|`.
+
+title: Holon Feature Map
+
+generated_banner: >
+  GENERATED — edit [`featuremap.yaml`](featuremap.yaml), then run
+  `python3 scripts/featuremap.py generate`. `python3 scripts/featuremap.py check`
+  fails when this file and the pin sources disagree.
+
+lead: >
+  The one-page answer to *"which features could this change impact?"*. Rows are
+  user-visible features and cross-cutting aspects; columns say where each one is
+  **pinned** (what test fails if you break it), **ruled** (which decision governs
+  it), and **entered** (the one file to open first).
+
+sections:
+  - heading: How to use this
+    body: |
+      - **Before a refactoring discussion**, scan the area tables for anything your
+        change touches. A row with a pin is safe to change boldly — the keystone will
+        tell you. A row in [Unpinned features](#unpinned-features) is one you must
+        reason about by hand.
+      - **Pins are the currency.** A "Pinned by" cell names either a keystone
+        *transition* (what drives the feature) or an *invariant id* (what observes it).
+        Both are verbatim from code. Grep the name and you land on the test.
+      - **This is a map of pointers, not a spec.** Every cell should be one clause.
+        If you want the detail, follow the link.
+  - heading: How to keep it current
+    body: |
+      - A discussion that adds a feature adds a row to
+        [`featuremap.yaml`](featuremap.yaml) and regenerates.
+      - A new transition or invariant needs no edit to be visible: it appears under
+        [Unclaimed by any row](#unclaimed-by-any-row) until a row claims it.
+      - A row that moves out of [Unpinned features](#unpinned-features) is a small
+        celebration — note it in the PR that added the pin.
+      - **Stale links are bugs, and here they are fatal.** Generation refuses a row
+        naming a path, a link target, a transition, an invariant id, or a known-red
+        key that no longer resolves.
+
+legend:
+  - column: Pinned by
+    holds: >
+      Keystone transition struct names (`SplitBlock`) and/or invariant ids
+      (`inv-no-orphan-blocks`), verbatim from code. Transitions are declared by
+      `declare_e2e_transitions!` in
+      `crates/holon-integration-tests/src/pbt/transitions/`; invariant ids are
+      declared by their bodies and correspondence families and assembled in
+      `crates/holon-integration-tests/src/pbt/composed/catalog.rs`.
+  - column: Ruled by
+    holds: >
+      An ADR under [`docs/adr/`](../adr/), or an invariant number from
+      [Model.md](Model.md).
+  - column: Mode axes
+    holds: >
+      Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour
+      varies on: **Storage** (Loro store on/off), **File adapter** (org/none),
+      **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P
+      on/off). `—` means the feature behaves the same everywhere. *Headless vs
+      windowed* is a test-slice axis, not a product mode; it is called out in prose
+      where it matters.
+
+keystone_note: >
+  The composed keystone is
+  [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs).
+  Its alphabet is {transitions} transitions; the repo declares {invariants}
+  invariant ids plus {families} correspondence-family ids. Open reds are
+  registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red
+  listed there is a pass-with-note, anything else is a regression.
+
+areas:
+  - name: Block editing
+    rows:
+      - feature: Typing / text edit
+        what: Character keystrokes into a block's `MutableText`
+        transitions: [TypeChars, DeliverBlockContent]
+        invariants: ["inv-editor-text/mirror", "inv-block-content/block_raw"]
+        ruled_by: Model.md inv 12 (every field write resolves a cell backing)
+        mode_axes: Merge fidelity (op-CRDT vs LWW text backing)
+        entry: "`crates/holon-core/src/cell_registry.rs`"
+      - feature: Caret movement
+        what: Cursor keystrokes against `InputState`
+        transitions: [MoveCursor, ArrowNavigate]
+        invariants: ["inv-editor-caret/mirror"]
+        ruled_by: "[0010](../adr/0010-focus-authority-in-memory-signal.md) — focus is in-memory, never persisted"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/reactive_view_model.rs`"
+      - feature: Split block
+        what: Enter at cursor splits a block in two
+        transitions: [SplitBlock]
+        invariants: [inv-birth-contract-satisfied]
+        ruled_by: "[0030](../adr/0030-birth-atomicity-authority-and-mirror-contract.md) — births fire in the authority"
+        mode_axes: Storage (Loro mints vs SQL mints)
+        entry: "`crates/holon-integration-tests/src/pbt/transitions/split_block.rs`"
+      - feature: Join / backspace-merge
+        what: Backspace at start merges into the previous visible block
+        transitions: [JoinBlock, DeleteBackward]
+        ruled_by: "[0030](../adr/0030-birth-atomicity-authority-and-mirror-contract.md)"
+        mode_axes: Storage
+        entry: "`crates/holon-core/src/traits.rs` (`BlockOperations`)"
+      - feature: Indent / outdent
+        what: Chords reparenting a block among its siblings
+        transitions: [Indent, Outdent]
+        invariants: [inv-no-parent-cycles, inv-no-orphan-blocks]
+        ruled_by: "[0005](../adr/0005-children-as-ordered-list.md) — `sort_key` is an adapter detail"
+        mode_axes: Storage
+        entry: "`crates/holon-core/src/traits.rs`"
+      - feature: Reorder (chord + drag)
+        what: Alt+Up/Down and pointer drag move a block among siblings
+        transitions: [MoveUp, MoveDown, DragDropBlock]
+        invariants: [inv-birth-contract-satisfied]
+        ruled_by: >
+          Model.md inv 2, 3 — the consolidator mints every fractional index; intent
+          carries `after_sibling`, never an order key
+        mode_axes: Storage (Loro-fi vs `gen_key_between`)
+        entry: "`crates/holon-loro/src/loro_block_operations.rs`"
+      - feature: Structural ops as commit points
+        what: Pending editor text flushes through the merge path before a structural op runs
+        transitions: [Indent, Outdent, SplitBlock]
+        pin_note: all preceded by the flush
+        ruled_by: Model.md inv 8
+        mode_axes: Merge fidelity
+        entry: "[UI.md](UI.md)"
+      - feature: Undo
+        what: Engine undo restores the pre-mutation block tree
+        transitions: [UndoLastMutation]
+        invariants: [inv-undo-redo-reference-heal]
+        ruled_by: "[0031](../adr/0031-native-transition-catalog-and-macro-reification.md)"
+        mode_axes: Storage
+        entry: "`crates/holon-core/src/undo.rs`, `crates/holon/src/core/operation_log.rs`"
+      - feature: Redo
+        what: Redo re-executes the forward op and mints a **fresh** id
+        transitions: [Redo]
+        invariants: [inv-undo-redo-reference-heal]
+        ruled_by: "[0031](../adr/0031-native-transition-catalog-and-macro-reification.md)"
+        mode_axes: Storage
+        entry: "`crates/holon/src/core/operation_log.rs`"
+      - feature: Slash commands
+        what: Slash-menu keystroke sequence resolving to a command
+        transitions: [TriggerSlashCommand]
+        invariants: [inv-viewmodel-editable-text-triggers]
+        ruled_by: "[0024](../adr/0024-unified-action-execution.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/popup_menu.rs`"
+      - feature: Templates
+        what: A canned inline template instantiates into real blocks
+        transitions: [InstantiateTemplate]
+        ruled_by: "[0024](../adr/0024-unified-action-execution.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/popup_menu.rs`"
+    open_reds: [editor-text-mirror, editor-caret-mirror, movecursor-unopened-editor, split-id-no-pairing, syn-real-mint]
+    note: >
+      `syn-real-mint` is a block-loss detector, not a minting defect.
+
+  - name: Outline, rendering & widgets
+    rows:
+      - feature: Render pipeline
+        what: query → rows → `EntityProfile.resolve` → ViewModel tree → platform view
+        invariants: [inv-viewmodel-root-matches-render-expr, inv-viewmodel-snapshot, inv-frontend-root-not-error]
+        ruled_by: "[0018](../adr/0018-reactive-engine-viewmodel.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-api/src/entity_profile.rs`"
+      - feature: Widget catalog
+        what: Per-widget shadow builders (`board`, `card`, `state_toggle`, …)
+        invariants: [inv-viewmodel-no-error-widgets, "inv-displayed-text/viewmodel"]
+        ruled_by: "[0018](../adr/0018-reactive-engine-viewmodel.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/shadow_builders/`"
+      - feature: "`op_button`"
+        what: A row-bound button dispatching a named op with its params
+        pin_note: "*(none — see Unpinned)*"
+        ruled_by: "[0024](../adr/0024-unified-action-execution.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/shadow_builders/op_button.rs`"
+        unpinned: >
+          the widget that dispatches a named op with its params. No keystone
+          transition clicks one and no invariant observes the dispatch. Given
+          [ADR 0024](../adr/0024-unified-action-execution.md) makes ops the sole
+          action language, this is the most load-bearing unpinned row in the map.
+      - feature: "`pie_menu`"
+        what: Radial menu overlay; exempt from layout containment
+        pin_note: "*(only the layout-slice `assert_layout_ok` overflow allowance)*"
+        ruled_by: "[0026](../adr/0026-attention-environment-architecture.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/shadow_builders/pie_menu.rs`"
+        unpinned: >
+          only the layout slice touches it, and only as an *exemption* from the
+          containment assertion. Nothing checks that it renders correctly.
+      - feature: Popups
+        what: One `PopupMenu` behind slash commands, wiki-links, mentions
+        transitions: [TriggerSlashCommand]
+        invariants: [inv-viewmodel-editable-text-triggers]
+        ruled_by: "[0024](../adr/0024-unified-action-execution.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/popup_menu.rs`"
+      - feature: Collapse / expand
+        what: Chevron and click gestures flip a block's collapsed gate
+        transitions: [ToggleCollapse, ExpandToggle]
+        invariants: [inv-embedded-page-collapsed-lazy]
+        ruled_by: Model.md — `Mutable<T>` is per-render-slot, never registry-keyed
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/reactive_view_model.rs`"
+      - feature: Drawers
+        what: Property/metadata drawer open-close
+        transitions: [ToggleDrawer]
+        invariants: [inv-drawer-open-matches-ref]
+        ruled_by: "—"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/shadow_builders/`"
+      - feature: Inline text styling
+        what: Bold/italic/underline/strike/code/link marks at paint level
+        invariants: [inv-paint-text-styling, inv-mark-bounds-within-content]
+        ruled_by: "—"
+        mode_axes: "—"
+        entry: "`crates/holon-org-format/src/models.rs`"
+      - feature: Virtual slots / lazy rows
+        what: Off-screen rows are slots, not materialized widgets
+        invariants: [inv-viewmodel-tree-virtual-slots, inv-journal-feed-viewport-lazy]
+        ruled_by: "[0018](../adr/0018-reactive-engine-viewmodel.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/reactive_view_model.rs`"
+      - feature: Scroll & sticky headers
+        what: Two-mode wheel motion, occlusion routing, sticky accordion
+        transitions: [WheelScroll]
+        invariants: [inv-wheel-two-mode-motion-law, inv-wheel-occlusion-routing, inv-sticky-accordion-spec]
+        ruled_by: "[0026](../adr/0026-attention-environment-architecture.md)"
+        mode_axes: "—"
+        entry: "`frontends/gpui/src/` (windowed slice only)"
+      - feature: Advice weave
+        what: Top-K suppression-filtered advice rows woven at each anchor
+        invariants: [inv-advice-rows-woven]
+        ruled_by: >
+          [0021](../adr/0021-advice-suppression-storage-and-readonly-v1.md),
+          [0022](../adr/0022-runtime-definable-advice-rules.md),
+          [0023](../adr/0023-two-stage-relevance-app-layer-reranker.md)
+        mode_axes: "—"
+        entry: "`crates/holon/src/api/ui_watcher.rs`"
+      - feature: Display placement
+        what: A row shown somewhere it does not canonically live
+        invariants: [inv-display-placement-canonical-inert]
+        pin_note: env-gated on `HOLON_PBT_DISPLAY_PLACED`
+        ruled_by: "[0015](../adr/0015-computed-placement-and-curated-state-primitives.md) *(Proposed, not implemented)*"
+        mode_axes: "—"
+        entry: "[ADR 0015](../adr/0015-computed-placement-and-curated-state-primitives.md)"
+        unpinned: >
+          [ADR 0015](../adr/0015-computed-placement-and-curated-state-primitives.md)
+          is Proposed and unimplemented; the invariant exists but is inert unless
+          `HOLON_PBT_DISPLAY_PLACED` is set.
+    open_reds: [lib-displayed-text-nested-content-skipped]
+
+  - name: Navigation, focus & panes
+    rows:
+      - feature: Click-to-focus
+        what: Pointer click resolves a click intent and moves focus
+        transitions: [ClickBlock, FocusEditableText]
+        invariants: [inv-focus-matches-ref, inv-navigation-focus]
+        ruled_by: "[0010](../adr/0010-focus-authority-in-memory-signal.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/operations.rs`"
+      - feature: Page navigation
+        what: Navigating a region to a new focus root
+        transitions: [NavigateFocus]
+        invariants: [inv-focus-roots, inv-main-panel-rows-match-focus]
+        ruled_by: "[0016](../adr/0016-occurrence-keyed-focus-authority.md) *(Proposed)*"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/operations.rs`"
+      - feature: Back / forward / home
+        what: Per-region navigation history
+        transitions: [NavigateBack, NavigateForward, NavigateHome]
+        ruled_by: "[0010](../adr/0010-focus-authority-in-memory-signal.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/operations.rs`"
+      - feature: Open in tab
+        what: Cmd+click a sidebar page into a new tab
+        transitions: [OpenTabViaModifierClick]
+        ruled_by: "[0026](../adr/0026-attention-environment-architecture.md)"
+        mode_axes: "—"
+        entry: "`frontends/gpui/src/views/render_entity_view.rs`"
+      - feature: Pin to sidebar
+        what: Shift+click a bullet pins it to the right sidebar
+        transitions: [PinBlock, UnpinBlock]
+        pin_note: "*no invariant observes pinned state*"
+        ruled_by: "[0026](../adr/0026-attention-environment-architecture.md)"
+        mode_axes: "—"
+        entry: "`assets/default/types/block_profile.yaml` (`shift_action` wiring)"
+        unpinned: >
+          `PinBlock`/`UnpinBlock` drive the op, but no invariant reads pinned state
+          back. The open `lib-*pin*` known-reds live in exactly this hole.
+      - feature: Sidebar
+        what: Page list, watch-seeded, click routes to the main panel
+        transitions: [SwitchView]
+        invariants: [inv-sidebar-page-tag-preserved]
+        ruled_by: "—"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/shadow_builders/`"
+      - feature: View modes
+        what: Switching a region's view mode (outline / board / …)
+        transitions: [SwitchViewMode, SwitchView]
+        pin_note: the derived pair `inv_pair_view_selection_current_view()`
+        ruled_by: "[0018](../adr/0018-reactive-engine-viewmodel.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/reactive_view_model.rs`"
+    open_reds: [lib-nav-history-shift-action-region, lib-pin-block-right-sidebar-probe, lib-unpin-block-probe, lib-focus-roots-mismatch-right-sidebar, lib-right-sidebar-renders-pins, lib-sut-only-pin-not-caught, pinblock-unrendered-target, sidebar-focus-bind, lib-sidebar-pages-declared-order]
+    note: >
+      The pin / right-sidebar cluster is the largest open family in the registry:
+      one region-literal typo (`right` vs `right_sidebar`) accounts for all of it.
+
+  - name: Queries & projections
+    rows:
+      - feature: Query languages
+        what: PRQL / GQL / SQL, all compiled to plain SQL
+        invariants: [inv-viewmodel-decompiled-rows-match-query]
+        ruled_by: "[Architecture.md §Multi-Language Query Support](../Architecture.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-api/src/types.rs` (`QueryLanguage`)"
+      - feature: Degraded no-query mode
+        what: With no query engine, a block shows its source
+        invariants: [inv-viewmodel-shows-source-when-no-query, inv-source-language-iff-source]
+        ruled_by: "—"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/render_interpreter.rs`"
+      - feature: Filters
+        what: "`holon_filter` source blocks resolving to a typed `FilterSpec`"
+        invariants: [inv-filter-spec-resolves]
+        ruled_by: "—"
+        mode_axes: "—"
+        entry: "`crates/holon-turso/src/`"
+      - feature: Matviews / IVM
+        what: Incrementally maintained materialized views over blocks
+        invariants: [inv-matview-consistent-with-recompute, inv-typed-matview-matches-ref, "inv-matview-consistent-with-ref/root_layout"]
+        ruled_by: Model.md layer 3 — exactly one writer, verbatim and total
+        mode_axes: Storage
+        entry: "`crates/holon-turso/src/matview_manager.rs`"
+      - feature: CDC → LiveData
+        what: Convergent-state stream feeding cells and the ViewModel
+        invariants: [inv-live-children-match-ref, inv-live-tree-matches-fresh, inv-frontend-engine]
+        ruled_by: "[0018](../adr/0018-reactive-engine-viewmodel.md); Model.md layer 4"
+        mode_axes: Storage
+        entry: "`crates/holon-api/src/live_data.rs`"
+      - feature: Block history
+        what: An op-grounded history table over block writes
+        invariants: ["inv-history-no-phantom-rows/block_history", "inv-history-records-all-creates/block_history"]
+        ruled_by: "[0025](../adr/0025-op-grounded-projections.md)"
+        mode_axes: Storage
+        entry: "[Schema.md](Schema.md)"
+      - feature: Schema & typed entities
+        what: Runtime-declared types projected into their own matviews
+        transitions: [DeclareTypedSchema, CreateTypedEntity, RegisterEntityScheme, ConcurrentSchemaInit]
+        invariants: [inv-typed-matview-matches-ref]
+        ruled_by: "[0029](../adr/0029-entity-identity-single-minting-authority.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-turso/src/dynamic_schema_module.rs`"
+    open_reds: [history-ingest-create-unrecorded, history-join-phantom-row]
+
+  - name: Rules & automation
+    rows:
+      - feature: PN action language
+        what: Petri-net transitions are the sole action surface; Rhai-compiled guards
+        pin_note: "*(no keystone transition drives net firing directly)*"
+        ruled_by: >
+          [0024](../adr/0024-unified-action-execution.md),
+          [0017](../adr/0017-petri-net-task-ranking-engine.md)
+        mode_axes: "—"
+        entry: "`crates/holon-engine/src/`"
+        unpinned: >
+          the Petri-net engine has no keystone transition or invariant. Only
+          `holon_rule` blocks (the YAML rule surface) are pinned, via the journal
+          rule.
+      - feature: "`holon_rule` blocks"
+        what: "Single-block YAML rules with `when:`/`emit:` arcs"
+        transitions: [AdvanceDay]
+        invariants: [inv-journal-one-per-day]
+        ruled_by: "[0024 §7.2](../adr/0024-unified-action-execution.md)"
+        mode_axes: "—"
+        entry: "`crates/holon/src/api/holon_rule_watcher.rs`"
+      - feature: Query watches
+        what: Registering a query watch and its CDC subscription
+        transitions: [SetupWatch, RemoveWatch]
+        invariants: [inv-active-watches-match-ref, inv-watch-rows-match-ref]
+        ruled_by: "[0018](../adr/0018-reactive-engine-viewmodel.md)"
+        mode_axes: "—"
+        entry: "`crates/holon/src/api/action_watcher.rs`"
+      - feature: Task ranking
+        what: Task blocks materialized into a Petri net for WSJF ranking
+        pin_note: "*(no keystone invariant)*"
+        ruled_by: "[0017](../adr/0017-petri-net-task-ranking-engine.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-petri/src/lib.rs`"
+        unpinned: >
+          WSJF ranking over the task net is exercised by nothing in the keystone.
+      - feature: Task state cycle
+        what: "`state_toggle` click cycles a task through its states"
+        transitions: [ToggleState]
+        invariants: [inv-task-state-matches-ref, inv-task-state-storage-coherence, inv-viewmodel-state-toggle-correct]
+        ruled_by: "[0024](../adr/0024-unified-action-execution.md)"
+        mode_axes: Storage (the coherence twin needs the Loro task-state cap)
+        entry: "`crates/holon-frontend/src/shadow_builders/state_toggle.rs`"
+    open_reds: [task-state-storage-coherence, state-toggle-row-absent, watch-rows-cdc-parent]
+
+  - name: Storage & sync
+    rows:
+      - feature: Loro CRDT store
+        what: Durable replica with op history and frontiers
+        transitions: [SimulateRestart, CreateStaleLoro]
+        invariants: ["inv-blocks-match-ref/loro", inv-loro-children-match-ref, inv-loro-no-errors]
+        ruled_by: >
+          [0003](../adr/0003-all-in-lorotree-architecture.md) +
+          [amendment](../adr/0003-amendment-multi-tree.md)
+        mode_axes: Storage; Merge fidelity
+        entry: "`crates/holon-loro/src/loro_sync_controller.rs`"
+      - feature: Turso projection
+        what: Single-writer, total, verbatim projection of the consolidated tree
+        invariants: ["inv-blocks-match-ref/block_raw", "inv-blocks-match-ref/matview", "inv-block-parent/block_raw"]
+        ruled_by: Model.md inv 4, 5
+        mode_axes: Storage
+        entry: "`crates/holon-turso/src/turso.rs`"
+      - feature: SqlOnly mode
+        what: Loro store off; Turso-LWW is the consolidator
+        pin_note: >
+          *(whole keystone runs in both arms; SqlOnly deselects the Loro-cap
+          invariants — disclosed, not faked)*
+        ruled_by: Model.md §Four orthogonal mode axes
+        mode_axes: Storage; Merge fidelity
+        entry: "`crates/holon/src/core/sql_operation_provider.rs`"
+        unpinned_exempt: the whole keystone runs in both arms
+      - feature: Consolidator epoch guard
+        what: A mode flip without a base re-seed is refused at startup
+        transitions: [EpochFlipRejected]
+        ruled_by: Model.md inv 10
+        mode_axes: Storage
+        entry: "`crates/holon-app/src/consolidator_epoch.rs`"
+      - feature: Org file round-trip
+        what: Disk org → parse → blocks → render → byte-identical disk org
+        transitions: [WriteOrgFile, BulkExternalAdd, DenseProjectionEdit]
+        invariants: [inv-org-render-fixed-point, "inv-blocks-match-ref/org"]
+        ruled_by: >
+          [0014](../adr/0014-doc-scheme-retirement.md);
+          [ORG_SYNTAX.md](../Reference/ORG_SYNTAX.md)
+        mode_axes: File adapter
+        entry: "`crates/holon-org-format/src/models.rs`"
+      - feature: 3-way diff ingest
+        what: "Inbound intent is `diff(base, current)` per replica"
+        transitions: [StaleExternalRewrite, ExternalWriteWhileFocused, ExternalWriteSameBlockFocused]
+        ruled_by: Model.md inv 1, 6
+        mode_axes: File adapter; Merge fidelity
+        entry: "`crates/holon-orgmode/src/`"
+      - feature: Page identity / name chains
+        what: A page's file path is its chain of **page** ancestors
+        transitions: [RenamePage, BlockToPage, CreatePageAtFreedPath]
+        invariants: [inv-no-page-under-non-page, inv-every-page-has-its-own-file, inv-companion-has-no-child-page-headings]
+        ruled_by: "[Model.md §Page identity](Model.md) (Martin ruled Option A, keep-the-refusal)"
+        mode_axes: File adapter
+        entry: "`crates/holon-filesystem/src/sync_ports.rs`"
+      - feature: Documents & directories
+        what: Creating, renaming, deleting docs and dirs on disk
+        transitions: [CreateDocument, RenameDocument, DeleteDocument, CreateDirectory]
+        invariants: [inv-no-write-outside-vault-root]
+        ruled_by: "[0011](../adr/0011-filesystem-port-trait.md)"
+        mode_axes: File adapter
+        entry: "`crates/holon-filesystem/src/`"
+      - feature: Tombstones
+        what: A tombstone outlives every registered replica's base
+        pin_note: "*(no keystone invariant)*"
+        ruled_by: Model.md inv 9
+        mode_axes: Storage
+        entry: "[Replication.md](Replication.md)"
+        unpinned: >
+          stated as an invariant of the system (Model.md invariant 9), checked by no
+          invariant of the test suite. A premature GC would resurrect deleted blocks
+          on a stale replica's next diff.
+      - feature: P2P sync
+        what: Iroh transport carrying Loro deltas between devices
+        transitions: [AddPeer, PeerEdit, PeerCharEdit, SyncWithPeer, MergeFromPeer, SyncNow]
+        ruled_by: "[0001](../adr/0001-hybrid-sync-architecture.md); Model.md inv 11"
+        mode_axes: Transport
+        entry: "`crates/holon-loro/src/iroh_sync_adapter.rs`"
+      - feature: Git / jj vault init
+        what: Initializing version control over the vault directory
+        transitions: [GitInit, JjGitInit]
+        ruled_by: "—"
+        mode_axes: File adapter
+        entry: "`crates/holon-filesystem/src/`"
+    open_reds: [org-blocks-ref-diverge, org-render-echo-loop, page-without-own-file, loro-stable-id-missing, loro-frontier-height, delete-backward-merge-budget, lib-seed-wide-drift]
+    note: >
+      `org-blocks-ref-diverge` is half fixed — cause A (undo over-reverting
+      file-ingested content) is locked by a keystone regression; cause B, the
+      `::img::0` sub-block id remap, is open.
+
+  - name: Homes & re-homing
+    rows:
+      - feature: Home / capability profiles
+        what: Which durable format an entity lives in, derived (never stored)
+        invariants: [inv-home-profile-matches-derived]
+        ruled_by: >
+          [0012](../adr/0012-reference-model-capability-contract.md),
+          [0019](../adr/0019-capmap-dependency-injection.md)
+        mode_axes: File adapter
+        entry: "`crates/holon-capability/src/home.rs`"
+      - feature: "`rehome_entity`"
+        what: Moving a file-homed leaf into Holon's own storage
+        transitions: [RehomeEntity]
+        invariants: [inv-home-profile-matches-derived]
+        ruled_by: "[0019](../adr/0019-capmap-dependency-injection.md)"
+        mode_axes: File adapter
+        entry: "`crates/holon-app/src/rehome_entity.rs`"
+      - feature: Profile assets
+        what: The declarative profiles shipped with the app
+        pin_note: "*(consumed by every profile-resolving invariant)*"
+        ruled_by: "[RenderPipeline.md](RenderPipeline.md)"
+        mode_axes: "—"
+        entry: "`assets/default/types/`, `assets/default/capability/holon-native.yaml`"
+        unpinned_exempt: consumed by every profile-resolving invariant
+
+  - name: Integrations
+    rows:
+      - feature: MCP client sidecars
+        what: YAML-declared external connectors bridged to `OperationProvider`
+        transitions: [EmitMcpData]
+        pin_note: CDC re-eval / duplicate detection only
+        ruled_by: >
+          [0001](../adr/0001-hybrid-sync-architecture.md),
+          [0006](../adr/0006-actor-terminology-and-mcp-dual-role.md)
+        mode_axes: "—"
+        entry: "`crates/holon-mcp-client/src/mcp_sidecar.rs`"
+      - feature: Todoist
+        what: "The reference connector: REST transport, OAuth2, sync policy, undo"
+        pin_note: "*(none — see Unpinned)*"
+        ruled_by: "[Integrations.md](Integrations.md)"
+        mode_axes: "—"
+        entry: "`assets/integrations/todoist.yaml`"
+        unpinned: >
+          `EmitMcpData` covers CDC re-emission only. Nothing exercises the reference
+          connector's sync, auth, write-back, or undo.
+      - feature: Other sidecars
+        what: gcal, gmail, claude-history, jsonplaceholder
+        pin_note: "*(none)*"
+        ruled_by: "[Integrations.md](Integrations.md)"
+        mode_axes: "—"
+        entry: "`assets/integrations/`"
+        unpinned: >
+          the same hole as Todoist, once per connector.
+      - feature: Write authorization
+        what: What an integration is permitted to write back
+        pin_note: "*(none in the keystone)*"
+        ruled_by: "[0028](../adr/0028-sharing-policy-overlay.md) (adjacent)"
+        mode_axes: "—"
+        entry: "`crates/holon-mcp-client/src/write_authorization.rs`"
+        unpinned: >
+          no keystone coverage of what a connector may write back.
+      - feature: LogSeq DB import
+        what: "Reads a LogSeq DB graph (Transit-JSON in SQLite `kvs`) into blocks"
+        pin_note: "*(standalone test `logseq_db_import_store.rs`, not the keystone)*"
+        ruled_by: "—"
+        mode_axes: File adapter
+        entry: "`crates/holon-logseq-db/src/ingest.rs`"
+        unpinned: >
+          covered by standalone crate tests, not by the keystone, so no
+          cross-subsystem interaction is exercised.
+      - feature: LogSeq write-back
+        what: "Pushes title and `:block/tags` changes back as LogSeq tail transactions"
+        pin_note: "*(standalone tests only)*"
+        ruled_by: "—"
+        mode_axes: File adapter
+        entry: "`crates/holon-logseq-db/src/kvs_writer.rs`"
+        unpinned: >
+          the write leg has the same standalone-only coverage as the import leg.
+
+  - name: Journals, tags & properties
+    rows:
+      - feature: Daily journal pages
+        what: The `daily_journal` rule emits exactly one page per calendar day
+        transitions: [AdvanceDay]
+        invariants: [inv-journal-one-per-day]
+        ruled_by: "[0024 §6](../adr/0024-unified-action-execution.md)"
+        mode_axes: File adapter
+        entry: "`crates/holon/src/api/holon_rule_watcher.rs`"
+      - feature: Journals feed
+        what: Day pages expand exactly while inside the rendered window
+        invariants: [inv-journal-feed-viewport-lazy]
+        ruled_by: "[0018](../adr/0018-reactive-engine-viewmodel.md)"
+        mode_axes: "—"
+        entry: "*(windowed slice only)*"
+      - feature: Tags
+        what: "`Block.tags`, an edge field backed by the `block_tags` junction"
+        transitions: [SetEdgeField]
+        invariants: [inv-block-tags-references-exist]
+        ruled_by: "[0005](../adr/0005-children-as-ordered-list.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-api/src/block.rs`"
+      - feature: The `Page` tag
+        what: The literal tag that makes a block a page
+        invariants: [inv-sidebar-page-tag-preserved, inv-no-page-under-non-page]
+        ruled_by: "[Model.md §Page identity](Model.md)"
+        mode_axes: File adapter
+        entry: "`crates/holon-api/src/block.rs`"
+      - feature: Org properties
+        what: Drawer key/values round-tripping through the store
+        invariants: ["inv-blocks-match-ref/org"]
+        ruled_by: "[CompassConventions.md](../Reference/CompassConventions.md)"
+        mode_axes: File adapter
+        entry: "`crates/holon-org-format/src/models.rs`"
+    note: >
+      Known hazards, not bugs to re-discover: `_`-prefixed property **keys** are
+      erased on write-back, and an empty property value drops its key entirely
+      (`crates/holon-org-format/src/models.rs`). Authored drawer order **survives**
+      both production write legs via the `_drawer_order` carrier.
+
+  - name: Sharing
+    rows:
+      - feature: Policy overlay
+        what: Sharing is a policy overlay over aligned containers
+        transitions: [ShareContainer]
+        invariants: [inv-audience-never-over-approximates]
+        ruled_by: "[0028](../adr/0028-sharing-policy-overlay.md)"
+        mode_axes: Transport
+        entry: "`crates/holon-sharing/src/policy.rs`"
+      - feature: Two-instance convergence
+        what: The receiver holds exactly what the owner's policy sanctions
+        transitions: [SyncNow]
+        invariants: [inv-two-instance-convergence]
+        pin_note: "*two-instance slice only*"
+        ruled_by: "[0028](../adr/0028-sharing-policy-overlay.md)"
+        mode_axes: Transport
+        entry: "`crates/holon-integration-tests/tests/two_instance_composed_pbt.rs`"
+      - feature: Crossing log & arbitration
+        what: Owner-scoped totally-ordered log with deterministic conflict resolution
+        pin_note: "`tests/inc4_pbt.rs` (crate-local, not the keystone)"
+        ruled_by: "[0028](../adr/0028-sharing-policy-overlay.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-sharing/src/log.rs`"
+        unpinned_exempt: crate-local `tests/inc4_pbt.rs`
+      - feature: Alias ledger
+        what: Owner-private old-id → new-id succession chains
+        pin_note: "`tests/inc56_pbt.rs` (crate-local)"
+        ruled_by: "[0028](../adr/0028-sharing-policy-overlay.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-sharing/src/alias_ledger.rs`"
+        unpinned_exempt: crate-local `tests/inc56_pbt.rs`
+      - feature: Mount boundary
+        what: A shared subtree's org file is a one-way projection sink
+        pin_note: >
+          *(oracles are taught to MAP the Loro↔SQL shape difference; no dedicated
+          invariant)*
+        ruled_by: Model.md inv 11 (disclosed exception)
+        mode_axes: Transport; File adapter
+        entry: "[Model.md](Model.md)"
+        unpinned_exempt: the oracles map the shape difference instead
+      - feature: Encrypted relay
+        what: Server-blind relay transport
+        pin_note: "*(design only)*"
+        ruled_by: "[EncryptedRelaySync.md](EncryptedRelaySync.md) — design discussion captured 2026-07-20"
+        mode_axes: Transport
+        entry: "*(not implemented)*"
+        unpinned: >
+          design only, nothing built.
+    note: >
+      Ratified design; increments 4–6 exist in code, the end-to-end feature does
+      not ship yet.
+
+  - name: Latency & budgets
+    rows:
+      - feature: Interaction latency SLO
+        what: p95 interaction → projection-visible under 200ms
+        invariants: [inv-settle-budget]
+        ruled_by: "Project rule (CLAUDE.md): a breach is a **bug**, triaged into the bug funnel"
+        mode_axes: Storage
+        entry: "`crates/holon-integration-tests/src/pbt/invariants/bodies/settle_budget.rs`"
+      - feature: SQL / wall / RSS budget
+        what: Per-transition resource ceiling
+        invariants: [inv-sql-budget]
+        pin_note: "`otel-testing` feature"
+        ruled_by: "—"
+        mode_axes: Storage
+        entry: "`crates/holon-integration-tests/src/pbt/transition_budgets.rs`"
+      - feature: Complexity-class trend
+        what: An O(1)-claiming transition must not grow with sequence position
+        invariants: [inv-complexity-class-trend]
+        pin_note: "*observe-only until `HOLON_TREND_BUDGET=1`*"
+        ruled_by: "—"
+        mode_axes: "—"
+        entry: "`crates/holon-integration-tests/src/pbt/complexity_trend.rs`"
+      - feature: Steady-state reseed
+        what: No interactive transition triggers an O(N) full reseed
+        invariants: [inv-no-steady-reseed-leak]
+        pin_note: "*observe-only until `HOLON_PBT_RESEED_ORACLE=enforce`*; soak rung `soak_reseed_reproduction`"
+        ruled_by: "—"
+        mode_axes: Storage
+        entry: "`crates/holon-integration-tests/src/pbt/composed/reseed_observer.rs`"
+      - feature: Navigation at vault scale
+        what: Cold focus-descendant matview cost at ~2000 blocks
+        pin_note: soak rung `soak_nav_latency`
+        ruled_by: "—"
+        mode_axes: Storage
+        entry: "`crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs`"
+        unpinned_exempt: covered by the soak rung, outside the keystone's scale
+      - feature: Swallowed errors
+        what: No ERROR-level event or panic escaped a transition
+        invariants: [inv-no-errors, inv-no-observed-errors, inv-no-declared-column-absent]
+        pin_note: "*the last observe-only*"
+        ruled_by: CLAUDE.md — never swallow errors
+        mode_axes: "—"
+        entry: "`crates/holon-integration-tests/src/pbt/invariants/bodies/no_errors.rs`"
+    note: >
+      The keystone's own scale is small (a 3-block focus doc), so the vault-scale
+      behaviours above are only reachable through the soak rungs. That is the single
+      biggest structural blind spot in the pin coverage.
+
+  - name: Frontends
+    rows:
+      - feature: GPUI desktop (macOS)
+        what: The primary frontend
+        pin_prefix: "Windowed slice"
+        invariants: [inv-frontend-bounds-rendered, inv-window-focus-matches-engine-focus, inv-live-block-shell-present, inv-inline-row-mount-present, inv-paint-text-styling, "inv-displayed-text/widget"]
+        ruled_by: "[0026](../adr/0026-attention-environment-architecture.md)"
+        mode_axes: "—"
+        entry: "`frontends/gpui/src/`"
+      - feature: iOS
+        what: GPUI core in a native shell
+        pin_note: "*(none in the keystone)*"
+        ruled_by: "—"
+        mode_axes: "—"
+        entry: "`frontends/gpui/ios/`"
+        unpinned: >
+          the native shell has no automated coverage; the shared GPUI core is covered
+          only through the macOS windowed slice.
+      - feature: Android
+        what: GPUI core in a native shell with a Java text-input view
+        pin_note: "*(none in the keystone)*"
+        ruled_by: "—"
+        mode_axes: "—"
+        entry: "`frontends/gpui/android/`"
+        unpinned: >
+          same as iOS, plus the Java text-input view no test drives.
+      - feature: Dioxus web
+        what: Backend + engine in a Web Worker, DOM on the main thread
+        pin_note: "`tests/web_arm_keystone.rs`"
+        ruled_by: "—"
+        mode_axes: "—"
+        entry: "`frontends/dioxus-web/`"
+        unpinned_exempt: its own arm keystone, `tests/web_arm_keystone.rs`
+      - feature: MCP server frontend
+        what: Every frontend launches one; also the live-PBT driver
+        pin_note: "`general_e2e_composed_pbt_live_mcp` *(gated on `HOLON_PBT_LIVE_MCP`)*"
+        ruled_by: "[0006](../adr/0006-actor-terminology-and-mcp-dual-role.md)"
+        mode_axes: "—"
+        entry: "`frontends/mcp/src/tools.rs`"
+        unpinned_exempt: the live-MCP keystone run drives it end to end
+      - feature: TUI
+        what: Terminal frontend
+        pin_note: "*(none)*"
+        ruled_by: "—"
+        mode_axes: "—"
+        entry: "`frontends/tui/`"
+        unpinned_exempt: tracked as the open red `tui-focus-propagate`
+      - feature: Shared ViewModel layer
+        what: The platform-agnostic layer all frontends consume
+        pin_note: The whole headless keystone
+        ruled_by: "[0018](../adr/0018-reactive-engine-viewmodel.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-frontend/src/reactive_view_model.rs`"
+        unpinned_exempt: every headless invariant observes this layer
+    open_reds: [tui-focus-propagate]
+
+unpinned_lead: >
+  Rows above whose coverage a human judged incomplete. No automated test drives
+  these — a change here is only as safe as the reasoning behind it.
+
+unclaimed_lead: >
+  Declared in the sources, claimed by no row above. A new transition or invariant
+  lands here automatically, so a coverage gap never depends on someone
+  remembering to write it down.
+
+sources_lead: >
+  Every derived part of this page, and where it comes from.
+
+source_table:
+  - content: The transition list
+    source: >
+      `declare_e2e_transitions!` in
+      `crates/holon-integration-tests/src/pbt/transitions/mod.rs` — an arch test
+      already asserts one file per variant.
+  - content: One-clause descriptions of unclaimed names
+    source: >
+      the `@pbt covers <slug> — <clause>` annotation of the module that declares
+      the transition or the invariant id.
+  - content: The invariant id universe
+    source: >
+      every `InvariantId("inv-…")` body, `capability_pair!` id override, and
+      correspondence-family `id: "inv-…"` under `crates/`.
+  - content: Open reds per area
+    source: >
+      [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a key is listed
+      only while its `Status` is `known-red`.
+  - content: Path and link freshness
+    source: >
+      the working tree; a cell naming a file that does not exist fails generation.
+
+sources_closing: >
+  What stays hand-written in [`featuremap.yaml`](featuremap.yaml): the grouping of
+  transitions and invariants into features Martin would name, the one-clause
+  descriptions, and the "Ruled by" column linking each to its decision.
