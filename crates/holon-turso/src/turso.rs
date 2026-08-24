@@ -2322,6 +2322,7 @@ impl TursoBackend {
             rowid: i64,
             columns: usize,
             consequence: &str,
+            cause: &dyn std::fmt::Display,
         ) {
             tracing::error!(
                 relation = %relation,
@@ -2329,25 +2330,28 @@ impl TursoBackend {
                 change_kind = kind,
                 columns = columns,
                 consequence = consequence,
-                "CDC change record failed to parse, so consumers of this relation are now out \
+                cause = %cause,
+                "CDC change record failed to decode, so consumers of this relation are now out \
                  of sync with it. DISCLOSED on the batch's `degraded` field."
             );
             failures.push(format!(
-                "{kind} on '{relation}' rowid={rowid} ({columns}-column schema): {consequence}"
+                "{kind} on '{relation}' rowid={rowid} ({columns}-column schema): {consequence} \
+                 [decode error: {cause}]"
             ));
         }
 
         for change in event.changes.iter() {
             let change_data = match &change.change {
-                DatabaseChangeType::Insert { .. } => {
-                    if let Some(values) = change.parse_record() {
+                DatabaseChangeType::Insert { .. } => match change.parse_record() {
+                    Ok(values) => {
                         let mut data =
                             TursoBackend::parse_row_values_with_schema(&values, &columns);
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
                         let origin = extract_change_origin_from_data(&data);
                         record(&mut origins, &origin);
                         ChangeData::Created { data, origin }
-                    } else {
+                    }
+                    Err(e) => {
                         note_parse_failure(
                             &mut parse_failures,
                             &event.relation_name,
@@ -2355,12 +2359,13 @@ impl TursoBackend {
                             change.id,
                             columns.len(),
                             "row omitted from this batch entirely",
+                            &e,
                         );
                         continue;
                     }
-                }
-                DatabaseChangeType::Update { .. } => {
-                    if let Some(values) = change.parse_record() {
+                },
+                DatabaseChangeType::Update { .. } => match change.parse_record() {
+                    Ok(values) => {
                         let mut data =
                             TursoBackend::parse_row_values_with_schema(&values, &columns);
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
@@ -2378,7 +2383,8 @@ impl TursoBackend {
                             data,
                             origin,
                         }
-                    } else {
+                    }
+                    Err(e) => {
                         note_parse_failure(
                             &mut parse_failures,
                             &event.relation_name,
@@ -2386,12 +2392,13 @@ impl TursoBackend {
                             change.id,
                             columns.len(),
                             "row omitted from this batch entirely",
+                            &e,
                         );
                         continue;
                     }
-                }
-                DatabaseChangeType::Delete { .. } => {
-                    if let Some(values) = change.parse_record() {
+                },
+                DatabaseChangeType::Delete { .. } => match change.parse_record() {
+                    Ok(values) => {
                         let mut data =
                             TursoBackend::parse_row_values_with_schema(&values, &columns);
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
@@ -2408,7 +2415,8 @@ impl TursoBackend {
                             id: entity_id,
                             origin,
                         }
-                    } else {
+                    }
+                    Err(e) => {
                         // The delete still has to go out — withholding it leaves
                         // a deleted row on screen — but keyed by rowid it matches
                         // no widget, so the batch is disclosed as degraded.
@@ -2420,6 +2428,7 @@ impl TursoBackend {
                             columns.len(),
                             "delete IS in this batch but keyed by rowid, which matches no \
                              widget — the row stays on screen",
+                            &e,
                         );
                         ChangeData::Deleted {
                             id: change.id.to_string(),
@@ -2429,7 +2438,7 @@ impl TursoBackend {
                             },
                         }
                     }
-                }
+                },
             };
 
             raw_changes.push(RowChange {

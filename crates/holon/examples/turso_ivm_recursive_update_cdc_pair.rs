@@ -122,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
             // Try to recover the row's `id` column for clarity in the printout.
             let id = change
                 .parse_record()
+                .ok()
                 .and_then(|values| {
                     event
                         .columns

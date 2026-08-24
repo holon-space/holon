@@ -120,10 +120,13 @@ async fn main() -> anyhow::Result<()> {
             };
             // Try to parse the record using parse_record() — the same path
             // process_cdc_event takes — and see what keys land.
-            let parsed_keys: Vec<String> = change
-                .parse_record()
-                .map(|values| values.iter().map(|v| format!("{:?}", v)).collect())
-                .unwrap_or_default();
+            // An empty list would otherwise read the same whether the record
+            // held no values or failed to decode — which this repro exists to
+            // tell apart.
+            let parsed_keys: Vec<String> = match change.parse_record() {
+                Ok(values) => values.iter().map(|v| format!("{:?}", v)).collect(),
+                Err(e) => vec![format!("<decode failed: {e}>")],
+            };
             recorder.lock().unwrap().push(CdcRecord {
                 relation: event.relation_name.clone(),
                 change_type,
