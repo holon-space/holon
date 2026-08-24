@@ -5857,6 +5857,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-net"
+version = "0.1.0"
+dependencies = [
+ "holon-api",
+ "holon-core",
+ "holon-pattern",
+ "holon-rules",
+ "proptest 1.11.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-oracles"
 version = "0.1.0"
 dependencies = [
