@@ -79,6 +79,18 @@ pub struct KindDelta {
     pub existence: ExistenceFlow,
 }
 
+impl KindDelta {
+    /// Whether any aspect's flow moves tokens — anything beyond
+    /// `Untouched`/`Reads`.
+    pub fn moves_tokens(&self) -> bool {
+        !matches!(
+            self.structural,
+            StructuralFlow::Untouched | StructuralFlow::Reads
+        ) || matches!(self.text, TextFlow::Produces)
+            || matches!(self.existence, ExistenceFlow::Produces)
+    }
+}
+
 /// An operation's declared marking delta. Non-defaultable, following the
 /// [`crate::arcs::TransitionArcs`] house pattern.
 /// flutter_rust_bridge:non_opaque
@@ -108,6 +120,21 @@ impl MarkingDelta {
             MarkingDelta::Undeclared => None,
             MarkingDelta::Static { kinds } | MarkingDelta::Envelope { kinds, .. } => Some(kinds),
         }
+    }
+
+    /// The declared kinds whose flows move tokens of an authority-reserved
+    /// relation ([`crate::arcs::AUTHORITY_RESERVED_RELATIONS`]) — a marking
+    /// delta that would mint capabilities.
+    pub fn authority_reserved_writes(&self) -> Vec<&ArcRelation> {
+        self.kinds()
+            .map(|kinds| {
+                kinds
+                    .iter()
+                    .filter(|k| k.kind.is_authority_reserved() && k.moves_tokens())
+                    .map(|k| &k.kind)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The declaration for one kind, if this op declares one for it.
@@ -483,6 +510,51 @@ mod tests {
             delta.check_observation(&ArcRelation::block(), &text_moved),
             Err(DeltaViolation::Text { .. })
         ));
+    }
+
+    /// Reading authorization state is legal; a delta that moves its tokens is
+    /// reported — the anti-laundering reservation.
+    #[test]
+    fn a_delta_moving_authority_reserved_tokens_is_reported() {
+        let reading = MarkingDelta::Static {
+            kinds: vec![KindDelta {
+                kind: ArcRelation::new("membership"),
+                structural: StructuralFlow::Reads,
+                text: TextFlow::Reads,
+                existence: ExistenceFlow::Reads,
+            }],
+        };
+        assert!(reading.authority_reserved_writes().is_empty());
+
+        let minting = MarkingDelta::Static {
+            kinds: vec![
+                KindDelta {
+                    kind: ArcRelation::new("membership"),
+                    structural: StructuralFlow::Produces,
+                    text: TextFlow::Untouched,
+                    existence: ExistenceFlow::Untouched,
+                },
+                KindDelta {
+                    kind: ArcRelation::block(),
+                    structural: StructuralFlow::Relocates,
+                    text: TextFlow::Untouched,
+                    existence: ExistenceFlow::Reads,
+                },
+            ],
+        };
+        assert_eq!(
+            minting
+                .authority_reserved_writes()
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>(),
+            vec!["membership"]
+        );
+        assert!(
+            MarkingDelta::Undeclared
+                .authority_reserved_writes()
+                .is_empty()
+        );
     }
 
     /// `Undeclared` and a declaration with no kinds are distinguishable, which

@@ -1078,7 +1078,11 @@ impl DispatchingOperationEngine {
             // states it.
             mp.insert(
                 crate::api::net_guard::CONFIRM_BREAK_PARAM.into(),
-                Value::Boolean(true),
+                Value::String(
+                    crate::api::net_guard::ConfirmableClass::MachineryContainment
+                        .as_str()
+                        .to_string(),
+                ),
             );
             match &prev {
                 Some(pid) => {
@@ -1847,7 +1851,11 @@ impl DispatchingOperationEngine {
             // delta cannot show that, so this loop states it.
             mp.insert(
                 crate::api::net_guard::CONFIRM_BREAK_PARAM.into(),
-                Value::Boolean(true),
+                Value::String(
+                    crate::api::net_guard::ConfirmableClass::MachineryContainment
+                        .as_str()
+                        .to_string(),
+                ),
             );
             let (fwd, inv, ch) = self.dispatch_merge_constituent("move_block", mp).await?;
             forwards.push(fwd);
@@ -1881,7 +1889,11 @@ impl DispatchingOperationEngine {
                     // above does.
                     mp.insert(
                         crate::api::net_guard::CONFIRM_BREAK_PARAM.into(),
-                        Value::Boolean(true),
+                        Value::String(
+                            crate::api::net_guard::ConfirmableClass::MachineryContainment
+                                .as_str()
+                                .to_string(),
+                        ),
                     );
                     let (fwd, inv, ch) = self.dispatch_merge_constituent("move_block", mp).await?;
                     forwards.push(fwd);

@@ -146,9 +146,10 @@ site (`operation_dispatcher.rs:911-915`) — not a new interceptor abstraction
 (Concerns §1). **Ruled (D12.a, 2026-08-24): the net guard stays a distinct
 gate.** It overlaps `GuardWorld` conceptually — both are enabledness — so both
 seams carry a comment stating when and how they unify: *when* the derived
-projection exists and lived experience shows the declared-guard predicates are
-expressible as net arcs, *how* by generalizing `GuardWorld` to marking-aware
-whole-delta evaluation and folding the net guard into it (Concerns §2).
+projection exists and the two primitives of deferred item 6 make the
+declared-guard predicates expressible as net arcs, *how* by generalizing
+`GuardWorld` to marking-aware whole-delta evaluation and folding the net guard
+into it (Concerns §2).
 
 **First policy: the placement-and-capability move guard.** A move is refused
 when either half fails:
@@ -181,6 +182,15 @@ when either half fails:
   a merge verdict that overrides a local firing surfaces as a **visible
   environment event in the journal** — a lost claim is something a
   compensation rule can fire on, never silent marking drift.
+
+**Authorization-relevant predicates read the store, never the derived
+projection.** The projection lags its sources — cold start, IVM catch-up — and
+a subject the projection cannot classify tempts a guard toward "confirm",
+because the pressure toward fail-open is latency and latency is permanent. A
+predicate whose refusal protects capability therefore evaluates against
+durable state, and where the store cannot answer, it refuses. A
+convenience policy may still choose the projection and fail open; an
+authorization policy may not.
 
 ### 4. Tokens are aspect-granular
 
@@ -410,6 +420,15 @@ the projection exists and the two vocabularies have been lived with.
 4. **`OperationDescriptor` → `Transition` rename.**
 5. **Quiescence detection and cross-rule fairness.** The net guard reserves
    the arbiter slot (§3); the policies that would occupy it are not chosen.
+6. **The declared-guard → arc-language merge gate.** Two primitives the arc
+   language deliberately lacks decide whether declared guards can ever compile
+   to arcs: a **correlated place predicate (relational hop)** — a place
+   definition that references a second entity's attributes, correlated per
+   firing (the shape of `parent(...)` guards) — and an **inhibitor over an
+   uncorrelated place** — emptiness of a place as an enabledness condition
+   (the shape of negated `block_exists`). The unification in §3 is on the
+   table only when both are expressible as arcs; while either is missing,
+   declared guards stay a guard-side language.
 
 ## Consequences
 

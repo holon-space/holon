@@ -28,6 +28,14 @@ use serde::Serialize;
 use crate::schema::BuiltinSchemas;
 use crate::schema::SchemaSource;
 
+/// Relations that carry authorization state — who may act (`session`) and
+/// what they may touch (`membership`). A transition may read them; only the
+/// sharing ingress writes them, so no operation descriptor may declare an
+/// out-arc or a marking delta into them. The catalog lock
+/// (`crates/holon-app/tests/authority_place_reservation.rs`) enforces this
+/// over every registered op.
+pub const AUTHORITY_RESERVED_RELATIONS: &[&str] = &["membership", "session"];
+
 /// The relation an arc names — an entity type, by name. Open: a relation that
 /// exists only at runtime is as representable as `block`, and is checked
 /// against its own schema at registration time.
@@ -56,6 +64,11 @@ impl ArcRelation {
     /// [`ArcPlace::parse`].
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Whether this relation is one of [`AUTHORITY_RESERVED_RELATIONS`].
+    pub fn is_authority_reserved(&self) -> bool {
+        AUTHORITY_RESERVED_RELATIONS.contains(&self.0.as_str())
     }
 }
 
@@ -266,6 +279,20 @@ impl TransitionArcs {
             TransitionArcs::Declared { reads, emits } => reads
                 .iter()
                 .chain(emits.iter().map(ArcEmit::place))
+                .collect(),
+        }
+    }
+
+    /// The out-arc places naming an authority-reserved relation. Written or
+    /// excluded, both are the descriptor claiming a write path into
+    /// authorization state — an emit that would mint capabilities.
+    pub fn authority_reserved_emits(&self) -> Vec<&ArcPlace> {
+        match self {
+            TransitionArcs::Undeclared => Vec::new(),
+            TransitionArcs::Declared { emits, .. } => emits
+                .iter()
+                .map(ArcEmit::place)
+                .filter(|p| p.relation.is_authority_reserved())
                 .collect(),
         }
     }
@@ -493,6 +520,49 @@ mod tests {
             }
             .emits(),
             Some(&[][..])
+        );
+    }
+
+    /// Reading authorization state is legal; any out-arc into it — written or
+    /// excluded — is reported. The anti-laundering reservation.
+    #[test]
+    fn an_out_arc_into_an_authority_reserved_relation_is_reported() {
+        let reading = TransitionArcs::Declared {
+            reads: vec![
+                ArcPlace::new("membership", "grantee"),
+                ArcPlace::new("session", "principal"),
+            ],
+            emits: vec![ArcEmit::Writes(
+                ArcPlace::parse("block.content").expect("parses"),
+            )],
+        };
+        assert!(reading.authority_reserved_emits().is_empty());
+
+        let minting = TransitionArcs::Declared {
+            reads: vec![],
+            emits: vec![
+                ArcEmit::Writes(ArcPlace::new("membership", "grantee")),
+                ArcEmit::Excluded {
+                    place: ArcPlace::new("session", "principal"),
+                    reason: "written through an unmodeled seam".to_string(),
+                },
+            ],
+        };
+        assert_eq!(
+            minting
+                .authority_reserved_emits()
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                "membership.grantee".to_string(),
+                "session.principal".to_string()
+            ]
+        );
+        assert!(
+            TransitionArcs::Undeclared
+                .authority_reserved_emits()
+                .is_empty()
         );
     }
 

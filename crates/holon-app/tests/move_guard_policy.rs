@@ -173,14 +173,14 @@ async fn move_block(
     engine: &holon::api::BackendEngine,
     id: &str,
     parent_id: &str,
-    confirm_break: bool,
+    confirm_break: Option<&str>,
 ) -> anyhow::Result<()> {
     let mut p: HashMap<Arc<str>, Value> = HashMap::new();
     p.insert(Arc::from("id"), Value::String(id.to_string()));
     p.insert(Arc::from("parent_id"), Value::String(parent_id.to_string()));
     p.insert(Arc::from("after_block_id"), Value::Null);
-    if confirm_break {
-        p.insert(Arc::from("confirm_break"), Value::Boolean(true));
+    if let Some(class) = confirm_break {
+        p.insert(Arc::from("confirm_break"), Value::String(class.to_string()));
     }
     engine
         .execute_operation(
@@ -250,7 +250,7 @@ fn machinery_may_not_move_to_a_heading_in_another_page() {
         .await;
         seed_two_pages_one_rule(&engine).await;
 
-        let err = move_block(&engine, "block:rule", "block:elsewhere", false)
+        let err = move_block(&engine, "block:rule", "block:elsewhere", None)
             .await
             .expect_err("separating a rule head from its owning heading must be refused");
 
@@ -260,8 +260,9 @@ fn machinery_may_not_move_to_a_heading_in_another_page() {
             "the refusal must name what it protects: {err}"
         );
         assert!(
-            err.contains("confirm_break"),
-            "an overridable refusal must name the override: {err}"
+            err.contains("confirm_break") && err.contains("machinery_containment"),
+            "an overridable refusal must name the override AND the class a \
+             confirmation has to be minted for: {err}"
         );
         assert_eq!(
             parent_of(&engine, "block:rule").await,
@@ -285,9 +286,14 @@ fn a_confirmed_caller_may_separate_machinery_anyway() {
         .await;
         seed_two_pages_one_rule(&engine).await;
 
-        move_block(&engine, "block:rule", "block:elsewhere", true)
-            .await
-            .expect("an explicit confirmation carries the move through");
+        move_block(
+            &engine,
+            "block:rule",
+            "block:elsewhere",
+            Some("machinery_containment"),
+        )
+        .await
+        .expect("a confirmation minted for the machinery refusal carries the move through");
 
         assert_eq!(parent_of(&engine, "block:rule").await, "block:elsewhere");
     });
@@ -307,7 +313,7 @@ fn ordinary_content_moves_between_pages_freely() {
         .await;
         seed_two_pages_one_rule(&engine).await;
 
-        move_block(&engine, "block:plain", "block:elsewhere", false)
+        move_block(&engine, "block:plain", "block:elsewhere", None)
             .await
             .expect("a plain block may move to another page");
 
@@ -330,7 +336,7 @@ fn a_home_that_declares_no_program_kind_refuses_one() {
         .await;
         seed_two_pages_one_rule(&engine).await;
 
-        let err = move_block(&engine, "block:rule", "block:owner", false)
+        let err = move_block(&engine, "block:rule", "block:owner", None)
             .await
             .expect_err("org declares no `program` kind in this registry");
 
@@ -340,8 +346,84 @@ fn a_home_that_declares_no_program_kind_refuses_one() {
             "the refusal must name the kind the home withholds: {err}"
         );
         assert!(
-            err.contains("confirm_break"),
-            "an overridable refusal must name the override: {err}"
+            err.contains("confirm_break") && err.contains("destination_capability"),
+            "an overridable refusal must name the override AND the class a \
+             confirmation has to be minted for: {err}"
+        );
+    });
+}
+
+/// A confirmation answers exactly the refusal class it was minted for. Minted
+/// for the destination-capability refusal, it must not carry a move past the
+/// machinery-containment refusal — a universal override would be a blanket
+/// bypass of every policy the gate ever hosts.
+#[test]
+fn a_confirmation_for_another_class_answers_nothing() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(
+            dir.path().join("t.db"),
+            registry_with_org_kinds("[block, page, program]"),
+        )
+        .await;
+        seed_two_pages_one_rule(&engine).await;
+
+        let err = move_block(
+            &engine,
+            "block:rule",
+            "block:elsewhere",
+            Some("destination_capability"),
+        )
+        .await
+        .expect_err("a wrong-class confirmation must not override the machinery refusal");
+
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("machinery_containment"),
+            "the refusal must name the class a confirmation would have to be \
+             minted for: {err}"
+        );
+        assert_eq!(
+            parent_of(&engine, "block:rule").await,
+            "block:owner",
+            "a wrong-class confirmation leaves the tree untouched"
+        );
+    });
+}
+
+/// `authorization` names a refusal class on purpose NOT confirmable: the
+/// parser refuses to mint a confirmation for it, loudly.
+#[test]
+fn an_authorization_confirmation_cannot_be_minted() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(
+            dir.path().join("t.db"),
+            registry_with_org_kinds("[block, page, program]"),
+        )
+        .await;
+        seed_two_pages_one_rule(&engine).await;
+
+        let err = move_block(
+            &engine,
+            "block:plain",
+            "block:elsewhere",
+            Some("authorization"),
+        )
+        .await
+        .expect_err("no confirmation answers an authorization refusal");
+
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("authorization") && err.contains("not confirmable"),
+            "the refusal must say the class is not confirmable: {err}"
+        );
+        assert_eq!(
+            parent_of(&engine, "block:plain").await,
+            "block:owner",
+            "an unmintable confirmation aborts the dispatch before the provider"
         );
     });
 }

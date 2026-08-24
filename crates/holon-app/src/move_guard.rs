@@ -1,6 +1,7 @@
 //! The net gate's first policy: where a block may be re-placed (ADR 0032 §3).
 //!
-//! Two refusals, both overridable by an explicit confirmation. Machinery
+//! Two refusals, each overridable only by a confirmation minted for its own
+//! class. Machinery
 //! containment keeps a rule's blocks under a page whose file can carry the
 //! rule; destination capability keeps an entity out of a home whose profile
 //! does not declare it can store that kind.
@@ -15,6 +16,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fluxdi::Injector;
 use holon::api::net_guard::CONFIRM_BREAK_PARAM;
+use holon::api::net_guard::ConfirmableClass;
 use holon::api::net_guard::Confirmation;
 use holon::api::net_guard::NetGuard;
 use holon::api::net_guard::NetGuardOp;
@@ -200,25 +202,44 @@ impl NetGuard for MoveGuard {
         // no bearing on, an ordinary org page being just as wrong as the root.
         // An operation that relocates the whole owning heading says so with
         // `confirm_break`; from one move's delta the two are indistinguishable.
-        let reason = if subject.is_program && destination != subject.parent_id {
-            Some(format!(
-                "re-homing a rule's action block breaks the rule: `{id}` is rule machinery owned \
-                 by `{}`, and `{destination}` is outside it",
-                subject.parent_id
+        let refusal = if subject.is_program && destination != subject.parent_id {
+            Some((
+                ConfirmableClass::MachineryContainment,
+                format!(
+                    "re-homing a rule's action block breaks the rule: `{id}` is rule machinery \
+                     owned by `{}`, and `{destination}` is outside it",
+                    subject.parent_id
+                ),
             ))
         } else {
             self.destination_hosts_kind(self.destination_format(&destination).await?, subject.kind)?
-                .map(|why| format!("`{id}` cannot move into `{destination}`: {why}"))
+                .map(|why| {
+                    (
+                        ConfirmableClass::DestinationCapability,
+                        format!("`{id}` cannot move into `{destination}`: {why}"),
+                    )
+                })
         };
-        let Some(reason) = reason else {
+        let Some((class, reason)) = refusal else {
             return Ok(NetVerdict::Confirm);
         };
-        if op.confirmation == Confirmation::BreakConfirmed {
+        if op.confirmation.answers(class.into()) {
             return Ok(NetVerdict::Confirm);
         }
+        let mismatch = match op.confirmation {
+            Confirmation::Confirmed(minted) => format!(
+                " — a `{}` confirmation does not answer this `{}` refusal",
+                minted.as_str(),
+                class.as_str()
+            ),
+            Confirmation::Absent => String::new(),
+        };
         Ok(NetVerdict::Refuse(NetRefusal {
+            class: class.into(),
             reason: format!(
-                "{reason}. Re-dispatch with `{CONFIRM_BREAK_PARAM}: true` to do it anyway"
+                "{reason}. Re-dispatch with `{CONFIRM_BREAK_PARAM}: \"{}\"` to do it \
+                 anyway{mismatch}",
+                class.as_str()
             ),
         }))
     }
