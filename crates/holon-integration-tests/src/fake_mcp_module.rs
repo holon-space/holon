@@ -47,6 +47,7 @@ const READONLY_ENTITY: &str = "fake_readonly";
 const WRITE_TOOL: &str = "update-probe";
 const READ_TOOL: &str = "find-readonly";
 const PROVIDER_NAME: &str = "fake-mcp";
+const PREFIX: &str = "fk_";
 
 // ── In-memory MCP server ──────────────────────────────────────────
 
@@ -345,7 +346,11 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
     );
 
     let sidecar = McpSidecar {
-        entity_prefix: None,
+        // Prefixed on purpose: an unprefixed sidecar whose entity keys have no
+        // underscores is the one corner where the raw key, the canonical
+        // EntityName and the table name coincide, so every lookup succeeds by
+        // accident and no test can see them diverge.
+        entity_prefix: Some(PREFIX.to_string()),
         entities,
         writes: Default::default(),
         once_only: Default::default(),

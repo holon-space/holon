@@ -31,6 +31,11 @@ use holon_turso::turso::TursoBackend;
 const MOCK_BIN: &str = env!("CARGO_BIN_EXE_mock-mcp-server");
 const RAW_BIN: &str = env!("CARGO_BIN_EXE_mock-mcp-raw");
 const TABLE: &str = "mock_items";
+// The entity the connector ADVERTISES: `entity_prefix` applied, the form
+// `EntityName` canonicalizes to. Dispatch selects a provider by its own
+// descriptor's entity, so this — not the sidecar's internal key — is the only
+// name `execute_operation` accepts.
+const ITEMS: &str = "mock_items";
 
 // ── In-memory SyncTokenStore ──────────────────────────────────────
 struct InMemorySyncTokenStore {
@@ -411,11 +416,7 @@ async fn write_happy_is_accepted() {
     let integ = write_provider("write_keyed.yaml", "write_happy", &db).await;
     let res = integ
         .operation_provider
-        .execute_operation(
-            &EntityName::from("items"),
-            "write_item",
-            storage("buy milk"),
-        )
+        .execute_operation(&EntityName::from(ITEMS), "write_item", storage("buy milk"))
         .await
         .expect("well-formed keyed write should be accepted");
     let resp = res.response.expect("write response present");
@@ -430,7 +431,7 @@ async fn write_denied_when_writes_disabled() {
     let integ = write_provider("write_disabled.yaml", "write_happy", &db).await;
     let err = integ
         .operation_provider
-        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .execute_operation(&EntityName::from(ITEMS), "write_item", storage("x"))
         .await
         .expect_err("write must be denied when writes are disabled");
     let msg = err.to_string();
@@ -448,7 +449,7 @@ async fn once_only_always_run_dispatches() {
     let integ = write_provider("write_once_only_always_run.yaml", "write_happy", &db).await;
     let res = integ
         .operation_provider
-        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .execute_operation(&EntityName::from(ITEMS), "write_item", storage("x"))
         .await
         .expect("always_run once_only should dispatch");
     let resp = res.response.expect("write response present");
@@ -469,7 +470,7 @@ async fn once_only_confirm_manually_queues_not_dispatched() {
     let integ = write_provider("write_once_only.yaml", "write_happy", &db).await;
     let provider = &integ.operation_provider;
     let err = provider
-        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .execute_operation(&EntityName::from(ITEMS), "write_item", storage("x"))
         .await
         .expect_err("confirm_manually must queue, not dispatch");
     let msg = err.to_string();
@@ -497,11 +498,7 @@ async fn once_only_confirm_then_approve_one_effect() {
     let provider = &integ.operation_provider;
 
     provider
-        .execute_operation(
-            &EntityName::from("items"),
-            "write_item",
-            storage("buy milk"),
-        )
+        .execute_operation(&EntityName::from(ITEMS), "write_item", storage("buy milk"))
         .await
         .expect_err("first attempt is queued for confirmation");
     let key = {
@@ -538,7 +535,7 @@ async fn once_only_confirm_approve_no_key_param_local_at_most_once() {
     let provider = &integ.operation_provider;
 
     provider
-        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .execute_operation(&EntityName::from(ITEMS), "write_item", storage("x"))
         .await
         .expect_err("queued for confirmation");
     let key = provider.pending_writes()[0].intent_key.clone();
@@ -576,7 +573,7 @@ async fn once_only_double_approve_is_noop() {
     let provider = &integ.operation_provider;
 
     provider
-        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .execute_operation(&EntityName::from(ITEMS), "write_item", storage("x"))
         .await
         .expect_err("queued for confirmation");
     let key = provider.pending_writes()[0].intent_key.clone();
@@ -596,7 +593,7 @@ async fn once_only_double_approve_is_noop() {
 
     // The winner's dispatch fires exactly one effect.
     let res = provider
-        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .execute_operation(&EntityName::from(ITEMS), "write_item", storage("x"))
         .await
         .expect("confirmed re-dispatch");
     assert_eq!(as_int(&res.response.expect("resp"), "applied_count"), 1);
@@ -613,7 +610,7 @@ async fn once_only_triggered_by_refire_coalesces() {
 
     for _ in 0..3 {
         provider
-            .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+            .execute_operation(&EntityName::from(ITEMS), "write_item", storage("x"))
             .await
             .expect_err("each re-fire is queued, not dispatched");
     }
@@ -640,7 +637,7 @@ async fn once_only_dispatch_failure_no_auto_retry() {
     let provider = &integ.operation_provider;
 
     let err = provider
-        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .execute_operation(&EntityName::from(ITEMS), "write_item", storage("x"))
         .await
         .expect_err("post-dispatch failure must surface loud");
     assert!(
@@ -658,7 +655,7 @@ async fn once_only_dispatch_failure_no_auto_retry() {
 
     // A retry of the same intent is refused — never fire the effect twice.
     let retry = provider
-        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .execute_operation(&EntityName::from(ITEMS), "write_item", storage("x"))
         .await
         .expect_err("outcome-unknown intent must not be auto-retried");
     assert!(
@@ -675,7 +672,7 @@ async fn write_conflict_fails_loud() {
     let integ = write_provider("write_keyed.yaml", "write_conflict", &db).await;
     let err = integ
         .operation_provider
-        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .execute_operation(&EntityName::from(ITEMS), "write_item", storage("x"))
         .await
         .expect_err("a CAS conflict must surface as an error");
     assert!(
@@ -691,7 +688,7 @@ async fn write_slow_ack_is_tolerated() {
     let integ = write_provider("write_keyed.yaml", "write_slow_ack", &db).await;
     let res = integ
         .operation_provider
-        .execute_operation(&EntityName::from("items"), "write_item", storage("x"))
+        .execute_operation(&EntityName::from(ITEMS), "write_item", storage("x"))
         .await
         .expect("a slow ack should still resolve to success");
     assert!(is_true(&res.response.expect("response"), "ok"));
@@ -710,11 +707,7 @@ async fn keyed_retry_storm_yields_one_effect() {
     let mut last_applied = 0;
     for _ in 0..5 {
         let res = provider
-            .execute_operation(
-                &EntityName::from("items"),
-                "write_item",
-                storage("buy milk"),
-            )
+            .execute_operation(&EntityName::from(ITEMS), "write_item", storage("buy milk"))
             .await
             .expect("each keyed dispatch should be accepted");
         let resp = res.response.expect("response present");

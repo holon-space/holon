@@ -311,7 +311,12 @@ impl McpOperationProvider {
                 .unwrap_or_default();
 
             let descriptor = OperationDescriptor {
-                entity_name: entity_name.clone().into(),
+                // The CANONICAL name, the same one the entity's type and table
+                // carry. Routing by the raw key would give one entity two
+                // identities: a write aimed at the type's name would find only
+                // whatever authority was derived locally, and two connectors
+                // each declaring `session` would collide.
+                entity_name: sidecar.prefixed_name(&entity_name),
                 entity_short_name: entity_config.short_name_or(&entity_name),
                 id_column: entity_config.id_column_or_default(),
                 name: normalized.clone(),
@@ -614,6 +619,14 @@ impl OperationProvider for McpOperationProvider {
         op_name: &str,
         params: StorageEntity,
     ) -> Result<OperationResult> {
+        // Canonical name in, sidecar key out — resolved ONCE here so every
+        // lookup below indexes its map with the spelling that map is keyed by.
+        let entity_key = self.sidecar.entity_key_of(entity_name).map_err(
+            |e| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("connector cannot serve '{op_name}': {e}").into()
+            },
+        )?;
+
         let peer =
             self.peer
                 .as_ref()
@@ -685,7 +698,7 @@ impl OperationProvider for McpOperationProvider {
                 let id_col = self
                     .sidecar
                     .entities
-                    .get(entity_name.as_str())
+                    .get(entity_key)
                     .map(|e| e.id_column_or_default())
                     .unwrap_or_else(|| "id".to_string());
                 let entity_id = match params.get(id_col.as_str()) {
@@ -793,7 +806,7 @@ impl OperationProvider for McpOperationProvider {
         });
 
         let undo_action = self
-            .build_undo_action(original_name, entity_name.as_str(), &params)
+            .build_undo_action(original_name, entity_key, &params)
             .await;
 
         // `_`-prefixed params are Holon's own bookkeeping — the same columns

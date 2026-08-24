@@ -63,20 +63,33 @@ async fn authorities_for(env: &TestEnvironment, entity: &str) -> Vec<Vec<String>
 }
 
 async fn assert_authorities(env: &TestEnvironment, boot: &str) {
-    let claimed = authorities_for(env, "fake_probe").await;
+    let claimed = authorities_for(env, "fk_fake_probe").await;
     assert_eq!(
         claimed.len(),
         1,
-        "[{boot}] 'fake_probe' is mirrored from the fake connector, so the connector must be its \
+        "[{boot}] 'fk_fake_probe' is mirrored from the fake connector, so the connector must be its \
          only write authority; found {} providers claiming it: {claimed:?}",
         claimed.len()
     );
     assert!(
         claimed[0].iter().any(|op| op == "update_probe"),
-        "[{boot}] the surviving authority for 'fake_probe' is not the connector — it advertises \
+        "[{boot}] the surviving authority for 'fk_fake_probe' is not the connector — it advertises \
          {:?}, which does not include the connector's own tool",
         claimed[0]
     );
+
+    // The connector's own descriptors must use the SAME name the type and
+    // table use. A sidecar entity that stays routable under its raw key is a
+    // second identity for one entity: writes aimed at the prefixed name find
+    // only the locally derived authority and never reach the provider.
+    for raw in ["fake_probe", "fake_shadow", "fake_readonly"] {
+        let stray = authorities_for(env, raw).await;
+        assert!(
+            stray.is_empty(),
+            "[{boot}] '{raw}' is the sidecar's internal key, not an entity identity, yet it is \
+             routable: {stray:?}"
+        );
+    }
 
     // Two mirrored entities the connector does not WRITE. 'fake_shadow' has no
     // tool at all; 'fake_readonly' has a read tool, so it IS routable and would
@@ -84,7 +97,7 @@ async fn assert_authorities(env: &TestEnvironment, boot: &str) {
     // Both must keep the authority derived from their columns — otherwise the
     // entity is left with no way to be written and, worse, the boot-time
     // capability check that would have said so never runs.
-    for entity in ["fake_shadow", "fake_readonly"] {
+    for entity in ["fk_fake_shadow", "fk_fake_readonly"] {
         let unclaimed = authorities_for(env, entity).await;
         let ops: Vec<&String> = unclaimed.iter().flatten().collect();
         assert!(

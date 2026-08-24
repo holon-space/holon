@@ -185,6 +185,45 @@ impl McpIntegration {
     }
 }
 
+/// Refuse two connectors that would answer to the same canonical entity name.
+///
+/// Entity names are the namespace ACROSS integrations, and the prefix is part
+/// of the name: `entity_prefix: todoist_` with key `tasks` canonicalizes to the
+/// same `todoist-tasks` as an unprefixed key `todoist_tasks` in another
+/// sidecar. Two connectors answering one name means a dispatch lands in
+/// whichever the routing scan reaches first; registration alone would not catch
+/// it, because it refuses on the (entity, op) PAIR and two connectors naming
+/// their tools differently overlap on no pair.
+///
+/// Checked over every declared entity, including schema-less ones: those
+/// register no type, so the type registry's own collision check never sees
+/// them, yet their tools still produce descriptors.
+pub fn assert_no_cross_sidecar_entity_collisions<'a, I, K>(sidecars: I) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = (&'a str, Option<&'a str>, K)>,
+    K: IntoIterator<Item = &'a str>,
+{
+    let mut claimed: HashMap<String, (String, String)> = HashMap::new();
+    for (provider, prefix, keys) in sidecars {
+        for key in keys {
+            let canonical = crate::canonical_entity_name(prefix, key)
+                .as_str()
+                .to_string();
+            if let Some((other_provider, other_key)) =
+                claimed.insert(canonical.clone(), (provider.to_string(), key.to_string()))
+            {
+                anyhow::bail!(
+                    "integrations '{other_provider}' (entity '{other_key}') and '{provider}' \
+                     (entity '{key}') both resolve to entity '{canonical}'. An entity name is \
+                     the identity ACROSS integrations — give one of them a distinct \
+                     `entity_prefix` or entity name."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Register every entity a sidecar declares as a type in `type_registry`.
 ///
 /// Free-standing so a test harness standing in for a connector seeds the
@@ -1510,6 +1549,66 @@ mod entity_type_registration_tests {
              sql_type: TEXT\n        primary_key: true\n"
         );
         McpSidecar::from_yaml(&yaml).expect("sidecar yaml parses")
+    }
+
+    /// The prefix is part of the name, so a prefixed key and another sidecar's
+    /// unprefixed key can land on one entity. Registration alone cannot catch
+    /// it: it refuses on the (entity, op) pair, and two connectors naming their
+    /// tools differently overlap on none.
+    #[test]
+    fn two_sidecars_resolving_to_one_entity_name_are_refused() {
+        let prefixed = McpSidecar::from_yaml(
+            "entity_prefix: todoist_\nentities:\n  tasks:\n    short_name: t\n",
+        )
+        .expect("yaml parses");
+        let plain = McpSidecar::from_yaml("entities:\n  todoist_tasks:\n    short_name: t\n")
+            .expect("yaml parses");
+
+        let err = assert_no_cross_sidecar_entity_collisions([
+            (
+                "other-connector",
+                prefixed.entity_prefix.as_deref(),
+                prefixed.entities.keys().map(String::as_str),
+            ),
+            (
+                "todoist",
+                plain.entity_prefix.as_deref(),
+                plain.entities.keys().map(String::as_str),
+            ),
+        ])
+        .expect_err("both resolve to 'todoist-tasks'");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("other-connector")
+                && msg.contains("todoist")
+                && msg.contains("todoist-tasks"),
+            "the refusal must name both integrations and the shared entity, got: {msg}"
+        );
+    }
+
+    /// The set we actually ship must be unambiguous — this is the guard that
+    /// makes a future sidecar's prefix choice a failing test rather than a
+    /// silent second claimant.
+    #[test]
+    fn the_bundled_sidecars_claim_distinct_entity_names() {
+        let parsed: Vec<(&str, McpSidecar)> = crate::BUNDLED_SIDECARS
+            .iter()
+            .map(|b| {
+                (
+                    b.provider,
+                    McpSidecar::from_yaml(b.yaml)
+                        .unwrap_or_else(|e| panic!("bundled '{}': {e:#}", b.provider)),
+                )
+            })
+            .collect();
+        assert_no_cross_sidecar_entity_collisions(parsed.iter().map(|(n, s)| {
+            (
+                *n,
+                s.entity_prefix.as_deref(),
+                s.entities.keys().map(String::as_str),
+            )
+        }))
+        .expect("shipped sidecars must claim distinct entity names");
     }
 
     #[test]

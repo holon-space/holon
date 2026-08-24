@@ -311,6 +311,29 @@ impl Module for McpIntegrationsModule {
             return Ok(());
         }
 
+        // Cross-connector identity check, before anything connects: the case
+        // no single sidecar can see, since an entity name is the identity
+        // ACROSS integrations.
+        holon_mcp_client::assert_no_cross_sidecar_entity_collisions(configs.iter().map(
+            |(name, cfg)| {
+                (
+                    name.as_str(),
+                    cfg.entity_prefix.as_deref(),
+                    cfg.entities.keys().map(String::as_str),
+                )
+            },
+        ))
+        .map_err(|e| {
+            fluxdi::Error::module_lifecycle_failed(
+                "McpIntegrationsModule",
+                "configure",
+                &format!(
+                    "integration configuration is ambiguous ({e:#}) — continuing would route one \
+                     entity's writes to whichever connector the scan reached first."
+                ),
+            )
+        })?;
+
         let configs = Arc::new(configs.clone());
         let pending_flows = Arc::new(PendingOAuthFlows::new());
         let pending_flows_clone = pending_flows.clone();

@@ -316,10 +316,20 @@ struct ResolvedEnumeration {
     bindings: Vec<EnumerationBinding>,
 }
 
-/// URI scheme used to prefix cached ids of `{prefix}{entity}` — same
-/// normalization as `holon_api::EntityName` (underscores → hyphens).
+/// URI scheme used to prefix cached ids of `{prefix}{entity}`: the entity's
+/// canonical name, obtained from the one helper that builds it rather than
+/// re-derived here.
 fn id_scheme_for_entity(prefix: &str, entity: &str) -> String {
-    format!("{prefix}{entity}").replace('_', "-")
+    crate::canonical_entity_name(Some(prefix), entity)
+        .as_str()
+        .to_string()
+}
+
+/// The cache table backing `{prefix}{entity}` — the canonical name's SQL
+/// spelling, so it agrees with the table `register_sidecar_entity_types`
+/// declares even when the entity key carries a hyphen.
+fn table_for_entity(prefix: &str, entity: &str) -> String {
+    crate::canonical_entity_name(Some(prefix), entity).table_name()
 }
 
 impl ResolvedEnumeration {
@@ -343,7 +353,7 @@ impl ResolvedEnumeration {
             })
             .collect();
         let cols: Vec<&str> = bindings.iter().map(|b| b.parent_col.as_str()).collect();
-        let table = format!("{}{}", prefix, ef.entity);
+        let table = table_for_entity(prefix, &ef.entity);
         let mut enumerate_sql = format!("SELECT {} FROM {}", cols.join(", "), table);
         if let Some(w) = &ef.where_sql {
             enumerate_sql.push_str(&format!(" WHERE {w}"));

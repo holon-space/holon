@@ -31,7 +31,11 @@ use holon_turso::turso::TursoBackend;
 
 const MOCK_BIN: &str = env!("CARGO_BIN_EXE_mock-mcp-server");
 const TABLE: &str = "cc_pending_question";
-const ENTITY: &str = "pending_question";
+// The entity the connector ADVERTISES: `entity_prefix` applied, the form
+// `EntityName` canonicalizes to. Dispatch selects a provider by its own
+// descriptor's entity, so this — not the sidecar's internal key — is the only
+// name `execute_operation` accepts.
+const ENTITY: &str = "cc_pending_question";
 /// The mirror stores the primary key scheme-qualified.
 const ROW_ID: &str = "cc-pending-question:job-77:0:1a2b3c4d";
 /// The provider's opaque `answer_question.question_id` — the URI path of

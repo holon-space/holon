@@ -140,7 +140,11 @@ fn applied_count(result: &holon_core::OperationResult) -> i64 {
     }
 }
 
-const LIVE_SESSION: &str = "live_session";
+// The entity the connector ADVERTISES: `entity_prefix` applied, the form
+// `EntityName` canonicalizes to. Dispatch selects a provider by its own
+// descriptor's entity, so this — not the sidecar's internal key — is the only
+// name `execute_operation` accepts.
+const LIVE_SESSION: &str = "cc_live_session";
 
 /// (a) A send is QUEUED, not fired. The caller gets the disclosed
 /// "queued for confirmation" error, the intent sits in the pending-writes queue

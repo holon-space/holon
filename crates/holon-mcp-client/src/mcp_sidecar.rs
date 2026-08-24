@@ -466,6 +466,21 @@ impl ToolConfig {
     }
 }
 
+/// The entity identity a connector's `entity_prefix` and entity key produce.
+///
+/// The single place the two are combined, so the config loader and the sidecar
+/// itself cannot canonicalize differently.
+pub fn canonical_entity_name(
+    entity_prefix: Option<&str>,
+    entity_key: &str,
+) -> holon_api::EntityName {
+    let raw = match entity_prefix {
+        Some(prefix) => format!("{prefix}{entity_key}"),
+        None => entity_key.to_string(),
+    };
+    holon_api::EntityName::new(raw)
+}
+
 /// Whether a connector serves an entity's writes, or the entity is a local
 /// mirror of a feed the connector only reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -613,11 +628,46 @@ impl McpSidecar {
     /// E.g. prefix `"cc_"` + entity `"session"` → `EntityName("cc-session")`.
     /// Use `.as_str()` for URI schemes, `.table_name()` for SQL identifiers.
     pub fn prefixed_name(&self, entity_name: &str) -> holon_api::EntityName {
-        let raw = match &self.entity_prefix {
-            Some(prefix) => format!("{prefix}{entity_name}"),
-            None => entity_name.to_string(),
+        canonical_entity_name(self.entity_prefix.as_deref(), entity_name)
+    }
+
+    /// The entity key `entity` refers to — the inverse of
+    /// [`Self::prefixed_name`].
+    ///
+    /// An entity has two spellings: the key this file is written in, and the
+    /// canonical [`holon_api::EntityName`] the rest of the system routes and
+    /// stores by (prefix applied, `_` folded to `-`). Everything reached from a
+    /// dispatch arrives in the canonical spelling and every map here is keyed
+    /// by the raw one, so the conversion belongs at that boundary —
+    /// indexing a map with the wrong spelling silently misses and takes a
+    /// default branch.
+    pub fn entity_key_of(&self, entity: &holon_api::EntityName) -> anyhow::Result<&str> {
+        if entity.is_wildcard() {
+            anyhow::bail!("the wildcard entity names no sidecar entity");
+        }
+        let unfolded = entity.table_name();
+        let stripped = match &self.entity_prefix {
+            Some(prefix) => unfolded.strip_prefix(prefix.as_str()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "entity '{}' does not carry this sidecar's `entity_prefix: {prefix}` — it \
+                     names no entity here",
+                    entity.as_str()
+                )
+            })?,
+            None => unfolded.as_str(),
         };
-        holon_api::EntityName::new(raw)
+        self.entities
+            .get_key_value(stripped)
+            .map(|(key, _)| key.as_str())
+            .ok_or_else(|| {
+                let mut known: Vec<&str> = self.entities.keys().map(String::as_str).collect();
+                known.sort_unstable();
+                anyhow::anyhow!(
+                    "entity '{}' resolves to key '{stripped}', which this sidecar does not \
+                     declare; it declares {known:?}",
+                    entity.as_str()
+                )
+            })
     }
 
     /// Find a YAML entity key that maps to the given MCP server entity name.
@@ -649,6 +699,26 @@ impl McpSidecar {
     /// `effect`, or a `keyed` tool with no `key_param`, is a config error, not
     /// a silently-defaulted setting (parse, don't validate).
     fn validate_write_policy(&self) -> anyhow::Result<()> {
+        // Two keys that canonicalize to one name are indistinguishable to
+        // everything downstream: `EntityName` folds `_` to `-`, so `x_y` and
+        // `x-y` become the same entity and a write aimed at one would resolve
+        // to whichever the map happened to answer with.
+        let mut canonical: HashMap<String, &str> = HashMap::new();
+        for key in self.entities.keys() {
+            let name = self.prefixed_name(key).as_str().to_string();
+            if let Some(first) = canonical.insert(name.clone(), key) {
+                let (a, b) = if first < key.as_str() {
+                    (first, key.as_str())
+                } else {
+                    (key.as_str(), first)
+                };
+                anyhow::bail!(
+                    "sidecar entities '{a}' and '{b}' are the same entity once canonicalized \
+                     ('{name}') — `_` and `-` do not distinguish two entities. Rename one."
+                );
+            }
+        }
+
         for (name, tool) in &self.tools {
             match tool.effect {
                 None if tool.is_write_shaped() => anyhow::bail!(
@@ -1181,6 +1251,69 @@ entities:
                 )
             });
         }
+    }
+
+    /// Every entity of every shipped sidecar must survive the round trip
+    /// through its canonical name. A key containing `_`, or a sidecar carrying
+    /// an `entity_prefix`, is exactly where the two spellings diverge — and the
+    /// consumer that cannot get back reads a default instead of failing.
+    #[test]
+    fn every_bundled_entity_round_trips_through_its_canonical_name() {
+        for bundled in crate::BUNDLED_SIDECARS {
+            let sidecar = McpSidecar::from_yaml(bundled.yaml)
+                .unwrap_or_else(|e| panic!("bundled sidecar '{}': {e:#}", bundled.provider));
+            for key in sidecar.entities.keys() {
+                let canonical = sidecar.prefixed_name(key);
+                let back = sidecar.entity_key_of(&canonical).unwrap_or_else(|e| {
+                    panic!(
+                        "'{}' entity '{key}' → '{}' does not resolve back: {e:#}",
+                        bundled.provider,
+                        canonical.as_str()
+                    )
+                });
+                assert_eq!(back, key, "'{}' entity '{key}'", bundled.provider);
+            }
+        }
+    }
+
+    /// `_` and `-` are the same character to `EntityName`, so two keys that
+    /// differ only there are one entity — and `entity_key_of` would answer with
+    /// whichever the map happened to hold.
+    #[test]
+    fn two_entity_keys_that_canonicalize_alike_are_refused_at_load() {
+        let err = McpSidecar::from_yaml(
+            "entities:\n  pending_question:\n    short_name: a\n  pending-question:\n    \
+             short_name: b\n",
+        )
+        .expect_err("two keys folding to one canonical name must not load");
+        let msg = err.to_string();
+        // The canonical name is `pending-question`, so a message that only
+        // interpolated THAT would satisfy a `contains` for either spelling.
+        // Assert the pair phrase, which only naming both raw keys produces.
+        assert!(
+            msg.contains("'pending-question' and 'pending_question'"),
+            "the refusal must name both raw keys as the colliding pair, got: {msg}"
+        );
+        assert!(
+            msg.contains("canonicalized ('pending-question')"),
+            "the refusal must name the canonical form they share, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_canonical_name_from_another_sidecar_is_refused() {
+        let sidecar = McpSidecar::from_yaml(
+            "entity_prefix: cc_\nentities:\n  live_session:\n    short_name: s\n",
+        )
+        .expect("yaml parses");
+        let foreign = holon_api::EntityName::new("gmail_message");
+        let err = sidecar
+            .entity_key_of(&foreign)
+            .expect_err("a name carrying another connector's prefix names nothing here");
+        assert!(
+            err.to_string().contains("gmail-message"),
+            "the refusal must name the entity it was given, got: {err}"
+        );
     }
 
     #[test]
