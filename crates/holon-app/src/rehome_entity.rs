@@ -193,6 +193,14 @@ pub fn rehome_entity_descriptor() -> OperationDescriptor {
         },
         trigger: None,
         bound_params: Default::default(),
+        marking_delta: holon_api::marking::MarkingDelta::Static {
+            kinds: vec![holon_api::marking::KindDelta {
+                kind: holon_api::arcs::ArcRelation::block(),
+                structural: holon_api::marking::StructuralFlow::Relocates,
+                text: holon_api::marking::TextFlow::Untouched,
+                existence: holon_api::marking::ExistenceFlow::Reads,
+            }],
+        },
         guard: holon_api::pattern::OpGuard::None,
         arcs: holon_api::arcs::TransitionArcs::Declared {
             reads: vec![holon_api::arcs::ArcPlace::new("block", "parent_id")],

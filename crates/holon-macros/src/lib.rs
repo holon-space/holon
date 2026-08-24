@@ -427,6 +427,15 @@ pub fn emits(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// No-op proc macro for
+/// `#[marking_delta(block(structural = …, text = …, existence = …))]`, so
+/// Rust's parser accepts the attribute. `operations_trait` parses the aspect
+/// flows at expansion time into `MarkingDelta` (ADR 0032 §4).
+#[proc_macro_attribute]
+pub fn marking_delta(_: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 /// Auto-discover builder modules and generate registration function.
 ///
 /// Scans a directory for `.rs` files, emits `mod` declarations for each,

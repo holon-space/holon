@@ -329,6 +329,7 @@ impl McpOperationProvider {
                 // ADR 0031 P6=A makes illegal as a descriptor guard (guards are
                 // relational). It stays a parse-time-validated declaration on
                 // the sidecar; nothing ever evaluated it from here.
+                marking_delta: holon_api::marking::MarkingDelta::Undeclared,
                 guard: holon_api::pattern::OpGuard::None,
                 arcs: holon_api::arcs::TransitionArcs::Undeclared,
                 target_scope: holon_api::TargetScope::Block,

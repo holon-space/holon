@@ -255,3 +255,72 @@ fn a_logseq_db_target_is_refused_before_anything_moves() {
         assert_eq!(parent_of(&engine, "block:leaf").await, "block:page");
     });
 }
+
+/// Snapshot the three aspects of every block row, so a firing can be held to
+/// the marking delta its descriptor declares (ADR 0032 §4).
+async fn block_rows(
+    engine: &holon::api::BackendEngine,
+) -> std::collections::BTreeMap<String, holon_api::marking::RowState> {
+    let rows = engine
+        .db_handle()
+        .query(
+            "SELECT id, parent_id, sort_key, content FROM block_raw",
+            HashMap::new(),
+        )
+        .await
+        .expect("read block rows");
+    rows.into_iter()
+        .map(|r| {
+            let text = |k: &str| {
+                r.get(k)
+                    .and_then(|v| v.as_string().map(str::to_string))
+                    .unwrap_or_default()
+            };
+            let parent = r
+                .get("parent_id")
+                .and_then(|v| v.as_string().map(str::to_string));
+            (
+                text("id"),
+                holon_api::marking::RowState {
+                    placement: parent.map(|parent| holon_api::marking::Placement {
+                        parent,
+                        order: text("sort_key"),
+                    }),
+                    text: text("content"),
+                },
+            )
+        })
+        .collect()
+}
+
+/// The op's own descriptor is the claim under test, so it is read from the
+/// provider rather than restated here.
+#[test]
+fn the_move_delivers_the_marking_delta_the_descriptor_declares() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(dir.path().join("t.db")).await;
+        seed(&engine, "block:page", "sentinel:no_parent", true).await;
+        seed(&engine, "block:leaf", "block:page", false).await;
+
+        let before = block_rows(&engine).await;
+        engine
+            .execute_operation(
+                &holon_api::EntityName::new("block"),
+                "rehome_entity",
+                params("block:leaf", "holon-native"),
+                holon_api::operation_engine::OpOrigin::User,
+            )
+            .await
+            .expect("a leaf under a page can move home");
+        let observed = holon_api::marking::observe(&before, &block_rows(&engine).await);
+
+        let declared = holon_app::rehome_entity::rehome_entity_descriptor().marking_delta;
+        if let Err(violation) =
+            declared.check_observation(&holon_api::ArcRelation::block(), &observed)
+        {
+            panic!("rehome_entity declares a marking delta it does not deliver: {violation}");
+        }
+    });
+}

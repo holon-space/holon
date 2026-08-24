@@ -11,6 +11,7 @@
 //! `holon_api::Value` stay the canonical consumer paths.
 
 pub mod arcs;
+pub mod marking;
 pub mod pattern;
 pub mod schema;
 mod value;

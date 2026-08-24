@@ -1757,4 +1757,221 @@ mod tests {
         assert!(store.get_first_child(None).await.unwrap().is_none());
         assert!(store.get_last_child(None).await.unwrap().is_none());
     }
+
+    /// The truthfulness gate for the declared marking deltas (ADR 0032 §4,
+    /// Consequences item 1): each op runs against the fixture store, and what
+    /// its rows did is compared against what its descriptor claims.
+    ///
+    /// A declaration is a falsifiable claim, so the oracle is written to red on
+    /// a wrong one: a `Produces` that sees a placement removed, a `Reads` that
+    /// sees anything move, and — under `Static` — a declared mover that moved
+    /// nothing all fail here rather than in review.
+    mod marking_delta_oracle {
+        use std::collections::BTreeMap;
+
+        use holon_api::arcs::ArcRelation;
+        use holon_api::marking::AspectChange;
+        use holon_api::marking::MarkingDelta;
+        use holon_api::marking::ObservedDelta;
+        use holon_api::marking::Placement;
+        use holon_api::marking::RowState;
+        use holon_api::marking::StructuralEvidence;
+
+        use super::*;
+
+        fn snapshot(store: &MemStore) -> BTreeMap<String, RowState> {
+            store
+                .blocks
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|b| {
+                    (
+                        b.id.as_str().to_string(),
+                        RowState {
+                            placement: b.parent_id.as_ref().map(|p| Placement {
+                                parent: p.as_str().to_string(),
+                                order: b.sort_key.clone(),
+                            }),
+                            text: b.content.clone(),
+                        },
+                    )
+                })
+                .collect()
+        }
+
+        /// Run `op` against the store and hold its descriptor's declaration to
+        /// what the rows did.
+        async fn check<F, Fut>(op_name: &str, declared: MarkingDelta, store: &MemStore, run: F)
+        where
+            F: FnOnce() -> Fut,
+            Fut: std::future::Future<Output = ()>,
+        {
+            assert!(
+                !matches!(declared, MarkingDelta::Undeclared),
+                "{op_name} carries no marking delta, so this oracle would check nothing"
+            );
+            let before = snapshot(store);
+            run().await;
+            let observed = holon_api::marking::observe(&before, &snapshot(store));
+            if let Err(violation) = declared.check_observation(&ArcRelation::block(), &observed) {
+                panic!("{op_name} declares a marking delta it does not deliver: {violation}");
+            }
+        }
+
+        fn crud_delta(
+            descriptor: fn(&str, &str, &str, &str) -> holon_api::OperationDescriptor,
+        ) -> MarkingDelta {
+            descriptor("block", "block", "block", "id").marking_delta
+        }
+
+        fn seeded() -> MemStore {
+            let store = MemStore::new();
+            insert_block(&store, "P", None, None);
+            insert_block(&store, "A", Some("P"), None);
+            let key_a = store.get("A").unwrap().sort_key;
+            insert_block(&store, "B", Some("P"), Some(&key_a));
+            store
+        }
+
+        #[tokio::test]
+        async fn create_produces_all_three_tokens() {
+            let store = seeded();
+            let declared = crud_delta(crate::__operations_crud_operations::CREATE_OP);
+            check("create", declared, &store, || async {
+                let mut fields = crate::storage::types::StorageEntity::new();
+                fields.insert("id".into(), Value::String("block:N".to_string()));
+                fields.insert("parent_id".into(), Value::String("block:P".to_string()));
+                fields.insert("sort_key".into(), Value::String("a5".to_string()));
+                fields.insert("content".into(), Value::String("new".to_string()));
+                CrudOperations::create(&store, fields).await.unwrap();
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn delete_consumes_the_placement_and_produces_absence() {
+            let store = seeded();
+            let declared = crud_delta(crate::__operations_crud_operations::DELETE_OP);
+            check("delete", declared, &store, || async {
+                CrudOperations::delete(&store, "A").await.unwrap();
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn set_field_of_content_moves_only_the_text_token() {
+            let store = seeded();
+            let declared = crud_delta(crate::__operations_crud_operations::SET_FIELD_OP);
+            check("set_field(content)", declared, &store, || async {
+                CrudOperations::set_field(&store, "A", "content", Value::String("edited".into()))
+                    .await
+                    .unwrap();
+            })
+            .await;
+        }
+
+        /// The same declaration covers the parameter that makes it structural —
+        /// which is what `varies_by("field")` claims, checked rather than
+        /// asserted in prose.
+        #[tokio::test]
+        async fn set_field_of_parent_id_moves_the_placement_token() {
+            let store = seeded();
+            let declared = crud_delta(crate::__operations_crud_operations::SET_FIELD_OP);
+            check("set_field(parent_id)", declared, &store, || async {
+                CrudOperations::set_field(
+                    &store,
+                    "B",
+                    "parent_id",
+                    Value::String("block:A".into()),
+                )
+                .await
+                .unwrap();
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn move_block_relocates_and_touches_nothing_else() {
+            let store = seeded();
+            let declared = crud_delta(crate::__operations_block_operations::MOVE_BLOCK_OP);
+            check("move_block", declared, &store, || async {
+                store
+                    .move_block(&EntityUri::block("B"), &EntityUri::block("P"), None)
+                    .await
+                    .unwrap();
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn split_block_places_a_new_block_and_rewrites_the_text() {
+            let store = seeded();
+            let declared = crud_delta(crate::__operations_block_operations::SPLIT_BLOCK_OP);
+            check("split_block", declared, &store, || async {
+                store.split_block(&EntityUri::block("A"), 3).await.unwrap();
+            })
+            .await;
+        }
+
+        #[tokio::test]
+        async fn join_block_consumes_the_joined_block() {
+            let store = seeded();
+            let declared = crud_delta(crate::__operations_block_operations::JOIN_BLOCK_OP);
+            check("join_block", declared, &store, || async {
+                store.join_block(&EntityUri::block("B"), 0).await.unwrap();
+            })
+            .await;
+        }
+
+        /// `varies_by("position")` is the whole content of join_block's
+        /// envelope: a non-zero position is a documented no-op, and the
+        /// envelope is what makes that firing legal against the same
+        /// declaration.
+        #[tokio::test]
+        async fn join_block_at_a_non_zero_position_moves_nothing() {
+            let store = seeded();
+            let declared = crud_delta(crate::__operations_block_operations::JOIN_BLOCK_OP);
+            check("join_block(position != 0)", declared, &store, || async {
+                store.join_block(&EntityUri::block("B"), 4).await.unwrap();
+            })
+            .await;
+        }
+
+        /// The oracle's own teeth, proven without editing a declaration: the
+        /// same observation that clears `Relocates` must refute `Untouched`.
+        #[test]
+        fn a_declaration_that_contradicts_the_observation_is_refuted() {
+            let observed = ObservedDelta {
+                structural: [StructuralEvidence::Moved].into_iter().collect(),
+                text: AspectChange::Unchanged,
+                existence: AspectChange::Unchanged,
+            };
+            let honest = MarkingDelta::Static {
+                kinds: vec![holon_api::marking::KindDelta {
+                    kind: ArcRelation::block(),
+                    structural: holon_api::marking::StructuralFlow::Relocates,
+                    text: holon_api::marking::TextFlow::Untouched,
+                    existence: holon_api::marking::ExistenceFlow::Reads,
+                }],
+            };
+            let wrong = MarkingDelta::Static {
+                kinds: vec![holon_api::marking::KindDelta {
+                    kind: ArcRelation::block(),
+                    structural: holon_api::marking::StructuralFlow::Untouched,
+                    text: holon_api::marking::TextFlow::Untouched,
+                    existence: holon_api::marking::ExistenceFlow::Reads,
+                }],
+            };
+            assert_eq!(
+                honest.check_observation(&ArcRelation::block(), &observed),
+                Ok(())
+            );
+            assert!(
+                wrong
+                    .check_observation(&ArcRelation::block(), &observed)
+                    .is_err()
+            );
+        }
+    }
 }

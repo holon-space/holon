@@ -98,6 +98,7 @@ fn click_wiring() -> OperationWiring {
             menu_exposure: holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::Test,
             },
+            marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },

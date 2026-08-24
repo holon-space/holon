@@ -37,6 +37,7 @@ fn descriptor_with(arcs: TransitionArcs) -> OperationDescriptor {
         target_scope: TargetScope::Block,
         trigger: None,
         bound_params: HashMap::new(),
+        marking_delta: holon_api::marking::MarkingDelta::Undeclared,
         guard: OpGuard::None,
         arcs,
     }

@@ -399,6 +399,7 @@ mod tests {
             },
             trigger: None,
             bound_params: HashMap::new(),
+            marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         }

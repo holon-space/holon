@@ -66,6 +66,7 @@ impl StubProvider {
             },
             trigger: None,
             bound_params: Default::default(),
+            marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         }

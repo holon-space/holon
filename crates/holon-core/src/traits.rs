@@ -608,6 +608,10 @@ where
     #[holon_macros::emits("block.requires", "block.advice_suppressed")]
     #[holon_macros::emits(excluded("block.sort_key", "the ordering authority mints order keys"))]
     #[holon_macros::emits(excluded("block.after_block_id", "a positional anchor, not a column"))]
+    #[holon_macros::marking_delta(
+        block(structural = relocates, text = produces, existence = untouched),
+        varies_by("field")
+    )]
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult>;
 
     /// Create new entity (returns new ID, changes, and inverse operation for
@@ -620,6 +624,7 @@ where
     /// into the concrete writer's transaction. Re-keys therefore never ride
     /// a `String` key in `fields` (ADR 0030 D4, amended; Ruling B).
     #[holon_macros::boundary_behavior(private_only)]
+    #[holon_macros::marking_delta(block(structural = produces, text = produces, existence = produces))]
     async fn create(
         &self,
         fields: crate::storage::types::StorageEntity,
@@ -627,6 +632,7 @@ where
 
     /// Delete entity (returns changes and inverse operation for undo)
     #[holon_macros::boundary_behavior(private_only)]
+    #[holon_macros::marking_delta(block(structural = consumes, text = untouched, existence = produces))]
     async fn delete(&self, id: &str) -> Result<OperationResult>;
 
     /// Get operations metadata (automatically delegates to entity type)
@@ -1191,6 +1197,7 @@ where
     #[holon_macros::triggered_by(availability_of = "selected_id", providing = ["parent_id"])]
     #[holon_macros::menu_exposure(pointer_gesture)]
     #[holon_macros::boundary_behavior(crossing_widens)]
+    #[holon_macros::marking_delta(block(structural = relocates, text = untouched, existence = reads))]
     async fn move_block(
         &self,
         id: &EntityUri,
@@ -1300,6 +1307,7 @@ where
     #[holon_macros::affects("content")]
     #[holon_macros::menu_exposure(keyboard_gesture)]
     #[holon_macros::boundary_behavior(private_only)]
+    #[holon_macros::marking_delta(block(structural = produces, text = produces, existence = produces))]
     async fn split_block(&self, id: &EntityUri, position: i64) -> Result<OperationResult> {
         use uuid::Uuid;
 
@@ -1657,6 +1665,10 @@ where
     ///   positions, so we re-check here.
     #[holon_macros::affects("content", "parent_id", "sort_key")]
     #[holon_macros::boundary_behavior(private_only)]
+    #[holon_macros::marking_delta(
+        block(structural = consumes, text = produces, existence = produces),
+        varies_by("position")
+    )]
     async fn join_block(&self, id: &EntityUri, position: i64) -> Result<OperationResult> {
         if position != 0 {
             return Ok(OperationResult::irreversible(vec![]));
@@ -2946,6 +2958,7 @@ pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
         },
         trigger: None,
         bound_params: std::collections::HashMap::new(),
+        marking_delta: holon_api::marking::MarkingDelta::Undeclared,
         guard: holon_api::pattern::OpGuard::None,
         arcs: holon_api::arcs::TransitionArcs::Undeclared,
     }

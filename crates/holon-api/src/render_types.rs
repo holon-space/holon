@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::Value;
 use crate::arcs::TransitionArcs;
+use crate::marking::MarkingDelta;
 use crate::pattern::OpGuard;
 use crate::predicate::Predicate;
 use crate::types::EntityName;
@@ -431,6 +432,18 @@ pub struct OperationDescriptor {
     /// [`OperationDescriptor::guard`]. The certificate is
     /// `crates/holon-api/tests/descriptor_arcs_roundtrip.rs`.
     pub arcs: TransitionArcs,
+
+    /// What this op does to each aspect's tokens, per entity kind
+    /// (ADR 0032 §4). Non-defaultable: an op that declares nothing carries
+    /// [`MarkingDelta::Undeclared`], whose runtime meaning is "cannot say",
+    /// never "changes nothing".
+    ///
+    /// Ordinary serializable data for the same dual-consumer reason as
+    /// [`OperationDescriptor::arcs`]. The certificate is
+    /// `crates/holon-api/tests/descriptor_marking_delta_roundtrip.rs`; the
+    /// truthfulness oracle is `marking_delta_oracle` in
+    /// `crates/holon-core/src/block_operations_tests.rs`.
+    pub marking_delta: MarkingDelta,
 }
 
 // NOTE: `OperationDescriptor` intentionally has NO `Default`. `menu_exposure`

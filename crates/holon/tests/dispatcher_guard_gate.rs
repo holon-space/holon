@@ -101,6 +101,7 @@ fn descriptor(op: &str, guard: OpGuard) -> OperationDescriptor {
         trigger: None,
         bound_params: Default::default(),
         guard,
+        marking_delta: holon_api::marking::MarkingDelta::Undeclared,
         arcs: holon_api::arcs::TransitionArcs::Undeclared,
     }
 }

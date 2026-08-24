@@ -110,6 +110,7 @@ pub fn dismiss_advice_descriptor(
         boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
         trigger: None,
         bound_params: std::collections::HashMap::new(),
+        marking_delta: holon_api::marking::MarkingDelta::Undeclared,
         guard: holon_api::pattern::OpGuard::None,
         arcs: holon_api::arcs::TransitionArcs::Undeclared,
     }
@@ -202,6 +203,7 @@ fn tag_descriptor(
         boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
         trigger: None,
         bound_params: std::collections::HashMap::new(),
+        marking_delta: holon_api::marking::MarkingDelta::Undeclared,
         guard: holon_api::pattern::OpGuard::None,
         arcs: holon_api::arcs::TransitionArcs::Undeclared,
     }

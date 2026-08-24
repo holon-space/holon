@@ -2097,6 +2097,7 @@ impl DispatchingOperationEngine {
             trigger: None,
             bound_params: Default::default(),
             affected_fields: vec![],
+            marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         }
@@ -2144,6 +2145,7 @@ impl DispatchingOperationEngine {
             trigger: None,
             bound_params: Default::default(),
             affected_fields: vec![],
+            marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         }
@@ -2199,6 +2201,7 @@ impl DispatchingOperationEngine {
             boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
             trigger: None,
             bound_params: Default::default(),
+            marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         }

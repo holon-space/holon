@@ -92,6 +92,7 @@ fn set_field_descriptor() -> OperationDescriptor {
         // either direction at any time, and the refusals this op does make
         // (unknown provider, wrong field, wrong word) are parameter validity,
         // which ADR 0031 puts in typed params rather than in a guard.
+        marking_delta: holon_api::marking::MarkingDelta::Undeclared,
         guard: holon_api::pattern::OpGuard::None,
         arcs: holon_api::arcs::TransitionArcs::Declared {
             // Read-modify-write: the configuration axis is carried through
@@ -146,6 +147,7 @@ fn begin_oauth_descriptor() -> OperationDescriptor {
         // Offer the flow only where it can run. The three literals are the
         // PROJECTED values: `config_status_value` lowercases the display enum,
         // and `configure_progress` is empty exactly while no flow is running.
+        marking_delta: holon_api::marking::MarkingDelta::Undeclared,
         guard: holon_api::pattern::OpGuard::parse(
             "integration.config_status == \"unconfigured\" and integration.configurable == 1 and \
              integration.configure_progress == \"\"",

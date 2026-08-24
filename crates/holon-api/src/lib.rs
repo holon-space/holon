@@ -217,6 +217,7 @@ pub use holon_expr::unoptimized_engine;
 // both declaration surfaces at expansion time); these are their canonical paths.
 pub use holon_pattern::Value;
 pub use holon_pattern::arcs;
+pub use holon_pattern::marking;
 pub use holon_pattern::pattern;
 pub use holon_pattern::schema;
 // Re-export inline-mark types (rich text)
@@ -239,6 +240,11 @@ pub use interp_value::{
 // Re-export link search candidate
 pub use link_candidate::LinkCandidate;
 pub use link_candidate::QuickOpenResults;
+// Re-export the declared marking-delta vocabulary (ADR 0032 §4)
+pub use marking::{
+    AspectChange, DeltaViolation, ExistenceFlow, KindDelta, MarkingDelta, ObservedDelta, Placement,
+    RowState, StructuralEvidence, StructuralFlow, TextFlow,
+};
 // Re-export the dual-evaluated Pattern guard AST (ADR 0024 Phase-2 spike)
 pub use pattern::{
     BuiltinRef, CmpOp, CurrentSchema, FieldRef, Guard, GuardParseError, GuardResult, InMemoryWorld,

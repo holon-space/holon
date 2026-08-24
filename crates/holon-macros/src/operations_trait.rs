@@ -1,6 +1,12 @@
 use holon_pattern::arcs::ArcEmit;
 use holon_pattern::arcs::ArcPlace;
+use holon_pattern::arcs::ArcRelation;
 use holon_pattern::arcs::TransitionArcs;
+use holon_pattern::marking::ExistenceFlow;
+use holon_pattern::marking::KindDelta;
+use holon_pattern::marking::MarkingDelta;
+use holon_pattern::marking::StructuralFlow;
+use holon_pattern::marking::TextFlow;
 use holon_pattern::pattern::BuiltinRef;
 use holon_pattern::pattern::Guard;
 use holon_pattern::pattern::OpGuard;
@@ -213,6 +219,20 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 }
             };
 
+            // The declared marking delta (ADR 0032 §4): aspect flows per entity
+            // kind, parsed HERE so a `varies_by` naming a parameter the method
+            // does not take is a compile error.
+            let delta_field = match extract_marking_delta(&method.attrs, &method.sig) {
+                Ok(delta) => {
+                    let expr = marking_delta_tokens(&delta);
+                    quote! { marking_delta: #expr, }
+                }
+                Err(err) => {
+                    let err = err.to_compile_error();
+                    quote! { marking_delta: { #err }, }
+                }
+            };
+
             // Extract affected fields from #[operation(affects = [...])] attribute
             let affected_fields = extract_affected_fields(&method.attrs);
             let affected_fields_expr = if affected_fields.is_empty() {
@@ -311,6 +331,7 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         bound_params: ::std::collections::HashMap::new(),
                         #guard_field
                         #arcs_field
+                        #delta_field
                     }
                 }
             }
@@ -1396,6 +1417,314 @@ fn transition_arcs_tokens(arcs: &TransitionArcs) -> proc_macro2::TokenStream {
                 }
             }
         }
+    }
+}
+
+/// One kind clause inside `#[marking_delta(...)]`:
+/// `block(structural = relocates, text = untouched, existence = reads)`.
+struct ParsedKindDelta {
+    kind: syn::Ident,
+    aspects: Vec<(syn::Ident, syn::Ident)>,
+}
+
+impl syn::parse::Parse for ParsedKindDelta {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let kind: syn::Ident = input.parse().map_err(|_| {
+            input.error(
+                "#[marking_delta] takes kind clauses — \
+                 block(structural = …, text = …, existence = …) — and an optional \
+                 varies_by(\"param\", …)",
+            )
+        })?;
+        let inner;
+        syn::parenthesized!(inner in input);
+        let mut aspects = Vec::new();
+        while !inner.is_empty() {
+            let aspect: syn::Ident = inner.parse()?;
+            inner.parse::<syn::Token![=]>()?;
+            let flow: syn::Ident = inner.parse()?;
+            aspects.push((aspect, flow));
+            if inner.peek(syn::Token![,]) {
+                inner.parse::<syn::Token![,]>()?;
+            }
+        }
+        Ok(ParsedKindDelta { kind, aspects })
+    }
+}
+
+/// One item at the top level of `#[marking_delta(...)]`.
+enum ParsedDeltaItem {
+    Kind(ParsedKindDelta),
+    VariesBy(Vec<syn::LitStr>),
+}
+
+impl syn::parse::Parse for ParsedDeltaItem {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let fork = input.fork();
+        let head: syn::Ident = fork.parse()?;
+        if head == "varies_by" {
+            input.parse::<syn::Ident>()?;
+            let inner;
+            syn::parenthesized!(inner in input);
+            let lits = Punctuated::<syn::LitStr, syn::Token![,]>::parse_terminated(&inner)?;
+            return Ok(ParsedDeltaItem::VariesBy(lits.into_iter().collect()));
+        }
+        Ok(ParsedDeltaItem::Kind(input.parse()?))
+    }
+}
+
+/// Every parameter name the method accepts, so `varies_by` cannot name one that
+/// does not exist.
+fn method_param_names(sig: &syn::Signature) -> Vec<String> {
+    sig.inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::FnArg::Typed(pat) => match &*pat.pat {
+                syn::Pat::Ident(ident) => Some(ident.ident.to_string()),
+                _ => None,
+            },
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect()
+}
+
+fn parse_structural_flow(flow: &syn::Ident) -> syn::Result<StructuralFlow> {
+    match flow.to_string().as_str() {
+        "untouched" => Ok(StructuralFlow::Untouched),
+        "reads" => Ok(StructuralFlow::Reads),
+        "produces" => Ok(StructuralFlow::Produces),
+        "consumes" => Ok(StructuralFlow::Consumes),
+        "relocates" => Ok(StructuralFlow::Relocates),
+        other => Err(syn::Error::new_spanned(
+            flow,
+            format!(
+                "unknown structural flow {other}; one of untouched, reads, produces, consumes, \
+                 relocates"
+            ),
+        )),
+    }
+}
+
+fn parse_text_flow(flow: &syn::Ident) -> syn::Result<TextFlow> {
+    match flow.to_string().as_str() {
+        "untouched" => Ok(TextFlow::Untouched),
+        "reads" => Ok(TextFlow::Reads),
+        "produces" => Ok(TextFlow::Produces),
+        "consumes" => Err(syn::Error::new_spanned(
+            flow,
+            "text tokens are CRDT-shared and never exclusively held, so nothing consumes them \
+             (ADR 0032 §4)",
+        )),
+        other => Err(syn::Error::new_spanned(
+            flow,
+            format!("unknown text flow {other}; one of untouched, reads, produces"),
+        )),
+    }
+}
+
+fn parse_existence_flow(flow: &syn::Ident) -> syn::Result<ExistenceFlow> {
+    match flow.to_string().as_str() {
+        "untouched" => Ok(ExistenceFlow::Untouched),
+        "reads" => Ok(ExistenceFlow::Reads),
+        "produces" => Ok(ExistenceFlow::Produces),
+        "consumes" => Err(syn::Error::new_spanned(
+            flow,
+            "existence tokens are never consumed; a deletion PRODUCES the absent state \
+             (ADR 0032 §4)",
+        )),
+        other => Err(syn::Error::new_spanned(
+            flow,
+            format!("unknown existence flow {other}; one of untouched, reads, produces"),
+        )),
+    }
+}
+
+/// Parse `#[marking_delta(...)]` into the declared [`MarkingDelta`]. Absent,
+/// the op is [`MarkingDelta::Undeclared`] — "cannot say", never "changes
+/// nothing".
+fn extract_marking_delta(
+    attrs: &[syn::Attribute],
+    sig: &syn::Signature,
+) -> syn::Result<MarkingDelta> {
+    let Some(attr) = attrs.iter().find(|a| attr_is(a, "marking_delta")) else {
+        return Ok(MarkingDelta::Undeclared);
+    };
+    let Meta::List(meta_list) = &attr.meta else {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "#[marking_delta] takes a parenthesized list of kind clauses",
+        ));
+    };
+
+    let items = meta_list
+        .parse_args_with(Punctuated::<ParsedDeltaItem, syn::Token![,]>::parse_terminated)?;
+
+    let mut kinds: Vec<KindDelta> = Vec::new();
+    let mut varies_by: Option<Vec<String>> = None;
+
+    for item in items {
+        match item {
+            ParsedDeltaItem::VariesBy(lits) => {
+                let params = method_param_names(sig);
+                let mut names = Vec::new();
+                for lit in &lits {
+                    let name = lit.value();
+                    if !params.contains(&name) {
+                        return Err(syn::Error::new_spanned(
+                            lit,
+                            format!(
+                                "varies_by({name:?}) names no parameter of this method; it takes \
+                                 {params:?}"
+                            ),
+                        ));
+                    }
+                    names.push(name);
+                }
+                if names.is_empty() {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "varies_by() with no parameters claims the delta is dynamic without \
+                         saying what decides it — declare the static delta instead",
+                    ));
+                }
+                varies_by = Some(names);
+            }
+            ParsedDeltaItem::Kind(parsed) => {
+                let mut structural = None;
+                let mut text = None;
+                let mut existence = None;
+                for (aspect, flow) in &parsed.aspects {
+                    match aspect.to_string().as_str() {
+                        "structural" => structural = Some(parse_structural_flow(flow)?),
+                        "text" => text = Some(parse_text_flow(flow)?),
+                        "existence" => existence = Some(parse_existence_flow(flow)?),
+                        other => {
+                            return Err(syn::Error::new_spanned(
+                                aspect,
+                                format!(
+                                    "unknown aspect {other}; the aspects are structural, text, \
+                                     existence (ADR 0032 §4)"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                let missing: Vec<&str> = [
+                    ("structural", structural.is_none()),
+                    ("text", text.is_none()),
+                    ("existence", existence.is_none()),
+                ]
+                .into_iter()
+                .filter(|(_, absent)| *absent)
+                .map(|(name, _)| name)
+                .collect();
+                if !missing.is_empty() {
+                    return Err(syn::Error::new_spanned(
+                        &parsed.kind,
+                        format!(
+                            "kind {} leaves {missing:?} unstated; every aspect is declared, and \
+                             `untouched` is how an op says it moves none of that aspect's tokens",
+                            parsed.kind
+                        ),
+                    ));
+                }
+                let relation = parsed.kind.to_string();
+                if kinds.iter().any(|k| k.kind.as_str() == relation) {
+                    return Err(syn::Error::new_spanned(
+                        &parsed.kind,
+                        format!("kind {relation} is declared twice"),
+                    ));
+                }
+                kinds.push(KindDelta {
+                    kind: ArcRelation::new(relation),
+                    structural: structural.expect("checked above"),
+                    text: text.expect("checked above"),
+                    existence: existence.expect("checked above"),
+                });
+            }
+        }
+    }
+
+    if kinds.is_empty() {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "#[marking_delta] with no kind clause says nothing that Undeclared does not already \
+             say — omit the attribute or name a kind",
+        ));
+    }
+
+    Ok(match varies_by {
+        Some(varies_by) => MarkingDelta::Envelope { kinds, varies_by },
+        None => MarkingDelta::Static { kinds },
+    })
+}
+
+/// Emit the parsed delta as a literal constructor expression — plain
+/// serializable data, for the same dual-consumer reason as the arcs.
+fn marking_delta_tokens(delta: &MarkingDelta) -> proc_macro2::TokenStream {
+    let kind_exprs = |kinds: &Vec<KindDelta>| {
+        let exprs: Vec<_> = kinds
+            .iter()
+            .map(|k| {
+                let relation = k.kind.as_str();
+                let structural = format_ident!("{}", structural_variant(k.structural));
+                let text = format_ident!("{}", text_variant(k.text));
+                let existence = format_ident!("{}", existence_variant(k.existence));
+                quote! {
+                    holon_api::marking::KindDelta {
+                        kind: holon_api::arcs::ArcRelation::new(#relation),
+                        structural: holon_api::marking::StructuralFlow::#structural,
+                        text: holon_api::marking::TextFlow::#text,
+                        existence: holon_api::marking::ExistenceFlow::#existence,
+                    }
+                }
+            })
+            .collect();
+        quote! { vec![#(#exprs),*] }
+    };
+
+    match delta {
+        MarkingDelta::Undeclared => quote! { holon_api::marking::MarkingDelta::Undeclared },
+        MarkingDelta::Static { kinds } => {
+            let kinds = kind_exprs(kinds);
+            quote! { holon_api::marking::MarkingDelta::Static { kinds: #kinds } }
+        }
+        MarkingDelta::Envelope { kinds, varies_by } => {
+            let kinds = kind_exprs(kinds);
+            let params = varies_by.iter().map(|p| quote! { #p.to_string() });
+            quote! {
+                holon_api::marking::MarkingDelta::Envelope {
+                    kinds: #kinds,
+                    varies_by: vec![#(#params),*],
+                }
+            }
+        }
+    }
+}
+
+fn structural_variant(flow: StructuralFlow) -> &'static str {
+    match flow {
+        StructuralFlow::Untouched => "Untouched",
+        StructuralFlow::Reads => "Reads",
+        StructuralFlow::Produces => "Produces",
+        StructuralFlow::Consumes => "Consumes",
+        StructuralFlow::Relocates => "Relocates",
+    }
+}
+
+fn text_variant(flow: TextFlow) -> &'static str {
+    match flow {
+        TextFlow::Untouched => "Untouched",
+        TextFlow::Reads => "Reads",
+        TextFlow::Produces => "Produces",
+    }
+}
+
+fn existence_variant(flow: ExistenceFlow) -> &'static str {
+    match flow {
+        ExistenceFlow::Untouched => "Untouched",
+        ExistenceFlow::Reads => "Reads",
+        ExistenceFlow::Produces => "Produces",
     }
 }
 

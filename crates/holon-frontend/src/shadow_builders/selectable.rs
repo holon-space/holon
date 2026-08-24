@@ -43,6 +43,7 @@ fn build_wiring(name: &str, args: &[Arg], row: &DataRow, trigger: Trigger) -> Op
             menu_exposure: holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::PointerGesture,
             },
+            marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
