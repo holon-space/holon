@@ -3260,6 +3260,10 @@ impl ReactiveEngine {
             hash_query(&query, lang, &query_context)
         ));
         let results = self.registry.get_or_create(&key);
+        let renderer = holon_api::render_requirements::requirements_for_template(
+            &render_expr,
+            &std::collections::BTreeMap::new(),
+        );
         results.set_render_expr(render_expr);
         results.set_generation(1);
 
@@ -3300,7 +3304,13 @@ impl ReactiveEngine {
                 let mut backoff = Duration::from_millis(250);
                 loop {
                     match session
-                        .watch_query(&query, lang, HashMap::new(), query_context.clone())
+                        .watch_query(
+                            &query,
+                            lang,
+                            HashMap::new(),
+                            query_context.clone(),
+                            renderer.clone(),
+                        )
                         .await
                     {
                         Ok(stream) => {
@@ -3577,7 +3587,15 @@ impl BuilderServices for ReactiveEngine {
         let bridge = crate::bridge_thread::capture();
         std::thread::scope(|s| {
             s.spawn(|| {
-                bridge.run(|| rt.block_on(engine.watch_query(query, lang, HashMap::new(), ctx)))
+                bridge.run(|| {
+                    rt.block_on(engine.watch_query(
+                        query,
+                        lang,
+                        HashMap::new(),
+                        ctx,
+                        holon_api::render_requirements::RenderRequirements::none(),
+                    ))
+                })
             })
             .join()
             .unwrap()

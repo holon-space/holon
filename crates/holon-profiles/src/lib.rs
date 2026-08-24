@@ -273,7 +273,9 @@ impl ParsedProfile {
             // declared columns come from the type-def base it merges into (see
             // `profile_from_type_def` + `build_cache_from_source` merge order).
             declared_columns: BTreeSet::new(),
-        })
+            render_requirements: Default::default(),
+        }
+        .derive_render_requirements())
     }
 }
 
@@ -625,13 +627,17 @@ pub fn profile_from_type_def(type_def: &holon_api::TypeDefinition) -> Option<Ent
         .map(|f| f.name.clone())
         .collect();
 
-    Some(EntityProfile {
-        entity_name: holon_api::EntityName::new(&type_def.name),
-        variants,
-        computed_fields,
-        virtual_child: None,
-        declared_columns,
-    })
+    Some(
+        EntityProfile {
+            entity_name: holon_api::EntityName::new(&type_def.name),
+            variants,
+            computed_fields,
+            virtual_child: None,
+            declared_columns,
+            render_requirements: Default::default(),
+        }
+        .derive_render_requirements(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1132,7 +1138,9 @@ impl ProfileResolver {
             computed_fields: profile.computed_fields.clone(),
             virtual_child: profile.virtual_child.clone(),
             declared_columns: profile.declared_columns.clone(),
+            render_requirements: Default::default(),
         }
+        .derive_render_requirements()
     }
 }
 
@@ -1221,6 +1229,7 @@ impl ProfileResolving for ProfileResolver {
     fn resolve_computed_only(
         &self,
         row: &HashMap<String, holon_api::Value>,
+        binding: &holon_api::render_requirements::RenderRequirements,
     ) -> HashMap<String, holon_api::Value> {
         // Mirror the short-circuits of `resolve_with_computed` (value rows and
         // unregistered entities carry no computed fields) but SKIP variant
@@ -1238,7 +1247,7 @@ impl ProfileResolving for ProfileResolver {
             None => return HashMap::new(),
         };
         let engine = self.rhai_engine.read().unwrap().clone();
-        entity_profile.compute_fields_only(row, &engine)
+        entity_profile.compute_fields_only(row, &engine, binding)
     }
 
     fn resolve_batch(&self, rows: &[HashMap<String, holon_api::Value>]) -> Vec<Arc<RenderProfile>> {
@@ -1387,6 +1396,11 @@ pub fn is_profile_block_by_source_language(source_language: Option<&str>) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The block profile is its own renderer on the render seat.
+    fn entity_dispatch() -> holon_api::render_requirements::RenderRequirements {
+        holon_api::render_requirements::RenderRequirements::entity_dispatch()
+    }
 
     /// Walk a parsed render tree and collect every string-literal value (the
     /// text a `text("…")` / label arg carries), so a test can assert none was
@@ -1689,21 +1703,21 @@ variants:
 
         assert_eq!(
             profile
-                .compute_fields_only(&row(Some(1)), &engine)
+                .compute_fields_only(&row(Some(1)), &engine, &entity_dispatch())
                 .get("bullet_shape"),
             Some(&Value::String("orgmode".to_string())),
             "collapsed block → ringed orgmode bullet"
         );
         assert_eq!(
             profile
-                .compute_fields_only(&row(Some(0)), &engine)
+                .compute_fields_only(&row(Some(0)), &engine, &entity_dispatch())
                 .get("bullet_shape"),
             Some(&Value::String("circle".to_string())),
             "expanded/leaf block → plain circle dot"
         );
         // Absent `collapsed`: the field is unbound (not a "orgmode"), so the
         // icon name falls back to its default dot.
-        let out = profile.compute_fields_only(&row(None), &engine);
+        let out = profile.compute_fields_only(&row(None), &engine, &entity_dispatch());
         assert_ne!(
             out.get("bullet_shape"),
             Some(&Value::String("orgmode".to_string())),
@@ -2316,6 +2330,7 @@ variants:
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            render_requirements: Default::default(),
         };
         let mut row: holon_api::entity::StorageEntity = HashMap::new();
         row.insert(

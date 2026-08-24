@@ -15,7 +15,7 @@ use crate::pbt::composed::declared_column_gaps::InvNoDeclaredColumnAbsent;
 
 pub fn wire() -> Box<dyn CapInvariant> {
     Box::new(BridgedInvariant::new(
-        InvNoDeclaredColumnAbsent::from_env(),
+        InvNoDeclaredColumnAbsent::new(),
         RunMode::Strict,
         Needs {
             sut_present: vec![CapId::of::<dyn DeclaredColumnGaps>()],

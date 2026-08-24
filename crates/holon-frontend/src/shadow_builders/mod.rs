@@ -51,6 +51,16 @@ pub fn register_render_dsl_widget_names() {
         "section_stack",
     ]);
     holon_api::render_dsl::register_widget_names(&all_names);
+    holon_api::render_requirements::register_widget_param_defaults(
+        all_widget_metas().into_iter().map(|meta| {
+            let params = meta
+                .params
+                .iter()
+                .map(|p| (p.name.to_string(), p.default.is_some()))
+                .collect::<Vec<_>>();
+            (meta.name.to_string(), params)
+        }),
+    );
 }
 
 pub fn build_shadow_interpreter() -> RenderInterpreter<ReactiveViewModel> {

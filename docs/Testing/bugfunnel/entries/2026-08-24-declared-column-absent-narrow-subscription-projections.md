@@ -3,7 +3,7 @@ id: 2026-08-24-declared-column-absent-narrow-subscription-projections
 date: 2026-08-24
 gap: ORACLE
 secondary: ENVIRONMENT
-status: OPEN
+status: FIXED
 summary: >-
   The eight chronic per-run "DECLARED column absent" warnings come from
   subscription SELECT lists that are narrower than the block entity's declared
@@ -132,7 +132,9 @@ through all of them.
 
 ## Remedy
 
-OPEN.
+FIXED (D7.c, Martin 2026-08-24). The rung that closed it is at the END of
+this section; everything between here and it is the measurement that produced
+the ruling, kept because the fix rests on it.
 
 Built here: the parity oracle,
 `crates/holon-integration-tests/tests/span_capture_suite/declared_column_parity.rs`
@@ -240,3 +242,81 @@ recorded — "hydrate vs no-compute-on-delta vs declared-relative-to-source" all
 presuppose a CDC-delta narrowing that does not exist. The remaining choice is
 the already-ratified one: widen the authored SELECTs, keep the warning as a
 true positive, and let the oracle hold the line.
+
+## Fix rung (D7.c — requirement is a property of the BINDING)
+
+Martin's ruling: the contract attaches to each `(query, renderer)` binding, not
+to the query. A renderer declares REQUIRED fields (the render is wrong without
+them) and OPTIONAL-WITH-DEFAULT fields (documented degradation). A query must
+carry the union of its attached renderers' REQUIRED fields.
+
+The manifest is DERIVED, not authored (`crates/holon-api/src/render_requirements.rs`):
+
+- A `col("F")` under a widget parameter that declares a `#[default]` is
+  OPTIONAL; anywhere else — a variant condition, an undefaulted parameter — it
+  is REQUIRED. The classification data is the `WidgetMeta` parameter table the
+  frontend's builder registry publishes (`register_widget_param_defaults`).
+- A computed-field name expands to the columns its expression reads,
+  transitively through sibling computed fields, carrying its classification
+  down. A computed field no template binds contributes nothing.
+- `render_entity()` / `live_block()` marks the binding as deferring to each
+  row's own entity profile, which then answers with its own manifest.
+
+The manifest travels with the subscription (`QueryEngine::watch_query` gained a
+`RenderRequirements` argument → `enrich_stream` → `resolve_computed_only`), so
+the loud gate is a three-way narrowing: the column is in the entity's declared
+schema AND the profile requires it AND the subscribed binding's renderer
+requires it. A binding with no renderer — a raw watch, the advice streams, an
+MCP read — requires nothing and announces nothing.
+
+### The eight pairs, accounted for
+
+Derived classification for the shipped block profile, pinned by
+`render_requirement_manifest.rs`: REQUIRED (declared) = `content`,
+`content_type`, `id`, `parent_id`, `source_language`, `widget_only`; OPTIONAL
+(declared) = `collapsed`.
+
+| # | pair | verdict |
+|---|---|---|
+| 1 | `is_source` / `content_type` | REQUIRED — variant conditions (`source_editing`, `source`) have no default |
+| 2 | `is_image` / `content_type` | REQUIRED — the `image_block` condition |
+| 3 | `is_holon_source` / `source_language` | REQUIRED — the `holon_source` condition |
+| 4 | `is_rule_head` / `source_language` | REQUIRED — reached by the `rule_card` condition via `is_program` |
+| 5 | `is_legacy_rule` / `source_language` | REQUIRED **by column** — no template binds `is_legacy_rule` (the banner reads `source_language` directly through `if_col`), but the column is required elsewhere, so the gap is real and is reported once per affected field |
+| 6 | `bullet_shape` / `collapsed` | OPTIONAL-WITH-DEFAULT — bound only under `icon`'s `name`, which declares `"circle"`. Silenced |
+| 7 | `is_widget_only` / `widget_only` | REQUIRED — the `query_block` / `query_block_titled` conditions |
+| 8 | `is_program` / `parent_id` | REQUIRED — the `rule_card` condition |
+
+Seven required, one reclassified. The required seven are met by widening the two
+authored outline projections — `descendants` and `focused_children`
+(`crates/holon/sql/prql_stdlib.prql`) — and the `block_with_path` recursive CTE
+beneath `descendants`
+(`crates/holon-turso/sql/schema/blocks_with_paths.sql`) with `collapsed` and
+`widget_only`. `collapsed` is widened too although the invariant no longer
+demands it: the outline draws disclosure state, and the plain-dot fallback is
+the user-visible defect this entry opens with.
+
+`inv-no-declared-column-absent` is re-scoped to render-bound REQUIRED fields and
+ENFORCED — the `HOLON_PBT_DECLARED_COLUMN_ORACLE` gating is gone.
+
+### What the fix did NOT need
+
+`crate::pbt::query::all_block_columns` is unchanged. The keystone's `SetupWatch`
+seat keeps its deliberately narrow generated projections; what changed is that
+it declares the renderer it actually has. `register_watch_compiled`
+(`crates/holon-integration-tests/src/pbt/frontend_slice/components.rs`) keeps
+the watch guard and DROPS the rendered tree, and the invariants over those
+watches read rows — so it now passes a `table` with no `item_template` instead
+of `table_expr()`'s `render_entity()`.
+
+### Reach limit, measured
+
+Inverting the `descendants` projection (dropping `widget_only`) does NOT redden
+the hand-authored gate: those replays never subscribe a render-bound narrow
+production query. The composed invariant's red on this tree came from the
+harness's own binding, not from the outline. The outline is instead held by
+`the_outline_source_carries_every_column_its_renderer_requires`
+(`declared_column_parity.rs`), which drives `from descendants` through the
+production `watch_query` seat directly; the same inversion fails it naming
+`is_widget_only/widget_only`. Whoever extends the composed catalog should treat
+"a transition that subscribes the outline" as still-missing coverage.

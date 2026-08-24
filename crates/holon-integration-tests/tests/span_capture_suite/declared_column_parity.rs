@@ -93,7 +93,14 @@ async fn set_field(
 }
 
 /// Every `(computed field, declared column)` pair a block-profile row loses
-/// when its subscription projects only `id` and `content`.
+/// when its subscription projects only `id` and `content` AND renders through
+/// the block profile.
+///
+/// `collapsed` is absent from this list and `bullet_shape` with it: the profile
+/// binds it only under `icon`'s defaulting `name` parameter, so a row without
+/// it draws the plain bullet — documented degradation, nothing to announce.
+/// Every other pair here traces back to a variant condition, which has no
+/// default to fall back on.
 ///
 /// Asserted as SET EQUALITY, not membership: the defect this whole change
 /// documents is a count drifting from three to eight with nothing going red, so
@@ -101,7 +108,6 @@ async fn set_field(
 /// legitimate change to the block profile's computed fields SHOULD fail here
 /// and be updated deliberately.
 const EXPECTED_GAPS: &[(&str, &str)] = &[
-    ("bullet_shape", "collapsed"),
     ("is_holon_source", "source_language"),
     ("is_image", "content_type"),
     ("is_legacy_rule", "source_language"),
@@ -166,6 +172,7 @@ fn a_narrow_subscription_unbinds_the_declared_columns_it_omits() {
             holon_api::QueryLanguage::HolonSql,
             HashMap::new(),
             None,
+            holon_api::render_requirements::RenderRequirements::entity_dispatch(),
         )
         .await
         .expect("narrow watch_query");
@@ -208,6 +215,119 @@ fn a_narrow_subscription_unbinds_the_declared_columns_it_omits() {
              If the block profile's computed fields changed on purpose, update \
              EXPECTED_GAPS and the table in the bugfunnel entry together.",
             expected.len(),
+        );
+    });
+}
+
+/// The same narrow SELECT, bound to no renderer, announces nothing.
+///
+/// This is the binding half of the contract: requirement belongs to the
+/// (query, renderer) pair, so the identical projection is a gap when the block
+/// profile draws its rows and legal when nothing does. A raw watch — an MCP
+/// read, an advice stream, a generated keystone projection — is the second
+/// case.
+#[test]
+fn a_narrow_subscription_with_no_renderer_announces_nothing() {
+    let collector = SpanCollector::global();
+    let scope = begin_test_scope();
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    attach_scope_to_runtime(&mut builder, scope);
+    let runtime = Arc::new(builder.build().expect("tokio runtime"));
+    runtime.clone().block_on(async move {
+        holon_api::computed::reset_missing_declared_warnings();
+
+        let env = TestEnvironment::new(runtime.clone()).expect("TestEnvironment");
+        env.start_app(true).await.expect("start_app");
+
+        collector.reset();
+        holon_api::computed::reset_missing_declared_warnings();
+
+        let _stream = holon_api::QueryEngine::watch_query(
+            env.engine().as_ref(),
+            "SELECT id, content FROM block_raw",
+            holon_api::QueryLanguage::HolonSql,
+            HashMap::new(),
+            None,
+            holon_api::render_requirements::RenderRequirements::none(),
+        )
+        .await
+        .expect("narrow watch_query");
+
+        // Long enough for the same rows that produce EXPECTED_GAPS under a
+        // block-profile renderer to have flowed through the enrich seat.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        let seen: Vec<String> = collector
+            .captured_warnings()
+            .iter()
+            .filter(|w| w.message.contains(SIGNAL))
+            .map(|w| {
+                let (context, column) = gap_pair(&w.message);
+                format!("{context}/{column}")
+            })
+            .collect();
+        assert!(
+            seen.is_empty(),
+            "a subscription with no renderer attached requires no column, so the same narrow \
+             projection that yields {} pair(s) under the block profile must yield none here. \
+             Observed: {seen:?}",
+            EXPECTED_GAPS.len(),
+        );
+    });
+}
+
+/// `from descendants` — the outline's own source, rendered through
+/// `render_entity()` — carries every column the block profile requires.
+///
+/// The outline is the binding the eight boot warnings came from, and it is the
+/// one no boot-only assertion reaches: this drives the query directly through
+/// the production `watch_query` seat rather than waiting for a navigation
+/// cursor to produce it. Dropping a column from the `descendants` projection in
+/// `crates/holon/sql/prql_stdlib.prql` fails this test naming the pair.
+#[test]
+fn the_outline_source_carries_every_column_its_renderer_requires() {
+    let collector = SpanCollector::global();
+    let scope = begin_test_scope();
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    attach_scope_to_runtime(&mut builder, scope);
+    let runtime = Arc::new(builder.build().expect("tokio runtime"));
+    runtime.clone().block_on(async move {
+        holon_api::computed::reset_missing_declared_warnings();
+
+        let env = TestEnvironment::new(runtime.clone()).expect("TestEnvironment");
+        env.start_app(true).await.expect("start_app");
+
+        collector.reset();
+        holon_api::computed::reset_missing_declared_warnings();
+
+        let _stream = holon_api::QueryEngine::watch_query(
+            env.engine().as_ref(),
+            "from descendants",
+            holon_api::QueryLanguage::HolonPrql,
+            HashMap::new(),
+            None,
+            holon_api::render_requirements::RenderRequirements::entity_dispatch(),
+        )
+        .await
+        .expect("descendants watch_query");
+
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        let seen: Vec<String> = collector
+            .captured_warnings()
+            .iter()
+            .filter(|w| w.message.contains(SIGNAL))
+            .map(|w| {
+                let (context, column) = gap_pair(&w.message);
+                format!("{context}/{column}")
+            })
+            .collect();
+        assert!(
+            seen.is_empty(),
+            "the outline projection must carry every column the block profile requires to \
+             render a row. Missing: {seen:?}",
         );
     });
 }

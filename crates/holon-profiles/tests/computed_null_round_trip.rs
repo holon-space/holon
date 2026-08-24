@@ -82,6 +82,11 @@ fn test_engine() -> RhaiEngine {
     engine
 }
 
+/// The block profile is its own renderer on the render seat.
+fn entity_dispatch() -> holon_api::render_requirements::RenderRequirements {
+    holon_api::render_requirements::RenderRequirements::entity_dispatch()
+}
+
 fn block_profile() -> EntityProfile {
     let registry = holon_profiles::type_registry::create_default_registry()
         .expect("default registry must build");
@@ -127,7 +132,7 @@ fn enriched_null_computed_field_does_not_degrade_the_page_row_condition() {
     let raw = plain_block_row();
 
     // Seat B (enrichment): computed fields only. Unbound fields come back Null.
-    let computed = profile.compute_fields_only(&raw, &test_engine());
+    let computed = profile.compute_fields_only(&raw, &test_engine(), &entity_dispatch());
     assert_eq!(
         computed.get("is_page_row"),
         Some(&Value::Null),
@@ -171,7 +176,7 @@ fn page_row_still_selects_embedded_page_after_a_round_trip() {
     row.insert("id".into(), Value::String("block:page".into()));
     row.insert("tags".into(), Value::String("[\"Page\"]".into()));
 
-    let computed = profile.compute_fields_only(&row, &test_engine());
+    let computed = profile.compute_fields_only(&row, &test_engine(), &entity_dispatch());
     assert_eq!(computed.get("is_page_row"), Some(&Value::Boolean(true)));
 
     let mut enriched = row;
@@ -184,7 +189,7 @@ fn page_row_still_selects_embedded_page_after_a_round_trip() {
         "page row degraded on the second pass: {events:#?}"
     );
     assert_eq!(
-        profile.compute_fields_only(&enriched, &test_engine()),
+        profile.compute_fields_only(&enriched, &test_engine(), &entity_dispatch()),
         computed,
         "computed fields must be idempotent across the enrich→render round trip"
     );
@@ -287,7 +292,7 @@ fn no_shipped_block_condition_degrades_on_any_enriched_row_shape() {
         for k in remove {
             row.remove(k);
         }
-        let computed = profile.compute_fields_only(&row, &test_engine());
+        let computed = profile.compute_fields_only(&row, &test_engine(), &entity_dispatch());
         let mut enriched = row;
         for (k, v) in computed {
             enriched.insert(k, v);

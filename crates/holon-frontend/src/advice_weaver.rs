@@ -49,6 +49,7 @@ use holon_api::OccurrenceId;
 use holon_api::QueryLanguage;
 use holon_api::RowKey;
 use holon_api::Value;
+use holon_api::render_requirements::RenderRequirements;
 use holon_api::widget_spec::DataRow;
 
 /// The session-level advice sidecar: anchor → synthesized advice rows (rank
@@ -364,6 +365,7 @@ pub fn spawn_session_weaver(
                     QueryLanguage::HolonSql,
                     HashMap::new(),
                     None,
+                    RenderRequirements::none(),
                 )
                 .await
             {
@@ -386,6 +388,7 @@ pub fn spawn_session_weaver(
                         QueryLanguage::HolonSql,
                         HashMap::new(),
                         None,
+                        RenderRequirements::none(),
                     )
                     .await
                 {

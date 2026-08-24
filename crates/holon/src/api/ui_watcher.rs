@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use holon_api::EntityUri;
 use holon_api::reactive::ReactiveStreamExt;
+use holon_api::render_requirements::RenderRequirements;
 use holon_api::render_types::Arg;
 use holon_api::render_types::RenderExpr;
 use holon_api::streaming::ActorAbortGuard;
@@ -316,7 +317,13 @@ async fn forward_data_stream(
             generation
         );
         let metadata = batch_with_metadata.metadata.clone();
-        let enriched = enrich_batch(batch_with_metadata.inner.items, &profile_resolver);
+        // `watch_ui` renders each row through its own entity profile
+        // (`BlockDomain::render_entity`), so the profile answers for itself.
+        let enriched = enrich_batch(
+            batch_with_metadata.inner.items,
+            &profile_resolver,
+            &RenderRequirements::entity_dispatch(),
+        );
         // Convert Change<EnrichedRow> → Change<DataRow> at the UiEvent boundary.
         // UiEvent::Data uses MapChange (= Change<DataRow>) — the FFI boundary requires
         // this shape.
@@ -348,16 +355,17 @@ async fn forward_data_stream(
 pub fn enrich_batch(
     items: Vec<crate::storage::turso::RowChange>,
     profile_resolver: &Arc<dyn ProfileResolving>,
+    renderer: &RenderRequirements,
 ) -> Vec<Change<EnrichedRow>> {
     items
         .into_iter()
         .map(|row_change| match row_change.change {
             Change::Created { data, origin } => {
-                let data = enrich_row(data, profile_resolver);
+                let data = enrich_row(data, profile_resolver, renderer);
                 Change::Created { data, origin }
             }
             Change::Updated { id, data, origin } => {
-                let data = enrich_row(data, profile_resolver);
+                let data = enrich_row(data, profile_resolver, renderer);
                 Change::Updated { id, data, origin }
             }
             Change::Deleted { id, origin } => Change::Deleted { id, origin },
@@ -380,15 +388,17 @@ pub fn enrich_batch(
 pub fn enrich_row(
     data: holon_api::StorageEntity,
     resolver: &Arc<dyn ProfileResolving>,
+    renderer: &RenderRequirements,
 ) -> EnrichedRow {
     let resolver = resolver.clone();
+    let renderer = renderer.clone();
     EnrichedRow::from_storage(data, |row| {
         // Computed fields only — do NOT resolve the render profile here. The
         // profile was discarded anyway, and resolving it evaluated UI-bearing
         // variant conditions against this raw storage row (no UI-state bindings),
         // emitting spurious `eval_bool_source` errors. See
         // `ProfileResolving::resolve_computed_only`.
-        resolver.resolve_computed_only(row)
+        resolver.resolve_computed_only(row, &renderer)
     })
 }
 
@@ -406,6 +416,7 @@ use holon_api::EnrichedChangeStream;
 pub fn enrich_stream(
     raw: RowChangeStream,
     profile_resolver: Arc<dyn ProfileResolving>,
+    renderer: RenderRequirements,
 ) -> EnrichedChangeStream {
     use holon_api::streaming::Batch;
     use holon_api::streaming::WithMetadata;
@@ -416,7 +427,7 @@ pub fn enrich_stream(
     crate::util::spawn_actor(async move {
         tokio::pin!(raw);
         while let Some(batch) = raw.next().await {
-            let enriched = enrich_batch(batch.inner.items, &profile_resolver);
+            let enriched = enrich_batch(batch.inner.items, &profile_resolver, &renderer);
             let enriched_batch = WithMetadata {
                 inner: Batch { items: enriched },
                 metadata: batch.metadata,

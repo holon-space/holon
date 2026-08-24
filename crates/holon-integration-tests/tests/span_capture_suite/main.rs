@@ -12,5 +12,6 @@ mod declared_column_parity;
 mod host_page_with_inline_subpages_ingest;
 mod interaction_trace_connectivity;
 mod region_writeback_loss;
+mod render_requirement_manifest;
 mod split_doc_root_idless_duplicates;
 mod substrate_corruption_faults;

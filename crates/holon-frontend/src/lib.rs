@@ -851,6 +851,7 @@ impl<T> FrontendSession<T> {
         language: holon_api::QueryLanguage,
         params: HashMap<String, Value>,
         context: Option<QueryContext>,
+        renderer: holon_api::render_requirements::RenderRequirements,
     ) -> Result<holon_api::EnrichedChangeStream> {
         self.query_engine()
             .ok_or_else(|| {
@@ -859,7 +860,7 @@ impl<T> FrontendSession<T> {
                      (no-Turso) session"
                 )
             })?
-            .watch_query(query, language, params, context)
+            .watch_query(query, language, params, context, renderer)
             .await
     }
 

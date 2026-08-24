@@ -25,6 +25,7 @@ use crate::CompiledExpr;
 use crate::EntityName;
 use crate::Value;
 use crate::predicate::Predicate;
+use crate::render_requirements::RenderRequirements;
 use crate::render_types::OperationDescriptor;
 use crate::render_types::RenderExpr;
 use crate::render_types::RenderProfile;
@@ -118,6 +119,12 @@ pub struct EntityProfile {
     /// UI-state variable — and is silent. Empty for profiles built without a
     /// TypeDefinition (org-source / test fixtures): every miss is then silent.
     pub declared_columns: BTreeSet<String>,
+    /// What this profile needs from a row when it is the renderer — derived
+    /// from its variants' conditions and render templates by
+    /// [`Self::derive_render_requirements`]. A column outside `required` is
+    /// either unbound by every template (nothing reads it) or bound to a widget
+    /// parameter that declares a default, and its absence is silent.
+    pub render_requirements: RenderRequirements,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +141,55 @@ impl EntityProfile {
             .take()
             .map(|c| c.widened_to_declared(&self.declared_columns));
         self
+    }
+
+    /// Fill [`Self::render_requirements`] from this profile's own variants.
+    ///
+    /// Call after any change to `variants` or `computed_fields` — a filtered
+    /// variant set is a different renderer with a different manifest.
+    pub fn derive_render_requirements(mut self) -> Self {
+        let computed: std::collections::BTreeMap<String, BTreeSet<String>> = self
+            .computed_fields
+            .iter()
+            .map(|(name, expr)| (name.clone(), expr.required_columns.clone()))
+            .collect();
+
+        let mut names = crate::render_requirements::BoundNames::default();
+        for variant in &self.variants {
+            names
+                .required
+                .extend(variant.condition_required.iter().cloned());
+            names
+                .required
+                .extend(variant.data_condition_required.iter().cloned());
+            let bound = crate::render_requirements::bound_names(&variant.profile.render);
+            names.required.extend(bound.required);
+            names.optional.extend(bound.optional);
+        }
+        names.optional = names
+            .optional
+            .difference(&names.required)
+            .cloned()
+            .collect();
+
+        self.render_requirements =
+            crate::render_requirements::expand_through_computed(&names, &computed);
+        self
+    }
+
+    /// The columns whose absence is announced on this row.
+    ///
+    /// Three-way narrowing: the column must be part of the entity's declared
+    /// schema (otherwise it is expected heterogeneity), this profile must need
+    /// it to render correctly, and the subscription that delivered the row must
+    /// have a renderer that needs it too. A raw watch with no renderer attached
+    /// narrows the set to empty.
+    fn loud_columns(&self, binding: &RenderRequirements) -> BTreeSet<String> {
+        self.render_requirements
+            .intersect_required(binding)
+            .intersection(&self.declared_columns)
+            .cloned()
+            .collect()
     }
 
     /// Resolve a single row to its RenderProfile.
@@ -153,9 +209,12 @@ impl EntityProfile {
         row: &HashMap<String, Value>,
         engine: &RhaiEngine,
     ) -> (Option<Arc<StoredProfile>>, HashMap<String, Value>) {
-        let mut scope = self.build_scope(row, engine);
+        // The render seat: this profile IS the renderer, so it is its own
+        // binding.
+        let loud = self.loud_columns(&self.render_requirements);
+        let mut scope = self.build_scope(row, engine, &loud);
 
-        let profile = self.resolve_from_scope(engine, &mut scope);
+        let profile = self.resolve_from_scope(engine, &mut scope, &loud);
         let computed = self.extract_computed_values(&scope);
         (profile, computed)
     }
@@ -170,12 +229,17 @@ impl EntityProfile {
     /// raw storage row that carries no such bindings, emitting spurious
     /// eval errors. Computing the fields directly (build scope → extract
     /// computed) skips that entirely.
+    ///
+    /// `binding` is the requirement manifest of the renderer attached to the
+    /// subscription this row arrived on.
     pub fn compute_fields_only(
         &self,
         row: &HashMap<String, Value>,
         engine: &RhaiEngine,
+        binding: &RenderRequirements,
     ) -> HashMap<String, Value> {
-        let scope = self.build_scope(row, engine);
+        let loud = self.loud_columns(binding);
+        let scope = self.build_scope(row, engine, &loud);
         self.extract_computed_values(&scope)
     }
 
@@ -194,7 +258,8 @@ impl EntityProfile {
         Vec<(&StoredVariant, Arc<StoredProfile>)>,
         HashMap<String, Value>,
     ) {
-        let mut scope = self.build_scope(row, engine);
+        let loud = self.loud_columns(&self.render_requirements);
+        let mut scope = self.build_scope(row, engine, &loud);
 
         let mut candidates = Vec::new();
         for variant in &self.variants {
@@ -204,7 +269,7 @@ impl EntityProfile {
                     engine,
                     dc,
                     &variant.data_condition_required,
-                    &self.declared_columns,
+                    &loud,
                     &mut scope,
                 ),
             };
@@ -226,6 +291,7 @@ impl EntityProfile {
         &self,
         engine: &RhaiEngine,
         scope: &mut Scope<'_>,
+        loud: &BTreeSet<String>,
     ) -> Option<Arc<StoredProfile>> {
         // Variants are sorted by priority desc.
         // First match wins — conditionless variants (empty condition_source) always
@@ -236,7 +302,7 @@ impl EntityProfile {
                     engine,
                     &variant.condition_source,
                     &variant.condition_required,
-                    &self.declared_columns,
+                    loud,
                     scope,
                 )
             {
@@ -263,7 +329,12 @@ impl EntityProfile {
             .collect()
     }
 
-    fn build_scope(&self, row: &HashMap<String, Value>, engine: &RhaiEngine) -> Scope<'static> {
+    fn build_scope(
+        &self,
+        row: &HashMap<String, Value>,
+        engine: &RhaiEngine,
+        loud: &BTreeSet<String>,
+    ) -> Scope<'static> {
         let mut scope = Scope::new();
 
         // The computed pass below is the SOLE authority for these names in
@@ -309,7 +380,7 @@ impl EntityProfile {
             &mut scope,
             &self.computed_fields,
             &mut computed_ctx,
-            &self.declared_columns,
+            loud,
         );
 
         scope
@@ -435,7 +506,16 @@ pub trait ProfileResolving: Send + Sync {
     /// storage row), producing spurious eval errors. Real resolvers override
     /// this with the resolution-free path; the default falls back to the
     /// full pass so mock/test resolvers keep working unchanged.
-    fn resolve_computed_only(&self, row: &HashMap<String, Value>) -> HashMap<String, Value> {
+    ///
+    /// `binding` is the requirement manifest of the renderer attached to the
+    /// subscription the row arrived on, and it scopes which absent columns are
+    /// announced.
+    fn resolve_computed_only(
+        &self,
+        row: &HashMap<String, Value>,
+        binding: &RenderRequirements,
+    ) -> HashMap<String, Value> {
+        let _ = binding;
         self.resolve_with_computed(row).1
     }
 

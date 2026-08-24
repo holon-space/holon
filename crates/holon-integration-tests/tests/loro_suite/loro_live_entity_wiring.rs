@@ -69,7 +69,10 @@ fn boot(blocks: &Blocks) -> FrontendSession {
 fn computed(session: &FrontendSession, block: &Block) -> Option<Value> {
     session
         .profiles()
-        .resolve_computed_only(&block_to_data_row(block))
+        .resolve_computed_only(
+            &block_to_data_row(block),
+            &holon_api::render_requirements::RenderRequirements::entity_dispatch(),
+        )
         .get("has_query_source")
         .cloned()
 }
@@ -82,7 +85,10 @@ fn await_field(session: &FrontendSession, block: &Block, field: &str, expected: 
     loop {
         let value = session
             .profiles()
-            .resolve_computed_only(&block_to_data_row(block))
+            .resolve_computed_only(
+                &block_to_data_row(block),
+                &holon_api::render_requirements::RenderRequirements::entity_dispatch(),
+            )
             .get(field)
             .cloned()
             .unwrap_or(Value::Null);

@@ -61,12 +61,14 @@ impl QueryEngine for BackendEngine {
         language: QueryLanguage,
         params: HashMap<String, Value>,
         context: Option<QueryContext>,
+        renderer: holon_api::render_requirements::RenderRequirements,
     ) -> Result<EnrichedChangeStream> {
         let sql = BackendEngine::compile_to_sql(self, query, language)?;
         let raw = BackendEngine::query_and_watch(self, sql, params, context).await?;
         Ok(crate::api::ui_watcher::enrich_stream(
             raw,
             self.profile_resolver().clone(),
+            renderer,
         ))
     }
 

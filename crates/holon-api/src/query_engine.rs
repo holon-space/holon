@@ -56,12 +56,18 @@ pub trait QueryEngine: Send + Sync {
     /// **enriched** change stream. SQL compilation and enrichment both happen
     /// behind this capability — the storage-agnostic layers never see SQL
     /// strings or the raw Turso stream (storage de-leak Stage 2).
+    ///
+    /// `renderer` is the requirement manifest of the renderer this
+    /// subscription feeds. It travels with the subscription because the
+    /// contract is per-binding: the same SQL can serve several renderers, and
+    /// only the binding knows which columns the render is wrong without.
     async fn watch_query(
         &self,
         query: &str,
         language: QueryLanguage,
         params: HashMap<String, Value>,
         context: Option<QueryContext>,
+        renderer: crate::render_requirements::RenderRequirements,
     ) -> Result<EnrichedChangeStream>;
 
     /// Sort-key spec (`col` for ascending, `-col` for descending) implied by

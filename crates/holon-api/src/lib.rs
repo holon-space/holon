@@ -54,6 +54,7 @@ pub mod reactive;
 /// flutter_rust_bridge:ignore
 pub mod render_dsl;
 pub mod render_eval;
+pub mod render_requirements;
 pub mod render_types;
 pub mod repository;
 pub mod share_props;

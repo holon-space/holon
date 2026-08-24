@@ -41,7 +41,6 @@ use holon_frontend::UserDriver;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::reactive::ReactiveRenderedRows;
-use holon_frontend::reactive::table_expr;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::SutAdviceMatview;
 use holon_pbt_core::capabilities::SutAppLifecycle;
@@ -1130,9 +1129,19 @@ impl HeadlessFrontendComponent {
     /// query pre-compiled at the transition boundary.
     fn register_watch_compiled(&self, query_id: &str, source: String, lang: QueryLanguage) {
         let services: Arc<dyn BuilderServices> = self.reactive.clone();
-        let (key, mut live) =
-            self.reactive
-                .watch_query_live(source, lang, table_expr(), None, services);
+        // A `table` with no `item_template`: this seat keeps the watch guard and
+        // drops the tree, and the invariants over these watches read ROWS from
+        // the registry. Declaring `render_entity()` here would bind every
+        // generated projection to the block profile's full requirement
+        // manifest, so a deliberately narrow generated SELECT would report a
+        // gap no render can suffer.
+        let data_watch = holon_api::render_types::RenderExpr::FunctionCall {
+            name: "table".to_string(),
+            args: Vec::new(),
+        };
+        let (key, mut live) = self
+            .reactive
+            .watch_query_live(source, lang, data_watch, None, services);
         let guard = live
             .watch_guard
             .take()
