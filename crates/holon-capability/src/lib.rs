@@ -59,6 +59,7 @@ pub use axes::ConstraintId;
 pub use axes::ContentAxis;
 pub use axes::ContentRepresentation;
 pub use axes::Cycles;
+pub use axes::EntityKind;
 pub use axes::Extension;
 pub use axes::HierarchyAxis;
 pub use axes::HierarchyShape;

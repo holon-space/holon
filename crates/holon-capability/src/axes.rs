@@ -309,6 +309,31 @@ pub enum HostedKind {
     FreeStanding,
 }
 
+/// WHICH entity a format can home, as a closed vocabulary.
+///
+/// A sibling field of [`HostedKind`] rather than more members on it: that enum
+/// answers "what shape" (in a tree or not) and this one answers "what thing",
+/// and a format declares both independently — org homes every kind
+/// hierarchically, a LogSeq graph homes pages and blocks hierarchically and no
+/// program at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntityKind {
+    /// An ordinary content block.
+    Block,
+    /// A block tagged `Page` — the root of its own document.
+    Page,
+    /// Rule machinery: a rule head, or a source block that is one's sibling.
+    Program,
+}
+
+impl std::fmt::Display for EntityKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = serde_yaml::to_string(self).map_err(|_| std::fmt::Error)?;
+        f.write_str(s.trim())
+    }
+}
+
 // =============================================================================
 // Axis 2 — content
 // =============================================================================

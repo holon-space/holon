@@ -18,6 +18,7 @@ use sha2::Sha256;
 use crate::axes::AssetsAxis;
 use crate::axes::ComputedAxis;
 use crate::axes::ContentAxis;
+use crate::axes::EntityKind;
 use crate::axes::HierarchyAxis;
 use crate::axes::HostedKind;
 use crate::axes::IdentityAxis;
@@ -81,6 +82,7 @@ impl std::fmt::Display for ProfileRevision {
 #[serde(deny_unknown_fields)]
 pub struct FidelityAxes {
     pub hosted_kinds: BTreeSet<HostedKind>,
+    pub hosted_entity_kinds: BTreeSet<EntityKind>,
     pub content: ContentAxis,
     pub property_keys: PropertyKeysAxis,
     pub property_values: PropertyValuesAxis,
@@ -265,6 +267,10 @@ impl CapabilityProfile {
 
     pub fn hosted_kinds(&self) -> &BTreeSet<HostedKind> {
         &self.fidelity.hosted_kinds
+    }
+
+    pub fn hosted_entity_kinds(&self) -> &BTreeSet<EntityKind> {
+        &self.fidelity.hosted_entity_kinds
     }
 
     pub fn content(&self) -> &ContentAxis {

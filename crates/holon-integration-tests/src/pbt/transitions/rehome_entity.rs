@@ -15,6 +15,8 @@
 //!   `SutRehomeEntity`, changing which capability profile governs it.
 //! @pbt covers rehome-entity — a file-homed leaf moves to Holon's own storage;
 //! the derived home profile follows immediately and the old file releases it
+//! @pbt covers rehome-machinery-refused — a rule's own source block is drawn
+//! and the placement policy refuses it, leaving the rule intact
 
 use holon_api::EntityUri;
 use holon_pbt_core::TransitionFactory;
@@ -45,15 +47,14 @@ pub struct RehomeEntity {
     pub block_id: EntityUri,
 }
 
-/// Leaves of USER content that a tracked file currently holds.
+/// Leaves that a tracked file currently holds, INCLUDING rule machinery.
 ///
-/// Two exclusions, for different reasons. The op refuses a non-leaf and a
-/// block no document holds BY NAME, so offering those would test the refusal
-/// rather than the move. The machinery blocks — layout scaffolding, render and
-/// query sources, and Source-typed program blocks such as a rule's trigger and
-/// action — are excluded because their placement IS their meaning: a rule's
-/// action block moved out of its page stops parsing, which is a fact about
-/// rules, not about re-homing.
+/// The op refuses a non-leaf and a block no document holds BY NAME, so
+/// offering those would test the refusal rather than the move. Rule machinery
+/// is offered: a rule's action block leaving the structure that owns it is a
+/// move the placement policy must refuse, and a draw that cannot reach it
+/// cannot judge the refusal. Layout scaffolding and display sources stay out —
+/// they are the harness's own furniture.
 fn candidates<R: RefBlockTree + RefDocuments>(state: &R) -> Vec<EntityUri> {
     state
         .all_non_seed_block_ids()
@@ -61,7 +62,7 @@ fn candidates<R: RefBlockTree + RefDocuments>(state: &R) -> Vec<EntityUri> {
         .filter(|id| !state.is_page_block(id))
         .filter(|id| !state.is_layout_block(id))
         .filter(|id| !state.is_no_content_update(id))
-        .filter(|id| !state.is_source_block(id))
+        .filter(|id| !state.is_source_block(id) || state.is_rule_machinery(id))
         .filter(|id| state.sorted_children(id).is_empty())
         .filter(|id| matches!(state.file_home_of(id), DrawnHome::File(_)))
         .collect()
@@ -113,7 +114,8 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefDocuments + RefDocume
             check(
                 !state.is_layout_block(&self.block_id)
                     && !state.is_no_content_update(&self.block_id)
-                    && !state.is_source_block(&self.block_id),
+                    && (!state.is_source_block(&self.block_id)
+                        || state.is_rule_machinery(&self.block_id)),
                 Reason::PreconditionFailed,
             ),
             check(
@@ -128,6 +130,11 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefDocuments + RefDocume
     }
 
     fn apply_to_ref(&self, state: &mut R) {
+        // Rule machinery does not move: the placement policy refuses it, so the
+        // tree, the file, and the home binding are all unchanged.
+        if state.is_rule_machinery(&self.block_id) {
+            return;
+        }
         // Re-parenting to the no-parent root is the whole model: with no page
         // ancestor the block has no file, so `RefDocuments::file_home_of`
         // answers `Storeless` and the derived profile becomes `holon-native`
@@ -145,8 +152,22 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefDocuments + RefDocume
 crate::cap_transition! {
     RehomeEntity: holon_pbt_core::capabilities::SutRehomeEntity,
     where R: [ RefLifecycle + RefBlockTree + RefDocuments ],
-    |me, _state, sut| {
-        sut.rehome_entity(&me.block_id, HOLON_NATIVE).await;
+    |me, state, sut| {
+        let outcome = sut.rehome_entity(&me.block_id, HOLON_NATIVE).await;
+        let expected_refusal = state.is_rule_machinery(&me.block_id);
+        match (&outcome, expected_refusal) {
+            (holon_pbt_core::capabilities::RehomeOutcome::Moved, false) => {}
+            (holon_pbt_core::capabilities::RehomeOutcome::Refused(_), true) => {}
+            _ => panic!(
+                "re-homing {} : expected {}, got {outcome:?}",
+                me.block_id,
+                if expected_refusal {
+                    "a refusal, because the block is rule machinery"
+                } else {
+                    "the move to succeed"
+                },
+            ),
+        }
     }
     sql_budget: |_me, state| {
         // One re-parent plus the home walk on either side of it, then the

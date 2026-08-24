@@ -137,6 +137,8 @@ enforced_by:
     - clause: hierarchy_reparent
       site: "crates/holon-core/src/traits.rs:2429-2440 (move_block page-under-non-page refusal; shared predicate block_op_catalog::page_under_non_page_prohibited; pinned by block_operations_tests.rs:1290, which asserts the tree is UNTOUCHED after the refusal)"
   # Refused when the TYPE is declared, not when a value is written.
+    - clause: hosted_entity_kinds
+      site: "crates/holon-app/src/move_guard.rs:destination_hosts_kind (net-guard destination-capability refusal, ADR 0032 §3)"
   declaration:
     - clause: computed_live
       site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type)"
@@ -147,6 +149,7 @@ enforced_by:
 
 fidelity_axes:
   hosted_kinds: [hierarchical]
+  hosted_entity_kinds: [block, page, program]
   content:
     representation: opaque_text
     inline_constructs: []

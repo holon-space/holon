@@ -167,6 +167,27 @@ impl RefBlockTree for ReferenceState {
             .is_some_and(|b| b.content_type == ContentType::Source)
     }
 
+    fn is_rule_machinery(&self, id: &EntityUri) -> bool {
+        let Some(uri) = parse_id(id) else {
+            return false;
+        };
+        let blocks = &self.domain.block_state.blocks;
+        let Some(block) = blocks.get(&uri) else {
+            return false;
+        };
+        if block.content_type != ContentType::Source {
+            return false;
+        }
+        blocks.values().any(|sibling| {
+            sibling.parent_id == block.parent_id
+                && sibling.content_type == ContentType::Source
+                && sibling
+                    .source_language
+                    .as_ref()
+                    .is_some_and(|l| l.is_rule())
+        })
+    }
+
     fn is_collapsed(&self, id: &EntityUri) -> bool {
         let Some(uri) = parse_id(id) else {
             return false;

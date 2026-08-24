@@ -294,6 +294,14 @@ impl OperationProvider for RehomeEntityProvider {
             Value::String(EntityUri::no_parent().as_str().to_string()),
         );
         move_params.insert("after_block_id".into(), Value::Null);
+        // The net gate sees the inner `move_block`, so a confirmation given to
+        // this operation has to travel with the move it governs.
+        if let Some(confirm) = params.get(holon::api::net_guard::CONFIRM_BREAK_PARAM) {
+            move_params.insert(
+                holon::api::net_guard::CONFIRM_BREAK_PARAM.into(),
+                confirm.clone(),
+            );
+        }
         let dispatcher = self
             .injector
             .resolve_async::<holon::api::operation_dispatcher::OperationDispatcher>()

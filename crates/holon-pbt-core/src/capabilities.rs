@@ -221,6 +221,14 @@ pub trait RefBlockTree {
         false
     }
 
+    /// True if `id` is rule machinery — a source block under a heading that
+    /// owns a rule head, which includes the rule head itself. The model's
+    /// answer to the `is_program` computed field. Substrates with no rules →
+    /// `false`.
+    fn is_rule_machinery(&self, _: &EntityUri) -> bool {
+        false
+    }
+
     /// True if `id`'s children are hidden (`block.collapsed`, document state
     /// since the 2026-07-11 ruling), so the visible outline skips them.
     /// Substrates with no collapse concept render fully expanded → `false`.
@@ -3275,7 +3283,18 @@ pub trait SutBlockToPage {
 /// reprojection. Dispatched through the op-floor `DirectUserDriver`.
 #[holon_macros::capmap_adapter]
 pub trait SutRehomeEntity {
-    async fn rehome_entity(&self, target: &EntityUri, home: &str);
+    async fn rehome_entity(&self, target: &EntityUri, home: &str) -> RehomeOutcome;
+}
+
+/// What the production op did with a re-home request.
+///
+/// A refusal is an OUTCOME, not a harness failure: the placement policy refuses
+/// a move that would break a rule, and the model predicts which draws those
+/// are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RehomeOutcome {
+    Moved,
+    Refused(String),
 }
 
 /// SUT capability: the two halves of the **page-identity lifecycle** — retitle

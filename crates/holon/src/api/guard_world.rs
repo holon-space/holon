@@ -80,6 +80,14 @@ impl<'a> GuardQuery<'a> {
 }
 
 /// Answers "does this guard hold for this row, right now".
+///
+/// # Unification with [`crate::api::net_guard::NetGuard`]
+/// The net gate answers the same question — enabledness — for the whole delta
+/// an operation would write, where this one answers it for a bound subject
+/// against the current world. They unify once the derived net projection
+/// exists AND lived experience shows these predicates are expressible as net
+/// arcs: this trait generalizes to marking-aware whole-delta evaluation and
+/// `NetGuard` folds into it.
 #[async_trait]
 pub trait GuardWorld: Send + Sync {
     async fn guard_holds(&self, query: &GuardQuery<'_>) -> Result<bool>;

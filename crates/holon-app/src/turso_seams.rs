@@ -1012,6 +1012,20 @@ impl Module for OrgModeModule {
             },
         ));
 
+        // ADR 0032 §3 — the net gate's placement policy, contributed here for
+        // the same reason: deciding a destination's capability needs both
+        // homes' profiles.
+        injector.provide::<dyn holon::api::net_guard::NetGuard>(Provider::root_async(
+            |resolver| async move {
+                let registry = Arc::new(
+                    holon_capability::registry::shipped_profiles()
+                        .expect("the shipped capability profiles must parse"),
+                );
+                Arc::new(crate::move_guard::MoveGuard::new(resolver, registry))
+                    as Arc<dyn holon::api::net_guard::NetGuard>
+            },
+        ));
+
         Ok(())
     }
 }

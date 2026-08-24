@@ -57,6 +57,8 @@ pub struct OperationDispatcher {
     /// ADR 0031 Increment 3 — the world declared `#[require]` guards are
     /// evaluated against. Absent only in composition sites with no projection.
     guard_world: Option<Arc<dyn crate::api::guard_world::GuardWorld>>,
+    /// ADR 0032 §3 — the marking legality of an operation's whole delta.
+    net_guard: Option<Arc<dyn crate::api::net_guard::NetGuard>>,
     /// Classifies `[[…]]` targets in live-edit content. Built from the
     /// `TypeRegistry` at wiring time so a UI-authored `[[<entity>:<id>]]`
     /// resolves for exactly the entities that exist; the `Default` value knows
@@ -134,6 +136,13 @@ impl OperationDispatcher {
     /// never runs.
     pub fn set_guard_world(&mut self, world: Arc<dyn crate::api::guard_world::GuardWorld>) {
         self.guard_world = Some(world);
+    }
+
+    /// Install the ADR 0032 §3 net guard. Consulted before every dispatched
+    /// operation, after the two gates above; a refused operation is returned as
+    /// an `Err` and the provider never runs.
+    pub fn set_net_guard(&mut self, guard: Arc<dyn crate::api::net_guard::NetGuard>) {
+        self.net_guard = Some(guard);
     }
 
     /// Add an observer to this dispatcher
@@ -417,6 +426,59 @@ impl OperationDispatcher {
             query.subject()
         )
         .into())
+    }
+
+    /// The ADR 0032 §3 net-guard decision for one dispatched operation.
+    ///
+    /// # Unification with [`Self::enforce_guard`]
+    /// The gate above answers the same question — enabledness — for a
+    /// subject-bound predicate against the current world; this one answers it
+    /// for the whole delta an operation would write. They unify once the
+    /// derived net projection exists AND the declared-guard predicates prove
+    /// expressible as net arcs: `GuardWorld` generalizes to marking-aware
+    /// whole-delta evaluation and [`crate::api::net_guard::NetGuard`] folds
+    /// into it.
+    async fn enforce_net_guard(
+        &self,
+        resolved_entity_name: &str,
+        op_name: &str,
+        params: &StorageEntity,
+    ) -> Result<()> {
+        let Some(guard) = &self.net_guard else {
+            return Ok(());
+        };
+        let op = crate::api::net_guard::NetGuardOp {
+            entity_name: resolved_entity_name,
+            op_name,
+            params,
+            confirmation: crate::api::net_guard::Confirmation::parse(params)?,
+        };
+        match guard.check(&op).await? {
+            crate::api::net_guard::NetVerdict::Confirm => Ok(()),
+            crate::api::net_guard::NetVerdict::Refuse(refusal) => Err(format!(
+                "ADR 0032 net-guard refusal: {resolved_entity_name}.{op_name} — {}",
+                refusal.reason
+            )
+            .into()),
+        }
+    }
+
+    /// Fail-loud guard that a composed backend actually installed the ADR 0032
+    /// net gate.
+    ///
+    /// Every composition site installs one, `InertNetGuard` where no placement
+    /// policy exists, so `None` means a site that forgot rather than a site
+    /// that declined.
+    pub fn assert_net_guard_installed(&self) -> Result<()> {
+        if self.net_guard.is_some() {
+            return Ok(());
+        }
+        Err(
+            "[OperationDispatcher] no NetGuard installed: every operation would execute without \
+             the ADR 0032 placement check. Call `set_net_guard` at this composition site \
+             (`holon::api::net_guard::InertNetGuard` where no placement policy exists)."
+                .into(),
+        )
     }
 
     /// Fail-loud guard that a composed backend actually installed the ADR 0028
@@ -915,6 +977,11 @@ impl OperationDispatcher {
                 self.enforce_guard(&available_ops, resolved_entity_name, op_name, &params)
                     .await?;
 
+                // ADR 0032 §3 — THE net gate: is the marking this operation
+                // would produce legal.
+                self.enforce_net_guard(resolved_entity_name, op_name, &params)
+                    .await?;
+
                 info!(
                     "[OperationDispatcher] Routing operation to provider: entity={}, op={}",
                     resolved_entity_name, op_name
@@ -1383,6 +1450,19 @@ impl Module for OperationModule {
                 });
             dispatcher.set_boundary_enforcer(enforcer);
 
+            // ADR 0032 §3 — install the net gate. The placement policy needs
+            // capability profiles and a document-home authority, neither of
+            // which this crate links, so a composition root that has them
+            // registers one and a container without them gets the inert guard.
+            let net_guard = r
+                .optional_resolve_async::<dyn crate::api::net_guard::NetGuard>()
+                .await
+                .unwrap_or_else(|| {
+                    Arc::new(crate::api::net_guard::InertNetGuard)
+                        as Arc<dyn crate::api::net_guard::NetGuard>
+                });
+            dispatcher.set_net_guard(net_guard);
+
             // Every free-standing type the registry carries gets a write
             // authority derived from ITS definition. `FreeStandingTypeViews`
             // creates the type's Turso serialization; without this the type
@@ -1440,6 +1520,9 @@ impl Module for OperationModule {
             dispatcher
                 .assert_boundary_seam_installed()
                 .expect("[OperationModule] boundary-seam startup check failed");
+            dispatcher
+                .assert_net_guard_installed()
+                .expect("[OperationModule] net-gate startup check failed");
             // Every in-tree descriptor's arcs already passed the macro's
             // compile-time parse; this is the gate for the ones that did not —
             // a descriptor deserialized from a sidecar or a created entity

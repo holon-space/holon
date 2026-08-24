@@ -35,6 +35,7 @@ pub mod integrations_section;
 pub mod integrations_settings;
 pub mod loro_seams;
 pub mod mcp_integrations;
+pub mod move_guard;
 pub mod no_turso;
 #[cfg(test)]
 mod no_turso_test;

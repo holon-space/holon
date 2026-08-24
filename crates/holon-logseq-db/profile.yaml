@@ -174,6 +174,8 @@ enforced_by:
   operation:
     - clause: hierarchy_reparent
       site: "crates/holon-logseq-db/src/kvs_writer.rs:1210-1212 (out_of_scope_shape refuses a re-parent BEFORE any datom is appended; the whole push is abandoned)"
+    - clause: hosted_entity_kinds
+      site: "crates/holon-app/src/move_guard.rs:destination_hosts_kind (net-guard destination-capability refusal, ADR 0032 §3)"
   declaration:
     - clause: computed_live
       site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type)"
@@ -184,6 +186,7 @@ enforced_by:
 
 fidelity_axes:
   hosted_kinds: [hierarchical]
+  hosted_entity_kinds: [block, page]
 
   content:
     representation: marked_text

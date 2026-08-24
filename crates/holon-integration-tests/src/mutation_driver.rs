@@ -24,6 +24,7 @@ use holon_frontend::ReactiveViewModel;
 use holon_frontend::operations::OperationIntent;
 pub use holon_frontend::user_driver::ReactiveEngineDriver;
 pub use holon_frontend::user_driver::UserDriver;
+use holon_pbt_core::capabilities::RehomeOutcome;
 use holon_pbt_core::capabilities::SutBlockCreate;
 use holon_pbt_core::capabilities::SutBlockToPage;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
@@ -459,23 +460,27 @@ impl SutTemplateInstantiate for DirectUserDriver {
 }
 
 /// Op-floor `SutRehomeEntity`: dispatch `block.rehome_entity` through the
-/// production engine. Any failure is a real defect — the transition's
-/// preconditions already exclude every case the op refuses by name (non-leaf,
-/// a block no document holds, a home that cannot receive an entity).
+/// production engine.
+///
+/// The error is returned rather than panicked on: the transition's
+/// preconditions exclude the cases the op refuses BY NAME (non-leaf, a block no
+/// document holds, a home that cannot receive an entity), and what is left —
+/// the placement policy's refusal — is a verdict the reference model predicts.
 #[async_trait::async_trait(?Send)]
 impl SutRehomeEntity for DirectUserDriver {
-    async fn rehome_entity(&self, target: &EntityUri, home: &str) {
+    async fn rehome_entity(&self, target: &EntityUri, home: &str) -> RehomeOutcome {
         let mut params: HashMap<String, Value> = HashMap::new();
         params.insert(
             "id".to_string(),
             Value::String(self.resolve(target).to_string()),
         );
         params.insert("target".to_string(), Value::String(home.to_string()));
-        if let Err(e) = self
+        match self
             .synthetic_dispatch("block", "rehome_entity", params)
             .await
         {
-            panic!("[DirectUserDriver floor] block/rehome_entity failed: {e:#}");
+            Ok(_) => RehomeOutcome::Moved,
+            Err(e) => RehomeOutcome::Refused(format!("{e:#}")),
         }
     }
 }

@@ -1072,6 +1072,14 @@ impl DispatchingOperationEngine {
             let mut mp = StorageEntity::new();
             mp.insert("id".into(), Value::String(child.clone()));
             mp.insert("parent_id".into(), Value::String(plan.page_id.clone()));
+            // EVERY child travels, so rule machinery among them keeps the
+            // siblings it is read with and the net gate's separation refusal
+            // does not apply. One move's delta cannot show that, so this loop
+            // states it.
+            mp.insert(
+                crate::api::net_guard::CONFIRM_BREAK_PARAM.into(),
+                Value::Boolean(true),
+            );
             match &prev {
                 Some(pid) => {
                     mp.insert("after_block_id".into(), Value::String(pid.clone()));
@@ -1833,6 +1841,14 @@ impl DispatchingOperationEngine {
                     None => Value::Null,
                 },
             );
+            // The duplicate's whole child set lands under the canonical, so
+            // rule machinery among them keeps the siblings it is read with and
+            // the net gate's separation refusal does not apply. One move's
+            // delta cannot show that, so this loop states it.
+            mp.insert(
+                crate::api::net_guard::CONFIRM_BREAK_PARAM.into(),
+                Value::Boolean(true),
+            );
             let (fwd, inv, ch) = self.dispatch_merge_constituent("move_block", mp).await?;
             forwards.push(fwd);
             move_invs.push(inv);
@@ -1859,6 +1875,13 @@ impl DispatchingOperationEngine {
                             Some(a) => Value::String(a.clone()),
                             None => Value::Null,
                         },
+                    );
+                    // Every orphan of the loser lands under the keeper, so this
+                    // relocation carries a rule whole exactly as the child move
+                    // above does.
+                    mp.insert(
+                        crate::api::net_guard::CONFIRM_BREAK_PARAM.into(),
+                        Value::Boolean(true),
                     );
                     let (fwd, inv, ch) = self.dispatch_merge_constituent("move_block", mp).await?;
                     forwards.push(fwd);

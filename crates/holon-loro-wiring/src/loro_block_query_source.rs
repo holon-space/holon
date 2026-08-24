@@ -189,6 +189,10 @@ pub fn register_loro_operation_engine(
     // so it needs the same boundary seam `OperationModule` installs; a
     // dispatcher without one is an enforcement bypass, not a fast path.
     dispatcher.set_boundary_enforcer(Arc::new(holon_sharing::PolicyOverlayEnforcer::inert()));
+    // ADR 0032 §3 — the net gate, likewise. A Loro-only session resolves no
+    // capability profiles and no document home, so it hosts no placement
+    // policy; the gate is installed inert rather than left absent.
+    dispatcher.set_net_guard(Arc::new(holon::api::net_guard::InertNetGuard));
     // Same fail-loud assembly guard the Turso path runs via `OperationModule`:
     // this is the ONE dispatcher construction outside DI, so a future edit that
     // drops block CRUD here must crash at composition time, not silently drop
@@ -199,6 +203,9 @@ pub fn register_loro_operation_engine(
     dispatcher
         .assert_boundary_seam_installed()
         .expect("[loro_block_query_source] boundary-seam assembly check failed");
+    dispatcher
+        .assert_net_guard_installed()
+        .expect("[loro_block_query_source] net-gate assembly check failed");
     dispatcher
         .assert_declared_arcs_match_schema(&holon_api::schema::BuiltinSchemas)
         .expect("[loro_block_query_source] arc-schema assembly check failed");

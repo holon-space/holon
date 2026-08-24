@@ -29,6 +29,7 @@ use serde::Serialize;
 pub enum ClauseId {
     // axis 1
     HostedKinds,
+    HostedEntityKinds,
     // axis 2
     ContentRepresentation,
     ContentInlineConstructs,
@@ -97,6 +98,7 @@ impl std::fmt::Display for ClauseId {
 /// exempt the new field — which is why the exhaustiveness test below exists.
 pub const ALL_CLAUSES: &[ClauseId] = &[
     ClauseId::HostedKinds,
+    ClauseId::HostedEntityKinds,
     ClauseId::ContentRepresentation,
     ClauseId::ContentInlineConstructs,
     ClauseId::ContentBlockConstructs,
@@ -491,7 +493,7 @@ mod tests {
         );
         assert_eq!(
             listed.len(),
-            44,
+            45,
             "a clause was added to the vocabulary without adding it to ALL_CLAUSES, which \
              would exempt it from the driven-or-marked law"
         );

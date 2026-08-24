@@ -135,6 +135,11 @@ fn loss_for(
             "an entity of this kind has no home in the target",
         ),
 
+        ClauseId::HostedEntityKinds => lost_members(
+            missing(from.hosted_entity_kinds(), to.hosted_entity_kinds()),
+            "the target declares no home for entities of this kind",
+        ),
+
         ClauseId::ContentRepresentation => {
             use ContentRepresentation::*;
             // Ordered by how much structure survives. Moving DOWN this order
