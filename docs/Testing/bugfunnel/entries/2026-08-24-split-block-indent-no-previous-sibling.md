@@ -1,20 +1,19 @@
 ---
 id: 2026-08-24-split-block-indent-no-previous-sibling
 date: 2026-08-24
-gap: COVERAGE
-secondary: null
-status: OPEN
+gap: ENVIRONMENT
+secondary: COVERAGE
+retriaged_from: COVERAGE
+status: FIXED
 summary: >-
-  Splitting the same block twice reaches a state where the split's own indent
-  step has no previous sibling to indent under, and the production op refuses
-  with a hard error.
+  Enter on a block whose rendered surface carries an org italic delimiter fired
+  the slash-command menu instead of splitting, because the headless editor
+  mirror re-derived the menu from the text at the caret on every Enter.
 ---
 
 ## Bug
 
-`SplitBlock` on a block that has already been split can drive the split's
-follow-on `indent` into a position with no previous sibling. The production op
-refuses, loudly:
+`SplitBlock`'s Enter keystroke refused, loudly:
 
 ```
 panicked at crates/holon-integration-tests/src/pbt/op_write_cap.rs:299:17:
@@ -22,47 +21,47 @@ panicked at crates/holon-integration-tests/src/pbt/op_write_cap.rs:299:17:
 Operation 'indent' on entity 'block' failed: Cannot indent: no previous sibling to become parent
 ```
 
-This is a HARD SUT error — the operation refused — not an oracle divergence, so
-no invariant is at fault and no model change would make it green. Something a
-user can reach by pressing Enter twice in the same place.
-
 Found by the keystone PBT under forced weights, during 2b.4 I2b verification
-(lane `inc2b-i1`, verifier round 2). It is NOT a re-homing defect: the shrunk
-counterexample contains no `RehomeEntity` and `native_homed: {}`.
+(lane `inc2b-i1`, verifier round 2). The `indent` in the message is not part of
+the split: it is the first item of the slash-command menu, dispatched in place
+of the split.
 
 ## Root cause
 
-Not diagnosed here — this entry records the escape and the repro; a separate
-lane owns the fix. The shape is that the split compound's `indent` constituent
-assumes a previous sibling exists at the position the split just created, which
-a second split at the same block can violate.
+`HeadlessEditorMirror::handle_keystroke`'s Enter arm ran `check_triggers`
+against the block's current surface text on every press, and executed the
+first matching command instead of splitting whenever a `/` sat at a word
+boundary before the caret
+(`crates/holon-frontend/src/headless_editor_mirror.rs`). Vault syntax renders
+an `Italic` mark as `/…/`, so the instantiated template child `see krtvhl now`
+(Bold 0..3, Italic 4..14) has the surface `*see* /krtvhl now/`. Splitting it at
+content byte 4 puts the caret immediately after that delimiter, giving an empty
+filter — every block operation matches and `items.first()` is `indent`, which
+refuses because the block is a first sibling.
 
-Reproduction, the verifier's shrunk 4-transition counterexample:
+Production reaches the menu only through
+`EditorViewModel::on_text_changed` (`check_triggers` on an `InputEvent::Change`,
+`crates/holon-frontend/src/editor_view_model.rs:849`), and `on_key(Enter)`
+consults the live overlay (`:1003`) rather than the text. No prod gesture opens
+the menu on markup the user never typed; the mirror was a second, divergent
+derivation of a decision prod makes once.
 
-```
-SplitBlock { block_id: block:c1, position: 0 }
-SplitBlock { block_id: block:c1, position: 2 }
-InstantiateTemplate { parent_id: block::sp… }
-SplitBlock { … }
-```
-
-Discovering run:
-
-```
-HOLON_PBT_FORCE_FULL=1 \
-HOLON_PBT_WEIGHTS='RehomeEntity:120,SplitBlock:60,BlockToPage:40,InstantiateTemplate:40,WriteOrgFile:30,ExpandToggle:30' \
-PROPTEST_CASES=24 cargo test -p holon-integration-tests --features pbt --test general_e2e_composed_pbt
-```
+Retriaged from COVERAGE: the escape is test-environment divergence from prod,
+not a generator that could not reach the state. The reachability observation
+below still holds and is why the divergence surfaced when it did.
 
 ## Missing piece
 
-REACHABILITY, and it is worth being precise about what changed. The transition
-and the invariants were always there; what was missing was a draw distribution
-that reached this state. The `RehomeEntity` weight raised from 2 to 10 in
-2b.4 I2b (verifier finding D6, "the default keystone never draws
-`RehomeEntity`") shifted the global distribution enough to reach it — the
-transition being weighted is unrelated to the bug, but re-weighting one member
-re-weights every draw.
+Prod/test parity on the slash-menu lifecycle: the mirror carried no overlay
+state, so it had to guess from the buffer.
+
+REACHABILITY is the reason it surfaced on 2026-08-24 and not earlier. The
+transition and the invariants were always there; what changed was the draw
+distribution. The `RehomeEntity` weight raised from 2 to 10 in 2b.4 I2b
+(verifier finding D6, "the default keystone never draws `RehomeEntity`")
+shifted the global distribution enough to reach it — the transition being
+weighted is unrelated to the bug, but re-weighting one member re-weights every
+draw.
 
 Measured novelty at the time of filing:
 
@@ -73,8 +72,13 @@ Measured novelty at the time of filing:
 
 ## Remedy
 
-Open. A separate lane takes the production fix. Until then this is an
-unregistered red that a sufficiently split-heavy draw can hit; whoever picks it
-up should decide whether the split compound should skip the indent when no
-previous sibling exists, or whether the split should not have produced that
-position at all.
+The mirror now tracks the slash menu the way prod does: `note_text_changed`
+opens, refilters or dismisses it on each text-mutating keystroke, and
+`slash_command_selection` consumes it on Enter. With no menu open Enter always
+splits, so the Enter path is total over blocks whose surface merely contains a
+`/`.
+
+Pinned by the hand-authored keystone regression
+`enter-at-an-italic-delimiter-splits-instead-of-firing-the-slash-menu`
+(`crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl`),
+which reproduces the panic above in two transitions.

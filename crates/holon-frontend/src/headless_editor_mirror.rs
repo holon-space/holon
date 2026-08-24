@@ -74,6 +74,12 @@ pub struct HeadlessEditorMirror {
     /// echo composition (`evaluate_data_sync_echo`) is the live headless typing
     /// path — the composition the keystone was structurally blind to before.
     editors: Mutex<HashMap<String, EditorViewModel>>,
+    /// Filter text of the slash-command menu a TEXT CHANGE opened on a block,
+    /// keyed by canonical block id — the headless stand-in for the popup
+    /// overlay `EditorViewModel::on_key` consults. Production opens that
+    /// overlay only from `on_text_changed`, so a `/` nobody typed — an org
+    /// italic delimiter in the rendered surface, say — never reaches Enter.
+    slash_menus: Mutex<HashMap<String, String>>,
     /// Block the focus authority last settled on, so a move away from it can be
     /// detected as an edge — GPUI gets the same edge from its deduped focus
     /// signal ([`commit_departing_editor`](Self::commit_departing_editor)).
@@ -91,6 +97,7 @@ impl HeadlessEditorMirror {
         Self {
             cursors: Mutex::new(HashMap::new()),
             editors: Mutex::new(HashMap::new()),
+            slash_menus: Mutex::new(HashMap::new()),
             last_focused: Mutex::new(None),
         }
     }
@@ -105,6 +112,7 @@ impl HeadlessEditorMirror {
         // The editor buffer is occurrence-independent (canonical write home), so
         // any focus-loss / structural-op forget on this block retires its VM.
         self.editors.lock().unwrap().remove(block_id);
+        self.slash_menus.lock().unwrap().remove(block_id);
     }
 
     /// Read-only view of the tracked cursor for a block's CANONICAL occurrence.
@@ -653,15 +661,14 @@ impl HeadlessEditorMirror {
                 self.vm_commit_edit(engine, &block_id, &current_text, &new_text)
                     .await?;
                 self.set_cursor(&block_id, occ, new_cursor_byte);
+                self.note_text_changed(engine, &block_uri, &new_text, new_cursor_byte);
             }
             "enter" if !has_ctrl_alt_cmd && !has_shift => {
                 // LogSeq parity: if the cursor sits after a `/cmd` that matches a
                 // slash command, Enter executes it instead of splitting — the
                 // same routing GPUI does via `EditorViewModel`/popup
                 // (`editor_view.rs:578-616`). Otherwise split at the cursor.
-                if let Some(intent) =
-                    self.slash_command_on_enter(engine, &block_uri, &current_text, cursor_byte)
-                {
+                if let Some(intent) = self.slash_command_selection(engine, &block_uri) {
                     engine.dispatch_intent_sync(intent).await?;
                 } else {
                     let intent = structural_block_action(
@@ -710,7 +717,9 @@ impl HeadlessEditorMirror {
                 new_text.insert_str(cursor_byte, &inserted);
                 self.vm_commit_edit(engine, &block_id, &current_text, &new_text)
                     .await?;
-                self.set_cursor(&block_id, occ, cursor_byte + inserted.len());
+                let new_cursor_byte = cursor_byte + inserted.len();
+                self.set_cursor(&block_id, occ, new_cursor_byte);
+                self.note_text_changed(engine, &block_uri, &new_text, new_cursor_byte);
             }
             _ => {
                 tracing::trace!(
@@ -721,66 +730,81 @@ impl HeadlessEditorMirror {
         Ok(())
     }
 
-    /// Replicate GPUI's Enter→slash-command routing for the headless path: if
-    /// the text before the cursor ends in a `/cmd` matching an available block
-    /// operation, return that command's intent to dispatch. Returns `None` when
-    /// no command matches (the caller then falls through to `split_block`).
-    ///
-    /// Uses the same pure logic GPUI's `EditorViewModel`/`CommandProvider`
-    /// drive (`check_triggers` + `build_command_items` + `on_select`), but
-    /// sources the block's operations from its entity profile rather than a
-    /// rendered node — leaf-block rendering streams in async and is unreliable
-    /// to snapshot mid-keystroke in headless.
-    fn slash_command_on_enter(
-        &self,
+    /// The block's available operations as popup wirings. Entity-level (keyed
+    /// by id scheme), identical to what the renderer attaches to the block's
+    /// editable node — sourced from the profile cache rather than a rendered
+    /// node because leaf-block render data streams in async and is unreliable
+    /// to read mid-keystroke in headless.
+    fn block_wirings(
         engine: &Arc<ReactiveEngine>,
         block_uri: &holon_api::EntityUri,
-        current_text: &str,
-        cursor_byte: usize,
-    ) -> Option<OperationIntent> {
-        use holon_api::render_types::OperationWiring;
-
-        use crate::command_provider::CommandProvider;
-        use crate::input_trigger::ViewEvent;
-        use crate::input_trigger::check_triggers;
-        use crate::input_trigger::default_triggers_for_operations;
-        use crate::popup_menu::PopupProvider;
-        use crate::popup_menu::PopupResult;
-
-        // The block's available operations are entity-level (keyed by id
-        // scheme), identical to what the renderer attaches to the block's
-        // editable node — so source them from the profile cache rather than a
-        // rendered node (leaf-block render data streams in async and is
-        // unreliable to read mid-keystroke in headless).
+    ) -> Vec<holon_api::render_types::OperationWiring> {
         let services: &dyn BuilderServices = engine.as_ref();
-        let descriptors = services.entity_operations(block_uri.scheme());
-        if descriptors.is_empty() {
-            return None;
-        }
-        let wirings: Vec<OperationWiring> = descriptors
+        services
+            .entity_operations(block_uri.scheme())
             .into_iter()
-            .map(|descriptor| OperationWiring {
+            .map(|descriptor| holon_api::render_types::OperationWiring {
                 modified_param: String::new(),
                 descriptor,
             })
-            .collect();
+            .collect()
+    }
 
-        // Does the text before the cursor end in a `/cmd`? `check_triggers`
-        // slices `current_line[..cursor_column]` as bytes, so pass the byte
-        // offset.
+    /// Open, update or dismiss the block's slash-command menu after an edit —
+    /// the headless half of `EditorViewModel::on_text_changed`. `new_text` is
+    /// the post-edit buffer and `cursor_byte` the caret in it, the coordinates
+    /// `check_triggers` slices.
+    fn note_text_changed(
+        &self,
+        engine: &Arc<ReactiveEngine>,
+        block_uri: &holon_api::EntityUri,
+        new_text: &str,
+        cursor_byte: usize,
+    ) {
+        use crate::input_trigger::ViewEvent;
+        use crate::input_trigger::check_triggers;
+        use crate::input_trigger::default_triggers_for_operations;
+
+        let wirings = Self::block_wirings(engine, block_uri);
         let triggers = default_triggers_for_operations(&wirings);
-        let event = check_triggers(&triggers, current_text, cursor_byte)?;
-        let ViewEvent::TriggerFired {
-            action,
-            filter_text,
-            ..
-        } = event
-        else {
-            return None;
+        let filter = match check_triggers(&triggers, new_text, cursor_byte) {
+            Some(ViewEvent::TriggerFired {
+                action,
+                filter_text,
+                ..
+            }) if action == "command_menu" => Some(filter_text),
+            _ => None,
         };
-        if action != "command_menu" {
-            return None;
-        }
+        let mut menus = self.slash_menus.lock().unwrap();
+        match filter {
+            Some(filter) => menus.insert(block_uri.as_str().to_string(), filter),
+            None => menus.remove(block_uri.as_str()),
+        };
+    }
+
+    /// The intent Enter fires when the block's slash-command menu is open —
+    /// the headless half of `EditorViewModel::on_key(Enter)`, which routes to
+    /// the popup only while the overlay is active. `None` (no menu, or a filter
+    /// that matches no operation) leaves Enter on `split_block`.
+    ///
+    /// Selection resolution is the same pure logic GPUI drives
+    /// (`build_command_items` + `on_select`); the menu is consumed either way,
+    /// as executing or dismissing it does in prod.
+    fn slash_command_selection(
+        &self,
+        engine: &Arc<ReactiveEngine>,
+        block_uri: &holon_api::EntityUri,
+    ) -> Option<OperationIntent> {
+        use crate::command_provider::CommandProvider;
+        use crate::popup_menu::PopupProvider;
+        use crate::popup_menu::PopupResult;
+
+        let filter_text = self
+            .slash_menus
+            .lock()
+            .unwrap()
+            .remove(block_uri.as_str())?;
+        let wirings = Self::block_wirings(engine, block_uri);
 
         let mut context = HashMap::new();
         context.insert(
