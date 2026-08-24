@@ -2831,6 +2831,7 @@ impl ReferenceState {
         self.domain.block_state = restored;
         self.rematerialize_file_ingested(&pre_restore);
         self.recompute_derived();
+        self.clear_focus_for_blocks_dropped_by_restore(&pre_restore);
     }
 
     /// Redo: snapshot current state onto undo stack, restore from redo stack.
@@ -2851,6 +2852,25 @@ impl ReferenceState {
         // file-backed and never enters the loop.
         self.rematerialize_file_ingested(&pre_restore);
         self.recompute_derived();
+        self.clear_focus_for_blocks_dropped_by_restore(&pre_restore);
+    }
+
+    /// A block a snapshot restore dropped is gone from the tree, so
+    /// [`Self::clear_focus_if_deleted`]'s contract applies to it: no focus and
+    /// no editor survives it.
+    ///
+    /// Runs AFTER `rematerialize_file_ingested`, which puts file-ingested
+    /// blocks back — those were never dropped.
+    fn clear_focus_for_blocks_dropped_by_restore(&mut self, pre_restore: &BlockState) {
+        let dropped: Vec<EntityUri> = pre_restore
+            .blocks
+            .keys()
+            .filter(|id| !self.domain.block_state.blocks.contains_key(*id))
+            .cloned()
+            .collect();
+        for id in &dropped {
+            self.clear_focus_if_deleted(id);
+        }
     }
 
     /// Prod's `engine.undo()` reverts only USER-origin ops

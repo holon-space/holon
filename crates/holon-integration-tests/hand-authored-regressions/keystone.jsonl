@@ -670,3 +670,10 @@
 # unchanged. Without the gate the op SUCCEEDS and the rule breaks: that is the red this case
 # pins.
 {"name": "rehome-rule-action-is-refused", "description": "ADR 0032 D9.d machinery containment: re-homing a rule's action block is refused by the net gate, and the reference model expects the refusal", "transitions": [{"RehomeEntity": {"block_id": "block:journals::action::0"}}]}
+#
+# --- an undo that removes the edited block closes its editor -------------------------------
+# `SplitBlock` opens the editor on the block it mints, and the snapshot it pushed predates
+# that block. Undoing therefore drops the block the editor is open on. Prod reaches the same
+# state through the dispatcher (undo replays the inverse `delete`, whose success arm runs
+# `clear_focus_after_delete`), so the editor is gone and the next Enter has nothing to split.
+{"name": "undo-that-drops-the-edited-block-closes-its-editor", "description": "Split block:parent at 2, then undo. The undo restores a tree that predates the split product, so the editor SplitBlock opened on it must close with it -- clear_focus_if_deleted's contract, which the snapshot-restore path did not honour. RED before the fix, at the check right after the undo: [inv-editor-text/mirror] Live editor text mismatch ... reference: \"rent\" / SUT MutableText: \"\". The SUT holds no editor for the dropped block, so the reference is the side that was wrong. Downstream, the surviving ghost also passed PressKey's active_editor_block().is_some() precondition in the generated alphabet and reached split_block_apply_to_ref as `block block::split-N is absent from the reference`; that Enter is left out of this case because the replay driver applies transitions without re-checking preconditions, so it would panic for its own reason once the editor is correctly closed. Turso wiring is load-bearing -- the editor mirror is deselected in Loro-only draws.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"SplitBlock": {"block_id": "block:parent", "position": 2}}, {"UndoLastMutation": null}]}
