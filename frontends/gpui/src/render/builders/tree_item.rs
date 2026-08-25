@@ -1,9 +1,6 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures_signals::signal::Mutable;
-use holon_api::Value;
-use holon_frontend::OperationIntent;
 use holon_frontend::disclosure_halo_id_for;
 use holon_frontend::expand_toggle_id_for;
 use holon_frontend::reactive::BuilderServices;
@@ -113,34 +110,6 @@ fn bullet_dot(ctx: &GpuiRenderContext) -> Div {
         )
 }
 
-/// Resolve the row's profile and confirm it carries a `set_field` op,
-/// returning the owning entity name for a typed intent (same pattern as
-/// `board::resolve_row_op_entity`). Logs and returns `None` when the row has
-/// no profile / op — the chevron then folds view-locally only (disclosed
-/// degraded mode for static contexts like the design gallery).
-fn resolve_set_field_entity(
-    services: &Arc<dyn BuilderServices>,
-    row_id: &str,
-) -> Option<holon_api::EntityName> {
-    let mut probe: HashMap<String, Value> = HashMap::new();
-    probe.insert("id".into(), Value::String(row_id.to_string()));
-    let Some(profile) = services.resolve_profile(&probe) else {
-        tracing::warn!(
-            "tree_item chevron: resolve_profile None for row_id={row_id}; collapse will not \
-             persist"
-        );
-        return None;
-    };
-    let Some(op) = profile.operations.iter().find(|o| o.name == "set_field") else {
-        tracing::warn!(
-            "tree_item chevron: set_field op not on profile for row_id={row_id}; collapse will \
-             not persist"
-        );
-        return None;
-    };
-    Some(op.entity_name.clone())
-}
-
 /// The disclosure glyph a parent row draws: right-pointing while its subtree is
 /// hidden, down-pointing while it is shown. Pure so the direction contract is
 /// unit-testable without a window, and so the render tree can be tagged with
@@ -207,7 +176,11 @@ fn collapse_chevron(
     collapsed: bool,
     el_id: String,
     expanded: Mutable<bool>,
-    persist: Option<(Arc<dyn BuilderServices>, String)>,
+    persist: Option<(
+        Arc<dyn BuilderServices>,
+        String,
+        Arc<holon_api::widget_spec::DataRow>,
+    )>,
     halo_id: Option<String>,
     ctx: &GpuiRenderContext,
 ) -> gpui::Stateful<Div> {
@@ -228,15 +201,13 @@ fn collapse_chevron(
             // (set_field origin = User) and synced. The local gate flip above
             // keeps the fold instant; the CDC echo re-wraps the tree_item
             // with the same value.
-            if let Some((services, row_id)) = &persist {
-                if let Some(entity_name) = resolve_set_field_entity(services, row_id) {
-                    let intent = OperationIntent::set_field(
-                        &entity_name,
-                        "set_field",
-                        row_id,
-                        "collapsed",
-                        Value::Boolean(!new_expanded),
-                    );
+            if let Some((services, row_id, row)) = &persist {
+                if let Some(intent) = holon_frontend::expand_toggle::tree_chevron_persist_intent(
+                    services.as_ref(),
+                    row,
+                    row_id,
+                    new_expanded,
+                ) {
                     services.dispatch_intent(intent);
                 }
             }
@@ -246,7 +217,7 @@ fn collapse_chevron(
             tracing::info!(
                 target: "holon_latency",
                 stage = "sidebar_toggle",
-                block = persist.as_ref().map(|(_, id)| id.as_str()).unwrap_or("<view-local>"),
+                block = persist.as_ref().map(|(_, id, _)| id.as_str()).unwrap_or("<view-local>"),
                 expanded = new_expanded,
                 ms = t_toggle.elapsed().as_millis() as u64,
                 "holon_latency",
@@ -346,7 +317,9 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             let mutable = expanded_handle.unwrap_or_else(|| Mutable::new(true));
             // Persist through set_field(collapsed) when the row is identifiable;
             // rows without an id (synthetic gallery items) fold view-locally.
-            let persist = id.clone().map(|row_id| (ctx.services.clone(), row_id));
+            let persist = id
+                .clone()
+                .map(|row_id| (ctx.services.clone(), row_id, node.entity()));
             // Register under the row's OWN identity — the explicit `target_id`
             // when a blueprint stamped one, otherwise the content child's entity
             // id, which is all a production row carries. Keying this off

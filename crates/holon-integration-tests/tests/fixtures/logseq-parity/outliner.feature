@@ -95,29 +95,21 @@ Feature: Outliner editing
     And within 15 seconds block "block:open-sibling" is not collapsed
     And within 15 seconds block "block:hidden-child" is a child of block "block:folded-parent"
 
-  # The gesture half of log:4. MEASURED 2026-08-22 (lane gv-vocab), with the
-  # steps below run for real: the assertion vocabulary is NO LONGER the gap —
-  # `block "<id>" is collapsed` exists and the scenario above uses it. The
-  # blocker is the ACTION. Driving `I toggle collapse of "block:c1"` headlessly
-  # unwraps the `expand_toggle::c1` geometry handle down to `block:c1` and
-  # dispatches a plain `click_entity` (`pbt/driver_input.rs`
-  # `click_at_element`), so the chevron-ness is thrown away: the reference model
-  # records the fold while the store never writes it, and the composed catalog
-  # reds with
-  #   inv-blocks-match-ref/{org,matview}: block:c1: collapsed: sut=false ref=true
-  # Two ways out, and picking one is a real decision, not a vocabulary fix:
-  # teach the headless driver to dispatch the chevron's own collapse operation,
-  # or accept that a bullet chevron is view-local and correct `ToggleCollapse`'s
-  # `apply_to_ref` (which sets the document field unconditionally, while
-  # `expand_toggle.rs` documents profile-driven toggles as view-local only).
-  @wip @observed
+  # The gesture half of log:4. `I toggle collapse of` clicks the row's REAL
+  # disclosure caret (ruling 2026-08-25): the driver routes the
+  # `expand_toggle::<id>` handle to `UserDriver::click_expand_toggle`, which
+  # clicks the chevron geometry (windowed) or runs the located caret node's
+  # own click handler (headless) — a true toggle, so it drives BOTH the fold
+  # and the unfold. Collapse is document state; both caret shapes dispatch
+  # `set_field(collapsed)` through the dispatcher.
+  @observed
   Scenario: Clicking the disclosure caret folds the subtree   # log:4
     When I focus block "block:structural-page" in region "main"
     And I indent block "block:c2"
     Then within 10 seconds block "block:c2" is a child of block "block:c1"
     When I toggle collapse of "block:c1"
     Then within 10 seconds block "block:c1" is collapsed
-    When I toggle the expander of block "block:c1"
+    When I toggle collapse of "block:c1"
     Then within 10 seconds block "block:c1" is not collapsed
 
   @wip @observed

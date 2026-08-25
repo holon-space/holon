@@ -577,10 +577,35 @@ impl SutBlockInteract for DriverInputComponent {
         } else {
             "main"
         };
-        let target = match element_id.split_once("::") {
-            Some((kind, suffix)) if !kind.contains(':') => suffix,
-            _ => element_id,
+        let (kind, target) = match element_id.split_once("::") {
+            Some((kind, suffix)) if !kind.contains(':') => (Some(kind), suffix),
+            _ => (None, element_id),
         };
+        // A chevron handle is NOT its row: unwrapping it to the block uri and
+        // clicking would hit the row body (focus only) and silently drop the
+        // fold. Click the caret widget itself — the real collapse gesture
+        // (ruling 2026-08-25, logseq-parity log:4).
+        if kind == Some("expand_toggle") {
+            // Same handle-inversion as the generic path below: a scheme-less
+            // suffix is a `block:` id `geometry::bare_target` stripped.
+            let uri = if target.contains(':') {
+                EntityUri::parse(target).unwrap_or_else(|e| {
+                    panic!(
+                        "[click_at_element] {element_id:?} (target {target:?}) is not an \
+                         EntityUri: {e}"
+                    )
+                })
+            } else {
+                EntityUri::block(target)
+            };
+            self.driver()
+                .click_expand_toggle(&uri)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("[click_at_element] click_expand_toggle({element_id}) failed: {e:#}")
+                });
+            return;
+        }
         // `geometry::bare_target` strips a `block:` scheme (and only that) when
         // it builds a handle, so a scheme-less suffix IS a block id and this is
         // its inverse. Without it every chevron/bullet handle — which is how

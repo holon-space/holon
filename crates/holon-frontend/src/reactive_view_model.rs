@@ -438,6 +438,19 @@ pub struct ExpandToggleTarget {
     pub row_id: Option<String>,
 }
 
+/// The `tree_item` chevron a caret click acts on, as located by
+/// [`ReactiveViewModel::find_tree_chevron`]: the per-row `expanded` gate plus
+/// the row id [`crate::expand_toggle::tree_chevron_persist_intent`] needs.
+/// Tree rows draw their own chevron instead of dispatching an `expand_toggle`
+/// node, so `find_expand_toggle` cannot see them.
+pub struct TreeChevronTarget {
+    pub expanded: Mutable<bool>,
+    pub row_id: String,
+    /// The full data row the tree_item interprets — profile resolution for
+    /// the persist leg needs the declared columns, not just the id.
+    pub row: Arc<DataRow>,
+}
+
 pub struct ReactiveViewModel {
     /// The render expression this node was built from.
     /// For leaf nodes: `text(...)`, `badge(...)`, etc.
@@ -641,6 +654,47 @@ impl ReactiveViewModel {
             }
         }
         None
+    }
+
+    /// Locate the `tree_item` whose chevron a caret click on `target_id`
+    /// hits — the row-drawn twin of [`Self::find_expand_toggle`]. Matches the
+    /// identity the GPUI builder registers the chevron under (the explicit
+    /// `target_id` prop when stamped, otherwise the row id), scheme-insensitive
+    /// because geometry handles carry bare ids while rows carry schemed ones.
+    /// Rows without a chevron (leaves, `show_chevron: false`) never match — a
+    /// caret that isn't rendered cannot be clicked. Walks collections (via
+    /// [`crate::focus_path::walk_tree`]) because production tree rows arrive
+    /// through a `live_query`'s collection.
+    pub fn find_tree_chevron(&self, target_id: &str) -> Option<TreeChevronTarget> {
+        fn bare(s: &str) -> &str {
+            s.strip_prefix("block:").unwrap_or(s)
+        }
+        let mut found: Option<TreeChevronTarget> = None;
+        crate::focus_path::walk_tree(self, &mut |node| {
+            if found.is_some() || !matches!(node.widget_name().as_deref(), Some("tree_item")) {
+                return;
+            }
+            let has_children = node.prop_bool("has_children").unwrap_or(false);
+            let show_chevron = node.prop_bool("show_chevron").unwrap_or(has_children);
+            if !(has_children && show_chevron) {
+                return;
+            }
+            let Some(id) = node.prop_str("target_id").or_else(|| node.row_id()) else {
+                return;
+            };
+            if bare(&id) != bare(target_id) {
+                return;
+            }
+            let Some(expanded) = node.expanded.as_ref() else {
+                return;
+            };
+            found = Some(TreeChevronTarget {
+                expanded: expanded.clone(),
+                row_id: id,
+                row: node.entity(),
+            });
+        });
+        found
     }
 
     /// Update this node's *structural* mutables (expr, props) in place from
@@ -1803,12 +1857,24 @@ impl ReactiveViewModel {
     }
 
     /// Create a flat tree item with depth metadata.
+    ///
+    /// Seeds the fold gate from the row's `collapsed` column exactly like
+    /// the streaming twin (`wrap_tree_item` in `mutable_tree.rs`) — collapse
+    /// is document state, and a gate-less tree_item would render a chevron
+    /// no driver can read or flip. Stored as SQLite INTEGER 0/1 on the read
+    /// path; Boolean accepted for synthetic rows.
     pub fn tree_item(content: ReactiveViewModel, depth: usize, has_children: bool) -> Self {
         let mut props = HashMap::new();
         props.insert("depth".to_string(), Value::Integer(depth as i64));
         props.insert("has_children".to_string(), Value::Boolean(has_children));
+        let collapsed = match content.entity().get("collapsed") {
+            Some(Value::Integer(i)) => *i != 0,
+            Some(Value::Boolean(b)) => *b,
+            _ => false,
+        };
         Self {
             children: vec![Arc::new(content)],
+            expanded: Some(Mutable::new(!collapsed)),
             ..Self::from_widget("tree_item", props)
         }
     }

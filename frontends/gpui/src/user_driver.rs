@@ -782,6 +782,13 @@ impl UserDriver for GpuiUserDriver {
         Ok(())
     }
 
+    /// Caret CLICK: identical gesture — the chevron is a toggle, so
+    /// `set_block_expanded`'s direction arg is unused and its body IS the
+    /// click. Delegate rather than duplicate the geometry synthesis.
+    async fn click_expand_toggle(&self, target: &EntityUri) -> Result<()> {
+        self.set_block_expanded(target, false).await
+    }
+
     /// Focus the entity via click, then press the chord keys through
     /// the interaction channel. Modifier keys are pressed, the regular
     /// keys are clicked, and modifiers are released in reverse.

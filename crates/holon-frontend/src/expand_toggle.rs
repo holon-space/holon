@@ -54,6 +54,47 @@ pub fn expand_toggle_effects(
     }
 }
 
+/// The persist leg of a `tree_item` chevron click, decided once for every
+/// frontend like [`expand_toggle_effects`]: resolve the row's profile, take
+/// its `set_field` operation's entity, and build the `set_field(collapsed)`
+/// write the chevron dispatches. `None` (warned) when no profile resolves or
+/// it carries no `set_field` — the fold is then view-local, like an unwired
+/// `expand_toggle`.
+pub fn tree_chevron_persist_intent(
+    services: &dyn crate::reactive::BuilderServices,
+    row: &holon_api::widget_spec::DataRow,
+    row_id: &str,
+    new_expanded: bool,
+) -> Option<OperationIntent> {
+    // Resolve off the FULL data row the tree_item interprets — a skinny
+    // `{id}` probe starves the profile's computed-field conditions of their
+    // declared columns (inv-no-declared-column-absent). `id` is pinned to
+    // `row_id` so a synthetic row still resolves by scheme.
+    let mut probe = row.clone();
+    probe.insert("id".into(), Value::String(row_id.to_string()));
+    let Some(profile) = services.resolve_profile(&probe) else {
+        tracing::warn!(
+            "tree_item chevron: resolve_profile None for row_id={row_id}; collapse will not \
+             persist"
+        );
+        return None;
+    };
+    let Some(op) = profile.operations.iter().find(|o| o.name == "set_field") else {
+        tracing::warn!(
+            "tree_item chevron: set_field op not on profile for row_id={row_id}; collapse will \
+             not persist"
+        );
+        return None;
+    };
+    Some(OperationIntent::set_field(
+        &op.entity_name,
+        "set_field",
+        row_id,
+        "collapsed",
+        Value::Boolean(!new_expanded),
+    ))
+}
+
 /// A `set_field("collapsed")` wiring as an `expand_toggle` node carries it.
 /// Shared with `reactive_view_model`'s walk test so both sides of the seam —
 /// deciding the effects and locating the node they are decided from — are

@@ -468,6 +468,22 @@ pub trait UserDriver: Send + Sync {
         )
     }
 
+    /// Click block `target`'s disclosure caret — the genuine toggle gesture,
+    /// with no direction: whatever handler production wires to the caret runs
+    /// with the flip it computes itself. This is the verb for driving a CLICK
+    /// on the collapse widget (`ToggleCollapse`); [`Self::set_block_expanded`]
+    /// stays the ref-owned directed variant.
+    ///
+    /// Default impl fails loud for the same reason `set_block_expanded`'s does.
+    async fn click_expand_toggle(&self, target: &EntityUri) -> Result<()> {
+        let _ = target;
+        anyhow::bail!(
+            "click_expand_toggle is unimplemented for this UserDriver. Only a driver with a \
+             reactive view tree (ReactiveEngineDriver) or a real window \
+             (GpuiUserDriver/SimUserDriver) can click the disclosure caret."
+        )
+    }
+
     /// Click the `state_toggle` glyph on `entity_id`'s row, advancing its
     /// task-state cycle by one — the faithful "tap the checkbox" gesture.
     ///
@@ -878,6 +894,122 @@ impl ReactiveEngineDriver {
     }
 }
 
+/// A rendered caret the headless driver can act on: either a dispatched
+/// `expand_toggle` node or a `tree_item`'s row-drawn chevron.
+enum CaretTarget {
+    Node(crate::reactive_view_model::ExpandToggleTarget),
+    TreeChevron(crate::reactive_view_model::TreeChevronTarget),
+}
+
+impl ReactiveEngineDriver {
+    /// Search the router's live per-block trees for `target`'s caret. Live
+    /// rows (main panel, sidebars) exist only there — a one-shot
+    /// `snapshot_reactive` stops at live slots, so this is the headless
+    /// equivalent of the windowed geometry lookup under
+    /// `expand_toggle_id_for`.
+    fn find_caret(&self, target_str: &str) -> Option<CaretTarget> {
+        let contents = self.router.block_contents.lock().unwrap();
+        for tree in contents.values() {
+            if let Some(found) = tree.find_expand_toggle(target_str) {
+                return Some(CaretTarget::Node(found));
+            }
+            if let Some(chevron) = tree.find_tree_chevron(target_str) {
+                return Some(CaretTarget::TreeChevron(chevron));
+            }
+        }
+        None
+    }
+
+    /// Census of every caret-bearing widget the live trees DO hold, so a
+    /// caret miss names the actual trees instead of guessing.
+    fn caret_census(&self) -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        let contents = self.router.block_contents.lock().unwrap();
+        for tree in contents.values() {
+            crate::focus_path::walk_tree(tree, &mut |node| match node.widget_name().as_deref() {
+                Some("tree_item") => {
+                    let id = node
+                        .prop_str("target_id")
+                        .or_else(|| node.row_id())
+                        .unwrap_or_else(|| "<no id>".into());
+                    seen.push(format!(
+                        "tree_item({id}, has_children={:?}, show_chevron={:?}, gate={})",
+                        node.prop_bool("has_children"),
+                        node.prop_bool("show_chevron"),
+                        node.expanded.is_some(),
+                    ));
+                }
+                Some("expand_toggle") => {
+                    seen.push(format!(
+                        "expand_toggle({})",
+                        node.prop_str("target_id").unwrap_or_default()
+                    ));
+                }
+                _ => {}
+            });
+        }
+        seen
+    }
+
+    /// Mirror the `expand_toggle` builder's chevron `on_mouse_down` for a
+    /// mounted node: flip the gate to `expanded`, then perform exactly the
+    /// writes `expand_toggle_effects` decides off that node's wiring — a node
+    /// the production handler would leave view-local stays view-local here
+    /// too.
+    async fn flip_expand_toggle_node(
+        &self,
+        target_str: &str,
+        found: &crate::reactive_view_model::ExpandToggleTarget,
+        expanded: bool,
+    ) -> Result<()> {
+        found.gate.set(expanded);
+        let fx = crate::expand_toggle::expand_toggle_effects(
+            target_str,
+            expanded,
+            &found.operations,
+            found.entity_name.as_ref(),
+            found.row_id.as_deref(),
+        );
+        self.engine
+            .ui_state()
+            .set_block_expanded_view(&fx.view_store.0, fx.view_store.1);
+        match fx.intent {
+            Some(intent) => self.engine.dispatch_intent_sync(intent).await,
+            None => {
+                tracing::warn!(
+                    target_id = %target_str,
+                    "no set_field(collapsed) wiring or row id on the expand_toggle node — the \
+                     fold is view-local and will not persist"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Mirror the `tree_item` chevron's `on_mouse_down` (`collapse_chevron` in
+    /// the GPUI builder): flip the row's `expanded` gate, then dispatch the
+    /// same `set_field(collapsed)` write it builds — decided by the shared
+    /// `tree_chevron_persist_intent`, which warns and skips the write when the
+    /// row's profile carries no `set_field` (the fold is then view-local,
+    /// exactly as in production).
+    async fn flip_tree_chevron(
+        &self,
+        chevron: &crate::reactive_view_model::TreeChevronTarget,
+        expanded: bool,
+    ) -> Result<()> {
+        chevron.expanded.set(expanded);
+        match crate::expand_toggle::tree_chevron_persist_intent(
+            self.engine.as_ref(),
+            &chevron.row,
+            &chevron.row_id,
+            expanded,
+        ) {
+            Some(intent) => self.engine.dispatch_intent_sync(intent).await,
+            None => Ok(()),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl UserDriver for ReactiveEngineDriver {
     async fn synthetic_dispatch(
@@ -958,26 +1090,27 @@ impl UserDriver for ReactiveEngineDriver {
             .snapshot_reactive(&root_uri)
             .find_expand_toggle(target_str)
         {
-            found.gate.set(expanded);
-            let fx = crate::expand_toggle::expand_toggle_effects(
-                target_str,
-                expanded,
-                &found.operations,
-                found.entity_name.as_ref(),
-                found.row_id.as_deref(),
-            );
-            self.engine
-                .ui_state()
-                .set_block_expanded_view(&fx.view_store.0, fx.view_store.1);
-            match fx.intent {
-                Some(intent) => self.engine.dispatch_intent_sync(intent).await?,
-                None => tracing::warn!(
-                    target_id = %target_str,
-                    "set_block_expanded: no set_field(collapsed) wiring or row id on the \
-                     expand_toggle node — the fold is view-local and will not persist"
-                ),
+            return self
+                .flip_expand_toggle_node(target_str, &found, expanded)
+                .await;
+        }
+
+        // Live-tree carets: main-panel/sidebar rows exist only in the
+        // router's per-block trees (a one-shot snapshot stops at live
+        // slots). A `tree_item` row draws its own caret (`collapse_chevron`
+        // in the GPUI builder) instead of dispatching an `expand_toggle`
+        // node; mirror that handler via the shared
+        // `tree_chevron_persist_intent`.
+        match self.find_caret(target_str) {
+            Some(CaretTarget::Node(found)) => {
+                return self
+                    .flip_expand_toggle_node(target_str, &found, expanded)
+                    .await;
             }
-            return Ok(());
+            Some(CaretTarget::TreeChevron(chevron)) => {
+                return self.flip_tree_chevron(&chevron, expanded).await;
+            }
+            None => {}
         }
 
         // Profile-driven embedded page: the `expand_toggle` is synthesized
@@ -1010,6 +1143,52 @@ impl UserDriver for ReactiveEngineDriver {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+    }
+
+    /// Headless caret CLICK: locate the caret the way a user's eye does —
+    /// either an `expand_toggle` node or a `tree_item` chevron — read its
+    /// CURRENT gate and flip it, running the same handler body the production
+    /// chevron's `on_mouse_down` runs. No direction argument: the click owns
+    /// the toggle, exactly like a mouse press on the glyph. Fails loud when
+    /// the target renders no caret at all — a caret that isn't rendered
+    /// cannot be clicked.
+    async fn click_expand_toggle(&self, target: &EntityUri) -> Result<()> {
+        let root_uri = holon_api::root_layout_block_uri();
+        let target_str = target.as_str();
+        // Live rows (main panel, sidebars) exist only in the router's
+        // per-block trees — a one-shot `snapshot_reactive` stops at live
+        // slots. Bootstrap the router exactly like `drop_entity` does.
+        self.router.ensure_block_watch(&root_uri);
+        self.router
+            .wait_until_ready(Duration::from_secs(2))
+            .await
+            .context("router not ready before click_expand_toggle")?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match self.find_caret(target_str) {
+                Some(CaretTarget::Node(found)) => {
+                    let expanded = !found.gate.get();
+                    return self
+                        .flip_expand_toggle_node(target_str, &found, expanded)
+                        .await;
+                }
+                Some(CaretTarget::TreeChevron(chevron)) => {
+                    let expanded = !chevron.expanded.get();
+                    return self.flip_tree_chevron(&chevron, expanded).await;
+                }
+                None => {}
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "click_expand_toggle: {target_str} renders neither an `expand_toggle` node \
+                     nor a tree_item chevron within 2s — there is no caret to click (leaf row, \
+                     `show_chevron: false`, or the row is not mounted). Caret-bearing widgets \
+                     in the live trees: [{}]",
+                    self.caret_census().join(", ")
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 

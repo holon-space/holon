@@ -70,12 +70,26 @@ impl TransitionRef<ReferenceState> for ToggleCollapse {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        // Mirror the click outcome locally — the SUT click path will
-        // flip the gate's `Mutable<bool>` on the next render, and the
-        // ref state must reflect that so subsequent preconditions stay
-        // accurate.
+        // A caret click is a TOGGLE: the SUT flips whatever the rendered
+        // gate holds, and that gate is seeded from the block's `collapsed`
+        // document field. Mirror the flip off the ref block's `collapsed`
+        // so both directions of the gesture stay modelled (the generator
+        // only picks expanded targets, so generated sequences still
+        // collapse; replayed scenarios may re-expand).
         let uri = parse_target(&self.target_id);
-        state.set_expanded(&uri, false);
+        let now_collapsed = state
+            .domain
+            .block_state
+            .blocks
+            .get(&uri)
+            .unwrap_or_else(|| {
+                panic!(
+                    "[ToggleCollapse::apply_to_ref] {uri} is not in the reference block state — \
+                     a caret cannot be clicked on a block the model does not know about"
+                )
+            })
+            .collapsed;
+        state.set_expanded(&uri, now_collapsed);
     }
 }
 

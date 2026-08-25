@@ -445,6 +445,13 @@ impl UserDriver for SimUserDriver {
         Ok(())
     }
 
+    /// Caret CLICK: identical gesture — the chevron is a toggle, so
+    /// `set_block_expanded`'s direction arg is unused and its body IS the
+    /// click (mirrors `GpuiUserDriver`).
+    async fn click_expand_toggle(&self, target: &EntityUri) -> Result<(), anyhow::Error> {
+        self.set_block_expanded(target, false).await
+    }
+
     /// The trait default clicks the block ROW (which only focuses), never
     /// reaching the `state_toggle` glyph's `on_mouse_down`, so `task_state`
     /// never cycles — the windowed `toggle_state never landed` defect. The
