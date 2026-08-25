@@ -95,6 +95,7 @@ pub mod viewmodel_root_matches_render_expr;
 pub mod viewmodel_shows_source_when_no_query;
 pub mod viewmodel_snapshot;
 pub mod viewmodel_state_toggle_correct;
+pub mod viewmodel_task_rows_have_state_toggle;
 pub mod viewmodel_tree_virtual_slots;
 pub mod watch_rows;
 pub mod window_focus;

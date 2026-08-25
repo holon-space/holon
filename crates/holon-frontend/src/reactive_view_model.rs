@@ -1711,6 +1711,7 @@ impl ReactiveViewModel {
         child_space_fn: Option<std::sync::Arc<crate::reactive_view::ChildSpaceFn>>,
         virtual_child: Option<crate::reactive_view::VirtualChildSlot>,
         rules: Vec<holon_api::render_types::RuleSpec>,
+        context_root_id: Option<String>,
         props: HashMap<String, Value>,
     ) -> Self {
         if widget == "query_result" {
@@ -1724,6 +1725,7 @@ impl ReactiveViewModel {
                 sort_key,
                 virtual_child,
                 rules,
+                context_root_id,
             },
             data_source,
             parent_space,

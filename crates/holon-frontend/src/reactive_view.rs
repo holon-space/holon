@@ -641,6 +641,12 @@ pub struct CollectionConfig {
     /// (the driver receives rows incrementally via VecDiff and the
     /// collection size shifts with each event).
     pub rules: Vec<holon_api::render_types::RuleSpec>,
+    /// The id of the entity this collection renders INSIDE (see
+    /// `render_interpreter::collection_context_root_id`). The TREE driver
+    /// compares each row id against it to inject the `is_context_root`
+    /// positional key rules dispatch on; `None` for collections built with
+    /// no surrounding entity.
+    pub context_root_id: Option<String>,
 }
 
 /// Pure function that partitions a parent's container-query allocation
@@ -711,6 +717,10 @@ enum ReactiveViewInner {
         /// into the row's `ctx.flags`. Empty = no rules effect. See
         /// `crate::row_pipeline::apply_rules_and_interpret_with_ctx`.
         rules: Vec<holon_api::render_types::RuleSpec>,
+        /// See [`CollectionConfig::context_root_id`]: the surrounding
+        /// entity's id the TREE driver's `is_context_root` positional key
+        /// compares row ids against.
+        context_root_id: Option<String>,
     },
     /// A grouped collection (board, future calendar, …): rows are
     /// partitioned by a row column at runtime and the result is a list of
@@ -807,6 +817,7 @@ impl ReactiveView {
                 child_space_fn,
                 virtual_child: config.virtual_child,
                 rules: config.rules,
+                context_root_id: config.context_root_id,
             },
             items: MutableVec::new(),
             driver_handle: Mutex::new(None),
@@ -1253,6 +1264,12 @@ impl ReactiveView {
             ReactiveViewInner::Collection { rules, .. } => rules.clone(),
             _ => Vec::new(),
         };
+        let config_context_root: Option<String> = match &self.inner {
+            ReactiveViewInner::Collection {
+                context_root_id, ..
+            } => context_root_id.clone(),
+            _ => None,
+        };
 
         let node_interpret_fn: InterpretFn = {
             let svc = services.clone();
@@ -1286,8 +1303,9 @@ impl ReactiveView {
         };
 
         // Interprets a row at a known tree depth. Injects the same `level` /
-        // `depth` positional keys as the static tree path so rules like
-        // `eq("level", 0)` fire on the streaming path too; the returned
+        // `depth` / `is_context_root` positional keys as the static tree path
+        // so rules like `eq("level", 0)` and `eq("is_context_root", 1)` fire
+        // on the streaming path too; the returned
         // override map is threaded into the TreeItem wrapper by MutableTree.
         // The virtual creation-slot row skips rules to mirror the static
         // path, which appends the slot after rule evaluation.
@@ -1301,6 +1319,7 @@ impl ReactiveView {
             let nif = node_interpret_fn;
             let ds = data_source.clone();
             let rules = config_rules;
+            let context_root = config_context_root;
             let advice_tmpl = advice_readonly_template();
             let slot_tmpl = creation_affordance_template();
             Arc::new(
@@ -1327,9 +1346,18 @@ impl ReactiveView {
                     };
                     let active_rules: &[holon_api::render_types::RuleSpec] =
                         if is_virtual || is_advice { &[] } else { &rules };
+                    let is_context_root = context_root.as_deref().is_some_and(|cid| {
+                        row.get("id")
+                            .and_then(|v| v.as_string())
+                            .is_some_and(|rid| rid == cid)
+                    });
                     let positional = HashMap::from([
                         ("level".to_string(), holon_api::Value::Integer(depth as i64)),
                         ("depth".to_string(), holon_api::Value::Integer(depth as i64)),
+                        (
+                            "is_context_root".to_string(),
+                            holon_api::Value::Integer(is_context_root as i64),
+                        ),
                     ]);
                     let svc_for_interpret = svc.clone();
                     let (mut node, overrides) =
@@ -2953,6 +2981,7 @@ mod tests {
                 sort_key: None,
                 virtual_child: None,
                 rules: Vec::new(),
+                context_root_id: None,
             },
             data_source,
             None,
@@ -3074,6 +3103,7 @@ mod tests {
                 sort_key: Some("-content".to_string()),
                 virtual_child: None,
                 rules: Vec::new(),
+                context_root_id: None,
             },
             data_source,
             None,
@@ -3157,6 +3187,7 @@ mod tests {
                 sort_key: Some("-content".to_string()),
                 virtual_child: None,
                 rules: Vec::new(),
+                context_root_id: None,
             },
             data_source,
             None,
@@ -3319,6 +3350,7 @@ mod tests {
                 sort_key: Some(spec.to_string()),
                 virtual_child: None,
                 rules: Vec::new(),
+                context_root_id: None,
             },
             data_source,
             None,
@@ -3792,6 +3824,7 @@ mod tests {
                 sort_key: None,
                 virtual_child: None,
                 rules: Vec::new(),
+                context_root_id: None,
             },
             data_source,
             None,
@@ -3940,6 +3973,7 @@ mod tests {
                 sort_key: None,
                 virtual_child: None,
                 rules: Vec::new(),
+                context_root_id: None,
             },
             data_source,
             None,

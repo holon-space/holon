@@ -220,6 +220,7 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         invariants::viewmodel_shows_source_when_no_query::wire(),
         invariants::viewmodel_entity_ids_subset_of_data::wire(),
         invariants::viewmodel_state_toggle_correct::wire(),
+        invariants::viewmodel_task_rows_have_state_toggle::wire(),
         invariants::viewmodel_editable_text_triggers::wire(),
         // Storage-projection cluster (Bundle C-remainder batch 3):
         // `live_children_match_ref` (`SutSqlProjection + SutLoroLog +

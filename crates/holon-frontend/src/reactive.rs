@@ -523,6 +523,7 @@ pub trait BuilderServices: Send + Sync {
         let ctx = RenderContext {
             data_rows: rows.into(),
             available_space: self.viewport_snapshot(),
+            context_entity: Some(block_id.to_string()),
             ..Default::default()
         };
         let rvm = self.interpret(&expr, &ctx);
@@ -2643,6 +2644,7 @@ impl ReactiveEngine {
         let ctx = RenderContext {
             data_rows: rows.into(),
             data_source: Some(results.clone()),
+            context_entity: Some(block_id.to_string()),
             ..Default::default()
         };
         let tree = services.interpret(&expr, &ctx);
@@ -2654,11 +2656,13 @@ impl ReactiveEngine {
         // produces Streaming collections (not Static snapshots).
         let results_for_signal = results.clone();
         let services_for_signal = services.clone();
+        let block_id_for_signal = block_id.clone();
         let structural = results.structural_signal_with_ui_gen(
             Arc::new(move |expr: &RenderExpr, rows: &[Arc<DataRow>]| {
                 let ctx = RenderContext {
                     data_rows: rows.to_vec().into(),
                     data_source: Some(results_for_signal.clone()),
+                    context_entity: Some(block_id_for_signal.to_string()),
                     ..Default::default()
                 };
                 services_for_signal.interpret(expr, &ctx)
@@ -3203,6 +3207,9 @@ impl ReactiveEngine {
         query_context: Option<crate::QueryContext>,
         services: Arc<dyn BuilderServices>,
     ) -> (EntityUri, LiveBlock) {
+        let context_entity = query_context
+            .as_ref()
+            .and_then(|c| c.current_block_id.as_ref().map(|u| u.to_string()));
         let (key, results) = self.ensure_query_watching(query, lang, render_expr, query_context);
         // `ensure_query_watching` counted +1 for this call; the guard owns
         // that count and releases it on drop.
@@ -3212,6 +3219,7 @@ impl ReactiveEngine {
         let ctx = RenderContext {
             data_rows: rows.into(),
             data_source: Some(results.clone()),
+            context_entity: context_entity.clone(),
             ..Default::default()
         };
         let tree = services.interpret(&expr, &ctx);
@@ -3224,6 +3232,7 @@ impl ReactiveEngine {
                 let ctx = RenderContext {
                     data_rows: rows.to_vec().into(),
                     data_source: Some(results_for_signal.clone()),
+                    context_entity: context_entity.clone(),
                     ..Default::default()
                 };
                 services_for_signal.interpret(expr, &ctx)

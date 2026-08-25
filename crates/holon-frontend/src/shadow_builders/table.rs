@@ -154,7 +154,7 @@ holon_macros::widget_builder! {
             // Bare `table` — the collection widget it has always been.
             return match children {
                 CollectionData::Streaming { item_template, data_source, sort_key, rules } => {
-                    ViewModel::streaming_collection("table", item_template, data_source, gap, false, sort_key, __parent_space, None, virtual_child, rules, Default::default())
+                    ViewModel::streaming_collection("table", item_template, data_source, gap, false, sort_key, __parent_space, None, virtual_child, rules, None, Default::default())
                 }
                 CollectionData::Static { mut items } => {
                     if let Some(tmpl) = ba.args.get_template("item_template").or(ba.args.get_template("item")) {
@@ -188,7 +188,7 @@ holon_macros::widget_builder! {
         match data_source {
             Some(ds) => ViewModel::streaming_collection(
                 "table_columnar", item_template, ds, gap, false, sort_key,
-                __parent_space, None, virtual_child, rules, props,
+                __parent_space, None, virtual_child, rules, None, props,
             ),
             None => {
                 let sorted = holon_api::render_eval::sorted_rows(&ba.ctx.data_rows, sort_key.as_deref());

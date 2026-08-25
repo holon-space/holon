@@ -187,6 +187,15 @@ pub struct RenderContext {
     /// cleared inside the resolved block's own descendants so flags scope
     /// only to the immediate target.
     pub flags: HashMap<String, holon_api::Value>,
+    /// The id of the entity whose resolved render this context interprets —
+    /// set by `live_block` / `watch_live` / `live_query` when they mount a
+    /// block's render expression over that block's data rows. Collection
+    /// builders read it (via `render_interpreter::collection_context_root_id`)
+    /// to mark the row whose id equals it as the tree's context root
+    /// (`is_context_root` positional key). NOT derivable from `row()`: a
+    /// mounted render context has no bound row, and `row()` then reads
+    /// `data_rows.first()` — an arbitrary result row.
+    pub context_entity: Option<String>,
 }
 
 impl RenderContext {
@@ -297,6 +306,15 @@ impl RenderContext {
         Self {
             data_rows: data_rows.into(),
             current_row: None,
+            ..self.clone()
+        }
+    }
+
+    /// Bind the entity whose resolved render this context interprets — see
+    /// the `context_entity` field.
+    pub fn with_context_entity(&self, id: impl Into<String>) -> Self {
+        Self {
+            context_entity: Some(id.into()),
             ..self.clone()
         }
     }

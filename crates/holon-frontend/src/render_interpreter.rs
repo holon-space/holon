@@ -504,6 +504,29 @@ impl<'a> TreeInputs<'a> {
     }
 }
 
+/// The id of the entity a collection renders INSIDE: the explicit
+/// `virtual_parent` string (resolved from the `Bool(true)` sentinel by
+/// `resolve_virtual_parent`), else the context's `context_entity` — bound by
+/// `live_block` / `watch_live` / `live_query` when they mount a block's
+/// resolved render over that block's data rows.
+///
+/// Deliberately NOT `ctx.row()`: a mounted render context has no bound row,
+/// so `row()` reads `data_rows.first()` — an arbitrary result row, which
+/// would crown a random row as context root.
+///
+/// The tree builders compare each row id against it to inject the
+/// `is_context_root` positional key (Integer 1/0), so a profile rule can
+/// distinguish a page's OWN root row from a parentless flat-query result row
+/// (`eq("is_context_root", 1)` — the tree_view page_title rule). A flat query
+/// over foreign blocks has no row matching the context id, so none of its
+/// rows is a context root.
+pub fn collection_context_root_id<W>(ba: &BuilderArgs<'_, W>) -> Option<String> {
+    ba.args
+        .get_string("virtual_parent")
+        .map(|s| s.to_string())
+        .or_else(|| ba.ctx.context_entity.clone())
+}
+
 /// `tree` builder: interprets rows as a hierarchical tree using `parent_id` and
 /// `sortkey`.
 ///
@@ -541,6 +564,7 @@ pub fn shared_tree_build<W: WithEntity>(
     // drops the row order of) for roots while child buckets keep `sort_col`.
     // `None` = no declared root key = pre-C1' behavior.
     let root_sort_key = crate::row_pipeline::extract_root_sort_key(&rules);
+    let context_root_id = collection_context_root_id(ba);
     let tree = OutlineTree::from_rows(rows, parent_id_col, sort_col, root_sort_key.as_deref());
     tree.walk_depth_first(|resolved_row, depth| {
         // Tree adjusts `ctx.depth` before the pipeline applies, so child
@@ -553,9 +577,19 @@ pub fn shared_tree_build<W: WithEntity>(
             depth: ba.ctx.depth + depth,
             ..ba.ctx.with_row(Arc::clone(resolved_row))
         };
+        let is_context_root = context_root_id.as_deref().is_some_and(|cid| {
+            resolved_row
+                .get("id")
+                .and_then(|v| v.as_string())
+                .is_some_and(|rid| rid == cid)
+        });
         let positional = HashMap::from([
             ("level".to_string(), holon_api::Value::Integer(depth as i64)),
             ("depth".to_string(), holon_api::Value::Integer(depth as i64)),
+            (
+                "is_context_root".to_string(),
+                holon_api::Value::Integer(is_context_root as i64),
+            ),
         ]);
         let (node, overrides) = crate::row_pipeline::apply_rules_and_interpret_with_ctx(
             row_ctx,
@@ -609,7 +643,9 @@ pub fn shared_live_block_build<W>(ba: &BuilderArgs<'_, W>) -> Result<W, String> 
     // (e.g. `column(row(...))`) propagates flags through the whole
     // subtree — harmless because no consumer reads them on those
     // widgets.
-    let child_ctx = deeper.with_data_rows(data_rows);
+    let child_ctx = deeper
+        .with_data_rows(data_rows)
+        .with_context_entity(block_id.to_string());
     Ok((ba.interpret)(&render_expr, &child_ctx))
 }
 
@@ -716,7 +752,10 @@ pub fn shared_live_query_build<W>(
 
     match result {
         Ok(_stream) => {
-            let child_ctx = deeper_ctx.with_data_rows(vec![]);
+            let mut child_ctx = deeper_ctx.with_data_rows(vec![]);
+            if let Some(id) = &context_id {
+                child_ctx = child_ctx.with_context_entity(id.clone());
+            }
             let content = (ba.interpret)(&live_query_render_expr, &child_ctx);
             Ok(LiveQueryResult {
                 content,

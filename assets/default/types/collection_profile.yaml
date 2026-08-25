@@ -18,8 +18,16 @@ variants:
     # synthetic data row id (`<scheme>:__virtual:<parent_local>`).
     # Sort by `sort_key` (FractionalIndex), not `sequence`: blocks minted by
     # split/insert carry no `sequence` and would sort to the end (see
-    # `data_row_sort_key` in holon-api/src/widget_spec.rs). The level-0 rule
-    # mirrors the right sidebar's inline render (assets/default/index.org).
+    # `data_row_sort_key` in holon-api/src/widget_spec.rs).
+    # The page_title rule fires on `is_context_root` (row id == the resolved
+    # virtual_parent / surrounding entity id), NOT on `eq("level", 0)`: a flat
+    # query over foreign blocks (the vault's Now list) makes EVERY result row
+    # a level-0 root, and a level keyed rule stamped the page_title role on
+    # each of them — one bare h1 text blob per task (bugfunnel
+    # 2026-08-25-flat-query-task-rows-render-as-page-title-blobs). Only a
+    # page's OWN root row is a context root. The right sidebar's inline render
+    # (assets/default/index.org) deliberately KEEPS `eq("level", 0)`: its
+    # level-0 rows are pinned subtree heads that all render as headers.
     # `show_bullet: false` on ALL rows (the trailing `always()` rule): every
     # block already draws its own leading marker — the draggable orgmode bullet
     # (◉) in the default/editing content variants — so the tree chrome's
@@ -27,7 +35,7 @@ variants:
     # Parent rows keep their disclosure chevron (show_chevron defaults to
     # has_children and is not suppressed here). The sidebar page tree is a
     # separate render and is unaffected.
-    render: 'tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity(), creation_slot: true, virtual_parent: true, rules: [#{when: eq("level", 0), override: #{role: "page_title", show_bullet: false, show_chevron: false}}, #{when: always(), override: #{show_bullet: false}}]})'
+    render: 'tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: render_entity(), creation_slot: true, virtual_parent: true, rules: [#{when: eq("is_context_root", 1), override: #{role: "page_title", show_bullet: false, show_chevron: false}}, #{when: always(), override: #{show_bullet: false}}]})'
   - name: table_view
     priority: 1
     condition: 'view_mode == "table"'
