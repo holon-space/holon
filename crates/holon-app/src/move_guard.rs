@@ -9,7 +9,8 @@
 //! It lives with the composition root for the same reason `rehome_entity`
 //! does: deciding a destination's capability needs `holon-capability`, which
 //! `holon` may not link. It builds no writer — every read goes through the
-//! shared block projection and the document-home authority.
+//! backend-blind `BlockReader` seam and the profile resolver's computed
+//! fields, so the guard evaluates with Turso absent (ADR 0032 D10).
 
 use std::sync::Arc;
 
@@ -22,7 +23,6 @@ use holon::api::net_guard::NetGuard;
 use holon::api::net_guard::NetGuardOp;
 use holon::api::net_guard::NetRefusal;
 use holon::api::net_guard::NetVerdict;
-use holon::core::queryable_cache::QueryableCache;
 use holon_api::EntityUri;
 use holon_api::live_data::home_by::DurableFormat;
 use holon_api::live_data::home_by::HomeAuthority;
@@ -31,20 +31,22 @@ use holon_capability::ProfileRegistry;
 use holon_capability::profile_of;
 use holon_core::Result;
 use holon_core::block_ordering::BlockOrdering;
+use holon_filesystem::BlockReader;
 use holon_orgmode::home_authority::BlockHomeAuthority;
 use holon_orgmode::home_authority::DocHome;
 use holon_orgmode::home_authority::HomeBurstMemo;
+use holon_profiles::ProfileResolving;
 
 /// The op whose delta this policy ranges over. `rehome_entity` performs its
 /// move by dispatching this one, so guarding it covers both.
 const MOVE_BLOCK_OP: &str = "move_block";
 
-/// What the projection says about the block being moved.
+/// What the store says about the block being moved.
 struct Subject {
     parent_id: EntityUri,
     /// Rule machinery: a source block under a heading that owns a rule head —
-    /// which includes the rule head itself. The same two clauses
-    /// `block_profile.yaml`'s `is_program` states, read here as one predicate.
+    /// which includes the rule head itself. `block_profile.yaml`'s
+    /// `is_program` computed field, evaluated — not restated.
     is_program: bool,
     kind: EntityKind,
 }
@@ -62,74 +64,98 @@ impl MoveGuard {
         Self { injector, registry }
     }
 
-    async fn cache(&self) -> Arc<QueryableCache<holon_api::block::Block>> {
-        self.injector
-            .resolve_async::<QueryableCache<holon_api::block::Block>>()
-            .await
+    async fn reader(&self) -> Arc<dyn BlockReader> {
+        self.injector.resolve_async::<dyn BlockReader>().await
     }
 
     async fn authority(&self) -> BlockHomeAuthority {
-        let cache = self.cache().await;
         BlockHomeAuthority::new(
-            Arc::new(crate::turso_seams::CacheBlockReader::new(cache)),
+            self.reader().await,
             self.injector.resolve_async::<dyn BlockOrdering>().await,
         )
     }
 
-    /// The subject's row, or `None` when the projection does not hold it yet.
+    /// The subject's block, or `None` when the store does not hold it yet.
     ///
-    /// A block the projection has not caught up on cannot be classified, and
+    /// A block the store has not caught up on cannot be classified, and
     /// the classification is what both refusals rest on — so an unseen block
     /// is confirmed rather than refused on a guess.
+    ///
+    /// `is_program` is the block profile's computed field of that name,
+    /// evaluated through the same resolver the renderer uses — the yaml is
+    /// the single statement of the predicate, and its `rule_sibling` lookup
+    /// carries both storage arms (D10: no Turso required).
     async fn subject(&self, id: &EntityUri) -> Result<Option<Subject>> {
-        let mut params = std::collections::HashMap::new();
-        params.insert(
-            "id".to_string(),
-            holon_api::Value::String(id.as_str().to_string()),
-        );
-        let rows = self
-            .cache()
+        let Some(block) = self
+            .reader()
             .await
-            .db_handle()
-            .query(
-                "SELECT b.parent_id AS parent_id, \
-                 (b.content_type = 'source' AND EXISTS (SELECT 1 FROM block_raw s WHERE \
-                 s.parent_id = b.parent_id AND s.content_type = 'source' AND s.source_language IN \
-                 ('holon_rule', 'action'))) AS is_program, \
-                 EXISTS (SELECT 1 FROM block_tags t WHERE t.block_id = b.id AND t.tag = 'Page') AS \
-                 is_page \
-                 FROM block_raw b WHERE b.id = $id",
-                params,
-            )
+            .get_block_authoritative(id)
             .await
-            .map_err(|e| format!("net guard: classifying `{id}`: {e}"))?;
-        let Some(row) = rows.into_iter().next() else {
+            .map_err(|e| format!("net guard: classifying `{id}`: {e}"))?
+        else {
             return Ok(None);
         };
-        let flag = |key: &str| {
-            row.get(key)
-                .map(|v| match v {
-                    holon_api::Value::Boolean(b) => *b,
-                    holon_api::Value::Integer(i) => *i != 0,
-                    other => panic!("net guard: `{key}` came back as {other:?}, not a flag"),
-                })
-                .unwrap_or(false)
+
+        let mut row = std::collections::HashMap::new();
+        row.insert(
+            "id".to_string(),
+            holon_api::Value::String(block.id.as_str().to_string()),
+        );
+        row.insert(
+            "parent_id".to_string(),
+            holon_api::Value::String(block.parent_id.as_str().to_string()),
+        );
+        row.insert(
+            "content_type".to_string(),
+            holon_api::Value::String(block.content_type.to_string()),
+        );
+        // Always bound, `Null` for a non-source block: an absent column would
+        // leave `is_rule_head` structurally unbound and `is_program` would
+        // come back `Null` instead of `false`.
+        row.insert(
+            "source_language".to_string(),
+            match &block.source_language {
+                Some(lang) => holon_api::Value::String(lang.to_string()),
+                None => holon_api::Value::Null,
+            },
+        );
+        let computed = self
+            .injector
+            .resolve_async::<dyn ProfileResolving>()
+            .await
+            .resolve_computed_only(
+                &row,
+                &holon_api::render_requirements::RenderRequirements::none(),
+            );
+        let is_program = match computed.get("is_program") {
+            Some(holon_api::Value::Boolean(b)) => *b,
+            // The evaluator's typed "unbound" — a genuine eval failure is
+            // warn-disclosed there. Falsy, exactly as every renderer
+            // condition treats it.
+            Some(holon_api::Value::Null) => false,
+            Some(other) => {
+                return Err(format!(
+                    "net guard: `is_program` for `{id}` came back as {other:?}, not a flag"
+                )
+                .into());
+            }
+            None => {
+                return Err(format!(
+                    "net guard: the block profile computed no `is_program` for `{id}` — the \
+                     resolver is missing the block type profile"
+                )
+                .into());
+            }
         };
-        let parent_id = row
-            .get("parent_id")
-            .and_then(|v| v.as_string())
-            .ok_or_else(|| format!("net guard: `{id}` has no parent_id in the projection"))?;
-        let is_program = flag("is_program");
         let kind = if is_program {
             EntityKind::Program
-        } else if flag("is_page") {
+        } else if block.tags.contains(holon_api::PAGE_TAG) {
             EntityKind::Page
         } else {
             EntityKind::Block
         };
         Ok(Some(Subject {
-            parent_id: EntityUri::parse(parent_id)
-                .map_err(|e| format!("net guard: `{id}`'s parent_id is not an entity uri: {e}"))?,
+            parent_id: block.parent_id,
             is_program,
             kind,
         }))

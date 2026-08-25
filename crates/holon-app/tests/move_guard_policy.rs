@@ -78,6 +78,20 @@ async fn engine(
                     )) as Arc<dyn holon_core::OperationProvider>
                 },
             ));
+            // The guard reads through the backend-blind `BlockReader` seam;
+            // this container's arm is the same one `OrgModeModule` registers
+            // in production: `CacheBlockReader` over the block cache.
+            injector.provide::<dyn holon_filesystem::BlockReader>(Provider::root_async(
+                |resolver| async move {
+                    let cache = resolver
+                        .resolve_async::<holon::core::queryable_cache::QueryableCache<
+                            holon_api::block::Block,
+                        >>()
+                        .await;
+                    Arc::new(holon_app::turso_seams::CacheBlockReader::new(cache))
+                        as Arc<dyn holon_filesystem::BlockReader>
+                },
+            ));
             let registry = registry.clone();
             injector.provide::<dyn holon::api::net_guard::NetGuard>(Provider::root_async(
                 move |resolver| {
@@ -464,5 +478,95 @@ fn merging_a_heading_that_owns_a_rule_moves_the_rule_whole() {
             "block:canon",
             "the head and the trigger it is read with must land together"
         );
+    });
+}
+
+/// D18.c wiring pin: the guard's classification IS the renderer's — ONE
+/// declaration (`block_profile.yaml`'s `is_program`), one evaluator. Two
+/// assertions per fixture block: the resolver's computed `is_program` has the
+/// extension the guard's old inline SQL had (a head is its own sibling
+/// witness; a trigger is program via the sibling clause; text beside a head
+/// and a page are NOT program), and the guard's observable verdict matches
+/// that same value (machinery refusal iff program). Any future second
+/// classifier drifting from the yaml reds here.
+#[test]
+fn guard_classification_agrees_with_the_renderers_is_program() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = engine(
+            dir.path().join("t.db"),
+            registry_with_org_kinds("[block, page, program]"),
+        )
+        .await;
+        seed_merge_sides_one_rule(&engine).await;
+        seed(&engine, "block:pageB", "sentinel:no_parent", None, true).await;
+
+        // Order matters: the non-program blocks genuinely move, so they go last.
+        let cases = [
+            ("block:dupRule", true),
+            ("block:dupTrig", true),
+            ("block:canon", false),
+            ("block:pageA", false),
+        ];
+        for (id, expect_program) in cases {
+            let rows = engine
+                .db_handle()
+                .query(
+                    &format!(
+                        "SELECT id, parent_id, content_type, source_language FROM block_raw \
+                         WHERE id = '{id}'"
+                    ),
+                    HashMap::new(),
+                )
+                .await
+                .expect("projection row");
+            let raw = rows
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| panic!("{id} must be in the projection"));
+            let mut row: HashMap<String, Value> = HashMap::new();
+            for key in ["id", "parent_id", "content_type", "source_language"] {
+                row.insert(
+                    key.to_string(),
+                    raw.get(key).cloned().unwrap_or(Value::Null),
+                );
+            }
+            let computed = engine.profile_resolver().resolve_computed_only(
+                &row,
+                &holon_api::render_requirements::RenderRequirements::none(),
+            );
+            let is_program = match computed.get("is_program") {
+                Some(Value::Boolean(b)) => *b,
+                other => panic!("is_program for {id} must be a Boolean, got {other:?}"),
+            };
+            assert_eq!(
+                is_program, expect_program,
+                "the yaml's is_program must have the old SQL predicate's extension for {id}"
+            );
+
+            let moved = move_block(&engine, id, "block:pageB", None).await;
+            match (expect_program, moved) {
+                (true, Err(e)) => {
+                    let e = format!("{e:#}");
+                    assert!(
+                        e.contains("machinery_containment"),
+                        "{id} must refuse with the machinery class: {e}"
+                    );
+                }
+                (true, Ok(())) => panic!("{id} is program — its move must be refused"),
+                (false, Ok(())) => {}
+                // Other layers may still refuse (`block:pageA` is a root block
+                // move_block rejects outright) — the probe only pins that the
+                // GUARD never classed a non-program block as machinery.
+                (false, Err(e)) => {
+                    let e = format!("{e:#}");
+                    assert!(
+                        !e.contains("machinery_containment"),
+                        "{id} is not program — the guard must not refuse it as machinery: {e}"
+                    );
+                }
+            }
+        }
     });
 }

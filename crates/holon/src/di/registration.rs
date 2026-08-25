@@ -574,6 +574,21 @@ pub fn register_core_services_with_backend(
     register_shared_services(injector)?;
     register_schema_providers(injector);
 
+    // The renderer's profile resolver as its own seam, so consumers that must
+    // stay storage-blind (the net-guard policies classify through its computed
+    // fields) depend on the trait, not on the Turso-coupled engine. Resolved
+    // lazily at first use, never at wiring time: the guard is consulted from
+    // inside the dispatcher, and the engine's factory resolves the dispatcher.
+    // A no-Turso container provides its own resolver under this same trait.
+    injector.provide::<dyn crate::entity_profile::ProfileResolving>(Provider::root_async(
+        |inj| async move {
+            inj.resolve_async::<BackendEngine>()
+                .await
+                .profile_resolver()
+                .clone()
+        },
+    ));
+
     let backend_for_engine = backend.clone();
     injector.provide::<BackendEngine>(
         Provider::root_async(move |inj| {
