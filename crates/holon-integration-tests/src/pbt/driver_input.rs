@@ -606,6 +606,19 @@ impl SutBlockInteract for DriverInputComponent {
                 });
             return;
         }
+        // A VMS button is a view-local closure in GPUI, never an `OperationIntent`,
+        // so nothing in the resolved tree answers it headlessly. Unwrapping the
+        // handle would yield `block:<id>::<mode>` — a syntactically valid URI no
+        // entity carries — and `click_entity` degrades an unresolvable target to
+        // bare focus, turning the switch into a silent no-op. Refuse instead.
+        if kind == Some("vms_button") {
+            panic!(
+                "[click_at_element] {element_id:?} is a view_mode_switcher button, which the \
+                 headless medium cannot dispatch: the mode change is a view-local closure in \
+                 GPUI, not an operation. Clicking it would resolve {target:?} to an entity \
+                 nothing answers and degrade to bare focus."
+            );
+        }
         // `geometry::bare_target` strips a `block:` scheme (and only that) when
         // it builds a handle, so a scheme-less suffix IS a block id and this is
         // its inverse. Without it every chevron/bullet handle — which is how

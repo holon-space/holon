@@ -123,6 +123,14 @@ pub enum Reason {
 
     // ---------- shared layout-PBT variants ----------
     NoSwitchableHandles,
+    /// The targeted block surfaces no `view_mode_switcher`, so the VMS button
+    /// a `SwitchViewMode` would click does not exist and the click cannot take
+    /// effect. Distinct from `NoSwitchableHandles`, which is the *generator*
+    /// declining a state with no candidates at all.
+    NoModeSwitchableSurface,
+    /// The targeted block IS mode-switchable, but does not offer the requested
+    /// mode — its VMS has no button with that name.
+    ModeNotOfferedByBlock,
     NoDrawerHandles,
     NoCollapsibleTargets,
     DeliverNotMeaningfulInBackendTests,

@@ -31,6 +31,7 @@ fn feature_files() -> Vec<PathBuf> {
         crate_root.join("tests/fixtures/composed_split_gherkin/split_routes_prefix_suffix.feature"),
         crate_root.join("tests/fixtures/_gherkin_negative/then_before_startup.feature"),
         crate_root.join("tests/fixtures/_gherkin_negative/split_corrupt_id.feature"),
+        crate_root.join("tests/fixtures/_gherkin_negative/switch_view_mode_no_surface.feature"),
         repo_root.join("frontends/gpui/tests/features/ordinary_block_interaction.feature"),
     ];
     for f in &files {

@@ -25,6 +25,7 @@ pub mod matchers;
 use std::path::Path;
 
 use assert::Assertion;
+use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::RefLifecycle;
 use proptest::strategy::Strategy;
 use proptest::strategy::ValueTree;
@@ -232,12 +233,24 @@ where
     for (i, step) in steps.iter().enumerate() {
         match step {
             FixtureStep::Action(t) => {
-                assert!(
-                    M::preconditions(&ref_state, t),
-                    "[{label}] step {i}: preconditions FAILED for {} — the fixture encodes a \
-                     stale assumption",
-                    t.variant_name()
-                );
+                if !M::preconditions(&ref_state, t) {
+                    // The machine's gate is a bare bool, so re-ask the transition
+                    // for its named reasons: "preconditions FAILED" alone leaves a
+                    // fixture author guessing which assumption went stale.
+                    let why = match t.preconditions(&ref_state) {
+                        validated::Validated::Good(()) => "alphabet gate".to_string(),
+                        validated::Validated::Fail(reasons) => reasons
+                            .iter()
+                            .map(|r| format!("{r:?}"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    };
+                    panic!(
+                        "[{label}] step {i}: preconditions FAILED for {} ({why}) — the fixture \
+                         encodes a stale assumption",
+                        t.variant_name()
+                    );
+                }
                 // Mark this transition seen BEFORE applying it (matching
                 // proptest-state-machine's `test_sequential`): the proptest
                 // shrinker's first step deletes never-seen trailing transitions,

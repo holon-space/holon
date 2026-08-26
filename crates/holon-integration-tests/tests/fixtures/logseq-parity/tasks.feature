@@ -36,19 +36,43 @@ Feature: Tasks and TODO workflow (DB version)
     Then within 10 seconds block "block:c1" has task state "TODO"
     And within 10 seconds block "block:c1" contains "Buy milk"
 
-  @wip @observed
-  Scenario: There is no "/task" slash command   # log:7
-    # TRIAGE: class B — the behaviour matches, the assertion cannot be written.
-    # Holon's slash menu is DERIVED from the operation registry, so no "/task"
-    # command exists here either. What is missing is the EMPTY-RESULT
-    # affordance: Holon renders no "No matched commands" string (grep finds
-    # none), it renders nothing at all. The menu-item oracle that unblocked
-    # scenario 3 below reads the item list, so it can see "the list is empty" —
-    # but the recorded `Then` asserts a STRING Holon does not have. Un-`@wip`
-    # this by ruling on the empty-menu affordance first, not by weakening the
-    # assertion.
-    When I type "/task" in a block
-    Then the slash menu shows "No matched commands"
+  # RULED 2026-08-26 by Martin (D37.b). LogSeq DB has no "/task" command and
+  # answers the query with a "No matched commands" notice. Holon deviates on
+  # BOTH halves, and each is pinned below.
+  #
+  # MEASURED 2026-08-26, not assumed: "/task" is not a no-match query here at
+  # all. `CommandProvider::build_command_items` filters by SUBSTRING over each
+  # op's `name` and `display_name`, so "task" hits the `Cycle Task State` op —
+  # the registry answers a query LogSeq has no command for. Extending the same
+  # filter to "taskzzz" is what produces the genuine no-match state, and it
+  # does so without closing and re-opening the menu (an editor cannot be
+  # re-opened on a second block mid-scenario).
+  #
+  # The no-match state is an OPEN menu with ZERO items — MEASURED:
+  # `HeadlessEditorMirror::slash_menu_labels` returns `Some(vec![])` (the
+  # `slash_menus` entry survives; only `build_command_items` empties), never
+  # `None`. The `does not offer` steps pin exactly that: their oracle
+  # (`SutEditorMirrorRead::editor_slash_menu_labels`) hard-fails on a CLOSED
+  # menu, so passing them proves the menu is still open while offering
+  # nothing. "Cycle Task State" is the DISTINGUISHING one — it is the op the
+  # pre-"zzz" filter DID match two steps earlier, so its disappearance is the
+  # filter narrowing to empty, not a label that was never there.
+  # The trailing omission step is the weaker half by construction —
+  # headless renders no menu chrome, so it is a tripwire for the string
+  # reaching the widget tree, not proof of what an overlay draws.
+  @observed
+  Scenario: A no-match slash query leaves an EMPTY menu, never "No matched commands"   # log:7
+    When I focus block "block:structural-page" in region "main"
+    And I focus the editor of block "block:c1"
+    # The seed's `c1` is the two chars "c1"; the mid-line "/" trigger is
+    # word-boundary gated, so the line has to be empty for "/" to fire.
+    And I press backspace 2 times
+    And I type "/task"
+    Then the slash menu on block "block:c1" offers "Cycle Task State"
+    When I type "zzz"
+    Then the slash menu on block "block:c1" does not offer "Cycle Task State"
+    And the slash menu on block "block:c1" does not offer "Indent"
+    And the widget does not contain "No matched commands"
 
   # RULED (D21.a). LogSeq DB hand-names its menu entries "Node reference" /
   # "Node embed" under a "BASIC" group. Holon's labels are SCHEMA-DERIVED from

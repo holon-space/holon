@@ -8,6 +8,7 @@ mod arc_marking_equality;
 mod class_one_invariant_classifier;
 mod cross_medium_caps;
 mod dogfood_recorded_replay;
+mod gherkin_negative_replay;
 mod gpui_mcp_replay;
 mod holon_rule_runtime_discovery_prod_session;
 mod live_self_check_suite;

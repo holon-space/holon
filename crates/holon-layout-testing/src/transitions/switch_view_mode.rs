@@ -22,6 +22,8 @@ use crate::sut::LayoutSut;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SwitchViewModeReason {
     NoSwitchableHandles,
+    NoModeSwitchableSurface,
+    ModeNotOfferedByBlock,
 }
 
 impl<R> TransitionFactory<LayoutRef<'_, R>> for SwitchViewMode
@@ -64,7 +66,22 @@ where
     R: LayoutRefState + ?Sized,
 {
     type Reason = SwitchViewModeReason;
-    fn preconditions(&self, _: &LayoutRef<'_, R>) -> Validated<(), Self::Reason> {
+    /// The VMS button `apply_to_sut` clicks only exists if the ref-state
+    /// surfaces a switchable handle for this block offering this mode. Without
+    /// one the click resolves to an entity nothing answers and degrades to bare
+    /// focus, so a fixture asking for the switch would pass having changed
+    /// nothing — refuse it here instead.
+    fn preconditions(&self, state: &LayoutRef<'_, R>) -> Validated<(), Self::Reason> {
+        let Some(handle) = state
+            .switchable_handles()
+            .iter()
+            .find(|h| h.block_id == self.block_id)
+        else {
+            return Validated::fail(SwitchViewModeReason::NoModeSwitchableSurface);
+        };
+        if !handle.mode_names.contains(&self.target_mode) {
+            return Validated::fail(SwitchViewModeReason::ModeNotOfferedByBlock);
+        }
         Good(())
     }
     fn apply_to_ref(&self, _: &mut LayoutRef<'_, R>) {}

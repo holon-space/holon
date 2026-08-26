@@ -33,6 +33,8 @@ use crate::pbt::reference_state::ReferenceState;
 fn map_reason(r: SwitchViewModeReason) -> Reason {
     match r {
         SwitchViewModeReason::NoSwitchableHandles => Reason::NoSwitchableHandles,
+        SwitchViewModeReason::NoModeSwitchableSurface => Reason::NoModeSwitchableSurface,
+        SwitchViewModeReason::ModeNotOfferedByBlock => Reason::ModeNotOfferedByBlock,
     }
 }
 
