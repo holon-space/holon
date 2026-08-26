@@ -1,9 +1,11 @@
-@wip @power @observed @documented-only
+@power @observed @documented-only
 Feature: Tags and classes (DB version)
   # DB version treats tags as CLASSES that can carry properties. Observed via the
   # built-in #Task and #Query classes (log:9, log:15); broader behavior from inventory.
   #
-  # TRIAGE 2026-08-22 (lane gap-props). All four stay @wip. Holon HAS tags as
+  # TRIAGE 2026-08-22 (lane gap-props), scenario 1 SUPERSEDED 2026-08-26 by
+  # ruling D21.a (rewritten as its inverse, below). The other three stay @wip.
+  # Holon HAS tags as
   # first-class edges: a `block_tags(block_id, tag)` junction table, populated
   # from org headline tags and joined by holon-advice's rules
   # (holon-advice/src/lib.rs:196). What Holon does NOT have is any of the three
@@ -18,17 +20,33 @@ Feature: Tags and classes (DB version)
   # cap surface exposes `SutSqlProjection::block_tag_block_ids()` (which blocks
   # appear in the junction at all) but nothing that reads ONE block's tags.
 
+  # RULED 2026-08-26 by Martin (D21.a). LogSeq DB renders a task node with a
+  # red "#Task" class hashtag next to its content. Holon marks a task with the
+  # STATE_TOGGLE glyph instead (an open circle for TODO, a check for DONE) and
+  # keeps the keyword in the org headline — it renders no "#Task" tag, and
+  # there is no #Query class at all. A synthetic tag would duplicate state the
+  # glyph already shows.
+  #
+  # What the assertions read: the headless snapshot cannot see a painted glyph,
+  # but it carries the state_toggle's PROPS (vm_snapshot.rs) — `field` (the
+  # bound column, `task_state`) and `current` (the keyword the glyph paints).
+  # So `contains "task_state"` proves the toggle is the thing rendering the
+  # task-ness, and the omission of "#Task" is the deviation being guarded.
+  # `has task state` pins the store side independently, so a toggle that
+  # rendered without a keyword behind it could not pass.
   @observed
-  Scenario: Built-in classes render as colored hashtags
-    # TRIAGE: class C — DEVIATION REJECTED, decision-for-review. Holon marks a
-    # task with a state_toggle GLYPH (open circle for TODO, check for DONE) and
-    # keeps the keyword in the org headline; it renders no "#Task" tag, and
-    # there is no #Query class at all. Adding a synthetic tag would duplicate
-    # state the glyph already shows.
-    Then a task node shows a red "#Task" tag
-    And a query node shows a red "#Query" tag
+  Scenario: A task node is marked by the state_toggle glyph, not a class hashtag
+    When I focus block "block:structural-page" in region "main"
+    And I cycle block "block:c1" to state "TODO"
+    Then within 10 seconds block "block:c1" has task state "TODO"
+    And within 10 seconds block "block:c1" contains "task_state"
+    And within 10 seconds block "block:c1" contains "TODO"
+    # The LogSeq-DB chrome is ABSENT — no class hashtag on the row, and no
+    # #Query class anywhere in the tree.
+    And block "block:c1" does not contain "#Task"
+    And the widget does not contain "#Query"
 
-  @documented-only
+  @wip @documented-only
   Scenario: A #tag creates or links a tag page/class
     # NOTE: candidate deliberate-deviation vs file-version plain tags
     # TRIAGE: split. The second Then ("the block is tagged with that class") is
@@ -40,7 +58,7 @@ Feature: Tags and classes (DB version)
     Then a class/page "SomeTag" is created or linked
     And the block is tagged with that class
 
-  @documented-only
+  @wip @documented-only
   Scenario: A class can define properties inherited by its instances
     # TRIAGE: class C — the single biggest feature gap in this cluster, and the
     # one the rest of the cluster depends on. It needs a tag to BE a declared
@@ -52,7 +70,7 @@ Feature: Tags and classes (DB version)
     When a node is tagged with that class
     Then the node gains that class's properties for editing and querying
 
-  @hover-revealed @observed
+  @wip @hover-revealed @observed
   Scenario: Hovering a tag reveals a remove control   # log:H3
     # TRIAGE: class C, and not headless-testable even once built. Holon renders
     # no tag chip to hover, and the step registry has no hover verb. A windowed

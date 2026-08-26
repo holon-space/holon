@@ -35,6 +35,7 @@ use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::EntityUri;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::SutBackend;
+use holon_pbt_core::capabilities::SutEditorMirrorRead;
 use holon_pbt_core::capabilities::SutFocus;
 use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::capabilities::SutSqlProjection;
@@ -51,6 +52,33 @@ pub enum Assertion {
         locator: Option<String>,
         text: String,
         exact: bool,
+        within_secs: Option<u64>,
+    },
+    /// The rendered widget tree does NOT contain `text` — the inverse of
+    /// [`Assertion::WidgetContains`], for pinning chrome Holon deliberately
+    /// does not draw. Carries no `within` budget on purpose: an absence is
+    /// true the instant it is read, so retrying could only mask a
+    /// still-arriving render. Order it AFTER the positive assertions that
+    /// prove the surface has settled.
+    WidgetOmits {
+        locator: Option<String>,
+        text: String,
+    },
+    /// No `ViewKind::Error` widget anywhere in the scope. The rendered failure
+    /// of a widget is otherwise INVISIBLE to a text assertion — worse, an
+    /// error message quoting the thing that failed (a query's own SQL, say)
+    /// can satisfy a `contains` that was meant to prove the healthy render.
+    /// Pair this with any assertion whose expected text could appear inside a
+    /// failure message. Budget-free for the same reason as
+    /// [`Assertion::WidgetOmits`].
+    NoErrorWidget { locator: Option<String> },
+    /// `block_id`'s open slash-command menu offers (or does not offer) an item
+    /// labelled `label`. Reads
+    /// `SutEditorMirrorRead::editor_slash_menu_labels`.
+    SlashMenuOffers {
+        block_id: String,
+        label: String,
+        expected: bool,
         within_secs: Option<u64>,
     },
     /// The SUT's focused block resolves to `block_id` (a reference-model id;
@@ -107,6 +135,9 @@ impl Assertion {
     fn within_secs(&self) -> Option<u64> {
         match self {
             Assertion::WidgetContains { within_secs, .. } => *within_secs,
+            Assertion::WidgetOmits { .. } => None,
+            Assertion::NoErrorWidget { .. } => None,
+            Assertion::SlashMenuOffers { within_secs, .. } => *within_secs,
             Assertion::FocusOn { within_secs, .. } => *within_secs,
             Assertion::ParentIs { within_secs, .. } => *within_secs,
             Assertion::ChildIndex { within_secs, .. } => *within_secs,
@@ -183,6 +214,18 @@ where
                 exact,
                 ..
             } => widget_contains_caps(caps, resolver, locator.as_deref(), text, *exact).await,
+            Assertion::WidgetOmits { locator, text } => {
+                widget_omits_caps(caps, resolver, locator.as_deref(), text).await
+            }
+            Assertion::NoErrorWidget { locator } => {
+                no_error_widget_caps(caps, resolver, locator.as_deref()).await
+            }
+            Assertion::SlashMenuOffers {
+                block_id,
+                label,
+                expected,
+                ..
+            } => slash_menu_offers_caps(caps, resolver, block_id, label, *expected).await,
             Assertion::FocusOn { block_id, .. } => {
                 focus_on_caps(ref_, caps, resolver, block_id).await
             }
@@ -232,25 +275,7 @@ async fn widget_contains_caps(
     text: &str,
     exact: bool,
 ) -> Result<(), String> {
-    let (scope, haystack) = match locator {
-        None => (
-            "root widget".to_string(),
-            snapshot_text(&caps.widget_tree_snapshot().await),
-        ),
-        Some(id) => {
-            let id_uri = EntityUri::parse(id).map_err(|e| {
-                format!("[widget-contains] locator {id:?} is not a valid EntityUri: {e}")
-            })?;
-            let resolved = resolve_via(resolver, &id_uri);
-            let snap = caps.widget_tree_for(&resolved).await.ok_or_else(|| {
-                format!(
-                    "[widget-contains] block {id:?} (resolved {resolved:?}) did not render (no \
-                     widget tree)"
-                )
-            })?;
-            (format!("block {id:?}"), snapshot_text(&snap))
-        }
-    };
+    let (scope, haystack) = widget_haystack(caps, resolver, locator).await?;
 
     let matched = if exact {
         haystack.trim() == text.trim()
@@ -264,6 +289,114 @@ async fn widget_contains_caps(
     Err(format!(
         "[widget-contains] expected {scope} to contain {qualifier}{text:?}, but rendered text \
          was:\n{haystack}"
+    ))
+}
+
+/// The `(scope-label, rendered-text)` pair a widget assertion matches against.
+/// `locator = None` is the whole tree; `Some(id)` scopes to that block's
+/// subtree.
+async fn widget_scope(
+    caps: &CapMap,
+    resolver: &IdResolver,
+    locator: Option<&str>,
+) -> Result<(String, WidgetSnapshot), String> {
+    match locator {
+        None => Ok(("root widget".to_string(), caps.widget_tree_snapshot().await)),
+        Some(id) => {
+            let id_uri = EntityUri::parse(id)
+                .map_err(|e| format!("[widget] locator {id:?} is not a valid EntityUri: {e}"))?;
+            let resolved = resolve_via(resolver, &id_uri);
+            let snap = caps.widget_tree_for(&resolved).await.ok_or_else(|| {
+                format!("[widget] block {id:?} (resolved {resolved:?}) did not render (no tree)")
+            })?;
+            Ok((format!("block {id:?}"), snap))
+        }
+    }
+}
+
+async fn widget_haystack(
+    caps: &CapMap,
+    resolver: &IdResolver,
+    locator: Option<&str>,
+) -> Result<(String, String), String> {
+    let (scope, snap) = widget_scope(caps, resolver, locator).await?;
+    Ok((scope, snapshot_text(&snap)))
+}
+
+/// Rendered-failure oracle: no `ViewKind::Error` node in the scope. Reads the
+/// SAME translated tree every other widget assertion reads, so it sees the
+/// per-block live trees `inv-viewmodel-no-error-widgets` cannot (that
+/// invariant's cap walks only from `root_layout_block_uri()`).
+async fn no_error_widget_caps(
+    caps: &CapMap,
+    resolver: &IdResolver,
+    locator: Option<&str>,
+) -> Result<(), String> {
+    let (scope, snap) = widget_scope(caps, resolver, locator).await?;
+    let errors: Vec<String> = snap
+        .walk()
+        .filter(|n| n.kind == "error")
+        .map(|n| {
+            n.props
+                .get("message")
+                .cloned()
+                .unwrap_or_else(|| "<error widget with no message prop>".to_string())
+        })
+        .collect();
+    if errors.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "[no-error-widget] {scope} rendered {} error widget(s): {errors:?}",
+        errors.len()
+    ))
+}
+
+/// Negative widget oracle: the rendered text must NOT contain `text`. The
+/// failure message quotes the surrounding line so a hit is diagnosable without
+/// dumping the whole tree.
+async fn widget_omits_caps(
+    caps: &CapMap,
+    resolver: &IdResolver,
+    locator: Option<&str>,
+    text: &str,
+) -> Result<(), String> {
+    let (scope, haystack) = widget_haystack(caps, resolver, locator).await?;
+    match haystack.lines().find(|line| line.contains(text)) {
+        None => Ok(()),
+        Some(hit) => Err(format!(
+            "[widget-omits] expected {scope} NOT to contain {text:?}, but it rendered {hit:?}"
+        )),
+    }
+}
+
+/// Slash-menu oracle. Reads `SutEditorMirrorRead::editor_slash_menu_labels` —
+/// the labels the operation registry advertises for the block whose editor has
+/// the menu open, resolved through the same `CommandProvider` call Enter
+/// selects from. A closed menu is a HARD failure either way: an assertion about
+/// what a menu does or does not offer is meaningless when no menu is open.
+async fn slash_menu_offers_caps(
+    caps: &CapMap,
+    resolver: &IdResolver,
+    block_id: &str,
+    label: &str,
+    expected: bool,
+) -> Result<(), String> {
+    let id_uri = EntityUri::parse(block_id)
+        .map_err(|e| format!("[slash-menu] {block_id:?} is not a valid EntityUri: {e}"))?;
+    let resolved = resolve_via(resolver, &id_uri);
+    let labels = caps
+        .editor_slash_menu_labels(&resolved)
+        .map_err(|e| format!("[slash-menu] labels unreadable for {block_id:?}: {e}"))?
+        .ok_or_else(|| {
+            format!("[slash-menu] no slash menu is open on block {block_id:?} (type \"/\" first)")
+        })?;
+    if labels.iter().any(|l| l == label) == expected {
+        return Ok(());
+    }
+    let verb = if expected { "to offer" } else { "NOT to offer" };
+    Err(format!(
+        "[slash-menu] expected block {block_id:?}'s menu {verb} {label:?}, but it offers {labels:?}"
     ))
 }
 

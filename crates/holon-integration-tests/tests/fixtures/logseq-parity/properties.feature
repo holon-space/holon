@@ -33,9 +33,16 @@ Feature: Properties (DB version — first-class typed values)
   Scenario: User-defined properties are typed
     # NOTE: candidate deliberate-deviation vs file-version free-text "key:: value"
     # TRIAGE: class C — needs the block/typed-datatype join described in the
-    # file header, plus a property-editing UI. Neither exists. This is the
-    # scenario to revisit when block-generalization increment 2 (write
-    # authority) lands: if blocks become typed entities, this turns into class B.
+    # file header, plus a property-editing UI. Neither exists.
+    #
+    # PARKED 2026-08-26 by Martin (D23.a). Deliberately NOT parity work: typed
+    # user properties are a deliverable of the BLOCK-GENERALIZATION program
+    # (blocks as a generic datatype — typed datatypes plus capability
+    # profiles), not something to build against a LogSeq recording. Revisit at
+    # increment 2b or later, when a block can BE an instance of a declared
+    # type; at that point this becomes class B (only the property-editing UI
+    # and a `Then` over typed values remain). Stays `@wip` until then — do not
+    # un-tag it as part of a parity sweep.
     When I add a property to a node
     Then I choose the property and a value of its declared type (text, number, date, node ref, checkbox, ...)
     And the value is stored as a typed value, not raw text

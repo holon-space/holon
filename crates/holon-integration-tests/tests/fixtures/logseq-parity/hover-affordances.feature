@@ -55,6 +55,18 @@ Feature: Hover-revealed affordances (cross-cutting)
   @core
   Scenario: A plain block's right gutter has no controls   # log:H9
     # NOTE: candidate deliberate-deviation — block controls live in the LEFT gutter
+    #
+    # RULED 2026-08-26 by Martin (D25.a): this is CONFORMING, not a deviation.
+    # Holon's block controls are left-gutter too (bullet, drag handle,
+    # disclosure caret), and the right side carries a node's tags only — which
+    # is exactly what the recorded expectation states. Nothing to build.
+    #
+    # It stays `@wip` for a VOCABULARY reason, not a behaviour one: the class-B
+    # hover gap. There is no hover transition and no `UserDriver` hover
+    # gesture, and hover-revealed pixels sit outside the headless widget-tree
+    # snapshot — the same blocker outliner.feature scenario 6 records. Un-tag
+    # this once a windowed (GPUI) hover verb exists; no production change is
+    # owed first.
     When I hover the right end of a plain block row
     Then no action controls appear on the right (only a node's tags render there when present)
 

@@ -22,6 +22,25 @@ use super::assert_steps::BlockIsNotCollapsed;
 use super::assert_steps::BlockIsNthChild;
 use super::assert_steps::BlockIsTopLevelOf;
 use super::assert_steps::BlockResolvesLink;
+use super::assert_steps::SlashMenuOffers;
+use super::assert_steps::SlashMenuOmits;
+
+/// Refuse a `within N seconds` prefix on an assertion that has no retry
+/// budget to give it. An ABSENCE is true the instant it is read, so a budget
+/// could only mask a still-arriving render — and honouring the prefix by
+/// dropping it would silently discard an instruction the author wrote on
+/// purpose.
+fn refuse_within(raw: &str, within_secs: Option<u64>) -> Result<(), String> {
+    match within_secs {
+        None => Ok(()),
+        Some(secs) => Err(format!(
+            "step {raw:?} asks for a `within {secs} seconds` budget on an assertion that takes \
+             none: an absence is true the instant it is read, so retrying could only hide a \
+             render that had not arrived yet. Drop the prefix, and order the step AFTER a \
+             positive assertion that proves the surface has settled."
+        )),
+    }
+}
 
 /// Translate a single Gherkin `Then` step into an assertion. An optional
 /// `within <N> seconds ` prefix sets a retry budget on the assertion.
@@ -139,6 +158,75 @@ pub fn match_assertion(step: &Step) -> Result<Assertion, String> {
             target: v.target,
             resolved_id: None,
             within_secs,
+        });
+    }
+
+    // The negative form is tried FIRST: `does not offer` must never fall
+    // through to the positive template.
+    if let Some(v) = SlashMenuOmits::parse_step(text, docstring)
+        .map_err(|e| format!("step {text:?} matches `does not offer` but its fields do not: {e}"))?
+    {
+        return Ok(Assertion::SlashMenuOffers {
+            block_id: v.block_id.to_string(),
+            label: v.label,
+            expected: false,
+            within_secs,
+        });
+    }
+    if let Some(v) = SlashMenuOffers::parse_step(text, docstring)
+        .map_err(|e| format!("step {text:?} matches `offers` but its fields do not: {e}"))?
+    {
+        return Ok(Assertion::SlashMenuOffers {
+            block_id: v.block_id.to_string(),
+            label: v.label,
+            expected: true,
+            within_secs,
+        });
+    }
+
+    // `the widget does not contain "<text>"` / `block "<id>" does not contain
+    // "<text>"` — the negative widget forms, for chrome Holon deliberately
+    // does not draw. Matched BEFORE the positive `contains` regexes so the
+    // longer phrase always wins.
+    //
+    // An absence assertion takes NO retry budget (see `Assertion::WidgetOmits`),
+    // so a `within N seconds` prefix on one is refused rather than dropped:
+    // silently ignoring an explicit instruction is exactly the degradation the
+    // fail-loud rule forbids.
+    let re_root_omits =
+        Regex::new(r#"(?i)^the widget does not (?:contain|show)\s+"(?P<text>.*)"$"#).unwrap();
+    if let Some(caps) = re_root_omits.captures(text) {
+        refuse_within(raw, within_secs)?;
+        return Ok(Assertion::WidgetOmits {
+            locator: None,
+            text: caps["text"].to_string(),
+        });
+    }
+    let re_block_omits =
+        Regex::new(r#"(?i)^block\s+"(?P<id>[^"]+)"\s+does not (?:contain|show)\s+"(?P<text>.*)"$"#)
+            .unwrap();
+    if let Some(caps) = re_block_omits.captures(text) {
+        refuse_within(raw, within_secs)?;
+        return Ok(Assertion::WidgetOmits {
+            locator: Some(caps["id"].to_string()),
+            text: caps["text"].to_string(),
+        });
+    }
+
+    // `the widget renders no error widget` / `block "<id>" renders no error
+    // widget` — no `ViewKind::Error` node in the scope. Budget-free for the
+    // same reason as the omission forms.
+    let re_root_no_error = Regex::new(r"(?i)^the widget renders no error widget$").unwrap();
+    if re_root_no_error.is_match(text) {
+        refuse_within(raw, within_secs)?;
+        return Ok(Assertion::NoErrorWidget { locator: None });
+    }
+    let re_block_no_error =
+        Regex::new(r#"(?i)^block\s+"(?P<id>[^"]+)"\s+renders no error widget$"#).unwrap();
+    if let Some(caps) = re_block_no_error.captures(text) {
+        refuse_within(raw, within_secs)?;
+        return Ok(Assertion::NoErrorWidget {
+            locator: Some(caps["id"].to_string()),
         });
     }
 

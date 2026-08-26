@@ -782,6 +782,41 @@ impl HeadlessEditorMirror {
         };
     }
 
+    /// The labels of the items the block's OPEN slash-command menu offers, in
+    /// menu order. `None` when no menu is open on the block.
+    ///
+    /// Resolved through the same `CommandProvider::build_command_items` call
+    /// [`slash_command_selection`](Self::slash_command_selection) routes Enter
+    /// through, so what a test reads is what Enter would pick from. Unlike
+    /// that method this one does NOT consume the menu — reading it must not
+    /// close it.
+    pub fn slash_menu_labels(
+        &self,
+        engine: &Arc<ReactiveEngine>,
+        block_uri: &holon_api::EntityUri,
+    ) -> Option<Vec<String>> {
+        use crate::command_provider::CommandProvider;
+
+        let filter_text = self
+            .slash_menus
+            .lock()
+            .unwrap()
+            .get(block_uri.as_str())
+            .cloned()?;
+        let wirings = Self::block_wirings(engine, block_uri);
+        let mut context = HashMap::new();
+        context.insert(
+            "id".to_string(),
+            Value::String(block_uri.as_str().to_string()),
+        );
+        Some(
+            CommandProvider::build_command_items(&wirings, &context, &filter_text)
+                .into_iter()
+                .map(|item| item.label)
+                .collect(),
+        )
+    }
+
     /// The intent Enter fires when the block's slash-command menu is open —
     /// the headless half of `EditorViewModel::on_key(Enter)`, which routes to
     /// the popup only while the overlay is active. `None` (no menu, or a filter

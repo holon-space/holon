@@ -24,6 +24,15 @@ slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
 filter = "binary_id(holon-integration-tests) & (test(frontend_slice::navigation_pbt) + test(frontend_slice::structural_pbt) + test(composed::wide_e2e::tests))"
 slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
 
+# The LogSeq-parity replay boots one composed SUT per un-`@wip`ed scenario, so
+# its runtime grows with every scenario the corpus turns into a live gate. It
+# crossed the 2 min default the moment the D21-D24 rulings landed (measured
+# 2026-08-26: ~10 replayed scenarios, >120s). A timeout there reads as "a
+# parity expectation broke", which is the opposite of what it means.
+[[profile.default.overrides]]
+filter = "binary_id(holon-integration-tests::catalog_suite) & test(logseq_parity)"
+slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
+
 # The two LogSeq-DB bisects walk N = 1..24 comparing Holon's writer against
 # LogSeq's, spawning an nbb oracle subprocess per prefix. Measured 2026-08-22:
 # push::bisect_the_pushed_edits_prefix_by_prefix 118s ALONE, and it TIMED OUT

@@ -2544,6 +2544,13 @@ impl SutEditorMirrorRead for HeadlessFrontendComponent {
                 format!("[editor_live_text] no editor VM and no MutableText for {block_id}: {e:#}")
             })
     }
+
+    fn editor_slash_menu_labels(
+        &self,
+        block_id: &EntityUri,
+    ) -> Result<Option<Vec<String>>, String> {
+        Ok(self.driver.slash_menu_labels(block_id))
+    }
 }
 
 /// `SutNavHistoryWrite` over the **production** `navigation.go_home` op

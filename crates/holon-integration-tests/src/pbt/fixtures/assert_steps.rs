@@ -110,6 +110,27 @@ pub struct BlockHasDanglingLink {
     pub target: String,
 }
 
+/// `the slash menu on block "<id>" offers "<label>"` — the block's OPEN
+/// slash-command menu carries an item with that label. The labels are the
+/// operation registry's `display_name`s, so this pins that the menu vocabulary
+/// is schema-derived (ruling #89 / ADR 0024) rather than hand-named.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("the slash menu on block {block_id} offers {label}")]
+pub struct SlashMenuOffers {
+    pub block_id: EntityUri,
+    pub label: String,
+}
+
+/// `the slash menu on block "<id>" does not offer "<label>"` — the negative of
+/// [`SlashMenuOffers`]. A closed menu fails this too: the assertion is about
+/// what an OPEN menu omits, not about the absence of a menu.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
+#[step_template("the slash menu on block {block_id} does not offer {label}")]
+pub struct SlashMenuOmits {
+    pub block_id: EntityUri,
+    pub label: String,
+}
+
 /// `(name, template)` for every assert-side step — the input to the
 /// registration-time ambiguity refusal, mirroring
 /// `E2ETransition::step_catalog`.
@@ -155,6 +176,14 @@ pub fn assert_step_catalog() -> Vec<(&'static str, &'static str)> {
         (
             "BlockHasDanglingLink",
             <BlockHasDanglingLink as StepVocabulary>::TEMPLATE,
+        ),
+        (
+            "SlashMenuOffers",
+            <SlashMenuOffers as StepVocabulary>::TEMPLATE,
+        ),
+        (
+            "SlashMenuOmits",
+            <SlashMenuOmits as StepVocabulary>::TEMPLATE,
         ),
     ]
 }

@@ -939,6 +939,17 @@ pub trait SutEditorMirrorRead {
     /// committed block content). `Err(reason)` = unobservable in this
     /// medium / for this block right now (disclosed Skip).
     fn editor_live_text(&self, block_id: &EntityUri) -> Result<String, String>;
+
+    /// Labels of the items the block's currently-OPEN slash-command menu
+    /// offers, in menu order. `Ok(None)` = observable medium, no menu open on
+    /// this block; `Err(reason)` = the medium has no slash menu to read.
+    ///
+    /// The labels are the operation registry's `display_name`s, so this is the
+    /// oracle for "the menu vocabulary is schema-derived" (ruling #89 / ADR
+    /// 0024). It reads the SAME `CommandProvider::build_command_items` result
+    /// the Enter key selects from — reading never consumes the menu.
+    fn editor_slash_menu_labels(&self, block_id: &EntityUri)
+    -> Result<Option<Vec<String>>, String>;
 }
 
 #[holon_macros::capmap_adapter]

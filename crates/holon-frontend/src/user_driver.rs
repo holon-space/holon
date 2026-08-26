@@ -555,6 +555,14 @@ impl ReactiveEngineDriver {
         self.editor_mirror.live_text(&block_id.to_string())
     }
 
+    /// Labels of the items the block's currently-open slash-command menu
+    /// offers, in menu order. `None` when no menu is open on the block. The
+    /// source `SutEditorMirrorRead::editor_slash_menu_labels` reads for the
+    /// headless frontend SUT.
+    pub fn slash_menu_labels(&self, block_id: &EntityUri) -> Option<Vec<String>> {
+        self.editor_mirror.slash_menu_labels(&self.engine, block_id)
+    }
+
     /// Converge the currently-focused editor's buffer against the settled SQL
     /// authority (Inc 4 — the headless data-sync loop). No-op when nothing is
     /// focused or no VM is open. Called from the composed harness settle after

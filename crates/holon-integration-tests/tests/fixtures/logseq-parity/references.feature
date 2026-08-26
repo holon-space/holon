@@ -125,12 +125,63 @@ Feature: References and backlinks
     Then within 15 seconds the widget contains "Linked references"
     And within 15 seconds the widget contains "Link to Project Alpha"
 
-  @wip @observed @power
-  Scenario: The (( )) block-ref syntax is removed; use [[ ]] for all node refs   # log:19
-    # NOTE: candidate deliberate-deviation (file version uses ((uuid)) for block refs)
-    When I type "((" to reference a block
-    Then a toast appears: "To reference a node, please use `[[]]`."
-    And no block-reference autocomplete is shown
+  # RULED 2026-08-26 by Martin (D24.a): `[[ ]]` is the ONE reference INPUT.
+  # LogSeq DB removed `((uuid))` too, but announces the removal with a toast
+  # ("To reference a node, please use `[[]]`."). Holon has no such toast and
+  # needs none — `((` was never an input affordance here, so there is nothing
+  # to announce; the characters are just characters.
+  #
+  # MEASURED, not assumed. The editor's trigger set is built by
+  # `input_trigger::default_triggers_for_operations`: exactly `[[` (action
+  # `doc_link`, always on) plus `/` (action `command_menu`, word-boundary
+  # gated) when the block has operations. There is no `((` trigger in
+  # production — the same `check_triggers` call the headless mirror and GPUI
+  # both run.
+  #
+  # WHAT THIS SCENARIO ACTUALLY PINS: the typed characters are not REWRITTEN —
+  # they survive into the block verbatim, so nothing consumed or transformed
+  # the prefix. It does NOT prove the absence of an affordance, and adding a
+  # `((` trigger would not red it: a trigger opens a popup, it does not touch
+  # the buffer (typing "/" leaves the "/" in the text, which is the proof), and
+  # `note_text_changed` ignores every action except `command_menu`
+  # (`headless_editor_mirror.rs`), so a `((` trigger would be invisible to the
+  # headless mirror entirely. Guarding affordance EXISTENCE needs a
+  # popup-visibility oracle — the slash-menu oracle covers only `command_menu`.
+  #
+  # SCOPE. This is about the INPUT affordance only. `((<valid-uuid>))` sitting
+  # in an ORG FILE is still parsed into a Link mark on the way in
+  # (`inline_marks.rs::scan_text_for_block_refs`) — that is foreign-vault READ
+  # compatibility, a separate concern from what the editor offers while you
+  # type, and deliberately untouched by this ruling. The literal typed below is
+  # a non-UUID for exactly that reason: it isolates the input path.
+  @observed @power
+  Scenario: Typing "((" opens no reference affordance — it stays plain text   # log:19
+    When I focus block "block:structural-page" in region "main"
+    And I focus the editor of block "block:c1"
+    And I press backspace 2 times
+    And I type "((see other))"
+    # The characters survive verbatim: nothing consumed the prefix, rewrote the
+    # line, or turned it into a reference.
+    Then within 10 seconds block "block:c1" contains "((see other))"
+
+  # The CONTRAST arm of the ruling, and what stops the scenario above from
+  # being vacuous: the same editor and the same typing gesture, with `[[ ]]`,
+  # DOES mint a `block_links` row. Without this the assertion above would still
+  # pass in a build where no typed text ever became a reference at all.
+  #
+  # It is a separate scenario, not a second half, because an editor cannot be
+  # opened on a second block while one is active (`FocusEditableText`
+  # precondition `active_editor_block().is_none()`) and no step closes one. The
+  # two scenarios boot their own SUT, so both drive `c1`.
+  @observed @power
+  Scenario: Typing "[[ ]]" — the one reference input — does mint a reference
+    When I focus block "block:structural-page" in region "main"
+    And I focus the editor of block "block:c1"
+    And I press backspace 2 times
+    And I type "[[Project Alpha]]"
+    # Dangling, not resolved: no page named "Project Alpha" exists in the wide
+    # seed. The row's existence is the point — that is what a reference IS.
+    Then within 10 seconds block "block:c1" has a dangling link "Project Alpha"
 
   @wip @observed @power
   Scenario: [[ ]] references any node — pages and blocks alike   # log:20, log:21

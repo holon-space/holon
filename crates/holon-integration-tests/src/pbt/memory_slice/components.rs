@@ -562,6 +562,18 @@ impl SutEditorMirrorRead for InMemEditorComponent {
             )),
         }
     }
+
+    /// The in-memory editor is caret+text math only — it runs no input
+    /// triggers, so it has no slash menu to report. Unobservable medium, not
+    /// an empty menu.
+    fn editor_slash_menu_labels(
+        &self,
+        block_id: &EntityUri,
+    ) -> Result<Option<Vec<String>>, String> {
+        Err(format!(
+            "the in-memory editor has no slash-command menu (asked for {block_id})"
+        ))
+    }
 }
 
 /// The editor hosts BOTH the read mirror and the keystroke-driven write target

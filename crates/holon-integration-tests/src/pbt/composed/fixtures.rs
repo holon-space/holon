@@ -135,6 +135,14 @@ impl SutEditorMirrorRead for BuggyEditor {
             Err(format!("no editor for {block_id}"))
         }
     }
+    fn editor_slash_menu_labels(
+        &self,
+        block_id: &EntityUri,
+    ) -> Result<Option<Vec<String>>, String> {
+        Err(format!(
+            "the buggy editor double has no slash menu ({block_id})"
+        ))
+    }
 }
 
 impl CapProvider for BuggyEditor {
