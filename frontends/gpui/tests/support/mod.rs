@@ -1298,10 +1298,11 @@ impl holon_api::QueryEngine for DeclaresNothingQueryEngine {
 
     async fn watch_query(
         &self,
-        _query: &str,
-        _language: holon_api::QueryLanguage,
-        _params: std::collections::HashMap<String, holon_api::Value>,
-        _context: Option<holon_api::QueryContext>,
+        _: &str,
+        _: holon_api::QueryLanguage,
+        _: std::collections::HashMap<String, holon_api::Value>,
+        _: Option<holon_api::QueryContext>,
+        _: holon_api::render_requirements::RenderRequirements,
     ) -> Result<holon_api::EnrichedChangeStream> {
         anyhow::bail!("DeclaresNothingQueryEngine does not watch queries")
     }

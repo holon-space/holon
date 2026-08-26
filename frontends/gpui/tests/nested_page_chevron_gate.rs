@@ -214,6 +214,11 @@ impl BuilderServices for ExpandStoreServices {
                 sort_key: None,
                 virtual_child: None,
                 rules: Vec::new(),
+                // The embedded page this `from descendants` collection renders
+                // inside — what production derives from the `QueryContext`'s
+                // `current_block_id`. No CHILD_ROWS id equals it, so no row is
+                // a context root.
+                context_root_id: Some(format!("block:{TARGET}")),
             },
             provider,
             None,
