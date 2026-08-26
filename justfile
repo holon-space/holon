@@ -171,7 +171,9 @@ capability-sweep:
 # Pattern-drift guard for the known-reds registry: replays the archived
 # 2026-07-31 full-depth corpus through the classifier and asserts its verdict is
 # unchanged. Cheap (no build) — run it after touching any assertion message that
-# docs/Testing/KeystoneKnownReds.md quotes in a `Match pattern`.
+# docs/Testing/KeystoneKnownReds.md quotes in a `Match pattern`, and after any
+# edit to the classifier itself (the second half pins how it reads a log's
+# pass/fail outcome, green corpus logs included).
 known-reds-fixture *FLAGS:
     scripts/keystone-known-reds-fixture.sh {{FLAGS}}
 

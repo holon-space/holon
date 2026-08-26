@@ -33,9 +33,9 @@ over these existing pieces, not a new measurement system:
 | --- | --- | --- |
 | `just pbt general\|petri\|orgmode\|loro` | proptest logs (pass/fail, shrunk case) | humans, `tee` to `/tmp` |
 | `just keystone-smoke / keystone-full / keystone-nightly` | tiered keystone runs | justfile, orchestrator |
-| `scripts/keystone-known-reds.sh` | per-signature classification vs the registry; exit 0/1 | keystone-nightly |
+| `scripts/keystone-known-reds.sh` | per-signature classification vs the registry; exit 0 pass / 1 novel / 3 no verdict | keystone-nightly |
 | `docs/Testing/KeystoneKnownReds.md` | known-red / fixed-pending-soak rows | the classifier |
-| `scripts/keystone-known-reds-fixture.sh` | registry drift check | `just known-reds-fixture` |
+| `scripts/keystone-known-reds-fixture.sh` | registry drift + outcome-classification check | `just known-reds-fixture` |
 | `just measure-latency` → `scripts/measure_latency.py` | per-action p50/p95/max + per-stage cost + **dominator line** | console |
 | `just latency-gate` → `measure_latency.py --ratchet docs/Testing/latency-ceilings.txt` | per-rung p50 vs ceiling, pass/fail | build gate |
 | `just soak` | vault-scale latency + RSS, written to `docs/Testing/soak/soak-*.txt` | committed text files |
@@ -342,6 +342,7 @@ escalation, not a design change.
 | failing unit/integration tests | nextest JSON | 0 | Tests |
 | keystone verdict (green/red/pass-with-note) | pbt + known-reds classifier | green | Keystone |
 | novel keystone signatures | `keystone-known-reds.sh` | 0 (regression) | Keystone |
+| keystone logs admitting no verdict | `keystone-known-reds.sh` exit 3 | 0 (broken input, not a pass) | Keystone |
 | known-red rows (open / fixed-pending-soak) | `KeystoneKnownReds.md` | decreasing | Keystone |
 | per-action e2e latency p50/p95/max | `measure_latency.py` | p95 < 200ms | Latency |
 | per-rung ratchet (p50 vs ceiling) | `measure_latency.py --ratchet` | ≤ ceiling | Latency |

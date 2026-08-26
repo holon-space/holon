@@ -267,6 +267,24 @@ matches the text it was written for. Re-bless with
 `scripts/keystone-known-reds-fixture.sh --bless` **only** after confirming the
 pattern change is intended.
 
+The same check then pins what the classifier says about a log BEFORE any pattern
+matching — whether it reads the run as failed, passed, or as saying nothing
+either way. That half is not blessable, and the four GREEN corpus logs are its
+fixtures, because until 2026-08-25 the classifier had no outcome detection at
+all: it assumed every log handed to it came from a non-zero exit, so a green
+log's absence of panics read as a missing signature and every passing run
+classified as `NOVEL: run failed but no panic signature was extracted`. A green
+run now exits 0 with nothing to classify; a run that genuinely failed with no
+extractable panic is still NOVEL at exit 1; and a log that admits no verdict is
+loud at exit 3 — `INDETERMINATE` (empty or truncated) and `UNREADABLE` (no such
+file) are worded differently on purpose, so a fixture case can pin each without
+the other standing in for it.
+
+Shapes no corpus run happens to have live in `synthetic/` beside the corpus, and
+are committed `.log.zst` for the same reason the corpus is: `.gitignore`'s
+`*.log` would otherwise drop them from every clean checkout and silently take
+the cases that depend on them along.
+
 **It cannot detect assertion-message drift, and must not be trusted to.** The
 corpus is ARCHIVED logs, so it pins each pattern against the wording that
 existed when the log was captured — never against what the code emits today.

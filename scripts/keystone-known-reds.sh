@@ -2,18 +2,24 @@
 # Classify FAILED keystone full-depth runs against the known-reds registry.
 #
 # Usage:
-#   scripts/keystone-known-reds.sh <failed-run.log> [<failed-run.log> ...]
+#   scripts/keystone-known-reds.sh <run.log> [<run.log> ...]
 #
-# Pass the log of every run that exited NON-ZERO (a green run has nothing to
-# classify). For each log the script extracts the failure signatures — the first
-# message line of every panic, which is either the composed-keystone oracle
-# verdict ("reconciled composed sequence diverged from the oracle: [(...)]") or
-# a harness assertion — and matches each one against the `Match pattern` column
-# of docs/Testing/KeystoneKnownReds.md.
+# `just keystone-nightly` passes only the runs that exited non-zero, but logs
+# also arrive by hand, so each log's outcome is read from the log itself. For a
+# FAILED run the script extracts the failure signatures — the first message line
+# of every panic, which is either the composed-keystone oracle verdict
+# ("reconciled composed sequence diverged from the oracle: [(...)]") or a
+# harness assertion — and matches each one against the `Match pattern` column of
+# docs/Testing/KeystoneKnownReds.md. A GREEN run has nothing to classify.
 #
-# Exit 0  — every extracted signature matched a `known-red` row (printed as WARN).
-# Exit 1  — at least one signature matched nothing, or a failed run yielded no
+# Exit 0  — nothing to triage: every extracted signature matched a `known-red`
+#           row (printed as WARN), and/or every log was green.
+# Exit 1  — at least one signature matched nothing, or a FAILED run yielded no
 #           signature at all. Both are regressions to triage, NOT rows to add.
+# Exit 3  — at least one log admits no verdict: INDETERMINATE (empty, or
+#           truncated before the run said anything) or UNREADABLE (no such
+#           file). Never silently a pass — the input is broken, so nothing can
+#           be said about the run at all.
 #
 # The registry is the single source of truth for the patterns; this script holds
 # none of its own.
@@ -23,7 +29,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 registry="$repo_root/docs/Testing/KeystoneKnownReds.md"
 
 if [ "$#" -lt 1 ]; then
-    echo "usage: $0 <failed-run.log> [<failed-run.log> ...]" >&2
+    echo "usage: $0 <run.log> [<run.log> ...]" >&2
     exit 2
 fi
 if [ ! -f "$registry" ]; then
@@ -75,9 +81,42 @@ is_collateral() {
     return 1
 }
 
+# What the log says the run DID: `failed`, `green`, or `indeterminate` (it says
+# nothing either way). Read from the harness's own verdict lines — cargo test's
+# `test result:`, cargo's and just's failure diagnostics, nextest's `Summary` /
+# `FAIL` — because the classifier is handed logs by hand as often as by
+# `just keystone-nightly`, and a green run's absence of panics is not a missing
+# signature.
+#
+# Precedence is deliberate where a log carries BOTH a green verdict and
+# something error-shaped: only the harness's own failure vocabulary outranks an
+# explicit `test result: ok.`, because a test that prints a line starting
+# `error: ` on its own stdout has not failed, and reading it as one reproduces
+# the very false alarm this classifier exists to avoid. With no green verdict to
+# weigh it against, any error-shaped line still counts as failure evidence.
+harness_failed_re='^test result: FAILED|^ +FAIL \[|tests run:.* [1-9][0-9]* failed|^error: (test failed|could not compile|recipe .* failed|process didn.t exit successfully|linking with|failed to run custom build command)'
+green_verdict_re='^test result: ok\.|tests run: [0-9]+ passed'
+any_error_re='^error(\[[A-Za-z0-9]+\])?: '
+
+log_outcome() {
+    local log="$1"
+    if grep -qE "$harness_failed_re" "$log"; then
+        printf 'failed'
+    elif grep -qE "$green_verdict_re" "$log"; then
+        printf 'green'
+    elif grep -qE "$any_error_re" "$log"; then
+        printf 'failed'
+    else
+        printf 'indeterminate'
+    fi
+}
+
 novel=0
 matched=0
 collateral=0
+green=0
+indeterminate=0
+unreadable=0
 # Per-key hit counts + one example each. Parallel indexed arrays, not an
 # associative array — macOS ships bash 3.2.
 counts=()
@@ -89,9 +128,9 @@ done
 novel_file=$(mktemp)
 
 for log in "$@"; do
-    if [ ! -f "$log" ]; then
-        echo "[known-reds] NOVEL: log not found: $log" >&2
-        novel=$((novel + 1))
+    if [ ! -f "$log" ] || [ ! -r "$log" ]; then
+        echo "[known-reds] UNREADABLE: $log — not a readable file." >&2
+        unreadable=$((unreadable + 1))
         continue
     fi
 
@@ -104,6 +143,31 @@ for log in "$@"; do
             loc = $0; sub(/^.*panicked at /, "", loc); sub(/:$/, "", loc)
             if ((getline msg) > 0) print loc "\t" msg
          }' "$log" >"$sigs_file"
+
+    # Panics ARE failure evidence, and outrank the verdict lines: a run killed
+    # mid-shrink is truncated before cargo ever prints `test result:`.
+    if [ -s "$sigs_file" ]; then
+        outcome=failed
+    else
+        outcome=$(log_outcome "$log")
+    fi
+
+    if [ "$outcome" = green ]; then
+        echo "[known-reds] GREEN: $log — run passed, nothing to classify."
+        green=$((green + 1))
+        rm -f "$sigs_file"
+        continue
+    fi
+
+    if [ "$outcome" = indeterminate ]; then
+        echo "[known-reds] INDETERMINATE: $log — the log states no pass/fail"
+        echo "               outcome (empty, truncated before any verdict, or not a"
+        echo "               keystone run log). Tail:"
+        tail -20 "$log" | sed 's/^/               | /'
+        indeterminate=$((indeterminate + 1))
+        rm -f "$sigs_file"
+        continue
+    fi
 
     if [ ! -s "$sigs_file" ]; then
         echo "[known-reds] NOVEL: $log — run failed but no panic signature was extracted"
@@ -197,11 +261,27 @@ fi
 rm -f "$novel_file"
 
 echo ""
+no_verdict=$((indeterminate + unreadable))
+if [ "$no_verdict" -ne 0 ]; then
+    echo "[known-reds] $indeterminate log(s) stated no outcome, $unreadable unreadable — see above."
+fi
 if [ "$novel" -ne 0 ]; then
     echo "[known-reds] FAIL: $novel novel panic(s), $matched known-red panic(s), $collateral collateral (ignored)."
     echo "             A novel signature is a regression to triage (bug-gap-triage),"
     echo "             not a row to add to $registry."
     exit 1
 fi
+if [ "$no_verdict" -ne 0 ]; then
+    echo "[known-reds] NO VERDICT: nothing can be said about $no_verdict of the $# log(s)."
+    echo "             Re-run the keystone and keep the whole log."
+    exit 3
+fi
+if [ "$matched" -eq 0 ] && [ "$collateral" -eq 0 ]; then
+    echo "[known-reds] PASS: $green green run(s), nothing to classify."
+    exit 0
+fi
 echo "[known-reds] PASS-WITH-NOTE: $matched known-red panic(s), 0 novel, $collateral collateral (ignored)."
+if [ "$green" -ne 0 ]; then
+    echo "             Plus $green green run(s) with nothing to classify."
+fi
 echo "             Registry: docs/Testing/KeystoneKnownReds.md"
