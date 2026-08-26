@@ -142,6 +142,9 @@ impl RefBlockTree for NullRef {
     fn main_panel_renders(&self, id: &EntityUri) -> bool {
         panic!("class-2: invariant read RefBlockTree::main_panel_renders")
     }
+    fn owns_query_source(&self, id: &EntityUri) -> bool {
+        panic!("class-2: invariant read RefBlockTree::owns_query_source")
+    }
     fn is_layout_block(&self, id: &EntityUri) -> bool {
         panic!("class-2: invariant read RefBlockTree::is_layout_block")
     }

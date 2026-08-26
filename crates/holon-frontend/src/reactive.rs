@@ -10,6 +10,7 @@
 //!                        (IS the cache)         (IS the join)       (IS the API)
 //! ```
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::str::FromStr;
@@ -1020,6 +1021,12 @@ impl ReactiveRowSet {
         }
     }
 
+    /// The keys currently in the set, without materializing the rows.
+    /// Read-only: takes the shared lock, allocates the key set, writes nothing.
+    pub fn row_ids(&self) -> BTreeSet<EntityUri> {
+        self.data.lock_ref().keys().cloned().collect()
+    }
+
     /// Number of rows, without materializing them.
     pub fn len(&self) -> usize {
         self.data.lock_ref().len()
@@ -1407,6 +1414,11 @@ impl ReactiveRenderedRows {
     /// set.
     pub fn apply_change(&self, change: holon_api::Change<EnrichedRow>, generation: u64) {
         self.rows.apply_change(change, generation);
+    }
+
+    /// Keys currently held by the inner row set. Read-only passthrough.
+    pub fn row_ids(&self) -> BTreeSet<EntityUri> {
+        self.rows.row_ids()
     }
 
     /// Synchronous snapshot of current state (Arc-wrapped rows, cheap).
@@ -2976,6 +2988,22 @@ impl ReactiveEngine {
     /// state outlives its watcher.
     pub fn watcher_registry_len(&self) -> usize {
         self.registry.entries.lock().unwrap().len()
+    }
+
+    /// Test/diagnostic introspection: the row ids the registry CURRENTLY holds
+    /// for `block_id`'s collection, or `None` when the registry has no entry
+    /// for it. This is what the collection was last delivered — the truth a
+    /// rendered row must correspond to.
+    ///
+    /// Read-only and NON-CREATING by contract: unlike every other registry
+    /// path it does not go through `get_or_create`, so observing a block
+    /// neither mints a `ReactiveRenderedRows` nor starts a watcher. `None`
+    /// therefore means "nothing is watching this" and must not be read as
+    /// "delivered no rows" — the two are different facts and the caller has to
+    /// distinguish them.
+    pub fn registry_row_ids(&self, block_id: &EntityUri) -> Option<BTreeSet<EntityUri>> {
+        let entry = self.registry.entries.lock().unwrap().get(block_id).cloned();
+        entry.map(|rows| rows.row_ids())
     }
 
     /// Spawn the CDC watcher task for `block_id`, feeding `reactive`.

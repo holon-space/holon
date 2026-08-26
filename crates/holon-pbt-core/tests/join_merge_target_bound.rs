@@ -59,6 +59,10 @@ impl RefBlockTree for CyclicRef {
     fn main_panel_renders(&self, _: &EntityUri) -> bool {
         true
     }
+    fn owns_query_source(&self, _: &EntityUri) -> bool {
+        false
+    }
+
     fn is_layout_block(&self, _: &EntityUri) -> bool {
         false
     }

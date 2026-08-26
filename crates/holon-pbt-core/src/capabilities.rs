@@ -221,6 +221,20 @@ pub trait RefBlockTree {
         false
     }
 
+    /// True if `id` owns a QUERY source child — a `holon_sql` / `holon_prql` /
+    /// `holon_gql` source block directly under it. Such a block does not render
+    /// its outline children: it renders the RESULT ROWS of the query it
+    /// carries, which the query may draw from anywhere in the graph. Callers
+    /// that judge "which blocks may appear here" must treat its rendered
+    /// subtree as a separate data domain rather than as outline content —
+    /// `inv-main-panel-rows-match-focus` stops its descent there.
+    ///
+    /// Substrates with no source blocks answer `false`. NOT a defaulted method
+    /// on purpose: `#[capmap_adapter]` inherits provided bodies instead of
+    /// forwarding them, so a default here would silently answer `false`
+    /// through `CapMap` no matter what the reference models.
+    fn owns_query_source(&self, id: &EntityUri) -> bool;
+
     /// True if `id` is rule machinery — a source block under a heading that
     /// owns a rule head, which includes the rule head itself. The model's
     /// answer to the `is_program` computed field. Substrates with no rules →
@@ -1856,6 +1870,25 @@ pub trait SutRenderer {
     /// assert tree-referenced entity_ids are a subset of available
     /// data rows.
     async fn root_data_row_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// Row ids the reactive registry CURRENTLY holds for `block_id`'s own
+    /// collection — what that block's query actually delivered, as opposed to
+    /// what its subtree happens to render. `inv-main-panel-rows-match-focus`
+    /// judges a row rendered inside a nested query surface against this set:
+    /// a rendered id the collection never delivered is a stale leftover, not a
+    /// result row.
+    ///
+    /// `None` means NOTHING IS WATCHING `block_id` — a different fact from
+    /// "delivered no rows" (`Some(empty)`), and callers must not conflate
+    /// them. Implementations MUST NOT start a watch, subscribe, or mutate
+    /// registry state to answer: this is an observation of what production
+    /// already holds, and a read that creates the thing it reads would make
+    /// every answer `Some` and the distinction meaningless.
+    ///
+    /// NOT defaulted on purpose — `#[capmap_adapter]` inherits provided bodies
+    /// rather than forwarding them, so a default would silently answer through
+    /// `CapMap`.
+    async fn collection_row_ids(&self, block_id: &EntityUri) -> Option<BTreeSet<EntityUri>>;
 
     /// Widget tree for a SPECIFIC block id — the snapshot the renderer
     /// would produce if that block were the root of its own subtree.

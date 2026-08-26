@@ -28,6 +28,36 @@
 //! matview, so a CDC delete that fails to propagate through the chain leaves
 //! the previously-focused root's rows in the panel.
 //!
+//! **Query surfaces are not outline content** (D36.a, 2026-08-26). A block
+//! whose own source is a query does not render its outline children — it
+//! renders the query's RESULT ROWS, which the query may legitimately draw from
+//! anywhere in the graph. Before this ruling the invariant reported such a row
+//! as a stale leftover, and fixtures had to author around it by keeping every
+//! needle inside the focused document.
+//!
+//! The exemption is RESULT-SET-AWARE (`outline_content_ids`), and that is
+//! load-bearing. The REFERENCE names the surfaces
+//! (`RefBlockTree::owns_query_source`, mirroring prod's own `has_query_source`
+//! gate); the SUT says what each surface's collection actually delivered
+//! (`SutRenderer::collection_row_ids`, a non-creating read of the reactive
+//! registry). A row rendered under a surface is excused ONLY if that surface
+//! delivered it. A blanket subtree exemption would have laundered a stale
+//! leftover rendered inside a query block at any depth — verification caught
+//! exactly that, and nothing else in the suite judges those rows.
+//!
+//! Never derived from "the query could have matched this row", which would
+//! launder any id. The main panel itself is excluded from the rule: its
+//! `focus_roots` source block IS the panel query, so treating it as a surface
+//! would make the whole check vacuous.
+//!
+//! KNOWN RESIDUAL, deliberately not papered over: a row that is stale in the
+//! REGISTRY ITSELF (a matview delete that never propagated, so render and row
+//! set agree and are both wrong), and the rows of an INLINE `live_query(…)`
+//! node (no entity id, so its synthetic `query:<hash>` registry key is not
+//! addressable from the widget tree). Neither is judged here and NOTHING ELSE
+//! judges them — see
+//! `docs/Testing/bugfunnel/entries/2026-08-26-query-surface-rows-unjudged.md`.
+//!
 //! Scoping and honesty:
 //! - Scoped to the main-panel subtree (located semantically via
 //!   `RefViewSelection::main_panel_block_id`, like
@@ -69,6 +99,7 @@
 //! web worker missing the CRUD provider, so the `closed_at` UPDATE never
 //! lands). Divergences recorded in the WS-STALEROW report.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::time::Duration;
 use std::time::Instant;
@@ -94,6 +125,91 @@ impl InvMainPanelRowsMatchFocus {
 /// Find the first node in pre-order whose `entity_id` equals `id`.
 fn find_by_entity_id<'a>(root: &'a WidgetSnapshot, id: &str) -> Option<&'a WidgetSnapshot> {
     root.walk().find(|n| n.entity_id.as_deref() == Some(id))
+}
+
+/// Ids the panel renders AS OUTLINE CONTENT — the walk this invariant judges.
+///
+/// A query surface nested in the outline is a different data domain: a block
+/// whose own source is a query renders RESULT ROWS the query may draw from
+/// anywhere in the graph, not that block's outline children. Demanding those
+/// sit in the focus subtree mismodels the feature.
+///
+/// The exemption is RESULT-SET-AWARE, not a subtree drop. `surfaces` maps a
+/// query-surface block id to the rows its collection CURRENTLY holds
+/// (`SutRenderer::collection_row_ids`); an id rendered under that surface is
+/// excused only if the surface actually delivered it. A row the query never
+/// produced — the stale leftover an earlier blanket exemption laundered — is
+/// still judged, at any depth. An UNWATCHED surface (registry has no entry)
+/// excuses nothing, so a surface rendering rows nothing is feeding reds rather
+/// than passing quietly.
+///
+/// Deliberately NOT derived from "the query could have matched this row": the
+/// question asked is what the collection was delivered, which is a fact the
+/// engine already holds.
+///
+/// Two honest limits. The surface block's OWN id is always judged (a
+/// previously-focused root lingering as a panel row is exactly such a node).
+/// And `panel` itself is never a surface: the main-panel block is query-driven
+/// by construction (its `focus_roots` source block IS the panel query), so
+/// treating it as one would make the check vacuous.
+fn outline_content_ids(
+    panel: &WidgetSnapshot,
+    surfaces: &BTreeMap<String, Option<BTreeSet<String>>>,
+) -> BTreeSet<String> {
+    /// The rows a `live_block` surface delivered, if this node opens one.
+    /// `Some(set)` = the registry's current rows; an UNWATCHED surface yields
+    /// the empty set, so everything it renders is judged rather than excused.
+    fn opens_surface<'a>(
+        node: &WidgetSnapshot,
+        surfaces: &'a BTreeMap<String, Option<BTreeSet<String>>>,
+    ) -> Option<&'a BTreeSet<String>> {
+        if node.kind != "live_block" {
+            return None;
+        }
+        static NOTHING: std::sync::LazyLock<BTreeSet<String>> =
+            std::sync::LazyLock::new(BTreeSet::new);
+        let delivered = surfaces.get(node.entity_id.as_deref()?)?;
+        Some(delivered.as_ref().unwrap_or(&NOTHING))
+    }
+    fn descend(
+        node: &WidgetSnapshot,
+        surfaces: &BTreeMap<String, Option<BTreeSet<String>>>,
+        // The enclosing query surface's delivered rows, when inside one.
+        enclosing: Option<&BTreeSet<String>>,
+        at_root: bool,
+        out: &mut BTreeSet<String>,
+    ) {
+        if !node.is_display_placed() {
+            if let Some(id) = &node.entity_id {
+                // Inside a surface, a rendered id is excused ONLY if that
+                // surface's collection actually delivered it. Anything else is
+                // a leftover the query never produced, and stays judged.
+                let excused = enclosing.is_some_and(|rows| rows.contains(id));
+                if !excused {
+                    out.insert(id.clone());
+                }
+            }
+        }
+        // An INLINE `live_query(…)` node carries no entity id, so its registry
+        // entry (a synthetic `query:<hash>` key) is not addressable from the
+        // widget tree. Its rows stay unjudged — the residual recorded in
+        // docs/Testing/bugfunnel/entries/2026-08-26-query-surface-rows-unjudged.md.
+        if node.kind == "live_query" && !at_root {
+            return;
+        }
+        let inner = opens_surface(node, surfaces);
+        let enclosing = if at_root {
+            enclosing
+        } else {
+            inner.or(enclosing)
+        };
+        for child in &node.children {
+            descend(child, surfaces, enclosing, false, out);
+        }
+    }
+    let mut out = BTreeSet::new();
+    descend(panel, surfaces, None, true, &mut out);
+    out
 }
 
 /// The RENDERED ancestor chain of `id` inside `panel`, as `kind[entity_id]`
@@ -146,7 +262,7 @@ where
         // Fast path: evaluate the current (cached) snapshot. This is the
         // overwhelming common case — the panel is settled and the check
         // passes, so it adds no latency and re-uses the tick-shared recompute.
-        match Self::evaluate(ref_, &sut.widget_tree_snapshot().await) {
+        match Self::evaluate(ref_, sut, &sut.widget_tree_snapshot().await).await {
             InvariantResult::Ok => return InvariantResult::Ok,
             InvariantResult::Skipped(s) => return InvariantResult::Skipped(s),
             InvariantResult::Fail(_) => {}
@@ -182,7 +298,7 @@ where
                 ));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
-            match Self::evaluate(ref_, &sut.widget_tree_snapshot_fresh().await) {
+            match Self::evaluate(ref_, sut, &sut.widget_tree_snapshot_fresh().await).await {
                 InvariantResult::Ok => match stable_since {
                     Some(t) if t.elapsed() >= stable_for => return InvariantResult::Ok,
                     Some(_) => {}
@@ -205,13 +321,15 @@ where
 }
 
 impl InvMainPanelRowsMatchFocus {
-    /// Pure, snapshot-in / result-out evaluation against ONE widget-tree
-    /// snapshot. Split out so the bounded-wait loop can re-run it over fresh
-    /// re-samples. All reference reads are sync; only the SUT snapshot is
-    /// async (obtained by the caller).
-    fn evaluate<R>(ref_: &R, root: &WidgetSnapshot) -> InvariantResult
+    /// Snapshot-in / result-out evaluation against ONE widget-tree snapshot.
+    /// Split out so the bounded-wait loop can re-run it over fresh re-samples.
+    /// Reference reads are sync; the SUT snapshot is obtained by the caller,
+    /// and the per-surface registry rows are read HERE so each re-sample sees
+    /// the row sets belonging to the frame it is judging.
+    async fn evaluate<R, S>(ref_: &R, sut: &S, root: &WidgetSnapshot) -> InvariantResult
     where
         R: RefViewSelection + RefLayout + RefFocus + RefBlockTree,
+        S: SutRenderer,
     {
         // Layout-less mode: no main panel exists, so there is no per-region
         // row set to judge — the whole tree is "the content".
@@ -249,7 +367,36 @@ impl InvMainPanelRowsMatchFocus {
             .collect();
 
         let panel_ids = panel.collect_canonical_entity_ids();
-        let stale: Vec<&String> = panel_ids
+
+        // The STALE direction judges outline content only. The DROPPED
+        // direction below keeps the FULL id set: a required row that renders
+        // inside a nested query surface has rendered, and demanding it twice
+        // would turn the boundary into a false missing-row red.
+        // The reference names the query surfaces (a block owning a query
+        // source, per prod's own `has_query_source` gate); the SUT says what
+        // each one's collection actually delivered. Asked once per surface id
+        // per evaluation — `owns_query_source` scans the ref's block table and
+        // this runs inside the bounded-wait re-sample loop.
+        let surface_ids: BTreeSet<String> = panel
+            .walk()
+            .filter(|n| n.kind == "live_block")
+            .filter_map(|n| n.entity_id.clone())
+            .filter(|id| id.as_str() != main_panel_id.as_str())
+            .filter(|id| EntityUri::parse(id).is_ok_and(|uri| ref_.owns_query_source(&uri)))
+            .collect();
+        let mut surfaces: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
+        for id in surface_ids {
+            let Ok(uri) = EntityUri::parse(&id) else {
+                continue;
+            };
+            let delivered = sut
+                .collection_row_ids(&uri)
+                .await
+                .map(|rows| rows.iter().map(|u| u.as_str().to_string()).collect());
+            surfaces.insert(id, delivered);
+        }
+        let outline_ids = outline_content_ids(panel, &surfaces);
+        let stale: Vec<&String> = outline_ids
             .iter()
             .filter(|id| ref_known.contains(*id) && !allowed.contains(*id))
             .collect();
@@ -310,7 +457,9 @@ impl InvMainPanelRowsMatchFocus {
              chained-matview delete not propagated?).\n  stale ids: {stale:?}\n  stale REF \
              ancestor chains (child < parent < …):\n{}\n  stale RENDERED chains (panel > … > \
              node):\n{}\n  expected focus roots (per region): {focus_roots:?}\n  allowed set ({} \
-             ids), panel rendered ids ({}): {panel_ids:?}",
+             ids), outline content ids ({}): {outline_ids:?}\n  all panel rendered ids: \
+             {panel_ids:?}\n  query surfaces -> rows their collection delivered (None = \
+             UNWATCHED, excuses nothing): {surfaces:?}",
             chains
                 .iter()
                 .map(|c| format!("    {c}"))
@@ -322,7 +471,7 @@ impl InvMainPanelRowsMatchFocus {
                 .collect::<Vec<_>>()
                 .join("\n"),
             allowed.len(),
-            panel_ids.len(),
+            outline_ids.len(),
         ))
     }
 
@@ -473,5 +622,154 @@ impl InvMainPanelRowsMatchFocus {
                 })
                 .collect::<Vec<_>>(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(kind: &str, entity_id: Option<&str>, children: Vec<WidgetSnapshot>) -> WidgetSnapshot {
+        WidgetSnapshot {
+            kind: kind.to_string(),
+            entity_id: entity_id.map(str::to_string),
+            props: Default::default(),
+            operations: Vec::new(),
+            children,
+        }
+    }
+
+    fn ids(v: &[&str]) -> BTreeSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `host` owns a query source and renders two rows: one the query really
+    /// returned, one that is a leftover of an earlier navigation.
+    fn panel_with_two_rows_under_host() -> WidgetSnapshot {
+        node(
+            "live_block",
+            Some("block:default-main-panel"),
+            vec![node(
+                "live_block",
+                Some("block:doc"),
+                vec![node(
+                    "tree_item",
+                    Some("block:host"),
+                    vec![node(
+                        "live_block",
+                        Some("block:host"),
+                        vec![
+                            node("tree_item", Some("block:legit-result"), vec![]),
+                            node("tree_item", Some("block:stale-leftover"), vec![]),
+                        ],
+                    )],
+                )],
+            )],
+        )
+    }
+
+    fn surfaces(entries: &[(&str, Option<&[&str]>)]) -> BTreeMap<String, Option<BTreeSet<String>>> {
+        entries
+            .iter()
+            .map(|(id, rows)| (id.to_string(), rows.map(ids)))
+            .collect()
+    }
+
+    #[test]
+    fn a_row_the_surface_delivered_is_not_outline_content() {
+        let judged = outline_content_ids(
+            &panel_with_two_rows_under_host(),
+            &surfaces(&[("block:host", Some(&["block:legit-result"]))]),
+        );
+        assert!(
+            !judged.contains("block:legit-result"),
+            "a row the query actually returned is a result row, not outline content: {judged:?}"
+        );
+        assert!(
+            judged.contains("block:host"),
+            "the surface block's OWN id stays judged — a stale focus root is exactly such a \
+             node: {judged:?}"
+        );
+    }
+
+    /// The laundering counter-case the blanket exemption failed. Same surface,
+    /// same depth, same widget shape as the legitimate row above — the ONLY
+    /// difference is that the collection never delivered this id.
+    #[test]
+    fn a_row_the_surface_never_delivered_stays_judged() {
+        let judged = outline_content_ids(
+            &panel_with_two_rows_under_host(),
+            &surfaces(&[("block:host", Some(&["block:legit-result"]))]),
+        );
+        assert!(
+            judged.contains("block:stale-leftover"),
+            "a row rendered under a query surface that its collection never delivered is a \
+             leftover, not a result row, and must stay judged: {judged:?}"
+        );
+    }
+
+    /// An UNWATCHED surface must excuse nothing. `None` means "nothing is
+    /// watching this block", which is not evidence that any rendered row is
+    /// legitimate.
+    #[test]
+    fn an_unwatched_surface_excuses_nothing() {
+        let judged = outline_content_ids(
+            &panel_with_two_rows_under_host(),
+            &surfaces(&[("block:host", None)]),
+        );
+        assert!(
+            judged.contains("block:legit-result") && judged.contains("block:stale-leftover"),
+            "an unwatched surface has delivered nothing we can see, so every row it renders \
+             stays judged: {judged:?}"
+        );
+    }
+
+    /// Defect 2's shape: a headline owning BOTH a query-source child and a
+    /// rule-head child renders in prod as the rule card, never as a query
+    /// block, so `owns_query_source` reports false and no surface exists. The
+    /// walk must then judge everything under it.
+    #[test]
+    fn a_rule_machinery_headline_is_not_a_query_surface() {
+        let judged = outline_content_ids(&panel_with_two_rows_under_host(), &surfaces(&[]));
+        assert!(
+            judged.contains("block:legit-result") && judged.contains("block:stale-leftover"),
+            "a headline the reference does NOT report as a query surface (e.g. one owning a \
+             rule head) exempts nothing: {judged:?}"
+        );
+    }
+
+    /// The stale-row prod bug's own shape — a previously-focused root's row
+    /// under the panel's own collection, no surface involved.
+    #[test]
+    fn a_stale_row_in_the_outline_proper_stays_judged() {
+        let panel = node(
+            "live_block",
+            Some("block:default-main-panel"),
+            vec![
+                node("live_block", Some("block:doc"), vec![]),
+                node("tree_item", Some("block:previous-root"), vec![]),
+            ],
+        );
+        let judged = outline_content_ids(
+            &panel,
+            &surfaces(&[("block:default-main-panel", Some(&["block:previous-root"]))]),
+        );
+        assert!(
+            judged.contains("block:previous-root"),
+            "the panel root is never a surface — its rows are the thing this invariant \
+             judges: {judged:?}"
+        );
+    }
+
+    #[test]
+    fn the_panel_root_is_never_a_boundary() {
+        let judged = outline_content_ids(
+            &panel_with_two_rows_under_host(),
+            &surfaces(&[("block:default-main-panel", Some(&["block:doc"]))]),
+        );
+        assert!(
+            judged.contains("block:doc"),
+            "the panel's own subtree must still be walked: {judged:?}"
+        );
     }
 }

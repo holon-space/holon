@@ -159,6 +159,12 @@ mod tests {
 
     #[async_trait::async_trait(?Send)]
     impl SutRenderer for ForestSut {
+        async fn collection_row_ids(
+            &self,
+            _: &EntityUri,
+        ) -> Option<std::collections::BTreeSet<EntityUri>> {
+            None
+        }
         async fn widget_tree_snapshot(&self) -> WidgetSnapshot {
             self.root.clone()
         }
@@ -306,6 +312,12 @@ mod tests {
         }
         #[async_trait::async_trait(?Send)]
         impl SutRenderer for Unready {
+            async fn collection_row_ids(
+                &self,
+                _: &EntityUri,
+            ) -> Option<std::collections::BTreeSet<EntityUri>> {
+                None
+            }
             async fn widget_tree_snapshot(&self) -> WidgetSnapshot {
                 node("column", None, vec![error_node("must not be read")])
             }

@@ -1817,6 +1817,16 @@ impl SutRenderer for HeadlessFrontendComponent {
         out
     }
 
+    /// Non-creating read of the live registry — deliberately NOT via
+    /// `resolve_watch`, which calls `ensure_watching` and would mint the
+    /// entry it is meant to observe.
+    async fn collection_row_ids(
+        &self,
+        block_id: &EntityUri,
+    ) -> Option<std::collections::BTreeSet<EntityUri>> {
+        self.reactive.registry_row_ids(block_id)
+    }
+
     async fn root_data_row_ids(&self) -> std::collections::BTreeSet<EntityUri> {
         let root_uri = holon_api::root_layout_block_uri();
         let Some(rqr) = self.resolve_watch(&root_uri).await else {

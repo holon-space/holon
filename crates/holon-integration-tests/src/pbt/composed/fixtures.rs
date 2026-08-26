@@ -438,6 +438,12 @@ impl SutViewSelection for FixtureViewModel {
 
 #[async_trait::async_trait(?Send)]
 impl SutRenderer for FixtureViewModel {
+    async fn collection_row_ids(
+        &self,
+        _: &EntityUri,
+    ) -> Option<std::collections::BTreeSet<EntityUri>> {
+        None
+    }
     async fn widget_tree_snapshot(&self) -> WidgetSnapshot {
         WidgetSnapshot {
             kind: "column".to_string(),

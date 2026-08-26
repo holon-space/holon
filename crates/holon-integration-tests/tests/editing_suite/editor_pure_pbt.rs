@@ -251,6 +251,10 @@ impl RefBlockTree for EditorPureRef {
         // under the single root is rendered.
         self.is_descendant_of_any(id, &BTreeSet::from([self.root_id.clone()]))
     }
+    fn owns_query_source(&self, _: &EntityUri) -> bool {
+        false
+    }
+
     fn is_layout_block(&self, _: &EntityUri) -> bool {
         false
     }

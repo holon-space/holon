@@ -440,6 +440,12 @@ impl<'a, S: SutRenderer> SutRenderer for CachingProxy<'a, S> {
         snap
     }
 
+    /// Pass-through: a per-tick memo would freeze the very row set the
+    /// bounded-wait loop re-samples to observe a heal.
+    async fn collection_row_ids(&self, block_id: &EntityUri) -> Option<BTreeSet<EntityUri>> {
+        self.inner.collection_row_ids(block_id).await
+    }
+
     /// Memoised set snapshot — the root layout's data_rows are re-read by
     /// every renderer/matview invariant in the same tick.
     async fn root_data_row_ids(&self) -> BTreeSet<EntityUri> {

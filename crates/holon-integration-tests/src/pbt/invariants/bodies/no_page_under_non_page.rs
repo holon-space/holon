@@ -200,6 +200,10 @@ mod tests {
         fn main_panel_renders(&self, _: &EntityUri) -> bool {
             false
         }
+        fn owns_query_source(&self, _: &EntityUri) -> bool {
+            false
+        }
+
         fn is_layout_block(&self, _: &EntityUri) -> bool {
             false
         }

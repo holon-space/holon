@@ -171,6 +171,13 @@ impl SutRenderer for BlockQueryFrontendComponent {
         self.widget_tree_snapshot().await
     }
 
+    async fn collection_row_ids(
+        &self,
+        block_id: &EntityUri,
+    ) -> Option<std::collections::BTreeSet<EntityUri>> {
+        self.reactive.registry_row_ids(block_id)
+    }
+
     async fn root_data_row_ids(&self) -> std::collections::BTreeSet<EntityUri> {
         let Some(rqr) = self.resolve_watch(&self.root).await else {
             return Default::default();

@@ -167,6 +167,27 @@ impl RefBlockTree for ReferenceState {
             .is_some_and(|b| b.content_type == ContentType::Source)
     }
 
+    /// Mirrors `has_query_source` in `assets/default/types/block_profile.yaml`:
+    /// `query_source(id) != () && rule_sibling(id) == ()`. BOTH conjuncts —
+    /// a headline owning a rule head renders as the RULE CARD (`is_program`,
+    /// priority 0) and its query-source child is the rule's trigger, not a
+    /// display query, so prod never puts it on the query path.
+    fn owns_query_source(&self, id: &EntityUri) -> bool {
+        let Some(uri) = parse_id(id) else {
+            return false;
+        };
+        let source_langs: Vec<&holon_api::SourceLanguage> = self
+            .domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|child| child.parent_id == uri && child.content_type == ContentType::Source)
+            .filter_map(|child| child.source_language.as_ref())
+            .collect();
+        source_langs.iter().any(|l| l.as_query().is_some())
+            && !source_langs.iter().any(|l| l.is_rule())
+    }
+
     fn is_rule_machinery(&self, id: &EntityUri) -> bool {
         let Some(uri) = parse_id(id) else {
             return false;

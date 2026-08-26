@@ -735,6 +735,10 @@ impl SutRenderer for GpuiFrontendEngineComponent {
         Some(view_model_to_snapshot(&vm))
     }
 
+    async fn collection_row_ids(&self, block_id: &EntityUri) -> Option<BTreeSet<EntityUri>> {
+        self.engine.registry_row_ids(block_id)
+    }
+
     async fn root_data_row_ids(&self) -> BTreeSet<EntityUri> {
         let root_uri = holon_api::root_layout_block_uri();
         let Some(rqr) = self.resolve_watch(&root_uri).await else {

@@ -62,12 +62,10 @@ Feature: Queries (DB version — visual filter builder + table views)
     # block's subtree is as a result row the authored SQL produced. Change the
     # SQL's literal and this reds.
     #
-    # The needle is kept inside the SAME document on purpose. Measured
-    # 2026-08-26 (this lane): a result row drawn from OUTSIDE the main panel's
-    # focus subtree is reported as a stale row by
-    # `inv-main-panel-rows-match-focus`. Whether a `live_query` in a page body
-    # may legitimately surface rows from elsewhere is an open question for that
-    # invariant — not something to settle by weakening it from a fixture.
+    # The needle is kept inside the SAME document here so this scenario pins
+    # only the authored-text-drives-the-block claim. The cross-document case —
+    # a query legitimately drawing a row from OUTSIDE the focused subtree — is
+    # its own scenario below.
     Then within 15 seconds block "block:query-host" contains "alpha needle"
     # …and it ran SUCCESSFULLY. Without this the assertion above is satisfiable
     # by a rendered FAILURE: `ui_watcher` turns a broken query into an error
@@ -85,6 +83,48 @@ Feature: Queries (DB version — visual filter builder + table views)
     And the widget does not contain "+ Filter"
     And the widget does not contain "#Query"
     And the widget does not contain "Page reference"
+
+  # RULED 2026-08-26 by Martin (D36.a). A query in a page body may surface rows
+  # from ANYWHERE in the graph — that is what a query is for, and the whole
+  # point of authoring one in a document rather than typing an outline. Until
+  # this ruling `inv-main-panel-rows-match-focus` reported such a row as a stale
+  # leftover of a previous navigation, so every fixture that wanted a query had
+  # to keep its needle inside the focused document. This scenario is the
+  # standing gate that the workaround is gone: the needle lives in a DIFFERENT
+  # document, which the main panel does not render, and the query still draws it
+  # into the focused page's query block.
+  #
+  # The invariant now stops its descent at a query surface instead of judging
+  # its result rows as outline content. A row that reaches the panel by any
+  # OTHER path is still flagged — see the counter-cases in
+  # `pbt/invariants/bodies/main_panel_rows_match_focus.rs`.
+  @observed
+  Scenario: A query surfaces a row from outside the focused subtree
+    Given an org file "Report.org":
+      """
+      * Blocks the query found
+      :PROPERTIES:
+      :ID: cross-doc-host
+      :END:
+      #+BEGIN_SRC holon_sql :id cross-doc-host::src::0
+      SELECT b.* FROM block b WHERE b.content = 'beta needle'
+      #+END_SRC
+      """
+    Given an org file "Elsewhere.org":
+      """
+      * beta needle
+      :PROPERTIES:
+      :ID: beta-needle
+      :END:
+      """
+    When I focus block "block:ref-doc-0" in region "main"
+    # `beta-needle` is not a descendant of the focused document at all, so no
+    # outline path can put its content inside `cross-doc-host`. Only the
+    # authored query can — and the invariant must accept it.
+    Then within 15 seconds block "block:cross-doc-host" contains "beta needle"
+    # Same guard as the scenario above: a rendered FAILURE quotes the SQL, and
+    # that message contains the needle text.
+    And block "block:cross-doc-host" renders no error widget
 
   @wip @observed
   Scenario: Query results render as a live, configurable table view   # log:16
