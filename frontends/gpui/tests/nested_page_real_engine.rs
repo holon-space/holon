@@ -135,6 +135,7 @@ fn probe_descendants(
                 holon_api::QueryLanguage::HolonPrql,
                 std::collections::HashMap::new(),
                 Some(ctx),
+                holon_api::render_requirements::RenderRequirements::none(),
             )
             .await
         {
