@@ -78,6 +78,10 @@ pub struct BackendEngine {
     /// the render path and MCP so a broken or deprecated rule surfaces its
     /// error in place. Empty until action watchers run.
     rule_status: crate::api::rule_status::RuleStatusHandle,
+    /// ADR 0032 §2 — the `holon_rule` watcher's acceptance verdicts, the rule
+    /// half of [`Self::derived_net`]'s source union. Written by the watcher's
+    /// discovery loop, read on every derive.
+    accepted_rules: crate::api::accepted_rules::AcceptedRuleHandle,
     /// Keeps the advice reconciler's background tasks alive (mirrors how the
     /// profile watcher / `advice reconciler` stay alive by being held on
     /// the engine). `None` in configs that never install one (tests,
@@ -134,6 +138,7 @@ impl BackendEngine {
             graph_schema_cache: Arc::new(std::sync::RwLock::new(graph_schema)),
             advice_status: holon_advice::AdviceRuleStatusHandle::new(),
             rule_status: crate::api::rule_status::RuleStatusHandle::new(),
+            accepted_rules: crate::api::accepted_rules::AcceptedRuleHandle::new(),
             _advice_reconciler: None,
             _clock_scheduler: None,
         })
@@ -143,6 +148,13 @@ impl BackendEngine {
     /// deprecation / parse / compile / exec outcomes; the render path reads it.
     pub fn rule_status(&self) -> &crate::api::rule_status::RuleStatusHandle {
         &self.rule_status
+    }
+
+    /// The `holon_rule` acceptance registry (ADR 0032 §2) — the watcher
+    /// publishes its verdict per discovered rule block; the net derivation
+    /// reads it.
+    pub fn accepted_rules(&self) -> &crate::api::accepted_rules::AcceptedRuleHandle {
+        &self.accepted_rules
     }
 
     /// The advice-rule status map (ADR 0022) — read by the UI watcher to
@@ -1231,6 +1243,63 @@ impl BackendEngine {
         self.op_engine.has_operation(entity_name, op_name).await
     }
 
+    /// Every operation descriptor this engine can dispatch — the descriptor
+    /// half of the ADR 0032 net's sources.
+    ///
+    /// Two sources, because the engine has two: the dispatcher's registered
+    /// providers, plus the engine-synthetic `block` compounds, which are not
+    /// providers and so appear in neither `operations()` nor `all_providers()`.
+    ///
+    /// Both sync fan-out layers are EXCLUDED. The wildcard `*::sync` /
+    /// `*::full_sync` re-dispatch to each syncable provider, and each of those
+    /// lands on a `<provider>.sync` descriptor which re-dispatches into the
+    /// provider's own entity ops. Neither layer names a relation, so neither
+    /// has a place to lower an arc onto. `holon_core::classify_for_net` owns
+    /// that judgement and refuses — loudly, as an `Err` this propagates — any
+    /// descriptor that claims the shape without earning it, so a future
+    /// fan-out-named op that actually writes cannot slide out of the net.
+    ///
+    /// Duplicates keep the FIRST occurrence, which is the routing rule dispatch
+    /// itself follows (`execute_operation` takes the first provider advertising
+    /// the pair), so the net describes the descriptor that would actually run.
+    /// Duplicates are policed where they arise, by the registry-uniqueness
+    /// assertion in `OperationDispatcher::operations`.
+    pub fn operation_catalog(&self) -> Result<Vec<OperationDescriptor>> {
+        use holon_core::OperationProvider as _;
+
+        let mut catalog = Vec::new();
+        let mut claimed = std::collections::HashSet::new();
+        let synthetic = self.op_engine.firable_block_synthetic_descriptors();
+        for descriptor in self.dispatcher.operations().into_iter().chain(synthetic) {
+            let admission = holon_core::classify_for_net(&descriptor)
+                .map_err(|e| anyhow::anyhow!("the net's descriptor catalog refuses one: {e}"))?;
+            if admission == holon_core::NetAdmission::FanOutMarker {
+                continue;
+            }
+            if claimed.insert((descriptor.entity_name.clone(), descriptor.name.clone())) {
+                catalog.push(descriptor);
+            }
+        }
+        Ok(catalog)
+    }
+
+    /// The ADR 0032 derived net for this engine's CURRENT sources.
+    ///
+    /// Recomputed on every call and held nowhere. Providers register after boot
+    /// (`declare_type`) and rule blocks are discovered reactively, so a
+    /// snapshot cached beside this call would describe a world the engine
+    /// has already left — do not add one "for symmetry" with the other
+    /// derived artifacts.
+    ///
+    /// A reactive var recomputed on source change is a different thing and is
+    /// permitted (ADR 0032 §2): it re-derives on the change rather than
+    /// persisting a snapshot, so it has no staleness window to invalidate.
+    pub fn derived_net(&self) -> Result<holon_net::CompiledNet> {
+        let descriptors = self.operation_catalog()?;
+        let rules = self.accepted_rules.sources();
+        Ok(holon_net::derive_net(&descriptors, &rules)?)
+    }
+
     /// Map a table name to an entity name
     ///
     /// This mapping is used during query compilation to determine which
@@ -2221,5 +2290,190 @@ mod tests {
                 "must be TRANSIENT (retry preserved): {transient}"
             );
         }
+    }
+
+    /// The wildcard fan-out is not a transition. `*::sync` / `*::full_sync`
+    /// carry `entity_name == "*"`, which names no relation, so they lower to no
+    /// places; what they do is re-dispatch to each syncable provider.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_wildcard_sync_descriptors_are_not_in_the_net() {
+        let engine = create_test_engine().await.expect("test engine");
+        let net = engine
+            .derived_net()
+            .expect("the production catalog compiles");
+
+        for op in ["sync", "full_sync"] {
+            let key = holon_net::TransitionKey::operation("*", op);
+            assert!(
+                net.transition(&key).is_none(),
+                "the wildcard `*::{op}` descriptor must not be a transition; the net has {:?}",
+                net.transitions
+                    .iter()
+                    .map(|t| t.key().as_str().to_string())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert!(
+            !net.transitions.is_empty(),
+            "the assertion above must not pass by the net being empty",
+        );
+    }
+
+    /// The engine-synthetic `block` compounds are not dispatcher-registered
+    /// providers, so the catalog has to add them explicitly or the net omits
+    /// operations that demonstrably fire.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_engine_synthetic_block_compounds_are_in_the_net() {
+        let engine = create_test_engine().await.expect("test engine");
+        let net = engine
+            .derived_net()
+            .expect("the production catalog compiles");
+
+        for op in ["convert_block_to_page", "merge_blocks"] {
+            assert!(
+                engine.has_operation("block", op).await,
+                "{op} must be dispatchable for this assertion to mean anything",
+            );
+            assert!(
+                net.transition(&holon_net::TransitionKey::operation("block", op))
+                    .is_some(),
+                "{op} fires but the net does not describe it",
+            );
+        }
+    }
+
+    /// A rule block the watcher refused enters the net `active: false` +
+    /// `Unanalyzable` — declared automation that does not run, never an
+    /// absence. Pins the registry → `derive_net` wiring.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_rule_block_is_an_inactive_unanalyzable_transition() {
+        let engine = create_test_engine().await.expect("test engine");
+        engine.accepted_rules().set(
+            "block:rule-broken",
+            holon_net::RuleAcceptance::Opaque {
+                reason: "parse failed: mapping values are not allowed here".to_string(),
+            },
+        );
+
+        let net = engine
+            .derived_net()
+            .expect("the production catalog compiles");
+        let transition = net
+            .transition(&holon_net::TransitionKey::rule("block:rule-broken"))
+            .expect("a refused rule is still declared automation");
+
+        assert!(matches!(
+            &transition.source,
+            holon_net::TransitionSource::Rule { active: false, .. }
+        ));
+        assert!(matches!(
+            transition.analyzability,
+            holon_net::Analyzability::Unanalyzable { .. }
+        ));
+    }
+
+    /// The sub-fork settled by measurement: two production sites pass different
+    /// arguments to `block_synthetic_descriptors` — `di::registration` passes
+    /// `false`, `available_operations` passes `template_source.is_some()`. The
+    /// net must describe what can FIRE, and `has_operation` is the gate that
+    /// decides that, so this asserts the net agrees with the gate rather than
+    /// with either literal. Green in both wirings (template source present or
+    /// not), which is what makes it a measurement and not a guess.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_net_admits_instantiate_template_exactly_when_dispatch_does() {
+        let engine = create_test_engine().await.expect("test engine");
+        let dispatchable = engine.has_operation("block", "instantiate_template").await;
+        let net = engine
+            .derived_net()
+            .expect("the production catalog compiles");
+        let described = net
+            .transition(&holon_net::TransitionKey::operation(
+                "block",
+                "instantiate_template",
+            ))
+            .is_some();
+
+        assert_eq!(
+            described, dispatchable,
+            "the net must describe instantiate_template exactly when the engine will dispatch \
+             it; dispatchable={dispatchable}, described={described}",
+        );
+    }
+
+    /// D31.a recomputes the net on every call and caches nothing, and the
+    /// keystone's totality invariant calls it once per tick — so the derive has
+    /// to be cheap enough to sit on the tick path. The bound is deliberately
+    /// far above the measured cost: it guards against a derive that grows
+    /// an I/O or a quadratic scan, not against scheduler noise.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deriving_the_net_is_cheap_enough_for_the_tick_path() {
+        let engine = create_test_engine().await.expect("test engine");
+        engine.derived_net().expect("warm the lazily-built catalog");
+
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            engine
+                .derived_net()
+                .expect("the production catalog compiles");
+        }
+        let per_derive = start.elapsed() / 100;
+        eprintln!("[net-proj] derived_net() cost: {per_derive:?} per call");
+        assert!(
+            per_derive < std::time::Duration::from_millis(5),
+            "one derive took {per_derive:?}; at that cost a per-tick assertion dominates the \
+             keystone and the invariant belongs on the finish hook instead",
+        );
+    }
+
+    /// A provider advertising ONE descriptor, so a test can put an arbitrary
+    /// shape in front of the live catalog.
+    struct OneOpProvider(OperationDescriptor);
+
+    #[async_trait::async_trait]
+    impl holon_core::OperationProvider for OneOpProvider {
+        fn operations(&self) -> Vec<OperationDescriptor> {
+            vec![self.0.clone()]
+        }
+
+        async fn execute_operation(
+            &self,
+            _: &EntityName,
+            _: &str,
+            _: holon_api::StorageEntity,
+        ) -> holon_core::Result<holon_core::OperationResult> {
+            unreachable!("the net derivation never executes an operation")
+        }
+    }
+
+    /// Inversion of the fan-out exclusion, against the LIVE engine rather than
+    /// the classifier alone: register a provider whose entity wears the
+    /// `<provider>.sync` name while actually writing places, and the derive
+    /// must refuse it. If the exclusion ever went name-only, this
+    /// descriptor would be silently dropped and a real writer would sit
+    /// outside every net analysis.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_registered_sync_named_writer_is_refused_by_the_derive() {
+        let engine = create_test_engine().await.expect("test engine");
+        engine
+            .derived_net()
+            .expect("the catalog compiles before the writer is registered");
+
+        let mut writer = holon_core::generate_sync_operation("orgmode");
+        writer.entity_name = "orgmode.sync".into();
+        writer.id_column = "id".to_string();
+        writer.affected_fields = vec!["content".to_string()];
+        engine
+            .get_dispatcher()
+            .register_provider(Arc::new(OneOpProvider(writer)))
+            .expect("the pair is not yet claimed, so registration succeeds");
+
+        let err = engine
+            .derived_net()
+            .expect_err("a fan-out-named descriptor that writes places must be refused");
+        eprintln!("[net-proj] the derive refused the registered writer: {err}");
+        assert!(
+            err.to_string().contains("writes places"),
+            "the refusal must name the broken premise; got: {err}"
+        );
     }
 }

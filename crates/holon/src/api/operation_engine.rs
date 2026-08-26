@@ -2261,6 +2261,19 @@ impl DispatchingOperationEngine {
         ops
     }
 
+    /// The engine-synthetic `block` descriptors that can actually FIRE in this
+    /// wiring — what the ADR 0032 net must describe.
+    ///
+    /// `include_template_picker` is the FIRING question here, not the menu
+    /// question: [`Self::has_operation`] admits `instantiate_template` exactly
+    /// when a template source is wired. `di::registration` passes `false` to
+    /// the same builder because it fills the profile MENU, where the op is
+    /// reached through the template picker rather than as a bare entry — a
+    /// different question, not a disagreement about what runs.
+    pub fn firable_block_synthetic_descriptors(&self) -> Vec<OperationDescriptor> {
+        Self::block_synthetic_descriptors(self.template_source.is_some())
+    }
+
     /// Coerce a sub-trust-threshold dispatch into a proposal emission
     /// (VisionGapAnalysis C5). The wrapped op never reaches canonical state:
     /// it is recorded verbatim in a proposal block under `block:proposals`,

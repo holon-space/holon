@@ -795,6 +795,29 @@ impl SpanCollector {
         spans
     }
 
+    /// Every `(entity, op)` the production dispatcher was asked to execute
+    /// since the last [`SpanCollector::reset`], read off the
+    /// `dispatcher.execute_operation` span every dispatch path opens.
+    ///
+    /// The span is opened BEFORE routing, so a refused or failing operation
+    /// counts as fired: the net must describe what the system attempts, not
+    /// only what succeeded.
+    ///
+    /// The entity is the one that ROUTED where the dispatcher recorded it — a
+    /// caller may name a view and let the `id` param's scheme decide the real
+    /// provider — falling back to the declared name for a dispatch that
+    /// errored out before routing settled.
+    pub fn dispatched_operations(&self) -> std::collections::BTreeSet<(String, String)> {
+        self.spans_named("dispatcher.execute_operation")
+            .iter()
+            .filter_map(|span| {
+                let entity = span_attr(span, "operation.resolved_entity")
+                    .or_else(|| span_attr(span, "operation.entity"))?;
+                Some((entity, span_attr(span, "operation.name")?))
+            })
+            .collect()
+    }
+
     /// Maximum duration of any span matching the given name.
     /// Returns `Duration::ZERO` if no matching spans.
     pub fn max_duration_of(&self, name: &str) -> Duration {

@@ -558,7 +558,13 @@ impl OperationDispatcher {
             tracing::Level::INFO,
             "dispatcher.execute_operation",
             "operation.entity" = entity_name.as_str(),
-            "operation.name" = op_name
+            "operation.name" = op_name,
+            // Filled in below once routing has settled which entity actually
+            // answers. The two differ whenever a caller names a view
+            // (`focus_roots`) and the `id` param's scheme decides the real
+            // provider, so a consumer that must name what RAN — the ADR 0032
+            // net's totality check — reads this one.
+            "operation.resolved_entity" = tracing::field::Empty
         );
 
         async {
@@ -826,6 +832,7 @@ impl OperationDispatcher {
                 } else {
                     entity_name_str
                 };
+                tracing::Span::current().record("operation.resolved_entity", resolved_entity_name);
 
                 // Intent boundary (Model.md invariant 3): parse the field of a
                 // block `set_field` intent into the closed `BlockWriteField`

@@ -40,27 +40,42 @@ first:
 
 ## Decision
 
-### 1. One logical Petri net, and the marking derives from durable state only
+### 1. One logical Petri net, and written marking derives from durable state
 
 Holon has exactly **one** logical net. It is not a family of nets per feature.
 
-**The marking derives from durable store state, and nothing else.** Two claims,
-kept deliberately separate:
+**Marking that a transition writes derives from durable store state, and
+nothing else.** Two claims, kept deliberately separate:
 
 - **What a token is:** a token is *not* a row. Tokens are per **(entity,
   aspect)** (§4), and a token exists because durable rows exist with the
   attributes they have. For a simple block aspect that is one row's columns;
   for a **hierarchical entity** — a team, a digital twin with sub-twins — an
   aspect may derive from many rows or a whole subtree.
-- **What carries marking:** every token, simple or composite, must **reduce to
-  durable state**. Nothing else carries marking. In particular, CDC changes are
-  **ephemeral evaluation triggers**, never tokens.
+- **What carries marking:** every token a transition produces, consumes, or
+  relocates must **reduce to durable state**. Nothing else carries such
+  marking. In particular, CDC changes are **ephemeral evaluation triggers**,
+  never tokens.
 
-The second claim is load-bearing rather than philosophical: a resync re-emits
-every event with no marking change, so a net whose tokens were events would
-fire a phantom occurrence for every row it re-observes. Under the
-durable-state reading, resync is a no-op by construction — the marking it
-reports is the marking that was already there.
+The second claim is load-bearing rather than philosophical, and its reason
+also states its scope: a resync re-emits every event with no marking change, so
+a net whose tokens were events would fire a phantom occurrence for every row it
+re-observes. Under the durable-state reading, resync is a no-op by construction
+— the marking it reports is the marking that was already there.
+
+**That hazard only bites places a transition writes**, which is what bounds the
+requirement. A **read-only place** — one no transition produces, consumes, or
+relocates — has no event to re-emit and therefore no phantom to fire. Such a
+place need only be **observable**: it may be backed by any source the net can
+watch, a reactive var as legitimately as a durable row. Capability profiles are
+the motivating case — configuration, authored outside the net, read by guards
+(the destination-capability check in §3) and written by no transition.
+
+The exception is narrow and stays policed: **the moment a transition writes a
+place, that place owes durable state.** Read-only is a property of the whole
+transition catalog rather than a promise one declaration makes about itself, so
+giving a config-backed place its first writer is a change that must move the
+place onto durable state first, not a declaration that can be added in passing.
 
 **Places are entity types and attribute predicates, not Turso relations.**
 Places = the entity kinds and the predicates over their attributes ("blocks
@@ -90,6 +105,16 @@ sources at any time. ADR 0024's P1a forbids a second authoritative store, and
 that applies to the net's own definition as much as to its marking — editing
 the projection is not a way to change the net.
 
+**Delivery is not authority.** The net may be *pulled* — recomputed on demand
+and held nowhere — or *held as a reactive var*, recomputed whenever its sources
+change. Both are the same pure function of the same sources, so neither can be
+stale and neither acquires authority; the choice is one of delivery, not of
+semantics. A held net is emphatically not a cache kept for symmetry with the
+other derived artifacts: a cache persists a snapshot and then owes an
+invalidation story, whereas the net re-derives on the source change itself and
+so has no staleness window to manage. The line a delivery shape must not cross
+is retaining state the current sources no longer imply.
+
 Having the artifact buys analysis that the implicit net cannot offer. The
 honest list:
 
@@ -116,6 +141,30 @@ What the projection explicitly does **not** buy: **colored-Petri-net model
 checking**. Holon's colors are unbounded domains and its guards include
 inhibitor arcs, which together put reachability beyond decidability. Claiming
 otherwise would set an expectation the analysis cannot meet.
+
+**Anticipated: transitions that change the net's own structure.** None of this
+is built, and none of it is decided here; the shape is recorded because it is
+the shape that keeps such a change consistent with this section, and that is
+worth stating before someone needs it. Introducing or retiring a datatype —
+enabling an MCP client, disabling an integration — introduces or retires the
+places that datatype carries. Modelling that as a **meta-transition**, a
+transition *inside* the net whose effect happens to be on the net's own
+structure, does not make the net an authority. The opposite: a firing **is** the
+authority mechanism, so expressing structural change as a firing puts it under
+the same dispatcher, the same three gates, and the same occurrence journal as
+every other operation, instead of beside them. The net still holds no authority
+of its own — net-structure change simply stops being an out-of-band edit and
+becomes a first-class modelled operation.
+
+Such a transition acts on the **change delta** and does the housekeeping that
+delta implies. The motivating case is §5's: a transition removed while one of
+its firings is in flight leaves a claim that no live transition will ever end.
+§5 retires that claim by expiry, which is correct but only as prompt as the
+lease is long. A meta-transition observing the removal can release the claim
+immediately, as declared housekeeping on the delta, and record the release in
+the occurrence journal like any other firing. Expiry remains the backstop that
+makes correctness independent of anyone noticing; the meta-transition is the
+fast path, not a replacement for it.
 
 ### 3. Execution stays distributed; enforcement centralizes at the dispatcher
 
@@ -188,7 +237,8 @@ projection.** The projection lags its sources — cold start, IVM catch-up — a
 a subject the projection cannot classify tempts a guard toward "confirm",
 because the pressure toward fail-open is latency and latency is permanent. A
 predicate whose refusal protects capability therefore evaluates against
-durable state, and where the store cannot answer, it refuses. A
+authoritative state — the store, or the configuration backing a read-only place
+(§1) — and where that source cannot answer, it refuses. A
 convenience policy may still choose the projection and fail open; an
 authorization policy may not.
 
@@ -429,6 +479,10 @@ the projection exists and the two vocabularies have been lived with.
    (the shape of negated `block_exists`). The unification in §3 is on the
    table only when both are expressible as arcs; while either is missing,
    declared guards stay a guard-side language.
+7. **Meta-transitions over the net's own structure** (§2). Which structural
+   changes are modelled as transitions, what their marking deltas are over the
+   places they introduce and retire, and how their housekeeping on the delta is
+   declared rather than hard-coded. Foreseen, not designed.
 
 ## Consequences
 

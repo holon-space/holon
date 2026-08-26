@@ -52,6 +52,7 @@ use holon_api::link_parser::PageId;
 use holon_api::pattern::Subject;
 use holon_api::streaming::Change;
 use holon_core::storage::types::StorageEntity;
+use holon_net::RuleAcceptance;
 use holon_rules::Emit;
 use holon_rules::parse_holon_rule;
 use tokio::task::JoinHandle;
@@ -101,6 +102,7 @@ async fn run_discovery_loop(
                         info!("[holon_rule_watcher] aborted watcher for {id}");
                     }
                     status.clear(&id);
+                    engine.accepted_rules().clear(&id);
                 }
                 _ => {}
             }
@@ -135,7 +137,17 @@ async fn start_rule(
     // *pair*, owned by `action_watcher`. This single-block watcher must not touch
     // it (no firing, no status), so the two never stomp one block's rule card.
     match is_paired(engine, &block_id).await {
-        Ok(true) => return,
+        Ok(true) => {
+            engine.accepted_rules().set(
+                &block_id,
+                RuleAcceptance::Opaque {
+                    reason: "one half of a legacy query+action pair; action_watcher owns its \
+                             firing, so this watcher never parsed it"
+                        .to_string(),
+                },
+            );
+            return;
+        }
         Ok(false) => {}
         Err(e) => {
             // An uncertain pairing check must not silently fire; surface it loud.
@@ -143,6 +155,12 @@ async fn start_rule(
             status.set(
                 &block_id,
                 RuleStatus::CompileError(format!("pairing check failed: {e:#}")),
+            );
+            engine.accepted_rules().set(
+                &block_id,
+                RuleAcceptance::Opaque {
+                    reason: format!("pairing check failed: {e:#}"),
+                },
             );
             return;
         }
@@ -153,6 +171,12 @@ async fn start_rule(
         Err(e) => {
             tracing::warn!("[holon_rule_watcher] {block_id} failed to parse: {e}");
             status.set(&block_id, RuleStatus::ParseError(e.to_string()));
+            engine.accepted_rules().set(
+                &block_id,
+                RuleAcceptance::Opaque {
+                    reason: format!("parse failed: {e}"),
+                },
+            );
             return;
         }
     };
@@ -160,10 +184,17 @@ async fn start_rule(
     // An operate rule carries a ratcheted `emit`. A guard-only rule (advice
     // authored in the holon_rule language) has none — the advice reconciler owns
     // it, so this watcher leaves it alone.
-    let emit = match rule.emit {
+    let emit = match rule.emit.clone() {
         Some(emit) => emit,
         None => {
             info!("[holon_rule_watcher] {block_id} is guard-only (no emit); not an operate rule");
+            engine.accepted_rules().set(
+                &block_id,
+                RuleAcceptance::Parked {
+                    rule,
+                    reason: "guard-only rule (no emit); the advice reconciler owns it".to_string(),
+                },
+            );
             return;
         }
     };
@@ -171,32 +202,30 @@ async fn start_rule(
     // Only clock-subject guards have a non-matview reactive binding today. A
     // block-subject operate rule's reactive form hits the chained-matview wall
     // (module docs) — surface it loud rather than fire a half-wired rule.
-    match &rule.guard.subject {
-        Subject::Clock => {}
-        Subject::Relation(relation) => {
-            status.set(
-                &block_id,
-                RuleStatus::CompileError(format!(
-                    "a rule guard iterates blocks or the clock; this one iterates {relation:?}"
-                )),
-            );
-            return;
-        }
-        Subject::Block => {
-            status.set(
-                &block_id,
-                RuleStatus::CompileError(
-                    "block-subject operate rules are not yet reactively wired (ADR 0024 §7.2 — \
-                     needs a non-chained-matview evaluator)"
-                        .to_string(),
-                ),
-            );
-            return;
-        }
+    let subject_refusal = match &rule.guard.subject {
+        Subject::Clock => None,
+        Subject::Relation(relation) => Some(format!(
+            "a rule guard iterates blocks or the clock; this one iterates {relation:?}"
+        )),
+        Subject::Block => Some(
+            "block-subject operate rules are not yet reactively wired (ADR 0024 §7.2 — needs a \
+             non-chained-matview evaluator)"
+                .to_string(),
+        ),
+    };
+    if let Some(reason) = subject_refusal {
+        status.set(&block_id, RuleStatus::CompileError(reason.clone()));
+        engine
+            .accepted_rules()
+            .set(&block_id, RuleAcceptance::Parked { rule, reason });
+        return;
     }
 
     info!("[holon_rule_watcher] starting operate watcher for {block_id}");
     status.set(&block_id, RuleStatus::Active);
+    engine
+        .accepted_rules()
+        .set(&block_id, RuleAcceptance::Running(rule));
     let rule_id = RuleId::new(block_id.clone());
     let handle = tokio::spawn(run_rule_watcher(
         engine.clone(),

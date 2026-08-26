@@ -3,6 +3,7 @@
 //! reports, and two sources claiming one key must be refused.
 
 use holon_api::OperationDescriptor;
+use holon_net::RuleAcceptance;
 use holon_net::RuleSource;
 use holon_net::TransitionKey;
 use holon_net::derive_net;
@@ -30,7 +31,7 @@ emit:
     .expect("the rule parses");
     RuleSource {
         block_id: block_id.to_string(),
-        rule,
+        acceptance: RuleAcceptance::Running(rule),
     }
 }
 
@@ -168,4 +169,85 @@ fn two_rules_from_one_block_are_refused() {
         derive_net(&[], &same_block).is_err(),
         "one block hosts at most one rule"
     );
+}
+
+/// A block the watcher could not parse is declared automation whose
+/// declaration cannot be read: it enters the net `active: false` and
+/// `Unanalyzable`, never as an absence (ADR 0032 fail-closed).
+#[test]
+fn an_unparseable_rule_block_is_inactive_and_unanalyzable() {
+    let opaque = RuleSource {
+        block_id: "block:rule-broken".to_string(),
+        acceptance: RuleAcceptance::Opaque {
+            reason: "parse failed: mapping values are not allowed here".to_string(),
+        },
+    };
+    let net = derive_net(&[], &[opaque]).expect("an opaque rule still compiles");
+
+    let key = TransitionKey::rule("block:rule-broken");
+    let transition = net
+        .transition(&key)
+        .expect("a rule the watcher refused must still be a transition");
+
+    assert!(
+        matches!(
+            &transition.source,
+            holon_net::TransitionSource::Rule { active: false, .. }
+        ),
+        "a refused rule is not active; got {:?}",
+        transition.source
+    );
+    assert_eq!(
+        transition.analyzability,
+        holon_net::Analyzability::Unanalyzable {
+            undeclared: vec![
+                holon_net::UndeclaredHalf::Arcs,
+                holon_net::UndeclaredHalf::MarkingDelta,
+            ],
+        },
+        "no parsed rule means neither half is declared",
+    );
+    assert!(
+        transition.arcs.is_empty(),
+        "an unreadable declaration yields no arcs, and the Unanalyzable slot is what says so",
+    );
+}
+
+/// A rule the watcher parsed but parked keeps its full arc declaration — only
+/// `active` records that it does not fire.
+#[test]
+fn a_parked_rule_stays_analyzable_but_inactive() {
+    let running = rule("block:rule-journal", "daily_journal", "journals");
+    let parked = RuleSource {
+        block_id: "block:rule-parked".to_string(),
+        acceptance: RuleAcceptance::Parked {
+            rule: match rule("block:rule-parked", "parked_journal", "parked").acceptance {
+                RuleAcceptance::Running(rule) => rule,
+                other => panic!("the fixture builds a running rule; got {other:?}"),
+            },
+            reason: "block-subject operate rules are not reactively wired".to_string(),
+        },
+    };
+    let net = derive_net(&[], &[running, parked]).expect("both rules compile");
+
+    let parked = net
+        .transition(&TransitionKey::rule("block:rule-parked"))
+        .expect("the parked rule is in the net");
+    assert_eq!(parked.analyzability, holon_net::Analyzability::Analyzable);
+    assert!(
+        !parked.arcs.is_empty(),
+        "a parked rule's declaration is still readable, so it still has arcs",
+    );
+    assert!(matches!(
+        &parked.source,
+        holon_net::TransitionSource::Rule { active: false, .. }
+    ));
+
+    let running = net
+        .transition(&TransitionKey::rule("block:rule-journal"))
+        .expect("the running rule is in the net");
+    assert!(matches!(
+        &running.source,
+        holon_net::TransitionSource::Rule { active: true, .. }
+    ));
 }

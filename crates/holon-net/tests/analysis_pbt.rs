@@ -223,7 +223,7 @@ emit:
     let net = CompiledNet {
         transitions: vec![compile_rule(&holon_net::RuleSource {
             block_id: "block:rule-daily-journal".to_string(),
-            rule,
+            acceptance: holon_net::RuleAcceptance::Running(rule),
         })],
     };
     let rule_key = TransitionKey::rule("block:rule-daily-journal");

@@ -58,10 +58,10 @@ pub enum TransitionSource {
     /// An [`holon_api::OperationDescriptor`], fired as a dispatched
     /// operation.
     Operation { entity: String, op: String },
-    /// A parsed `holon_rule` block, fired by its watcher. `active` states
-    /// whether the watcher runs it: only clock-subject rules fire today,
-    /// block-subject rules are parked by `holon_rule_watcher` — the net
-    /// still models them, because a parked rule is declared automation.
+    /// A `holon_rule` block, fired by its watcher. `active` is the WATCHER's
+    /// own verdict ([`crate::RuleAcceptance`]), never re-derived from the
+    /// rule's shape. A parked or unparseable rule is still modelled, because
+    /// declared automation that does not run is still declared.
     Rule {
         block_id: String,
         name: String,
@@ -84,5 +84,20 @@ impl TransitionSource {
             TransitionSource::Operation { entity, op } => format!("{entity}.{op}"),
             TransitionSource::Rule { name, .. } => format!("rule:{name}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The grammar's last-line guard, independent of any upstream filter: a
+    /// dotted entity name has no unambiguous key, so minting one dies here.
+    /// Whatever the catalog boundary decides to exclude, nothing that reaches
+    /// this point can smuggle a `.` past it.
+    #[test]
+    #[should_panic(expected = "contains the `.` that separates it from the op")]
+    fn a_dotted_entity_name_cannot_be_lowered_to_a_key() {
+        TransitionKey::operation("orgmode.sync", "sync");
     }
 }

@@ -59,6 +59,8 @@ gql-transform.workspace = true
 rand.workspace = true
 holon-petri.workspace = true
 holon-rules.workspace = true
+# ADR 0032 — the derived net `BackendEngine::derived_net` returns.
+holon-net.workspace = true
 holon-profiles.workspace = true
 fluxdi.workspace = true
 futures.workspace = true

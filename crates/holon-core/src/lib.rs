@@ -80,6 +80,7 @@ pub use traits::MarkOperations;
 pub use traits::MatviewHook;
 pub use traits::MaybeSendSync;
 pub use traits::MoveOperations;
+pub use traits::NetAdmission;
 pub use traits::OperationLogOperations;
 pub use traits::OperationObserver;
 pub use traits::OperationProvider;
@@ -96,8 +97,10 @@ pub use traits::TaskOperations;
 pub use traits::TextOperations;
 pub use traits::UndoAction;
 pub use traits::UnknownOperationError;
+pub use traits::classify_for_net;
 pub use traits::combine_matview_hooks;
 pub use traits::generate_sync_operation;
+pub use traits::has_sync_fan_out_name;
 // Re-export macro-generated operation dispatch functions
 pub use traits::{
     __operations_block_operations, __operations_crud_operations, __operations_mark_operations,

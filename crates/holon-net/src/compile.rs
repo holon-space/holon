@@ -10,7 +10,6 @@ use holon_api::marking::MarkingDelta;
 use holon_api::marking::StructuralFlow;
 use holon_api::marking::TextFlow;
 use holon_api::pattern::OpGuard;
-use holon_api::pattern::Subject;
 use holon_pattern::arcs::TransitionArcs;
 use holon_pattern::schema::block;
 use holon_pattern::schema::clock;
@@ -31,12 +30,51 @@ use crate::net::NetTransition;
 use crate::net::UndeclaredHalf;
 use crate::net::aspect_places;
 
-/// A rule block as the discovery query yields it: the block's id plus its
-/// parsed body.
+/// The rule watcher's verdict on one discovered `holon_rule` block.
+///
+/// The watcher is the SOLE authority for whether a rule fires, so this is what
+/// a rule transition's `active` flag reads. Nothing re-derives that answer from
+/// the rule's own shape — a mirror drifts the moment the watcher grows a
+/// refusal the mirror does not know about.
+///
+/// Every variant becomes a transition. Declared automation that does not run is
+/// still declared: modelling it as an absence would hide it from every analysis
+/// (ADR 0032 fail-closed posture).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuleAcceptance {
+    /// Parsed, owned by the watcher, and firing.
+    Running(HolonRule),
+    /// Parsed, but this watcher does not fire it — a guard-only rule the advice
+    /// reconciler owns, or a guard subject with no reactive binding. Fully
+    /// analyzable: the declaration is readable, it just does not run.
+    Parked { rule: HolonRule, reason: String },
+    /// Never parsed into a rule — a malformed body, or a block whose firing
+    /// another watcher owns so this one never read it. There is no declaration
+    /// to compile, which is `Unanalyzable` ("cannot say"), never absence.
+    Opaque { reason: String },
+}
+
+impl RuleAcceptance {
+    /// Whether the watcher runs this rule.
+    pub fn is_running(&self) -> bool {
+        matches!(self, RuleAcceptance::Running(_))
+    }
+
+    /// The parsed rule, when the watcher managed to read one.
+    pub fn rule(&self) -> Option<&HolonRule> {
+        match self {
+            RuleAcceptance::Running(rule) | RuleAcceptance::Parked { rule, .. } => Some(rule),
+            RuleAcceptance::Opaque { .. } => None,
+        }
+    }
+}
+
+/// A rule block as the discovery query yields it: the block's id plus the
+/// watcher's verdict on it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuleSource {
     pub block_id: String,
-    pub rule: HolonRule,
+    pub acceptance: RuleAcceptance,
 }
 
 /// Compile the declared automation surface into one net. Pure: same inputs,
@@ -136,17 +174,33 @@ pub fn compile_operation(
     Ok(transition)
 }
 
-/// Compile one parsed rule. Rules are always analyzable: guard and emit are
-/// fully declared by parse. `active` mirrors the watcher's reach — only
-/// clock-subject rules fire today.
+/// Compile one rule block. A parsed rule is analyzable — guard and emit are
+/// fully declared by parse — and `active` is the watcher's own verdict. A block
+/// the watcher never parsed becomes an `Unanalyzable` transition with no arcs:
+/// declared automation whose declaration cannot be read.
 pub fn compile_rule(source: &RuleSource) -> NetTransition {
-    let rule = &source.rule;
+    let Some(rule) = source.acceptance.rule() else {
+        return NetTransition {
+            source: TransitionSource::Rule {
+                block_id: source.block_id.clone(),
+                // No parsed rule, so no authored name — the block id is the
+                // only handle that exists.
+                name: source.block_id.clone(),
+                active: false,
+            },
+            analyzability: Analyzability::Unanalyzable {
+                undeclared: vec![UndeclaredHalf::Arcs, UndeclaredHalf::MarkingDelta],
+            },
+            arcs: Vec::new(),
+            residue: Vec::new(),
+        };
+    };
     let ClassifiedGuard { arcs, residue } = classify_guard(&rule.guard);
     let mut transition = NetTransition {
         source: TransitionSource::Rule {
             block_id: source.block_id.clone(),
             name: rule.name.as_str().to_string(),
-            active: matches!(rule.guard.subject, Subject::Clock),
+            active: source.acceptance.is_running(),
         },
         analyzability: Analyzability::Analyzable,
         arcs: Vec::new(),

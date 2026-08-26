@@ -1965,6 +1965,17 @@ impl SutBackend for HeadlessFrontendComponent {
 }
 
 #[async_trait::async_trait(?Send)]
+impl crate::pbt::net_cap::SutDerivedNet for HeadlessFrontendComponent {
+    async fn derived_net(&self) -> holon_net::CompiledNet {
+        crate::pbt::net_cap::derived_net_of(&self.engine)
+    }
+
+    async fn fired_operations(&self) -> std::collections::BTreeSet<(String, String)> {
+        crate::pbt::net_cap::fired_operations_from_spans()
+    }
+}
+
+#[async_trait::async_trait(?Send)]
 impl SutOrderKeys for HeadlessFrontendComponent {
     /// The `sort_key` column of the SAME `block` matview
     /// [`SutBackend::live_block_snapshot`] reads, so the birth contract judges
@@ -4190,6 +4201,10 @@ impl HeadlessFrontendComponent {
         caps.insert(self.clone() as Arc<dyn SutViewSelection>);
         caps.insert(self.clone() as Arc<dyn SutBackend>);
         caps.insert(self.clone() as Arc<dyn SutOrderKeys>);
+        // ADR 0032 net totality: this component owns the production dispatcher,
+        // so it is the one that can answer both "what does the net describe"
+        // and "what did this run fire".
+        caps.insert(self.clone() as Arc<dyn crate::pbt::net_cap::SutDerivedNet>);
         caps.insert(self.clone() as Arc<dyn SutWatch>);
         caps.insert(self.clone() as Arc<dyn SutOrgRead>);
         // `SutAdviceMatview` — the SQL-level advice twin's SUT read. Selecting

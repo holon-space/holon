@@ -101,6 +101,12 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // supplies those, so both deselect (disclosed) on the keystone.
         invariants::two_instance_convergence::wire(),
         invariants::boundary_respected::wire(),
+        // ADR 0032 §2 net totality (ruling D32.a, C1 half): every operation the
+        // run actually dispatched must have a transition in the derived net,
+        // `Unanalyzable` if its declarations are incomplete but never absent.
+        // Needs `SutDerivedNet`, no ref — slices with no production dispatcher
+        // deselect it.
+        invariants::net_totality::wire(),
         invariants::no_errors::wire(),
         // Mark-bounds tripwire (dogfood 2026-07-20): every inline mark's span
         // must lie within its block content (`end <= content.chars().count()`),

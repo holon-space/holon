@@ -25,6 +25,7 @@ pub mod loro_slice;
 pub mod loro_sync;
 pub mod mcp_server_actor_state;
 pub mod memory_slice;
+pub mod net_cap;
 pub mod op_write_cap;
 pub mod panic_diag;
 // `PeerRefState` + the new `LoroRefExt` co-located to `holon-loro-testing`

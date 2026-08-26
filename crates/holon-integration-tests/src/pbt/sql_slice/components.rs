@@ -312,10 +312,27 @@ impl SutSqlProjection for SqlProjectionComponent {
 // focus/nav invariants (`inv-navigation-focus`/`inv-focus-roots`) DESELECT here
 // honestly (C-5, 2026-07-02) — no honest-empty focus family to pass vacuously.
 
+#[async_trait::async_trait(?Send)]
+impl crate::pbt::net_cap::SutDerivedNet for SqlProjectionComponent {
+    async fn derived_net(&self) -> holon_net::CompiledNet {
+        crate::pbt::net_cap::derived_net_of(&self.engine)
+    }
+
+    async fn fired_operations(&self) -> std::collections::BTreeSet<(String, String)> {
+        crate::pbt::net_cap::fired_operations_from_spans()
+    }
+}
+
 impl CapProvider for SqlProjectionComponent {
     fn register(self: Arc<Self>, caps: &mut CapMap) {
         caps.insert(self.clone() as Arc<dyn SutBackend>);
         caps.insert(self.clone() as Arc<dyn SutSqlProjection>);
+        // ADR 0032 net totality: this component owns a production
+        // `BackendEngine`, so it can answer both halves the invariant needs.
+        // Registered on EVERY engine-bearing component, not just the frontend
+        // one, so the check engages on whatever storage arm a draw wires
+        // rather than silently deselecting.
+        caps.insert(self.clone() as Arc<dyn crate::pbt::net_cap::SutDerivedNet>);
         // Structural block-tree writes are NOT hand-rolled per component: they are
         // the production `block` operations, so we register the reusable
         // `OpDispatchWriter` over this component's `BackendEngine` (see

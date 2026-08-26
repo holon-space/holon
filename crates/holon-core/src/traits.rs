@@ -2964,6 +2964,82 @@ pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
     }
 }
 
+/// Does this entity name carry the `<provider>.sync` shape
+/// [`generate_sync_operation`] mints?
+///
+/// NAME SHAPE ONLY — it does not prove the descriptor is a fan-out marker.
+/// [`classify_for_net`] is what decides that, and it is the only place allowed
+/// to conclude "excluded". This exists for the one consumer that has a name and
+/// no descriptor: the ADR 0032 totality invariant reads `(entity, op)` pairs
+/// off dispatch spans, and leans on `classify_for_net` having already refused
+/// any dotted descriptor that was not a genuine marker.
+pub fn has_sync_fan_out_name(entity_name: &str) -> bool {
+    entity_name.ends_with(".sync")
+}
+
+/// What the ADR 0032 derived net does with one operation descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetAdmission {
+    /// Lower it to a transition.
+    Transition,
+    /// Exclude it: it names a provider set rather than a relation, so it has no
+    /// place to lower an arc onto. `*::sync` / `*::full_sync` and the
+    /// `<provider>.sync` descriptors the wildcard re-dispatches onto.
+    FanOutMarker,
+}
+
+/// Decide whether `descriptor` becomes a transition or is a fan-out marker
+/// outside the net's domain — and REFUSE anything that is neither.
+///
+/// A marker is recognized structurally: it lowers to zero places, meaning an
+/// empty `id_column` (no subject to bind) and no `affected_fields` (nothing
+/// written). The `<provider>.sync` name shape alone is not enough, because the
+/// exclusion is only sound while the thing excluded writes nothing — what a
+/// sync actually persists lands through the provider's own entity descriptors,
+/// which the net does describe.
+///
+/// BOTH fan-out name shapes — `*` and `<provider>.sync` — face the same
+/// structural demand. Neither spelling buys the exclusion on its own: the
+/// dispatcher's wildcard arm already anticipates a subject-taking `*` op as
+/// needing its own gate, and a wildcard that wrote places would be dropped from
+/// the catalog AND name-skipped by the totality invariant, invisible to both.
+///
+/// Two refusals, both loud, because both mean the exclusion's premise has
+/// broken and a silent skip would put a real writer outside every net analysis:
+/// a fan-out-named descriptor that HAS places, and any other dotted entity name
+/// (the `.` is what the transition-key grammar cannot encode, so a dotted name
+/// that is not a marker has no key to be lowered under either).
+pub fn classify_for_net(descriptor: &OperationDescriptor) -> Result<NetAdmission> {
+    let entity = descriptor.entity_name.as_str();
+    let places_free = descriptor.id_column.is_empty() && descriptor.affected_fields.is_empty();
+
+    if entity == "*" || has_sync_fan_out_name(entity) {
+        if !places_free {
+            return Err(format!(
+                "operation '{}' on entity '{entity}' carries a fan-out entity name but writes \
+                 places (id_column={:?}, affected_fields={:?}). The net excludes fan-out markers \
+                 ONLY because they lower to zero places; one that writes must be described as a \
+                 transition, and neither `*` nor a dotted name can be encoded as a transition \
+                 key. Give it a concrete, dotless entity name.",
+                descriptor.name, descriptor.id_column, descriptor.affected_fields,
+            )
+            .into());
+        }
+        return Ok(NetAdmission::FanOutMarker);
+    }
+    if entity.contains('.') {
+        return Err(format!(
+            "operation '{}' on entity '{entity}' has a dotted entity name that is not a \
+             `<provider>.sync` fan-out marker. `.` separates entity from op in a transition key, \
+             so this names no key the net could lower it under, and excluding it would hide a \
+             dispatchable operation from every net analysis. Give it a dotless entity name.",
+            descriptor.name,
+        )
+        .into());
+    }
+    Ok(NetAdmission::Transition)
+}
+
 /// Hook called after an FDW cache table is primed with data.
 /// Implementations can subscribe to resource notifications, update state, etc.
 /// Trait-shaped and storage-agnostic (string table/query identifiers); the
@@ -3270,6 +3346,98 @@ mod trait_unit_tests {
         assert!(
             err.to_string().contains("cycles inside the subtree"),
             "got: {err}"
+        );
+    }
+
+    /// A descriptor with the given entity name, op name, and places.
+    fn descriptor(
+        entity: &str,
+        op: &str,
+        id_column: &str,
+        affected: &[&str],
+    ) -> OperationDescriptor {
+        let mut d = generate_sync_operation("placeholder");
+        d.entity_name = entity.into();
+        d.name = op.to_string();
+        d.id_column = id_column.to_string();
+        d.affected_fields = affected.iter().map(|f| f.to_string()).collect();
+        d
+    }
+
+    /// The shape the exclusion is actually for: minted by
+    /// `generate_sync_operation`, zero places.
+    #[test]
+    fn a_placeless_sync_marker_is_out_of_the_nets_domain() {
+        let marker = generate_sync_operation("orgmode");
+        assert_eq!(
+            classify_for_net(&marker).expect("a genuine marker is admitted, not refused"),
+            NetAdmission::FanOutMarker,
+        );
+        assert_eq!(
+            classify_for_net(&descriptor("*", "full_sync", "", &[]))
+                .expect("the wildcard is a marker too"),
+            NetAdmission::FanOutMarker,
+        );
+    }
+
+    /// An ordinary relation stays a transition — the refusals below must not
+    /// pass by refusing everything.
+    #[test]
+    fn an_ordinary_relation_is_a_transition() {
+        assert_eq!(
+            classify_for_net(&descriptor("block", "set_field", "id", &["content"]))
+                .expect("a relation is admitted"),
+            NetAdmission::Transition,
+        );
+    }
+
+    /// The guard's teeth, part 1: the name shape alone must not buy the
+    /// exclusion. A `<provider>.sync` descriptor that WRITES is refused,
+    /// because excluding a writer would put it outside every net analysis.
+    #[test]
+    fn a_sync_marker_that_writes_places_is_refused() {
+        for writing in [
+            descriptor("orgmode.sync", "sync", "id", &[]),
+            descriptor("orgmode.sync", "sync", "", &["content"]),
+        ] {
+            let err = classify_for_net(&writing)
+                .expect_err("a fan-out name over real places must be refused, not excluded");
+            assert!(
+                err.to_string().contains("writes places"),
+                "the refusal must say the premise broke; got: {err}"
+            );
+        }
+    }
+
+    /// The guard's teeth, part 1b — the SAME demand on the other fan-out
+    /// spelling. `*` is the shape that would hide best: the catalog would drop
+    /// it and the totality invariant would name-skip it, so a wildcard writer
+    /// would be invisible to both halves of the net's own defences.
+    #[test]
+    fn a_wildcard_that_writes_places_is_refused() {
+        for writing in [
+            descriptor("*", "sync", "id", &[]),
+            descriptor("*", "full_sync", "", &["content"]),
+        ] {
+            let err = classify_for_net(&writing)
+                .expect_err("a wildcard over real places must be refused, not excluded");
+            assert!(
+                err.to_string().contains("writes places"),
+                "the refusal must say the premise broke; got: {err}"
+            );
+        }
+    }
+
+    /// The guard's teeth, part 2: a dotted entity that is not a sync marker is
+    /// refused even when it is placeless. `.` is unencodable in a transition
+    /// key, so there is no key to lower it under and no honest way to keep it.
+    #[test]
+    fn a_dotted_entity_that_is_not_a_sync_marker_is_refused() {
+        let err = classify_for_net(&descriptor("orgmode.import", "run", "", &[]))
+            .expect_err("a dotted non-marker entity must be refused");
+        assert!(
+            err.to_string().contains("dotted entity name"),
+            "the refusal must name the dot as the reason; got: {err}"
         );
     }
 }

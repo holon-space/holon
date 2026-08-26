@@ -1227,11 +1227,26 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         // sequence. `engaged=0` (i.e. `0/N`) flags an always-`Skipped`
         // invariant — a vacuity candidate — even for ids outside the scoped
         // engagement floor. Greppable via `[engagement summary]`.
+        //
+        // Catalogued-but-never-selected ids are listed too, as `=deselected`.
+        // The ledger is fed from `report.ran`, so a `Needs`-gated invariant this
+        // draw never selected leaves NO trace in it — and an id simply missing
+        // from the line is indistinguishable from one nobody wired. A draw that
+        // never selects an invariant is legitimate; a reader concluding the run
+        // covered it is not.
+        let selected: std::collections::BTreeSet<&str> = ledger.keys().copied().collect();
+        let deselected: Vec<String> = super::catalog::composed_invariant_catalog()
+            .iter()
+            .map(|inv| inv.id().0)
+            .filter(|id| !selected.contains(id))
+            .map(|id| format!("{id}=deselected"))
+            .collect();
         eprintln!(
             "[engagement summary] {}",
             ledger
                 .iter()
                 .map(|(id, t)| format!("{id}={}/{}", t.engaged, t.engaged + t.skipped))
+                .chain(deselected)
                 .collect::<Vec<_>>()
                 .join(" ")
         );

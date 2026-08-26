@@ -23,6 +23,7 @@ pub mod action_watcher;
 pub mod repository;
 pub mod types;
 
+pub mod accepted_rules;
 pub mod backend_engine;
 pub mod block_domain;
 pub mod guard_world;
