@@ -29,8 +29,10 @@ use holon_pbt_core::capabilities::SutErrorLog;
 use holon_pbt_core::capabilities::SutLoroLog;
 use holon_pbt_core::capabilities::SutLoroTaskState;
 use holon_pbt_core::capabilities::SutOrderKeys;
+use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::capabilities::SutSqlProjection;
 use holon_pbt_core::capabilities::SutViewSelection;
+use holon_pbt_core::capabilities::WidgetSnapshot;
 pub use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapProvider;
 use holon_pbt_core::composition::Config;
@@ -404,12 +406,17 @@ pub fn ref_task_state(states: Vec<(EntityUri, &str)>) -> CapMap {
 
 // ─── ViewModel SUT double ─────────────────────────────────────────────────
 
-/// A hand-crafted [`SutViewSelection`] SUT — its `headless_error_node_count`
-/// can be set to a non-zero count, which a real `HeadlessFrontendComponent`
-/// (rendering a valid tree) never produces. Same `SutViewSelection` cap,
-/// identical selection path, so the frontend invariants' catch tests run with
-/// no real engine. Only `headless_error_node_count` carries data; the rest are
-/// honest defaults.
+/// A hand-crafted [`SutViewSelection`] + [`SutRenderer`] SUT — its
+/// `headless_error_node_count` can be set to a non-zero count, which a real
+/// `HeadlessFrontendComponent` (rendering a valid tree) never produces. Same
+/// caps, identical selection path, so the frontend invariants' catch tests run
+/// with no real engine.
+///
+/// It carries `SutRenderer` because `inv-viewmodel-no-error-widgets` needs it
+/// to reach per-block live trees; that half's teeth live at the body level
+/// (`invariants::bodies::viewmodel_no_error_widgets::tests`), so here the
+/// renderer is an honest EMPTY forest: a childless root, no per-block tree
+/// resolves. Only `error_count` carries data.
 pub struct FixtureViewModel {
     /// What `headless_error_node_count` reports: `None` = tree not ready
     /// (Skip), `Some(0)` = clean, `Some(n)` = `n` error widgets.
@@ -429,14 +436,49 @@ impl SutViewSelection for FixtureViewModel {
     }
 }
 
-impl CapProvider for FixtureViewModel {
-    fn register(self: Arc<Self>, caps: &mut CapMap) {
-        caps.insert(self as Arc<dyn SutViewSelection>);
+#[async_trait::async_trait(?Send)]
+impl SutRenderer for FixtureViewModel {
+    async fn widget_tree_snapshot(&self) -> WidgetSnapshot {
+        WidgetSnapshot {
+            kind: "column".to_string(),
+            entity_id: None,
+            props: Default::default(),
+            operations: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+    async fn widget_tree_snapshot_fresh(&self) -> WidgetSnapshot {
+        self.widget_tree_snapshot().await
+    }
+    async fn widget_tree_for(&self, _: &EntityUri) -> Option<WidgetSnapshot> {
+        None
+    }
+    async fn render_tree_of(&self, _: &EntityUri) -> Option<String> {
+        None
+    }
+    async fn root_data_row_ids(&self) -> std::collections::BTreeSet<EntityUri> {
+        std::collections::BTreeSet::new()
+    }
+    async fn root_content_comparison(&self, _: &[String]) -> Option<(Vec<String>, Vec<String>)> {
+        None
+    }
+    async fn root_render_ready(&self) -> bool {
+        false
+    }
+    async fn root_render_kind(&self) -> Option<String> {
+        None
     }
 }
 
-/// Build a SUT `CapMap` exposing only `SutViewSelection` with a fixed error
-/// count.
+impl CapProvider for FixtureViewModel {
+    fn register(self: Arc<Self>, caps: &mut CapMap) {
+        caps.insert(self.clone() as Arc<dyn SutViewSelection>);
+        caps.insert(self as Arc<dyn SutRenderer>);
+    }
+}
+
+/// Build a SUT `CapMap` exposing `SutViewSelection` + `SutRenderer` with a
+/// fixed root error count over an empty per-block forest.
 pub fn viewmodel_map(error_count: Option<usize>) -> CapMap {
     Config::new().with(FixtureViewModel { error_count }).build()
 }

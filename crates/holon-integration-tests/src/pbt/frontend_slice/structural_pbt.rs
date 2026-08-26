@@ -4567,23 +4567,33 @@ entities:
     ///
     /// Expected RED at base: materialisation proportional to `days`.
     ///
-    /// **MEASURED 2026-08-11 — the premise does not hold HEADLESSLY. This rung
-    /// cannot go red for the intended reason, and that is increment 0's
-    /// result.** Both arms materialise ZERO day children (3 days: 3 listed / 0
+    /// **MEASURED 2026-08-11, RE-MEASURED 2026-08-26 — the premise does not
+    /// hold HEADLESSLY. This rung cannot go red for the intended reason.**
+    /// Both arms materialise ZERO day children (3 days: 3 listed / 0
     /// materialised; 12 days: 12 listed / 0 materialised), so it trips the
-    /// vacuity guard instead of the cost claim. Cause, verbatim from the
-    /// rendered tree under every day's `expand_toggle`:
+    /// vacuity guard instead of the cost claim.
+    ///
+    /// The 2026-08-11 cause is GONE and the reading it produced is now stale.
+    /// It was an error node under every day's `expand_toggle` —
     /// `ERROR: Query error: HeadlessBuilderServices does not support live
-    /// queries`. Term (c) — the per-day `live_query(from descendants)` — is
-    /// structurally unobservable in this slice: the headless component never
-    /// runs a nested live query, so it materialises nothing to count, at any
-    /// history size. The cost claim therefore has no headless home and must be
-    /// carried by a WINDOWED rung (plan §3 increment 2,
-    /// `journals_scroll_window_expands_and_releases`).
+    /// queries` — because that stub's `watch_query` bailed unconditionally.
+    /// D40.a gave it a real one-shot implementation, and the error node is no
+    /// longer rendered.
+    ///
+    /// The count is STILL zero, for a second, independent reason. The render
+    /// interpreter's `live_query` arm calls `watch_query` only to
+    /// validate-by-doing: it drops the stream and interprets the item template
+    /// against EMPTY data rows, leaving the real subscription to the platform
+    /// layer (`render_interpreter.rs`, the `live_query` arm). That platform
+    /// watcher is `BuilderServices::watch_query_live`, which
+    /// `HeadlessBuilderServices` does not implement — so term (c), the per-day
+    /// `live_query(from descendants)`, still materialises nothing at any
+    /// history size, and the cost claim still belongs to a WINDOWED rung
+    /// (plan §3 increment 2, `journals_scroll_window_expands_and_releases`).
     ///
     /// Kept, not deleted: the fixture and the measurement are exactly right and
-    /// this rung turns real the moment the headless component grows live-query
-    /// support. `#[ignore]` per `holon-feature` §1 — a red that is not
+    /// this rung turns real the moment the headless component grows a platform
+    /// watcher. `#[ignore]` per `holon-feature` §1 — a red that is not
     /// red-for-the-right-reason is never presented as one.
     ///
     /// Deliberately NOT asserted here: wall-clock latency. Headless timings do
@@ -4591,9 +4601,11 @@ entities:
     /// change that was 16x faster live), so the p95 SLO is the WINDOWED rung's
     /// job. This rung owns the structural, machine-independent claim.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "increment-0 measurement result: HeadlessBuilderServices does not \
-                support live queries, so per-day content is unobservable here at \
-                any history size — the cost claim belongs to a windowed rung"]
+    #[ignore = "re-measured 2026-08-26 (D40.a): the live-query error node is gone, \
+                but the interpreter's live_query arm validates and drops the stream, \
+                and HeadlessBuilderServices has no watch_query_live platform watcher \
+                — per-day content is still unobservable here at any history size, so \
+                the cost claim belongs to a windowed rung"]
     async fn journals_feed_cost_is_sublinear_in_history() {
         const SMALL: usize = 3;
         const LARGE: usize = 12;

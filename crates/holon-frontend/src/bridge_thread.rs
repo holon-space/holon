@@ -39,7 +39,7 @@ pub fn install_bridge_thread_hook(hook: BridgeThreadHook) {
 
 /// Capture the spawner's context. Call on the SPAWNING thread, then
 /// [`BridgeContext::run`] the bridge body inside the new thread.
-pub(crate) fn capture() -> BridgeContext {
+pub fn capture() -> BridgeContext {
     BridgeContext(
         HOOK.get()
             .and_then(|hook| (hook.current)().map(|c| (*hook, c))),
@@ -47,11 +47,11 @@ pub(crate) fn capture() -> BridgeContext {
 }
 
 /// The spawner's context, ready to be entered on a bridge thread.
-pub(crate) struct BridgeContext(Option<(BridgeThreadHook, u64)>);
+pub struct BridgeContext(Option<(BridgeThreadHook, u64)>);
 
 impl BridgeContext {
     /// Run the bridge body with the spawner's context entered.
-    pub(crate) fn run<T>(self, body: impl FnOnce() -> T) -> T {
+    pub fn run<T>(self, body: impl FnOnce() -> T) -> T {
         let Some((hook, context)) = self.0 else {
             return body();
         };

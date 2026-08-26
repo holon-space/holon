@@ -30,6 +30,7 @@ async-trait.workspace = true
 fluxdi.workspace = true
 futures-signals.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

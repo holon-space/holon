@@ -22,11 +22,18 @@ use holon_frontend::reactive::table_expr;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_frontend::render_interpreter::RenderInterpreter;
 
-/// `BuilderServices` stub for the MCP `describe_ui` path, which renders the
-/// UI tree without an interactive `ReactiveEngine` (no focus, no provider
-/// cache, no dispatch). This is NOT a test-fidelity concern: the E2E PBTs
-/// do not use this stub — they run windowless but drive the real
-/// `ReactiveEngine` (see the `BuilderServices` trait doc).
+/// `BuilderServices` for non-interactive rendering — the MCP `describe_ui`
+/// path and the composed PBT frontend slice both build their trees through it,
+/// without an interactive `ReactiveEngine` (no focus, no provider cache, no
+/// dispatch).
+///
+/// It IS a test-fidelity surface. The composed frontend slice's `services()`
+/// constructs it (`frontend_slice/components.rs`), so every `SutRenderer` tree
+/// the PBTs judge is interpreted here. What this impl cannot do, the PBTs
+/// cannot see — which is how an unconditionally-failing `watch_query` painted
+/// the default sidebar as an error widget in every headless run, unnoticed
+/// until the error-widget oracle learned to walk per-block trees
+/// (`2026-08-26-headless-services-render-live-query-blocks-as-error-widgets`).
 pub struct HeadlessBuilderServices {
     engine: Arc<BackendEngine>,
     interpreter: Arc<RenderInterpreter<ReactiveViewModel>>,
@@ -88,13 +95,68 @@ impl BuilderServices for HeadlessBuilderServices {
         self.engine.profile_resolver().profile_signal()
     }
 
+    /// One-shot compile + execute, delivered as a single closed batch.
+    ///
+    /// Headless has no CDC pump, so there is nothing to keep a subscription
+    /// alive for — but the caller's Ok/Err is load-bearing: the render
+    /// interpreter turns an `Err` into the block's error widget
+    /// (`render_interpreter.rs`, the `live_query` arm), so a refused matview
+    /// DDL or unparseable query MUST still fail here. Running the query for
+    /// real is what preserves that; only the streaming half is dropped.
+    ///
+    /// `QueryEngine::execute_query` is the no-matview, no-CDC path, so a
+    /// headless render costs one query and creates no view.
+    ///
+    /// `block_on` is illegal on a thread already inside a runtime and this is
+    /// called from interpretation, so the wait happens on a bridge thread
+    /// carrying the spawner's observability context — without it the PBT
+    /// harness charges this query's SQL spans to no test scope.
     fn watch_query(
         &self,
-        _: &str,
-        _: QueryLanguage,
-        _: Option<QueryContext>,
+        query: &str,
+        lang: QueryLanguage,
+        ctx: Option<QueryContext>,
     ) -> Result<holon_api::EnrichedChangeStream> {
-        anyhow::bail!("HeadlessBuilderServices does not support live queries")
+        let engine = self.engine.clone();
+        let rt = self.rt_handle.clone();
+        let bridge = holon_frontend::bridge_thread::capture();
+        let rows = std::thread::scope(|s| {
+            s.spawn(|| {
+                bridge.run(|| {
+                    rt.block_on(holon_api::QueryEngine::execute_query(
+                        engine.as_ref(),
+                        query,
+                        lang,
+                        HashMap::new(),
+                        ctx,
+                    ))
+                })
+            })
+            .join()
+            .expect("headless watch_query bridge thread panicked")
+        })?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let batch = holon_api::WithMetadata {
+            inner: holon_api::Batch {
+                items: rows
+                    .into_iter()
+                    .map(|row| holon_api::Change::Created {
+                        data: holon_api::widget_spec::EnrichedRow::from_raw(row, |_| {
+                            HashMap::new()
+                        }),
+                        origin: holon_api::ChangeOrigin::Local {
+                            operation_id: None,
+                            trace_id: None,
+                        },
+                    })
+                    .collect(),
+            },
+            metadata: holon_api::BatchMetadata::default(),
+        };
+        tx.try_send(batch)
+            .expect("fresh capacity-1 channel must accept its only batch");
+        Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
     }
 
     /// One-shot querying IS available headlessly even though live watching is

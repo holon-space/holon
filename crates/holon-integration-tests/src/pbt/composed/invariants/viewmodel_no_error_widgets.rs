@@ -1,10 +1,16 @@
-//! `inv-viewmodel-no-error-widgets` — the rendered ViewModel tree has no
-//! `Error` widget nodes. `Needs SutViewSelection` only (no reference): a
-//! SUT-internal liveness property of the render pipeline. Selected by any slice
-//! with a renderer/ViewModel — today the frontend slice's real headless
-//! `ReactiveEngine` (where it runs over the actual CDC→watch→interpret tree).
+//! `inv-viewmodel-no-error-widgets` — the rendered ViewModel FOREST has no
+//! `Error` widget nodes. `Needs SutViewSelection + SutRenderer` (no
+//! reference): a SUT-internal liveness property of the render pipeline.
+//! Selected by any slice with a renderer/ViewModel — today the frontend
+//! slice's real headless `ReactiveEngine` (where it runs over the actual
+//! CDC→watch→interpret trees) and the window slice; both register both caps.
+//!
+//! `SutRenderer` is what lets the body reach PER-BLOCK live trees, where a
+//! failed `render_entity` puts its error widget. Root-only was the escape
+//! `2026-08-26-render-failure-invisible-warn-and-root-only-oracle` records.
 
 use holon_pbt_core::RunMode;
+use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::capabilities::SutViewSelection;
 use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::BridgedInvariant;
@@ -20,7 +26,10 @@ pub fn wire() -> Box<dyn CapInvariant> {
         InvViewmodelNoErrorWidgets,
         RunMode::Strict,
         Needs {
-            sut_present: vec![CapId::of::<dyn SutViewSelection>()],
+            sut_present: vec![
+                CapId::of::<dyn SutViewSelection>(),
+                CapId::of::<dyn SutRenderer>(),
+            ],
             sut_absent: Vec::new(),
             ref_present: Vec::new(),
         },

@@ -291,7 +291,12 @@ async fn render_and_forward(
             forward_data_stream(data_stream, tx, profile_resolver, generation).await;
         }
         Err(e) => {
-            tracing::warn!("[UiWatcher] render_entity('{}') failed: {}", block_id, e);
+            // ERROR, not WARN: WARN is the disclosed-degradation tier and is
+            // deliberately not read by `inv-no-observed-errors`. A block that
+            // failed to render is a real failure, so it must reach the
+            // error-capture oracles. The error widget below stays: it is the
+            // visible, disclosed surface for the same failure.
+            tracing::error!("[UiWatcher] render_entity('{}') failed: {}", block_id, e);
             let _ = tx
                 .send(UiEvent::Structure {
                     render_expr: error_render_expr(&format!("{e:#}")),
