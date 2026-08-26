@@ -172,19 +172,19 @@ async fn prepare_update_returns_none_for_non_canonical_stored_properties() {
     );
 }
 
-/// `Value::Null` extra-prop is a property-REMOVAL sentinel: the merged
+/// `Value::REMOVED` extra-prop is the property-REMOVAL sentinel: the merged
 /// properties JSON must no longer contain the key. Pins the `#+TODO:`
 /// keyword-set-deleted-from-org-header path (org sync emits
-/// `todo_keywords: Null` via `LiveDocumentManager::update_metadata`).
+/// `todo_keywords: REMOVED` via `LiveDocumentManager::update_metadata`).
 #[tokio::test]
-async fn prepare_update_null_prop_removes_key_from_properties() {
+async fn prepare_update_removed_prop_removes_key_from_properties() {
     let stored_props = r#"{"keep":"v","todo_keywords":"[{\"keyword\":\"WIP\"}]"}"#;
     let (_backend, _db, provider, id) =
         make_provider_with_block("x", Some(stored_props), 1000).await;
 
     let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
     params.insert("id".into(), Value::String(id));
-    params.insert("todo_keywords".into(), Value::Null);
+    params.insert("todo_keywords".into(), Value::REMOVED);
 
     let result = provider
         .prepare_update(&params)
@@ -212,14 +212,14 @@ async fn prepare_update_null_prop_removes_key_from_properties() {
 /// Removing a key that doesn't exist is a no-op — the diff guard must
 /// suppress the UPDATE entirely (no spurious CDC).
 #[tokio::test]
-async fn prepare_update_null_prop_for_absent_key_is_noop() {
+async fn prepare_update_removed_prop_for_absent_key_is_noop() {
     let stored_props = r#"{"keep":"v"}"#;
     let (_backend, _db, provider, id) =
         make_provider_with_block("x", Some(stored_props), 1000).await;
 
     let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
     params.insert("id".into(), Value::String(id));
-    params.insert("todo_keywords".into(), Value::Null);
+    params.insert("todo_keywords".into(), Value::REMOVED);
 
     let result = provider
         .prepare_update(&params)
@@ -287,34 +287,204 @@ async fn stored_containers_keep_their_kind_through_the_merge_leg() {
     );
 }
 
-/// A stored JSON `null` keeps its key and its base serialization.
+/// Ruling D27.b at the merge leg: a submitted JSON `null` STORES a null.
 ///
-/// The hazard this pins is a silent DELETE: `Value::Null` is the property-
-/// REMOVAL sentinel on both write legs, so parsing a stored null into it would
-/// make merely READING the blob erase the key. `value_to_json` can put a
-/// top-level null there (`Value::Float(NaN)` and `Value::Json("null")` both map
-/// to one), and the delete/undo chain reads it straight back — so this is
-/// reachable, not hypothetical.
-///
-/// Asserting base's exact serialization, the string `"null"`, is deliberate:
-/// what null MEANS in the value space is open decision D27, and this leg must
-/// not pre-decide it.
+/// `Value::Null` is a real value now — removal is spelled `Value::REMOVED`
+/// (`prepare_update_removed_prop_removes_key_from_properties` above drives the
+/// other half). So the key must survive the merge holding JSON `null`, neither
+/// erased nor re-typed into the string `"null"` the pre-ruling leg carried.
 #[tokio::test]
-async fn a_submitted_json_null_is_not_read_as_the_removal_sentinel() {
+async fn a_submitted_json_null_is_stored_as_an_explicit_null() {
     let sql =
         merged_properties_sql(r#"{"k":"stored","keep":"v"}"#, r#"{"k":null,"other":"x"}"#).await;
 
     assert!(
-        sql.contains(r#""k":"null""#),
-        "a JSON null in the submitted bag must merge back as the string \"null\" (base behaviour, \
-         D27 pending); SQL: {sql}"
+        sql.contains(r#""k":null"#),
+        "a JSON null in the submitted bag must merge back as an explicit JSON null (D27.b); SQL: \
+         {sql}"
     );
     assert!(
-        !sql.contains(r#""k":"stored""#) || sql.contains(r#""k":"null""#),
-        "the key must not silently keep AND lose its value; SQL: {sql}"
+        !sql.contains(r#""k":"null""#),
+        "the null must not be re-typed into the string \"null\" (the pre-D27.b carrier); SQL: {sql}"
+    );
+    assert!(
+        !sql.contains(r#""k":"stored""#),
+        "the submitted null must overwrite the stored value; SQL: {sql}"
     );
     assert!(
         sql.contains(r#""keep":"v""#),
         "untouched keys must survive the merge; SQL: {sql}"
+    );
+}
+
+/// The other half of D27.b at the same leg: `Value::REMOVED` still DELETES,
+/// and it is distinguishable from the null above in the same helper.
+#[tokio::test]
+async fn a_removed_sentinel_still_deletes_the_key_at_the_merge_leg() {
+    let stored_props = r#"{"k":"stored","keep":"v"}"#;
+    let (_backend, _db, provider, id) =
+        make_provider_with_block("x", Some(stored_props), 1000).await;
+
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(id));
+    params.insert("k".into(), Value::REMOVED);
+
+    let sql = provider
+        .prepare_update(&params)
+        .await
+        .expect("prepare_update")
+        .expect("Some(PreparedOp) — a removal is a real change")
+        .row_statements
+        .join(";");
+
+    assert!(
+        !sql.contains(r#""k":"#),
+        "the REMOVED sentinel must delete the key outright, not store a null; SQL: {sql}"
+    );
+    assert!(
+        sql.contains(r#""keep":"v""#),
+        "untouched keys must survive the merge; SQL: {sql}"
+    );
+}
+
+/// The delete-inverse path: `capture_row` hands the whole `properties` blob
+/// back as a decoded `Value::Object`, and the resurrecting `create` re-writes
+/// it. Under D27.b a null-valued property in that blob must come back AS null
+/// — the create filter drops only `Value::REMOVED` now, so undoing the delete
+/// restores the block exactly as it stood.
+#[tokio::test]
+async fn a_null_valued_property_survives_the_delete_inverse_create() {
+    let (_backend, _db, provider, _) = make_provider_with_block("x", None, 1000).await;
+
+    let mut captured: HashMap<String, Value> = HashMap::new();
+    captured.insert("nullable".to_string(), Value::Null);
+    captured.insert("kept".to_string(), Value::String("v".to_string()));
+
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String("resurrected".to_string()));
+    params.insert("properties".into(), Value::Object(captured));
+
+    let sql = provider
+        .prepare_create(&params, None)
+        .expect("prepare_create")
+        .row_statements
+        .join(";");
+
+    assert!(
+        sql.contains(r#""nullable":null"#),
+        "an inverse-create must restore a null-valued property AS null; SQL: {sql}"
+    );
+    assert!(
+        sql.contains(r#""kept":"v""#),
+        "the other properties must survive too; SQL: {sql}"
+    );
+}
+
+/// The same leg refuses to store the sentinel: a create carrying `REMOVED` has
+/// nothing to remove, so the key is dropped rather than serialized.
+#[tokio::test]
+async fn a_removed_sentinel_is_dropped_by_create_rather_than_stored() {
+    let (_backend, _db, provider, _) = make_provider_with_block("x", None, 1000).await;
+
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String("fresh".to_string()));
+    params.insert("gone".into(), Value::REMOVED);
+    params.insert("kept".into(), Value::String("v".to_string()));
+
+    let sql = provider
+        .prepare_create(&params, None)
+        .expect("prepare_create")
+        .row_statements
+        .join(";");
+
+    assert!(
+        !sql.contains("gone"),
+        "a removal sentinel on create must be dropped, not stored; SQL: {sql}"
+    );
+    assert!(sql.contains(r#""kept":"v""#), "SQL: {sql}");
+}
+
+/// The SqlOnly leg — the SHIPPED production config, which has no Loro at all —
+/// must refuse the reserved removal marker too.
+///
+/// `value_to_json` would otherwise serialize a property value shaped like the
+/// marker straight into the blob, and `Block::try_from`
+/// (`holon-api/src/block.rs`, `from_str::<HashMap<String, Value>>`) reads it
+/// back as `Value::Removed`. Stored state would then hold a removal sentinel,
+/// which is exactly the invariant the unfiltered DB-read callers rely on.
+#[tokio::test]
+async fn a_top_level_removal_marker_is_refused_by_the_sql_create_leg() {
+    let (_backend, _db, provider, _) = make_provider_with_block("x", None, 1000).await;
+
+    let marker = Value::Object(HashMap::from([(
+        holon_api::REMOVED_MARKER_KEY.to_string(),
+        Value::Boolean(true),
+    )]));
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String("marker-create".to_string()));
+    params.insert("cfg".into(), marker);
+
+    let err = provider
+        .prepare_create(&params, None)
+        .err()
+        .expect("a removal marker must be REFUSED at the SQL write boundary, not stored");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains(holon_api::REMOVED_MARKER_KEY),
+        "the refusal must name the reserved key: {msg}"
+    );
+    assert!(
+        msg.contains("cfg"),
+        "the refusal must name the offending property: {msg}"
+    );
+}
+
+/// Nested is refused on the SQL leg for the same reason it is on the Loro leg:
+/// `Value`'s untagged deserializer mints a `Removed` at any depth.
+#[tokio::test]
+async fn a_nested_removal_marker_is_refused_by_the_sql_update_leg() {
+    let (_backend, _db, provider, id) =
+        make_provider_with_block("x", Some(r#"{"k":"v"}"#), 1000).await;
+
+    let nested = Value::Object(HashMap::from([(
+        holon_api::REMOVED_MARKER_KEY.to_string(),
+        Value::Boolean(true),
+    )]));
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(id));
+    params.insert(
+        "cfg".into(),
+        Value::Object(HashMap::from([("nested".to_string(), nested)])),
+    );
+
+    let err = provider
+        .prepare_update(&params)
+        .await
+        .err()
+        .expect("a nested removal marker must be REFUSED at the SQL write boundary");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("cfg.nested"),
+        "the refusal must name the offending key PATH: {msg}"
+    );
+}
+
+/// A marker arriving one level deeper still — inside the submitted `properties`
+/// BAG, the route `partition_params` parses — is refused on the same guard.
+#[tokio::test]
+async fn a_removal_marker_inside_the_submitted_bag_is_refused() {
+    let (_backend, _db, provider, id) =
+        make_provider_with_block("x", Some(r#"{"k":"v"}"#), 1000).await;
+
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(id));
+    params.insert(
+        "properties".into(),
+        Value::String(r#"{"cfg":{"__holon_removed":true}}"#.to_string()),
+    );
+
+    assert!(
+        provider.prepare_update(&params).await.is_err(),
+        "a removal marker inside the submitted properties bag must be REFUSED"
     );
 }

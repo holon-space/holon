@@ -497,7 +497,7 @@ fn value_to_sql_literal(v: &Value) -> Result<String, InlineError> {
         Value::String(s) | Value::DateTime(s) | Value::Json(s) => {
             format!("'{}'", s.replace('\'', "''"))
         }
-        Value::Null | Value::Array(_) | Value::Object(_) => {
+        Value::Removed(_) | Value::Null | Value::Array(_) | Value::Object(_) => {
             return Err(InlineError::NonScalarLiteral { value: v.clone() });
         }
     })
@@ -822,7 +822,7 @@ fn concat_text(v: &Value, context: &str) -> Result<String, ComputeError> {
         Value::Integer(i) => i.to_string(),
         Value::Float(f) => format!("{f:?}"),
         Value::Boolean(b) => if *b { "1" } else { "0" }.to_string(),
-        Value::Null | Value::Array(_) | Value::Object(_) => {
+        Value::Null | Value::Array(_) | Value::Object(_) | Value::Removed(_) => {
             return Err(ComputeError::WrongType {
                 context: context.to_string(),
                 expected: "a scalar value",

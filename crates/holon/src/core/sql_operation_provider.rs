@@ -43,6 +43,13 @@ pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
             .unwrap_or(serde_json::Value::Null),
         Value::Boolean(b) => serde_json::Value::Bool(*b),
         Value::Null => serde_json::Value::Null,
+        // `Removed` is write-leg INTENT, not a value: every caller filters it
+        // out before serializing. Reaching here means a removal was about to be
+        // stored as a value, which is the D27.b sentinel bug all over again.
+        Value::Removed(_) => panic!(
+            "[value_to_json] Value::REMOVED reached the properties serializer — a removal \
+             sentinel must be consumed by the merge, never stored"
+        ),
         Value::DateTime(s) => serde_json::Value::String(s.clone()),
         Value::Json(s) => serde_json::from_str(s).unwrap_or_else(|e| {
             panic!(
@@ -57,30 +64,6 @@ pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
                 .collect(),
         ),
     }
-}
-
-/// Read one value out of a STORED `properties` blob, by the key it sits under.
-///
-/// Delegates to the single canonical parser for every shape but one. A stored
-/// JSON `null` must NOT become `Value::Null` here: on both write legs that is
-/// the property-REMOVAL sentinel (pinned by
-/// `prepare_update_null_prop_removes_key_from_properties`, and filtered on
-/// create at `prepare_create`), so a value merely READ out of the blob would
-/// delete the key it was read from — losing the stored value with it.
-///
-/// Carrying it as the string `"null"` reproduces base behaviour exactly. What a
-/// null should MEAN in the value space is open decision D27 (explicit null vs.
-/// removal sentinel); until that is ruled, this leg may not pre-decide it.
-fn properties_blob_value(key: &str, v: serde_json::Value) -> Value {
-    if v.is_null() {
-        tracing::warn!(
-            key,
-            "stored properties blob holds a JSON null; carrying it as the string \"null\" — \
-             Value::Null is the property-removal sentinel and would delete this key (D27 pending)"
-        );
-        return Value::String("null".to_string());
-    }
-    Value::from_json_value(v)
 }
 
 /// Serialize a property map to canonical JSON (keys sorted by BTreeMap).
@@ -146,6 +129,12 @@ fn sql_literal_equals_value(sql_literal: &str, db_val: Option<&Value>) -> bool {
                 false
             }
             Value::Null => false,
+            // The DB read boundary never mints a sentinel, so a `Removed` here
+            // means one leaked out of the write leg into stored state.
+            Value::Removed(_) => panic!(
+                "sql_literal_equals_value: Value::REMOVED read out of the store — the removal \
+                 sentinel must never be stored"
+            ),
             Value::Object(_) | Value::Json(_) => {
                 // Turso may parse JSON TEXT columns into Value::Object (or
                 // Value::Json). Serialize back to string and compare canonically.
@@ -600,8 +589,20 @@ impl SqlOperationProvider {
             for (k, v) in map {
                 extra_props
                     .entry(k.clone())
-                    .or_insert_with(|| properties_blob_value(&k, v));
+                    .or_insert_with(|| Value::from_json_value(v));
             }
+        }
+
+        // ONE choke-point for both authored routes into the property bag (loose
+        // params and the submitted `properties` blob): the reserved removal
+        // marker must never reach storage. `Block::try_from` reads the stored
+        // blob back through `Value`'s untagged deserializer, which mints a
+        // `Value::Removed` from the marker's shape at any depth — putting a
+        // removal INSTRUCTION into stored state and breaking the invariant the
+        // unfiltered DB-read callers rely on. Refused here, named, while the
+        // author is present.
+        for (key, value) in &extra_props {
+            value.reject_reserved_marker(key)?;
         }
 
         Ok((sql_fields, extra_props, edge_field_params))
@@ -1350,13 +1351,13 @@ impl SqlOperationProvider {
         let (mut sql_fields, extra_props, edge_field_params) = self.partition_params(&params)?;
 
         if !extra_props.is_empty() {
-            // `Value::Null` props are removal sentinels (see `prepare_update`);
-            // on create there is nothing to remove, so they are dropped instead
-            // of serializing a literal JSON `null`.
+            // `Value::REMOVED` props are removal sentinels (see
+            // `prepare_update`); on create there is nothing to remove, so they
+            // are dropped. A `Value::Null` is a real value and IS stored.
             let props_json = properties_to_canonical_json(
                 extra_props
                     .into_iter()
-                    .filter(|(_, v)| !matches!(v, Value::Null))
+                    .filter(|(_, v)| !v.is_removed())
                     .map(|(k, v)| (k, value_to_json(&v))),
             );
             sql_fields.push((
@@ -1540,10 +1541,11 @@ impl SqlOperationProvider {
             };
 
             for (k, v) in &extra_props {
-                // `Value::Null` is the property-REMOVAL sentinel: a merge that
-                // only ever inserts can never clear a stale key (e.g. a
-                // `#+TODO:` keyword set deleted from the org file header).
-                if matches!(v, Value::Null) {
+                // `Value::REMOVED` is the property-REMOVAL sentinel: a merge
+                // that only ever inserts can never clear a stale key (e.g. a
+                // `#+TODO:` keyword set deleted from the org file header). A
+                // `Value::Null` merges in as the stored JSON null it is.
+                if v.is_removed() {
                     existing.remove(k);
                 } else {
                     existing.insert(k.clone(), value_to_json(v));
@@ -2061,11 +2063,11 @@ impl SqlOperationProvider {
 
     /// Statement set re-deriving `to_id`'s redirect rows from its
     /// `merged_from` property — the same replace-from-the-authoritative-field
-    /// shape as [`Self::block_link_statements`]. A `Null` value (the undo of a
-    /// merge, which `json_remove`s the property) yields just the DELETE, so
-    /// undoing a merge retracts its redirect.
+    /// shape as [`Self::block_link_statements`]. A removal sentinel (the undo
+    /// of a merge, which `json_remove`s the property) yields just the DELETE,
+    /// so undoing a merge retracts its redirect.
     fn block_redirect_statements(to_id: &str, merged_from: &Value) -> Result<Vec<String>> {
-        let entries = merge_blocks_plan::parse_merged_from(merged_from)?;
+        let entries = merge_blocks_plan::parse_merged_from(Some(merged_from))?;
         let toq = to_id.replace('\'', "''");
         let mut stmts = vec![format!("DELETE FROM block_redirects WHERE to_id = '{toq}'")];
         for (from_id, at) in entries {
@@ -2201,13 +2203,11 @@ impl SqlOperationProvider {
         ))
     }
 
-    /// Read one key out of a block's properties, as `Value::Null` when the
-    /// properties or the key are absent.
-    fn property_from_blob(properties: &Value, key: &str) -> Result<Value> {
-        Ok(Self::properties_map(Some(properties))?
-            .get(key)
-            .cloned()
-            .unwrap_or(Value::Null))
+    /// Read one key out of a block's properties. `None` when the properties or
+    /// the key are absent — distinct from `Some(Value::Null)`, which is a key
+    /// that exists and holds an explicit null (D27.b).
+    fn property_from_blob(properties: &Value, key: &str) -> Result<Option<Value>> {
+        Ok(Self::properties_map(Some(properties))?.get(key).cloned())
     }
 
     /// The `donor` properties whose keys `holder` does not already carry —
@@ -2229,11 +2229,10 @@ impl SqlOperationProvider {
             if key == "ID" || key.starts_with('_') {
                 continue;
             }
-            if !matches!(Self::property_from_blob(holder, key)?, Value::Null) {
+            if Self::property_from_blob(holder, key)?.is_some() {
                 continue;
             }
-            let value = Self::property_from_blob(donor, key)?;
-            if !matches!(value, Value::Null) {
+            if let Some(value) = Self::property_from_blob(donor, key)? {
                 out.push((key.clone(), value));
             }
         }
@@ -2326,36 +2325,51 @@ impl SqlOperationProvider {
     }
 
     /// Read the current value of `field` for row `id` so an inverse
-    /// [`Operation`] can restore it. Known SQL columns are read directly;
-    /// everything else is a `properties` JSON entry. A missing row or a
-    /// null/absent field both read back as [`Value::Null`] — the sentinel the
-    /// inverse `set_field` uses to REMOVE a property (`json_remove`).
+    /// [`Operation`] can restore it.
+    ///
+    /// A known SQL column is read directly and a NULL column reads back as
+    /// [`Value::Null`] — restoring the column to NULL is what the inverse
+    /// wants. Everything else is a `properties` entry, where D27.b makes the
+    /// two cases the old `json_extract` could not tell apart genuinely
+    /// different: an ABSENT key inverts to [`Value::REMOVED`] (the inverse
+    /// `json_remove`s it), a key holding an explicit null inverts to
+    /// [`Value::Null`] (the inverse restores the null). Reading the whole blob
+    /// answers both — `json_extract` returns SQL NULL for either.
     async fn read_field_old_value(&self, id: &str, field: &str) -> Result<Value> {
-        let sql = if self.write_schema.is_column(field) {
-            format!(
+        if self.write_schema.is_column(field) {
+            let sql = format!(
                 "SELECT {col} AS v FROM {table} WHERE id = '{id}'",
                 col = Self::quote_identifier(field),
                 table = self.table_name,
                 id = id.replace('\'', "''"),
-            )
-        } else {
-            format!(
-                "SELECT json_extract(properties, '$.{field}') AS v FROM {table} WHERE id = '{id}'",
-                field = field.replace('\'', "''"),
-                table = self.table_name,
-                id = id.replace('\'', "''"),
-            )
-        };
+            );
+            let rows = self
+                .db_handle
+                .query(&sql, HashMap::new())
+                .await
+                .map_err(|e| format!("read_field_old_value({field}): {e}"))?;
+            return Ok(rows
+                .into_iter()
+                .next()
+                .and_then(|mut r| r.remove("v"))
+                .unwrap_or(Value::Null));
+        }
+
+        let sql = format!(
+            "SELECT properties FROM {table} WHERE id = '{id}'",
+            table = self.table_name,
+            id = id.replace('\'', "''"),
+        );
         let rows = self
             .db_handle
             .query(&sql, HashMap::new())
             .await
             .map_err(|e| format!("read_field_old_value({field}): {e}"))?;
-        Ok(rows
-            .into_iter()
-            .next()
-            .and_then(|mut r| r.remove("v"))
-            .unwrap_or(Value::Null))
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(Value::REMOVED);
+        };
+        let properties = row.get("properties").cloned().unwrap_or(Value::Null);
+        Ok(Self::property_from_blob(&properties, field)?.unwrap_or(Value::REMOVED))
     }
 
     /// One read answering everything a content write needs about the row it is
@@ -3156,7 +3170,24 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     None => raw_value.clone(),
                 };
 
-                let sql_value = Self::value_to_sql(&value);
+                // `set_field` does not route through `partition_params`, so it
+                // carries the same marker refusal itself.
+                raw_value.reject_reserved_marker(field)?;
+
+                // A COLUMN has no "absent" state to return to: clearing one is
+                // `SET col = NULL`, which `Value::Null` already spells. Refusing
+                // here rather than lowering the sentinel keeps the two meanings
+                // from collapsing back into one.
+                if value.is_removed() && self.write_schema.is_column(field) {
+                    return Err(format!(
+                        "set_field('{field}'): a column cannot take the removal sentinel — write \
+                         Value::Null to clear it"
+                    )
+                    .into());
+                }
+                // Deferred: a removal has no SQL literal at all, and the
+                // `json_remove` branch below never asks for one.
+                let sql_value = || Self::value_to_sql(&value);
 
                 // Edge-typed field: DELETE all current rows then INSERT new
                 // ones (route through prepare-style helper so set_field
@@ -3239,13 +3270,14 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         "UPDATE {} SET {} = {}{} WHERE id = '{}'",
                         self.table_name,
                         Self::quote_identifier(field),
-                        sql_value,
+                        sql_value(),
                         write_seq_pair.as_deref().unwrap_or(""),
                         id.replace('\'', "''")
                     )
-                } else if matches!(value, Value::Null) {
-                    // Null means "remove this property" — use json_remove so we don't
-                    // leave a {"key": null} entry in the JSON column. `task_state`
+                } else if value.is_removed() {
+                    // REMOVED means "delete this property" — use json_remove so we
+                    // leave no {"key": null} entry behind (a stored null is a
+                    // different, real value under D27.b). `task_state`
                     // removal also removes its `task_state_category` sidecar (the
                     // pair invariant `Block::set_task_state` establishes).
                     if field == "task_state" {
@@ -3270,14 +3302,17 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     // UI cycle dropped/staled the category and a DONE keyword could
                     // read back as Active (see `TaskState::category_str_for_keyword`).
                     let keyword = value.as_string().ok_or_else(|| {
-                        format!("set_field('task_state'): expected String or Null, got {value:?}")
+                        format!(
+                            "set_field('task_state'): expected String or Value::REMOVED, got \
+                             {value:?}"
+                        )
                     })?;
                     let category = holon_api::TaskState::category_str_for_keyword(keyword);
                     format!(
                         "UPDATE {} SET properties = json_set(COALESCE(properties, '{{}}'), \
                          '$.task_state', {}, '$.task_state_category', '{}') WHERE id = '{}'",
                         self.table_name,
-                        sql_value,
+                        sql_value(),
                         category,
                         id.replace('\'', "''")
                     )
@@ -3287,7 +3322,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                          '$.{}', {}) WHERE id = '{}'",
                         self.table_name,
                         field.replace('\'', "''"),
-                        sql_value,
+                        sql_value(),
                         id.replace('\'', "''")
                     )
                 };
@@ -3378,8 +3413,9 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // fields carry a staleness fingerprint: the reader reads columns
                 // only, so a `properties`-backed field (e.g. `task_state`) gets
                 // an empty precondition (single-writer safe) but still a real
-                // inverse. `Value::Null` old-value on a property drives the
-                // inverse `json_remove`, restoring "absent" faithfully.
+                // inverse. A `Value::REMOVED` old-value on a property drives the
+                // inverse `json_remove`, restoring "absent" faithfully; a
+                // `Value::Null` old-value restores the stored null.
                 let changes = if self.write_schema.is_column(field) {
                     vec![FieldDelta::new(
                         id.to_string(),
@@ -3847,7 +3883,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                             })?;
                         let raw =
                             Self::property_from_blob(&props, merge_blocks_plan::MERGED_FROM_FIELD)?;
-                        merge_blocks_plan::parse_merged_from(&raw)?
+                        merge_blocks_plan::parse_merged_from(raw.as_ref())?
                     };
                     let mut losers = Vec::with_capacity(loser_ids.len());
                     for id in loser_ids {
@@ -3872,7 +3908,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         &canonical_properties,
                         merge_blocks_plan::MERGED_FROM_FIELD,
                     )?;
-                    merge_blocks_plan::parse_merged_from(&raw)?
+                    merge_blocks_plan::parse_merged_from(raw.as_ref())?
                 };
 
                 // Tags union, canonical first so a Page tag on EITHER side lands.

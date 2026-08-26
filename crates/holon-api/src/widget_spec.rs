@@ -145,6 +145,9 @@ fn canonicalize_value(v: &Value, hasher: &mut Fnv1a) {
             }
         }
         Value::Null => hasher.write(b"n"),
+        // Folded distinctly: a widget spec that REMOVES a property and one that
+        // sets it to null must not hash to the same id.
+        Value::Removed(_) => hasher.write(b"r"),
     }
 }
 

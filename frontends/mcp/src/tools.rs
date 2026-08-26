@@ -236,6 +236,11 @@ fn holon_to_json_value(v: &Value) -> serde_json::Value {
             serde_json::Value::Object(map)
         }
         Value::Null => serde_json::Value::Null,
+        // Never JSON `null`: an MCP client reading that back and submitting it
+        // would be asking to STORE a null, not to remove the key.
+        Value::Removed(_) => panic!(
+            "holon_to_json_value: Value::REMOVED is a write-leg sentinel and has no MCP JSON form"
+        ),
     }
 }
 

@@ -942,6 +942,9 @@ fn value_to_rhai(value: &Value) -> String {
         }
         Value::DateTime(s) => format!("\"{s}\""),
         Value::Json(s) => format!("\"{s}\""),
+        Value::Removed(_) => {
+            panic!("value_to_rhai: Value::REMOVED is a write-leg sentinel and has no Rhai literal")
+        }
     }
 }
 

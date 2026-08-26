@@ -6,6 +6,7 @@ use holon_api::Value;
 pub(crate) fn value_to_display(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
+        Value::Removed(_) => "<removed>".to_string(),
         Value::Boolean(b) => b.to_string(),
         Value::Integer(n) => n.to_string(),
         Value::Float(f) => f.to_string(),

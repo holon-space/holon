@@ -16,4 +16,6 @@ pub mod pattern;
 pub mod schema;
 mod value;
 
+pub use value::REMOVED_MARKER_KEY;
+pub use value::RemovedTag;
 pub use value::Value;

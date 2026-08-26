@@ -1444,6 +1444,12 @@ pub(crate) fn value_to_turso_param(value: &Value) -> turso::Value {
             turso::Value::Text(serde_json::to_string(&serde_json::Value::Object(json_obj)).unwrap())
         }
         Value::Null => turso::Value::Null,
+        // Binding a removal as a parameter would write the deletion INTENT into
+        // a column. The sentinel is consumed by the property merge, never bound.
+        Value::Removed(_) => panic!(
+            "value_to_turso_param: Value::REMOVED is a write-leg removal instruction, not a \
+             bindable value"
+        ),
     }
 }
 

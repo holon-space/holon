@@ -747,7 +747,15 @@ pub(crate) fn read_scalar_field_from_meta(meta: &loro::LoroMap, key: &str) -> Op
 /// Properties are arbitrary `serde_json::Value`; the per-key granularity (not
 /// per-field) is what H3 needs — concurrent edits to *different* properties are
 /// different keys.
-fn encode_property_value(value: &Value) -> anyhow::Result<loro::LoroValue> {
+fn encode_property_value(key: &str, value: &Value) -> anyhow::Result<loro::LoroValue> {
+    // The stored JSON is read back through `Value`'s untagged deserializer
+    // (`decode_properties_map`), which mints a `Value::Removed` from the
+    // marker's shape at ANY depth. A marker that reached storage would put a
+    // removal INSTRUCTION into stored state and detonate on the next
+    // projection, so refuse it here, where the author is present to see it.
+    if let Err(e) = value.reject_reserved_marker(key) {
+        anyhow::bail!(e);
+    }
     Ok(loro::LoroValue::from(
         serde_json::to_string(value)?.as_str(),
     ))
@@ -798,7 +806,7 @@ fn migrate_legacy_blob_into_map(meta: &loro::LoroMap, map: &loro::LoroMap) -> an
         .unwrap_or_else(|e| panic!("Corrupt properties JSON in Loro tree: {json:?}: {e}"));
     for (key, value) in &legacy {
         if map.get(key).is_none() {
-            map.insert(key, encode_property_value(value)?)?;
+            map.insert(key, encode_property_value(key, value)?)?;
         }
     }
     meta.delete(PROPERTIES)?;
@@ -817,7 +825,17 @@ fn merge_properties_into_meta(
     let map = properties_map_container(meta)?;
     migrate_legacy_blob_into_map(meta, &map)?;
     for (key, value) in properties {
-        map.insert(key, encode_property_value(value)?)?;
+        // Honour the removal sentinel, exactly as `apply_field_changes_to_meta`
+        // does. Inserting it instead would leave the key alive holding a
+        // deletion instruction — the shape `write_field("task_state", clear)`
+        // used to produce here while the other write path deleted.
+        if value.is_removed() {
+            if map.get(key).is_some() {
+                map.delete(key)?;
+            }
+        } else {
+            map.insert(key, encode_property_value(key, value)?)?;
+        }
     }
     Ok(())
 }
@@ -839,7 +857,7 @@ fn replace_properties_in_meta(
         map.delete(&key)?;
     }
     for (key, value) in properties {
-        map.insert(key, encode_property_value(value)?)?;
+        map.insert(key, encode_property_value(key, value)?)?;
     }
     drop_legacy_properties_blob(meta)
 }
@@ -853,12 +871,12 @@ fn apply_field_changes_to_meta(
     let map = properties_map_container(meta)?;
     migrate_legacy_blob_into_map(meta, &map)?;
     for (name, _old_value, new_value) in fields {
-        if new_value == &Value::Null {
+        if new_value.is_removed() {
             if map.get(name).is_some() {
                 map.delete(name)?;
             }
         } else {
-            map.insert(name, encode_property_value(new_value)?)?;
+            map.insert(name, encode_property_value(name, new_value)?)?;
         }
     }
     Ok(())
@@ -4517,6 +4535,82 @@ mod diff_checkout_race_tests {
         (doc, backend)
     }
 
+    /// The reserved removal marker must be refused at ANY depth, not only when
+    /// the whole property value IS the marker.
+    ///
+    /// `decode_properties_map` reads every stored property back through
+    /// `Value`'s untagged deserializer, so a marker nested inside an object
+    /// value is minted as a `Value::Removed` living in stored state. That
+    /// breaks the invariant every unfiltered DB-read caller relies on — the
+    /// store never holds a removal sentinel — and panics `value_to_json` on the
+    /// next Loro→SQL re-projection. Refuse it while the author is present.
+    #[tokio::test]
+    async fn a_nested_removal_marker_is_refused_by_the_loro_write_leg() {
+        let (_doc, backend) = make_backend().await;
+        backend
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::text("host"),
+                Some(EntityUri::block("marker-host")),
+                &HashMap::new(),
+                &holon_api::BlockEdges::default(),
+            )
+            .await
+            .expect("seed block");
+
+        let nested = Value::Object(HashMap::from([(
+            holon_api::REMOVED_MARKER_KEY.to_string(),
+            Value::Boolean(true),
+        )]));
+        let props = HashMap::from([(
+            "cfg".to_string(),
+            Value::Object(HashMap::from([("nested".to_string(), nested)])),
+        )]);
+
+        let err = backend
+            .update_block_properties("block:marker-host", &props)
+            .await
+            .expect_err("a nested removal marker must be REFUSED, not stored");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains(holon_api::REMOVED_MARKER_KEY),
+            "the refusal must name the reserved key: {msg}"
+        );
+        assert!(
+            msg.contains("cfg.nested"),
+            "the refusal must name the offending key PATH so the author can find it: {msg}"
+        );
+    }
+
+    /// The top-level shape stays refused too — same guard, depth 0.
+    #[tokio::test]
+    async fn a_top_level_removal_marker_is_refused_by_the_loro_write_leg() {
+        let (_doc, backend) = make_backend().await;
+        backend
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::text("host"),
+                Some(EntityUri::block("marker-host-2")),
+                &HashMap::new(),
+                &holon_api::BlockEdges::default(),
+            )
+            .await
+            .expect("seed block");
+
+        let props = HashMap::from([(
+            "cfg".to_string(),
+            Value::Object(HashMap::from([(
+                holon_api::REMOVED_MARKER_KEY.to_string(),
+                Value::Boolean(true),
+            )])),
+        )]);
+
+        backend
+            .update_block_properties("block:marker-host-2", &props)
+            .await
+            .expect_err("a top-level removal marker must be REFUSED, not stored");
+    }
+
     async fn seed_parent_and_child(backend: &LoroBackend) {
         let props = HashMap::new();
         let tags = Tags::default();
@@ -5209,12 +5303,18 @@ mod concurrent_child_creation_semantics {
 
         properties_map_container(&meta_of(&a, node))
             .unwrap()
-            .insert("from_a", encode_property_value(&Value::from(1)).unwrap())
+            .insert(
+                "from_a",
+                encode_property_value("from_a", &Value::from(1)).unwrap(),
+            )
             .unwrap();
         a.commit();
         properties_map_container(&meta_of(&b, node))
             .unwrap()
-            .insert("from_b", encode_property_value(&Value::from(2)).unwrap())
+            .insert(
+                "from_b",
+                encode_property_value("from_b", &Value::from(2)).unwrap(),
+            )
             .unwrap();
         b.commit();
 

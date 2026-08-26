@@ -222,6 +222,9 @@ fn canonical_value(v: &Value) -> String {
         Value::DateTime(s) => format!("dt:{s}"),
         Value::Json(s) => format!("j:{s}"),
         Value::Null => "null".to_string(),
+        // Distinct from "null": removing a property and setting it to null are
+        // different writes, so they must not hash to the same effect id.
+        Value::Removed(_) => "removed".to_string(),
         Value::Array(items) => {
             let parts: Vec<String> = items.iter().map(canonical_value).collect();
             format!("[{}]", parts.join(","))

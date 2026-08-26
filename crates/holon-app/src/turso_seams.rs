@@ -638,13 +638,13 @@ impl DocumentManager for LiveDocumentManager {
         // `doc.properties` is authoritative for doc-level metadata, but
         // `build_block_params` only emits keys that are PRESENT — and the
         // SQL provider's property merge can't clear what isn't mentioned.
-        // Emit a `Value::Null` removal sentinel for every property the
+        // Emit a `Value::REMOVED` sentinel for every property the
         // previously-known doc had that the new doc no longer carries
         // (e.g. `todo_keywords` after the `#+TODO:` header was deleted).
         if let Some(old) = self.live.read().get(doc.id.as_str()).cloned() {
             for key in old.properties.keys() {
                 if !doc.properties.contains_key(key) && !params.contains_key(key.as_str()) {
-                    params.insert(key.as_str().into(), holon_api::Value::Null);
+                    params.insert(key.as_str().into(), holon_api::Value::REMOVED);
                 }
             }
         }
@@ -654,7 +654,7 @@ impl DocumentManager for LiveDocumentManager {
         params.remove("parent_id");
         // Route through the authoritative block-write seam, NOT the SQL
         // command bus: under Loro authority the projector diffs Loro against
-        // the SQL row and emits a `Value::Null` removal for every property
+        // the SQL row and emits a `Value::REMOVED` sentinel for every property
         // Loro does not carry, so an SQL-direct write of `todo_keywords` is
         // reverted within the same ingest.
         self.ordering

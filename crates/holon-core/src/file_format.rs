@@ -109,11 +109,11 @@ pub trait FileFormatAdapter: Send + Sync {
     /// `previous` is the block as the file PREVIOUSLY declared it, and is what
     /// makes the file authoritative for the block's user-visible property set:
     /// a property key `previous` declared and `block` no longer does is emitted
-    /// as `Value::Null`, the writer's removal sentinel, so the store-side merge
-    /// clears it instead of keeping it alive forever. `None` for a create, and
-    /// for any caller that is NOT reconciling a file against its own prior
-    /// state — such a write names no authority over peer keys and must keep the
-    /// insert-only merge.
+    /// as `Value::REMOVED`, the writer's removal sentinel, so the store-side
+    /// merge clears it instead of keeping it alive forever. `None` for a
+    /// create, and for any caller that is NOT reconciling a file against
+    /// its own prior state — such a write names no authority over peer keys
+    /// and must keep the insert-only merge.
     fn build_block_params(
         &self,
         block: &Block,

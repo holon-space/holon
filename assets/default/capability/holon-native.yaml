@@ -177,9 +177,10 @@ fidelity_axes:
     # which is exactly what this clause is about.
     types: [string, integer, float, boolean, array, object]
     empty_string: representable
-    # MEASURED: a Null param is DROPPED from the blob entirely, so the
-    # substrate cannot distinguish "explicitly null" from "absent".
-    null: dropped
+    # Ruling D27.b: `Value::Null` is a REAL value here. Removal is spelled
+    # `Value::Removed`, so the substrate stores and reads back an explicit null
+    # and distinguishes it from "absent".
+    null: representable
     multi_value:
       kind: none
     reference_values: none

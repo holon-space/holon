@@ -277,6 +277,9 @@ fn format_header_args_value(args: &HashMap<String, holon_api::Value>) -> String 
                 holon_api::Value::DateTime(dt) => dt.to_string(),
                 holon_api::Value::Array(_) => "[array]".to_string(),
                 holon_api::Value::Object(_) => "[object]".to_string(),
+                holon_api::Value::Removed(_) => panic!(
+                    "source header args cannot carry Value::REMOVED — it is a write-leg sentinel"
+                ),
             };
             if v_str.is_empty() {
                 format!(":{}", k)
@@ -1968,5 +1971,48 @@ mod tests {
             "header arg dropped: {org:?}"
         );
         assert!(org.contains(":id src1"), "{org:?}");
+    }
+
+    /// Ruling D27.b makes `Value::Null` a real, storable property value in the
+    /// native substrate — but org still cannot carry it, and its profile says
+    /// so (`crates/holon-org-format/profile.yaml`, `property_values.null:
+    /// dropped`, `types: [string]`).
+    ///
+    /// The measured mechanism is the `as_string()` filter below: a Null is
+    /// excluded from the drawer the same way an Integer or an Array is, so it
+    /// never becomes an EMPTY property value — which is what the known
+    /// write-back hazard (an empty value drops its key) would have turned into
+    /// a second, silent loss on top. Pinned because the honest `null: dropped`
+    /// declaration is only honest while this holds.
+    #[test]
+    fn a_null_valued_property_never_reaches_the_org_drawer() {
+        let mut block = Block {
+            id: EntityUri::block("n1"),
+            parent_id: EntityUri::block("parent1"),
+            content: "headline".to_string(),
+            ..Block::default()
+        };
+        block
+            .properties
+            .insert("nullable".to_string(), holon_api::Value::Null);
+        block
+            .properties
+            .insert("present".to_string(), holon_api::Value::String("v".into()));
+
+        let drawer = block.drawer_properties();
+        assert!(
+            !drawer.contains_key("nullable"),
+            "a Null property must not reach the drawer at all: {drawer:?}"
+        );
+        assert_eq!(
+            drawer.get("present").map(String::as_str),
+            Some("v"),
+            "a string property must still render: {drawer:?}"
+        );
+        let org = block.to_org();
+        assert!(
+            !org.contains("nullable"),
+            "the dropped key must not appear in the rendered org either: {org:?}"
+        );
     }
 }

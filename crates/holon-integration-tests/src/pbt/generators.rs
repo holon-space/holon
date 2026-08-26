@@ -1211,7 +1211,10 @@ pub fn generate_layout_headline_mutation(
             .prop_map(|(id, maybe_kw)| {
                 let value = match maybe_kw {
                     Some(kw) => Value::String(kw),
-                    None => Value::Null,
+                    // Clearing is a REMOVAL, not a stored null (D27.b): a
+                    // `Value::Null` here would store JSON null under
+                    // `task_state` and leave the block a half-typed task.
+                    None => Value::REMOVED,
                 };
                 Mutation::Update {
                     id,

@@ -13,6 +13,12 @@ pub fn value_to_sql_literal(value: &Value) -> String {
         Value::String(s) | Value::DateTime(s) | Value::Json(s) => {
             format!("'{}'", s.replace('\'', "''"))
         }
+        // A removal is not a value: `prepare_update`/`set_field` consume the
+        // sentinel and emit `json_remove`, so one reaching a literal means the
+        // intent was about to be written as data.
+        Value::Removed(_) => panic!(
+            "value_to_sql_literal: Value::REMOVED is a write-leg removal instruction, not a value"
+        ),
         Value::Array(_) | Value::Object(_) => {
             let json: serde_json::Value = value.clone().into();
             let s = serde_json::to_string(&json).expect("Value→JSON serialization cannot fail");

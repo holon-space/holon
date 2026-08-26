@@ -41,7 +41,7 @@ pub trait LoroScalarField: Clone + Send + Sync + 'static {
     /// loud.
     fn decode(stored: Option<Value>) -> Result<Self>;
     /// Encode `self` into the `Value` persisted under the property key.
-    /// `Value::Null` deletes the key (mirrors `update_block_fields`).
+    /// `Value::REMOVED` deletes the key (mirrors `update_block_fields`).
     fn encode(self) -> Value;
 }
 

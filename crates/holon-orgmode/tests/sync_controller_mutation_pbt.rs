@@ -595,6 +595,7 @@ fn value_to_serde_json(v: &Value) -> serde_json::Value {
             .unwrap_or(serde_json::Value::Null),
         Value::Boolean(b) => serde_json::Value::Bool(*b),
         Value::Null => serde_json::Value::Null,
+        Value::Removed(_) => panic!("value_to_serde_json: the removal sentinel is not a value"),
         Value::DateTime(s) => serde_json::Value::String(s.clone()),
         Value::Json(s) => serde_json::from_str(s).unwrap_or(serde_json::Value::Null),
         Value::Array(arr) => {

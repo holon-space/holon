@@ -20,13 +20,17 @@ pub fn normalize_content(content: &str) -> String {
 
 /// Parse `merged_from` into its `(merged-away id, millis)` pairs. Fails loud
 /// on a malformed value rather than dropping provenance.
-pub fn parse_merged_from(value: &Value) -> Result<Vec<(String, i64)>, String> {
+///
+/// `None` (the key is absent), a stored null, and the removal sentinel (the
+/// undo of a merge, which `json_remove`s the property) all mean "no
+/// provenance".
+pub fn parse_merged_from(value: Option<&Value>) -> Result<Vec<(String, i64)>, String> {
     let raw = match value {
-        Value::Null => return Ok(Vec::new()),
-        Value::String(s) => s.clone(),
-        other => {
+        None | Some(Value::Null) | Some(Value::Removed(_)) => return Ok(Vec::new()),
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => {
             return Err(format!(
-                "{MERGED_FROM_FIELD}: expected String or Null, got {other:?}"
+                "{MERGED_FROM_FIELD}: expected String, null or absent, got {other:?}"
             ));
         }
     };
@@ -319,10 +323,10 @@ impl MergeBlocksPlan {
                             ));
                         }
                     },
-                    keeper_merged_from: parse_merged_from(&Value::String(get_str(
+                    keeper_merged_from: parse_merged_from(Some(&Value::String(get_str(
                         g,
                         "keeper_merged_from",
-                    )?))?,
+                    )?)))?,
                     losers,
                 })
             })
@@ -353,10 +357,10 @@ impl MergeBlocksPlan {
             duplicate_content: get_str(obj, "duplicate_content")?,
             merged_children,
             dedupe_groups,
-            existing_merged_from: parse_merged_from(&Value::String(get_str(
+            existing_merged_from: parse_merged_from(Some(&Value::String(get_str(
                 obj,
                 "existing_merged_from",
-            )?))?,
+            )?)))?,
             union_tags,
             adopted_properties,
             merged_at: get_i64(obj, "merged_at")?,
@@ -468,14 +472,14 @@ mod tests {
         let rendered = render_merged_from(&entries);
         assert_eq!(rendered, "dup-a 17 dup-b 42");
         assert_eq!(
-            parse_merged_from(&Value::String(rendered)).unwrap(),
+            parse_merged_from(Some(&Value::String(rendered))).unwrap(),
             entries
         );
     }
 
     #[test]
     fn malformed_merged_from_fails_loud() {
-        assert!(parse_merged_from(&Value::String("dup-a".into())).is_err());
-        assert!(parse_merged_from(&Value::String("dup-a later".into())).is_err());
+        assert!(parse_merged_from(Some(&Value::String("dup-a".into()))).is_err());
+        assert!(parse_merged_from(Some(&Value::String("dup-a later".into()))).is_err());
     }
 }

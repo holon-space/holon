@@ -275,6 +275,7 @@ fn as_json(value: &Value) -> serde_json::Value {
             serde_json::Value::Object(map.iter().map(|(k, v)| (k.clone(), as_json(v))).collect())
         }
         Value::Null => serde_json::Value::Null,
+        Value::Removed(_) => panic!("as_json: the removal sentinel is not a certifiable value"),
     }
 }
 

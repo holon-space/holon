@@ -471,7 +471,9 @@ impl CrudOperations<Block> for LoroBlockOperations {
             "task_state" => {
                 let old = match prior.get_property_str("task_state") {
                     Some(s) => Value::String(s),
-                    None => Value::Null,
+                    // Absent before the write → the inverse must DELETE the key,
+                    // not pin a null-valued `task_state` on the block.
+                    None => Value::REMOVED,
                 };
                 let mut params = HashMap::new();
                 params.insert("id".to_string(), Value::String(id.to_string()));
@@ -555,14 +557,15 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 // the `_` write arm below (DEADLINE/PRIORITY from
                 // `set_due_date`/`set_priority`, and any generic org drawer
                 // key). Capture the prior value for an EXACT inverse. A
-                // previously-ABSENT property inverts to a REMOVE: `Value::Null`
-                // routed back through the write arm's delete path, so undo of a
-                // first-time property write leaves the block genuinely
-                // property-free rather than pinning a null-valued key. The
+                // previously-ABSENT property inverts to a REMOVE
+                // (`Value::REMOVED`, routed back through the write arm's delete
+                // path), so undo of a first-time property write leaves the block
+                // genuinely property-free rather than pinning a null-valued
+                // key; a property that HELD a null inverts to that null. The
                 // properties blob is not a column the `SqlUndoStateReader`
                 // fingerprints, so `changes` stays empty (single-writer safe)
                 // while the inverse is a real, provably-correct restore.
-                let old = prior.get_property(field).unwrap_or(Value::Null);
+                let old = prior.get_property(field).unwrap_or(Value::REMOVED);
                 let mut params = HashMap::new();
                 params.insert("id".to_string(), Value::String(id.to_string()));
                 params.insert("field".to_string(), Value::String(field.to_string()));
@@ -678,36 +681,38 @@ impl CrudOperations<Block> for LoroBlockOperations {
                     .map_err(|e| format!("set_field('{f}') for {id}: {e:#}"))?;
             }
             _ => {
-                // Store in the properties map. A `Value::Null` REMOVES the key
-                // (the exact inverse of a previously-absent property) instead
-                // of pinning a null blob — `update_block_fields` routes through
-                // `apply_field_changes_to_meta`, which deletes on Null and
-                // inserts otherwise, per-key (H3-safe), matching the
-                // `LoroMetaCellBacking` write path.
+                // Store in the properties map. A `Value::REMOVED` DELETES the
+                // key (the exact inverse of a previously-absent property)
+                // instead of pinning a null blob — `update_block_fields` routes
+                // through `apply_field_changes_to_meta`, which deletes on the
+                // sentinel and inserts otherwise, per-key (H3-safe), matching
+                // the `LoroMetaCellBacking` write path. A `Value::Null` is a
+                // real value and IS stored.
                 //
                 // A bare `task_state` keyword write gets its
                 // `task_state_category` sidecar derived and written in the SAME
                 // commit — the pair invariant `Block::set_task_state`
                 // establishes at the org parse boundary (see
                 // `TaskState::category_str_for_keyword`); a `task_state` cleared
-                // to Null removes both keys together.
+                // with the REMOVED sentinel removes both keys together.
                 let mut fields: Vec<(String, Value, Value)> = Vec::new();
                 if field == "task_state" {
                     let category = match &value {
-                        Value::Null => Value::Null,
+                        Value::Removed(_) => Value::REMOVED,
                         Value::String(kw) => Value::String(
                             holon_api::TaskState::category_str_for_keyword(kw).to_string(),
                         ),
                         other => {
                             return Err(format!(
-                                "set_field('task_state'): expected String or Null, got {other:?}"
+                                "set_field('task_state'): expected String or Value::REMOVED, got \
+                                 {other:?}"
                             )
                             .into());
                         }
                     };
-                    fields.push(("task_state_category".to_string(), Value::Null, category));
+                    fields.push(("task_state_category".to_string(), Value::REMOVED, category));
                 }
-                fields.push((field.to_string(), Value::Null, value));
+                fields.push((field.to_string(), Value::REMOVED, value));
                 backend
                     .update_block_fields(id, &fields)
                     .await
@@ -1345,7 +1350,7 @@ impl TaskOperations<Block> for LoroBlockOperations {
                 self.set_field(id, "DEADLINE", Value::String(dt.to_rfc3339()))
                     .await
             }
-            None => self.set_field(id, "DEADLINE", Value::Null).await,
+            None => self.set_field(id, "DEADLINE", Value::REMOVED).await,
         }
     }
 
@@ -1945,8 +1950,8 @@ mod advice_dismiss_tests {
                     "cycle's inverse must restore task_state, not content — got {:?}",
                     op.params
                 );
-                // Prior task_state was absent → inverse restores Null (removal).
-                assert!(matches!(op.params.get("value"), Some(Value::Null)));
+                // Prior task_state was absent → inverse restores the REMOVED sentinel.
+                assert!(matches!(op.params.get("value"), Some(Value::Removed(_))));
             }
             other => panic!("cycle_task_state must be reversible, got {other:?}"),
         }

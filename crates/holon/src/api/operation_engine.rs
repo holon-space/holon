@@ -473,6 +473,7 @@ fn render_value(v: &Value) -> String {
         Value::Boolean(b) => b.to_string(),
         Value::DateTime(s) | Value::Json(s) => s.clone(),
         Value::Null => "null".to_string(),
+        Value::Removed(_) => "removed".to_string(),
         Value::Array(_) | Value::Object(_) => {
             serde_json::to_string(v).unwrap_or_else(|_| format!("{v:?}"))
         }

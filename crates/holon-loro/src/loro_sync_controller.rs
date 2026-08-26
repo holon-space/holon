@@ -1821,9 +1821,10 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
             }
             params.entry(k.as_str().into()).or_insert_with(|| v.clone());
         }
-        // Emit the `Value::Null` REMOVAL sentinel for every key present in
-        // `old` but absent from `new` — mirror the `marks` / `source_language`
-        // clear handling above (`Some -> None` => Null). Iterating only
+        // Emit the `Value::REMOVED` sentinel for every key present in `old` but
+        // absent from `new`. Distinct from the `marks` / `source_language`
+        // clears above: those are real COLUMNS taking a real SQL NULL, this is
+        // a property that must stop existing. Iterating only
         // `new.properties` could not represent a deletion, so a property
         // removed in Loro left the stale value in SQL's `properties` JSON
         // forever (the base advances to `after`, so it is never re-diffed —
@@ -1834,7 +1835,7 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
                 continue;
             }
             if !new.properties.contains_key(k) {
-                params.entry(k.as_str().into()).or_insert(Value::Null);
+                params.entry(k.as_str().into()).or_insert(Value::REMOVED);
             }
         }
     }
@@ -2167,13 +2168,13 @@ mod marks_outbound_tests {
     }
 
     /// Regression for the P0 silent data-loss bug: a property present in `old`
-    /// but absent from `new` (deleted in Loro) must emit the `Value::Null`
-    /// REMOVAL sentinel so `prepare_update` clears the key from SQL's
+    /// but absent from `new` (deleted in Loro) must emit the `Value::REMOVED`
+    /// sentinel so `prepare_update` clears the key from SQL's
     /// `properties` JSON. Iterating only `new.properties` dropped deletions —
     /// the stale value lived in SQL forever (mirror of the source_language
     /// fix).
     #[test]
-    fn block_diff_params_emits_null_when_property_removed() {
+    fn block_diff_params_emits_removed_when_property_removed() {
         let old = block_with_props(&[("foo", "bar"), ("keep", "me")]);
         let new = block_with_props(&[("keep", "me")]);
         assert!(
@@ -2183,14 +2184,14 @@ mod marks_outbound_tests {
         let params = block_diff_params(&old, &new);
         assert_eq!(
             params.get("foo"),
-            Some(&Value::Null),
-            "removed property must emit a Null sentinel (else SQL keeps the stale value forever): \
-             {params:?}"
+            Some(&Value::REMOVED),
+            "removed property must emit the REMOVED sentinel (else SQL keeps the stale value \
+             forever): {params:?}"
         );
     }
 
     /// The removal update must also round-trip through the typed intent
-    /// vocabulary (no `agrees_with_ops` divergence): the Null decodes to a
+    /// vocabulary (no `agrees_with_ops` divergence): the Removed decodes to a
     /// SetField, so source `update:1` re-encodes to `update:1`.
     #[test]
     fn property_removal_update_agrees_with_ops() {

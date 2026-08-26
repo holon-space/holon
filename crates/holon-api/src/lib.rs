@@ -215,6 +215,8 @@ pub use holon_expr::unoptimized_engine;
 // The guard AST, the transition-arc vocabulary and the dynamic `Value` live in
 // the leaf crate `holon-pattern` (reachable from `holon-macros`, which parses
 // both declaration surfaces at expansion time); these are their canonical paths.
+pub use holon_pattern::REMOVED_MARKER_KEY;
+pub use holon_pattern::RemovedTag;
 pub use holon_pattern::Value;
 pub use holon_pattern::arcs;
 pub use holon_pattern::marking;

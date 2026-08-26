@@ -356,6 +356,7 @@ fn format_value(v: &holon_api::Value) -> String {
         holon_api::Value::Array(a) => format!("[...{} items]", a.len()),
         holon_api::Value::DateTime(dt) => format!("\"{dt}\""),
         holon_api::Value::Json(j) => j.to_string(),
+        holon_api::Value::Removed(_) => "<removed>".to_string(),
     }
 }
 

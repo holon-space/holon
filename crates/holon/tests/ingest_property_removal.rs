@@ -2,7 +2,7 @@
 //!
 //! A property key the org file no longer declares must not survive in the
 //! store. The store-side merge has always had a removal sentinel
-//! (`Value::Null` at a top-level params key, honoured by
+//! (`Value::REMOVED` at a top-level params key, honoured by
 //! `SqlOperationProvider::prepare_update`), but the ingest params builder never
 //! EMITTED it — an insert-only merge kept every stale key alive, so renaming
 //! `:leads-to:` to `:contributes-to:` in the vault left the store carrying

@@ -162,6 +162,11 @@ impl ValueKind {
             holon_api::Value::Array(_) => Self::Array,
             holon_api::Value::Object(_) => Self::Object,
             holon_api::Value::Null => Self::Null,
+            // `Removed` is write-leg intent, not an inhabitant of the value
+            // space this axis describes, so it has no kind to report.
+            holon_api::Value::Removed(_) => {
+                panic!("ValueKind::from: Value::REMOVED is a removal sentinel, not a value kind")
+            }
         }
     }
 }

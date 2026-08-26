@@ -22,10 +22,11 @@ use crate::models::OrgBlockExt;
 ///
 /// `previous` is the block as the file previously declared it. It makes the
 /// file authoritative for the block's drawer: a key `previous` carried and
-/// `block` no longer does is emitted as `Value::Null` — the writer's removal
-/// sentinel — so a renamed or deleted drawer key is cleared from the store
-/// instead of surviving an insert-only merge forever. `None` for a create, and
-/// for any caller not reconciling a file against its own prior state.
+/// `block` no longer does is emitted as `Value::REMOVED` — the writer's
+/// removal sentinel — so a renamed or deleted drawer key is cleared from the
+/// store instead of surviving an insert-only merge forever. `None` for a
+/// create, and for any caller not reconciling a file against its own prior
+/// state.
 pub fn build_block_params(
     block: &Block,
     parent_id: &EntityUri,
@@ -187,7 +188,7 @@ pub fn build_block_params(
             {
                 continue;
             }
-            params.insert(k.into(), Value::Null);
+            params.insert(k.into(), Value::REMOVED);
         }
     }
 
@@ -542,7 +543,7 @@ mod tests {
         );
     }
 
-    /// A drawer key the file dropped is emitted as the `Value::Null` removal
+    /// A drawer key the file dropped is emitted as the `Value::REMOVED` removal
     /// sentinel; a key it still declares is emitted as its value; and the typed
     /// edge drawers (`REQUIRES`/`ADVICE_SUPPRESSED`) never take part — they
     /// travel as `Value::Array` params, so nulling them would clear a junction
@@ -562,7 +563,7 @@ mod tests {
 
         assert_eq!(
             params.get("leads-to"),
-            Some(&Value::Null),
+            Some(&Value::REMOVED),
             "a dropped drawer key must carry the removal sentinel: {params:?}"
         );
         assert_eq!(
@@ -629,7 +630,7 @@ mod tests {
         for c in columns {
             assert_ne!(
                 params.get(c),
-                Some(&Value::Null),
+                Some(&Value::REMOVED),
                 "drawer key `{c}` names a storage column — removing it must never emit a \
                  NULL column write: {params:?}"
             );
@@ -639,7 +640,7 @@ mod tests {
         let params = build_block_params(&current, &parent, &parent, Some(&previous));
         assert_eq!(
             params.get("keep"),
-            Some(&Value::Null),
+            Some(&Value::REMOVED),
             "the guard must not have disabled removal generally: {params:?}"
         );
     }
@@ -772,7 +773,7 @@ mod tests {
         );
         let params = build_block_params(&current, &parent, &parent, None);
         assert!(
-            !params.values().any(|v| matches!(v, Value::Null)),
+            !params.values().any(|v| v.is_removed()),
             "a create emits no removal sentinel: {params:?}"
         );
     }

@@ -8,6 +8,41 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use serde::Serialize;
 
+/// The key carrying [`RemovedTag`] on the wire.
+pub const REMOVED_MARKER_KEY: &str = "__holon_removed";
+
+/// Wire shape for [`Value::Removed`].
+///
+/// `Value` is `#[serde(untagged)]`, so a bare unit variant would go out as JSON
+/// `null` and come back as [`Value::Null`] — the two mean opposite things on
+/// the write leg (store a null vs. delete the key), and that round-trip would
+/// flip one into the other in silence. This tag gives `Removed` a shape only it
+/// matches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemovedTag;
+
+impl Serialize for RemovedTag {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(REMOVED_MARKER_KEY, &true)?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for RemovedTag {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let map = HashMap::<String, bool>::deserialize(deserializer)?;
+        if map.len() == 1 && map.get(REMOVED_MARKER_KEY) == Some(&true) {
+            Ok(RemovedTag)
+        } else {
+            Err(serde::de::Error::custom(
+                "not the removal marker: expected exactly {\"__holon_removed\": true}",
+            ))
+        }
+    }
+}
+
 /// Value type shaped for flutter_rust_bridge interop. // ALLOW(compatibility):
 /// FRB constrains the variant shape
 ///
@@ -19,6 +54,14 @@ use serde::Serialize;
 #[serde(untagged)]
 /// @c4 code
 pub enum Value {
+    /// Write-leg intent: DELETE the property this value is filed under.
+    ///
+    /// Not a value — nothing reads back as `Removed`, and the boundary parser
+    /// [`Value::from_json_value`] never produces one, so stored data can never
+    /// be re-typed into a removal. Declared FIRST because untagged
+    /// deserialization takes the first matching variant and `Object` would
+    /// otherwise swallow the marker map.
+    Removed(RemovedTag),
     String(String),
     Integer(i64),
     Float(f64),
@@ -175,6 +218,88 @@ impl Value {
         matches!(self, Value::Null)
     }
 
+    /// The property-REMOVAL sentinel.
+    pub const REMOVED: Value = Value::Removed(RemovedTag);
+
+    /// The dotted key path at which this value carries the reserved removal
+    /// marker, at ANY depth — `None` when it is clean.
+    ///
+    /// Every write leg must call this BEFORE storing a property value. The
+    /// stored blob is read back through `Value`'s untagged deserializer (Loro's
+    /// `decode_properties_map`, the SQL leg's `Block::try_from`), which mints a
+    /// [`Value::Removed`] from the marker's shape wherever it sits. A marker
+    /// that reaches storage therefore puts a removal INSTRUCTION into stored
+    /// state, breaking the invariant every unfiltered read relies on — that the
+    /// store never holds a sentinel — and detonating on the next projection.
+    ///
+    /// Depth-recursive rather than top-level: the shape is minted at whatever
+    /// depth it is found, so a guard that only inspects the root is a guard the
+    /// hazard walks around inside a nested object.
+    pub fn reserved_marker_path(&self) -> Option<String> {
+        fn walk(v: &Value, prefix: &str, out: &mut Option<String>) {
+            if out.is_some() {
+                return;
+            }
+            match v {
+                Value::Object(map) => {
+                    if map.len() == 1 && map.get(REMOVED_MARKER_KEY) == Some(&Value::Boolean(true))
+                    {
+                        *out = Some(prefix.to_string());
+                        return;
+                    }
+                    // Sorted so the reported path is deterministic when more
+                    // than one branch offends.
+                    let mut keys: Vec<&String> = map.keys().collect();
+                    keys.sort();
+                    for k in keys {
+                        let path = if prefix.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{prefix}.{k}")
+                        };
+                        walk(&map[k], &path, out);
+                    }
+                }
+                Value::Array(items) => {
+                    for (i, item) in items.iter().enumerate() {
+                        walk(item, &format!("{prefix}[{i}]"), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = None;
+        walk(self, "", &mut out);
+        out
+    }
+
+    /// Refuse this value if it carries the reserved removal marker at any
+    /// depth, naming the full key path under the property `key`.
+    ///
+    /// The named refusal is the point: silently re-typing an authored value
+    /// into a removal instruction would delete the author's data and report
+    /// success. Callers are the WRITE legs, where the author is present.
+    pub fn reject_reserved_marker(&self, key: &str) -> Result<(), String> {
+        match self.reserved_marker_path() {
+            None => Ok(()),
+            Some(path) => {
+                let full = if path.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{key}.{path}")
+                };
+                Err(format!(
+                    "property '{full}' is the reserved removal marker                      {{\"{REMOVED_MARKER_KEY}\": true}} and cannot be stored as a value — it                      would read back as a removal instruction"
+                ))
+            }
+        }
+    }
+
+    /// Is this the write-leg instruction to delete the property?
+    pub fn is_removed(&self) -> bool {
+        matches!(self, Value::Removed(_))
+    }
+
     /// Create an empty Object (for serde default)
     pub fn default_object() -> Self {
         Value::Object(HashMap::new())
@@ -199,6 +324,12 @@ impl Value {
                 parts.join(", ")
             }
             Value::Object(map) => serde_json::to_string(map).unwrap_or_default(),
+            // A removal instruction has no rendering: nothing stored is ever
+            // `Removed`, so reaching a display path with one means a write-leg
+            // sentinel escaped into read state.
+            Value::Removed(_) => panic!(
+                "to_display_string: Value::REMOVED is a write-leg sentinel, not a displayable value"
+            ),
         }
     }
 
@@ -414,6 +545,13 @@ impl From<Value> for serde_json::Value {
                 serde_json::Value::Object(obj.into_iter().map(|(k, v)| (k, v.into())).collect())
             }
             Value::Null => serde_json::Value::Null,
+            // Never JSON `null`: that is the shape of an explicit null, and
+            // turning a removal into one would store the value the sentinel
+            // exists to delete.
+            Value::Removed(_) => panic!(
+                "Value::REMOVED cannot convert to JSON: it is a write-leg removal instruction, \
+                 not a value"
+            ),
         }
     }
 }
@@ -483,5 +621,46 @@ impl TryFrom<Value> for HashMap<String, Value> {
                 Err(format!("HashMap<String,Value>::try_from cannot convert {:?}", other).into())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod removal_sentinel_tests {
+    use super::*;
+
+    /// The whole reason `Removed` carries a tag instead of being a unit
+    /// variant: `Value` is `#[serde(untagged)]`, so a unit `Removed` would go
+    /// out as JSON `null`, come back as `Value::Null`, and silently turn a
+    /// property DELETE into a stored null. Loro round-trips every property
+    /// value through exactly this codec (`encode_property_value` /
+    /// `decode_properties_map`), so the flip would be reachable in production.
+    #[test]
+    fn removed_and_null_survive_a_json_round_trip_as_themselves() {
+        for value in [Value::REMOVED, Value::Null] {
+            let json = serde_json::to_string(&value).expect("serialize");
+            let back: Value = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, value, "round trip of {value:?} produced {json}");
+        }
+        assert_eq!(serde_json::to_string(&Value::Null).unwrap(), "null");
+        assert_ne!(
+            serde_json::to_string(&Value::REMOVED).unwrap(),
+            "null",
+            "the removal sentinel must not share JSON `null`'s shape"
+        );
+    }
+
+    /// The boundary parser never mints a sentinel, so no stored shape — not
+    /// even one an author wrote to look like the marker — can be read back as
+    /// a removal instruction.
+    #[test]
+    fn the_boundary_parser_never_produces_a_removal_sentinel() {
+        let marker: serde_json::Value =
+            serde_json::from_str(r#"{"__holon_removed":true}"#).expect("parse");
+        assert!(
+            !Value::from_json_value(marker).is_removed(),
+            "an authored object shaped like the marker must stay an object"
+        );
+        assert!(!Value::from_json_value(serde_json::Value::Null).is_removed());
+        assert!(Value::from_json_value(serde_json::Value::Null).is_null());
     }
 }

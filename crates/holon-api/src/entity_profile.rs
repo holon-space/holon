@@ -480,6 +480,11 @@ pub fn value_to_dynamic(value: &Value) -> rhai::Dynamic {
             }
             rhai::Dynamic::from(map)
         }
+        // Rhai's `()` already spells `Value::Null`; giving the removal sentinel
+        // the same Dynamic would make a script unable to tell them apart.
+        Value::Removed(_) => {
+            panic!("value_to_dynamic: Value::REMOVED is a write-leg sentinel and has no Rhai value")
+        }
     }
 }
 

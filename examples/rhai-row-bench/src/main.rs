@@ -56,6 +56,7 @@ fn value_to_dynamic(v: &Value) -> Dynamic {
         Value::Float(f) => Dynamic::from(*f),
         Value::Boolean(b) => Dynamic::from(*b),
         Value::Null => Dynamic::UNIT,
+        Value::Removed(_) => panic!("the removal sentinel has no Rhai value"),
     }
 }
 

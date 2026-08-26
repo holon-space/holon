@@ -145,6 +145,8 @@ fn hash_value(v: &holon_api::Value, h: &mut impl std::hash::Hasher) {
             }
         }
         Value::Null => {}
+        // Distinct from `Null`: the two are different cache keys.
+        Value::Removed(_) => 0xF0u8.hash(h),
     }
 }
 

@@ -798,13 +798,14 @@ impl EntityCellRegistry for BlockCellRegistry {
                 // keyword could read back as Active). Both keys land in ONE
                 // `update_block_properties` commit (per-key LWW merge, H3).
                 let category = match &value {
-                    Value::Null => Value::Null,
+                    Value::Removed(_) => Value::REMOVED,
                     Value::String(kw) => Value::String(
                         holon_api::TaskState::category_str_for_keyword(kw).to_string(),
                     ),
                     other => {
                         return Err(anyhow!(
-                            "write_field(task_state): expected String or Null, got {other:?}"
+                            "write_field(task_state): expected String or Value::REMOVED, got \
+                             {other:?}"
                         ));
                     }
                 };

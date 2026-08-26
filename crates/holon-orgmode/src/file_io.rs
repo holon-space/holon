@@ -51,6 +51,9 @@ pub fn value_to_header_arg_string(value: &Value) -> String {
             .collect::<Vec<_>>()
             .join(" "),
         Value::Object(_) | Value::Json(_) => serde_json::to_string(value).unwrap_or_default(),
+        Value::Removed(_) => panic!(
+            "value_to_header_arg_string: Value::REMOVED is a write-leg sentinel, not a header arg"
+        ),
     }
 }
 

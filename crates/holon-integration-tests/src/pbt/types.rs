@@ -103,7 +103,14 @@ fn apply_org_properties(block: &mut Block, fields: &HashMap<String, Value>, is_c
         ]
     };
     for (k, v) in fields.iter() {
-        if !extra_keys.contains(&k.as_str()) {
+        if extra_keys.contains(&k.as_str()) {
+            continue;
+        }
+        // Mirror the store: `Value::REMOVED` deletes the key, every other
+        // value — `Value::Null` included — is stored as itself (D27.b).
+        if v.is_removed() {
+            block.properties.remove(k);
+        } else {
             block.properties.insert(k.clone(), v.clone());
         }
     }
