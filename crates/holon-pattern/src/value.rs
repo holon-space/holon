@@ -59,12 +59,13 @@ impl Value {
             serde_json::Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     Value::Integer(i)
-                } else if let Some(f) = n.as_f64() {
-                    Value::Float(f)
+                } else if n.is_f64() {
+                    // `is_f64` rather than `as_f64`: the latter also answers for
+                    // an integer too large for `i64`, and rounding one into an
+                    // `f64` loses digits silently.
+                    Value::Float(n.as_f64().expect("is_f64 just answered"))
                 } else {
-                    Value::Json(
-                        serde_json::to_string(&serde_json::Value::Number(n)).unwrap_or_default(),
-                    )
+                    Value::Json(n.to_string())
                 }
             }
             serde_json::Value::String(s) => Value::String(s),

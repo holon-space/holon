@@ -386,6 +386,9 @@ async fn block_engine() -> anyhow::Result<Arc<BackendEngine>> {
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
                     let handle = Handle::current();
+                    // ALLOW(block_on): wrapped in `block_in_place`, which is what makes a
+                    // blocking wait legal on a multi-thread runtime thread (same contract as
+                    // the `blocking` helper above).
                     handle.block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
                 })
                 .expect("block_raw cache");
@@ -403,19 +406,7 @@ async fn block_engine() -> anyhow::Result<Arc<BackendEngine>> {
 /// back as whatever JSON kept — which is precisely what the `types` clause is
 /// asking about.
 fn from_json(value: &serde_json::Value) -> Value {
-    match value {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Boolean(*b),
-        serde_json::Value::Number(n) => match n.as_i64() {
-            Some(i) => Value::Integer(i),
-            None => Value::Float(n.as_f64().unwrap_or_default()),
-        },
-        serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(items) => Value::Array(items.iter().map(from_json).collect()),
-        serde_json::Value::Object(map) => {
-            Value::Object(map.iter().map(|(k, v)| (k.clone(), from_json(v))).collect())
-        }
-    }
+    Value::from_json_value(value.clone())
 }
 
 /// A distinct block id per probe: two probes sharing one id would certify the

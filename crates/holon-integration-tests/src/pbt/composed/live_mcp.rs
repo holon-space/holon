@@ -1182,21 +1182,7 @@ fn row_to_string_vec(row: &serde_json::Map<String, serde_json::Value>) -> Vec<St
 /// Convert an MCP JSON scalar into a `holon_api::Value` (the row-parser's value
 /// type), so `parse_block_rows` can consume MCP `execute_raw_sql` output.
 fn json_value_to_holon(v: &serde_json::Value) -> Value {
-    match v {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Boolean(*b),
-        serde_json::Value::Number(n) => n
-            .as_i64()
-            .map(Value::Integer)
-            .unwrap_or_else(|| Value::Float(n.as_f64().expect("JSON number is f64"))),
-        serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(a) => Value::Array(a.iter().map(json_value_to_holon).collect()),
-        serde_json::Value::Object(o) => Value::Object(
-            o.iter()
-                .map(|(k, v)| (k.clone(), json_value_to_holon(v)))
-                .collect(),
-        ),
-    }
+    Value::from_json_value(v.clone())
 }
 
 /// A JSON SQL row → the `StorageEntity` shape `parse_block_row` reads.

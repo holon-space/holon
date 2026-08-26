@@ -18,24 +18,9 @@ use tracing::info_span;
 use crate::mcp_call_surface::McpCallSurface;
 use crate::mcp_sidecar::CursorConfig;
 
-/// Convert a serde_json::Value to holon_api::Value, preserving nested objects
-/// as JSON text.
+/// Convert a serde_json::Value to holon_api::Value.
 pub fn json_value_to_holon_value(v: &serde_json::Value) -> Value {
-    match v {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Boolean(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Integer(i)
-            } else if let Some(f) = n.as_f64() {
-                Value::Float(f)
-            } else {
-                Value::String(n.to_string())
-            }
-        }
-        serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => Value::String(v.to_string()),
-    }
+    Value::from_json_value(v.clone())
 }
 
 /// A fetched record batch from an MCP server, with optional new cursor

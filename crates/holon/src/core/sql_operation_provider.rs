@@ -59,6 +59,30 @@ pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
     }
 }
 
+/// Read one value out of a STORED `properties` blob, by the key it sits under.
+///
+/// Delegates to the single canonical parser for every shape but one. A stored
+/// JSON `null` must NOT become `Value::Null` here: on both write legs that is
+/// the property-REMOVAL sentinel (pinned by
+/// `prepare_update_null_prop_removes_key_from_properties`, and filtered on
+/// create at `prepare_create`), so a value merely READ out of the blob would
+/// delete the key it was read from — losing the stored value with it.
+///
+/// Carrying it as the string `"null"` reproduces base behaviour exactly. What a
+/// null should MEAN in the value space is open decision D27 (explicit null vs.
+/// removal sentinel); until that is ruled, this leg may not pre-decide it.
+fn properties_blob_value(key: &str, v: serde_json::Value) -> Value {
+    if v.is_null() {
+        tracing::warn!(
+            key,
+            "stored properties blob holds a JSON null; carrying it as the string \"null\" — \
+             Value::Null is the property-removal sentinel and would delete this key (D27 pending)"
+        );
+        return Value::String("null".to_string());
+    }
+    Value::from_json_value(v)
+}
+
 /// Serialize a property map to canonical JSON (keys sorted by BTreeMap).
 ///
 /// All callers writing the `properties` column must go through this so the
@@ -574,18 +598,9 @@ impl SqlOperationProvider {
             >(&json_str)
         {
             for (k, v) in map {
-                extra_props.entry(k).or_insert_with(|| match v {
-                    serde_json::Value::String(s) => Value::String(s),
-                    serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            Value::Integer(i)
-                        } else {
-                            Value::Float(n.as_f64().unwrap_or(0.0))
-                        }
-                    }
-                    serde_json::Value::Bool(b) => Value::Boolean(b),
-                    _ => Value::String(v.to_string()),
-                });
+                extra_props
+                    .entry(k.clone())
+                    .or_insert_with(|| properties_blob_value(&k, v));
             }
         }
 
@@ -4388,6 +4403,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
 #[cfg(test)]
 #[path = "sql_operation_provider_diff_test.rs"]
 mod sql_operation_provider_diff_test;
+
+#[cfg(test)]
+#[path = "json_value_parse_differential_test.rs"]
+mod json_value_parse_differential_test;
 
 #[cfg(test)]
 mod write_schema_tests {

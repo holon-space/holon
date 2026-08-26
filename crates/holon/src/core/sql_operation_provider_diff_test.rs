@@ -230,3 +230,91 @@ async fn prepare_update_null_prop_for_absent_key_is_noop() {
         "removing an absent key must be a no-op; got Some"
     );
 }
+
+/// The merged `properties` SQL for an update that submits a whole `properties`
+/// BAG.
+///
+/// The bag is the route that reaches the blob's read-parse: `partition_params`
+/// captures the `properties` param and parses each member into `extra_props`
+/// (`sql_operation_provider.rs:595`). A test that instead passes loose
+/// key/value params never touches that parse — it merges raw JSON — which is
+/// why both tests below go through this helper.
+async fn merged_properties_sql(stored_props: &str, submitted_bag: &str) -> String {
+    let (_backend, _db, provider, id) =
+        make_provider_with_block("x", Some(stored_props), 1000).await;
+
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(id));
+    params.insert("properties".into(), Value::String(submitted_bag.into()));
+
+    let result = provider
+        .prepare_update(&params)
+        .await
+        .expect("prepare_update")
+        .expect("Some(PreparedOp) — the submitted bag is a real change");
+    result
+        .row_statements
+        .iter()
+        .chain(&result.edge_statements)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// A stored array or object survives the read-merge-write round with its KIND
+/// intact.
+///
+/// This is the whole point of giving the blob boundary ONE parser: the merge
+/// leg used to stringify these two shapes while every other reader of the same
+/// blob kept them structured, so what a caller saw depended on which door it
+/// came through. Drives the production `prepare_update` path — reverting the
+/// merge leg to its old inline closure reds this test.
+#[tokio::test]
+async fn stored_containers_keep_their_kind_through_the_merge_leg() {
+    let sql = merged_properties_sql(r#"{"keep":"v"}"#, r#"{"arr":[1,2],"obj":{"a":1}}"#).await;
+
+    assert!(
+        sql.contains(r#""arr":[1,2]"#),
+        "a stored array must merge back as an array, not as the text \"[1,2]\"; SQL: {sql}"
+    );
+    assert!(
+        sql.contains(r#""obj":{"a":1}"#),
+        "a stored object must merge back as an object, not as text; SQL: {sql}"
+    );
+    assert!(
+        sql.contains(r#""keep":"v""#),
+        "untouched keys must survive the merge; SQL: {sql}"
+    );
+}
+
+/// A stored JSON `null` keeps its key and its base serialization.
+///
+/// The hazard this pins is a silent DELETE: `Value::Null` is the property-
+/// REMOVAL sentinel on both write legs, so parsing a stored null into it would
+/// make merely READING the blob erase the key. `value_to_json` can put a
+/// top-level null there (`Value::Float(NaN)` and `Value::Json("null")` both map
+/// to one), and the delete/undo chain reads it straight back — so this is
+/// reachable, not hypothetical.
+///
+/// Asserting base's exact serialization, the string `"null"`, is deliberate:
+/// what null MEANS in the value space is open decision D27, and this leg must
+/// not pre-decide it.
+#[tokio::test]
+async fn a_submitted_json_null_is_not_read_as_the_removal_sentinel() {
+    let sql =
+        merged_properties_sql(r#"{"k":"stored","keep":"v"}"#, r#"{"k":null,"other":"x"}"#).await;
+
+    assert!(
+        sql.contains(r#""k":"null""#),
+        "a JSON null in the submitted bag must merge back as the string \"null\" (base behaviour, \
+         D27 pending); SQL: {sql}"
+    );
+    assert!(
+        !sql.contains(r#""k":"stored""#) || sql.contains(r#""k":"null""#),
+        "the key must not silently keep AND lose its value; SQL: {sql}"
+    );
+    assert!(
+        sql.contains(r#""keep":"v""#),
+        "untouched keys must survive the merge; SQL: {sql}"
+    );
+}

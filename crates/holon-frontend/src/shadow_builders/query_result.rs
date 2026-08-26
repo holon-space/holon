@@ -24,6 +24,20 @@ holon_macros::widget_builder! {
     }
 }
 
+/// A table cell's DISPLAY text — deliberately NOT the JSON→`Value` parse.
+///
+/// Every non-null cell renders as text, so a number, a bool and a nested blob
+/// all arrive at the renderer already stringified. Resembling a parser is what
+/// made this look like a sixth copy of one; it is a formatter, and unifying it
+/// with `Value::from_json_value` would change what the table renders.
+fn cell_text(v: &serde_json::Value) -> Value {
+    match v {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        other => Value::String(other.to_string()),
+    }
+}
+
 fn parse_json_rows(s: &str) -> ViewModel {
     match serde_json::from_str::<serde_json::Value>(s) {
         Ok(serde_json::Value::Array(rows)) => {
@@ -31,17 +45,8 @@ fn parse_json_rows(s: &str) -> ViewModel {
                 .iter()
                 .filter_map(|row| {
                     if let serde_json::Value::Object(map) = row {
-                        let data: HashMap<String, Value> = map
-                            .iter()
-                            .map(|(k, v)| {
-                                let val = match v {
-                                    serde_json::Value::String(s) => Value::String(s.clone()),
-                                    serde_json::Value::Null => Value::Null,
-                                    other => Value::String(other.to_string()),
-                                };
-                                (k.clone(), val)
-                            })
-                            .collect();
+                        let data: HashMap<String, Value> =
+                            map.iter().map(|(k, v)| (k.clone(), cell_text(v))).collect();
                         Some(ViewModel::element("table_row", Arc::new(data), vec![]))
                     } else {
                         None
