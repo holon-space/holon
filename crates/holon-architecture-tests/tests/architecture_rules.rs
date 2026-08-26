@@ -438,7 +438,9 @@ fn only_the_registry_hands_out_capability_profile_values() {
         "these sites name the `CapabilityProfile` VALUE outside the registry:\n{}\n\nCarry a \
          `CapabilityProfileId` and ask `ProfileRegistry::get` at each question instead. A site \
          that genuinely owns a loaded profile — a certification test — belongs in \
-         PROFILE_VALUE_HOLDERS in {}.\n",
+         PROFILE_VALUE_HOLDERS in {}. A site that needs a bespoke profile SET rather than a \
+         held value — assembling a registry for DI, e.g. in a policy test — should build it \
+         via `ProfileRegistry::from_yaml` in the owning crate instead of naming the value type.\n",
         offenders.join("\n"),
         file!(),
     );

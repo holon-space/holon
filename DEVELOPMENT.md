@@ -543,7 +543,10 @@ Notes:
   `archlint`, which scans the tree — measured 2026-08-14 at ~35s (25s of it the
   scan) regardless of build warmth, too slow for a per-commit tier and cheap
   against Tier 2's five-minute keystone leg. It runs first within Tier 2 so a
-  structural red lands before that leg starts.
+  structural red lands before that leg starts. Cheap enough that even a
+  hand-picked, partial gate list for a lane or a landing should still include
+  it — two pre-existing arch reds escaped by running a custom gate list that
+  omitted it.
 - **Why lanes should compose `landing-gate` rather than their own string**: the
   gate strings drifted per lane, and a lane spelling the feature list
   differently is a lane running a different gate. Its body is recipe names and

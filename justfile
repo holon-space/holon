@@ -1014,7 +1014,9 @@ check-web-arm:
 # Architecture rules (archlint + the Rust-side structural tests). Its own
 # package, so `cargo nextest run --workspace` was the only thing that ran it and
 # no gate runs that — a red architecture test sat on main for 4 days
-# (BugFunnel 2026-08-12).
+# (BugFunnel 2026-08-12). Cheap (~35s): any per-lane or per-landing gate list,
+# even a hand-picked subset, should include THIS recipe — omitting it is how a
+# red architecture rule escapes a landing.
 gate-arch:
     #!/usr/bin/env bash
     set -euo pipefail
