@@ -142,6 +142,201 @@ async fn planted_sql_matches_eval() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// I3-0: `Concat` / `And` / `IsDefined` / the unit literal, against real SQLite.
+// ---------------------------------------------------------------------------
+
+/// Real SQLite is the oracle for the semantics `Computation::eval` had to pick
+/// for [`Computation::Concat`]: NULL propagation and numeric-to-text coercion.
+/// `eval` chose SQL-faithfully rather than Rhai-faithfully precisely because
+/// this planted column is what production reads — so this test, not the
+/// Rhai-differential PBT, is what decides those two rules are right.
+#[tokio::test]
+async fn concat_and_definedness_match_sqlite() {
+    let (_backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
+    std::mem::forget(_backend);
+    handle
+        .execute_ddl(
+            "CREATE TABLE q (id TEXT PRIMARY KEY, role TEXT, email TEXT, n INTEGER, f REAL, fw REAL)",
+        )
+        .await
+        .expect("create table");
+    handle
+        .execute(
+            "INSERT INTO q (id, role, email, n, f, fw) VALUES ('r1', 'CTO', 'ada@x', 1, 2.5, 1.0)",
+            vec![],
+        )
+        .await
+        .expect("seed row");
+
+    let ctx: HashMap<String, Value> = HashMap::from([
+        ("role".to_string(), Value::String("CTO".into())),
+        ("email".to_string(), Value::String("ada@x".into())),
+        ("n".to_string(), Value::Integer(1)),
+        ("f".to_string(), Value::Float(2.5)),
+        ("fw".to_string(), Value::Float(1.0)),
+    ]);
+
+    let sources = [
+        // Text join, multibyte separator.
+        r#"role + " — " + email"#,
+        // Numeric-to-text coercion, both kinds.
+        r#""n=" + n"#,
+        r#""f=" + f"#,
+        // Whole float: `{:?}` keeps the decimal point, matching SQLite's REAL text.
+        r#""fw=" + fw"#,
+        // Definedness and the unit comparison, in isolation and conjoined.
+        r#"if is_def_var("role") { role } else { email }"#,
+        r#"if role != () { role } else { email }"#,
+        // The acceptance case itself.
+        r#"if is_def_var("role") && role != () { role + " — " + email } else { email }"#,
+    ];
+
+    for (i, src) in sources.iter().enumerate() {
+        let comp = holon_api::expr_parser::parse(src)
+            .unwrap_or_else(|e| panic!("subset must parse `{src}`: {e}"));
+        let expected = comp
+            .eval(&ctx)
+            .unwrap_or_else(|e| panic!("`{src}` must evaluate: {e}"));
+
+        let plan = DerivedFieldPlan::plan(vec![DerivedField::new("d", comp)]);
+        assert_eq!(
+            plan.sql_planted.len(),
+            1,
+            "`{src}` must plant (seat A); stage={:?}",
+            plan.stage_evaluated
+        );
+        let col = &plan.sql_planted[0].sql;
+        let view = format!("v_concat_{i}");
+        reconcile_named_view(&handle, &view, &format!("SELECT id, {col} AS d FROM q"))
+            .await
+            .unwrap_or_else(|e| panic!("planted DDL `{col}` for `{src}` must succeed: {e}"));
+        let rows = handle
+            .query(&format!("SELECT d FROM {view}"), HashMap::new())
+            .await
+            .expect("query planted view");
+        let sql_val = rows[0].get("d").cloned().expect("d column");
+        assert_eq!(
+            expected, sql_val,
+            "`{src}`: eval={expected:?} matview_sql={sql_val:?} (planted `{col}`)"
+        );
+    }
+}
+
+/// NULL propagation through `||`, on a row where the guarded column IS null —
+/// the state the whole `is_def_var(x) && x != ()` idiom exists to handle, and
+/// the one a row can actually be in.
+#[tokio::test]
+async fn null_role_takes_the_else_branch_in_both_engines() {
+    let (_backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
+    std::mem::forget(_backend);
+    handle
+        .execute_ddl("CREATE TABLE qn (id TEXT PRIMARY KEY, role TEXT, email TEXT)")
+        .await
+        .expect("create table");
+    handle
+        .execute(
+            "INSERT INTO qn (id, role, email) VALUES ('r1', NULL, 'ada@x')",
+            vec![],
+        )
+        .await
+        .expect("seed row");
+
+    let src = r#"if is_def_var("role") && role != () { role + " — " + email } else { email }"#;
+    let comp = holon_api::expr_parser::parse(src).expect("must parse");
+    // In-memory, a NULL column reads back as `Value::Null`.
+    let ctx: HashMap<String, Value> = HashMap::from([
+        ("role".to_string(), Value::Null),
+        ("email".to_string(), Value::String("ada@x".into())),
+    ]);
+    let expected = comp.eval(&ctx).expect("must evaluate");
+    assert_eq!(expected, Value::String("ada@x".to_string()));
+
+    let plan = DerivedFieldPlan::plan(vec![DerivedField::new("d", comp)]);
+    let col = &plan.sql_planted[0].sql;
+    reconcile_named_view(
+        &handle,
+        "v_nullrole",
+        &format!("SELECT id, {col} AS d FROM qn"),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("planted DDL `{col}` must succeed: {e}"));
+    let rows = handle
+        .query("SELECT d FROM v_nullrole", HashMap::new())
+        .await
+        .expect("query planted view");
+    let sql_val = rows[0].get("d").cloned().expect("d column");
+    assert_eq!(expected, sql_val, "planted `{col}`");
+}
+
+/// THE ONE STATE WHERE `IsDefined` DISAGREES ACROSS THE SEATS, pinned rather
+/// than fixed — the divergence `Computation::IsDefined`'s doc comment names.
+///
+/// `eval` is key-presence (matching Rhai: a key bound to `Value::Null` IS
+/// defined); the lowering `(role IS NOT NULL)` is false on the equivalent row,
+/// because a row has no spelling for "absent" other than NULL. Isolated, the
+/// two therefore disagree. Conjoined with `role != ()` — the idiom the shape
+/// exists to serve — they agree on all three states, which is what
+/// `null_role_takes_the_else_branch_in_both_engines` shows.
+///
+/// A fix would have to invent an absence marker inside the row world; pinning
+/// keeps the disagreement visible instead of letting it be rediscovered.
+#[tokio::test]
+async fn is_defined_eval_and_sql_diverge_on_null() {
+    let (_backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
+    std::mem::forget(_backend);
+    handle
+        .execute_ddl("CREATE TABLE qd (id TEXT PRIMARY KEY, role TEXT)")
+        .await
+        .expect("create table");
+    handle
+        .execute("INSERT INTO qd (id, role) VALUES ('r1', NULL)", vec![])
+        .await
+        .expect("seed row");
+
+    let comp = holon_api::expr_parser::parse(r#"is_def_var("role")"#).expect("must parse");
+
+    // Seat A, on a context where the key is PRESENT and bound to Null — the
+    // in-memory image of that row.
+    let ctx: HashMap<String, Value> = HashMap::from([("role".to_string(), Value::Null)]);
+    assert_eq!(
+        comp.eval(&ctx).expect("must evaluate"),
+        Value::Boolean(true),
+        "eval is key-presence: a key bound to Null is defined"
+    );
+
+    // Seat B, on the row itself.
+    let plan = DerivedFieldPlan::plan(vec![DerivedField::new("d", comp)]);
+    let col = &plan.sql_planted[0].sql;
+    assert_eq!(col, "(role IS NOT NULL)");
+    reconcile_named_view(
+        &handle,
+        "v_isdef_null",
+        &format!("SELECT id, {col} AS d FROM qd"),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("planted DDL `{col}` must succeed: {e}"));
+    let rows = handle
+        .query("SELECT d FROM v_isdef_null", HashMap::new())
+        .await
+        .expect("query planted view");
+    let sql_val = rows[0].get("d").cloned().expect("d column");
+    assert_eq!(
+        sql_val,
+        Value::Integer(0),
+        "SQL cannot distinguish absent from NULL"
+    );
+
+    // The absent-key state is the one both seats DO agree on.
+    assert_eq!(
+        holon_api::expr_parser::parse(r#"is_def_var("role")"#)
+            .unwrap()
+            .eval(&HashMap::new())
+            .expect("must evaluate"),
+        Value::Boolean(false)
+    );
+}
+
 /// v0.8 FIX GUARD (was `matview_whole_float_literal_bug_is_pinned`). The Turso
 /// fork's matview logical plan used to integer-type whole-number float
 /// literals, so a planted `(3.0 / 2.0)` maintained as `1` and `(xi / 2.0)` as

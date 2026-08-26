@@ -396,6 +396,358 @@ proptest! {
     }
 }
 
+// ---------------------------------------------------------------------------
+// I3-0: string literals, `Concat`, `&&`, `is_def_var`, `()`.
+// ---------------------------------------------------------------------------
+
+const STR_VARS: [&str; 2] = ["s", "t"];
+
+/// A text-valued expression: a leading string LITERAL followed by a
+/// left-associated chain of further literals and string-bound context vars.
+///
+/// The leading literal is not decoration — it is the interior boundary. The
+/// subset decides `+` syntactically (`is_string_typed`), so text-ness has to
+/// enter the chain at the leftmost operand and propagate rightwards through the
+/// left-associated `Concat`s. A var-only prefix (`s + t`) is arithmetic to the
+/// subset and concatenation to Rhai; that divergence is real and pinned by
+/// `concat_of_two_untyped_fields_diverges_from_rhai`, so the generator stays
+/// out of it rather than rediscovering it 512 times.
+///
+/// Mixed-type and NULL operands are likewise not generated — see
+/// `directed_concat_null_and_coercion_semantics`.
+fn arb_str_expr() -> impl Strategy<Value = String> {
+    let lit = prop_oneof![
+        Just("\"\"".to_string()),
+        Just("\" — \"".to_string()),
+        Just("\"x\"".to_string()),
+        Just("\"a b\"".to_string()),
+    ];
+    let leaf = prop_oneof![
+        lit.clone(),
+        (0usize..STR_VARS.len()).prop_map(|i| STR_VARS[i].to_string()),
+    ];
+    (lit, prop::collection::vec(leaf, 0..4)).prop_map(|(head, rest)| {
+        rest.into_iter()
+            .fold(head, |acc, leaf| format!("({acc} + {leaf})"))
+    })
+}
+
+fn str_ctx() -> HashMap<String, Value> {
+    HashMap::from([
+        ("s".to_string(), Value::String("Ada".to_string())),
+        ("t".to_string(), Value::String("Löve — ✓".to_string())),
+    ])
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 512,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// Concatenation over the agreed interior: subset `Concat` == Rhai `+`,
+    /// multibyte content included.
+    #[test]
+    fn subset_concat_equals_rhai(src in arb_str_expr()) {
+        let ctx = str_ctx();
+        let comp = expr_parser::parse(&src)
+            .unwrap_or_else(|e| panic!("subset parser rejected `{src}`: {e}"));
+        prop_assert!(
+            !matches!(comp, Computation::Script(_)),
+            "`{src}` must be a typed computation"
+        );
+        let engine = bounded_engine();
+        let script = CompiledExpr::compile(&engine, &src)
+            .unwrap_or_else(|e| panic!("Rhai rejected `{src}`: {e}"));
+
+        let subset_val = comp.eval(&ctx);
+        let rhai_val = Computation::Script(script).eval(&ctx);
+        prop_assert_eq!(
+            format!("{subset_val:?}"),
+            format!("{rhai_val:?}"),
+            "concat divergence on `{}`", src
+        );
+    }
+}
+
+/// The two regimes where `Concat` deliberately does NOT follow Rhai, because
+/// its lowering target is SQLite `||` and the planted column is what production
+/// reads.
+///
+/// 1. **NULL propagates.** `x || NULL` is NULL in SQL; Rhai's `+` on `()`
+///    raises. `Concat` returns [`Value::Null`] — SQL-faithful.
+/// 2. **Numeric operands are coerced to text**, using the same rendering
+///    `SqlFragment::inline_sql` plants (`{:?}` for floats, so `1.0` keeps its
+///    decimal point exactly as SQLite prints a REAL). Rhai renders an f64 with
+///    `Display` (`1`), which is the divergence this test freezes.
+///
+/// The SQL half of both claims is checked against a real engine in
+/// `holon-turso/tests/derived_field_eval_vs_sql.rs`.
+#[test]
+fn directed_concat_null_and_coercion_semantics() {
+    let cases: &[(&str, HashMap<String, Value>, Value)] = &[
+        (
+            r#"role + " — " + email"#,
+            HashMap::from([
+                ("role".to_string(), Value::Null),
+                ("email".to_string(), Value::String("a@b".into())),
+            ]),
+            Value::Null,
+        ),
+        (
+            r#""n=" + n"#,
+            HashMap::from([("n".to_string(), Value::Integer(1))]),
+            Value::String("n=1".into()),
+        ),
+        (
+            r#""f=" + f"#,
+            HashMap::from([("f".to_string(), Value::Float(1.0))]),
+            Value::String("f=1.0".into()),
+        ),
+        (
+            r#""f=" + f"#,
+            HashMap::from([("f".to_string(), Value::Float(2.5))]),
+            Value::String("f=2.5".into()),
+        ),
+        (
+            r#""b=" + b"#,
+            HashMap::from([("b".to_string(), Value::Boolean(true))]),
+            Value::String("b=1".into()),
+        ),
+    ];
+    for (src, ctx, expected) in cases {
+        let got = expr_parser::parse(src)
+            .unwrap_or_else(|e| panic!("must parse `{src}`: {e}"))
+            .eval(ctx)
+            .unwrap_or_else(|e| panic!("`{src}` must evaluate: {e}"));
+        assert_eq!(&got, expected, "`{src}` over {ctx:?}");
+    }
+}
+
+/// `&&` must short-circuit, or the definedness guard raises the very
+/// `MissingField` it exists to prevent. This is the load-bearing property of
+/// the acceptance case, not a nicety.
+#[test]
+fn logical_and_short_circuits_like_rhai() {
+    let src = r#"is_def_var("role") && role != ()"#;
+    let comp = expr_parser::parse(src).unwrap();
+    let engine = bounded_engine();
+    let script = Computation::Script(CompiledExpr::compile(&engine, src).unwrap());
+
+    let absent: HashMap<String, Value> = HashMap::new();
+    assert_eq!(comp.eval(&absent).unwrap(), Value::Boolean(false));
+    assert_eq!(script.eval(&absent).unwrap(), Value::Boolean(false));
+
+    let null = HashMap::from([("role".to_string(), Value::Null)]);
+    assert_eq!(comp.eval(&null).unwrap(), Value::Boolean(false));
+
+    let present = HashMap::from([("role".to_string(), Value::String("CTO".into()))]);
+    assert_eq!(comp.eval(&present).unwrap(), Value::Boolean(true));
+    assert_eq!(script.eval(&present).unwrap(), Value::Boolean(true));
+}
+
+/// The acceptance case, evaluated over the three `role` states, against Rhai.
+#[test]
+fn display_name_matches_rhai_on_every_role_state() {
+    let src = r#"if is_def_var("role") && role != () { role + " — " + email } else { email }"#;
+    let comp = expr_parser::parse(src).unwrap();
+    let engine = bounded_engine();
+    let script = Computation::Script(CompiledExpr::compile(&engine, src).unwrap());
+
+    let email = Value::String("ada@x".to_string());
+    let absent = HashMap::from([("email".to_string(), email.clone())]);
+    let present = HashMap::from([
+        ("email".to_string(), email.clone()),
+        ("role".to_string(), Value::String("CTO".into())),
+    ]);
+    for ctx in [&absent, &present] {
+        assert_eq!(
+            comp.eval(ctx).unwrap(),
+            script.eval(ctx).unwrap(),
+            "display_name divergence over {ctx:?}"
+        );
+    }
+    assert_eq!(comp.eval(&absent).unwrap(), email);
+    assert_eq!(
+        comp.eval(&present).unwrap(),
+        Value::String("CTO — ada@x".to_string())
+    );
+    // Rhai binds no `()`-valued variable through a `Scope` of `Value`s, so the
+    // null state has no Rhai counterpart — the subset leg alone pins it.
+    let null_role = HashMap::from([
+        ("email".to_string(), email.clone()),
+        ("role".to_string(), Value::Null),
+    ]);
+    assert_eq!(comp.eval(&null_role).unwrap(), email);
+}
+
+/// Widening the grammar moves shipped expressions from seat B to seat A, so the
+/// ones that newly parse must be checked, not assumed.
+///
+/// `block_profile.yaml`'s `bullet_shape` is the one shipped computed field the
+/// I3-0 shapes newly admit (`!= ()`, `&&`, string-literal results); the rest
+/// still reject on `||`, `.`-method calls or non-`is_def_var` call forms and
+/// keep falling back to Rhai. Its three `collapsed` states must agree with
+/// Rhai.
+#[test]
+fn newly_parseable_shipped_bullet_shape_matches_rhai() {
+    let src = r#"if collapsed != () && collapsed != 0 { "orgmode" } else { "circle" }"#;
+    let comp = expr_parser::parse(src).expect("now in the subset");
+    let script = Computation::Script(CompiledExpr::compile(&bounded_engine(), src).unwrap());
+    comp.compile_sql().expect("and it must lower to SQL");
+
+    for (collapsed, expected) in [
+        (Value::Integer(1), "orgmode"),
+        (Value::Integer(0), "circle"),
+        (Value::Null, "circle"),
+    ] {
+        let ctx = HashMap::from([("collapsed".to_string(), collapsed.clone())]);
+        assert_eq!(
+            comp.eval(&ctx).unwrap(),
+            Value::String(expected.to_string()),
+            "bullet_shape over collapsed={collapsed:?}"
+        );
+        // Rhai binds no unit through a `Value` scope, so it checks the two
+        // numeric states.
+        if collapsed != Value::Null {
+            assert_eq!(comp.eval(&ctx).unwrap(), script.eval(&ctx).unwrap());
+        }
+    }
+}
+
+/// KNOWN LIMITATION, found by the differential oracle (counterexample `s + s`):
+/// `+` over two operands that are neither provably text nor provably numeric
+/// stays arithmetic and fails LOUD, where Rhai — which knows the runtime types
+/// — concatenates.
+///
+/// The subset cannot decide this without the declared column types, and this
+/// lane deliberately does not route the type registry through `Computation`
+/// (that is I3-1). Until it does, a text-joining field must carry a string
+/// literal — every realistic display field carries a separator anyway. Failing
+/// loud is third in the error-handling order; silently taking SQLite's
+/// `+`-on-TEXT coercion (which yields `0`) would be fourth.
+#[test]
+fn concat_of_two_untyped_fields_diverges_from_rhai() {
+    let comp = expr_parser::parse("a + b").unwrap();
+    assert!(matches!(comp, Computation::Arith { .. }));
+    let ctx = HashMap::from([
+        ("a".to_string(), Value::String("x".into())),
+        ("b".to_string(), Value::String("y".into())),
+    ]);
+    let err = comp
+        .eval(&ctx)
+        .expect_err("must fail loud, not concatenate");
+    assert!(
+        matches!(err, holon_api::computation::ComputeError::NotNumeric { .. }),
+        "expected NotNumeric, got {err:?}"
+    );
+    // Rhai, knowing the runtime types, succeeds — the divergence, frozen.
+    let rhai = Computation::Script(CompiledExpr::compile(&bounded_engine(), "a + b").unwrap())
+        .eval(&ctx)
+        .expect("Rhai concatenates");
+    assert_eq!(rhai, Value::String("xy".to_string()));
+}
+
+/// KNOWN LIMITATION, the MIRROR of
+/// `concat_of_two_untyped_fields_diverges_from_rhai`: where that one has syntax
+/// say numeric and a string flow (loud `NotNumeric`), here syntax says TEXT and
+/// a number flows — and the subset silently concatenates.
+///
+/// `is_string_typed` reads a `Case` as text when any arm is a string literal,
+/// so `(if c {"x"} else {y}) + z` is `Concat` regardless of which arm the
+/// scrutinee actually selects. With `c = false` the value that flows is `y`, a
+/// number, and `Concat` renders it: `"12"`, where Rhai — which sees the runtime
+/// types — adds to `3`. The SQL leg agrees with the subset, not with Rhai
+/// (`iif(0,'x',1) || 2` is `'12'`), so this is a subset-vs-Rhai divergence, not
+/// an eval-vs-SQL one: the two seats stay consistent with each other.
+///
+/// Not fixable without the declared field types — the same I3-1 gap. It is
+/// pinned rather than made loud because a `Concat` over a number is
+/// well-defined in the seat that matters (the planted column); only the Rhai
+/// reading differs.
+#[test]
+fn case_armed_concat_of_a_number_diverges_from_rhai() {
+    let src = r#"(if c { "x" } else { y }) + z"#;
+    let comp = expr_parser::parse(src).unwrap();
+    assert!(matches!(comp, Computation::Concat { .. }));
+    let ctx = HashMap::from([
+        ("c".to_string(), Value::Boolean(false)),
+        ("y".to_string(), Value::Integer(1)),
+        ("z".to_string(), Value::Integer(2)),
+    ]);
+    assert_eq!(
+        comp.eval(&ctx).expect("subset concatenates"),
+        Value::String("12".to_string())
+    );
+    let rhai = Computation::Script(CompiledExpr::compile(&bounded_engine(), src).unwrap())
+        .eval(&ctx)
+        .expect("Rhai adds");
+    assert_eq!(rhai, Value::Integer(3));
+}
+
+/// The THIRD Rhai-divergence axis for `Concat` (after NULL and float): a
+/// boolean operand renders SQL-style `1`/`0`, not Rhai's `true`/`false`.
+///
+/// `concat_text` is deliberately SQLite-faithful — the planted column is what
+/// production reads, and SQLite has no boolean type — so this follows from the
+/// same rule that decided the NULL and float axes. Pinned against Rhai here so
+/// the axis is not silent; pinned against `eval` in
+/// `directed_concat_null_and_coercion_semantics`.
+#[test]
+fn concat_of_a_boolean_renders_sql_style_not_rhai_style() {
+    let src = r#"("a" + b) + c"#;
+    let comp = expr_parser::parse(src).unwrap();
+    let ctx = HashMap::from([
+        ("b".to_string(), Value::Integer(1)),
+        ("c".to_string(), Value::Boolean(false)),
+    ]);
+    assert_eq!(
+        comp.eval(&ctx).expect("subset concatenates"),
+        Value::String("a10".to_string()),
+        "boolean renders as SQLite's 0"
+    );
+    let rhai = Computation::Script(CompiledExpr::compile(&bounded_engine(), src).unwrap())
+        .eval(&ctx)
+        .expect("Rhai concatenates");
+    assert_eq!(rhai, Value::String("a1false".to_string()));
+}
+
+/// F4 — the two seats must AGREE on a non-boolean `&&` operand, and they do so
+/// by BOTH refusing it.
+///
+/// `eval` raises `WrongType`; the lowering `(… AND n)` would be read truthily
+/// by SQLite (`1 AND 5` is `1`), so seat A raising where seat B yields a value
+/// is exactly the eval/SQL disagreement the dual oracle exists to forbid. The
+/// subset therefore rejects a `&&` operand that is not boolean by syntax, and
+/// the expression falls back to Rhai — which raises on it too.
+#[test]
+fn a_non_boolean_and_operand_is_refused_by_both_seats() {
+    let src = r#"is_def_var("n") && n"#;
+    let err = expr_parser::parse(src).expect_err("must leave the subset");
+    assert!(
+        err.message.contains("boolean by syntax"),
+        "error must name the constraint: {}",
+        err.message
+    );
+
+    // Seat B, the fallback: Rhai compiles it but raises at evaluation, so no
+    // seat silently produces a value.
+    let ctx = HashMap::from([("n".to_string(), Value::Integer(5))]);
+    let rhai =
+        Computation::Script(CompiledExpr::compile(&bounded_engine(), src).unwrap()).eval(&ctx);
+    assert!(rhai.is_err(), "Rhai must raise too, got {rhai:?}");
+
+    // The boolean-by-syntax shapes the acceptance case relies on still parse.
+    for ok in [
+        r#"is_def_var("role") && role != ()"#,
+        "collapsed != () && collapsed != 0",
+        r#"a == 1 && b == 2 && c == 3"#,
+    ] {
+        expr_parser::parse(ok).unwrap_or_else(|e| panic!("`{ok}` must stay in the subset: {e}"));
+    }
+}
+
 /// The verifier's two refutation counterexamples, pinned as directed regression
 /// cases, plus mixed and whole-float division. Confirms subset eval == Rhai for
 /// the integer-semantics class the float-only generator structurally missed.

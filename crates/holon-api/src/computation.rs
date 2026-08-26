@@ -153,6 +153,69 @@ fn values_match(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// A context key / column name that is a bare SQL identifier: non-empty,
+/// `[A-Za-z_][A-Za-z0-9_]*`.
+///
+/// The constraint is in the type because the name reaches planted matview DDL
+/// in **identifier position** (`(<name> IS NOT NULL)`), where quoting is not an
+/// option — a definedness test is over a column, and quoting would turn it into
+/// a comparison against a string literal. Anything that is not an identifier is
+/// therefore rejected where a raw string first appears, not re-checked at the
+/// SQL boundary.
+///
+/// The grammar is exactly the one the subset tokenizer already enforces for a
+/// bare field reference, so `is_def_var("x")` and `x` accept the same names.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FieldIdent(String);
+
+impl FieldIdent {
+    pub fn parse(name: &str) -> Result<Self, InvalidFieldIdent> {
+        let mut chars = name.chars();
+        let valid = match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+                chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }
+            _ => false,
+        };
+        if valid {
+            Ok(FieldIdent(name.to_string()))
+        } else {
+            Err(InvalidFieldIdent {
+                name: name.to_string(),
+            })
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for FieldIdent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A name that is not a bare SQL identifier and so cannot become a
+/// [`FieldIdent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidFieldIdent {
+    pub name: String,
+}
+
+impl fmt::Display for InvalidFieldIdent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "`{}` is not a bare identifier ([A-Za-z_][A-Za-z0-9_]*), so it cannot name a column",
+            self.name
+        )
+    }
+}
+
+impl std::error::Error for InvalidFieldIdent {}
+
 /// A value-producing computation over a named-value context.
 ///
 /// This type is **not** FRB-exposed (it may carry an opaque Rhai AST). The
@@ -202,6 +265,59 @@ pub enum Computation {
         branches: Vec<(Computation, Computation)>,
         else_: Box<Computation>,
     },
+    /// Text concatenation of two sub-computations (`lhs || rhs` in SQL). A
+    /// shape of its own rather than an [`ArithOp::Add`] overload: `Add`'s
+    /// `apply` is `f64`-typed by contract, and widening it would make every
+    /// numeric operand silently stringifiable.
+    ///
+    /// Rendering follows **SQLite, not Rhai** — the planted column is what
+    /// production reads. Three axes diverge from Rhai, each pinned by a named
+    /// test in `derived_field_dual_eval_pbt.rs`:
+    ///
+    /// | operand | here | Rhai |
+    /// |---|---|---|
+    /// | [`Value::Null`] | propagates ⇒ `Null` | raises |
+    /// | whole float `1.0` | `"1.0"` (`{:?}`) | `"1"` (`Display`) |
+    /// | [`Value::Boolean`] | `"1"` / `"0"` | `"true"` / `"false"` |
+    ///
+    /// A fourth divergence is about *which* operator is chosen, not rendering:
+    /// `+` is `Concat` by syntax, so a `Case` with one text arm concatenates a
+    /// number the other arm supplies where Rhai adds it
+    /// (`case_armed_concat_of_a_number_diverges_from_rhai`). All four need the
+    /// declared field types to resolve — the I3-1 gap.
+    Concat {
+        lhs: Box<Computation>,
+        rhs: Box<Computation>,
+    },
+    /// Short-circuiting boolean conjunction (`lhs && rhs`). Short-circuit is
+    /// load-bearing, not an optimization: `is_def_var("role") && role != ()`
+    /// must not evaluate `role` when it is absent, or the guard raises the
+    /// very [`ComputeError::MissingField`] it exists to prevent.
+    ///
+    /// `eval` raises [`ComputeError::WrongType`] on a non-boolean operand, but
+    /// the lowering `(l AND r)` is read truthily by SQLite — so the subset
+    /// parser refuses an operand that is not boolean by syntax, keeping the two
+    /// seats from disagreeing
+    /// (`a_non_boolean_and_operand_is_refused_by_both_seats`).
+    And {
+        lhs: Box<Computation>,
+        rhs: Box<Computation>,
+    },
+    /// `is_def_var("name")` — is `name` bound in the context?
+    ///
+    /// `eval` is key-presence, matching Rhai exactly (a key bound to
+    /// [`Value::Null`] is *defined*). SQL lowers to `name IS NOT NULL`, because
+    /// a row has no notion of an absent column — NULL is the row world's only
+    /// spelling of "not there". The two therefore disagree on exactly one
+    /// state: a context key present with a `Null` value. The idiom this shape
+    /// serves conjoins it with `name != ()`, under which both legs agree; the
+    /// isolated divergence is pinned by
+    /// `is_defined_eval_and_sql_diverge_on_null` in
+    /// `holon-turso/tests/derived_field_eval_vs_sql.rs`.
+    ///
+    /// The name is a [`FieldIdent`], not a `String`: it lands in identifier
+    /// position in planted DDL, where it cannot be quoted or parameterised.
+    IsDefined(FieldIdent),
     /// The boolean-valued shape — reuses the FRB predicate and its tuned
     /// semantics.
     Predicate(Predicate),
@@ -217,6 +333,13 @@ pub enum ComputeError {
     MissingField(String),
     NotNumeric {
         context: String,
+        value: Value,
+    },
+    /// An operand of the wrong type for a non-arithmetic shape (a non-boolean
+    /// under `&&`, a non-scalar under `||`).
+    WrongType {
+        context: String,
+        expected: &'static str,
         value: Value,
     },
     Script {
@@ -241,6 +364,13 @@ impl fmt::Display for ComputeError {
             }
             ComputeError::NotNumeric { context, value } => {
                 write!(f, "non-numeric operand in {context}: {value:?}")
+            }
+            ComputeError::WrongType {
+                context,
+                expected,
+                value,
+            } => {
+                write!(f, "{context} expects {expected}, found {value:?}")
             }
             ComputeError::Script { source, detail } => {
                 write!(f, "Rhai evaluation failed for `{source}`: {detail}")
@@ -380,6 +510,9 @@ fn value_to_sql_literal(v: &Value) -> Result<String, InlineError> {
 pub enum SqlUnsupported {
     /// An arbitrary Rhai script — genuinely uncompilable to SQL.
     Script { source: String },
+    /// A column name that is not a bare identifier. It would land unquoted in
+    /// identifier position, so it is refused rather than emitted.
+    NonIdentifierColumn { detail: String },
 }
 
 impl fmt::Display for SqlUnsupported {
@@ -390,6 +523,9 @@ impl fmt::Display for SqlUnsupported {
                 "computation `{source}` is a Rhai script and cannot be compiled to SQL; evaluate \
                  it in-memory (disclosed degraded mode)"
             ),
+            SqlUnsupported::NonIdentifierColumn { detail } => {
+                write!(f, "cannot compile a column reference to SQL: {detail}")
+            }
         }
     }
 }
@@ -430,6 +566,28 @@ impl Computation {
                 }
                 else_.eval(ctx)
             }
+            Computation::Concat { lhs, rhs } => {
+                let l = lhs.eval(ctx)?;
+                let r = rhs.eval(ctx)?;
+                if l == Value::Null || r == Value::Null {
+                    return Ok(Value::Null);
+                }
+                Ok(Value::String(format!(
+                    "{}{}",
+                    concat_text(&l, "`||` left operand")?,
+                    concat_text(&r, "`||` right operand")?
+                )))
+            }
+            Computation::And { lhs, rhs } => {
+                if !as_bool(&lhs.eval(ctx)?, "`&&` left operand")? {
+                    return Ok(Value::Boolean(false));
+                }
+                Ok(Value::Boolean(as_bool(
+                    &rhs.eval(ctx)?,
+                    "`&&` right operand",
+                )?))
+            }
+            Computation::IsDefined(name) => Ok(Value::Boolean(ctx.contains_key(name.as_str()))),
             Computation::Predicate(p) => Ok(Value::Boolean(p.evaluate(ctx))),
             Computation::Script(expr) => eval_script(expr, ctx),
         }
@@ -452,9 +610,15 @@ impl Computation {
             Computation::Field(name) => {
                 out.insert(name.clone());
             }
-            Computation::Arith { lhs, rhs, .. } | Computation::Compare { lhs, rhs, .. } => {
+            Computation::Arith { lhs, rhs, .. }
+            | Computation::Compare { lhs, rhs, .. }
+            | Computation::Concat { lhs, rhs }
+            | Computation::And { lhs, rhs } => {
                 lhs.collect_fields(out);
                 rhs.collect_fields(out);
+            }
+            Computation::IsDefined(name) => {
+                out.insert(name.as_str().to_string());
             }
             Computation::Case {
                 scrutinee,
@@ -476,8 +640,21 @@ impl Computation {
     /// names the exact shape that cannot lower — never a bare `None`.
     pub fn compile_sql(&self) -> Result<SqlFragment, SqlUnsupported> {
         match self {
+            // `NULL` is emitted as a keyword, not a bound param: a param can
+            // neither be inlined into a matview column expression nor compared
+            // with `=`.
+            Computation::Lit(Value::Null) => Ok(SqlFragment::new("NULL", vec![])),
             Computation::Lit(v) => Ok(SqlFragment::new("?", vec![v.clone()])),
-            Computation::Field(name) => Ok(SqlFragment::new(name.clone(), vec![])),
+            // The subset tokenizer only ever builds `Field` from an identifier,
+            // but the variant carries a raw `String` a programmatic caller does
+            // not inherit that constraint from — and this is identifier
+            // position, so a non-identifier would be injected verbatim.
+            Computation::Field(name) => {
+                FieldIdent::parse(name).map_err(|e| SqlUnsupported::NonIdentifierColumn {
+                    detail: e.to_string(),
+                })?;
+                Ok(SqlFragment::new(name.clone(), vec![]))
+            }
             Computation::Arith { op, lhs, rhs } => {
                 let l = lhs.compile_sql()?;
                 let r = rhs.compile_sql()?;
@@ -488,6 +665,29 @@ impl Computation {
                     params,
                 ))
             }
+            // `x = NULL` is NULL in SQL, never true — an `=`/`!=` against the
+            // unit literal must lower to the null-test operators or the whole
+            // guard silently evaluates to NULL.
+            Computation::Compare {
+                op: op @ (CmpOp::Eq | CmpOp::Ne),
+                lhs,
+                rhs,
+            } if **lhs == Computation::Lit(Value::Null)
+                || **rhs == Computation::Lit(Value::Null) =>
+            {
+                let other = if **lhs == Computation::Lit(Value::Null) {
+                    rhs
+                } else {
+                    lhs
+                };
+                let o = other.compile_sql()?;
+                let test = if matches!(op, CmpOp::Eq) {
+                    "IS NULL"
+                } else {
+                    "IS NOT NULL"
+                };
+                Ok(SqlFragment::new(format!("({} {})", o.sql, test), o.params))
+            }
             Computation::Compare { op, lhs, rhs } => {
                 let l = lhs.compile_sql()?;
                 let r = rhs.compile_sql()?;
@@ -497,6 +697,31 @@ impl Computation {
                     format!("({} {} {})", l.sql, op.sql(), r.sql),
                     params,
                 ))
+            }
+            Computation::Concat { lhs, rhs } => {
+                let l = lhs.compile_sql()?;
+                let r = rhs.compile_sql()?;
+                let mut params = l.params;
+                params.extend(r.params);
+                Ok(SqlFragment::new(
+                    format!("({} || {})", l.sql, r.sql),
+                    params,
+                ))
+            }
+            Computation::And { lhs, rhs } => {
+                let l = lhs.compile_sql()?;
+                let r = rhs.compile_sql()?;
+                let mut params = l.params;
+                params.extend(r.params);
+                Ok(SqlFragment::new(
+                    format!("({} AND {})", l.sql, r.sql),
+                    params,
+                ))
+            }
+            // `name` is a `FieldIdent`, so it is an identifier by construction —
+            // the only reason this interpolation is safe.
+            Computation::IsDefined(name) => {
+                Ok(SqlFragment::new(format!("({name} IS NOT NULL)"), vec![]))
             }
             Computation::Case {
                 scrutinee,
@@ -569,6 +794,42 @@ fn collect_predicate_fields(pred: &Predicate, out: &mut std::collections::BTreeS
         }
         Predicate::Always => {}
     }
+}
+
+fn as_bool(v: &Value, context: &str) -> Result<bool, ComputeError> {
+    match v {
+        Value::Boolean(b) => Ok(*b),
+        other => Err(ComputeError::WrongType {
+            context: context.to_string(),
+            expected: "a boolean",
+            value: other.clone(),
+        }),
+    }
+}
+
+/// The canonical value→text rendering for [`Computation::Concat`], chosen to
+/// match what SQLite's `||` produces for the same value, so the planted column
+/// and the in-memory evaluation agree.
+///
+/// `Float` uses `{:?}` (shortest round-tripping form, always with a decimal
+/// point) — the same rendering [`value_to_sql_literal`] plants. That agrees
+/// with SQLite over ordinary magnitudes; the two exponent spellings drift at
+/// extremes (`1e20` vs SQLite's `1.0e+20`), which is why the eval-vs-SQL matrix
+/// pins the agreeing range explicitly.
+fn concat_text(v: &Value, context: &str) -> Result<String, ComputeError> {
+    Ok(match v {
+        Value::String(s) | Value::DateTime(s) | Value::Json(s) => s.clone(),
+        Value::Integer(i) => i.to_string(),
+        Value::Float(f) => format!("{f:?}"),
+        Value::Boolean(b) => if *b { "1" } else { "0" }.to_string(),
+        Value::Null | Value::Array(_) | Value::Object(_) => {
+            return Err(ComputeError::WrongType {
+                context: context.to_string(),
+                expected: "a scalar value",
+                value: v.clone(),
+            });
+        }
+    })
 }
 
 fn as_number(v: &Value, context: &str) -> Result<f64, ComputeError> {
@@ -651,6 +912,17 @@ fn eval_script(expr: &CompiledExpr, ctx: &Context) -> Result<Value, ComputeError
 /// with [`Computation::compile_sql`]'s contract, and And/Or propagate child
 /// errors with `?` instead of `filter_map`-dropping them.
 pub fn predicate_to_sql(pred: &Predicate) -> Result<SqlFragment, SqlUnsupported> {
+    // Every arm below interpolates `field` into identifier position, where it
+    // can be neither quoted nor parameterised. `Predicate` is FRB-exposed and
+    // carries a raw `String`, so the constraint cannot live in its type without
+    // crossing the bridge; it is enforced here instead — the one place a
+    // predicate becomes SQL text. `Not`/`And`/`Or` recurse through this same
+    // check.
+    if let Some(field) = predicate_column(pred) {
+        FieldIdent::parse(field).map_err(|e| SqlUnsupported::NonIdentifierColumn {
+            detail: e.to_string(),
+        })?;
+    }
     Ok(match pred {
         Predicate::Eq { field, value } => {
             SqlFragment::new(format!("{field} = ?"), vec![value.clone()])
@@ -688,6 +960,22 @@ pub fn predicate_to_sql(pred: &Predicate) -> Result<SqlFragment, SqlUnsupported>
         // Was silently `None`; a no-op filter is `TRUE`, which IS compilable.
         Predicate::Always => SqlFragment::new("1 = 1", vec![]),
     })
+}
+
+/// The column a predicate names directly, if it names one. The composite shapes
+/// return `None` — their children are checked when they recurse.
+fn predicate_column(pred: &Predicate) -> Option<&str> {
+    match pred {
+        Predicate::Eq { field, .. }
+        | Predicate::Ne { field, .. }
+        | Predicate::Gt { field, .. }
+        | Predicate::Lt { field, .. }
+        | Predicate::Gte { field, .. }
+        | Predicate::Lte { field, .. }
+        | Predicate::IsNotNull(field)
+        | Predicate::Var(field) => Some(field),
+        Predicate::Not(_) | Predicate::And(_) | Predicate::Or(_) | Predicate::Always => None,
+    }
 }
 
 fn join_predicates(preds: &[Predicate], sep: &str) -> Result<SqlFragment, SqlUnsupported> {

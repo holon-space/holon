@@ -11,21 +11,27 @@
 //! The subset:
 //!
 //! ```text
-//! expr        := if_expr | switch_expr | comparison
-//! if_expr     := 'if' comparison block ('else' 'if' comparison block)* 'else' block
+//! expr        := if_expr | switch_expr | and_expr
+//! if_expr     := 'if' and_expr block ('else' 'if' and_expr block)* 'else' block
 //! switch_expr := 'switch' comparison '{' arm (',' arm)* ','? '}'
 //! arm         := ('-'? number) '=>' expr | '_' '=>' expr     // labels: distinct numeric literals
 //! block       := '{' expr '}'
+//! and_expr    := comparison ( '&&' comparison )*   // operands boolean by syntax
 //! comparison  := additive ( ('=='|'!='|'<'|'<='|'>'|'>=') additive )?
 //! additive    := multiplicative ( ('+'|'-') multiplicative )*
 //! multiplicative := unary ( ('*'|'/') unary )*
 //! unary       := '-'? primary
-//! primary     := number | identifier | '(' expr ')'
+//! primary     := number | string | identifier | is_def_var | '(' expr ')' | '()'
+//! is_def_var  := 'is_def_var' '(' string ')'      // the string must be an identifier
 //! ```
 //!
 //! `if`/`switch` both lower to [`Computation::Case`] (see its docs): `switch`
 //! keeps its scrutinee; `if` uses a `true` scrutinee with each branch's
 //! `match_value` being the boolean condition.
+//!
+//! `+` produces [`Computation::Concat`] instead of [`Computation::Arith`] when
+//! either operand is text by syntax (see [`is_string_typed`]); `()` is
+//! [`Value::Null`], the only "nothing" inhabitant `Value` and SQL share.
 //!
 //! This is a **total function that fails loud with a typed error** — it does
 //! NOT swallow. The *caller* (petri `=`-prop path) treats a parse error as the
@@ -40,6 +46,7 @@ use crate::Value;
 use crate::computation::ArithOp;
 use crate::computation::CmpOp;
 use crate::computation::Computation;
+use crate::computation::FieldIdent;
 
 /// A subset-parse failure. Not a user error on its own: the derived-field
 /// pipeline falls back to Rhai on `Err`. Carries a message for disclosure.
@@ -92,7 +99,10 @@ enum Tok {
         text: String,
         is_float: bool,
     },
+    /// String literal, already unescaped.
+    Str(String),
     Ident(String),
+    AndAnd,
     Plus,
     Minus,
     Star,
@@ -153,6 +163,65 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, ExprParseError> {
                     }
                 }
                 out.push(Tok::Ident(src[start..i].to_string()));
+            }
+            '"' => {
+                i += 1;
+                let mut s = String::new();
+                loop {
+                    let Some(&b) = bytes.get(i) else {
+                        return Err(ExprParseError::new("unterminated string literal"));
+                    };
+                    match b {
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        b'\\' => {
+                            i += 1;
+                            let Some(&esc) = bytes.get(i) else {
+                                return Err(ExprParseError::new(
+                                    "unterminated escape in string literal",
+                                ));
+                            };
+                            s.push(match esc {
+                                b'"' => '"',
+                                b'\\' => '\\',
+                                b'n' => '\n',
+                                b'r' => '\r',
+                                b't' => '\t',
+                                other => {
+                                    return Err(ExprParseError::new(format!(
+                                        "unsupported escape `\\{}` in string literal",
+                                        other as char
+                                    )));
+                                }
+                            });
+                            i += 1;
+                        }
+                        // Multibyte UTF-8 passes through untouched: only ASCII
+                        // `"` and `\` terminate, and continuation bytes are all
+                        // >= 0x80.
+                        _ => {
+                            let start = i;
+                            while i < bytes.len() && bytes[i] != b'"' && bytes[i] != b'\\' {
+                                i += 1;
+                            }
+                            s.push_str(&src[start..i]);
+                        }
+                    }
+                }
+                out.push(Tok::Str(s));
+            }
+            '&' => {
+                i += 1;
+                if next_is(bytes, i, b'&') {
+                    out.push(Tok::AndAnd);
+                    i += 1;
+                } else {
+                    return Err(ExprParseError::new(
+                        "bitwise `&` is not in the subset (only `&&`)",
+                    ));
+                }
             }
             '+' => {
                 out.push(Tok::Plus);
@@ -284,8 +353,23 @@ impl Parser {
         } else if self.peek_ident("switch") {
             self.parse_switch()
         } else {
-            self.parse_comparison()
+            self.parse_and()
         }
+    }
+
+    fn parse_and(&mut self) -> Result<Computation, ExprParseError> {
+        let mut lhs = self.parse_comparison()?;
+        while matches!(self.peek(), Some(Tok::AndAnd)) {
+            self.bump();
+            let rhs = self.parse_comparison()?;
+            require_boolean_typed(&lhs, "`&&` left operand")?;
+            require_boolean_typed(&rhs, "`&&` right operand")?;
+            lhs = Computation::And {
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
+        }
+        Ok(lhs)
     }
 
     fn parse_block(&mut self) -> Result<Computation, ExprParseError> {
@@ -302,14 +386,14 @@ impl Parser {
     fn parse_if(&mut self) -> Result<Computation, ExprParseError> {
         self.expect(&Tok::Ident("if".into()), "`if`")?;
         let mut branches = Vec::new();
-        let cond = self.parse_comparison()?;
+        let cond = self.parse_and()?;
         let body = self.parse_block()?;
         branches.push((cond, body));
         loop {
             self.expect(&Tok::Ident("else".into()), "`else`")?;
             if self.peek_ident("if") {
                 self.bump(); // consume `if`
-                let cond = self.parse_comparison()?;
+                let cond = self.parse_and()?;
                 let body = self.parse_block()?;
                 branches.push((cond, body));
             } else {
@@ -428,10 +512,17 @@ impl Parser {
             };
             self.bump();
             let rhs = self.parse_multiplicative()?;
-            lhs = Computation::Arith {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            lhs = if op == ArithOp::Add && (is_string_typed(&lhs) || is_string_typed(&rhs)) {
+                Computation::Concat {
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                }
+            } else {
+                Computation::Arith {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                }
             };
         }
         Ok(lhs)
@@ -476,6 +567,7 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Computation, ExprParseError> {
         match self.bump() {
+            Some(Tok::Str(s)) => Ok(Computation::Lit(Value::String(s))),
             Some(Tok::Num { text, is_float }) => {
                 let value = if is_float {
                     Value::Float(text.parse::<f64>().map_err(|e| {
@@ -497,17 +589,110 @@ impl Parser {
                         "keyword `{name}` is not a valid primary in the subset"
                     )));
                 }
+                if name == "is_def_var" {
+                    return self.parse_is_def_var();
+                }
                 Ok(Computation::Field(name))
             }
             Some(Tok::LParen) => {
+                // `()` — Rhai's unit. Modelled as `Value::Null`, the only
+                // "nothing" inhabitant `Value` has and the one SQL agrees with.
+                if matches!(self.peek(), Some(Tok::RParen)) {
+                    self.bump();
+                    return Ok(Computation::Lit(Value::Null));
+                }
                 let inner = self.parse_expr()?;
                 self.expect(&Tok::RParen, "`)`")?;
                 Ok(inner)
             }
             other => Err(ExprParseError::new(format!(
-                "expected a number, identifier, or `(`, found {other:?}"
+                "expected a number, string, identifier, or `(`, found {other:?}"
             ))),
         }
+    }
+
+    /// `is_def_var("name")` — the one call form in the subset. Rhai's own
+    /// definedness builtin, so the source stays compilable by BOTH engines and
+    /// the differential oracle keeps covering it.
+    ///
+    /// The argument is a string LITERAL in the source but names a variable, so
+    /// it must satisfy the same identifier grammar as a bare field reference —
+    /// its lowering puts it in unquotable identifier position. Rejecting here
+    /// is what keeps [`Computation::IsDefined`]'s [`FieldIdent`] inhabited only
+    /// by names that can safely reach DDL.
+    fn parse_is_def_var(&mut self) -> Result<Computation, ExprParseError> {
+        self.expect(&Tok::LParen, "`(` after `is_def_var`")?;
+        let name = match self.bump() {
+            Some(Tok::Str(s)) => s,
+            other => {
+                return Err(ExprParseError::new(format!(
+                    "is_def_var expects a string-literal variable name, found {other:?}"
+                )));
+            }
+        };
+        self.expect(&Tok::RParen, "`)` closing is_def_var")?;
+        let ident = FieldIdent::parse(&name)
+            .map_err(|e| ExprParseError::new(format!("is_def_var argument: {e}")))?;
+        Ok(Computation::IsDefined(ident))
+    }
+}
+
+/// Does this sub-expression produce text *by syntax alone*?
+///
+/// This is what decides whether `+` is arithmetic or concatenation, and it is
+/// deliberately syntactic: a chain is text as soon as one string literal
+/// appears in it. `a + b` over two string COLUMNS carries no such evidence and
+/// stays [`Computation::Arith`], failing loud at eval — the alternative is
+/// inferring types the declaration never states. Every display field that
+/// concatenates carries a separator literal, so the evidence is there in
+/// practice.
+/// Reject a `&&` operand that is not boolean *by syntax alone*.
+///
+/// This exists to keep the two seats symmetric. `Computation::eval` raises
+/// [`crate::computation::ComputeError::WrongType`] on a non-boolean operand,
+/// but the SQL lowering `(a AND b)` has no such notion — SQLite reads any
+/// scalar truthily (`1 AND 5` is `1`), so a bare column operand would make seat
+/// A raise where seat B silently yields a value. Neither seat may accept what
+/// the other rejects, so such an expression leaves the subset entirely and
+/// falls back to Rhai, which raises on a non-boolean `&&` operand too.
+///
+/// The cost is that a boolean COLUMN (`is_source && is_focused`) carries no
+/// syntactic evidence of its type and so cannot ride seat A yet — the same
+/// missing-declared-types gap as [`is_string_typed`], closed by the same I3-1
+/// work.
+fn require_boolean_typed(c: &Computation, position: &str) -> Result<(), ExprParseError> {
+    if is_boolean_typed(c) {
+        return Ok(());
+    }
+    Err(ExprParseError::new(format!(
+        "{position} is not boolean by syntax; the subset requires a comparison, `&&`, \
+         `is_def_var`, or a boolean literal so that in-memory and SQL evaluation agree"
+    )))
+}
+
+/// Does this sub-expression produce a boolean *by syntax alone*? The mirror of
+/// [`is_string_typed`], on the same syntactic-evidence principle.
+fn is_boolean_typed(c: &Computation) -> bool {
+    match c {
+        Computation::Compare { .. }
+        | Computation::And { .. }
+        | Computation::IsDefined(_)
+        | Computation::Predicate(_)
+        | Computation::Lit(Value::Boolean(_)) => true,
+        Computation::Case {
+            branches, else_, ..
+        } => is_boolean_typed(else_) && branches.iter().all(|(_, r)| is_boolean_typed(r)),
+        _ => false,
+    }
+}
+
+fn is_string_typed(c: &Computation) -> bool {
+    match c {
+        Computation::Lit(Value::String(_)) | Computation::Concat { .. } => true,
+        Computation::Case {
+            branches, else_, ..
+        } => is_string_typed(else_) || branches.iter().any(|(_, r)| is_string_typed(r)),
+        _ => false,
     }
 }
 
@@ -575,10 +760,42 @@ mod tests {
 
     #[test]
     fn rejects_out_of_subset_constructs() {
-        // Function calls, string literals, boolean ops -> Err (caller falls back).
+        // Calls other than `is_def_var`, statements, bitwise ops -> Err (the
+        // caller falls back to Rhai).
         assert!(parse("max(a, b)").is_err());
-        assert!(parse("\"hello\"").is_err());
-        assert!(parse("a && b").is_err());
         assert!(parse("let x = 1").is_err());
+        assert!(parse("a & b").is_err());
+        assert!(parse("a || b").is_err());
+        assert!(parse("is_def_var(role)").is_err());
+        assert!(parse("\"unterminated").is_err());
+        assert!(parse("\"bad \\q escape\"").is_err());
+    }
+
+    #[test]
+    fn parses_the_i3_0_shapes() {
+        assert_eq!(
+            parse("\"hello\"").unwrap(),
+            Computation::Lit(Value::String("hello".into()))
+        );
+        assert_eq!(parse("()").unwrap(), Computation::Lit(Value::Null));
+        assert_eq!(
+            parse("is_def_var(\"role\")").unwrap(),
+            Computation::IsDefined(FieldIdent::parse("role").unwrap())
+        );
+        assert!(matches!(
+            parse("a > 1 && b > 2").unwrap(),
+            Computation::And { .. }
+        ));
+        // Multibyte string content survives the byte-indexed tokenizer.
+        assert_eq!(
+            parse("\" — \"").unwrap(),
+            Computation::Lit(Value::String(" — ".into()))
+        );
+        // `+` becomes Concat once a string literal appears, and stays Concat
+        // through the rest of the left-associated chain.
+        assert!(matches!(
+            parse("role + \" — \" + email").unwrap(),
+            Computation::Concat { .. }
+        ));
     }
 }
