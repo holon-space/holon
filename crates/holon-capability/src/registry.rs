@@ -39,6 +39,24 @@ impl ProfileRegistry {
         Ok(Self { profiles: map })
     }
 
+    /// Build a registry straight from profile yaml, `label` naming each
+    /// document in a parse error.
+    ///
+    /// The parse belongs here so that assembling a registry — the shipped set
+    /// below, or a bespoke one a consumer needs — never obliges a caller to
+    /// hold a `CapabilityProfile` value of its own.
+    pub fn from_yaml<'a>(documents: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<Self> {
+        let mut profiles = Vec::new();
+        for (label, yaml) in documents {
+            profiles.push(
+                CapabilityProfile::from_yaml(yaml).map_err(|e| {
+                    anyhow::anyhow!("parsing the `{label}` capability profile: {e}")
+                })?,
+            );
+        }
+        Self::new(profiles)
+    }
+
     pub fn get(&self, id: &CapabilityProfileId) -> Option<&CapabilityProfile> {
         self.profiles.get(id)
     }
@@ -104,21 +122,13 @@ impl ProfileRegistry {
 /// Every id [`crate::profile_of`] can return must parse, so a home that cannot
 /// be priced fails at startup rather than at the first move.
 pub fn shipped_profiles() -> Result<ProfileRegistry> {
-    const SHIPPED: &[(&str, &str)] = &[
+    ProfileRegistry::from_yaml([
         (
             "holon-native",
             include_str!("../../../assets/default/capability/holon-native.yaml"),
         ),
         ("org", include_str!("../../holon-org-format/profile.yaml")),
-    ];
-    let mut profiles = Vec::new();
-    for (name, yaml) in SHIPPED {
-        profiles.push(
-            CapabilityProfile::from_yaml(yaml)
-                .map_err(|e| anyhow::anyhow!("parsing the shipped `{name}` profile: {e}"))?,
-        );
-    }
-    ProfileRegistry::new(profiles)
+    ])
 }
 
 #[cfg(test)]

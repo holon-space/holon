@@ -18,7 +18,6 @@ use std::sync::Arc;
 use fluxdi::Module;
 use fluxdi::Provider;
 use holon_api::Value;
-use holon_capability::CapabilityProfile;
 use holon_capability::ProfileRegistry;
 use holon_loro_wiring::EventInfraModule;
 
@@ -47,9 +46,9 @@ fn registry_with_org_kinds(kinds: &str) -> Arc<ProfileRegistry> {
     );
     let narrowed = ORG.replace(DECLARED, &format!("hosted_entity_kinds: {kinds}"));
     Arc::new(
-        ProfileRegistry::new(vec![
-            CapabilityProfile::from_yaml(&narrowed).expect("narrowed org profile parses"),
-            CapabilityProfile::from_yaml(NATIVE).expect("native profile parses"),
+        ProfileRegistry::from_yaml([
+            ("org (narrowed)", narrowed.as_str()),
+            ("holon-native", NATIVE),
         ])
         .expect("registry builds"),
     )
