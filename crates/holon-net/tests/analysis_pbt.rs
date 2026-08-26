@@ -14,6 +14,7 @@ use holon_net::CompiledNet;
 use holon_net::Flow;
 use holon_net::NetArc;
 use holon_net::NetTransition;
+use holon_net::TransitionKey;
 use holon_net::TransitionSource;
 use holon_net::compile::compile_rule;
 use holon_net::net::UndeclaredHalf;
@@ -110,6 +111,10 @@ fn analyzable_indices(net: &CompiledNet) -> Vec<usize> {
         .collect()
 }
 
+fn key(net: &CompiledNet, index: usize) -> TransitionKey {
+    net.transitions[index].key()
+}
+
 proptest! {
     /// Per-place writer/reader sets equal a naive recount, and unanalyzable
     /// transitions are listed, never silently conflict-free.
@@ -117,35 +122,37 @@ proptest! {
     fn conflict_report_equals_the_naive_recount(net in arb_net()) {
         let report = holon_net::conflicts(&net);
 
-        let expected_unanalyzable: Vec<usize> = net
+        let expected_unanalyzable: Vec<TransitionKey> = net
             .transitions
             .iter()
-            .enumerate()
-            .filter(|(_, t)| t.analyzability != Analyzability::Analyzable)
-            .map(|(i, _)| i)
+            .filter(|t| t.analyzability != Analyzability::Analyzable)
+            .map(NetTransition::key)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect();
         prop_assert_eq!(&report.unanalyzable, &expected_unanalyzable);
 
-        let mut model: BTreeMap<String, (BTreeSet<usize>, BTreeSet<usize>)> = BTreeMap::new();
+        let mut model: BTreeMap<String, (BTreeSet<TransitionKey>, BTreeSet<TransitionKey>)> =
+            BTreeMap::new();
         for i in analyzable_indices(&net) {
             for place in writes(&net.transitions[i]) {
-                model.entry(place).or_default().0.insert(i);
+                model.entry(place).or_default().0.insert(key(&net, i));
             }
             for place in reads(&net.transitions[i]) {
-                model.entry(place).or_default().1.insert(i);
+                model.entry(place).or_default().1.insert(key(&net, i));
             }
         }
-        let expected: BTreeMap<String, (Vec<usize>, Vec<usize>)> = model
+        let expected: BTreeMap<String, (Vec<TransitionKey>, Vec<TransitionKey>)> = model
             .into_iter()
             .filter_map(|(place, (writers, readers))| {
-                let readers: Vec<usize> = readers.difference(&writers).copied().collect();
+                let readers: Vec<TransitionKey> = readers.difference(&writers).cloned().collect();
                 if writers.is_empty() || writers.len() + readers.len() < 2 {
                     return None;
                 }
                 Some((place, (writers.into_iter().collect(), readers)))
             })
             .collect();
-        let got: BTreeMap<String, (Vec<usize>, Vec<usize>)> = report
+        let got: BTreeMap<String, (Vec<TransitionKey>, Vec<TransitionKey>)> = report
             .contentions
             .iter()
             .map(|c| (c.place.to_string(), (c.writers.clone(), c.readers.clone())))
@@ -187,10 +194,12 @@ proptest! {
             }
         }
 
-        let got: BTreeSet<usize> = report
+        let expected: BTreeSet<TransitionKey> =
+            expected.into_iter().map(|i| key(&net, i)).collect();
+        let got: BTreeSet<TransitionKey> = report
             .cycles
             .iter()
-            .flat_map(|c| c.transitions.iter().copied())
+            .flat_map(|c| c.transitions.iter().cloned())
             .collect();
         prop_assert_eq!(got, expected);
     }
@@ -217,6 +226,7 @@ emit:
             rule,
         })],
     };
+    let rule_key = TransitionKey::rule("block:rule-daily-journal");
     let report = holon_net::cycles(&net);
     assert_eq!(
         report
@@ -224,14 +234,17 @@ emit:
             .iter()
             .map(|c| c.transitions.clone())
             .collect::<Vec<_>>(),
-        vec![vec![0]],
+        vec![vec![rule_key.clone()]],
         "emit produces the places the inhibitor footprint reads: {:#?}",
         net.transitions[0].arcs
     );
 
     let conflict = holon_net::conflicts(&net);
     assert!(
-        conflict.contentions.iter().all(|c| c.writers == vec![0]),
+        conflict
+            .contentions
+            .iter()
+            .all(|c| c.writers == vec![rule_key.clone()]),
         "a single transition cannot contend with anything else: {:#?}",
         conflict.contentions
     );

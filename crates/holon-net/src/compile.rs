@@ -1,5 +1,7 @@
 //! `derive_net` — the pure derivation from sources to [`CompiledNet`].
 
+use std::collections::BTreeSet;
+
 use holon_api::OperationDescriptor;
 use holon_api::arcs::ArcEmit;
 use holon_api::arcs::ArcPlace;
@@ -44,11 +46,18 @@ pub fn derive_net(
     rules: &[RuleSource],
 ) -> Result<CompiledNet, NetCompileError> {
     let mut transitions = Vec::with_capacity(descriptors.len() + rules.len());
+    let mut claimed = BTreeSet::new();
     for descriptor in descriptors {
         transitions.push(compile_operation(descriptor)?);
     }
     for rule in rules {
         transitions.push(compile_rule(rule));
+    }
+    for transition in &transitions {
+        let key = transition.key();
+        if !claimed.insert(key.clone()) {
+            return Err(NetCompileError::DuplicateTransition { key });
+        }
     }
     Ok(CompiledNet { transitions })
 }

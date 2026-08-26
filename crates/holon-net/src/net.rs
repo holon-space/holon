@@ -11,6 +11,7 @@ use holon_pattern::schema::block;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::bridge::TransitionKey;
 use crate::bridge::TransitionSource;
 
 /// Reserved for correlated multi-arc bindings — the CPN-orthodox join ADR
@@ -121,6 +122,12 @@ pub struct NetTransition {
 }
 
 impl NetTransition {
+    /// This transition's identity, derived from its source — the net stores
+    /// no second copy that could drift.
+    pub fn key(&self) -> TransitionKey {
+        self.source.key()
+    }
+
     /// The places this transition may write: every `Produce` or `Relocate`
     /// arc's place.
     pub fn written_places(&self) -> BTreeSet<&ArcPlace> {
@@ -156,6 +163,14 @@ pub struct CompiledNet {
     pub transitions: Vec<NetTransition>,
 }
 
+impl CompiledNet {
+    /// The transition a report's key names. `None` only when the key belongs
+    /// to a different net than the report it came from.
+    pub fn transition(&self, key: &TransitionKey) -> Option<&NetTransition> {
+        self.transitions.iter().find(|t| &t.key() == key)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NetCompileError {
     #[error(
@@ -164,6 +179,13 @@ pub enum NetCompileError {
          another kind)"
     )]
     AspectUnmapped { kind: ArcRelation, aspect: Aspect },
+
+    #[error(
+        "two sources compile to the transition {key}: an operation is identified by its \
+         (entity, op) and a rule by its block, so a repeat means two providers claim one \
+         identity — resolve the claim rather than letting one silently shadow the other"
+    )]
+    DuplicateTransition { key: TransitionKey },
 }
 
 /// The concrete places that carry one coarse aspect's tokens (ADR 0032 §4),

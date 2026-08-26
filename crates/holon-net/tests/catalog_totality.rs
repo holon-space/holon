@@ -11,6 +11,7 @@ use holon_api::marking::MarkingDelta;
 use holon_net::Analyzability;
 use holon_net::ArcOrigin;
 use holon_net::Aspect;
+use holon_net::TransitionKey;
 use holon_net::net::UndeclaredHalf;
 use holon_net::net::aspect_places;
 use holon_pattern::arcs::TransitionArcs;
@@ -40,11 +41,10 @@ fn catalog_analyzability_matches_the_declared_halves() {
     let ops = block_catalog();
     let net = holon_net::derive_net(&ops, &[]).unwrap();
     let analyzability = |name: &str| {
-        let index = ops
-            .iter()
-            .position(|op| op.name == name)
-            .unwrap_or_else(|| panic!("catalog advertises {name}"));
-        net.transitions[index].analyzability.clone()
+        net.transition(&TransitionKey::operation("block", name))
+            .unwrap_or_else(|| panic!("catalog advertises {name}"))
+            .analyzability
+            .clone()
     };
     assert_eq!(analyzability("set_field"), Analyzability::Analyzable);
     for name in [
@@ -148,32 +148,43 @@ fn undeclared_halves_are_unanalyzable_and_distinct_from_declared_empty() {
     let ops = block_catalog();
     let set_field = ops.iter().find(|op| op.name == "set_field").unwrap();
 
+    // Distinct op names: three variants of one op would claim one key.
     let mut arcless = set_field.clone();
+    arcless.name = "arcless".to_string();
     arcless.arcs = TransitionArcs::Undeclared;
     let mut deltaless = set_field.clone();
+    deltaless.name = "deltaless".to_string();
     deltaless.marking_delta = MarkingDelta::Undeclared;
     let mut empty_arcs = set_field.clone();
+    empty_arcs.name = "empty_arcs".to_string();
     empty_arcs.arcs = TransitionArcs::Declared {
         reads: vec![],
         emits: vec![],
     };
 
     let net = holon_net::derive_net(&[arcless, deltaless, empty_arcs], &[]).unwrap();
+    let transition = |name: &str| {
+        net.transition(&TransitionKey::operation("block", name))
+            .unwrap_or_else(|| panic!("the net carries {name}"))
+    };
     assert_eq!(
-        net.transitions[0].analyzability,
+        transition("arcless").analyzability,
         Analyzability::Unanalyzable {
             undeclared: vec![UndeclaredHalf::Arcs]
         }
     );
     assert_eq!(
-        net.transitions[1].analyzability,
+        transition("deltaless").analyzability,
         Analyzability::Unanalyzable {
             undeclared: vec![UndeclaredHalf::MarkingDelta]
         }
     );
-    assert_eq!(net.transitions[2].analyzability, Analyzability::Analyzable);
+    assert_eq!(
+        transition("empty_arcs").analyzability,
+        Analyzability::Analyzable
+    );
     assert!(
-        !net.transitions[2]
+        !transition("empty_arcs")
             .arcs
             .iter()
             .any(|a| matches!(a.origin, ArcOrigin::DeclaredRead | ArcOrigin::DeclaredEmit)),

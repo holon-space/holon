@@ -13,21 +13,22 @@ use holon_pattern::arcs::ArcPlace;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::bridge::TransitionKey;
 use crate::net::Analyzability;
 use crate::net::ArcOrigin;
 use crate::net::CompiledNet;
 use crate::net::NetTransition;
 
-/// Transitions contending for one place. Indices point into
-/// [`CompiledNet::transitions`].
+/// Transitions contending for one place, named by the keys
+/// [`CompiledNet::transition`] resolves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaceContention {
     pub place: ArcPlace,
     /// Transitions that write the place (produce, consume, or relocate a
     /// token in it).
-    pub writers: Vec<usize>,
+    pub writers: Vec<TransitionKey>,
     /// Transitions whose enabledness reads the place without writing it.
-    pub readers: Vec<usize>,
+    pub readers: Vec<TransitionKey>,
     /// True when a participant touches the place only through a guard
     /// footprint — predicate-opaque, so the contention may be vacuous.
     pub over_approximate: bool,
@@ -39,7 +40,7 @@ pub struct ConflictReport {
     pub contentions: Vec<PlaceContention>,
     /// Transitions the analysis cannot speak for ("cannot say", never "no
     /// conflicts").
-    pub unanalyzable: Vec<usize>,
+    pub unanalyzable: Vec<TransitionKey>,
 }
 
 /// A set of transitions whose produced places feed back into their own read
@@ -48,38 +49,39 @@ pub struct ConflictReport {
 /// benign self-loop through its inhibitor's footprint read.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CycleFinding {
-    pub transitions: Vec<usize>,
+    pub transitions: Vec<TransitionKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CycleReport {
     pub cycles: Vec<CycleFinding>,
-    pub unanalyzable: Vec<usize>,
+    pub unanalyzable: Vec<TransitionKey>,
 }
 
 /// Pairwise read/write contention per place, over the analyzable transitions.
 pub fn conflicts(net: &CompiledNet) -> ConflictReport {
-    let unanalyzable = unanalyzable_indices(net);
-    let mut writers: BTreeMap<&ArcPlace, BTreeSet<usize>> = BTreeMap::new();
-    let mut readers: BTreeMap<&ArcPlace, BTreeSet<usize>> = BTreeMap::new();
-    let mut footprint_touch: BTreeSet<(&ArcPlace, usize)> = BTreeSet::new();
-    for (index, transition) in analyzable(net) {
+    let unanalyzable = unanalyzable_keys(net);
+    let mut writers: BTreeMap<&ArcPlace, BTreeSet<TransitionKey>> = BTreeMap::new();
+    let mut readers: BTreeMap<&ArcPlace, BTreeSet<TransitionKey>> = BTreeMap::new();
+    let mut footprint_touch: BTreeSet<(&ArcPlace, TransitionKey)> = BTreeSet::new();
+    for (_, transition) in analyzable(net) {
+        let key = transition.key();
         for place in transition.written_places() {
-            writers.entry(place).or_default().insert(index);
+            writers.entry(place).or_default().insert(key.clone());
         }
         for place in transition.read_places() {
-            readers.entry(place).or_default().insert(index);
+            readers.entry(place).or_default().insert(key.clone());
         }
         for arc in &transition.arcs {
             if arc.origin == ArcOrigin::GuardFootprint {
-                footprint_touch.insert((&arc.place, index));
+                footprint_touch.insert((&arc.place, key.clone()));
             }
         }
     }
 
     let mut contentions = Vec::new();
     for (place, place_writers) in &writers {
-        let place_readers: BTreeSet<usize> = readers
+        let place_readers: BTreeSet<TransitionKey> = readers
             .get(place)
             .map(|r| r - place_writers)
             .unwrap_or_default();
@@ -89,11 +91,11 @@ pub fn conflicts(net: &CompiledNet) -> ConflictReport {
         let over_approximate = place_writers
             .iter()
             .chain(&place_readers)
-            .any(|&t| footprint_touch.contains(&(place, t)));
+            .any(|t| footprint_touch.contains(&(place, t.clone())));
         contentions.push(PlaceContention {
             place: (*place).clone(),
-            writers: place_writers.iter().copied().collect(),
-            readers: place_readers.iter().copied().collect(),
+            writers: place_writers.iter().cloned().collect(),
+            readers: place_readers.into_iter().collect(),
             over_approximate,
         });
     }
@@ -107,7 +109,7 @@ pub fn conflicts(net: &CompiledNet) -> ConflictReport {
 /// analyzable transitions. Reported: components of two or more, and
 /// self-loops.
 pub fn cycles(net: &CompiledNet) -> CycleReport {
-    let unanalyzable = unanalyzable_indices(net);
+    let unanalyzable = unanalyzable_keys(net);
     let nodes: Vec<usize> = analyzable(net).map(|(i, _)| i).collect();
     let edges = feed_edges(net, &nodes);
 
@@ -118,9 +120,12 @@ pub fn cycles(net: &CompiledNet) -> CycleReport {
                 .get(&component[0])
                 .is_some_and(|targets| targets.contains(&component[0]));
         if is_cycle {
-            cycles.push(CycleFinding {
-                transitions: component,
-            });
+            let mut transitions: Vec<TransitionKey> = component
+                .into_iter()
+                .map(|i| net.transitions[i].key())
+                .collect();
+            transitions.sort();
+            cycles.push(CycleFinding { transitions });
         }
     }
     cycles.sort();
@@ -151,12 +156,13 @@ fn analyzable(net: &CompiledNet) -> impl Iterator<Item = (usize, &NetTransition)
         .filter(|(_, t)| t.analyzability == Analyzability::Analyzable)
 }
 
-fn unanalyzable_indices(net: &CompiledNet) -> Vec<usize> {
+fn unanalyzable_keys(net: &CompiledNet) -> Vec<TransitionKey> {
     net.transitions
         .iter()
-        .enumerate()
-        .filter(|(_, t)| !matches!(t.analyzability, Analyzability::Analyzable))
-        .map(|(i, _)| i)
+        .filter(|t| !matches!(t.analyzability, Analyzability::Analyzable))
+        .map(NetTransition::key)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect()
 }
 
