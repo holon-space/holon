@@ -67,7 +67,21 @@ where
             if is_fan_out(&entity) {
                 continue;
             }
-            let key = holon_net::TransitionKey::operation(&entity, &op);
+            let key = match holon_net::TransitionKey::operation(&entity, &op) {
+                Ok(key) => key,
+                // A fired non-fan-out pair whose entity the key grammar cannot
+                // encode is a hole of its own kind: `classify_for_net` should
+                // have refused the descriptor at the catalog, so the net cannot
+                // be describing it either.
+                Err(err) => {
+                    return InvariantResult::Fail(format!(
+                        "the run fired `{entity}`.`{op}`, whose entity no transition key can \
+                         encode: {err}. `holon_core::classify_for_net` refuses this shape at the \
+                         catalog boundary, so a pair that both fires and cannot be keyed is an \
+                         operation outside every net analysis",
+                    ));
+                }
+            };
             if net.transition(&key).is_none() {
                 missing.push(key);
             }
@@ -126,7 +140,7 @@ mod tests {
     fn transition(entity: &str, op: &str, analyzability: Analyzability) -> NetTransition {
         NetTransition {
             source: TransitionSource::Operation {
-                entity: entity.to_string(),
+                entity: holon_net::NetEntity::parse(entity).expect("dotless entity"),
                 op: op.to_string(),
             },
             analyzability,
@@ -210,8 +224,8 @@ mod tests {
     /// `<provider>.sync` marker per syncable provider
     /// (`holon_core::generate_sync_operation`). Those name a provider too, so
     /// they are out of the domain for the same reason — and their name carries
-    /// the `.` a transition key cannot encode, so letting one through would
-    /// panic the key grammar rather than report a hole.
+    /// the `.` a transition key cannot encode, so letting one through would red
+    /// on the key grammar rather than report a hole.
     #[tokio::test]
     async fn the_per_provider_sync_fan_out_is_not_a_hole() {
         let sut = FakeNetSut {
@@ -223,6 +237,26 @@ mod tests {
         assert!(
             matches!(check(&sut).await, InvariantResult::Ok),
             "a `<provider>.sync` marker names a provider, not a relation",
+        );
+    }
+
+    /// A dotted entity that is NOT a fan-out marker has no transition key, so
+    /// the check reds naming it — it does not panic out of the invariant, and
+    /// it does not pass by being unkeyable.
+    #[tokio::test]
+    async fn a_dotted_non_fan_out_entity_reds_instead_of_panicking() {
+        let sut = FakeNetSut {
+            net: CompiledNet {
+                transitions: Vec::new(),
+            },
+            fired: fired(&[("orgmode.import", "run")]),
+        };
+        let InvariantResult::Fail(message) = check(&sut).await else {
+            panic!("a fired operation with no encodable key is not a passing world");
+        };
+        assert!(
+            message.contains("orgmode.import") && message.contains("run"),
+            "the failure must name the unkeyable pair: {message}"
         );
     }
 }

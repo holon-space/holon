@@ -16,6 +16,7 @@ use holon_pattern::schema::clock;
 use holon_rules::HolonRule;
 use holon_rules::TemplateSegment;
 
+use crate::bridge::NetEntity;
 use crate::bridge::TransitionSource;
 use crate::guards::ClassifiedGuard;
 use crate::guards::classify_guard;
@@ -108,7 +109,12 @@ pub fn compile_operation(
 ) -> Result<NetTransition, NetCompileError> {
     let mut transition = NetTransition {
         source: TransitionSource::Operation {
-            entity: descriptor.entity_name.as_str().to_string(),
+            entity: NetEntity::parse(descriptor.entity_name.as_str()).map_err(|source| {
+                NetCompileError::UnkeyableOperation {
+                    op: descriptor.name.clone(),
+                    source,
+                }
+            })?,
             op: descriptor.name.clone(),
         },
         analyzability: Analyzability::Analyzable,

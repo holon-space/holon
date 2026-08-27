@@ -41,7 +41,7 @@ fn catalog_analyzability_matches_the_declared_halves() {
     let ops = block_catalog();
     let net = holon_net::derive_net(&ops, &[]).unwrap();
     let analyzability = |name: &str| {
-        net.transition(&TransitionKey::operation("block", name))
+        net.transition(&TransitionKey::operation("block", name).expect("dotless entity"))
             .unwrap_or_else(|| panic!("catalog advertises {name}"))
             .analyzability
             .clone()
@@ -164,7 +164,7 @@ fn undeclared_halves_are_unanalyzable_and_distinct_from_declared_empty() {
 
     let net = holon_net::derive_net(&[arcless, deltaless, empty_arcs], &[]).unwrap();
     let transition = |name: &str| {
-        net.transition(&TransitionKey::operation("block", name))
+        net.transition(&TransitionKey::operation("block", name).expect("dotless entity"))
             .unwrap_or_else(|| panic!("the net carries {name}"))
     };
     assert_eq!(

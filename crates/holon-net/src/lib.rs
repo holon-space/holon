@@ -22,6 +22,8 @@ pub use analysis::ConflictReport;
 pub use analysis::CycleReport;
 pub use analysis::conflicts;
 pub use analysis::cycles;
+pub use bridge::NetEntity;
+pub use bridge::NetError;
 pub use bridge::TransitionKey;
 pub use bridge::TransitionSource;
 pub use compile::RuleAcceptance;

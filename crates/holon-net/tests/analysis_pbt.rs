@@ -65,7 +65,7 @@ fn arb_transition(index: usize) -> impl Strategy<Value = NetTransition> {
     )
         .prop_map(move |(arcs, unanalyzable)| NetTransition {
             source: TransitionSource::Operation {
-                entity: "block".to_string(),
+                entity: holon_net::NetEntity::parse("block").expect("dotless entity"),
                 op: format!("op_{index}"),
             },
             analyzability: if unanalyzable {

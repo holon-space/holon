@@ -93,6 +93,39 @@ fn two_descriptors_with_the_same_entity_and_op_are_refused() {
     );
 }
 
+/// `classify_for_net` refuses a dotted non-marker entity at the catalog, but
+/// `derive_net` is a public entry point of its own: a descriptor that reaches
+/// it anyway must come back as a typed error naming the offender, never as a
+/// panic through the library boundary.
+#[test]
+fn a_descriptor_with_a_dotted_entity_is_a_typed_error() {
+    let ops = block_catalog();
+    let mut dotted = ops
+        .iter()
+        .find(|op| op.name == "set_field")
+        .expect("the catalog advertises set_field")
+        .clone();
+    dotted.entity_name = holon_api::EntityName::new("orgmode.import");
+
+    let err = derive_net(&[dotted], &[]).expect_err("a dotted entity has no transition key");
+    assert!(
+        matches!(
+            &err,
+            holon_net::NetCompileError::UnkeyableOperation { op, source }
+                if op == "set_field"
+                    && source == &holon_net::NetError::DottedEntityName {
+                        entity: "orgmode.import".to_string(),
+                    }
+        ),
+        "{err:?}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("set_field") && message.contains("orgmode.import"),
+        "the error must name both halves of the offending pair: {message}"
+    );
+}
+
 /// Two rules sharing a display name are distinct transitions — the rule's
 /// identity is its block, not its name.
 #[test]
@@ -109,7 +142,7 @@ fn two_rules_sharing_a_name_are_distinct_transitions() {
 /// with a transition by. Changing either form breaks that wire contract.
 #[test]
 fn the_key_serializes_as_its_rendered_string() {
-    let op = TransitionKey::operation("block", "set_field");
+    let op = TransitionKey::operation("block", "set_field").expect("a dotless entity keys");
     let rule = TransitionKey::rule("block:rule-daily-journal");
     assert_eq!(op.to_string(), "op:block.set_field");
     assert_eq!(rule.to_string(), "rule:block:rule-daily-journal");

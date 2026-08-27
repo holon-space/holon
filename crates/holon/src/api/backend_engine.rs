@@ -2303,7 +2303,7 @@ mod tests {
             .expect("the production catalog compiles");
 
         for op in ["sync", "full_sync"] {
-            let key = holon_net::TransitionKey::operation("*", op);
+            let key = holon_net::TransitionKey::operation("*", op).expect("`*` is dotless");
             assert!(
                 net.transition(&key).is_none(),
                 "the wildcard `*::{op}` descriptor must not be a transition; the net has {:?}",
@@ -2335,8 +2335,10 @@ mod tests {
                 "{op} must be dispatchable for this assertion to mean anything",
             );
             assert!(
-                net.transition(&holon_net::TransitionKey::operation("block", op))
-                    .is_some(),
+                net.transition(
+                    &holon_net::TransitionKey::operation("block", op).expect("dotless entity")
+                )
+                .is_some(),
                 "{op} fires but the net does not describe it",
             );
         }
@@ -2387,10 +2389,10 @@ mod tests {
             .derived_net()
             .expect("the production catalog compiles");
         let described = net
-            .transition(&holon_net::TransitionKey::operation(
-                "block",
-                "instantiate_template",
-            ))
+            .transition(
+                &holon_net::TransitionKey::operation("block", "instantiate_template")
+                    .expect("dotless entity"),
+            )
             .is_some();
 
         assert_eq!(

@@ -186,6 +186,18 @@ pub enum NetCompileError {
          identity — resolve the claim rather than letting one silently shadow the other"
     )]
     DuplicateTransition { key: TransitionKey },
+
+    #[error(
+        "operation {op:?} cannot be lowered to a transition: {source}. \
+         `holon_core::classify_for_net` refuses this shape at the catalog boundary, so a \
+         descriptor reaching compilation with it means the catalog was bypassed — give it a \
+         dotless entity name rather than letting it sit outside every net analysis"
+    )]
+    UnkeyableOperation {
+        op: String,
+        #[source]
+        source: crate::bridge::NetError,
+    },
 }
 
 /// The concrete places that carry one coarse aspect's tokens (ADR 0032 §4),
@@ -247,7 +259,7 @@ mod tests {
         let net = CompiledNet {
             transitions: vec![NetTransition {
                 source: TransitionSource::Operation {
-                    entity: "block".into(),
+                    entity: crate::bridge::NetEntity::parse("block").expect("dotless"),
                     op: "set_field".into(),
                 },
                 analyzability: Analyzability::Analyzable,
