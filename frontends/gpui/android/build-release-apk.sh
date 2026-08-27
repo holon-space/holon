@@ -30,6 +30,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR/../../.."
+# shellcheck source=lib-release-so.sh
+source "$SCRIPT_DIR/lib-release-so.sh"
 
 SDK="${ANDROID_SDK_HOME:-${ANDROID_HOME:?ANDROID_SDK_HOME or ANDROID_HOME must be set}}"
 BT="$SDK/build-tools/36.0.0"
@@ -56,7 +58,7 @@ command -v javac >/dev/null || { echo "ERROR: javac not on PATH (a JDK is requir
 
 rm -rf "$BUILD"
 mkdir -p "$BUILD/lib/arm64-v8a"
-cp "$SO" "$BUILD/lib/arm64-v8a/"
+stage_release_so "$SO" "$BUILD/lib/arm64-v8a"
 cp "$LIBCXX" "$BUILD/lib/arm64-v8a/"
 
 # Compile the vendored soft-keyboard host class (dev.gpui.mobile.GpuiTextInputView)

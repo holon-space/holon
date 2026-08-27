@@ -271,14 +271,6 @@ jobs:
           cargo ndk -t arm64-v8a -P 33 build --locked \
             -p holon-gpui --no-default-features --features mobile \
             --lib --release
-          # Strip debug symbols: cargo-ndk only strips when copying via -o (we
-          # don't), so the release-with-debuginfo .so shipped raw — a 660MB APK
-          # that Play rejected ("APK of size 659911196 is too large",
-          # mobile-v0.0.11 attempt 3). Play's APK cap is 100MB.
-          STRIP="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
-          ls -lh target/aarch64-linux-android/release/libholon_gpui.so
-          "$STRIP" target/aarch64-linux-android/release/libholon_gpui.so
-          ls -lh target/aarch64-linux-android/release/libholon_gpui.so
 
       # Download + pin bundletool (produces the AAB Play requires). Fail loud on
       # a checksum mismatch — never build a release from an unverified binary.
