@@ -1,15 +1,20 @@
-name: Release (Desktop)
+name: Release
 
-# Desktop release: v*.*.* tags → macOS/Linux/Windows artifacts on a GitHub
-# Release, each with SLSA build provenance via GitHub Artifact Attestations.
-# Mobile releases use mobile-v*.*.* tags → release-mobile.yml.
+# v*.*.* tags → every platform in one run: macOS/Linux/Windows artifacts on a
+# GitHub Release, iOS to TestFlight, Android to the Google Play INTERNAL testing
+# track (promotion to production is always a manual step in Play Console). Every
+# artifact carries SLSA build provenance via GitHub Artifact Attestations.
+# The store jobs are gated on repo variables so tagging without the store
+# credentials configured skips loudly instead of failing:
+#   vars.APPLE_RELEASE_ENABLED == 'true'   → iOS + macOS signing/notarization
+#   vars.ANDROID_RELEASE_ENABLED == 'true' → Android signing + Play upload
 # Full operator guide: docs/Operations/ReleasePipeline.md
 
 on:
   push:
     tags: ['v*.*.*']
 
-# Permissions are scoped per-job: only the build job needs attestation perms.
+# Permissions are scoped per-job: only the build jobs need attestation perms.
 permissions: {}
 
 env:
@@ -38,13 +43,15 @@ jobs:
           tag="$GITHUB_REF_NAME"
           if [ "$APPLE_RELEASE_ENABLED" = "true" ]; then
             macos_line="- **macOS**: signed with a Developer ID certificate and notarized by Apple."
+            ios_line="- **iOS**: submitted to TestFlight; the attached \`Holon.ipa\` mirrors the exact submitted build."
           else
             macos_line="- **macOS**: ⚠️ **UNSIGNED** (Apple Developer Program enrollment pending). Gatekeeper will block the first launch — right-click the app → Open, or run \`xattr -dr com.apple.quarantine Holon.app\`. This build will be signed + notarized once the repo variable \`APPLE_RELEASE_ENABLED\` is set to \`true\` (see docs/Operations/ReleasePipeline.md)."
+            ios_line="- **iOS**: ⚠️ SKIPPED — Apple Developer Program enrollment pending (repo variable \`APPLE_RELEASE_ENABLED\` is not \`true\`)."
           fi
           if [ "$ANDROID_RELEASE_ENABLED" = "true" ]; then
-            android_line="- **Android**: \`holon-release.apk\` attached for sideloading (arm64), signed with the release keystore. Not a store submission — those go through \`mobile-v*\` tags."
+            android_line="- **Android**: the signed \`holon-release.aab\` is uploaded to the Google Play **internal testing** track as a draft release; both it and a sideloadable \`holon-release.apk\` (same .so, direct APK pipeline) are attached to this Release. Promotion beyond internal testing is manual, in Play Console."
           else
-            android_line="- **Android**: no APK attached — requires the release keystore secrets and repo variable \`ANDROID_RELEASE_ENABLED=true\` (see docs/Operations/ReleasePipeline.md)."
+            android_line="- **Android**: ⚠️ SKIPPED — no AAB or APK attached. Android cannot install unsigned APKs and Play cannot accept an unsigned bundle, so both need the release keystore secrets (\`ANDROID_RELEASE_*\`) and repo variable \`ANDROID_RELEASE_ENABLED=true\` (see docs/Operations/ReleasePipeline.md)."
           fi
           cat > notes.md <<EOF
           ## Signing status
@@ -52,6 +59,7 @@ jobs:
           $macos_line
           - **Windows**: unsigned (no code-signing certificate for v1) — Windows SmartScreen will show a "protected your PC" prompt once; choose "More info" → "Run anyway". The \`.exe\` is statically linked (no VC++ redistributable needed).
           - **Linux**: two artifacts — a portable \`.AppImage\` (chmod +x and run; bundles the GUI libraries) and a plain \`.tar.gz\` (extract and run \`./holon-gpui\`). Both need glibc ≥ 2.35 and a Vulkan-capable GPU driver. No OS-level signing applies.
+          $ios_line
           $android_line
 
           ## Verify build provenance (recommended)
@@ -392,23 +400,136 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
             dist/Holon-* dist/SHA256SUMS-*.txt
 
-  # Sideloadable APK on every desktop release (store submissions stay on
-  # mobile-v* tags → release-mobile.yml). Android refuses to install unsigned
-  # APKs, so this needs the release keystore — same gate as the store path.
-  android-apk-skipped:
-    name: Android APK (skipped)
+  ios-skipped:
+    name: iOS → TestFlight (skipped)
+    if: vars.APPLE_RELEASE_ENABLED != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain why iOS is skipped
+        run: |
+          echo "::warning::iOS release SKIPPED: repo variable APPLE_RELEASE_ENABLED is not 'true'."
+          echo "To enable: enroll in the Apple Developer Program, register the app in App Store"
+          echo "Connect, add the APPLE_*/IOS_* secrets, then set APPLE_RELEASE_ENABLED=true."
+          echo "Step-by-step: docs/Operations/ReleasePipeline.md"
+
+  ios:
+    name: iOS → TestFlight
+    if: vars.APPLE_RELEASE_ENABLED == 'true'
+    needs: create-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ios
+          cache-on-failure: true
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Derive version + build number from tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          IFS=. read -r major minor patch <<< "$version"
+          echo "HOLON_VERSION=$version" >> "$GITHUB_ENV"
+          # Deterministic monotone build number from the semver — re-submitting
+          # the same version requires bumping the patch level and re-tagging.
+          echo "HOLON_BUILD_NUMBER=$((major * 10000 + minor * 100 + patch))" >> "$GITHUB_ENV"
+
+      - name: Generate Xcode project
+        working-directory: frontends/gpui/ios
+        run: xcodegen generate --spec project.yml
+
+      - name: Import signing certificate + provisioning profile
+        env:
+          IOS_DISTRIBUTION_CERT_P12_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERT_P12_BASE64 }}
+          IOS_DISTRIBUTION_CERT_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERT_PASSWORD }}
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          printf '%s' "$IOS_DISTRIBUTION_CERT_P12_BASE64" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" \
+            -P "$IOS_DISTRIBUTION_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          PROFILE="$RUNNER_TEMP/holon.mobileprovision"
+          printf '%s' "$IOS_PROVISIONING_PROFILE_BASE64" | base64 -d > "$PROFILE"
+          UUID="$(security cms -D -i "$PROFILE" | plutil -extract UUID raw -o - -)"
+          NAME="$(security cms -D -i "$PROFILE" | plutil -extract Name raw -o - -)"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+          echo "IOS_PROVISIONING_PROFILE_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "Installed provisioning profile '$NAME' ($UUID)"
+
+      - name: Build + upload to TestFlight (fastlane)
+        working-directory: frontends/gpui/ios
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        run: fastlane ios release
+
+      - name: Upload raw build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-logs
+          path: |
+            frontends/gpui/ios/build/logs/
+            ~/Library/Logs/gym/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: frontends/gpui/ios/build/Holon.ipa
+
+      - name: Mirror submitted IPA on the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+            frontends/gpui/ios/build/Holon.ipa
+
+  android-skipped:
+    name: Android → Play internal + sideload APK (skipped)
     if: vars.ANDROID_RELEASE_ENABLED != 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Explain why the APK is skipped
+      - name: Explain why Android is skipped
         run: |
-          echo "::warning::Android APK SKIPPED: repo variable ANDROID_RELEASE_ENABLED is not 'true'."
-          echo "Android cannot install unsigned APKs, so a sideloadable APK requires the release"
-          echo "keystore secrets (ANDROID_RELEASE_*). Set them + ANDROID_RELEASE_ENABLED=true and"
-          echo "every v* release will carry holon-release.apk. Step-by-step: docs/Operations/ReleasePipeline.md"
+          echo "::warning::Android release SKIPPED: repo variable ANDROID_RELEASE_ENABLED is not 'true'."
+          echo "This skips BOTH the Play internal-track upload and the sideloadable holon-release.apk"
+          echo "attached to the Release — Android cannot install unsigned APKs, so both need the keystore."
+          echo "To enable: create a Play service account + release keystore, add the ANDROID_*/GOOGLE_*"
+          echo "secrets, then set ANDROID_RELEASE_ENABLED=true."
+          echo "Step-by-step: docs/Operations/ReleasePipeline.md"
 
-  android-apk:
-    name: Android APK → GitHub Release
+  android:
+    name: Android → Play internal track
     if: vars.ANDROID_RELEASE_ENABLED == 'true'
     needs: create-release
     permissions:
@@ -429,14 +550,10 @@ jobs:
           toolchain: nightly
           targets: aarch64-linux-android
 
-      # shared-key `android-release` is intentionally the SAME as the Play
-      # job in release-mobile.yml: both cross-compile the identical
-      # aarch64-linux-android target from the same root Cargo.lock, so a
-      # mobile-v* build warms this v* sideload build and vice-versa.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: android-release
+          key: android
           cache-on-failure: true
 
       - name: Install Android SDK components (pinned versions from build script)
@@ -458,6 +575,9 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           IFS=. read -r major minor patch <<< "$version"
           echo "VERSION_NAME=$version" >> "$GITHUB_ENV"
+          # Deterministic monotone versionCode from the semver — Play rejects
+          # re-uploads of the same versionCode, so re-submitting requires a
+          # patch bump and a new tag.
           echo "VERSION_CODE=$((major * 10000 + minor * 100 + patch))" >> "$GITHUB_ENV"
 
       - name: Build Android .so
@@ -476,7 +596,24 @@ jobs:
             -p holon-gpui --no-default-features --features mobile \
             --lib --release
 
-      - name: Package release-signed APK
+      # Download + pin bundletool (produces the AAB Play requires). Fail loud on
+      # a checksum mismatch — never build a release from an unverified binary.
+      - name: Download + verify bundletool
+        env:
+          BUNDLETOOL_VERSION: "1.17.2"
+          BUNDLETOOL_SHA256: "2d4ad908faea64047c1cc9cb747e6aa667c6ab192e09607bd16b67246a8cd6ae"
+        run: |
+          JAR="$RUNNER_TEMP/bundletool-all-$BUNDLETOOL_VERSION.jar"
+          curl -fsSL -o "$JAR" \
+            "https://github.com/google/bundletool/releases/download/$BUNDLETOOL_VERSION/bundletool-all-$BUNDLETOOL_VERSION.jar"
+          echo "$BUNDLETOOL_SHA256  $JAR" | sha256sum -c -
+          echo "BUNDLETOOL_JAR=$JAR" >> "$GITHUB_ENV"
+
+      # Play upload uses ONLY the AAB. The universal-ish sideload APK below is a
+      # secondary artifact (GitHub Release attachment for dogfooding), not
+      # uploaded to Play. Both scripts strip and size-check the .so they package
+      # (frontends/gpui/android/lib-release-so.sh).
+      - name: Package release-signed AAB (Play) + APK (sideload)
         env:
           ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
@@ -486,16 +623,30 @@ jobs:
           KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
           printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_FILE"
           export KEYSTORE_FILE
+          bash frontends/gpui/android/build-release-aab.sh
           bash frontends/gpui/android/build-release-apk.sh
+
+      - name: Install fastlane
+        run: sudo gem install fastlane -N
+
+      - name: Upload to Play internal testing track (fastlane supply)
+        working-directory: frontends/gpui/android
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          HOLON_AAB_PATH: build-release-aab/holon-release.aab
+        run: fastlane android internal
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: frontends/gpui/android/build-release/holon-release.apk
+          subject-path: |
+            frontends/gpui/android/build-release-aab/holon-release.aab
+            frontends/gpui/android/build-release/holon-release.apk
 
-      - name: Upload APK to release
+      - name: Mirror uploaded AAB + sideload APK on the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+            frontends/gpui/android/build-release-aab/holon-release.aab \
             frontends/gpui/android/build-release/holon-release.apk

@@ -7,7 +7,7 @@ default_platform(:ios)
 # project.yml, kept that way for frictionless local dev). The release build
 # re-enables signing via xcargs overrides with MANUAL signing: CI imports the
 # Distribution cert + provisioning profile into a throwaway keychain first
-# (see .github/workflows/release-mobile.yml).
+# (see .github/workflows/release.yml).
 #
 # Required env:
 #   APPLE_TEAM_ID, APPLE_API_KEY_ID, APPLE_API_ISSUER_ID,

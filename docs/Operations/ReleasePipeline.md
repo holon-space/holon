@@ -1,25 +1,34 @@
 # Release Pipeline
 
-**The workflow files are the specification.** What builds, in what order, with
+**The workflow file is the specification.** What builds, in what order, with
 which tools, into which artifact names, lives in
-`.github/workflows/release-desktop.yml` (tag `v*.*.*`) and
-`.github/workflows/release-mobile.yml` (tag `mobile-v*.*.*`). Read those for
-"what happens".
+`.github/workflows/release.yml` (tag `v*.*.*`). Read that for "what happens".
 
-This document holds only what those files cannot say: *why* the pipeline is
+This document holds only what that file cannot say: *why* the pipeline is
 shaped this way, the one-time setup that happens outside the repo, where each
 secret comes from, the human steps, and what to do when a release job fails.
 
-## Why two workflows
+## Why one workflow
 
-Desktop and mobile are decoupled by tag prefix so a desktop fix can ship
-without pushing a new build number to Apple/Google (stores reject reused build
-numbers, and every mobile upload consumes review/TestFlight processing time).
-The two workflows share nothing but the attestation and release-notes pattern.
+One tag builds every platform: macOS, Linux, Windows, iOS and Android.
+
+Desktop and mobile used to be split by tag prefix (`v*` vs `mobile-v*`) so a
+desktop fix could ship without consuming an Apple/Google build number. The
+split cost more than it saved, because both halves needed the same
+`aarch64-linux-android` build and each kept its own copy of it. The copies
+diverged: a fix to strip the release `.so` landed in the mobile half only, so
+the same commit shipped a 93 MB APK under `mobile-v0.0.16` and a 759 MB one
+under `v0.0.17`. One recipe per platform makes that class of drift
+unrepresentable.
+
+The accepted cost: **every `v*` tag now consumes an Apple build number and a
+Play versionCode**, so a desktop-only fix still burns a store submission slot.
+Both stores reject reused build numbers, so a re-release always means a new
+patch version and a new tag.
 
 ## Why attestation, not code signing, is the integrity mechanism
 
-Both workflows attach a GitHub **Artifact Attestation** (SLSA build
+The workflow attaches a GitHub **Artifact Attestation** (SLSA build
 provenance) to every artifact: a publicly verifiable statement that the file
 was built by this repo's release workflow from the exact tagged commit. OS
 code-signing (Apple notarization, Play signing) only proves the *publisher's
@@ -36,14 +45,24 @@ Per-OS `SHA256SUMS-*.txt` files are attached as a plain-checksum fallback.
 
 Apple Developer Program enrollment and the Android keystore are external
 prerequisites that may not exist yet. Rather than let a release fail on
-missing credentials, both workflows branch on repo **variables**
+missing credentials, the workflow branches on repo **variables**
 `APPLE_RELEASE_ENABLED` and `ANDROID_RELEASE_ENABLED`; when a variable is not
 `"true"` the gated job is replaced by a stub job (`ios-skipped`,
-`android-skipped`, `android-apk-skipped`) that emits a `::warning::` saying
-exactly which variable and secrets are missing, and the generated release
-notes label the degraded output (e.g. an `-unsigned` macOS zip). This is the
-"fall back visibly" rule applied to CI: a release still ships, but nobody can
-mistake it for a signed one.
+`android-skipped`) that emits a `::warning::` saying exactly which variable
+and secrets are missing, and the generated release notes label the degraded
+output (e.g. an `-unsigned` macOS zip). This is the "fall back visibly" rule
+applied to CI: a release still ships, but nobody can mistake it for a signed
+one.
+
+**The variable is not the same thing as the secrets.** Both variables are
+currently `true`, so the stub jobs never run and the real jobs always attempt
+the signed path. `APPLE_RELEASE_ENABLED=true` with the `MACOS_DEVELOPER_ID_*`
+secrets unset does **not** produce the unsigned fallback — it produces a
+*failing* macOS job (`security: SecKeychainItemImport: One or more parameters
+passed to a function were not valid`), and the release ships with no macOS
+artifact at all. The unsigned fallback is reached only by setting the
+variable to `false`. Turning a variable on is therefore a commitment to
+having its secrets in place.
 
 Variables (not secrets) because they must be readable in `if:` conditions and
 carry nothing sensitive. Set them under Settings → Secrets and variables →
@@ -176,20 +195,25 @@ it. Names not listed here do not exist.
    `frontends/gpui/macos/Info.plist` (`CFBundleVersion`,
    `CFBundleShortVersionString`) is copied verbatim into the `.app` by
    `scripts/bundle-macos.sh`; nothing injects it. Everything else derives from
-   the tag: desktop artifact names, the iOS build number, and the Android
+   the one tag: desktop artifact names, the iOS build number, and the Android
    `versionName`/`versionCode` (`code = major*10000 + minor*100 + patch`).
    Because that derivation is deterministic, **re-submitting to a store
    requires bumping the patch version and tagging again** — stores reject
    reused build numbers. There is no automated version bumping or changelog
    generation.
 
+   Build numbers must stay monotone per store, and the highest each has
+   accepted is what constrains the next tag: Play is at versionCode **16**
+   (`mobile-v0.0.16`), TestFlight at build **14** (`mobile-v0.0.14`), and tag
+   `v0.0.17` already exists. So the next tag is **≥ `v0.0.18`** → versionCode
+   and build number 18, clear of both.
+
 2. **Tag and push.** Tags are a git-level concept and jj has no tag command;
    this repo is jj/git-colocated, so plain git is correct here — the one place
    git commands are right in this repo. From a clean, pushed `main`:
 
    ```
-   git tag v1.2.0 && git push origin v1.2.0                  # desktop
-   git tag mobile-v1.2.0 && git push origin mobile-v1.2.0    # mobile
+   git tag v1.2.0 && git push origin v1.2.0
    ```
 
 3. **Finish in the stores by hand.** Nothing is auto-promoted. iOS lands in
@@ -212,6 +236,23 @@ it. Names not listed here do not exist.
   shape; fix the script, don't work around it in Play.
 - **Store rejects a reused build number.** Bump patch, tag again (see above).
   Never retag an existing tag.
+- **macOS job fails at `security import`** (`SecKeychainItemImport: One or
+  more parameters passed to a function were not valid`). The
+  `MACOS_DEVELOPER_ID_CERT_P12_BASE64` / `_PASSWORD` secrets are empty while
+  `APPLE_RELEASE_ENABLED` is `true`. Add the secrets, or set the variable to
+  `false` to ship the unsigned zip deliberately. In a step log an unset secret
+  prints as blank where a set one prints `***`.
+- **Windows job fails compiling `windows-core`** (`the trait bound
+  IWbemObjectSink: windows_core::Interface is not satisfied`). A dependency
+  version skew in the tree, not a pipeline defect — fix it in `Cargo.toml`.
+- **iOS job fails with `linker command failed` / fastlane `Exit status: 65`.**
+  A real build failure. The `ios-build-logs` artifact (uploaded on failure,
+  7-day retention) carries the raw `gym` logs.
+- **A packaging script aborts on the `.so` size cap.** The packaged
+  `libholon_gpui.so` came out over 150 MB, which means stripping did not
+  happen — `llvm-strip` was missing, or the NDK layout moved. Fix
+  `frontends/gpui/android/lib-release-so.sh`; do not raise the cap to get past
+  it. An unstripped `.so` is ~760 MB and the stores reject it.
 - **A macOS/Windows/Linux artifact fails to launch on a specific machine.**
   The AppImage and Windows artifacts are freshly minted; a runtime failure on
   one machine is a finding to triage, not automatically a pipeline defect.
@@ -253,6 +294,17 @@ it. Names not listed here do not exist.
   `validate`. The direct-APK pipeline (`build-release-apk.sh`) still runs to
   produce a sideloadable `holon-release.apk` for the GitHub Release; only the
   AAB goes to Play.
+- **Stripping the Android `.so`**: the release profile keeps debuginfo and
+  cargo-ndk strips only when copying via `-o`, which these scripts do not use,
+  so an unstripped `libholon_gpui.so` is ~760 MB against ~92 MB stripped. Both
+  packaging scripts stage the library through `stage_release_so`
+  (`frontends/gpui/android/lib-release-so.sh`), which strips a **copy** in the
+  packaging tree — the cargo artifact under `target/` stays debuggable — and
+  then refuses to package anything over a 150 MB cap. The cap sits ~1.6× above
+  the real stripped size and ~5× below an unstripped one, so it catches a
+  broken strip without tripping on genuine binary growth. It lives in the
+  scripts rather than in workflow YAML so a local packaging run is bound by it
+  too.
 - **Play track**: uploads go to `internal` as `draft`, never auto-promoted.
 - **Windows signing**: skipped in v1 by decision. Follow-up if SmartScreen
   friction matters: an OV/EV cert or Azure Trusted Signing.
