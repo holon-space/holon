@@ -352,3 +352,15 @@ core-graphics = { path = ".cargo/patches/core-graphics" }
 # PR upstream is planned (fork-and-contribute); drop this patch when a released
 # loro version ships fork_at-on-shallow.
 loro = { git = "https://github.com/nightscape/loro.git", rev = "855da28b" }
+
+# Holon wmi fork — narrows `windows` and `windows-core` to one shared major.
+# wmi 0.18.4 requires each as `>=0.59, <0.63`; cargo resolves the two edges
+# independently, and this tree carries several `windows-core` majors (gpui
+# pins ^0.61, wgpu-hal/xcap pin ^0.62), so it paired `windows 0.62.2` with
+# `windows-core 0.61.2`. wmi mixes both paths internally, so the Windows build
+# died at `#[implement(IWbemObjectSink)]` with `the trait bound
+# IWbemObjectSink: windows_core::Interface is not satisfied`. Not fixable from
+# here: cargo has no per-edge version selection, and both global `--precise`
+# directions are unsatisfiable while ^0.61 and ^0.62 consumers coexist.
+# Drop this patch once a released wmi pins the pair itself.
+wmi = { git = "https://github.com/holon-space/wmi-rs.git", branch = "holon" }

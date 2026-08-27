@@ -16307,8 +16307,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 [[package]]
 name = "wmi"
 version = "0.18.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c81b85c57a57500e56669586496bf2abd5cf082b9d32995251185d105208b64"
+source = "git+https://github.com/holon-space/wmi-rs.git?branch=holon#a5cf638657465b05f7389b042f397a6709b2e0b9"
 dependencies = [
  "chrono",
  "futures",
@@ -16316,7 +16315,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.19",
  "windows 0.62.2",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
