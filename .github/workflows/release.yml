@@ -166,6 +166,10 @@ jobs:
             platform: linux
           - os: windows-latest
             platform: windows
+    env:
+      # Parallel rustc front end. Apple targets get this from
+      # .cargo/config.toml; Linux and Windows are not covered there.
+      RUSTFLAGS: -Zthreads=8
     defaults:
       run:
         shell: bash
@@ -271,7 +275,9 @@ jobs:
         env:
           # Static CRT so the .exe doesn't depend on the VC++ redistributable
           # (vcruntime140.dll), which isn't present on a clean Windows install.
-          RUSTFLAGS: -C target-feature=+crt-static
+          # Step env replaces job env rather than extending it, so the job's
+          # -Zthreads is repeated here.
+          RUSTFLAGS: -C target-feature=+crt-static -Zthreads=8
         run: |
           cargo build --release --locked -p holon-gpui
           name="Holon-$VERSION-windows-x86_64"
@@ -502,6 +508,11 @@ jobs:
       id-token: write
       attestations: write
     runs-on: macos-latest
+    env:
+      # The signed IPA carries no debuginfo, so the release profile's
+      # line-tables data is compile cost that nothing consumes. Symbolicating
+      # TestFlight crashes would mean keeping it and uploading the symbols.
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
     defaults:
       run:
         shell: bash
@@ -632,6 +643,15 @@ jobs:
       id-token: write
       attestations: write
     runs-on: ubuntu-latest
+    env:
+      # lib-release-so.sh strips the release profile's line-tables debuginfo
+      # out of the packaged .so, so generating it is compile cost that nothing
+      # consumes. Symbolicating Play crashes would mean keeping it and
+      # uploading the symbols.
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+      # Parallel rustc front end. Apple targets get this from
+      # .cargo/config.toml; the Android target is not covered there.
+      RUSTFLAGS: -Zthreads=8
     defaults:
       run:
         shell: bash

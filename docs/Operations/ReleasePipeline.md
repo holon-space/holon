@@ -345,6 +345,13 @@ submission.
   broken strip without tripping on genuine binary growth. It lives in the
   scripts rather than in workflow YAML so a local packaging run is bound by it
   too.
+- **No symbols in mobile builds**: the iOS and Android release jobs set
+  `CARGO_PROFILE_RELEASE_DEBUG=false`, dropping the workspace profile's
+  `line-tables-only` debuginfo. Neither shipped artifact carries it anyway —
+  the packaging script strips the `.so` and the IPA has none — so it was
+  compile time spent on bytes that were discarded. A Play/TestFlight crash
+  therefore symbolicates no further than addresses; wanting real stack traces
+  means reversing this and uploading the symbols to the store instead.
 - **Play track**: uploads go to `internal` as `draft`, never auto-promoted.
 - **Windows signing**: skipped in v1 by decision. Follow-up if SmartScreen
   friction matters: an OV/EV cert or Azure Trusted Signing.
