@@ -24,6 +24,7 @@ pub mod render;
 pub mod reset;
 pub mod search_ui;
 pub mod share_ui;
+pub mod soft_keyboard;
 pub mod tab_strip;
 
 pub mod user_driver;

@@ -74,6 +74,10 @@ required-features = ["pbt"]
 name = "nested_page_real_engine"
 required-features = ["pbt"]
 
+[[test]]
+name = "soft_keyboard_survives_spurious_blur"
+required-features = ["pbt"]
+
 [features]
 default = ["desktop"]
 desktop = ["dep:gpui_platform"]

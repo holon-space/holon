@@ -115,11 +115,11 @@ pub struct EditorView {
     /// owns content) while `task_state` has no second source — and without
     /// it the editable surface cannot render the block's vault syntax.
     task_row: Option<ReadOnlyMutable<Arc<DataRow>>>,
-    #[cfg(feature = "mobile")]
     /// The soft-keyboard focus generation this editor claimed on its last
-    /// focus-gain (see `crate::mobile::editor_focus_gained`). Passed back on
-    /// blur so a stale editor's late-arriving blur cannot hide the keyboard
-    /// after a successor already claimed focus. Zero = never gained focus.
+    /// focus-gain (see `crate::soft_keyboard::editor_focus_gained`). Passed
+    /// back on blur so a stale editor's late-arriving blur cannot hide the
+    /// keyboard after a successor already claimed focus. Zero = never gained
+    /// focus.
     focus_gen: std::cell::Cell<u64>,
 }
 
@@ -314,8 +314,7 @@ impl EditorView {
                 window,
                 move |this, entity, event, window, cx| match event {
                     InputEvent::Focus => {
-                        #[cfg(feature = "mobile")]
-                        this.note_focus_gained_mobile();
+                        this.note_focus_gained();
 
                         // Promote this block to be the UiState.focused_block.
                         // Without this, clicking inside an editable_text gives the
@@ -344,8 +343,7 @@ impl EditorView {
                         let _ = entity;
                     }
                     InputEvent::Blur => {
-                        #[cfg(feature = "mobile")]
-                        this.note_focus_lost_mobile(cx);
+                        this.note_blur_event(entity, window, cx);
 
                         let value = entity.read(cx).value().to_string();
                         let action = ctrl.lock().unwrap().on_blur(&value);
@@ -770,29 +768,30 @@ impl EditorView {
             _task_state_subscription,
             prev_focused: std::cell::Cell::new(false),
             task_row,
-            #[cfg(feature = "mobile")]
             focus_gen: std::cell::Cell::new(0),
         }
     }
 
-    /// Mobile soft-keyboard focus hooks, keeping `focus_gen` in lockstep with
-    /// the generation claimed on gain so blur can prove it is not stale.
-    /// No-ops off `feature = "mobile"`.
-    #[cfg(feature = "mobile")]
-    pub fn note_focus_gained_mobile(&self) {
-        self.focus_gen.set(crate::mobile::editor_focus_gained());
+    /// Soft-keyboard focus hooks, keeping `focus_gen` in lockstep with the
+    /// generation claimed on gain so blur can prove it is not stale.
+    pub fn note_focus_gained(&self) {
+        self.focus_gen
+            .set(crate::soft_keyboard::editor_focus_gained());
     }
 
-    #[cfg(feature = "mobile")]
-    pub fn note_focus_lost_mobile(&self, cx: &mut App) {
-        crate::mobile::editor_focus_lost(cx, self.focus_gen.get());
+    /// A gpui focus-out event reached this editor's input. Routed through
+    /// `editor_blur_event`, which re-reads the authoritative window focus:
+    /// gpui also emits this when the focused element merely dropped out of
+    /// the rendered frame or the window went inactive.
+    pub fn note_blur_event(&self, input: &gpui::Entity<InputState>, window: &Window, cx: &mut App) {
+        let focus = input.read(cx).focus_handle(cx);
+        crate::soft_keyboard::editor_blur_event(window, &focus, cx, self.focus_gen.get());
     }
 
     /// The soft-keyboard focus generation this editor last claimed (0 if never
     /// focused). Callers that hold a live `entity.read(cx)` borrow — which
     /// blocks the `&mut cx` that `editor_focus_lost` needs — read this and pass
-    /// it to `crate::mobile::editor_focus_lost` directly.
-    #[cfg(feature = "mobile")]
+    /// it to `crate::soft_keyboard::editor_focus_lost` directly.
     pub fn focus_gen(&self) -> u64 {
         self.focus_gen.get()
     }

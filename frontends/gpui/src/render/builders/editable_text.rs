@@ -104,23 +104,22 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
                 // MCP-driven clicks: the field focuses — caret renders — but no
                 // `InputEvent` fires), so the soft keyboard was never raised on
                 // focus. Drive it from the render-path focus edge, which is the
-                // reliable mobile focus signal. `editor_focus_gained/lost` are
-                // no-ops off `feature = "mobile"`.
-                #[cfg(feature = "mobile")]
+                // reliable mobile focus signal. `just_blurred` here is derived
+                // from `window.focus` itself, so it is already the
+                // authoritative signal `editor_focus_lost` expects — no
+                // `editor_blur_event` re-check needed.
                 {
                     // Re-borrow via short-lived `entity.read(cx)` temporaries rather
                     // than the outer `view` binding: `editor_focus_lost` needs
                     // `&mut cx`, which cannot coexist with a live `entity.read(cx)`
                     // borrow (`view` is such a borrow).
                     if just_focused {
-                        entity.read(cx).note_focus_gained_mobile();
+                        entity.read(cx).note_focus_gained();
                     } else if just_blurred {
                         let my_gen = entity.read(cx).focus_gen();
-                        crate::mobile::editor_focus_lost(cx, my_gen);
+                        crate::soft_keyboard::editor_focus_lost(cx, my_gen);
                     }
                 }
-                #[cfg(not(feature = "mobile"))]
-                let _ = just_blurred;
                 (input, is_focused, just_focused)
             };
             // Reconcile a stale `InputState` to the authority when the user cannot
