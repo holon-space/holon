@@ -66,9 +66,12 @@ cp "$LIBCXX" "$BUILD/lib/arm64-v8a/"
 # JNI to raise the platform IME, and the manifest declares hasCode="true" — an APK
 # without the dex ships a keyboard that can never surface. Small and
 # self-contained (imports only android.*) — always rebuilt.
-JAVA_SRC="$SCRIPT_DIR/java/dev/gpui/mobile/GpuiTextInputView.java"
+JAVA_SRCS=(
+    "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiTextInputView.java"
+    "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiNativeActivity.java"
+)
 mkdir -p "$BUILD/classes" "$BUILD/dex"
-javac -source 8 -target 8 -cp "$PLATFORM" -d "$BUILD/classes" "$JAVA_SRC"
+javac -source 8 -target 8 -cp "$PLATFORM" -d "$BUILD/classes" "${JAVA_SRCS[@]}"
 "$BT/d8" --min-api 33 --output "$BUILD/dex" "$BUILD/classes"/dev/gpui/mobile/*.class
 cp "$BUILD/dex/classes.dex" "$BUILD/classes.dex"
 
@@ -108,7 +111,9 @@ RES_DIR="$PROJECT_ROOT/assets/icons/app/android/res"
 # so an APK without classes.dex installs fine and then fails the runtime
 # find_app_class lookup — a defect only reproducible on-device. Checking the aligned
 # APK (not the intermediate build dir) is what makes this assertion meaningful.
-if ! unzip -Z1 "$BUILD/holon-release.apk" | grep -qxF 'classes.dex'; then
+# No `grep -q` here: its early exit SIGPIPEs unzip, which `pipefail` then reports
+# as a missing dex.
+if ! unzip -Z1 "$BUILD/holon-release.apk" | grep -xF 'classes.dex' >/dev/null; then
     echo "ERROR: holon-release.apk has no classes.dex — the soft-keyboard host class" >&2
     echo "       (dev.gpui.mobile.GpuiTextInputView) is missing from the shipped APK." >&2
     exit 1

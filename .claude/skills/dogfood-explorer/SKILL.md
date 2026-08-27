@@ -182,7 +182,7 @@ adb forward tcp:8620 tcp:8520      # host:8620 → device:8520 (the in-app MCP p
 
 **Launch:**
 ```bash
-adb shell am start -n space.holon.gpui/android.app.NativeActivity
+adb shell am start -n space.holon.gpui/dev.gpui.mobile.GpuiNativeActivity
 ```
 
 **Health-gate** (through the forward) before driving:

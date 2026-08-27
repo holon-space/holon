@@ -19,7 +19,7 @@ bt := sdk / "build-tools/36.0.0"
 platform := sdk / "platforms/android-36/android.jar"
 ndk := env("ANDROID_NDK_HOME", sdk / "ndk/29.0.14206865")
 package := "space.holon.gpui"
-activity := package / "android.app.NativeActivity"
+activity := package / "dev.gpui.mobile.GpuiNativeActivity"
 build_dir := "android/build"
 manifest := "android/AndroidManifest.xml"
 

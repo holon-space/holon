@@ -72,8 +72,11 @@ cp "$LIBCXX" "$BUILD/module/lib/arm64-v8a/"
 # runtime looks this class up via find_app_class + JNI to raise the platform IME,
 # so the dex is REQUIRED in the base module (manifest hasCode="true"). Small and
 # self-contained (imports only android.*) — always rebuilt.
-JAVA_SRC="$SCRIPT_DIR/java/dev/gpui/mobile/GpuiTextInputView.java"
-javac -source 8 -target 8 -cp "$PLATFORM" -d "$BUILD/classes" "$JAVA_SRC"
+JAVA_SRCS=(
+    "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiTextInputView.java"
+    "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiNativeActivity.java"
+)
+javac -source 8 -target 8 -cp "$PLATFORM" -d "$BUILD/classes" "${JAVA_SRCS[@]}"
 "$BT/d8" --min-api 33 --output "$BUILD/dex" "$BUILD/classes"/dev/gpui/mobile/*.class
 # bundletool base-module layout carries dex under dex/ (peer of manifest/, lib/).
 cp "$BUILD/dex/classes.dex" "$BUILD/module/dex/classes.dex"
@@ -140,7 +143,9 @@ java -jar "$BUNDLETOOL_JAR" build-bundle \
 # so a bundle without it installs fine and then fails the runtime find_app_class
 # lookup — a defect only reproducible on-device. Checking the .aab itself (not the
 # staging dir bundletool consumed) is what makes this assertion meaningful.
-if ! unzip -Z1 "$BUILD/holon-release.aab" | grep -q 'dex/classes\.dex$'; then
+# No `grep -q` here: its early exit SIGPIPEs unzip, which `pipefail` then reports
+# as a missing dex.
+if ! unzip -Z1 "$BUILD/holon-release.aab" | grep 'dex/classes\.dex$' >/dev/null; then
     echo "ERROR: holon-release.aab has no dex/classes.dex — the soft-keyboard host" >&2
     echo "       class (dev.gpui.mobile.GpuiTextInputView) is missing from the bundle." >&2
     exit 1

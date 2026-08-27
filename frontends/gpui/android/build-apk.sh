@@ -61,11 +61,14 @@ cp "$NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-an
 # to classes.dex. The GPUI Android runtime looks this class up via find_app_class +
 # JNI to raise the platform IME; a pure no-dex NativeActivity APK lacks it entirely,
 # so the keyboard can never surface. Small and self-contained — always rebuilt.
-JAVA_SRC="$SCRIPT_DIR/java/dev/gpui/mobile/GpuiTextInputView.java"
+JAVA_SRCS=(
+    "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiTextInputView.java"
+    "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiNativeActivity.java"
+)
 [ -e "$BT/d8" ] || { echo "ERROR: d8 not found: $BT/d8 (install build-tools;36.0.0)" >&2; exit 1; }
 command -v javac >/dev/null || { echo "ERROR: javac not on PATH (a JDK is required to build classes.dex)" >&2; exit 1; }
 mkdir -p "$BUILD/classes" "$BUILD/dex"
-javac -source 8 -target 8 -cp "$PLATFORM" -d "$BUILD/classes" "$JAVA_SRC"
+javac -source 8 -target 8 -cp "$PLATFORM" -d "$BUILD/classes" "${JAVA_SRCS[@]}"
 "$BT/d8" --min-api 33 --output "$BUILD/dex" "$BUILD/classes"/dev/gpui/mobile/*.class
 cp "$BUILD/dex/classes.dex" "$BUILD/classes.dex"
 
@@ -91,7 +94,9 @@ cd "$SCRIPT_DIR"
 
 # Assert the built artifact carries the dex — the manifest declares hasCode="true",
 # so without it find_app_class fails at runtime and the keyboard never surfaces.
-if ! unzip -Z1 "$BUILD/holon.apk" | grep -qxF 'classes.dex'; then
+# No `grep -q` here: its early exit SIGPIPEs unzip, which `pipefail` then reports
+# as a missing dex.
+if ! unzip -Z1 "$BUILD/holon.apk" | grep -xF 'classes.dex' >/dev/null; then
     echo "ERROR: holon.apk has no classes.dex — the soft-keyboard host class" >&2
     echo "       (dev.gpui.mobile.GpuiTextInputView) is missing from the APK." >&2
     exit 1
@@ -109,10 +114,10 @@ if $INSTALL; then
     adb install -r "$BUILD/holon.apk"
 fi
 if $LAUNCH; then
-    adb shell am start -n space.holon.gpui/android.app.NativeActivity
+    adb shell am start -n space.holon.gpui/dev.gpui.mobile.GpuiNativeActivity
 fi
 
 if ! $INSTALL; then
     echo "Install:   adb install -r $BUILD/holon.apk"
-    echo "Launch:    adb shell am start -n space.holon.gpui/android.app.NativeActivity"
+    echo "Launch:    adb shell am start -n space.holon.gpui/dev.gpui.mobile.GpuiNativeActivity"
 fi

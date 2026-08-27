@@ -11,18 +11,13 @@
         android:hasCode="true"
         android:debuggable="true">
 
-        <!-- ESCALATION PATH (do NOT implement here without on-device evidence):
-             classes.dex now ships dev.gpui.mobile.GpuiTextInputView, which the
-             GPUI runtime loads via find_app_class to host the platform IME on a
-             plain NativeActivity. If on-device testing shows the class loads but
-             the soft keyboard still never surfaces under NativeActivity, the next
-             step is to launch the fork's dev.gpui.mobile.GpuiActivity (a
-             NativeActivity subclass) instead of android.app.NativeActivity below.
-             That pulls in androidx (splashscreen, media) + more Gpui* classes, so
-             it requires vendoring those and an androidx-capable dex/resource build.
-             Out of scope for this lane. -->
+        <!-- Soft-keyboard design: GpuiTextInputView hosts the platform IME and
+             hops every view/IMM call onto the UI thread (JNI calls it from the
+             android_main thread). GpuiNativeActivity exists solely to
+             System.loadLibrary the native code so that view's native methods
+             resolve — NativeActivity's own dlopen does not register them. -->
         <activity
-            android:name="android.app.NativeActivity"
+            android:name="dev.gpui.mobile.GpuiNativeActivity"
             android:exported="true"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
             android:windowSoftInputMode="adjustResize"

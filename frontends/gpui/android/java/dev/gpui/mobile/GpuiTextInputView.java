@@ -3,7 +3,8 @@
 // Provides the platform-IME host View (dev.gpui.mobile.GpuiTextInputView) that the
 // GPUI Android runtime looks up via find_app_class + JNI to raise the soft keyboard.
 // Self-contained: imports only android.* (no androidx, no other Gpui* classes).
-// When bumping the gpui-mobile fork pin, re-sync this file from the new rev.
+// Identical to the fork's copy on branch holon-ime-fixes apart from this header;
+// re-sync from the new rev when bumping the pin.
 
 package dev.gpui.mobile;
 
@@ -33,6 +34,9 @@ public final class GpuiTextInputView extends View {
     private static GpuiTextInputView sView;
     private static int sKeyboardType;
 
+    /** Frames to keep re-asking for the IME while the view is not yet served. */
+    private static final int IME_REQUEST_ATTEMPTS = 12;
+
     private final SpannableStringBuilder editable = new SpannableStringBuilder();
     private boolean applyingNativeState;
 
@@ -40,32 +44,44 @@ public final class GpuiTextInputView extends View {
         super(context);
         setFocusable(true);
         setFocusableInTouchMode(true);
-        setVisibility(INVISIBLE);
+        // ViewRootImpl never makes a non-VISIBLE view the served view, so an
+        // INVISIBLE host can never take focus nor raise the IME. Stay VISIBLE
+        // and invisible in practice: 1x1 (see ensureView), transparent, unpainted.
+        setVisibility(VISIBLE);
+        setBackgroundColor(android.graphics.Color.TRANSPARENT);
+        setAlpha(0f);
+        setWillNotDraw(true);
     }
 
+    // JNI calls these from the android_main thread, but view and IMM APIs are
+    // only legal on the Android UI thread — hence the hops below.
     public static void showKeyboard(Activity activity, int keyboardType) {
-        GpuiTextInputView view = ensureView(activity);
-        sKeyboardType = keyboardType;
-        view.requestFocus();
+        activity.runOnUiThread(() -> {
+            GpuiTextInputView view = ensureView(activity);
+            sKeyboardType = keyboardType;
+            view.requestFocus();
 
-        InputMethodManager imm =
-                (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
-        if (imm != null) {
-            imm.restartInput(view);
-            imm.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT);
-        }
+            InputMethodManager imm =
+                    (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.restartInput(view);
+                requestIme(view, imm, IME_REQUEST_ATTEMPTS);
+            }
+        });
     }
 
     public static void hideKeyboard(Activity activity) {
-        if (sView == null) {
-            return;
-        }
-        InputMethodManager imm =
-                (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
-        if (imm != null) {
-            imm.hideSoftInputFromWindow(sView.getWindowToken(), 0);
-        }
-        sView.clearFocus();
+        activity.runOnUiThread(() -> {
+            if (sView == null) {
+                return;
+            }
+            InputMethodManager imm =
+                    (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.hideSoftInputFromWindow(sView.getWindowToken(), 0);
+            }
+            sView.clearFocus();
+        });
     }
 
     public static void updateEditingState(
@@ -75,11 +91,25 @@ public final class GpuiTextInputView extends View {
             int composingStart,
             int composingEnd,
             boolean selectionReversed) {
-        if (sView == null || text == null) {
+        GpuiTextInputView view = sView;
+        if (view == null || text == null) {
             return;
         }
-        sView.applyEditingState(
-                text, selectionStart, selectionEnd, composingStart, composingEnd, selectionReversed);
+        view.post(() -> view.applyEditingState(
+                text, selectionStart, selectionEnd, composingStart, composingEnd, selectionReversed));
+    }
+
+    /**
+     * Ask for the IME, retrying on the next frame while the request is refused.
+     *
+     * requestFocus() only queues the focus change; ViewRootImpl makes this view
+     * the served view during a later traversal, and showSoftInput returns false
+     * until then.
+     */
+    private static void requestIme(GpuiTextInputView view, InputMethodManager imm, int attemptsLeft) {
+        if (!imm.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT) && attemptsLeft > 0) {
+            view.post(() -> requestIme(view, imm, attemptsLeft - 1));
+        }
     }
 
     private static GpuiTextInputView ensureView(Activity activity) {
