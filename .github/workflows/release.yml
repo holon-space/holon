@@ -13,6 +13,17 @@ name: Release
 on:
   push:
     tags: ['v*.*.*']
+  # Dry run, always: build every platform without creating a Release,
+  # submitting to TestFlight, or uploading to Play. Artifacts land as run
+  # artifacts instead, so the pipeline can be exercised without consuming a
+  # store build number. Publishing needs a tag — the artifact names, the
+  # Release, and both store build numbers all derive from it.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build, without the leading v (e.g. 0.0.18)'
+        type: string
+        required: true
 
 # Permissions are scoped per-job: only the build jobs need attestation perms.
 permissions: {}
@@ -30,11 +41,59 @@ jobs:
     permissions:
       contents: write
     runs-on: ubuntu-latest
+    outputs:
+      # Every gated step downstream reads this one value, so publishing is
+      # decided once. Consumers compare it to the STRING 'true' — job outputs
+      # are strings, and a bare `if: needs...publish` would fire on "false".
+      publish: ${{ steps.mode.outputs.publish }}
+      version: ${{ steps.mode.outputs.version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
 
+      # Only a tag push publishes. Every other trigger — a manual dispatch, or
+      # one added later — is a dry run, so the unconsidered case never reaches
+      # a store.
+      - name: Resolve release mode + version
+        id: mode
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+          PUBLISH: ${{ github.event_name == 'push' }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            version="${DISPATCH_VERSION:?the version input is required}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          # Both store build numbers are computed from this by arithmetic, so a
+          # malformed value must stop the run rather than reach a packaging script.
+          case "$version" in
+            *[!0-9.]*|*..*|.*|*.) echo "::error::version '$version' is not MAJOR.MINOR.PATCH"; exit 1 ;;
+          esac
+          IFS=. read -r major minor patch extra <<< "$version"
+          if [ -z "$major" ] || [ -z "$minor" ] || [ -z "$patch" ] || [ -n "$extra" ]; then
+            echo "::error::version '$version' is not MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          # A leading zero makes the shell read the field as octal: 010 becomes
+          # build number 80000, and 08 is not a number at all.
+          for field in "$major" "$minor" "$patch"; do
+            case "$field" in
+              0) ;;
+              0*) echo "::error::version '$version' has a leading zero in '$field'"; exit 1 ;;
+            esac
+          done
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          if [ "$PUBLISH" = "true" ]; then
+            echo "Publishing run for $version: a Release is created and the stores receive uploads."
+          else
+            echo "::warning::DRY RUN for $version: no Release, no TestFlight, no Play upload." \
+              "Every platform still builds; artifacts are attached to this run instead."
+          fi
+
       - name: Create release for tag (if absent)
+        if: steps.mode.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           APPLE_RELEASE_ENABLED: ${{ vars.APPLE_RELEASE_ENABLED }}
@@ -141,8 +200,8 @@ jobs:
             libfontconfig1-dev libwayland-dev libxkbcommon-dev \
             libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev
 
-      - name: Derive version from tag
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Take version from create-release
+        run: echo "VERSION=${{ needs.create-release.outputs.version }}" >> "$GITHUB_ENV"
 
       - name: Build + package (Linux)
         if: matrix.platform == 'linux'
@@ -235,11 +294,20 @@ jobs:
             dist/*
 
       - name: Upload artifacts to release
+        if: needs.create-release.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
             dist/Holon-* dist/SHA256SUMS-*.txt
+
+      - name: Keep artifacts on the run (dry run)
+        if: needs.create-release.outputs.publish != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dryrun-dist-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
 
   # macOS universal2 = two per-arch cargo builds. Building them in one job runs
   # them serially (~70 min wall, the release critical path). Split each arch onto
@@ -299,7 +367,7 @@ jobs:
   # cargo builds moved out (to build-macos) so they run in parallel.
   finalize-macos:
     name: Build macos
-    needs: build-macos
+    needs: [create-release, build-macos]
     permissions:
       contents: write
       id-token: write
@@ -312,12 +380,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: Derive version from tag
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Take version from create-release
+        run: echo "VERSION=${{ needs.create-release.outputs.version }}" >> "$GITHUB_ENV"
 
+      # Only the two per-arch binaries: the run also carries ios-build-logs (on
+      # an iOS failure) and the dry-run dist bundles, and an unfiltered download
+      # would unpack all of them into arch-bins/.
       - name: Download per-arch binaries
         uses: actions/download-artifact@v4
         with:
+          pattern: holon-gpui-*
           path: arch-bins
 
       # lipo the two per-arch builds into the same universal2 binary the old job
@@ -394,11 +466,20 @@ jobs:
             dist/*
 
       - name: Upload artifacts to release
+        if: needs.create-release.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
             dist/Holon-* dist/SHA256SUMS-*.txt
+
+      - name: Keep artifacts on the run (dry run)
+        if: needs.create-release.outputs.publish != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dryrun-dist-macos
+          path: dist/
+          if-no-files-found: error
 
   ios-skipped:
     name: iOS → TestFlight (skipped)
@@ -442,11 +523,12 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
-      - name: Derive version + build number from tag
+      - name: Derive build number from the version
+        env:
+          VERSION: ${{ needs.create-release.outputs.version }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          IFS=. read -r major minor patch <<< "$version"
-          echo "HOLON_VERSION=$version" >> "$GITHUB_ENV"
+          IFS=. read -r major minor patch <<< "$VERSION"
+          echo "HOLON_VERSION=$VERSION" >> "$GITHUB_ENV"
           # Deterministic monotone build number from the semver — re-submitting
           # the same version requires bumping the patch level and re-tagging.
           echo "HOLON_BUILD_NUMBER=$((major * 10000 + minor * 100 + patch))" >> "$GITHUB_ENV"
@@ -482,6 +564,9 @@ jobs:
           echo "IOS_PROVISIONING_PROFILE_NAME=$NAME" >> "$GITHUB_ENV"
           echo "Installed provisioning profile '$NAME' ($UUID)"
 
+      # One fastlane lane builds AND submits, so the dry run cannot be a step
+      # `if:` without also skipping the build. HOLON_PUBLISH gates the submission
+      # inside the lane instead; the build runs identically either way.
       - name: Build + upload to TestFlight (fastlane)
         working-directory: frontends/gpui/ios
         env:
@@ -489,6 +574,7 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          HOLON_PUBLISH: ${{ needs.create-release.outputs.publish }}
         run: fastlane ios release
 
       - name: Upload raw build logs on failure
@@ -508,11 +594,20 @@ jobs:
           subject-path: frontends/gpui/ios/build/Holon.ipa
 
       - name: Mirror submitted IPA on the GitHub Release
+        if: needs.create-release.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
             frontends/gpui/ios/build/Holon.ipa
+
+      - name: Keep the IPA on the run (dry run)
+        if: needs.create-release.outputs.publish != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dryrun-ios-ipa
+          path: frontends/gpui/ios/build/Holon.ipa
+          if-no-files-found: error
 
   android-skipped:
     name: Android → Play internal + sideload APK (skipped)
@@ -529,7 +624,7 @@ jobs:
           echo "Step-by-step: docs/Operations/ReleasePipeline.md"
 
   android:
-    name: Android → Play internal track
+    name: Android → Play internal + sideload APK
     if: vars.ANDROID_RELEASE_ENABLED == 'true'
     needs: create-release
     permissions:
@@ -570,11 +665,12 @@ jobs:
         with:
           tool: cargo-ndk
 
-      - name: Derive version + versionCode from tag
+      - name: Derive versionCode from the version
+        env:
+          VERSION: ${{ needs.create-release.outputs.version }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          IFS=. read -r major minor patch <<< "$version"
-          echo "VERSION_NAME=$version" >> "$GITHUB_ENV"
+          IFS=. read -r major minor patch <<< "$VERSION"
+          echo "VERSION_NAME=$VERSION" >> "$GITHUB_ENV"
           # Deterministic monotone versionCode from the semver — Play rejects
           # re-uploads of the same versionCode, so re-submitting requires a
           # patch bump and a new tag.
@@ -627,9 +723,11 @@ jobs:
           bash frontends/gpui/android/build-release-apk.sh
 
       - name: Install fastlane
+        if: needs.create-release.outputs.publish == 'true'
         run: sudo gem install fastlane -N
 
       - name: Upload to Play internal testing track (fastlane supply)
+        if: needs.create-release.outputs.publish == 'true'
         working-directory: frontends/gpui/android
         env:
           GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
@@ -644,9 +742,20 @@ jobs:
             frontends/gpui/android/build-release/holon-release.apk
 
       - name: Mirror uploaded AAB + sideload APK on the GitHub Release
+        if: needs.create-release.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
             frontends/gpui/android/build-release-aab/holon-release.aab \
             frontends/gpui/android/build-release/holon-release.apk
+
+      - name: Keep the AAB + APK on the run (dry run)
+        if: needs.create-release.outputs.publish != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dryrun-android
+          path: |
+            frontends/gpui/android/build-release-aab/holon-release.aab
+            frontends/gpui/android/build-release/holon-release.apk
+          if-no-files-found: error

@@ -221,6 +221,37 @@ it. Names not listed here do not exist.
    lands as a **draft on the internal testing track** and must be promoted in
    Play Console.
 
+## Dry run — exercising the pipeline without spending a version
+
+A tag is a one-shot, irreversible test: it creates a public Release and burns
+an Apple build number and a Play versionCode even when the run fails. To test
+a pipeline change instead, run the workflow manually.
+
+Actions → **Release** → *Run workflow*, give it a `version` (e.g. `0.0.18`,
+no leading `v`). Every platform builds, signs, and packages exactly as it
+would for a tag; what is suppressed is only the publication:
+
+| | tag push | manual run |
+|---|---|---|
+| GitHub Release created | yes | no |
+| Artifacts | Release assets | run artifacts (`dryrun-*`) |
+| TestFlight submission | yes | no |
+| Play internal upload | yes | no |
+| Build, sign, package, attest | yes | yes |
+
+**A manual run can never publish** — there is no option to make it do so.
+Publishing is inseparable from the tag: the Release, the artifact names, and
+both store build numbers all derive from it, and a manual run has no tag to
+derive them from. To publish, push a tag.
+
+So a dry run proves the build and packaging work; it cannot prove the upload
+credentials work, since it never uses them.
+
+One value decides this: `create-release` resolves `publish` once, from the
+event alone, and every gated step reads it — so a step can only be in one
+mode, and a trigger added later is a dry run rather than an accidental store
+submission.
+
 ## Failure-mode playbook
 
 - **A gated job "did nothing".** Look for the `*-skipped` stub job in the run;
@@ -248,6 +279,15 @@ it. Names not listed here do not exist.
 - **iOS job fails with `linker command failed` / fastlane `Exit status: 65`.**
   A real build failure. The `ios-build-logs` artifact (uploaded on failure,
   7-day retention) carries the raw `gym` logs.
+- **A run produced no Release and no store upload.** Check the event that
+  started it. Every manual run is a dry run by design; `create-release` logs a
+  `DRY RUN` warning naming the version, and the artifacts are attached to the
+  run as `dryrun-*` instead of to a Release. Publishing requires a tag push.
+- **A run fails immediately in `create-release`.** The version must be bare
+  `MAJOR.MINOR.PATCH` with no leading zero on any field — `v0.0.18`, `0.0`,
+  `1.2.3-rc1` and `0.0.010` are all rejected there, before any job can turn
+  them into a store build number. (A leading zero is read as octal: `010`
+  would become build number 80000, and `08` is not a number at all.)
 - **A packaging script aborts on the `.so` size cap.** The packaged
   `libholon_gpui.so` came out over 150 MB, which means stripping did not
   happen — `llvm-strip` was missing, or the NDK layout moved. Fix

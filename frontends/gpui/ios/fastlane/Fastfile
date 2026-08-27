@@ -13,7 +13,9 @@ default_platform(:ios)
 #   APPLE_TEAM_ID, APPLE_API_KEY_ID, APPLE_API_ISSUER_ID,
 #   APPLE_API_KEY_P8_BASE64 (base64 of the .p8 key file),
 #   IOS_PROVISIONING_PROFILE_NAME (set by the workflow from the installed profile),
-#   HOLON_VERSION, HOLON_BUILD_NUMBER
+#   HOLON_VERSION, HOLON_BUILD_NUMBER,
+#   HOLON_PUBLISH ("true" submits the build to TestFlight; any other value
+#     builds and signs it without submitting)
 
 platform :ios do
   desc "Build a signed Release IPA and upload it to TestFlight"
@@ -61,9 +63,15 @@ platform :ios do
       }
     )
 
-    upload_to_testflight(
-      api_key: api_key,
-      skip_waiting_for_build_processing: true
-    )
+    # fetch, not [], so a caller that forgets the variable fails here rather
+    # than silently picking either behaviour.
+    if ENV.fetch("HOLON_PUBLISH") == "true"
+      upload_to_testflight(
+        api_key: api_key,
+        skip_waiting_for_build_processing: true
+      )
+    else
+      UI.important("HOLON_PUBLISH is not \"true\" — built and signed the IPA without submitting it.")
+    end
   end
 end
