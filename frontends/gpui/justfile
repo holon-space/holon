@@ -173,7 +173,10 @@ run-app profile="release": (bundle profile)
 # Build holon-gpui as an iOS simulator staticlib (aarch64-apple-ios-sim).
 ios-build profile="debug":
     rustup target add aarch64-apple-ios-sim 2>/dev/null || true
-    cargo build -p holon-gpui \
+    # Must match ios/project.yml's IPHONEOS_DEPLOYMENT_TARGET: unset, rustc
+    # links at its own 10.0 default while cc-rs compiles C deps at the SDK
+    # default, leaving ___chkstk_darwin undefined.
+    IPHONEOS_DEPLOYMENT_TARGET=16.0 cargo build -p holon-gpui \
         --target aarch64-apple-ios-sim \
         --no-default-features --features mobile \
         {{ if profile == "release" { "--release" } else { "" } }}

@@ -146,7 +146,14 @@ targets:
           # host compiles get the right headers, and cc-rs sees macosx ≠
           # iphoneos for target code and falls back to `xcrun --sdk iphoneos`.
           MACOS_SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
-          env -u IPHONEOS_DEPLOYMENT_TARGET -u MACOSX_DEPLOYMENT_TARGET \
+          # IPHONEOS_DEPLOYMENT_TARGET must be PASSED THROUGH, never unset:
+          # without it rustc links iOS artifacts at its own 10.0 default while
+          # cc-rs compiles the C deps at the SDK's default (26.5+), and the
+          # mismatch leaves ___chkstk_darwin undefined (v0.0.18, turso_sdk_kit).
+          # Referencing it unquoted-by-default under `set -u` fails loud if
+          # Xcode ever stops exporting it, instead of silently reverting to 10.0.
+          env -u MACOSX_DEPLOYMENT_TARGET \
+            IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET}" \
             SDKROOT="${MACOS_SDKROOT}" \
             cargo build -p holon-gpui \
             --target "${RUST_TARGET}" \

@@ -278,7 +278,21 @@ submission.
   version skew in the tree, not a pipeline defect — fix it in `Cargo.toml`.
 - **iOS job fails with `linker command failed` / fastlane `Exit status: 65`.**
   A real build failure. The `ios-build-logs` artifact (uploaded on failure,
-  7-day retention) carries the raw `gym` logs.
+  7-day retention) carries the raw `gym` logs. Read them for the signature
+  below before assuming anything else — the failure is inside the cargo
+  script phase, not the app link, so `xcbeautify` buries it.
+- **…and the logs show `___chkstk_darwin` undefined plus `was built for newer
+  'iOS' version (26.5) than being linked (10.0)`.** A deployment-target split:
+  the cargo invocation ran without `IPHONEOS_DEPLOYMENT_TARGET`, so rustc
+  linked at its own 10.0 default (visible as `-target arm64-apple-ios10.0.0`
+  on the link line) while cc-rs compiled the C deps at the SDK default.
+  `___chkstk_darwin` only exists in libSystem from iOS 12 up, so the 10.0 link
+  cannot resolve it. It surfaces on `turso_sdk_kit` because that crate builds a
+  `cdylib` and therefore links during `cargo build`. The fix lives in the
+  `Build Rust Static Library` script phase of `frontends/gpui/ios/project.yml`,
+  which passes Xcode's `IPHONEOS_DEPLOYMENT_TARGET` through to cargo under
+  `set -u` — so a missing value fails loud instead of silently reverting to
+  10.0. `frontends/gpui/justfile`'s `ios-build` pins the same value.
 - **A run produced no Release and no store upload.** Check the event that
   started it. Every manual run is a dry run by design; `create-release` logs a
   `DRY RUN` warning naming the version, and the artifacts are attached to the
