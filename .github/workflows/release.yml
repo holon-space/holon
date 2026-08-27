@@ -184,6 +184,18 @@ jobs:
         with:
           toolchain: nightly
 
+      # A turso snapshot file checks out to a 264-char path, past Windows'
+      # 260-char MAX_PATH. Only core.longpaths makes libgit2 (cargo's git-dep
+      # backend) use \\?\ paths — the machine-wide LongPathsEnabled registry
+      # flag does not, since cargo.exe ships no longPathAware manifest
+      # (rust-lang/cargo#13020). Must precede rust-cache, which runs
+      # `cargo metadata` from Node and so needs the HOME-independent --system.
+      - name: Enable git long paths (Windows MAX_PATH)
+        if: matrix.platform == 'windows'
+        run: |
+          git config --system core.longpaths true
+          git config --global core.longpaths true
+
       # rust-cache restores the newest target/ for this platform via a
       # lock-independent prefix (cargo's fingerprinting then recompiles only
       # changed deps), prunes stale artifacts before saving so entries stay
