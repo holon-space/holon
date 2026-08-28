@@ -798,12 +798,19 @@ pub struct HolonApp {
     /// Page-ancestor breadcrumb for the focused page.
     pub breadcrumb: Entity<breadcrumb::BreadcrumbState>,
     /// Last focus the breadcrumb was resolved for; a change re-resolves it.
-    last_breadcrumb_focus: Option<holon_api::EntityUri>,
+    /// The outer `None` means NEVER RESOLVED, which is not the same state as
+    /// `Some(None)` — resolved while nothing was focused. Collapsing the two
+    /// makes the first frame (no focus yet, latch empty) compare equal, so the
+    /// bar never resolves at all until something moves the focus.
+    last_breadcrumb_focus: Option<Option<holon_api::EntityUri>>,
     /// Open-blocks tab strip for the MAIN region.
     pub tab_strip: Entity<tab_strip::TabStripState>,
     /// Last focus the tab strip was resolved for; a change re-resolves it
     /// (e.g. `navigation.open_tab` moves focus to the newly-opened tab).
-    last_tab_strip_focus: Option<holon_api::EntityUri>,
+    /// Same never-resolved-vs-resolved-to-nothing distinction as
+    /// [`Self::last_breadcrumb_focus`]: without it a restart with tabs already
+    /// open draws no strip until the user's first click.
+    last_tab_strip_focus: Option<Option<holon_api::EntityUri>>,
     /// Live-oracle violations (debug builds): mirrors the global
     /// `holon_oracles` status; rendered as an impossible-to-miss top banner.
     #[cfg(debug_assertions)]
@@ -877,8 +884,8 @@ impl Render for HolonApp {
         // into `self.breadcrumb`.
         {
             let focused = self.app_model.read(cx).engine.ui_state().focused_block();
-            if focused != self.last_breadcrumb_focus {
-                self.last_breadcrumb_focus = focused.clone();
+            if self.last_breadcrumb_focus.as_ref() != Some(&focused) {
+                self.last_breadcrumb_focus = Some(focused.clone());
                 match focused {
                     Some(block_id) => {
                         let generation = self.breadcrumb.update(cx, |s, _| {
@@ -914,8 +921,8 @@ impl Render for HolonApp {
         // update in the click / keyboard handlers instead (see `tab_strip`).
         {
             let focused = self.app_model.read(cx).engine.ui_state().focused_block();
-            if focused != self.last_tab_strip_focus {
-                self.last_tab_strip_focus = focused;
+            if self.last_tab_strip_focus.as_ref() != Some(&focused) {
+                self.last_tab_strip_focus = Some(focused);
                 let generation = self.tab_strip.update(cx, |s, _| {
                     s.error = None;
                     s.generation = s.generation.wrapping_add(1);
@@ -1760,11 +1767,41 @@ pub struct RebindHandle {
     /// The quick-open modal's state, so a caller can read the effect the
     /// `open_search` chord produces. `None` if the window never built one.
     search_ui: Option<Entity<search_ui::SearchUiState>>,
+    /// The root view. The window's own root is a `gpui_component::Root`
+    /// wrapping an `AnyView`, so this is the only way back to the fields
+    /// `HolonApp` owns — the safe-area insets in particular. `None` if the
+    /// window never built one.
+    holon_app: Option<Entity<HolonApp>>,
 }
 
 impl RebindHandle {
     pub fn window(&self) -> AnyWindowHandle {
         self.window
+    }
+
+    /// How many tabs the open-tabs strip is currently DRAWING for the Main
+    /// region. This is the resolved UI state, not the `navigation_history`
+    /// table behind it — the two disagree whenever the strip has not been
+    /// re-resolved since the tabs changed. `None` if the window never built a
+    /// root view.
+    pub fn drawn_tab_count(&self, cx: &App) -> Option<usize> {
+        let view = self.holon_app.as_ref()?;
+        Some(view.read(cx).tab_strip.read(cx).tabs.len())
+    }
+
+    /// Set the bottom safe-area inset — the padding an open soft keyboard adds
+    /// to the page container, shrinking the box every panel lays out in
+    /// (`HolonApp::render`'s `.pb(...)`). On mobile the platform supplies this
+    /// on every frame; elsewhere nothing overwrites it, so a caller that wants
+    /// to see the app under an open keyboard sets it here.
+    pub fn set_safe_area_bottom(&self, px: f32, cx: &mut App) {
+        let Some(view) = self.holon_app.as_ref() else {
+            return;
+        };
+        view.update(cx, |app, cx| {
+            app.safe_area_bottom = px;
+            cx.notify();
+        });
     }
 
     /// Whether the quick-open modal is open — the user-visible effect the
@@ -1829,7 +1866,8 @@ pub fn launch_holon_window_rebindable(
         cx,
     )
     .map(
-        |(window, app_model, entity_cache, live_engine, search_ui)| RebindHandle {
+        |(window, app_model, entity_cache, live_engine, search_ui, holon_app)| RebindHandle {
+            holon_app,
             window,
             app_model,
             entity_cache,
@@ -1962,6 +2000,7 @@ fn launch_holon_window_impl(
     entity_view_registry::EntityCache,
     LiveEngine,
     Option<Entity<search_ui::SearchUiState>>,
+    Option<Entity<HolonApp>>,
 )> {
     gpui_component::init(cx);
 
@@ -1989,6 +2028,16 @@ fn launch_holon_window_impl(
     let search_entity_slot: Arc<std::sync::OnceLock<Entity<search_ui::SearchUiState>>> =
         Arc::new(std::sync::OnceLock::new());
     let search_entity_slot_for_window = search_entity_slot.clone();
+
+    // Slot to carry the root view out of the window-creation closure. The
+    // window's root is a `gpui_component::Root` wrapping an `AnyView`, so
+    // `HolonApp` is not reachable from the window handle; without this slot
+    // nothing outside can read or set the fields it owns — notably
+    // `safe_area_bottom`, which is how an open soft keyboard shrinks the
+    // content box.
+    let holon_app_slot: Arc<std::sync::OnceLock<Entity<HolonApp>>> =
+        Arc::new(std::sync::OnceLock::new());
+    let holon_app_slot_for_window = holon_app_slot.clone();
 
     // Slot to carry the tab-strip entity out of the window-creation closure so
     // the app-level tab keyboard action handlers (registered after the window
@@ -2390,6 +2439,7 @@ fn launch_holon_window_impl(
                 last_main_nav_gen: 0,
             }
         });
+        let _ = holon_app_slot_for_window.set(view.clone());
         let any_view: AnyView = view.into();
         cx.new(|cx| gpui_component::Root::new(any_view, window, cx))
     });
@@ -2758,6 +2808,7 @@ fn launch_holon_window_impl(
         entity_cache,
         live_engine,
         search_entity_slot.get().cloned(),
+        holon_app_slot.get().cloned(),
     ))
 }
 
