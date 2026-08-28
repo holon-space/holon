@@ -479,6 +479,86 @@ async fn read_assigned_to(
     }))
 }
 
+/// Parse one agent-supplied `requires` target into a stored block id.
+///
+/// A bare slug gets the `block:` scheme. An id carrying a DIFFERENT scheme is
+/// refused rather than prefixed: `ensure_block_prefix` would turn `doc:notes`
+/// into `block:doc:notes`, a stored cross-reference that resolves to nothing.
+fn parse_requires_target(raw: &str) -> Result<String, rmcp::ErrorData> {
+    if raw.is_empty() {
+        return Err(rmcp::ErrorData::invalid_params(
+            "`requires` contains an empty id".to_string(),
+            None,
+        ));
+    }
+    match raw.split_once(':') {
+        None => Ok(ensure_block_prefix(raw)),
+        Some(("block", _)) => Ok(raw.to_string()),
+        Some((scheme, _)) => Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "`requires` target {raw:?} carries the {scheme:?} scheme — this tool takes block \
+                 ids only (a bare slug, or a `block:`-prefixed id)"
+            ),
+            None,
+        )),
+    }
+}
+
+/// The `requires` targets that resolve to no existing block, in the caller's
+/// order.
+///
+/// `block_requires.required_id` carries NO foreign key: the target column is
+/// deliberately unconstrained so a forward or cross-file `:REQUIRES:` edge
+/// cannot abort a whole org ingest. Bulk ingest needs that latitude; an
+/// interactive tool call does not, and a dangling target there is invisible —
+/// `block_requirement_edges_matview` INNER-JOINs it away, so the task is simply
+/// never blocked. Hence the existence check lives at THIS boundary, not in the
+/// schema.
+async fn unresolvable_requires(
+    engine: &Arc<holon::api::backend_engine::BackendEngine>,
+    targets: &[String],
+) -> Result<Vec<String>, rmcp::ErrorData> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut params = HashMap::new();
+    let placeholders: Vec<String> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, target)| {
+            let key = format!("r{i}");
+            params.insert(key.clone(), Value::String(target.clone()));
+            format!("${key}")
+        })
+        .collect();
+    let sql = format!(
+        "SELECT id FROM block_raw WHERE id IN ({})",
+        placeholders.join(", ")
+    );
+    let rows = engine.execute_query(sql, params, None).await.map_err(|e| {
+        rmcp::ErrorData::internal_error(
+            format!("`requires` target existence check failed: {e}"),
+            None,
+        )
+    })?;
+
+    let mut found = std::collections::HashSet::new();
+    for row in rows {
+        let Some(Value::String(id)) = row.get("id") else {
+            return Err(rmcp::ErrorData::internal_error(
+                format!("block_raw.id came back as a non-string value: {row:?}"),
+                None,
+            ));
+        };
+        found.insert(id.clone());
+    }
+    Ok(targets
+        .iter()
+        .filter(|t| !found.contains(*t))
+        .cloned()
+        .collect())
+}
+
 /// Refuse a params key that the WRITER INTERPRETS rather than stores.
 ///
 /// The operation-control namespace (`_order_rekeys`, `after_block_id`,
@@ -1712,9 +1792,10 @@ impl HolonMcpServer {
                        gate to G1 so the new task is visible to `now_for_agent` immediately. \
                        Extra `properties` are merged into the JSON properties bucket. Detects id \
                        collision via `block.create`'s response (Some(existing_id) means INSERT OR \
-                       IGNORE no-op). NOTE: `tags` and `requires` params are reserved for a \
-                       follow-up — set them via separate operations for now. Returns the new \
-                       task's id."
+                       IGNORE no-op). `tags` and `requires` are written as edge fields in the \
+                       same create; `requires` accepts bare ids and returns them `block:`-scheme \
+                       normalized, and every target must already exist — an unresolvable one \
+                       fails the call and creates nothing. Returns the new task's id."
     )]
     async fn add_subtask(
         &self,
@@ -1764,6 +1845,65 @@ impl HolonMcpServer {
         // ID property mirrors the bare id so org-rendered :PROPERTIES: blocks stay
         // round-trip stable.
         storage.insert("ID".into(), Value::String(new_id_bare.clone()));
+
+        // Edge fields travel on the create params as a `Value::Array` of strings
+        // keyed by the column name — the carrier `EdgeField::param_value` builds
+        // and both write legs already read (`LoroBlockOperations::create`'s edge
+        // extraction, `SqlOperationProvider::partition_params`' edge partition).
+        // Absent/empty means "say nothing about this edge": emitting an empty
+        // Array would make the provider issue a junction-clearing DELETE for a
+        // row that cannot have edges yet.
+        // Both junctions are keyed `PRIMARY KEY (block_id, <target>)` and the
+        // provider emits one plain INSERT per element, so a repeated entry
+        // collides with the row it just wrote — on the Loro leg that surfaces
+        // as an outbound reconcile that can never succeed, wedging the
+        // projection instead of failing the call. A caller naming a target
+        // twice means it once, so collapse repeats here. Tags are additionally
+        // sorted because storage holds them as a set.
+        let mut tags: Vec<String> = params.tags.unwrap_or_default();
+        tags.sort();
+        tags.dedup();
+
+        let mut seen = std::collections::HashSet::new();
+        let requires: Vec<String> = params
+            .requires
+            .unwrap_or_default()
+            .iter()
+            .map(|r| parse_requires_target(r))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|target| seen.insert(target.clone()))
+            .collect();
+
+        // Refuse the WHOLE create when a target does not resolve, before
+        // anything is written — a half-born task whose dependency silently
+        // vanished at the matview join is worse than no task.
+        let missing = unresolvable_requires(&self.engine(), &requires).await?;
+        if !missing.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "`requires` names {} block(s) that do not exist: {}. Nothing was created — \
+                     create them first, or drop them from the call.",
+                    missing.len(),
+                    missing.join(", ")
+                ),
+                None,
+            ));
+        }
+
+        if !tags.is_empty() {
+            storage.insert(
+                "tags".into(),
+                Value::Array(tags.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        if !requires.is_empty() {
+            storage.insert(
+                "requires".into(),
+                Value::Array(requires.iter().cloned().map(Value::String).collect()),
+            );
+        }
+
         for (k, v) in params.properties.into_iter() {
             reject_operation_control_key(&k)?;
             storage.insert(std::sync::Arc::from(k.as_str()), json_to_holon_value(v));
@@ -1788,23 +1928,8 @@ impl HolonMcpServer {
             ));
         }
 
-        let tags_warning = params.tags.as_ref().filter(|v| !v.is_empty()).map(|v| {
-            format!(
-                "tags ignored ({} supplied) — set via separate operation",
-                v.len()
-            )
-        });
-        let requires_warning = params.requires.as_ref().filter(|v| !v.is_empty()).map(|v| {
-            format!(
-                "requires ignored ({} supplied) — set via separate operation",
-                v.len()
-            )
-        });
-
-        let warnings: Vec<String> = [tags_warning, requires_warning]
-            .into_iter()
-            .flatten()
-            .collect();
+        // Echo the edge fields as WRITTEN, so the caller sees the normalization
+        // its bare `requires` ids went through without a second read.
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::json!({
                 "task_id": new_id,
@@ -1812,7 +1937,8 @@ impl HolonMcpServer {
                 "parent_id": parent_id,
                 "task_state": task_state,
                 "gate": gate,
-                "warnings": warnings,
+                "tags": tags,
+                "requires": requires,
             })
             .to_string(),
         )]))

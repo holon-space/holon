@@ -618,12 +618,22 @@ pub struct AddSubtaskParams {
     #[serde(default)]
     pub gate: Option<String>,
     /// Tags to attach (e.g. `["agent"]` so the new task surfaces in
-    /// `now_for_agent` immediately). NOT yet wired — currently ignored
-    /// because `block.create` partitioning needs additional plumbing
-    /// for edge fields. Track in a follow-up.
+    /// `now_for_agent` immediately). Written as the `tags` edge field in the
+    /// same `block.create`. Stored as a SET: repeats collapse, and both the
+    /// stored rows and the echoed list come back sorted, not in call order.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
-    /// Initial blocker list (`requires` edge field). Same caveat as `tags`.
+    /// Initial blocker list (`requires` edge field): block ids this task waits
+    /// on. Bare slugs are accepted (auto-prefixed to `block:`); an id carrying
+    /// any other scheme is rejected. Repeats collapse to one edge, first
+    /// occurrence winning, and the echoed list is that deduped set.
+    ///
+    /// Every target must already exist. Storage itself does NOT enforce this —
+    /// `block_requires.required_id` is deliberately unconstrained so that bulk
+    /// org ingest can carry forward and cross-file references — and a dangling
+    /// target is dropped silently by the requirement matview's inner join. This
+    /// tool therefore checks existence up front and refuses the whole call,
+    /// creating nothing, if any target is unresolvable.
     #[serde(default)]
     pub requires: Option<Vec<String>>,
     /// Additional `properties` key/values merged in (priority, effort, etc.).
