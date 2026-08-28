@@ -31,28 +31,36 @@ is not a fast-typing race.
 
 ## Root cause
 
-NOT ESTABLISHED — recorded as an observation with a lead, not a diagnosis.
+ESTABLISHED — the Java mirror is overwritten with sentinel state every frame.
 
 The commit path is
 `GpuiInputConnection.commitText` → `currentReplacementRange()` →
 `nativeReplaceText(start, end, text)`
 (`frontends/gpui/android/java/dev/gpui/mobile/GpuiTextInputView.java`).
 `currentReplacementRange()` derives `start`/`end` from the view's own
-`SpannableStringBuilder` selection, which is only ever advanced by
-`updateEditingState(...)` being called back from Rust. Text landing at offset 0
-every time is consistent with that selection never advancing.
+`SpannableStringBuilder`, so that mirror is what every keystroke aims at.
 
-**Candidate cause to check FIRST, because this lane introduced it:** the soft
-keyboard fix made `updateEditingState` asynchronous — it now does
-`view.post(() -> view.applyEditingState(...))` instead of applying inline,
-because the JNI caller runs on the `android_main` thread and touching the view
-off the UI thread is illegal. If any part of the commit path expects the
-editable to be current synchronously, that hop would leave the selection stale.
-This is a HYPOTHESIS, not a finding: the keystrokes here were seconds apart, so a
-one-frame deferral should have settled long before the next commit, which argues
-against it. The competing explanation is that Rust never calls
-`updateEditingState` back after a commit at all. Whoever picks this up should
-establish which before changing anything.
+The chain that corrupts it (fork `src/android/`):
+
+1. `window.rs` `set_input_handler` called `sync_state_to_java` inline. gpui
+   invokes that from inside `Window::draw`, with the `App` already borrowed.
+2. `AsyncApp::update_window` therefore fails its `try_borrow_mut`, and gpui
+   discards the failure with `.ok()`.
+3. `sync_state_to_java` had `.unwrap_or_default()` on the text and
+   `.unwrap_or((-1, -1, false))` on the selection, so instead of aborting it
+   shipped `text=""` and `selection=(-1,-1)` to Java — every frame.
+4. `applyEditingState` clamped that negative selection to 0, asserting the caret
+   sits before the first character.
+5. So every `commitText` computed `Range(0, 0)` and prepended. Typing `H i a s`
+   stores `saiH`.
+
+Each step is individually reasonable and the composition is silent: an error is
+swallowed at (2), a placeholder substituted at (3), and a defensive clamp at (4)
+converts the placeholder into a plausible-looking caret position. Nothing logs.
+
+The asynchronous `view.post` hop introduced by the soft-keyboard fix was
+considered and is NOT the cause — the mirror was being actively overwritten with
+sentinels every frame, so staleness never needed to be timing-dependent.
 
 ## Missing piece
 
@@ -78,10 +86,20 @@ selection-handling defect would also go unnoticed.
 
 ## Remedy
 
-OPEN — deliberately not fixed in the lane that found it, to keep the
-soft-keyboard fix landable on its own evidence.
+Fix implemented on fork branch `holon-ime-fixes`, NOT yet verified on a device:
 
-The soft-keyboard work that surfaced this is complete and verified separately
-(see `2026-08-27-android-soft-keyboard-never-opens`); this entry is the defect
-sitting behind it. Practical impact: on-device text entry now *works* but
-produces reversed text, so it is not yet usable.
+- move the mirror out of `set_input_handler` (which only stores the handler now)
+  into the frame callback, in the same `input_handler.0.lock()` scope as
+  `drain_into` and running every frame, not only when edits are pending;
+- `sync_state_to_java` logs and returns instead of substituting placeholder text
+  or selection, leaving the Java mirror untouched when the handler can't be read;
+- `applyEditingState` treats a negative selection as "no selection"
+  (`Selection.removeSelection`) rather than clamping it to 0;
+- `sView`/`sKeyboardType` become `volatile`: the soft-keyboard fix moved
+  `ensureView` onto the UI thread, so they are now written there and read on
+  `android_main` with no happens-before edge — a regression introduced by that
+  fix and fixed here.
+
+Verification is BLOCKED: the emulator used for the original measurement died
+mid-run and would not restart (see the parent entry's caveat about that rig).
+The `saiH` measurement above stands; the expected post-fix result is `Hias`.

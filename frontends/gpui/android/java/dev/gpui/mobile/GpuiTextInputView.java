@@ -31,8 +31,11 @@ import android.widget.FrameLayout;
  * EditText, then forwards exact edit commands to Rust/GPUI.
  */
 public final class GpuiTextInputView extends View {
-    private static GpuiTextInputView sView;
-    private static int sKeyboardType;
+    // Written on the UI thread (ensureView runs inside the showKeyboard runnable)
+    // and read on the android_main thread by updateEditingState, so both need a
+    // happens-before edge; without one a stale null silently drops updates.
+    private static volatile GpuiTextInputView sView;
+    private static volatile int sKeyboardType;
 
     /** Frames to keep re-asking for the IME while the view is not yet served. */
     private static final int IME_REQUEST_ATTEMPTS = 12;
@@ -135,12 +138,19 @@ public final class GpuiTextInputView extends View {
         applyingNativeState = true;
         editable.replace(0, editable.length(), text);
         int textLength = editable.length();
-        int selStart = clamp(selectionStart, 0, textLength);
-        int selEnd = clamp(selectionEnd, 0, textLength);
-        Selection.setSelection(
-                editable,
-                selectionReversed ? selEnd : selStart,
-                selectionReversed ? selStart : selEnd);
+        if (selectionStart < 0 || selectionEnd < 0) {
+            // No selection upstream. Clamping to 0 would assert the caret sits
+            // before the first character, and every commitText would then compute
+            // a replacement range of (0,0) and prepend instead of insert.
+            Selection.removeSelection(editable);
+        } else {
+            int selStart = clamp(selectionStart, 0, textLength);
+            int selEnd = clamp(selectionEnd, 0, textLength);
+            Selection.setSelection(
+                    editable,
+                    selectionReversed ? selEnd : selStart,
+                    selectionReversed ? selStart : selEnd);
+        }
         BaseInputConnection.removeComposingSpans(editable);
         if (composingStart >= 0 && composingEnd > composingStart) {
             new BaseInputConnection(this, true) {
