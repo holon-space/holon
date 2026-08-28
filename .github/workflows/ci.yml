@@ -260,21 +260,73 @@ jobs:
       - name: Detect code duplication
         run: npx jscpd .
 
+  # Windows-target rot guard. Windows is otherwise compiled only by release.yml's
+  # `build (windows)` job, so Windows-only breakage surfaced at TAG time twice:
+  # the turso 264-char checkout hitting MAX_PATH, and a wmi/windows-core version
+  # skew failing at type-check. `check`, not `build`, is the cheapest thing that
+  # catches both — the first happens during dependency checkout, the second
+  # during type-check — and it skips the link + package half of the release job.
+  windows-check:
+    name: Windows Check
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflow == 'true' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      # A turso snapshot file checks out to a 264-char path, past Windows'
+      # 260-char MAX_PATH. Only core.longpaths makes libgit2 (cargo's git-dep
+      # backend) use \\?\ paths — the machine-wide LongPathsEnabled registry
+      # flag does not, since cargo.exe ships no longPathAware manifest
+      # (rust-lang/cargo#13020). Must precede rust-cache, which runs
+      # `cargo metadata` from Node and so needs the HOME-independent --system.
+      - name: Enable git long paths (Windows MAX_PATH)
+        run: |
+          git config --system core.longpaths true
+          git config --global core.longpaths true
+
+      # See rust-checks: rustc-version keying + prune + main-only save. Distinct
+      # `key` keeps the Windows target/ separate from the Linux jobs'.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      # Same package, profile, and RUSTFLAGS as release.yml's Windows build step
+      # — a flag that changes feature resolution (crt-static) must not differ, or
+      # this job goes green on a configuration the release never compiles.
+      - name: Check holon-gpui (windows)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static -Zthreads=8
+        run: cargo check --release --locked -p holon-gpui
+
   # Summary job
   ci-complete:
     name: CI Complete
-    needs: [changes, rust-checks, gated-suites, rust-quality]
+    needs: [changes, rust-checks, gated-suites, rust-quality, windows-check]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check status
         run: |
           failed=false
-          for job in rust-checks gated-suites rust-quality; do
+          for job in rust-checks gated-suites rust-quality windows-check; do
             case "$job" in
               rust-checks)    result="${{ needs.rust-checks.result }}" ;;
               gated-suites)   result="${{ needs.gated-suites.result }}" ;;
               rust-quality)   result="${{ needs.rust-quality.result }}" ;;
+              windows-check)  result="${{ needs.windows-check.result }}" ;;
             esac
             if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
               echo "❌ $job: $result"
