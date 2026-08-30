@@ -190,7 +190,11 @@ premortem = "0.6"
 # Forked at holon-space/orgize to ship a configurable `is_tag_char` predicate
 # that defaults to allowing `-` in tags (Orgzly / Logseq / Org-Roam style).
 orgize = { git = "https://github.com/holon-space/orgize.git", branch = "holon" }
-libsql = { version = "0.9", features = ["core", "remote"] }
+# `core` only: the sole consumer opens on-disk SQLite files. The default
+# `replication`/`remote`/`sync`/`tls` features add libsql's sqld client, whose
+# tonic 0.11 / hyper 0.14 stack pins the vulnerable h2 0.3 and
+# rustls-webpki 0.102.
+libsql = { version = "0.9", default-features = false, features = ["core"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 # getrandom 0.2 lives beside 0.3 in the graph (ahash/const-random pull it) and
 # has its own, differently-named browser opt-in: 0.3 wants `wasm_js` + a cfg,
