@@ -129,6 +129,28 @@ impl QueryEngine for BackendEngine {
         Ok(holon_api::QuickOpenResults { pages, content })
     }
 
+    async fn region_view_root(&self, region: holon_api::Region) -> Result<Option<EntityUri>> {
+        let sql = format!(
+            "SELECT fr.root_id AS root_id FROM focus_roots fr JOIN navigation_cursor nc ON \
+             nc.history_id = fr.history_id WHERE fr.region = '{}' AND nc.region = '{}'",
+            region.as_str(),
+            region.as_str(),
+        );
+        let rows = BackendEngine::execute_query(self, sql, HashMap::new(), None).await?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let raw = row
+            .get("root_id")
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| {
+                anyhow::anyhow!("region_view_root: focus_roots.root_id is not a string")
+            })?;
+        EntityUri::parse(raw).map(Some).map_err(|e| {
+            anyhow::anyhow!("region_view_root: root_id {raw:?} is not a block URI: {e}")
+        })
+    }
+
     async fn breadcrumb_trail(&self, block_id: &EntityUri) -> Result<Vec<LinkCandidate>> {
         use crate::storage::BLOCK_READ_TABLE;
         let escaped_id = block_id.to_string().replace('\'', "''");

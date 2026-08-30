@@ -1932,6 +1932,11 @@ pub struct UiState {
     /// `focused_block`, which also moves on same-page block clicks (which
     /// must NOT reset scroll). Not a render signal; polled during render.
     main_nav_generation: Mutable<u64>,
+    /// Bumped by every op that can move the `main` region's cursor — including
+    /// `go_back`/`go_forward`/`activate`/`close`, which move it WITHOUT a page
+    /// change. Chrome that mirrors the view root (the breadcrumb) keys on this;
+    /// scroll reset must not, or a tab switch would lose the tab's scroll.
+    main_view_generation: Mutable<u64>,
     /// View-local expansion state for `expand_toggle` widgets, keyed by the
     /// widget's `target_id` (bare block id). Purely a VIEW concern (RATIFIED
     /// 2026-07-16, Option B): never persisted, never written to the document,
@@ -1985,6 +1990,7 @@ impl UiState {
             pending_authority_reseed: Mutable::new(None),
             focused_occurrence: Mutable::new(None),
             main_nav_generation: Mutable::new(0),
+            main_view_generation: Mutable::new(0),
             expanded_view: Mutex::new(HashMap::new()),
             expanded_view_observed: Mutex::new(std::collections::HashSet::new()),
             op_failure_sink: Mutex::new(None),
@@ -2088,10 +2094,24 @@ impl UiState {
     }
 
     /// Record that a *page navigation* landed in the `main` region. Bumps
-    /// [`Self::main_nav_generation`] so the frontend resets main-panel scroll.
+    /// [`Self::main_nav_generation`] so the frontend resets main-panel scroll,
+    /// and [`Self::main_view_generation`] because a page change also moves the
+    /// view root.
     fn bump_main_nav(&self) {
         self.main_nav_generation
             .set(self.main_nav_generation.get() + 1);
+        self.bump_main_view();
+    }
+
+    /// Current main-region view generation; see [`Self::main_view_generation`].
+    pub fn main_view_generation(&self) -> u64 {
+        self.main_view_generation.get()
+    }
+
+    /// Record that the `main` region's cursor may have moved.
+    fn bump_main_view(&self) {
+        self.main_view_generation
+            .set(self.main_view_generation.get() + 1);
     }
 
     /// SPIKE: set the focused occurrence alongside the focused block. `None`
@@ -2164,13 +2184,15 @@ impl UiState {
         (self.focused_block.clone(), self.pending_caret_seed.clone())
     }
 
-    /// Cloned handles for the focus signal + main-region nav generation.
-    /// Used by [`ReactiveEngine::follow_dangling_link`], whose create→navigate
-    /// chain runs in a spawned task (so it can't borrow `&self`) and mirrors an
-    /// ordinary `navigation.focus` into these two `Mutable`s once the newly
-    /// created page's id is known from the create op's response.
-    fn nav_focus_handles(&self) -> (Mutable<Option<EntityUri>>, Mutable<u64>) {
-        (self.focused_block.clone(), self.main_nav_generation.clone())
+    /// Cloned handles a spawned task mirrors an ordinary `navigation.focus`
+    /// into; see [`ReactiveEngine::follow_dangling_link`], whose create→navigate
+    /// chain cannot borrow `&self`.
+    fn nav_focus_handles(&self) -> NavFocusHandles {
+        NavFocusHandles {
+            focused_block: self.focused_block.clone(),
+            main_nav: self.main_nav_generation.clone(),
+            main_view: self.main_view_generation.clone(),
+        }
     }
 
     /// Read the pending caret seed for `block` without consuming it. Returns
@@ -4088,12 +4110,12 @@ impl BuilderServices for ReactiveEngine {
 
     fn follow_dangling_link(&self, target: String, region: String) {
         let session = self.session.clone();
-        let (focused_block, main_nav) = self.ui_state.nav_focus_handles();
+        let nav_handles = self.ui_state.nav_focus_handles();
         // Capture focus at CLICK time to guard the last-writer race: the create
         // is async, so if the user navigates elsewhere during that window the
         // stale task must NOT stomp the newer focus. (Resolved-link clicks
         // mirror focus synchronously and have no such window.)
-        let focus_at_click = focused_block.get_cloned();
+        let focus_at_click = nav_handles.focused_block.get_cloned();
         // User-visible surface for a refused create (fail-loud). Captured before
         // the spawn because the task can't borrow `&self`. Without this a
         // collision-refused create (interim identity policy §5) would only log,
@@ -4101,15 +4123,9 @@ impl BuilderServices for ReactiveEngine {
         // see nothing open AND no error — indistinguishable from a dead link.
         let op_failure_sink = self.ui_state.op_failure_sink_handle();
         self.runtime_handle.spawn(async move {
-            if let Err(e) = create_page_and_navigate(
-                &session,
-                &focused_block,
-                &main_nav,
-                &target,
-                &region,
-                focus_at_click,
-            )
-            .await
+            if let Err(e) =
+                create_page_and_navigate(&session, &nav_handles, &target, &region, focus_at_click)
+                    .await
             {
                 // Disclose the failed follow: the user clicked a dangling link
                 // and nothing opened, so a dropped error would look like a dead
@@ -4643,23 +4659,34 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
             ui_state.set_focus(None);
             ui_state.bump_main_nav();
         }
-        // `focus_pin` / `close` / `go_back` / `go_forward` / `activate` would
-        // require reading `navigation_history` to know the target — leave them
-        // alone until the backend grows a synchronous "current focus" accessor.
-        // `activate` (tab switch) is the same class as `go_back`/`go_forward`:
-        // it moves the cursor within the existing open set (no `block_id` in
-        // the intent), so it deliberately does NOT bump `main_nav_generation`
-        // (the switched-to tab keeps its scroll); the main panel re-renders via
-        // the CDC path from the `navigation_cursor` change. `Err` is a
-        // non-navigation op (the `entity_name` guard above keeps it out here).
+        // These move the region's cursor within the existing open set without
+        // naming a target, so `focused_block` cannot be mirrored here (knowing
+        // the target needs a `navigation_history` read) and
+        // `main_nav_generation` must NOT move (the switched-to tab keeps its
+        // scroll). The view root does move, hence `main_view_generation`.
+        //
+        // `close` carries no region and names a row, not a cursor, so it bumps
+        // without knowing whether the cursor moved. Readers must therefore treat
+        // a bump as "the root MAY have moved" and compare the resolved root
+        // before acting on it (`breadcrumb::resolve_trail`).
         Ok(
             NavigationOp::FocusPin
             | NavigationOp::Close
             | NavigationOp::GoBack
             | NavigationOp::GoForward
             | NavigationOp::Activate,
-        )
-        | Err(_) => {}
+        ) => {
+            let region = intent
+                .params
+                .get("region")
+                .and_then(|v| v.as_string())
+                .unwrap_or("main");
+            if region == "main" {
+                ui_state.bump_main_view();
+            }
+        }
+        // A non-navigation op; the `entity_name` guard above keeps it out here.
+        Err(_) => {}
     }
 }
 
@@ -4821,10 +4848,16 @@ fn apply_structural_focus(
 /// `focus_chain` observe it) and then persisted through the backend
 /// `navigation.focus` op, exactly as `maybe_mirror_navigation_focus` +
 /// `NavigationProvider` do for an ordinary click on a resolved link.
+/// The `UiState` mirrors a spawned navigation writes to.
+struct NavFocusHandles {
+    focused_block: Mutable<Option<EntityUri>>,
+    main_nav: Mutable<u64>,
+    main_view: Mutable<u64>,
+}
+
 async fn create_page_and_navigate(
     session: &Arc<FrontendSession>,
-    focused_block: &Mutable<Option<EntityUri>>,
-    main_nav: &Mutable<u64>,
+    nav: &NavFocusHandles,
     target: &str,
     region: &str,
     focus_at_click: Option<EntityUri>,
@@ -4851,7 +4884,7 @@ async fn create_page_and_navigate(
     // makes the next click resolve), but only navigate if no newer navigation
     // landed during the async create window — otherwise a stale task would
     // stomp the user's newer focus in both UiState and persisted nav-history.
-    let focus_now = focused_block.get_cloned();
+    let focus_now = nav.focused_block.get_cloned();
     if dangling_nav_superseded(&focus_at_click, &focus_now) {
         tracing::info!(
             "dangling-link navigation superseded by newer navigation \
@@ -4863,11 +4896,12 @@ async fn create_page_and_navigate(
     // Mirror the navigation into UiState before persisting it, matching the
     // synchronous click-time mirror of an ordinary `navigation.focus`.
     if focus_now.as_ref() != Some(&leaf) {
-        focused_block.set(Some(leaf.clone()));
+        nav.focused_block.set(Some(leaf.clone()));
     }
     if reset_scroll {
-        main_nav.set(main_nav.get() + 1);
+        nav.main_nav.set(nav.main_nav.get() + 1);
     }
+    nav.main_view.set(nav.main_view.get() + 1);
 
     let nav_params = [
         (

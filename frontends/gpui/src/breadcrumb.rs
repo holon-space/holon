@@ -1,15 +1,20 @@
-//! Page-ancestor breadcrumb for the focused page (dogfood #5: no path back
+//! Page-ancestor breadcrumb for the current view (dogfood #5: no path back
 //! after navigating into a nested page).
 //!
-//! Resolves the focused block's `Page`-ancestor trail through the query
+//! The bar shows the path of what the user is looking at: the focused block
+//! when there is one, otherwise the Main region's view root. It therefore moves
+//! on navigation as well as on focus, and a cold boot onto an open page draws
+//! the trail before the user touches anything.
+//!
+//! Resolves the source block's `Page`-ancestor trail through the query
 //! capability ([`holon_api::QueryEngine::breadcrumb_trail`], which reuses the
 //! `block_with_path` matview — no separate tree walk) and renders it as
 //! clickable segments. A segment click navigates through the SAME chokepoint
 //! quick-open and the sidebar use ([`crate::search_ui::navigate_to`]).
 //!
 //! Async resolution mirrors `search_ui::run_search`: `HolonApp::render` detects
-//! a focus change and calls [`resolve_breadcrumb`], which runs the query on
-//! tokio and pumps the trail back into this entity, emitting
+//! a focus or navigation change and calls [`resolve_breadcrumb`], which runs
+//! the queries on tokio and pumps the trail back into this entity, emitting
 //! [`NotifyBreadcrumb`] to re-render.
 //!
 //! Fail-loud: a trail that can't be resolved lands in `error` and is rendered
@@ -34,7 +39,7 @@ use crate::search_ui::Hit;
 use crate::search_ui::SearchTheme;
 use crate::search_ui::navigate_to;
 
-/// Focused-page breadcrumb state. Its own `Entity` so async trail resolution
+/// Current-view breadcrumb state. Its own `Entity` so async trail resolution
 /// can update it and trigger a re-render (same pattern as `SearchUiState`).
 pub struct BreadcrumbState {
     /// The block whose trail is currently shown/being resolved.
@@ -42,8 +47,12 @@ pub struct BreadcrumbState {
     /// Page ancestors, root → current.
     pub segments: Vec<Hit>,
     pub error: Option<String>,
-    /// Drops stale async responses when focus changes rapidly.
+    /// Drops stale async responses when the bar is re-resolved rapidly.
     pub generation: u64,
+    /// Main view root as of the last resolution that read one. A steal from a
+    /// live caret requires this to have CHANGED — a bumped view generation on
+    /// its own does not, since ops that cannot move the cursor still bump it.
+    pub view_root: Option<EntityUri>,
 }
 
 impl Default for BreadcrumbState {
@@ -53,6 +62,7 @@ impl Default for BreadcrumbState {
             segments: Vec::new(),
             error: None,
             generation: 0,
+            view_root: None,
         }
     }
 }
@@ -60,9 +70,75 @@ impl Default for BreadcrumbState {
 pub struct NotifyBreadcrumb;
 impl EventEmitter<NotifyBreadcrumb> for BreadcrumbState {}
 
-/// Resolve the breadcrumb trail for `block_id` and pump it back into `state`.
+/// What one resolution decided: the block whose trail to draw, its page
+/// ancestors, and the view root observed while deciding (`None` when the
+/// resolution did not need to read one). The whole bar is `None` when there is
+/// nothing to show at all — no focus and no open view.
+struct Resolved {
+    source: EntityUri,
+    trail: Vec<holon_api::LinkCandidate>,
+    view_root: Option<EntityUri>,
+}
+
+/// Which block the bar draws, given what moved since the last resolution.
+///
+/// A caret that moved wins. Otherwise the caret is presumed stale ONLY if the
+/// view root really CHANGED — ops that cannot move the cursor (closing a
+/// background tab) bump the generation too, and those must leave a live caret
+/// alone.
+async fn resolve_trail(
+    focused: Option<EntityUri>,
+    caret_moved: bool,
+    view_moved: bool,
+    last_view_root: Option<EntityUri>,
+    session: &FrontendSession,
+) -> Result<Option<Resolved>, String> {
+    let qe = session
+        .query_engine()
+        .ok_or_else(|| "breadcrumb needs the Turso query backend".to_string())?;
+
+    // The view generation did not move, so the root cannot have either: skip
+    // reading it and carry the last one forward.
+    if let (false, Some(block)) = (view_moved, focused.clone()) {
+        let trail = qe
+            .breadcrumb_trail(&block)
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+        return Ok(Some(Resolved {
+            source: block,
+            trail,
+            view_root: last_view_root,
+        }));
+    }
+
+    let root = qe
+        .region_view_root(holon_api::Region::Main)
+        .await
+        .map_err(|e| format!("breadcrumb view root: {e:#}"))?;
+    let source = match (&focused, &root) {
+        (Some(caret), _) if caret_moved => caret.clone(),
+        (Some(caret), Some(root)) if Some(root) == last_view_root.as_ref() => caret.clone(),
+        (_, Some(root)) => root.clone(),
+        (_, None) => return Ok(None),
+    };
+    let trail = qe
+        .breadcrumb_trail(&source)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(Some(Resolved {
+        source,
+        trail,
+        view_root: root,
+    }))
+}
+
+/// Resolve the bar and pump it back into `state`. `caret_moved` says whether
+/// the focus changed since the last resolution; see [`resolve_trail`].
 pub fn resolve_breadcrumb(
-    block_id: EntityUri,
+    focused: Option<EntityUri>,
+    caret_moved: bool,
+    view_moved: bool,
+    last_view_root: Option<EntityUri>,
     generation: u64,
     session: Arc<FrontendSession>,
     rt_handle: tokio::runtime::Handle,
@@ -70,18 +146,10 @@ pub fn resolve_breadcrumb(
     window_handle: AnyWindowHandle,
     async_cx: &AsyncApp,
 ) {
-    let (tx, rx) =
-        futures::channel::oneshot::channel::<Result<Vec<holon_api::LinkCandidate>, String>>();
-    let query_block = block_id.clone();
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<Option<Resolved>, String>>();
     rt_handle.spawn(async move {
-        let outcome = match session.query_engine() {
-            Some(qe) => qe
-                .breadcrumb_trail(&query_block)
-                .await
-                .map_err(|e| format!("{e:#}")),
-            None => Err("breadcrumb needs the Turso query backend".to_string()),
-        };
-        let _ = tx.send(outcome);
+        let _ = tx
+            .send(resolve_trail(focused, caret_moved, view_moved, last_view_root, &session).await);
     });
 
     async_cx
@@ -91,14 +159,23 @@ pub fn resolve_breadcrumb(
                 state.update(cx, |s, cx| {
                     if s.generation == generation {
                         match outcome {
-                            Ok(Ok(trail)) => {
-                                s.segments = trail
+                            Ok(Ok(Some(resolved))) => {
+                                s.block_id = Some(resolved.source);
+                                s.view_root = resolved.view_root;
+                                s.segments = resolved
+                                    .trail
                                     .into_iter()
                                     .map(|c| Hit {
                                         id: c.id,
                                         label: c.label,
                                     })
                                     .collect();
+                                s.error = None;
+                            }
+                            Ok(Ok(None)) => {
+                                s.block_id = None;
+                                s.view_root = None;
+                                s.segments.clear();
                                 s.error = None;
                             }
                             Ok(Err(e)) => {
@@ -147,8 +224,8 @@ fn displayed_segments(segments: &[Hit]) -> Vec<Option<(usize, &Hit)>> {
     out
 }
 
-/// Render the breadcrumb bar for the currently-focused page. `None` when there
-/// is nothing to show (no focus / trail not yet resolved and no error).
+/// Render the breadcrumb bar for the current view. `None` when there is nothing
+/// to show (trail not yet resolved / nothing open, and no error).
 pub fn render_breadcrumb_bar(
     state_read: &BreadcrumbState,
     services: Arc<dyn BuilderServices>,

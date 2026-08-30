@@ -75,8 +75,52 @@ FIXED.
   `lane-logs/RED-tab-strip-boot.log` (`tabs open in navigation state=1 drawn by
   the strip=0`); green: `lane-logs/GREEN-tab-strip-boot.log` (`=1` / `=1`).
 
-Left OPEN, deliberately, because it is a product question rather than a bug:
-**what should the breadcrumb show when nothing is focused?** Today it shows
-nothing, so it still appears on the user's first tap (a smaller reflow, ~31px).
-Resolving it from the Main focus ROOT instead of the editor focus would remove
-that last pop-in, but it changes what the bar means. Needs Martin.
+The open product question — **what should the breadcrumb show when nothing is
+focused?** — was ruled by Martin (D41.b, 2026-08-30): the bar means the CURRENT
+VIEW's path, so with nothing focused it resolves from the Main view root, and a
+focused block still wins. That removes the last ~31px pop-in.
+
+- `last_breadcrumb_focus` became `last_breadcrumb_key`, a
+  `(Option<EntityUri>, main_view_generation)` pair.
+- `UiState::main_view_generation` is a SECOND counter, bumped by every op that
+  moves the `main` cursor — `go_back`/`go_forward`/`activate`/`close` included,
+  which move the view root without a page change. It is separate from
+  `main_nav_generation` because that one drives the main-panel scroll reset, and
+  a tab switch must keep the switched-to tab's scroll.
+- A caret that did not move while the view did is treated as stale: the
+  cursor-moving ops never set the focus, so it still names a row on the page
+  just left. The view wins in that case — but ONLY if the resolved view root
+  actually changed. `navigation.close` names a row rather than a cursor and
+  carries no region, so it bumps the generation even when a BACKGROUND tab
+  closes and the cursor does not move; comparing the resolved root is what keeps
+  such a bump from stealing the bar off a live caret.
+- `QueryEngine::region_view_root` reads the region's open root behind the
+  capability, so the frontend stays free of SQL.
+- `frontends/gpui/tests/breadcrumb_resolves_from_view_root_windowed.rs` pins the
+  cold boot, the navigation move, the focused-block case, Back, a tab switch and
+  the cleared-focus case, plus a background-tab close that must NOT move the
+  bar. Red logs: `lane-logs/breadcrumb-view-root-RED.log`
+  (`bar_block=None segments=Some(0)` against view root `block:journals`) and
+  `lane-logs/breadcrumb-back-activate-RED.log` (after Back the view is on
+  `block:wslice-graft-page` and the bar still reads `block:c1`) and
+  `lane-logs/breadcrumb-bg-close-RED.log` (a background close moves neither the
+  root nor the caret, and the bar leaves `block:c1` anyway).
+
+## Residual
+
+The bar resolves once per key change and never retries. A transient failure —
+`session.query_engine()` absent, or a `region_view_root` error on the first
+frame — latches an error/empty bar that persists until the focus or the view
+generation next moves. The cold boot itself is safe (the outer `None` still buys
+the FIRST resolution), so the exposure is failure-RETRY, not first-paint. Left
+uncoded deliberately: retrying on error means re-querying every frame while the
+error persists, which is a worse failure than the one it fixes.
+
+The windowed legs drive each gesture as its own settled frame. A real user can
+land a caret click and a Back within one frame, which the legs do not reproduce;
+the precedence they pin is the resolver's, not the frame scheduler's.
+
+The tab strip keeps the older, narrower trigger — it re-resolves on focus alone
+and keeps its active-tab highlight in sync optimistically — so its tab SET can
+still go stale on a cursor move that opens or closes a row. Not this entry's
+defect; recorded here because the two bars now differ in how they stay fresh.

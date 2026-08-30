@@ -795,20 +795,22 @@ pub struct HolonApp {
     pub share_ui: Entity<share_ui::ShareUiState>,
     /// User-facing search modal (quick-open + full-text content), cmd-K.
     pub search_ui: Entity<search_ui::SearchUiState>,
-    /// Page-ancestor breadcrumb for the focused page.
+    /// Page-ancestor breadcrumb for the current view.
     pub breadcrumb: Entity<breadcrumb::BreadcrumbState>,
-    /// Last focus the breadcrumb was resolved for; a change re-resolves it.
-    /// The outer `None` means NEVER RESOLVED, which is not the same state as
-    /// `Some(None)` — resolved while nothing was focused. Collapsing the two
-    /// makes the first frame (no focus yet, latch empty) compare equal, so the
-    /// bar never resolves at all until something moves the focus.
-    last_breadcrumb_focus: Option<Option<holon_api::EntityUri>>,
+    /// Focus + main-VIEW generation the breadcrumb was resolved for; a change
+    /// in either re-resolves it. The view generation, not the nav one: a tab
+    /// switch or Back moves the view root without a page change, and the bar
+    /// must follow it. The outer `None` means NEVER RESOLVED, which is not the
+    /// same state as `Some((None, _))` — resolved while nothing was focused.
+    /// Collapsing the two makes the first frame (no focus yet, latch empty)
+    /// compare equal, so the bar never resolves at all.
+    last_breadcrumb_key: Option<(Option<holon_api::EntityUri>, u64)>,
     /// Open-blocks tab strip for the MAIN region.
     pub tab_strip: Entity<tab_strip::TabStripState>,
     /// Last focus the tab strip was resolved for; a change re-resolves it
     /// (e.g. `navigation.open_tab` moves focus to the newly-opened tab).
     /// Same never-resolved-vs-resolved-to-nothing distinction as
-    /// [`Self::last_breadcrumb_focus`]: without it a restart with tabs already
+    /// [`Self::last_breadcrumb_key`]: without it a restart with tabs already
     /// open draws no strip until the user's first click.
     last_tab_strip_focus: Option<Option<holon_api::EntityUri>>,
     /// Live-oracle violations (debug builds): mirrors the global
@@ -879,38 +881,44 @@ impl Render for HolonApp {
                 scroll_reactive_shell_tree_to_top(&main_panel, cx);
             }
         }
-        // Re-resolve the page-ancestor breadcrumb whenever the focused block
-        // changes. The trail is fetched async (matview-backed) and pumped back
-        // into `self.breadcrumb`.
+        // Re-resolve the page-ancestor breadcrumb whenever the focused block or
+        // the Main view root moves: the bar shows the path of what the user is
+        // looking at, not only of a block they have the caret in.
         {
-            let focused = self.app_model.read(cx).engine.ui_state().focused_block();
-            if self.last_breadcrumb_focus.as_ref() != Some(&focused) {
-                self.last_breadcrumb_focus = Some(focused.clone());
-                match focused {
-                    Some(block_id) => {
-                        let generation = self.breadcrumb.update(cx, |s, _| {
-                            s.block_id = Some(block_id.clone());
-                            s.error = None;
-                            s.generation = s.generation.wrapping_add(1);
-                            s.generation
-                        });
-                        let session = self.session.clone();
-                        let rt_handle = self.rt_handle.clone();
-                        let state = self.breadcrumb.clone();
-                        let wh = window.window_handle();
-                        let async_cx = cx.to_async();
-                        breadcrumb::resolve_breadcrumb(
-                            block_id, generation, session, rt_handle, state, wh, &async_cx,
-                        );
-                    }
-                    None => {
-                        self.breadcrumb.update(cx, |s, _| {
-                            s.block_id = None;
-                            s.segments.clear();
-                            s.error = None;
-                        });
-                    }
-                }
+            let ui = self.app_model.read(cx).engine.ui_state();
+            let key = (ui.focused_block(), ui.main_view_generation());
+            if self.last_breadcrumb_key.as_ref() != Some(&key) {
+                // A caret that moved owns the bar. When only the view moved,
+                // the resolver decides: it steals from a live caret only if the
+                // view root really changed (`resolve_trail`).
+                let (caret_moved, view_moved) = match &self.last_breadcrumb_key {
+                    Some((last_focus, last_gen)) => (last_focus != &key.0, last_gen != &key.1),
+                    None => (key.0.is_some(), true),
+                };
+                let last_view_root = self.breadcrumb.read(cx).view_root.clone();
+                self.last_breadcrumb_key = Some(key.clone());
+                let generation = self.breadcrumb.update(cx, |s, _| {
+                    s.error = None;
+                    s.generation = s.generation.wrapping_add(1);
+                    s.generation
+                });
+                let session = self.session.clone();
+                let rt_handle = self.rt_handle.clone();
+                let state = self.breadcrumb.clone();
+                let wh = window.window_handle();
+                let async_cx = cx.to_async();
+                breadcrumb::resolve_breadcrumb(
+                    key.0.clone(),
+                    caret_moved,
+                    view_moved,
+                    last_view_root,
+                    generation,
+                    session,
+                    rt_handle,
+                    state,
+                    wh,
+                    &async_cx,
+                );
             }
         }
         // Re-resolve the open-tabs strip whenever the focused block changes.
@@ -1789,6 +1797,26 @@ impl RebindHandle {
         Some(view.read(cx).tab_strip.read(cx).tabs.len())
     }
 
+    /// How many segments the breadcrumb bar is currently DRAWING. Zero means
+    /// the bar renders nothing at all. `None` if the window never built a root
+    /// view.
+    pub fn drawn_breadcrumb_segments(&self, cx: &App) -> Option<usize> {
+        let view = self.holon_app.as_ref()?;
+        Some(view.read(cx).breadcrumb.read(cx).segments.len())
+    }
+
+    /// The block whose trail the breadcrumb bar is showing. `None` if the
+    /// window never built a root view, or the bar has resolved nothing.
+    pub fn breadcrumb_block(&self, cx: &App) -> Option<holon_api::EntityUri> {
+        self.holon_app
+            .as_ref()?
+            .read(cx)
+            .breadcrumb
+            .read(cx)
+            .block_id
+            .clone()
+    }
+
     /// Set the bottom safe-area inset — the padding an open soft keyboard adds
     /// to the page container, shrinking the box every panel lays out in
     /// (`HolonApp::render`'s `.pb(...)`). On mobile the platform supplies this
@@ -2430,7 +2458,7 @@ fn launch_holon_window_impl(
                 share_ui: share_ui_entity,
                 search_ui: search_ui_entity,
                 breadcrumb: breadcrumb_entity,
-                last_breadcrumb_focus: None,
+                last_breadcrumb_key: None,
                 tab_strip: tab_strip_entity,
                 last_tab_strip_focus: None,
                 #[cfg(debug_assertions)]

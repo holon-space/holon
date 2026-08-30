@@ -117,6 +117,14 @@ pub trait QueryEngine: Send + Sync {
         anyhow::bail!("QueryEngine::breadcrumb_trail not implemented by this impl")
     }
 
+    /// The block a region's panel is currently open on: the `focus_roots` row
+    /// the region's `navigation_cursor` points at. `None` when the region has
+    /// no open view.
+    async fn region_view_root(&self, region: crate::Region) -> Result<Option<EntityUri>> {
+        let _ = region;
+        anyhow::bail!("QueryEngine::region_view_root not implemented by this impl")
+    }
+
     /// Non-settling read of a single block's `content` straight from the
     /// write table (`block_raw`). Used by the headless editor mirror, which
     /// must see exactly what a production editor's SQL read would see —
