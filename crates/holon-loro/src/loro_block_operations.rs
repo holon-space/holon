@@ -1212,35 +1212,15 @@ impl LoroBlockOperations {
         if let Some(name) = &block.source_name {
             params.insert("source_name".into(), Value::String(name.clone()));
         }
-        if !block.tags.is_empty() {
-            params.insert(
-                "tags".into(),
-                Value::Array(block.tags.to_vec().into_iter().map(Value::String).collect()),
-            );
-        }
-        if !block.requires.is_empty() {
-            params.insert(
-                "requires".into(),
-                Value::Array(
-                    block
-                        .requires
-                        .iter()
-                        .map(|u| Value::String(u.to_string()))
-                        .collect(),
-                ),
-            );
-        }
-        if !block.advice_suppressed.is_empty() {
-            params.insert(
-                "advice_suppressed".into(),
-                Value::Array(
-                    block
-                        .advice_suppressed
-                        .iter()
-                        .map(|u| Value::String(u.to_string()))
-                        .collect(),
-                ),
-            );
+        // Every edge field through the one canonical builder. Hand-listing
+        // them here dropped `contributes_to` from the resurrected block
+        // and bypassed the builder's duplicate-target fold, which the
+        // junction primary keys make mandatory.
+        for field in holon_api::EdgeField::ALL {
+            if field.is_empty(block) {
+                continue;
+            }
+            params.insert(field.column().into(), field.param_value(block));
         }
         // Stored properties become params verbatim EXCEPT the ones `create`
         // reads as instructions rather than data. `block.marks` above is the

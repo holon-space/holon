@@ -94,37 +94,37 @@ impl EdgeField {
     /// The diff/create param value for this edge field from `block`. Always a
     /// `Value::Array` of id/tag strings — edge fields are set-valued, and the
     /// SQL provider's edge partition routes the Array to the junction table.
+    ///
+    /// A repeated target is folded out here, keeping the first occurrence.
+    /// Every junction keys on `(source, target)`, while three of the four
+    /// fields are carried on `Block` as a plain `Vec<EntityUri>` that can
+    /// hold the same target twice (`tags` cannot — `Tags` is a `BTreeSet`).
+    /// The provider's `edge_field_replace_sql` emits one plain `INSERT` per
+    /// element, so a repeat raises a primary-key violation that fails the
+    /// whole block write and, under the outbound reconcile's retry, never
+    /// converges. This is the one builder every write leg shares, so the
+    /// fold belongs here rather than at each call site.
     pub fn param_value(self, block: &Block) -> Value {
-        match self {
-            EdgeField::Tags => Value::Array(
-                block
-                    .tags
-                    .iter()
-                    .map(|t| Value::String(t.clone()))
-                    .collect(),
-            ),
-            EdgeField::Requires => Value::Array(
-                block
-                    .requires
-                    .iter()
-                    .map(|r| Value::String(r.to_string()))
-                    .collect(),
-            ),
-            EdgeField::AdviceSuppressed => Value::Array(
-                block
-                    .advice_suppressed
-                    .iter()
-                    .map(|r| Value::String(r.to_string()))
-                    .collect(),
-            ),
-            EdgeField::ContributesTo => Value::Array(
-                block
-                    .contributes_to
-                    .iter()
-                    .map(|r| Value::String(r.to_string()))
-                    .collect(),
-            ),
-        }
+        let targets: Vec<String> = match self {
+            EdgeField::Tags => block.tags.iter().cloned().collect(),
+            EdgeField::Requires => block.requires.iter().map(|r| r.to_string()).collect(),
+            EdgeField::AdviceSuppressed => block
+                .advice_suppressed
+                .iter()
+                .map(|r| r.to_string())
+                .collect(),
+            EdgeField::ContributesTo => {
+                block.contributes_to.iter().map(|r| r.to_string()).collect()
+            }
+        };
+        let mut seen = std::collections::HashSet::new();
+        Value::Array(
+            targets
+                .into_iter()
+                .filter(|t| seen.insert(t.clone()))
+                .map(Value::String)
+                .collect(),
+        )
     }
 }
 
@@ -270,5 +270,26 @@ mod mutation_gap_tests {
         );
         assert_eq!(EdgeFieldUpdate::Tags(Tags::default()).field_name(), "tags");
         assert_eq!(EdgeFieldUpdate::Requires(vec![]).field_name(), "requires");
+    }
+
+    /// Every junction keys on `(source, target)` and the provider emits one
+    /// plain `INSERT` per element, so a repeated target fails the whole block
+    /// write on the primary key. `Vec<EntityUri>` cannot express that
+    /// constraint, so this builder folds the repeat out — keeping the FIRST
+    /// occurrence, which holds the surviving targets in authored order.
+    ///
+    /// Bug-funnel `2026-08-30-edge-field-duplicate-target-wedges-write`.
+    #[test]
+    fn param_value_folds_a_repeated_target_keeping_authored_order() {
+        let b = block(&[], &["late", "early", "late"]);
+        assert_eq!(
+            EdgeField::Requires.param_value(&b),
+            Value::Array(vec![
+                Value::String("block:late".to_string()),
+                Value::String("block:early".to_string()),
+            ]),
+            "the repeat is dropped at its SECOND occurrence, so the surviving targets keep the \
+             order they were authored in — sorting instead would churn org write-back bytes"
+        );
     }
 }
