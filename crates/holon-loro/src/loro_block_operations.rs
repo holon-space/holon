@@ -365,7 +365,9 @@ fn block_op(op_name: &str, params: HashMap<String, Value>) -> Operation {
 /// `properties["marks"]`; without the second use the inverse would hand that
 /// string straight back to `create` as a real marks param and resurrect a plain
 /// block RICH (or fail on junk JSON).
-const CREATE_HANDLED_FIELDS: [&str; 15] = [
+/// Edge fields are handled too; `create_handles_field` enumerates those from
+/// [`holon_api::EdgeField`].
+const CREATE_HANDLED_FIELDS: [&str; 12] = [
     "parent_id",
     "content",
     // Flattened key-by-key by `create`, never stored verbatim.
@@ -378,15 +380,17 @@ const CREATE_HANDLED_FIELDS: [&str; 15] = [
     "source_name",
     "source_header_args",
     "source_results",
-    // Edge fields routed to their junctions.
-    "tags",
-    "requires",
-    "advice_suppressed",
     // Positional anchors. `after_block_id` is the canonical key every prod
     // caller uses; `after` is the delete-inverse restore key.
     holon_api::POSITION_AFTER_BLOCK_ID_PARAM,
     "after",
 ];
+
+/// Whether `create` reads `key` as an instruction rather than as a
+/// property to store — the edge fields plus [`CREATE_HANDLED_FIELDS`].
+fn create_handles_field(key: &str) -> bool {
+    holon_api::EdgeField::is_edge_column(key) || CREATE_HANDLED_FIELDS.contains(&key)
+}
 
 /// Build the `set_field("content", Object{text, marks})` payload that restores
 /// a block's rich content (text AND marks) as ONE atomic value. Routed through
@@ -851,7 +855,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
             source_language
         );
 
-        // Edge fields (tags / requires / advice_suppressed) are set-valued
+        // Edge fields are set-valued
         // junctions the projector reads from dedicated Loro meta keys, NOT the
         // `properties` blob. A `delete` inverse restores them by passing them
         // here; absent (every normal create caller) ⇒ empty, unchanged
@@ -966,7 +970,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
         // fields)
         let mut props = HashMap::new();
         for (key, value) in &fields {
-            if !CREATE_HANDLED_FIELDS.contains(&key.as_ref()) {
+            if !create_handles_field(key.as_ref()) {
                 props.insert(key.to_string(), value.clone());
             }
         }
@@ -1228,7 +1232,7 @@ impl LoroBlockOperations {
         // left by a doc written before that key was routed to Peritext would
         // otherwise be handed back as a real marks param.
         for (key, value) in &block.properties {
-            if CREATE_HANDLED_FIELDS.contains(&key.as_str()) {
+            if create_handles_field(key.as_str()) {
                 continue;
             }
             params.insert(key.clone(), value.clone());
@@ -2764,6 +2768,98 @@ mod advice_dismiss_tests {
             .await
             .expect_err("missing anchor must fail loud");
         assert!(err.to_string().contains("dismiss_advice"), "got: {err}");
+    }
+
+    /// Every edge field a `create` carries lands in the junction meta, and in
+    /// no other store: a second copy in the properties blob drifts from it.
+    #[tokio::test]
+    async fn create_routes_edge_fields_to_junctions_not_properties() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        let mut fields: StorageEntity = HashMap::new();
+        fields.insert("parent_id".into(), Value::String(anchor.clone()));
+        fields.insert("content".into(), Value::String("a step".into()));
+        fields.insert(
+            "tags".into(),
+            Value::Array(vec![Value::String("task".into())]),
+        );
+        fields.insert(
+            "requires".into(),
+            Value::Array(vec![Value::String("block:dep".into())]),
+        );
+        fields.insert(
+            "advice_suppressed".into(),
+            Value::Array(vec![Value::String("block:lesson".into())]),
+        );
+        fields.insert(
+            "contributes_to".into(),
+            Value::Array(vec![Value::String("block:goal".into())]),
+        );
+        let (block_id, _) = ops.create(fields).await.expect("create");
+
+        let block = backend.get_block(&block_id).await.expect("read");
+        assert_eq!(block.tags.to_vec(), vec!["task".to_string()]);
+        assert_eq!(uris(&block.requires), vec!["block:dep".to_string()]);
+        assert_eq!(
+            uris(&block.advice_suppressed),
+            vec!["block:lesson".to_string()]
+        );
+        assert_eq!(uris(&block.contributes_to), vec!["block:goal".to_string()]);
+
+        for field in holon_api::EdgeField::ALL {
+            assert!(
+                !block.properties.contains_key(field.column()),
+                "edge field {} was also written into the properties blob: {:?}",
+                field.column(),
+                block.properties
+            );
+        }
+    }
+
+    /// A leaf delete's inverse restores every edge field: the inverse params
+    /// are built from the block's junctions, so an edge they omit is lost on
+    /// undo.
+    #[tokio::test]
+    async fn leaf_delete_inverse_restores_every_edge_field() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        let c = seed_child(&backend, &anchor, "c", "a step").await;
+        for (field, target) in [
+            ("tags", "task"),
+            ("requires", "block:dep"),
+            ("advice_suppressed", "block:lesson"),
+            ("contributes_to", "block:goal"),
+        ] {
+            ops.set_field(&c, field, Value::Array(vec![Value::String(target.into())]))
+                .await
+                .unwrap_or_else(|e| panic!("set {field}: {e}"));
+        }
+        ops.save_doc("").await.expect("save");
+
+        let result = ops.delete(&c).await.expect("delete");
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("leaf delete must be reversible, got {other:?}"),
+        };
+        replay_inverse(&ops, &inverse).await;
+
+        let restored = backend.get_block(&c).await.expect("restored");
+        assert_eq!(restored.tags.to_vec(), vec!["task".to_string()]);
+        assert_eq!(uris(&restored.requires), vec!["block:dep".to_string()]);
+        assert_eq!(
+            uris(&restored.advice_suppressed),
+            vec!["block:lesson".to_string()]
+        );
+        assert_eq!(
+            uris(&restored.contributes_to),
+            vec!["block:goal".to_string()]
+        );
+    }
+
+    fn uris(targets: &[EntityUri]) -> Vec<String> {
+        targets.iter().map(|u| u.to_string()).collect()
     }
 
     #[test]

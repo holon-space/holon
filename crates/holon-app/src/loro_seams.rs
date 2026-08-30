@@ -470,20 +470,25 @@ impl BlockOrdering for LoroBlockOrdering {
         let source_language = params
             .remove("source_language")
             .and_then(|v| v.as_string().map(str::to_string));
-        let tags = match params.remove("tags") {
-            Some(v) => Some(parse_string_list(&v).map_err(|e| boxed(format!("'tags': {e}")))?),
-            None => None,
-        };
-        let requires = match params.remove("requires") {
-            Some(v) => Some(parse_string_list(&v).map_err(|e| boxed(format!("'requires': {e}")))?),
-            None => None,
-        };
-        let advice_suppressed = match params.remove("advice_suppressed") {
-            Some(v) => Some(
-                parse_string_list(&v).map_err(|e| boxed(format!("'advice_suppressed': {e}")))?,
-            ),
-            None => None,
-        };
+        // Every edge field is consumed here and written to its junction. What
+        // stays in the bag becomes a property, and the Loro read boundary
+        // strips edge columns out of properties.
+        let mut edges: Vec<(holon_api::EdgeField, Vec<String>)> = Vec::new();
+        for field in holon_api::EdgeField::ALL {
+            let column = field.column();
+            let Some(v) = params.remove(column) else {
+                continue;
+            };
+            let targets = parse_string_list(&v).map_err(|e| boxed(format!("'{column}': {e}")))?;
+            if field != holon_api::EdgeField::Tags {
+                for target in &targets {
+                    EntityUri::parse(target).map_err(|e| {
+                        boxed(format!("update_in_tree: invalid '{column}' URI: {e}"))
+                    })?;
+                }
+            }
+            edges.push((field, targets));
+        }
         // Everything remaining is a property.
         let properties = params;
 
@@ -519,38 +524,9 @@ impl BlockOrdering for LoroBlockOrdering {
                 .map_err(boxed)?;
         }
 
-        if let Some(tags) = tags {
+        for (field, targets) in edges {
             self.backend
-                .set_block_tags(&id, &tags)
-                .await
-                .map_err(boxed)?;
-        }
-        if let Some(requires) = requires {
-            let requires: Vec<EntityUri> = requires
-                .into_iter()
-                .map(|r| {
-                    EntityUri::parse_owned(r)
-                        .map_err(|e| boxed(format!("update_in_tree: invalid 'requires' URI: {e}")))
-                })
-                .collect::<Result<_, _>>()?;
-            self.backend
-                .set_block_requires(&id, &requires)
-                .await
-                .map_err(boxed)?;
-        }
-        if let Some(advice_suppressed) = advice_suppressed {
-            let advice_suppressed: Vec<EntityUri> = advice_suppressed
-                .into_iter()
-                .map(|r| {
-                    EntityUri::parse_owned(r).map_err(|e| {
-                        boxed(format!(
-                            "update_in_tree: invalid 'advice_suppressed' URI: {e}"
-                        ))
-                    })
-                })
-                .collect::<Result<_, _>>()?;
-            self.backend
-                .set_block_advice_suppressed(&id, &advice_suppressed)
+                .set_block_edge_field(&id, field.column(), &targets)
                 .await
                 .map_err(boxed)?;
         }
