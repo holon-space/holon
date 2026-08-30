@@ -71,6 +71,21 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
+      # The ubuntu image ships ~20 GB of toolchains this workspace never uses
+      # (Android SDK, .NET, GHC, CodeQL, Swift). `cargo test --workspace` plus
+      # `cargo clippy --all-targets` over 43 crates outgrew what was left and
+      # died mid-compile with ENOSPC — the runner could not even write its own
+      # _diag log, so the failure surfaced as an unrelated rust-cache error.
+      # The df lines are load-bearing: they are the only record of the real
+      # margin when this recurs.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+                      /usr/share/swift
+          df -h /
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -174,6 +189,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
+      # See rust-checks: this job compiles the same GPUI-linking graph, so it
+      # sits under the same ENOSPC ceiling.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+                      /usr/share/swift
+          df -h /
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -189,15 +214,24 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
-      # The guard compiles the gated integration-test binaries; those link GPUI
-      # (libfontconfig), so install its Linux build deps (mirrors latency-gate).
-      - name: Install GPUI Linux build deps
+      # The guard compiles EVERY gated integration-test binary, so it reaches
+      # the same system-library graph as rust-checks' `--all-targets` — not just
+      # GPUI's window stack but xcap's screen-capture stack. The narrower list
+      # this job used to install made the guard fail on libspa-sys' pkg-config
+      # probe rather than on the rot it exists to catch. Keep it in step with
+      # the rust-checks list above, which documents what each package is for.
+      - name: Install Linux system libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake pkg-config \
             libfontconfig1-dev libwayland-dev libxkbcommon-dev \
-            libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev
+            libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libegl1-mesa-dev \
+            libpipewire-0.3-dev \
+            libclang-dev
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
