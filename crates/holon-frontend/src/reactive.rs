@@ -2108,6 +2108,12 @@ impl UiState {
         self.main_view_generation.get()
     }
 
+    /// Signal over [`Self::main_view_generation`], for consumers that must act
+    /// on a `main`-region cursor move rather than poll for one.
+    pub fn main_view_signal(&self) -> impl Signal<Item = u64> {
+        self.main_view_generation.signal()
+    }
+
     /// Record that the `main` region's cursor may have moved.
     fn bump_main_view(&self) {
         self.main_view_generation

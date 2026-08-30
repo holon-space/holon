@@ -392,6 +392,13 @@ pub fn drawer_toggle_id_for(block_id: &str) -> String {
     format!("drawer_toggle::{block_id}")
 }
 
+/// Canonical element-id for the dismiss area beside an open overlay drawer.
+///
+/// One per `columns` node that has an open overlay drawer. Tagged so a
+/// geometry-based test can see where the dismiss area actually is instead of
+/// inferring it from drawer widths.
+pub const OVERLAY_SCRIM_ID: &str = "overlay_drawer_scrim";
+
 /// Canonical element-id for an outline/tree row's expand chevron.
 ///
 /// The frontend's `expand_toggle` builder must tag its clickable chevron

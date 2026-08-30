@@ -128,13 +128,31 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let first_shrink = items.iter().position(|n| is_shrink_drawer(n));
     let last_shrink = items.iter().rposition(|n| is_shrink_drawer(n));
 
-    let mut overlay_elements: Vec<(bool, AnyElement)> = Vec::new();
+    struct Overlay {
+        /// Panel plus toggle — what the drawer occupies while open.
+        width: f32,
+        is_right: bool,
+        block_id: String,
+        element: AnyElement,
+    }
+    let mut overlay_elements: Vec<Overlay> = Vec::new();
     let mut seen_flow_child = false;
+    // Layout width the in-flow shrink drawers take on each side of the flow
+    // child. The overlay scrim starts inside them: a shrink sidebar is beside
+    // the page, not under an overlay, so its clicks are its own.
+    let (mut left_in_flow, mut right_in_flow) = (0.0f32, 0.0f32);
 
     for (i, item) in items.iter().enumerate() {
         if is_overlay_drawer(item) {
-            let is_right = seen_flow_child;
-            overlay_elements.push((is_right, super::render(item, ctx)));
+            let block_id = item.prop_str("block_id").unwrap_or_default();
+            let prop_width = item.prop_f64("width").unwrap_or(300.0) as f32;
+            overlay_elements.push(Overlay {
+                is_right: seen_flow_child,
+                width: super::drawer::effective_drawer_width(&*ctx.services, &block_id, prop_width)
+                    + super::drawer::DRAWER_TOGGLE_WIDTH,
+                block_id,
+                element: super::render(item, ctx),
+            });
         } else if is_shrink_drawer(item) {
             let block_id = item.prop_str("block_id").unwrap_or_else(|| "".to_string());
             let prop_width = item.prop_f64("width").unwrap_or(300.0) as f32;
@@ -225,6 +243,13 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                         .child(tracked_toggle)
                 };
 
+                let occupied = if is_open { width + toggle_w } else { toggle_w };
+                if seen_flow_child {
+                    right_in_flow += occupied;
+                } else {
+                    left_in_flow += occupied;
+                }
+
                 container = container.child(column);
             } else {
                 let rendered = child.map(|c| super::render(c, ctx));
@@ -304,14 +329,58 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         }
     }
 
-    for (is_right, el) in overlay_elements {
+    // A dismiss target over the page still exposed beside an open overlay
+    // drawer. It stops the press so the row underneath does not also take the
+    // caret, and it is added before the drawers so they paint over it.
+    let open_overlays: Vec<(bool, String, f32)> = overlay_elements
+        .iter()
+        .filter(|o| ctx.services.drawer_open(&o.block_id, DrawerMode::Overlay))
+        .map(|o| (o.is_right, o.block_id.clone(), o.width))
+        .collect();
+    if !open_overlays.is_empty() {
+        let inset = |right: bool| -> f32 {
+            let overlaid: f32 = open_overlays
+                .iter()
+                .filter(|(is_right, _, _)| *is_right == right)
+                .map(|(_, _, width)| *width)
+                .sum();
+            overlaid.max(if right { right_in_flow } else { left_in_flow })
+        };
+        let dismissed: Vec<String> = open_overlays
+            .iter()
+            .map(|(_, block_id, _)| block_id.clone())
+            .collect();
+        let services = ctx.services.clone();
+        let scrim = div()
+            .id(hashed_id(holon_frontend::geometry::OVERLAY_SCRIM_ID))
+            .absolute()
+            .top_0()
+            .h_full()
+            .left(px(inset(false)))
+            .right(px(inset(true)))
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                for block_id in &dismissed {
+                    services.set_widget_open(block_id, false);
+                }
+                cx.stop_propagation();
+                window.refresh();
+            });
+        container = container.child(crate::geometry::TransparentTracker::new(
+            holon_frontend::geometry::OVERLAY_SCRIM_ID.to_string(),
+            "overlay_scrim",
+            ctx.bounds_registry.clone(),
+            scrim.into_any_element(),
+        ));
+    }
+
+    for overlay in overlay_elements {
         let wrapper = div().absolute().top_0().h_full();
-        let wrapper = if is_right {
+        let wrapper = if overlay.is_right {
             wrapper.right_0()
         } else {
             wrapper.left_0()
         };
-        container = container.child(wrapper.child(el));
+        container = container.child(wrapper.child(overlay.element));
     }
 
     container

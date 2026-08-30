@@ -408,10 +408,6 @@ struct AppModel {
     /// triggering a full tree rebuild. Present iff the current root is a
     /// Reactive variant (i.e. a streaming container like `columns`).
     root_view: Option<Arc<holon_frontend::ReactiveView>>,
-    /// Last observed navigation focus. Used to auto-close overlay-mode
-    /// (phone) drawers when navigation focus changes — see
-    /// [`AppModel::close_overlay_drawers_on_nav`].
-    last_focused_block: Option<holon_api::EntityUri>,
 }
 
 /// Extract the root `ReactiveView` from a `ReactiveViewModel`, if its top
@@ -475,21 +471,13 @@ impl AppModel {
         self.nav.set_root(self.root_vm.clone());
     }
 
-    /// When navigation focus changes, auto-close any OPEN overlay-mode drawers
-    /// (the phone left/right sidebars). Shrink-mode (desktop) sidebars are left
-    /// alone — keeping them open after navigation is the correct desktop UX.
-    /// Gated on [`DrawerMode::Overlay`], NOT `cfg(feature = "mobile")`, so a
-    /// narrow desktop window (which also gets overlay drawers via `if_space`)
-    /// behaves identically. Returns true iff at least one drawer was closed.
-    ///
-    /// Note: keyed on a *change* of focus, so re-selecting the already-focused
-    /// page does not re-close the drawer (an accepted edge case).
-    fn close_overlay_drawers_on_nav(&mut self) -> bool {
-        let focused = self.engine.ui_state().focused_block();
-        if focused == self.last_focused_block {
-            return false;
-        }
-        self.last_focused_block = focused;
+    /// Close every OPEN overlay-mode drawer (the phone left/right sidebars).
+    /// Shrink-mode (desktop) sidebars are left alone — keeping them open after
+    /// navigation is the correct desktop UX. Gated on [`DrawerMode::Overlay`],
+    /// NOT `cfg(feature = "mobile")`, so a narrow desktop window (which also
+    /// gets overlay drawers via `if_space`) behaves identically. Returns true
+    /// iff at least one drawer was closed.
+    fn close_overlay_drawers(&mut self) -> bool {
         let mut closed = false;
         for (bid, mode) in self.view_model.collect_drawers() {
             if matches!(mode, holon_frontend::view_model::DrawerMode::Overlay)
@@ -1832,6 +1820,12 @@ impl RebindHandle {
         });
     }
 
+    /// The drawers in the resolved root view, with the mode each one resolved
+    /// to at the current breakpoint.
+    pub fn drawers(&self, cx: &App) -> Vec<(String, holon_frontend::view_model::DrawerMode)> {
+        self.app_model.read(cx).view_model.collect_drawers()
+    }
+
     /// Whether the quick-open modal is open — the user-visible effect the
     /// `open_search` chord exists to produce.
     pub fn search_modal_open(&self, cx: &App) -> bool {
@@ -1853,6 +1847,8 @@ impl RebindHandle {
 
         let app_model = self.app_model.clone();
         let window = self.window;
+        let session_for_close = session.clone();
+        let rt_for_close = self.app_model.read(cx).rt_handle.clone();
         let _ = cx.update_window(window, |_, win, cx| {
             let vp = viewport_info_from_window(win.viewport_size(), win.scale_factor());
             app_model.update(cx, |m, cx| {
@@ -1862,7 +1858,15 @@ impl RebindHandle {
             // The root-layout signal pump is bound to the *old* engine's stream;
             // re-point it at the new engine so viewport / structural changes drive
             // the rebound window (and the `if_space` breakpoint re-evaluates).
-            spawn_root_layout_signal(app_model.clone(), engine, window, cx);
+            spawn_root_layout_signal(app_model.clone(), engine.clone(), window, cx);
+            spawn_overlay_drawer_close(
+                app_model.clone(),
+                engine,
+                session_for_close,
+                rt_for_close,
+                window,
+                cx,
+            );
         });
     }
 }
@@ -1983,14 +1987,6 @@ fn spawn_root_layout_signal(
                         m.reconcile_root_live_blocks(cx);
                         m.view_model =
                             resolved_view_model(&m.root_vm, &m.engine, &m.root_live_blocks, cx);
-                        // Auto-close phone overlay sidebars when navigation
-                        // focus changed (e.g. a page tap in the drawer), then
-                        // re-resolve so the closed state renders this frame.
-                        if m.close_overlay_drawers_on_nav() {
-                            m.reconcile_root_live_blocks(cx);
-                            m.view_model =
-                                resolved_view_model(&m.root_vm, &m.engine, &m.root_live_blocks, cx);
-                        }
                         m.nav.set_root(m.root_vm.clone());
                         cx.notify();
                     });
@@ -2000,6 +1996,92 @@ fn spawn_root_layout_signal(
             .await;
     })
     .detach();
+}
+
+/// Spawn the window's overlay-drawer auto-close pump on `engine`: every move of
+/// the `main` region's cursor runs [`AppModel::close_overlay_drawers`].
+///
+/// Keyed on `main_view_generation` rather than on the focused block, because
+/// placing the caret in a row also writes the focus — an overlay sidebar must
+/// survive typing, and close only when the page under it changes. It needs a
+/// pump of its own because neither counter bumps `viewport_generation`, so a
+/// page tap in the sidebar wakes no other loop this window runs. Bound to one
+/// engine like [`spawn_root_layout_signal`], and self-suppressing after a
+/// rebind the same way.
+fn spawn_overlay_drawer_close(
+    app_model: Entity<AppModel>,
+    engine: Arc<ReactiveEngine>,
+    session: Arc<FrontendSession>,
+    rt_handle: tokio::runtime::Handle,
+    wh: AnyWindowHandle,
+    cx: &mut App,
+) {
+    use futures::StreamExt;
+    use futures_signals::signal::SignalExt;
+
+    let mut nav_stream = engine.ui_state().main_view_signal().to_stream();
+    cx.spawn(async move |cx| {
+        // Outer `None` means "not yet observed", so the stream's opening
+        // emission only seeds and never closes a drawer.
+        let mut last: Option<(u64, Option<holon_api::EntityUri>)> = None;
+        while nav_stream.next().await.is_some() {
+            let nav_gen = engine.ui_state().main_nav_generation();
+            let root = match main_view_root(&session, &rt_handle).await {
+                Ok(root) => root,
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "overlay-drawer auto-close cannot read the Main view root; leaving open                          drawers alone this bump",
+                    );
+                    continue;
+                }
+            };
+            let moved = match &last {
+                Some((prev_gen, prev_root)) => *prev_gen != nav_gen || prev_root != &root,
+                None => false,
+            };
+            last = Some((nav_gen, root));
+            if !moved {
+                continue;
+            }
+            let _ = cx.update_window(wh, |_, _, cx| {
+                app_model.update(cx, |m, cx| {
+                    if !Arc::ptr_eq(&m.engine, &engine) {
+                        return;
+                    }
+                    if m.close_overlay_drawers() {
+                        cx.notify();
+                    }
+                });
+            });
+        }
+    })
+    .detach();
+}
+
+/// The block the `main` region is open on — the same read the breadcrumb
+/// resolves against.
+///
+/// The query runs on `rt_handle`: the backend is tokio-driven, and awaiting it
+/// on the GPUI executor stalls the frame loop (`breadcrumb::resolve_breadcrumb`
+/// crosses the same boundary the same way).
+async fn main_view_root(
+    session: &Arc<FrontendSession>,
+    rt_handle: &tokio::runtime::Handle,
+) -> anyhow::Result<Option<holon_api::EntityUri>> {
+    let session = session.clone();
+    let (tx, rx) = futures::channel::oneshot::channel();
+    rt_handle.spawn(async move {
+        let outcome = match session.query_engine() {
+            Some(qe) => qe.region_view_root(holon_api::Region::Main).await,
+            None => Err(anyhow::anyhow!(
+                "the Main view root needs the Turso query backend"
+            )),
+        };
+        let _ = tx.send(outcome);
+    });
+    rx.await
+        .map_err(|_| anyhow::anyhow!("the Main view root task was dropped before it answered"))?
 }
 
 /// Shared implementation for launching a Holon window.
@@ -2319,7 +2401,6 @@ fn launch_holon_window_impl(
                 share_ui: share_ui_entity.clone(),
                 root_live_blocks: std::collections::HashMap::new(),
                 root_view: initial_root_view,
-                last_focused_block: None,
             };
             // Initial reconciliation — create root LiveBlockView entities.
             // Each LiveBlockView manages its own child entities (editors, live queries).
@@ -2789,7 +2870,15 @@ fn launch_holon_window_impl(
     // lets the root `if_space(...)` re-pick its breakpoint branch when the
     // window resizes. Focus changes do NOT bump ui_generation so they
     // don't cascade here.
-    spawn_root_layout_signal(app_model.clone(), engine, wh, cx);
+    spawn_root_layout_signal(app_model.clone(), engine.clone(), wh, cx);
+    spawn_overlay_drawer_close(
+        app_model.clone(),
+        engine,
+        session.clone(),
+        rt_handle.clone(),
+        wh,
+        cx,
+    );
 
     // (The top-level `editor_cursor → focused_block` bridge was removed in
     // ADR 0010. Split/join focus now flows in-process from the op response to

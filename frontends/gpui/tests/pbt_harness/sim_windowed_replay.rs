@@ -211,6 +211,16 @@ impl SimUserDriver {
         }
     }
 
+    /// Click at a window point that belongs to no tracked entity — the gesture
+    /// a user makes when they tap the dimmed area beside an open overlay
+    /// drawer.
+    pub fn click_point(&self, x: f32, y: f32) {
+        self.raw_click(Point {
+            x: Pixels::from(x),
+            y: Pixels::from(y),
+        });
+    }
+
     /// Raw click at `pos` (no settle decisions — callers pump).
     fn raw_click(&self, pos: Point<Pixels>) {
         self.update_and_settle(|cx| {
