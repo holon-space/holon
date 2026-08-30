@@ -246,6 +246,18 @@ const IDENTITY_PREFLIGHT_SITE: &str = "identity-file-preflight";
 const PATH_DERIVATION_SITE: &str = "page-file-path-derivation";
 const IMAGE_PATH_SITE: &str = "image-file-path-derivation";
 
+/// Why a caller is resolving an id to a page-file path.
+///
+/// Only a document about to render ITSELF over a file can lose a contest
+/// for that file. A residence lookup asks where bytes already live — it
+/// passes block ids, and must stay answerable for every block whose own
+/// document homes the file it resolves to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathIntent {
+    WriteOwnFile,
+    LookupResidence,
+}
+
 /// What the creates pass must do with one buffered create once the authority
 /// reports whether it persisted it.
 enum PendingCreateKind {
@@ -2429,7 +2441,13 @@ impl FileSyncController {
                 // renamed later in a session that booted an unchanged vault has
                 // no previous home to retire and stays DOUBLE-HOMED, and a
                 // deletion of this path has no ownership proof to cascade on.
+                // BOTH records, as the full ingest writes both: a rename
+                // retires the union of them (`prior_page_homes`), so one left
+                // unwritten is one home the retire cannot reach.
                 self.note_doc_home(root, path);
+                if let Some(ref registrar) = self.alias_registrar {
+                    registrar.register_alias(root, path).await;
+                }
                 self.last_projection.insert(canonical.clone(), disk_content);
                 return Ok(());
             }
@@ -4248,7 +4266,7 @@ impl FileSyncController {
 
         self.page_identity_preflight(doc_id, delta, rows).await;
 
-        let vault_path = match self.doc_id_to_path(doc_id).await {
+        let vault_path = match self.doc_id_to_path(doc_id, PathIntent::WriteOwnFile).await {
             Ok(Some(p)) => p,
             Ok(None) => return Ok(false),
             Err(e) => {
@@ -5165,7 +5183,10 @@ impl FileSyncController {
                 let root_page = subtree_root_page
                     .as_ref()
                     .expect("a non-self walk has folded in >=1 page");
-                match self.doc_id_to_path(root_page).await? {
+                match self
+                    .doc_id_to_path(root_page, PathIntent::LookupResidence)
+                    .await?
+                {
                     Some(path) => {
                         let path = path.into_path_buf();
                         let rel = path.strip_prefix(&self.root_dir).unwrap_or(&path);
@@ -5482,7 +5503,7 @@ impl FileSyncController {
             if blocks.is_empty() {
                 continue;
             }
-            let vault_path = match self.doc_id_to_path(&doc_id).await {
+            let vault_path = match self.doc_id_to_path(&doc_id, PathIntent::WriteOwnFile).await {
                 Ok(Some(p)) => p,
                 Ok(None) => continue,
                 Err(e) => {
@@ -5831,7 +5852,7 @@ impl FileSyncController {
     /// (the row-28 truncation shape) pass as a move and be silently dropped
     /// from its parent file.
     async fn absent_block_owning_file(&self, id: &EntityUri) -> Result<AbsentOwner> {
-        let own_file = self.doc_id_to_path(id).await?;
+        let own_file = self.doc_id_to_path(id, PathIntent::LookupResidence).await?;
         if self
             .block_reader
             .get_block_authoritative(id)
@@ -5871,7 +5892,7 @@ impl FileSyncController {
             return Ok(None);
         };
         Ok(self
-            .doc_id_to_path(&page.id)
+            .doc_id_to_path(&page.id, PathIntent::LookupResidence)
             .await?
             .map(|p| p.into_path_buf()))
     }
@@ -6096,11 +6117,18 @@ impl FileSyncController {
     ///   same bucket as "not a page". Every caller `tracing::error!`s it and
     ///   skips only THIS document (bounded blast radius — never crash the sync
     ///   loop).
-    async fn doc_id_to_path(&self, doc_id: &EntityUri) -> Result<Option<VaultPath>> {
-        // Try alias registrar first (fastest path). An alias is only ever
-        // registered from an ingested vault file, so containment must already
-        // hold — assert it here rather than trust it, so NO path this function
-        // yields can name a file outside the vault.
+    async fn doc_id_to_path(
+        &self,
+        doc_id: &EntityUri,
+        intent: PathIntent,
+    ) -> Result<Option<VaultPath>> {
+        // Try alias registrar first (fastest path). An alias records where a
+        // document's file was actually INGESTED FROM, where the name chain
+        // below only says where a page of that title would go, so a doc that
+        // has one is routed by it. An alias is only ever registered from an
+        // ingested vault file, so containment must already hold — assert it
+        // here rather than trust it, so NO path this function yields can name
+        // a file outside the vault.
         if let Some(ref registrar) = self.alias_registrar {
             if let Some(path) = registrar.resolve_alias_to_path(doc_id).await {
                 let path = VaultPath::inside(&self.root_dir, path)
@@ -6113,14 +6141,53 @@ impl FileSyncController {
         // Walk the Document hierarchy to compute the path. An error here
         // (no-pages-under-non-pages assertion, missing ancestor) propagates
         // loudly — the callers decide the bounded blast radius.
+        //
+        // The empty chain is the document manager's verdict that this id names
+        // no page file, which no home record can overrule: a page can hold an
+        // identity file the hierarchy does not route to. So the gate runs
+        // before the home record is consulted for a path.
         let chain = self.doc_manager.name_chain(doc_id).await?;
         if chain.is_empty() {
             return Ok(None);
         }
         let path = VaultPath::page_file_from_name_chain(&self.root_dir, &chain)
             .with_context(|| format!("doc_id_to_path({doc_id})"))?;
+        if intent == PathIntent::WriteOwnFile {
+            self.refuse_contested_path(doc_id, &path)?;
+        }
         self.clear_failure(doc_id, PATH_DERIVATION_SITE);
         Ok(Some(path))
+    }
+
+    /// Refuse a name-chain-derived path a DIFFERENT document already homes.
+    ///
+    /// A name chain names a page, not a document: two docs under one
+    /// parent carrying one title derive the same file. Rendering this
+    /// document there writes it over a file it does not own, which the
+    /// removal guard can only meet as data loss (ADR 0025) — after that
+    /// file is already quarantined out of write-back.
+    ///
+    /// Only [`PathIntent::WriteOwnFile`] asks for this. A residence
+    /// lookup passes a block id, whose chain resolves to its own
+    /// document's file, and that document homing it is ownership, not a
+    /// contest.
+    fn refuse_contested_path(&self, doc_id: &EntityUri, path: &VaultPath) -> Result<()> {
+        let canonical = CanonicalPath::new(path.as_path());
+        if let Some((owner, _)) = self
+            .doc_home
+            .iter()
+            .find(|(other, home)| *other != doc_id && **home == canonical)
+        {
+            anyhow::bail!(
+                "AMBIGUOUS PAGE-FILE PATH: {doc_id} derives {} from its name chain, but \
+                 {owner} already homes that file. Two documents sharing one name chain \
+                 both derive it, and only the one that owns the file may be written \
+                 there, so this write is REFUSED. Give the two pages distinct titles, or \
+                 distinct parents, to separate their files.",
+                path.as_path().display()
+            );
+        }
+        Ok(())
     }
 
     /// Re-arm the loud disclosure for ONE `(doc, site)` after that site's
@@ -6309,10 +6376,10 @@ impl FileSyncController {
                 doc_id = %doc_id,
                 error = %format!("{err:#}"),
                 consequence,
-                "[FileSyncController] could not resolve this doc to a page-file path inside the \
-                 vault root (name_chain / VaultPath failed loud) — REFUSING write-back for THIS \
-                 document; every other document continues. Repeats for this doc log at DEBUG \
-                 until its path resolves again.",
+                "[FileSyncController] could not resolve this doc to a page-file path it may write \
+                 inside the vault root — REFUSING write-back for THIS document; every other \
+                 document continues. The `error` field carries which resolution step objected. \
+                 Repeats for this doc log at DEBUG until its path resolves again.",
             );
         } else {
             tracing::debug!(

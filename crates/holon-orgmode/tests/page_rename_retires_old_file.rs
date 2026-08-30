@@ -105,6 +105,18 @@ impl Fixtures {
         store.children.insert(page.id.clone(), vec![child.clone()]);
         (page.id, child.id)
     }
+
+    /// Rewrite the seeded page's one child block, so a later write-back
+    /// carries content the file does not have yet.
+    fn set_child_text(&self, text: &str) -> Block {
+        let target = EntityUri::block("pgorigin");
+        let child = non_page("pgchild", target.clone(), text);
+
+        let mut store = self.0.lock().unwrap();
+        store.by_id.insert(child.id.clone(), child.clone());
+        store.children.insert(target, vec![child.clone()]);
+        child
+    }
 }
 
 #[async_trait]
@@ -241,6 +253,55 @@ impl BlockOrdering for RecordingOrdering {
     }
 }
 
+/// Collects the ERROR-level tracing output of one test, so a refusal can
+/// be asserted on the surface an operator actually sees.
+#[derive(Clone, Default)]
+struct CapturedErrors(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedErrors {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl std::io::Write for CapturedErrors {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedErrors {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Every `.org` file under `root`, so a test can prove a document's
+/// content reached NO file rather than only the one it checked.
+fn all_org_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "org") {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
 #[derive(Default)]
 struct MapAliasRegistrar(Mutex<HashMap<EntityUri, PathBuf>>);
 
@@ -284,6 +345,25 @@ async fn write_back(
     controller
         .on_block_changed(
             &doc,
+            &BlockDelta::Upsert {
+                block: block.clone(),
+                prev: None,
+            },
+        )
+        .await
+}
+
+/// Drive one upsert for a doc the caller names, so a test can write
+/// back a doc other than the seeded page.
+async fn write_back_doc(
+    controller: &mut holon_filesystem::FileSyncController,
+    doc: &EntityUri,
+    block: &Block,
+) -> anyhow::Result<bool> {
+    controller.seed_holder_from_authority(doc).await?;
+    controller
+        .on_block_changed(
+            doc,
             &BlockDelta::Upsert {
                 block: block.clone(),
                 prev: None,
@@ -598,4 +678,155 @@ async fn a_page_renamed_after_a_cold_boot_fast_path_still_retires_its_old_file()
         !old_file.exists(),
         "a page renamed after a cold-boot fast path stayed DOUBLE-HOMED — {old_file:?} survived"
     );
+}
+
+/// The cold-boot fast path must record the doc's home in the ALIAS
+/// registry, not only in the controller's own map. Path derivation reads
+/// the alias first and otherwise falls back to a name chain, and a name
+/// chain is not unique: two docs sharing one can both answer it, so the
+/// loser's write-back is aimed at the winner's file.
+///
+/// See `docs/Testing/bugfunnel/entries/
+/// 2026-08-30-cold-boot-alias-gap-misroutes-writeback.md`.
+#[tokio::test]
+async fn a_cold_boot_fast_path_still_registers_the_docs_alias() {
+    let f = Fixtures::seeded(OLD_TITLE);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = vault_root(&tmp);
+    let old_file = root.join(DIR_TITLE).join(format!("{OLD_TITLE}.org"));
+
+    {
+        let mut controller = build_controller(&f, &root, None);
+        let original = f.block(&Fixtures::page_id());
+        write_back(&mut controller, &original)
+            .await
+            .expect("the page's first write-back must land");
+    }
+    {
+        let mut controller = build_controller(&f, &root, None);
+        controller
+            .on_file_changed(&old_file)
+            .await
+            .expect("ingesting the file must stamp its content hash");
+    }
+
+    // A fresh process holds an EMPTY alias registry: the map lives in
+    // memory, so only this boot's own ingests can fill it.
+    let registrar = Arc::new(MapAliasRegistrar::default());
+    let mut controller = build_controller(&f, &root, Some(registrar.clone()));
+    controller.initialize().await.expect("cold boot");
+    controller
+        .on_file_changed(&old_file)
+        .await
+        .expect("the unchanged file must take the fast path, not error");
+
+    use holon_filesystem::sync_ports::AliasRegistrar;
+    assert_eq!(
+        registrar.resolve_alias_to_path(&Fixtures::page_id()).await,
+        Some(old_file.clone()),
+        "the cold-boot fast path left {} with NO alias, so its write-back path is derived \
+         from a name chain any namesake doc also answers",
+        Fixtures::page_id()
+    );
+}
+
+/// The harm the ambiguity does. A namesake doc answers the owner's
+/// name chain, so its write-back is aimed at a file it does not own;
+/// the ADR-0025 removal guard then quarantines that file, and the
+/// owner's own edits stop reaching disk. Derivation must refuse a
+/// path another doc is known to home, so the owner keeps writing.
+///
+/// Driven through BOTH wirings: the refusal reads `doc_home`, which
+/// exists in every storage mode, so the SqlOnly default must be
+/// protected too and not only the Loro one.
+///
+/// See `docs/Testing/bugfunnel/entries/
+/// 2026-08-30-cold-boot-alias-gap-misroutes-writeback.md`.
+async fn a_namesake_never_takes_the_owners_file(registrar: Option<Arc<MapAliasRegistrar>>) {
+    let f = Fixtures::seeded(OLD_TITLE);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = vault_root(&tmp);
+    let old_file = root.join(DIR_TITLE).join(format!("{OLD_TITLE}.org"));
+
+    {
+        let mut controller = build_controller(&f, &root, None);
+        let original = f.block(&Fixtures::page_id());
+        write_back(&mut controller, &original)
+            .await
+            .expect("the page's first write-back must land");
+    }
+    {
+        let mut controller = build_controller(&f, &root, None);
+        controller
+            .on_file_changed(&old_file)
+            .await
+            .expect("ingesting the file must stamp its content hash");
+    }
+
+    let mut controller = build_controller(&f, &root, registrar);
+    controller.initialize().await.expect("cold boot");
+    controller
+        .on_file_changed(&old_file)
+        .await
+        .expect("the unchanged file must take the fast path, not error");
+
+    // A second live page answers the same name chain and owns no file.
+    let (namesake, namesake_child) = f.add_fileless_page("pgnamesake", OLD_TITLE);
+    let errors = CapturedErrors::default();
+    let wrote = {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(errors.clone())
+            .with_max_level(tracing::Level::ERROR)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        write_back_doc(&mut controller, &namesake, &f.block(&namesake_child))
+            .await
+            .expect("a namesake's write-back must not fail the sync loop")
+    };
+
+    assert!(
+        !wrote,
+        "the namesake {namesake} was allowed to write — a doc that owns no file must not \
+         reach one by answering another page's name chain"
+    );
+    let disclosed = errors.text();
+    assert!(
+        disclosed.contains("AMBIGUOUS PAGE-FILE PATH"),
+        "the namesake's refusal was silent — an operator has nothing to act on. ERROR \
+         output was:\n{disclosed}"
+    );
+
+    // The owner edits its page. Its own file is the only place that
+    // edit can land.
+    let edited = f.set_child_text("the owner's later edit");
+    write_back(&mut controller, &edited)
+        .await
+        .expect("the owner's write-back must not fail the sync loop");
+
+    let on_disk = std::fs::read_to_string(&old_file).unwrap();
+    assert!(
+        on_disk.contains("the owner's later edit"),
+        "the namesake {namesake} took {old_file:?} away from its owner — the owner's \
+         later edit never reached disk. On disk:\n{on_disk}"
+    );
+    for path in all_org_files(&root) {
+        let body = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            !body.contains("a line only the store holds"),
+            "the refused namesake's content reached {path:?} anyway:\n{body}"
+        );
+    }
+}
+
+/// Loro wiring — the owner's home is also in the alias registry.
+#[tokio::test]
+async fn a_namesake_docs_writeback_leaves_the_owners_file_writable() {
+    a_namesake_never_takes_the_owners_file(Some(Arc::new(MapAliasRegistrar::default()))).await;
+}
+
+/// SqlOnly wiring (the shipped default): `doc_home` is the only record
+/// of the owner's file, and the refusal has to hold on it alone.
+#[tokio::test]
+async fn a_namesake_docs_writeback_leaves_the_owners_file_writable_without_a_registrar() {
+    a_namesake_never_takes_the_owners_file(None).await;
 }
