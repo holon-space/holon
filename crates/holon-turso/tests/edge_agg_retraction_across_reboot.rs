@@ -17,10 +17,10 @@
 //! the persisted state while the `DELETE`'s retraction does not would produce.
 //!
 //! These tests state that as a contract over the REAL production SELECT
-//! (`edge_agg_view_select`, pinned by `edge_agg_view_select_groups_targets_by_source`):
-//! a wipe-and-rebuild of an unchanged target set leaves the aggregate holding
-//! each target ONCE — same boot, and across a reboot that leaves the view and
-//! its DBSP state on disk.
+//! (`edge_agg_view_select`, pinned by
+//! `edge_agg_view_select_groups_targets_by_source`): a wipe-and-rebuild of an
+//! unchanged target set leaves the aggregate holding each target ONCE — same
+//! boot, and across a reboot that leaves the view and its DBSP state on disk.
 
 use std::collections::HashMap;
 

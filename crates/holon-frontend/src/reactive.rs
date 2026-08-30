@@ -2185,8 +2185,8 @@ impl UiState {
     }
 
     /// Cloned handles a spawned task mirrors an ordinary `navigation.focus`
-    /// into; see [`ReactiveEngine::follow_dangling_link`], whose create→navigate
-    /// chain cannot borrow `&self`.
+    /// into; see [`ReactiveEngine::follow_dangling_link`], whose
+    /// create→navigate chain cannot borrow `&self`.
     fn nav_focus_handles(&self) -> NavFocusHandles {
         NavFocusHandles {
             focused_block: self.focused_block.clone(),

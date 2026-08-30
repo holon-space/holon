@@ -4,8 +4,8 @@
 //! Both chrome bars sit ABOVE the main panel, so a bar that resolves late
 //! inserts ~31px and reflows the panel mid-gesture — on the frame the soft
 //! keyboard is also shrinking it (the sibling escape
-//! `docs/Testing/bugfunnel/entries/2026-08-28-tab-strip-never-resolves-at-boot.md`).
-//! The cold-boot leg is therefore the load-bearing one.
+//! `docs/Testing/bugfunnel/entries/2026-08-28-tab-strip-never-resolves-at-boot.
+//! md`). The cold-boot leg is therefore the load-bearing one.
 //!
 //! Run: `cargo nextest run -p holon-gpui --test
 //! breadcrumb_resolves_from_view_root_windowed --features holon-gpui/pbt`
