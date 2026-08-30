@@ -727,7 +727,7 @@ fn the_dock_stays_one_row_below_the_main_panel() {
         );
 
         // VERTICAL BUDGET: the bar is the newest claimant on a phone's scarcest
-        // resource, after the tab strip, the breadcrumb and the keyboard inset —
+        // resource, after the one chrome row and the keyboard inset —
         // the same stack that once starved the panel to zero rows
         // (`block_focus_keeps_outline_windowed`). Adding a bar must not be what
         // tips it over.

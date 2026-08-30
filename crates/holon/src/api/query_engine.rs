@@ -151,6 +151,61 @@ impl QueryEngine for BackendEngine {
         })
     }
 
+    async fn region_open_tabs(&self, region: holon_api::Region) -> Result<holon_api::RegionTabs> {
+        // Open `navigation_history` rows, NOT `focus_roots`: that matview drops
+        // NULL-block rows, which is exactly what a blank tab is. LEFT JOIN
+        // because a blank tab has no block to take a caption from.
+        let tabs_sql = format!(
+            "SELECT nh.id AS history_id, nh.block_id AS block_id, substr(b.content, 1, \
+             instr(b.content || char(10), char(10)) - 1) AS caption FROM navigation_history nh \
+             LEFT JOIN block b ON b.id = nh.block_id WHERE nh.region = '{}' AND nh.closed_at IS \
+             NULL ORDER BY nh.id",
+            region.as_str(),
+        );
+        let rows = BackendEngine::execute_query(self, tabs_sql, HashMap::new(), None).await?;
+
+        let mut tabs = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let history_id = row
+                .get("history_id")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("region_open_tabs: navigation_history.id is not an integer")
+                })?;
+            let block_id = match row.get("block_id").and_then(|v| v.as_string()) {
+                Some(raw) => Some(EntityUri::parse(raw).map_err(|e| {
+                    anyhow::anyhow!("region_open_tabs: block_id {raw:?} is not a block URI: {e}")
+                })?),
+                None => None,
+            };
+            let caption = row
+                .get("caption")
+                .and_then(|v| v.as_string())
+                .map(str::to_string);
+            tabs.push(holon_api::OpenTab {
+                history_id,
+                block_id,
+                caption,
+            });
+        }
+
+        let cursor_sql = format!(
+            "SELECT history_id FROM navigation_cursor WHERE region = '{}'",
+            region.as_str(),
+        );
+        let cursor_rows =
+            BackendEngine::execute_query(self, cursor_sql, HashMap::new(), None).await?;
+        let active_history_id = cursor_rows
+            .first()
+            .and_then(|row| row.get("history_id"))
+            .and_then(|v| v.as_i64());
+
+        Ok(holon_api::RegionTabs {
+            tabs,
+            active_history_id,
+        })
+    }
+
     async fn breadcrumb_trail(&self, block_id: &EntityUri) -> Result<Vec<LinkCandidate>> {
         use crate::storage::BLOCK_READ_TABLE;
         let escaped_id = block_id.to_string().replace('\'', "''");

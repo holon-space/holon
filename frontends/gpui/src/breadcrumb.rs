@@ -224,24 +224,27 @@ fn displayed_segments(segments: &[Hit]) -> Vec<Option<(usize, &Hit)>> {
     out
 }
 
-/// Render the breadcrumb bar for the current view. `None` when there is nothing
-/// to show (trail not yet resolved / nothing open, and no error).
-pub fn render_breadcrumb_bar(
+/// The trail as the title row's own content: the same segments
+/// the bar form had, without a height, padding or border of its own, and
+/// laid out to give way — it takes the row's leftover width (`flex_1`) and
+/// clips (`min_w_0` + `overflow_hidden`) so the toolbar to its right is never
+/// pushed off a phone screen. `None` when there is nothing to show.
+///
+/// Long trails already collapse to `root … parent current` in
+/// [`displayed_segments`]; on a narrow row the clip finishes the job.
+pub fn render_breadcrumb_inline(
     state_read: &BreadcrumbState,
     services: Arc<dyn BuilderServices>,
     theme: SearchTheme,
-    left_pad: f32,
 ) -> Option<gpui::AnyElement> {
     if let Some(err) = &state_read.error {
         return Some(
             div()
                 .flex()
+                .flex_1()
+                .min_w_0()
                 .items_center()
-                .h(px(28.0))
-                .pl(px(left_pad))
-                .pr(px(16.0))
-                .border_b_1()
-                .border_color(theme.border)
+                .overflow_hidden()
                 .text_size(px(11.0))
                 .text_color(gpui::rgb(0xd9534f))
                 .child(format!("Breadcrumb unavailable: {err}"))
@@ -253,30 +256,27 @@ pub fn render_breadcrumb_bar(
     }
 
     let last_idx = state_read.segments.len() - 1;
-    let mut bar = div()
-        .id("breadcrumb-bar")
+    let mut row = div()
+        .id("breadcrumb-inline")
         .flex()
         .flex_row()
+        .flex_1()
+        .min_w_0()
         .items_center()
-        .flex_wrap()
-        .h(px(28.0))
-        .pl(px(left_pad))
-        .pr(px(16.0))
+        .overflow_hidden()
         .gap(px(4.0))
-        .border_b_1()
-        .border_color(theme.border)
         .text_size(px(12.0))
         .text_color(theme.muted_fg);
 
     let mut first = true;
     for item in displayed_segments(&state_read.segments) {
         if !first {
-            bar = bar.child(div().text_color(theme.muted_fg).child("›"));
+            row = row.child(div().text_color(theme.muted_fg).child("›"));
         }
         first = false;
         match item {
             None => {
-                bar = bar.child(div().child("…"));
+                row = row.child(div().child("…"));
             }
             Some((idx, seg)) => {
                 let is_current = idx == last_idx;
@@ -285,6 +285,7 @@ pub fn render_breadcrumb_bar(
                 let seg_fg = if is_current { theme.fg } else { theme.muted_fg };
                 let mut chip = div()
                     .id(SharedString::from(format!("breadcrumb-seg-{idx}")))
+                    .flex_none()
                     .px(px(4.0))
                     .rounded(px(4.0))
                     .text_color(seg_fg)
@@ -297,12 +298,12 @@ pub fn render_breadcrumb_bar(
                             navigate_to(&services, &target);
                         });
                 }
-                bar = bar.child(chip);
+                row = row.child(chip);
             }
         }
     }
 
-    Some(bar.into_any_element())
+    Some(row.into_any_element())
 }
 
 #[cfg(test)]

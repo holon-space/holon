@@ -628,9 +628,8 @@ fn collect_root_live_blocks(node: &ReactiveViewModel, ids: &mut std::collections
     }
 }
 
-/// The window's page container: the flex column that stacks the chrome bars
-/// (title bar, then the optional tab strip and breadcrumb bar) above the
-/// content wrapper.
+/// The window's page container: the flex column that stacks the single chrome
+/// row (the title row) above the content wrapper.
 ///
 /// `.flex()` is load-bearing. gpui defaults `display` to `Block` and
 /// `flex_col()` sets only the direction, so without it the bars and the
@@ -646,6 +645,11 @@ fn collect_root_live_blocks(node: &ReactiveViewModel, ids: &mut std::collections
 pub fn page_container() -> gpui::Div {
     div().size_full().flex().flex_col()
 }
+
+/// Height of the window's single chrome row, in logical px. The whole top
+/// chrome — hamburger, page trail, tab count, toolbar — lives in this one row,
+/// and the tab list anchors just below it.
+pub const TITLE_ROW_HEIGHT: f32 = 38.0;
 
 // ── Modal overlay helpers ──────────────────────────────────────────────────
 
@@ -799,14 +803,17 @@ pub struct HolonApp {
     /// Collapsing the two makes the first frame (no focus yet, latch empty)
     /// compare equal, so the bar never resolves at all.
     last_breadcrumb_key: Option<(Option<holon_api::EntityUri>, u64)>,
-    /// Open-blocks tab strip for the MAIN region.
+    /// Open tabs for the MAIN region: the title row's count button and the
+    /// list it opens.
     pub tab_strip: Entity<tab_strip::TabStripState>,
-    /// Last focus the tab strip was resolved for; a change re-resolves it
-    /// (e.g. `navigation.open_tab` moves focus to the newly-opened tab).
+    /// Focus + main-VIEW generation the open tabs were resolved for; a change
+    /// in either re-resolves them. The generation half carries `activate`,
+    /// `close` and `new_tab`, which move no focus.
+    ///
     /// Same never-resolved-vs-resolved-to-nothing distinction as
     /// [`Self::last_breadcrumb_key`]: without it a restart with tabs already
-    /// open draws no strip until the user's first click.
-    last_tab_strip_focus: Option<Option<holon_api::EntityUri>>,
+    /// open draws no count until the user's first click.
+    last_tab_strip_focus: Option<(Option<holon_api::EntityUri>, u64)>,
     /// Live-oracle violations (debug builds): mirrors the global
     /// `holon_oracles` status; rendered as an impossible-to-miss top banner.
     #[cfg(debug_assertions)]
@@ -921,18 +928,33 @@ impl Render for HolonApp {
                 );
             }
         }
-        // Re-resolve the open-tabs strip whenever the focused block changes.
-        // `navigation.open_tab` moves focus to the newly-opened tab, so this
-        // catches new/closed tabs. A plain `navigation.activate` (tab switch)
-        // does NOT change the focused block and so does NOT re-resolve here —
-        // the strip's active-tab highlight is kept in sync by the optimistic
-        // update in the click / keyboard handlers instead (see `tab_strip`).
+        // Re-resolve the open tabs when the focused block changes OR the main
+        // view generation moves. The generation half is what catches the ops
+        // that never touch focus — `activate`, `close`, `new_tab` — and the
+        // count button is now the only thing telling the user how many tabs
+        // they have, so a count that lags those ops is a wrong number on
+        // screen, not merely a missing chip.
         {
-            let focused = self.app_model.read(cx).engine.ui_state().focused_block();
-            if self.last_tab_strip_focus.as_ref() != Some(&focused) {
-                self.last_tab_strip_focus = Some(focused);
+            let key = {
+                let ui = self.app_model.read(cx).engine.ui_state();
+                (ui.focused_block(), ui.main_view_generation())
+            };
+            // A dropped stale read asks to be retried: the generation bumps when
+            // the op is DISPATCHED, so the first read can beat the write to the
+            // database. Re-reading on the next frame lets it catch up.
+            let recheck = self.tab_strip.read(cx).needs_recheck;
+            if self.last_tab_strip_focus.as_ref() != Some(&key) || recheck {
+                self.last_tab_strip_focus = Some(key);
+                if recheck {
+                    self.tab_strip.update(cx, |s, _| s.needs_recheck = false);
+                }
                 let generation = self.tab_strip.update(cx, |s, _| {
-                    s.error = None;
+                    // Only a READ error is this read's to answer for; a refused
+                    // WRITE outlives it (see `tab_strip::TabError`).
+                    if matches!(s.error, Some(tab_strip::TabError::Read(_))) {
+                        s.error = None;
+                    }
+                    s.reads_issued += 1;
                     s.generation = s.generation.wrapping_add(1);
                     s.generation
                 });
@@ -1137,13 +1159,36 @@ impl Render for HolonApp {
         let gallery_model = self.app_model.clone();
         let search_ui_for_btn = self.search_ui.clone();
 
+        let search_theme = search_ui::SearchTheme {
+            bg,
+            border: border_color,
+            fg: text,
+            muted_fg: theme.muted_foreground,
+            selected_bg: theme.accent,
+            selected_fg: theme.accent_foreground,
+        };
+
+        // The trail IS the title: it names the page the user is on, which the
+        // fixed word "Holon" never did.
+        let title_trail = breadcrumb::render_breadcrumb_inline(
+            self.breadcrumb.read(cx),
+            services.clone(),
+            search_theme,
+        );
+        let tab_count_button = tab_strip::render_tab_count_button(
+            self.tab_strip.read(cx),
+            self.tab_strip.clone(),
+            self.bounds_registry.clone(),
+            search_theme,
+        );
+
         let title_bar = div()
             .id("title-bar")
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
-            .h(px(38.0))
+            .h(px(TITLE_ROW_HEIGHT))
             .pl(traffic_light_pad)
             .pr(px(16.0))
             .border_b_1()
@@ -1161,11 +1206,14 @@ impl Render for HolonApp {
             .child(
                 div()
                     .flex()
+                    .flex_1()
+                    .min_w_0()
                     .items_center()
                     .gap(px(12.0))
                     .child(
                         div()
                             .id("sidebar-toggle")
+                            .flex_none()
                             .cursor_pointer()
                             .text_size(px(15.0))
                             .px(px(6.0))
@@ -1184,19 +1232,15 @@ impl Render for HolonApp {
                                 }
                             }),
                     )
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.muted_foreground)
-                            .child("Holon"),
-                    ),
+                    .children(title_trail),
             )
             .child(
                 div()
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap(px(4.0))
+                    .child(tab_count_button)
                     .child(
                         div()
                             .id("right-sidebar-toggle")
@@ -1503,33 +1547,23 @@ impl Render for HolonApp {
                 .child(root)
         };
 
-        let search_theme = search_ui::SearchTheme {
-            bg,
-            border: border_color,
-            fg: text,
-            muted_fg: theme.muted_foreground,
-            selected_bg: theme.accent,
-            selected_fg: theme.accent_foreground,
-        };
-
-        // Page-ancestor breadcrumb bar, between the title bar and the content.
-        // Full width for v1 (disclosed) — a slim path-back strip under the top
-        // bar; clicking a segment navigates via the shared chokepoint.
-        let breadcrumb_bar = breadcrumb::render_breadcrumb_bar(
-            self.breadcrumb.read(cx),
-            services.clone(),
-            search_theme,
-            16.0,
-        );
-
-        // Open-blocks tab strip for the MAIN region, mounted ABOVE the
-        // breadcrumb bar (tabs on top, then breadcrumb, then content).
-        let tab_strip_bar = tab_strip::render_tab_strip(
+        // The open tabs are reached through the title row's count button, which
+        // opens this list — so the chrome above the content is ONE row however
+        // many tabs are open.
+        //
+        // The anchor includes `safe_area_top`: the list is positioned against
+        // the page's BORDER box, which starts at the window's top edge, so the
+        // inset the page pads the title row down by has to be added back here.
+        // Measured under a 40px inset by `the_tab_list_hangs_under_the_title_
+        // row_beneath_a_notch`, which is what stops this from being counted
+        // twice or not at all.
+        let tab_list = tab_strip::render_tab_list(
             self.tab_strip.read(cx),
             self.tab_strip.clone(),
             services.clone(),
+            self.bounds_registry.clone(),
             search_theme,
-            16.0,
+            self.safe_area_top + TITLE_ROW_HEIGHT + 4.0,
         );
 
         let mut page = page_container()
@@ -1538,13 +1572,10 @@ impl Render for HolonApp {
             .pt(px(self.safe_area_top))
             .pb(px(self.safe_area_bottom))
             .child(title_bar);
-        if let Some(bar) = tab_strip_bar {
-            page = page.child(bar);
-        }
-        if let Some(bar) = breadcrumb_bar {
-            page = page.child(bar);
-        }
         page = page.child(content);
+        if let Some(list) = tab_list {
+            page = page.child(list);
+        }
 
         if let Some(overlay) = settings_overlay {
             page = page.child(overlay);
@@ -1797,15 +1828,15 @@ impl RebindHandle {
         Some(view.read(cx).tab_strip.read(cx).tabs.len())
     }
 
-    /// How many segments the breadcrumb bar is currently DRAWING. Zero means
-    /// the bar renders nothing at all. `None` if the window never built a root
-    /// view.
+    /// How many segments the title row's page trail is currently DRAWING.
+    /// Zero means it renders nothing at all. `None` if the window never built a
+    /// root view.
     pub fn drawn_breadcrumb_segments(&self, cx: &App) -> Option<usize> {
         let view = self.holon_app.as_ref()?;
         Some(view.read(cx).breadcrumb.read(cx).segments.len())
     }
 
-    /// The block whose trail the breadcrumb bar is showing. `None` if the
+    /// The block whose trail the title row is showing. `None` if the
     /// window never built a root view, or the bar has resolved nothing.
     pub fn breadcrumb_block(&self, cx: &App) -> Option<holon_api::EntityUri> {
         self.holon_app
@@ -1836,6 +1867,93 @@ impl RebindHandle {
     /// to at the current breakpoint.
     pub fn drawers(&self, cx: &App) -> Vec<(String, holon_frontend::view_model::DrawerMode)> {
         self.app_model.read(cx).view_model.collect_drawers()
+    }
+
+    /// The tab the chrome is highlighting as active. `None` if the window never
+    /// built a root view, or nothing is resolved yet.
+    pub fn drawn_active_tab(&self, cx: &App) -> Option<i64> {
+        self.holon_app
+            .as_ref()?
+            .read(cx)
+            .tab_strip
+            .read(cx)
+            .active_history_id
+    }
+
+    /// Switch to `history_id` through the chrome's own dispatch path, including
+    /// ids the engine will refuse — the list only ever offers rows that exist,
+    /// so a refusal is not otherwise reachable from a gesture.
+    #[cfg(feature = "pbt")]
+    pub fn activate_tab_for_test(&self, history_id: i64, cx: &mut App) {
+        let Some(view) = self.holon_app.as_ref() else {
+            return;
+        };
+        let (entity, services) = {
+            let app = view.read(cx);
+            let services: Arc<dyn BuilderServices> = app.app_model.read(cx).engine.clone();
+            (app.tab_strip.clone(), services)
+        };
+        tab_strip::dispatch_tab_op_for_test(
+            &entity,
+            &services,
+            tab_strip::activate_intent(history_id),
+            cx,
+        );
+    }
+
+    /// Put a tab write in flight that never reports back, to see what the
+    /// chrome says while it waits. A real hung write needs an engine that
+    /// can be held mid-operation, which the test environment cannot do.
+    #[cfg(feature = "pbt")]
+    pub fn begin_stuck_tab_write_for_test(&self, cx: &mut App) {
+        let Some(view) = self.holon_app.as_ref() else {
+            return;
+        };
+        let entity = view.read(cx).tab_strip.clone();
+        tab_strip::begin_stuck_write_for_test(&entity, cx);
+    }
+
+    /// Jump to the 1-based Nth open tab, the way the `cmd-N` binding does —
+    /// including when N is the tab already active, which is the no-op a caller
+    /// cannot reach through the list (its active row is not clickable).
+    pub fn jump_to_tab(&self, n: usize, cx: &mut App) {
+        let Some(view) = self.holon_app.as_ref() else {
+            return;
+        };
+        let (entity, services) = {
+            let app = view.read(cx);
+            let services: Arc<dyn BuilderServices> = app.app_model.read(cx).engine.clone();
+            (app.tab_strip.clone(), services)
+        };
+        tab_strip::apply_jump(&entity, &services, n, cx);
+    }
+
+    /// How many tab reads the chrome has issued. A retry loop that re-reads on
+    /// every frame is invisible to any assertion about what is DRAWN — the
+    /// screen is right the whole time — so the cost has to be counted directly.
+    pub fn tab_reads_issued(&self, cx: &App) -> Option<u64> {
+        Some(
+            self.holon_app
+                .as_ref()?
+                .read(cx)
+                .tab_strip
+                .read(cx)
+                .reads_issued,
+        )
+    }
+
+    /// Set the top safe-area inset — the strip a notch or status bar takes off
+    /// the top of the page. On mobile the platform supplies it every frame;
+    /// elsewhere nothing overwrites it, so a caller that wants to see the
+    /// chrome under a notch sets it here.
+    pub fn set_safe_area_top(&self, px: f32, cx: &mut App) {
+        let Some(view) = self.holon_app.as_ref() else {
+            return;
+        };
+        view.update(cx, |app, cx| {
+            app.safe_area_top = px;
+            cx.notify();
+        });
     }
 
     /// Set the soft keyboard's height — what the action bar reads to decide
@@ -2191,7 +2309,7 @@ fn launch_holon_window_impl(
         Arc::new(std::sync::OnceLock::new());
     let holon_app_slot_for_window = holon_app_slot.clone();
 
-    // Slot to carry the tab-strip entity out of the window-creation closure so
+    // Slot to carry the open-tabs entity out of the window-creation closure so
     // the app-level tab keyboard action handlers (registered after the window
     // exists) can read/update it.
     let tab_strip_entity_slot: Arc<std::sync::OnceLock<Entity<tab_strip::TabStripState>>> =

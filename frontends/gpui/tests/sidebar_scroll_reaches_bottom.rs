@@ -67,9 +67,9 @@ const SEED_ORG: &str = include_str!("../../../assets/default/index.org");
 const PAGE_COUNT: usize = 115;
 const WINDOW_W: f32 = 1512.0;
 const WINDOW_H: f32 = 948.0;
-/// The three chrome bars production stacks above the content wrapper
-/// (`lib.rs` `HolonApp::render`'s `page`): title bar, tab strip, breadcrumb.
-const CHROME_H: f32 = 96.0;
+/// The chrome production stacks above the content wrapper (`lib.rs`
+/// `HolonApp::render`'s `page`): one title row, `TITLE_ROW_HEIGHT`.
+const CHROME_H: f32 = 38.0;
 /// Production's Integrations section holds ONE row (`claude-history`). A
 /// section several viewports tall scrolls internally and masks a short scroll
 /// extent in the panel above it.

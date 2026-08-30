@@ -339,6 +339,10 @@ pub enum NavigationOp {
     /// open rows; if the block is already open it just activates that tab
     /// (no duplicate). The sole multi-open producer (ADR-0026 tab model, Q2).
     OpenTab,
+    /// Open one more BLANK tab in a region and move the cursor to it. Names no
+    /// target, so it records a NULL `block_id` (the shape `GoHome` writes) and
+    /// has nothing to dedup against — pressed twice, it opens two tabs.
+    NewTab,
 }
 
 impl NavigationOp {
@@ -351,6 +355,7 @@ impl NavigationOp {
         NavigationOp::GoHome,
         NavigationOp::Activate,
         NavigationOp::OpenTab,
+        NavigationOp::NewTab,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -363,6 +368,7 @@ impl NavigationOp {
             NavigationOp::GoHome => "go_home",
             NavigationOp::Activate => "activate",
             NavigationOp::OpenTab => "open_tab",
+            NavigationOp::NewTab => "new_tab",
         }
     }
 }
@@ -386,6 +392,7 @@ impl FromStr for NavigationOp {
             "go_home" => Ok(NavigationOp::GoHome),
             "activate" => Ok(NavigationOp::Activate),
             "open_tab" => Ok(NavigationOp::OpenTab),
+            "new_tab" => Ok(NavigationOp::NewTab),
             other => anyhow::bail!("Not a navigation op: {other:?}"),
         }
     }

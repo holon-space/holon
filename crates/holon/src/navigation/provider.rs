@@ -284,6 +284,30 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
+        OperationDescriptor {
+            entity_name: ENTITY_NAME.into(),
+            entity_short_name: SHORT_NAME.to_string(),
+            id_column: "region".to_string(),
+            name: NavigationOp::NewTab.as_str().to_string(),
+            display_name: "New Tab".to_string(),
+            description: "Open one more blank tab in a region and move the cursor to it"
+                .to_string(),
+            required_params: vec![region_param()],
+            affected_fields: vec!["history_id".to_string()],
+            param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Global,
+            // Opens a blank view of the reader's own; no sharing boundary
+            // crossing (ADR 0028 A2).
+            boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Navigation,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            marking_delta: holon_api::marking::MarkingDelta::Undeclared,
+            guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
+        },
     ];
     manual_ops
 }
@@ -767,6 +791,56 @@ impl NavigationProvider {
         Ok(OperationResult::irreversible(vec![]))
     }
 
+    /// Open one more BLANK tab in a region and move the cursor to it.
+    ///
+    /// Inserts an open row with a NULL `block_id` — the shape `go_home`
+    /// records, so the cursor-joined main panel falls through to its default
+    /// render — WITHOUT closing the region's other open rows. Names no target,
+    /// so unlike `open_tab` it has nothing to dedup against: pressed twice, it
+    /// opens two tabs.
+    async fn new_tab(&self, region: Region) -> Result<OperationResult> {
+        tracing::debug!("[NavigationProvider] new_tab: region={}", region);
+
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), Value::from(region));
+        params.insert("block_id".to_string(), Value::Null);
+
+        self.db_handle
+            .query(
+                include_str!("../../sql/navigation/insert_history.sql"),
+                params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to insert new tab in {region}: {e}"))?;
+
+        let max_result = self
+            .db_handle
+            .query(
+                include_str!("../../sql/navigation/get_max_history_id.sql"),
+                params.clone(),
+            )
+            .await
+            .map_err(|e| format!("Failed to get max history id after new_tab: {e}"))?;
+        let new_history_id: i64 = max_result
+            .first()
+            .and_then(|row| row.get("max_id"))
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| format!("Failed to get new history_id after new_tab in {region}"))?;
+
+        params.insert("new_id".to_string(), Value::Integer(new_history_id));
+        self.db_handle
+            .query(
+                include_str!("../../sql/navigation/upsert_cursor.sql"),
+                params,
+            )
+            .await
+            .map_err(|e| format!("Failed to move cursor to the new tab in {region}: {e}"))?;
+
+        self.assert_cursor_on_open_row(region).await?;
+
+        Ok(OperationResult::irreversible(vec![]))
+    }
+
     /// Go back in navigation history
     async fn go_back(&self, region: Region) -> Result<OperationResult> {
         tracing::debug!("[NavigationProvider] go_back: region={}", region);
@@ -1081,6 +1155,7 @@ impl OperationProvider for NavigationProvider {
                     .ok_or_else(|| "Missing required parameter 'block_id'".to_string())?;
                 self.open_tab(region, block_id).await
             }
+            Ok(NavigationOp::NewTab) => self.new_tab(region).await,
             // `close` is dispatched before region extraction above.
             Ok(NavigationOp::Close) => {
                 unreachable!("close is handled before region extraction")

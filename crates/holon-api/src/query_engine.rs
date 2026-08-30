@@ -43,6 +43,29 @@ pub struct EditorSource {
     pub task_state: Option<String>,
 }
 
+/// One open tab in a region: an open `navigation_history` row.
+///
+/// A tab with no `block_id` is BLANK — it names no page, so the region's panel
+/// renders its default view. That is a tab in its own right, which is why this
+/// is not shaped after `focus_roots` (that matview drops NULL-block rows).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenTab {
+    /// Row identity — what `navigation.activate` and `navigation.close` target.
+    pub history_id: i64,
+    pub block_id: Option<EntityUri>,
+    /// The page's first content line. `None` for a blank tab.
+    pub caption: Option<String>,
+}
+
+/// A region's tab bar: every open tab in stable insertion order, plus the one
+/// the region's cursor points at.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RegionTabs {
+    pub tabs: Vec<OpenTab>,
+    /// `history_id` of the active tab; `None` when the region has no cursor.
+    pub active_history_id: Option<i64>,
+}
+
 /// Compile + execute + watch queries, behind storage-agnostic types.
 /// Implemented by the Turso `BackendEngine`; absent in a no-Turso wiring.
 #[async_trait]
@@ -123,6 +146,15 @@ pub trait QueryEngine: Send + Sync {
     async fn region_view_root(&self, region: crate::Region) -> Result<Option<EntityUri>> {
         let _ = region;
         anyhow::bail!("QueryEngine::region_view_root not implemented by this impl")
+    }
+
+    /// Every open tab in `region` (insertion order) plus its active tab — what
+    /// the chrome's tab count and tab list are a view of.
+    ///
+    /// Blank tabs are included; see [`OpenTab`].
+    async fn region_open_tabs(&self, region: crate::Region) -> Result<RegionTabs> {
+        let _ = region;
+        anyhow::bail!("QueryEngine::region_open_tabs not implemented by this impl")
     }
 
     /// Non-settling read of a single block's `content` straight from the

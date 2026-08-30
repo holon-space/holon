@@ -61,6 +61,23 @@ static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLo
 });
 
 impl BuilderServices for SlotCapableServices {
+    /// SlotCapableServices is a test double with no backend to await: it
+    /// dispatches and reports that nothing was proven, rather than
+    /// inheriting a claim it cannot make.
+    fn dispatch_intent_awaitable(
+        &self,
+        intent: holon_frontend::operations::OperationIntent,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = anyhow::Result<holon_core::Delivery>> + Send + 'static,
+        >,
+    > {
+        self.dispatch_intent(intent);
+        Box::pin(std::future::ready(Ok(holon_core::Delivery::Unproven {
+            detail: "SlotCapableServices: test double, no delivery to prove".to_string(),
+        })))
+    }
+
     fn interpret(&self, expr: &RenderExpr, ctx: &RenderContext) -> ReactiveViewModel {
         self.interpreter.interpret(expr, ctx, self)
     }

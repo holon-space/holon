@@ -91,9 +91,8 @@ const PHONE_WINDOW: &str = "393x500";
 /// `raising_the_keyboard_must_not_hide_the_block_rows`.
 const TALL_WINDOW: &str = "393x852";
 /// How much vertical room an open soft keyboard costs, in logical px. The
-/// device measured a 792-physical bottom inset at ~2.75x ≈ 288 logical, plus
-/// the ~50px of tab-strip and breadcrumb chrome the same focus change mounts.
-/// 340 of 852 is the ~40% cut the device takes.
+/// device measured a 792-physical bottom inset at ~2.75x ≈ 288 logical; the
+/// rest is headroom. 340 of 852 is the ~40% cut the device takes.
 const KEYBOARD_INSET_PX: f32 = 340.0;
 
 /// The main panel's live_block id in the shipped layout.

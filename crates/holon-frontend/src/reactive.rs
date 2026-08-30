@@ -294,17 +294,18 @@ pub trait BuilderServices: Send + Sync {
     /// The `Ok` arm carries [`holon_core::Delivery`] rather than `()`: an
     /// external connector can succeed while telling us it cannot prove the
     /// effect landed, and a caller that collapses that into `Ok(())` reports a
-    /// delivery that may never have happened. Default fire-and-forget +
-    /// `Proven` (stub/headless has no backend result to await).
+    /// delivery that may never have happened.
+    ///
+    /// REQUIRED, deliberately. Callers await this to learn when a write landed
+    /// and re-read only then; an inherited "instantly proven" would make them
+    /// re-read before the write, and the only symptom is the pre-op world
+    /// staying on screen. An impl with no backend to await says so explicitly.
     fn dispatch_intent_awaitable(
         &self,
         intent: crate::operations::OperationIntent,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<holon_core::Delivery>> + Send + 'static>,
-    > {
-        self.dispatch_intent(intent);
-        Box::pin(std::future::ready(Ok(holon_core::Delivery::Proven)))
-    }
+    >;
 
     /// Dispatch an intent and await the operation's own RESPONSE PAYLOAD.
     ///
@@ -4522,6 +4523,21 @@ impl BuilderServices for StubBuilderServices {
         );
     }
 
+    /// A stub writes nothing, so there is nothing to await and nothing was
+    /// delivered. `Unproven` rather than `Proven`: a caller must not take a
+    /// no-op for a completed write.
+    fn dispatch_intent_awaitable(
+        &self,
+        intent: crate::operations::OperationIntent,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<holon_core::Delivery>> + Send + 'static>,
+    > {
+        self.dispatch_intent(intent);
+        Box::pin(std::future::ready(Ok(holon_core::Delivery::Unproven {
+            detail: "stub services write nothing; no delivery to prove".to_string(),
+        })))
+    }
+
     fn present_op(
         &self,
         op: holon_api::render_types::OperationDescriptor,
@@ -4667,11 +4683,23 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
                 ui_state.bump_main_nav();
             }
         }
-        Ok(NavigationOp::GoHome) => {
-            // ALLOW(direct_focus_mutation): mirror of navigation.go_home into UiState for
-            // value-fn graph.
-            ui_state.set_focus(None);
-            ui_state.bump_main_nav();
+        // Both land the region on its blank home view, so neither carries a
+        // target to mirror, and the panel shows new content — scroll resets.
+        // `new_tab` differs from `go_home` only in the SQL layer (it closes no
+        // other open row). Region-gated like the arm above: both ops take a
+        // region, and only main's focus and scroll live in this mirror.
+        Ok(NavigationOp::GoHome | NavigationOp::NewTab) => {
+            let region = intent
+                .params
+                .get("region")
+                .and_then(|v| v.as_string())
+                .unwrap_or("main");
+            if region == "main" {
+                // ALLOW(direct_focus_mutation): mirror of navigation.go_home into UiState
+                // for value-fn graph.
+                ui_state.set_focus(None);
+                ui_state.bump_main_nav();
+            }
         }
         // These move the region's cursor within the existing open set without
         // naming a target, so `focused_block` cannot be mirrored here (knowing

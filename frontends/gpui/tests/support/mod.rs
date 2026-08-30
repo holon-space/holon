@@ -107,6 +107,23 @@ pub struct StubServices {
 }
 
 impl BuilderServices for StubServices {
+    /// StubServices is a test double with no backend to await: it dispatches
+    /// and reports that nothing was proven, rather than inheriting a claim
+    /// it cannot make.
+    fn dispatch_intent_awaitable(
+        &self,
+        intent: holon_frontend::operations::OperationIntent,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = anyhow::Result<holon_core::Delivery>> + Send + 'static,
+        >,
+    > {
+        self.dispatch_intent(intent);
+        Box::pin(std::future::ready(Ok(holon_core::Delivery::Unproven {
+            detail: "StubServices: test double, no delivery to prove".to_string(),
+        })))
+    }
+
     fn interpret(&self, _: &RenderExpr, _: &FrontendRenderContext) -> ReactiveViewModel {
         unimplemented!("StubServices::interpret — fixture is not pure-layout")
     }
@@ -365,6 +382,23 @@ impl TestServices {
 }
 
 impl BuilderServices for TestServices {
+    /// TestServices is a test double with no backend to await: it dispatches
+    /// and reports that nothing was proven, rather than inheriting a claim
+    /// it cannot make.
+    fn dispatch_intent_awaitable(
+        &self,
+        intent: holon_frontend::operations::OperationIntent,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = anyhow::Result<holon_core::Delivery>> + Send + 'static,
+        >,
+    > {
+        self.dispatch_intent(intent);
+        Box::pin(std::future::ready(Ok(holon_core::Delivery::Unproven {
+            detail: "TestServices: test double, no delivery to prove".to_string(),
+        })))
+    }
+
     fn interpret(&self, expr: &RenderExpr, ctx: &FrontendRenderContext) -> ReactiveViewModel {
         self.inner.interpret(expr, ctx)
     }
@@ -713,8 +747,8 @@ pub struct ReactiveFixtureView {
     entity_cache: holon_gpui::entity_view_registry::EntityCache,
     fixture_size: Size<Pixels>,
     /// Height of the window chrome production stacks ABOVE the content
-    /// wrapper (title bar, tab strip, breadcrumb bar). `0.0` mounts the
-    /// content wrapper as the whole window — the historical fixture shape.
+    /// wrapper — one title row. `0.0` mounts the content wrapper as the whole
+    /// window — the historical fixture shape.
     /// See [`Self::with_page_chrome`].
     chrome_height: f32,
 }
@@ -782,8 +816,8 @@ impl ReactiveFixtureView {
 
     /// Stack `height` px of window chrome ABOVE the content wrapper, inside
     /// production's `page` div (`lib.rs` `HolonApp::render`: `size_full
-    /// flex_col`, children `title_bar` → optional tab strip → optional
-    /// breadcrumb bar → content). Without this the fixture mounts the content
+    /// flex_col`, children `title_bar` → content; the tab list is an overlay,
+    /// not a row). Without this the fixture mounts the content
     /// wrapper as the whole window, so any geometry defect that only appears
     /// when the wrapper has a preceding sibling is invisible to it.
     pub fn with_page_chrome(mut self, height: f32) -> Self {
@@ -837,8 +871,7 @@ impl Render for ReactiveFixtureView {
             return content.into_any_element();
         }
         // Production's `page` (`lib.rs` `HolonApp::render`): `size_full
-        // flex_col` stacking the title bar (plus optional tab strip and
-        // breadcrumb bar) ABOVE the content wrapper.
+        // flex_col` stacking the one title row ABOVE the content wrapper.
         // Production's OWN page container (`lib.rs`), not a copy of it: the
         // layout defect this fixture exists to catch lives in that chain, so
         // modelling it here would only ever assert the model.

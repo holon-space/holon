@@ -39,6 +39,10 @@ name = "reactive_vm_test"
 harness = false
 
 [[test]]
+name = "chrome_one_row_windowed"
+required-features = ["pbt"]
+
+[[test]]
 name = "gpui_gherkin_replay"
 harness = false
 required-features = ["pbt"]

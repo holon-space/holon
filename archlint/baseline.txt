@@ -5,7 +5,7 @@
 # as debt-free. Ratchet DOWN: as violations are fixed, regenerate with
 #   ./archlint/archlint --update-baseline
 # See archlint/BURNDOWN.md for the category table and burn-down priority.
-# Snapshot total: 113 violation(s) across 11 rule(s).
+# Snapshot total: 111 violation(s) across 11 rule(s).
 #
 #   deleted_cell_symbol: 2
 #   entity_uri_from_raw: 9
@@ -128,7 +128,5 @@ ok	crates/holon-markdown/src/logseq.rs	path.strip_prefix(root)
 ok	frontends/gpui/src/render/builders/render_entity.rs	any.clone()
 raw_sql_in_frontend	frontends/gpui/src/oracles_ui.rs	let sql = format!("SELECT id, content_type, source_language FROM {BLOCK_WRITE_TABLE}");
 raw_sql_in_frontend	frontends/gpui/src/oracles_ui.rs	let sql = format!("SELECT id, parent_id FROM {table}");
-raw_sql_in_frontend	frontends/gpui/src/tab_strip.rs	const CURSOR_SQL: &str = "SELECT history_id FROM navigation_cursor WHERE region = 'main'";
-raw_sql_in_frontend	frontends/gpui/src/tab_strip.rs	const OPEN_TABS_SQL: &str = "SELECT fr.history_id, fr.root_id, b.content \
 raw_sql_in_frontend	frontends/holon-worker/src/seed.rs	"SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = \
 sole_block_writer	crates/holon/src/storage/turso_sink_reader.rs	"INSERT INTO block_raw (id, parent_id) VALUES ('sentinel:no_parent', \

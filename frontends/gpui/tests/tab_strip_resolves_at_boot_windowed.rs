@@ -136,10 +136,14 @@ fn the_tab_strip_draws_an_open_tab_without_being_prodded() {
 
     // VACUITY GUARD, read from the table the strip is a view of. Without this a
     // failure below could just mean no tab was ever opened.
+    // Counted from `navigation_history`, not `focus_roots`: the strip draws one
+    // chip per OPEN row, and the matview omits the NULL-block rows that blank
+    // tabs are.
     let open_tabs = runtime
-        .block_on(
-            env.query_sql("SELECT fr.history_id FROM focus_roots fr WHERE fr.region = 'main'"),
-        )
+        .block_on(env.query_sql(
+            "SELECT nh.id FROM navigation_history nh WHERE nh.region = 'main' AND nh.closed_at IS \
+             NULL",
+        ))
         .expect("read the open Main tabs");
     assert!(
         !open_tabs.is_empty(),
