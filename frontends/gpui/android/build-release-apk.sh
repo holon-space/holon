@@ -72,6 +72,8 @@ JAVA_SRCS=(
 )
 mkdir -p "$BUILD/classes" "$BUILD/dex"
 javac -source 8 -target 8 -cp "$PLATFORM" -d "$BUILD/classes" "${JAVA_SRCS[@]}"
+"$SCRIPT_DIR/check-natives.sh" "$BUILD/classes" "$SO" \
+    "$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-nm"
 "$BT/d8" --min-api 33 --output "$BUILD/dex" "$BUILD/classes"/dev/gpui/mobile/*.class
 cp "$BUILD/dex/classes.dex" "$BUILD/classes.dex"
 
