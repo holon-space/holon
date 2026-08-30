@@ -214,12 +214,55 @@ Three residuals this fix does not close:
   the pre-existing `note_doc_home`, which is why the harm rung is run
   through that wiring too.
 
-Residue, parked for Martin's ruling — **not** implemented: ingest still
-accepts the same `#+ID:` from a second file and collapses two vault
-directories into one doc node (`:2463`). That is the upstream cause of
-this bug and no later layer can undo it, but the vault holds 8 such
-pairs today, several of them live-vs-`_archive` copies, so deciding what
-happens to them is a data-cleanup call rather than a code call. Until it
-is made, the two fixes above contain the damage: the mis-route cannot
-happen, and a genuine ambiguity is refused loudly instead of
-quarantining a file.
+The upstream cause — a second file carrying an `#+ID:` an existing file
+already claims, whose blocks then merge into that document — is addressed
+too (ruled D40.a). `ingest_file` refuses such a file: it is not ingested,
+its blocks never reach the store, and one ERROR names both paths, the
+shared id, and the remedy (fresh `#+ID:`, or delete the stray). Repeats
+for that path log at DEBUG.
+
+The check sits ahead of BOTH doors into a home record — the byte-identity
+fast path, which records one without resolving identity at all, and the
+full identity resolution. That placement is the whole of it: a first cut
+guarded only the second door, and the fast path then let a stray take the
+claimant's home on the next boot, after which the CLAIMANT's own edits
+were the ones refused. The stray needs only a stale persisted
+`file.content_hash` to reach that door, which every previously-ingested
+file has.
+
+Three things shape the check:
+
+- The claimant is whichever file THIS SESSION ingested first, because the
+  claim lives in the session's `doc_home` record. Vault scan order is
+  arbitrary, so which of two duplicates wins can differ between runs. The
+  disclosure says so, rather than implying a stable winner.
+- A claim whose file has VANISHED is a move or a rename, not a collision
+  — the id travels with the content — so only a claimant still on disk
+  refuses. That is one `metadata` stat, and only for a file whose id is
+  already homed elsewhere.
+- A stat that fails for any reason other than not-found refuses too,
+  under its own disclosure. Merging on a claim we could not read is the
+  outcome that loses data, and reporting it as a partial ingest would
+  claim a truncated DB state that does not exist.
+
+Refusing is a skip, not an `Err`: the ingest loop keeps serving every
+other file, which is the same containment posture as the write-back
+guards. The pre-ingest heal is guarded by the same predicate — it
+re-derives a doc-root's title and parent from the FILE's path, so reached
+from a stray it would rewrite the claimant's document to the stray's name
+chain before the refusal ever ran.
+
+Cost of the refusal: a refused file never enters `last_projection`, so
+every discovery tick re-reads and re-parses it, permanently, until its id
+is fixed or it is deleted. That is accepted — the alternative is
+forgetting a file the user may repair — and the heal guard keeps the tick
+from also writing.
+
+Pinned in `crates/holon-orgmode/tests/ingest_data_loss_guard.rs` by three
+tests, each red against `16a713fb` and green after: the merge refusal with
+both paths and the id disclosed and an ordinary re-ingest unaffected; the
+cold-boot fast path refusing a stray AND the claimant's later edit still
+ingesting; and a stray leaving the claimant's doc-root title untouched.
+
+What remains is data, not code: Martin's 3 rule-covered pairs are
+re-ID'd, and 5 byte-identical pairs await his D42 ruling.

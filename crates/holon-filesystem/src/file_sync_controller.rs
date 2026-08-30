@@ -245,6 +245,10 @@ const CREATE_CHUNK_BLOCKS: usize = ingest_progress::PROGRESS_EVERY_BLOCKS;
 const IDENTITY_PREFLIGHT_SITE: &str = "identity-file-preflight";
 const PATH_DERIVATION_SITE: &str = "page-file-path-derivation";
 const IMAGE_PATH_SITE: &str = "image-file-path-derivation";
+/// Identity-refusal disclosure conditions, kept apart so one does not mute
+/// the other for the same file.
+const DUPLICATE_ID_SITE: &str = "duplicate-doc-id";
+const UNSETTLED_IDENTITY_SITE: &str = "unsettled-doc-identity";
 
 /// Why a caller is resolving an id to a page-file path.
 ///
@@ -786,6 +790,13 @@ pub struct FileSyncController {
     /// re-ingests cleanly. This is the disk->DB (ingest-side) counterpart
     /// of the DB->disk write-back [`quarantined`](Self::quarantined) set.
     ingest_quarantine: HashMap<CanonicalPath, (std::time::SystemTime, u64)>,
+    /// Files already reported once for an identity problem, keyed by
+    /// `(path, condition)`. By path, not by id: two strays can collide with the
+    /// same owner, and each is its own thing for the user to fix. By condition
+    /// too: a duplicate-claim report must not mute a later unreadable-claimant
+    /// report for the same file, which is a different fault with a different
+    /// remedy.
+    duplicate_id_disclosed: HashSet<(CanonicalPath, &'static str)>,
 }
 
 impl FileSyncController {
@@ -846,6 +857,7 @@ impl FileSyncController {
             seed_pristine: HashMap::new(),
             writeback_readonly: HashSet::new(),
             ingest_quarantine: HashMap::new(),
+            duplicate_id_disclosed: HashSet::new(),
         }
     }
 
@@ -1368,6 +1380,17 @@ impl FileSyncController {
         if !doc.content.trim().is_empty() {
             return Ok(false); // healthy doc-root — nothing to heal
         }
+        // The heal re-derives the doc-root's title and parent from THIS file's
+        // path, so a file that does not own the id would rewrite the claimant's
+        // document to its own name chain — and a page's file follows its name
+        // chain. Anything other than a free id is left alone; `ingest_file`
+        // reaches the same question moments later and is what discloses it.
+        if !matches!(
+            self.live_claimant_of(&id, &CanonicalPath::new(path)).await,
+            Ok(None)
+        ) {
+            return Ok(false);
+        }
         let rel_path = path.strip_prefix(&self.root_dir).map_err(|e| {
             anyhow::anyhow!(
                 "File {} not under root {}: {}",
@@ -1681,6 +1704,115 @@ impl FileSyncController {
         Ok(())
     }
 
+    /// The file that already claims `doc_id`, when it is a DIFFERENT file from
+    /// `candidate` and is still on disk.
+    ///
+    /// A claim whose file has VANISHED is a move or a rename, not a collision —
+    /// the id travels with the content — so only a claimant still on disk
+    /// stands in the way.
+    async fn live_claimant_of(
+        &self,
+        doc_id: &EntityUri,
+        candidate: &CanonicalPath,
+    ) -> Result<Option<PathBuf>> {
+        let Some(home) = self.doc_home.get(doc_id) else {
+            return Ok(None);
+        };
+        if home == candidate {
+            return Ok(None);
+        }
+        let home_path = home.as_path_buf().clone();
+        match self.fs.metadata(&home_path).await {
+            Ok(_) => Ok(Some(home_path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            // Anything else leaves us unable to say whether the claimant is
+            // still there. Merging on a stat we could not read is the one
+            // outcome that loses data, so the ingest fails instead.
+            Err(e) => Err(e).with_context(|| {
+                format!(
+                    "stat the current claimant of {doc_id} at {} while ingesting another file \
+                     presenting the same `#+ID:`",
+                    home_path.display()
+                )
+            }),
+        }
+    }
+
+    /// Disclose a file whose identity could not be SETTLED — we could not read
+    /// whether another file still claims its `#+ID:`.
+    ///
+    /// Deliberately not an `Err`: the ingest never began, so the caller's
+    /// partial-ingest quarantine would report a truncated DB state that does
+    /// not exist and would suppress write-back for an intact file. Skipping
+    /// leaves the file re-checkable on the next tick.
+    fn disclose_unsettled_identity(
+        &mut self,
+        doc_id: &EntityUri,
+        path: &Path,
+        canonical: &CanonicalPath,
+        err: &anyhow::Error,
+    ) {
+        if self
+            .duplicate_id_disclosed
+            .insert((canonical.clone(), UNSETTLED_IDENTITY_SITE))
+        {
+            tracing::error!(
+                doc_id = %doc_id,
+                path = %path.display(),
+                error = %format!("{err:#}"),
+                "[FileSyncController] UNSETTLED DOCUMENT IDENTITY: could not determine whether \
+                 another file still claims this file's `#+ID:`, so it is NOT ingested — \
+                 merging on a claim we could not read is the outcome that loses data. \
+                 Nothing was written: the store holds none of this file's blocks and its \
+                 write-back is untouched. Re-attempted on the next tick. Repeats for this \
+                 path log at DEBUG.",
+            );
+        } else {
+            tracing::debug!(
+                doc_id = %doc_id,
+                path = %path.display(),
+                "[FileSyncController] identity still unsettled (already disclosed once at \
+                 ERROR)",
+            );
+        }
+    }
+
+    /// Disclose a refused duplicate-`#+ID:` file: ERROR the first time this
+    /// path collides, DEBUG on every repeat.
+    fn disclose_duplicate_doc_id(
+        &mut self,
+        doc_id: &EntityUri,
+        claimed_by: &Path,
+        refused: &Path,
+        canonical: &CanonicalPath,
+    ) {
+        if self
+            .duplicate_id_disclosed
+            .insert((canonical.clone(), DUPLICATE_ID_SITE))
+        {
+            tracing::error!(
+                doc_id = %doc_id,
+                claimed_by = %claimed_by.display(),
+                refused = %refused.display(),
+                "[FileSyncController] DUPLICATE DOCUMENT ID: this file carries an `#+ID:` \
+                 another file on disk already claims, so it is NOT ingested — its blocks \
+                 would merge into that document and collapse two vault files into one. \
+                 Give this file a fresh `#+ID:`, or delete it if it is a stray copy. The \
+                 claimant is whichever file this session ingested FIRST, and the vault \
+                 scan order is arbitrary, so which of the two wins can differ between \
+                 runs. Repeats for this path log at DEBUG.",
+            );
+        } else {
+            tracing::debug!(
+                doc_id = %doc_id,
+                claimed_by = %claimed_by.display(),
+                refused = %refused.display(),
+                "[FileSyncController] duplicate `#+ID:` still refused (already disclosed \
+                 once at ERROR)",
+            );
+        }
+    }
+
     /// Record that `path` now holds `doc_id`'s file.
     ///
     /// Called from every site that establishes a document's home — our own
@@ -1702,6 +1834,7 @@ impl FileSyncController {
         // A deleted file must not leave a stale ingest-quarantine entry: if the
         // same path reappears it starts un-quarantined (fresh discovery).
         self.ingest_quarantine.remove(canonical);
+        self.duplicate_id_disclosed.retain(|(p, _)| p != canonical);
     }
 
     /// Move every per-file tracking entry from `from` to `to` — the rename
@@ -1731,6 +1864,16 @@ impl FileSyncController {
         }
         if let Some(v) = self.ingest_quarantine.remove(from) {
             self.ingest_quarantine.insert(to.clone(), v);
+        }
+        let moved: Vec<&'static str> = self
+            .duplicate_id_disclosed
+            .iter()
+            .filter(|(p, _)| p == from)
+            .map(|(_, site)| *site)
+            .collect();
+        self.duplicate_id_disclosed.retain(|(p, _)| p != from);
+        for site in moved {
+            self.duplicate_id_disclosed.insert((to.clone(), site));
         }
         if let Some(v) = self.seed_pristine.remove(from) {
             self.seed_pristine.insert(to.clone(), v);
@@ -2413,6 +2556,26 @@ impl FileSyncController {
             .format
             .doc_id_from_content(&disk_content)
             .map(|bare| EntityUri::block(&bare));
+
+        // The duplicate-`#+ID:` refusal sits AHEAD of both doors into a home
+        // record: the byte-identity skip below records one without resolving
+        // identity, and the full ingest records one after resolving it. A file
+        // that gets past here on a claimed id would take the claimant's home,
+        // and the claimant's own next edit would then be the one refused.
+        if let Some(root) = &disk_root {
+            match self.live_claimant_of(root, &canonical).await {
+                Ok(Some(claimant)) => {
+                    self.disclose_duplicate_doc_id(root, &claimant, path, &canonical);
+                    return Ok(());
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.disclose_unsettled_identity(root, path, &canonical, &e);
+                    return Ok(());
+                }
+            }
+        }
+
         if let (Some(stored), Some(root)) = (self.last_projection_hash.get(&canonical), &disk_root)
         {
             // Invariant: fast-path skip requires the content present in EVERY
@@ -2503,6 +2666,8 @@ impl FileSyncController {
             Some(bare) => {
                 let id = EntityUri::block(bare);
                 match self.doc_manager.get_by_id(&id).await? {
+                    // The duplicate-id refusal already ran ahead of the fast
+                    // path, so reaching here means this file owns the id.
                     Some(doc) => (doc, false),
                     None => {
                         let parent_id = if segments.len() > 1 {
@@ -2587,6 +2752,10 @@ impl FileSyncController {
         }
 
         // Register UUID → file path (in the alias registry too, if Loro is available)
+        // This file reached identity resolution without colliding, so any
+        // earlier duplicate-id refusal for it is resolved — re-arm the loud
+        // disclosure in case the same path collides again later.
+        self.duplicate_id_disclosed.retain(|(p, _)| p != &canonical);
         self.note_doc_home(&document_uri, path);
         if let Some(ref registrar) = self.alias_registrar {
             registrar.register_alias(&document_uri, path).await;
