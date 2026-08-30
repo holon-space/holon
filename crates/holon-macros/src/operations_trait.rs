@@ -1992,6 +1992,11 @@ fn menu_exposure_tokens(variant: Option<String>) -> proc_macro2::TokenStream {
                 surfaces: holon_api::SurfaceSet { slash_menu: true, action_bar: false },
             }
         },
+        Some("action_bar") => quote! {
+            holon_api::MenuExposure::Listed {
+                surfaces: holon_api::SurfaceSet { slash_menu: true, action_bar: true },
+            }
+        },
         Some("keyboard_gesture") => quote! {
             holon_api::MenuExposure::NotListed {
                 surface: holon_api::NonMenuSurface::KeyboardGesture,

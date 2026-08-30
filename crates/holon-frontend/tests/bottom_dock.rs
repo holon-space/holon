@@ -148,7 +148,7 @@ const ROOT_LAYOUT_DSL: &str = r#"
 if_space(600,
   bottom_dock(
     columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "overlay"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "overlay"})),
-    columns(#{gap: 8, collection: chain_ops(0), item_template: op_button(col("name"))})),
+    row(#{gap: 8}, list(#{gap: 8, horizontal: true, collection: chain_ops(0), item_template: op_button(col("name"))}), list(#{gap: 8, horizontal: true, collection: ops_of("navigation:main", #{surface: "action_bar"}), item_template: op_button(col("name"))}))),
   if_space(1000,
     columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "shrink"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "overlay"})),
     columns(drawer("block:default-left-sidebar", live_block("block:default-left-sidebar"), #{mode: "shrink"}), live_block("block:default-main-panel"), drawer("block:default-right-sidebar", live_block("block:default-right-sidebar"), #{mode: "shrink"}))))
@@ -207,22 +207,37 @@ fn root_layout_mobile_viewport_has_bottom_dock() {
         "BottomDock must have main + dock slot"
     );
 
-    // Dock slot should be the streaming columns produced from chain_ops(0).
-    // With no focus seeded, chain_ops yields an empty row set, so the
-    // slot's streaming collection has 0 items — but it's still a collection
-    // view with Columns layout (not, say, a snapshot fallback).
+    // The dock slot is the streaming row produced from chain_ops(0). With no
+    // focus seeded chain_ops yields an empty row set, so the collection has 0
+    // items — but it must still be a streaming collection view (not a snapshot
+    // fallback) and it must be HORIZONTAL, which is what lays the ops along one
+    // scrollable line instead of stacking them full-width up the screen.
+    // The dock slot holds the bar's two tiers side by side, narrowest first.
     let dock_slot = &dock.children[1];
-    let is_streaming_columns = dock_slot.collection.as_ref().is_some_and(|view| {
-        view.layout()
-            .as_ref()
-            .map(|l| l.name() == "columns")
-            .unwrap_or(false)
-    });
-    assert!(
-        is_streaming_columns,
-        "dock slot should be a streaming Columns collection view; got {:?}",
+    assert_eq!(
+        dock_slot.children.len(),
+        2,
+        "the dock slot must hold the entity tier and the global tier; got {:?}",
         dock_slot.widget_name()
     );
+    for (i, tier) in dock_slot.children.iter().enumerate() {
+        let layout = tier
+            .collection
+            .as_ref()
+            .and_then(|view| view.layout())
+            .unwrap_or_else(|| {
+                panic!(
+                    "tier {i} must be a streaming collection view; got {:?}",
+                    tier.widget_name()
+                )
+            });
+        assert_eq!(layout.name(), "list", "tier {i} layout");
+        assert!(
+            layout.horizontal,
+            "the action bar lays its ops along one line; a non-horizontal tier stacks them \
+             full-width and the bar swallows the screen"
+        );
+    }
 }
 
 /// Verification #8 (MCP regression, desktop viewport).

@@ -775,8 +775,14 @@ pub struct HolonApp {
     /// desktop).
     pub safe_area_top: f32,
     /// Bottom safe area inset in logical pixels (home indicator on mobile, 0 on
-    /// desktop).
+    /// desktop). This is the TOTAL unusable bottom strip — nav bar and gesture
+    /// area included, and on Android the open IME too — which is what the page
+    /// container must pad by.
     pub safe_area_bottom: f32,
+    /// Height of the soft keyboard alone, in logical pixels; `0.0` when it is
+    /// down. Separate from `safe_area_bottom` because that is never zero on a
+    /// real phone, so it cannot answer "is the keyboard up".
+    pub keyboard_height: f32,
     /// Share/accept UI state. Shared with `AppModel.share_ui` — lives here too
     /// so the render pass can build overlays without a double-read through
     /// `app_model.read(cx).share_ui.read(cx)`.
@@ -830,7 +836,13 @@ impl Render for HolonApp {
         {
             self.safe_area_top = crate::mobile::safe_area_top_px();
             self.safe_area_bottom = crate::mobile::safe_area_bottom_px();
+            self.keyboard_height = crate::mobile::keyboard_height_px();
         }
+        // Republished rather than read from the platform inside the dock, so a
+        // windowed test can drive the bar through the same field.
+        cx.set_global(crate::render::builders::KeyboardHeight(
+            self.keyboard_height,
+        ));
         // Live theme application. The gpui_component `Theme` global is seeded
         // once at launch; the settings dropdown only persists the pref and
         // calls `window.refresh()`. Re-apply here whenever the selected theme
@@ -1826,6 +1838,24 @@ impl RebindHandle {
         self.app_model.read(cx).view_model.collect_drawers()
     }
 
+    /// Set the soft keyboard's height — what the action bar reads to decide
+    /// whether it has a keyboard to dock above.
+    ///
+    /// Distinct from [`Self::set_safe_area_bottom`], and a caller simulating a
+    /// keyboard needs BOTH: the inset is what shrinks the page (nav bar and
+    /// keyboard together), this is what says how much of it is keyboard. On
+    /// mobile the platform supplies both every frame; elsewhere nothing
+    /// overwrites them.
+    pub fn set_keyboard_height(&self, px: f32, cx: &mut App) {
+        let Some(view) = self.holon_app.as_ref() else {
+            return;
+        };
+        view.update(cx, |app, cx| {
+            app.keyboard_height = px;
+            cx.notify();
+        });
+    }
+
     /// Whether the quick-open modal is open — the user-visible effect the
     /// `open_search` chord exists to produce.
     pub fn search_modal_open(&self, cx: &App) -> bool {
@@ -1972,10 +2002,22 @@ fn spawn_root_layout_signal(
 ) {
     let root_uri = holon_api::root_layout_block_uri();
     let root_signal = engine.watch_signal(&root_uri);
+    let driver_services: Arc<dyn BuilderServices> = engine.clone();
     cx.spawn(async move |cx| {
         use futures_signals::signal::SignalExt;
         root_signal
             .for_each(move |rvm| {
+                // The root layout is re-interpreted on every emission, so any
+                // collection it carries — the action bar's ops row — arrives
+                // with a fresh, unstarted `ReactiveView`. Without this its
+                // driver never subscribes and the collection stays empty
+                // forever, which is what `ReactiveShell` does for the trees it
+                // owns.
+                holon_frontend::reactive_view::start_reactive_views(
+                    &rvm,
+                    &driver_services,
+                    &driver_services.runtime_handle(),
+                );
                 let _ = cx.update_window(wh, |_, _, cx| {
                     app_model.update(cx, |m, cx| {
                         // Only the loop bound to the currently-active engine drives
@@ -2536,6 +2578,7 @@ fn launch_holon_window_impl(
                 entity_cache: entity_cache_for_view,
                 safe_area_top: 0.0,
                 safe_area_bottom: 0.0,
+                keyboard_height: 0.0,
                 share_ui: share_ui_entity,
                 search_ui: search_ui_entity,
                 breadcrumb: breadcrumb_entity,

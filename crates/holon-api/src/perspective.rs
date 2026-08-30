@@ -58,6 +58,20 @@ use crate::types::SourceLanguage;
 /// perspective (the default layout).
 pub const ACTIVE_PERSPECTIVE_PROPERTY: &str = "active_perspective";
 
+/// The mobile action bar's two tiers, narrowest first — `TargetScope`'s
+/// `Block < Page < Global` order made structural, so what a user reaches with
+/// their thumb first are the ops acting on the block they are editing.
+///
+/// The entity tier re-targets on every focus change (`chain_ops` projects the
+/// focused block); the global tier does not depend on focus, so the bar keeps
+/// offering navigation even with nothing focused.
+const ACTION_BAR_ENTITY_OPS: &str = "list(#{gap: 8, horizontal: true, collection: chain_ops(0), \
+                                     item_template: op_button(col(\"name\"))})";
+/// App-level ops reached through the `navigation` entity — history and home,
+/// which a phone has no keyboard chord for.
+const ACTION_BAR_GLOBAL_OPS: &str = "list(#{gap: 8, horizontal: true, collection: ops_of(\"navigation:main\", #{surface: \
+     \"action_bar\"}), item_template: op_button(col(\"name\"))})";
+
 // Recognized `perspective_`-namespaced declaration fields on a perspective
 // block.
 const P_NAME: &str = "perspective_name";
@@ -309,9 +323,11 @@ impl PerspectiveSpec {
         };
 
         Ok(format!(
-            "if_space(600,\n  bottom_dock(\n    columns({narrow}),\n    columns(#{{gap: 8, \
-             collection: chain_ops(0), item_template: op_button(col(\"name\"))}})),\n  \
+            "if_space(600,\n  bottom_dock(\n    columns({narrow}),\n    \
+             row(#{{gap: 8}}, {entity_ops}, {global_ops})),\n  \
              if_space(1000,\n    columns({mid}),\n    columns({wide})))",
+            entity_ops = ACTION_BAR_ENTITY_OPS,
+            global_ops = ACTION_BAR_GLOBAL_OPS,
             narrow = cols(Breakpoint::Narrow),
             mid = cols(Breakpoint::Mid),
             wide = cols(Breakpoint::Wide),
@@ -674,27 +690,39 @@ mod tests {
         let spec = resolve_active_perspective(&EntityUri::block("root-layout"), &blocks).unwrap();
         let dsl = spec.layout_dsl().unwrap();
 
-        let expected = concat!(
-            "if_space(600,\n  ",
-            "bottom_dock(\n    ",
-            "columns(drawer(\"block:default-left-sidebar\", \
-             live_block(\"block:default-left-sidebar\"), #{mode: \"overlay\"}), ",
-            "live_block(\"block:default-main-panel\"), ",
-            "drawer(\"block:default-right-sidebar\", live_block(\"block:default-right-sidebar\"), \
-             #{mode: \"overlay\"})),\n    ",
-            "columns(#{gap: 8, collection: chain_ops(0), item_template: \
-             op_button(col(\"name\"))})),\n  ",
-            "if_space(1000,\n    ",
-            "columns(drawer(\"block:default-left-sidebar\", \
-             live_block(\"block:default-left-sidebar\"), #{mode: \"shrink\"}), ",
-            "live_block(\"block:default-main-panel\"), ",
-            "drawer(\"block:default-right-sidebar\", live_block(\"block:default-right-sidebar\"), \
-             #{mode: \"overlay\"})),\n    ",
-            "columns(drawer(\"block:default-left-sidebar\", \
-             live_block(\"block:default-left-sidebar\"), #{mode: \"shrink\"}), ",
-            "live_block(\"block:default-main-panel\"), ",
-            "drawer(\"block:default-right-sidebar\", live_block(\"block:default-right-sidebar\"), \
-             #{mode: \"shrink\"}))))",
+        // The bar's two tiers come from the same constants the builder uses:
+        // this test pins the LAYOUT around them, not their internal spelling.
+        let expected = format!(
+            "{}{}{}{}{}{}{}",
+            concat!(
+                "if_space(600,\n  ",
+                "bottom_dock(\n    ",
+                "columns(drawer(\"block:default-left-sidebar\", \
+                 live_block(\"block:default-left-sidebar\"), #{mode: \"overlay\"}), ",
+                "live_block(\"block:default-main-panel\"), ",
+                "drawer(\"block:default-right-sidebar\", \
+                 live_block(\"block:default-right-sidebar\"), #{mode: \"overlay\"})),\n    ",
+                "row(#{gap: 8}, ",
+            ),
+            ACTION_BAR_ENTITY_OPS,
+            ", ",
+            ACTION_BAR_GLOBAL_OPS,
+            ")),\n  ",
+            concat!(
+                "if_space(1000,\n    ",
+                "columns(drawer(\"block:default-left-sidebar\", \
+                 live_block(\"block:default-left-sidebar\"), #{mode: \"shrink\"}), ",
+                "live_block(\"block:default-main-panel\"), ",
+                "drawer(\"block:default-right-sidebar\", \
+                 live_block(\"block:default-right-sidebar\"), #{mode: \"overlay\"})),\n    ",
+            ),
+            concat!(
+                "columns(drawer(\"block:default-left-sidebar\", \
+                 live_block(\"block:default-left-sidebar\"), #{mode: \"shrink\"}), ",
+                "live_block(\"block:default-main-panel\"), ",
+                "drawer(\"block:default-right-sidebar\", \
+                 live_block(\"block:default-right-sidebar\"), #{mode: \"shrink\"}))))",
+            ),
         );
         assert_eq!(dsl, expected);
 

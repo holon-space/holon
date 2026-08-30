@@ -10,6 +10,7 @@ mod table;
 // (shell-less compositions) and the per-block ReactiveShell arm (production,
 // where the main panel is wrapped in a live_block so columns.rs sees no
 // column).
+pub(crate) use bottom_dock::KeyboardHeight;
 pub(crate) use column::has_pinned_child;
 pub(crate) use column::render_accordion_split;
 pub(crate) use column::slot_pinned_container;

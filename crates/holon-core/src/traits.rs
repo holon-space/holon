@@ -1113,7 +1113,7 @@ where
     /// and works correctly; mirroring that path here yields the same CDC
     /// propagation.
     #[holon_macros::affects("parent_id", "sort_key")]
-    #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::menu_exposure(action_bar)]
     #[holon_macros::boundary_behavior(crossing_widens)]
     async fn indent(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
@@ -1210,7 +1210,7 @@ where
 
     /// Move block out to parent's level (decrease indentation)
     #[holon_macros::affects("parent_id", "sort_key")]
-    #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::menu_exposure(action_bar)]
     #[holon_macros::boundary_behavior(forbidden_at_page_boundary)]
     async fn outdent(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
@@ -2104,7 +2104,7 @@ where
 
     /// Move a block up (swap with previous sibling)
     #[holon_macros::affects("parent_id", "sort_key")]
-    #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::menu_exposure(action_bar)]
     #[holon_macros::boundary_behavior(private_only)]
     async fn move_up(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
@@ -2212,7 +2212,7 @@ where
 
     /// Move a block down (swap with next sibling)
     #[holon_macros::affects("parent_id", "sort_key")]
-    #[holon_macros::menu_exposure(listed)]
+    #[holon_macros::menu_exposure(action_bar)]
     #[holon_macros::boundary_behavior(private_only)]
     async fn move_down(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
@@ -2655,6 +2655,7 @@ where
 
     /// Cycle to the next task state. "" → TODO → DOING → DONE → "".
     #[holon_macros::affects("task_state")]
+    #[holon_macros::menu_exposure(action_bar)]
     #[holon_macros::boundary_behavior(private_only)]
     async fn cycle_task_state(&self, id: &str) -> Result<OperationResult>;
 

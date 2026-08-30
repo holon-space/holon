@@ -2884,7 +2884,7 @@ impl OperationProvider for SqlOperationProvider {
                     menu_exposure: holon_api::MenuExposure::Listed {
                         surfaces: holon_api::SurfaceSet {
                             slash_menu: true,
-                            action_bar: false,
+                            action_bar: true,
                         },
                     },
                     trigger: None,

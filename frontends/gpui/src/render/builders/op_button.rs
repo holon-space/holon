@@ -195,7 +195,11 @@ fn open_or_dispatch(
         );
         return;
     };
-    let mut ctx_params: HashMap<String, Value> = HashMap::new();
+    // The descriptor's own `bound_params` come first — they are params the op
+    // declared already decided (a navigation op's `region`), and every other
+    // dispatch path honours them. The row's `id` is layered on top so a bound
+    // value can never shadow the target the button was drawn for.
+    let mut ctx_params: HashMap<String, Value> = op.bound_params.clone();
     ctx_params.insert("id".into(), Value::String(target_id.to_string()));
 
     let collector = ParamCollector::for_op(&op, &ctx_params);
@@ -373,6 +377,7 @@ fn choice_row(
 pub(crate) const OP_ICONS: &[(&str, &str)] = &[
     ("cycle_task_state", "\u{27F3}"), // ⟳
     ("delete", "\u{1F5D1}"),          // 🗑
+    ("delete_subtree", "\u{1F5D1}"),  // 🗑
     ("dismiss_advice", "\u{2715}"),   // ✕ (dismiss a woven advice suggestion, ADR 0022)
     ("create", "+"),
     ("update", "\u{270E}"),       // ✎
@@ -383,6 +388,9 @@ pub(crate) const OP_ICONS: &[(&str, &str)] = &[
     ("outdent", "\u{21E4}"),      // ⇤
     ("move_up", "\u{2191}"),      // ↑
     ("move_down", "\u{2193}"),    // ↓
+    ("go_back", "\u{2190}"),      // ←
+    ("go_forward", "\u{2192}"),   // →
+    ("go_home", "\u{2302}"),      // ⌂
 ];
 
 /// Op-name → icon glyph, already routed through `crate::icon` so glyphs the

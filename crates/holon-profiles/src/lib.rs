@@ -1197,7 +1197,14 @@ impl ProfileResolving for ProfileResolver {
                         render: holon_api::RenderExpr::Literal {
                             value: holon_api::Value::String("".to_string()),
                         },
-                        operations: vec![],
+                        // Having no RENDER profile does not mean having no
+                        // OPERATIONS: `navigation` is dispatcher-registered and
+                        // never drawn, so it reaches here with a real op set
+                        // that the surfaces asking "what can I do to this?"
+                        // (`ops_of`, the action bar, an op_button's tap) must
+                        // still see. Dropping them made those ops unreachable
+                        // and undispatchable rather than merely unrendered.
+                        operations: self.lookup_operations(entity_name_str),
                         variants: vec![],
                     }),
                     HashMap::new(),
@@ -1299,7 +1306,14 @@ impl ProfileResolving for ProfileResolver {
                         render: holon_api::RenderExpr::Literal {
                             value: holon_api::Value::String("".to_string()),
                         },
-                        operations: vec![],
+                        // Having no RENDER profile does not mean having no
+                        // OPERATIONS: `navigation` is dispatcher-registered and
+                        // never drawn, so it reaches here with a real op set
+                        // that the surfaces asking "what can I do to this?"
+                        // (`ops_of`, the action bar, an op_button's tap) must
+                        // still see. Dropping them made those ops unreachable
+                        // and undispatchable rather than merely unrendered.
+                        operations: self.lookup_operations(entity_name_str),
                         variants: vec![],
                     }),
                     HashMap::new(),

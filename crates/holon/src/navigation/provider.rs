@@ -136,11 +136,22 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Global,
             boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
-            menu_exposure: holon_api::MenuExposure::NotListed {
-                surface: holon_api::NonMenuSurface::Navigation,
+            // Action-bar only: a phone has no keyboard chord for history
+            // navigation, while a desktop user already has one, so this is
+            // deliberately NOT in the slash menu.
+            menu_exposure: holon_api::MenuExposure::Listed {
+                surfaces: holon_api::SurfaceSet {
+                    slash_menu: false,
+                    action_bar: true,
+                },
             },
             trigger: None,
-            bound_params: Default::default(),
+            // The bar acts on the main region; binding it here is what lets a
+            // tap dispatch without asking the user which region they meant.
+            bound_params: ::std::collections::HashMap::from([(
+                "region".to_string(),
+                holon_api::Value::from(holon_api::Region::Main),
+            )]),
             marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
@@ -157,11 +168,22 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Global,
             boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
-            menu_exposure: holon_api::MenuExposure::NotListed {
-                surface: holon_api::NonMenuSurface::Navigation,
+            // Action-bar only: a phone has no keyboard chord for history
+            // navigation, while a desktop user already has one, so this is
+            // deliberately NOT in the slash menu.
+            menu_exposure: holon_api::MenuExposure::Listed {
+                surfaces: holon_api::SurfaceSet {
+                    slash_menu: false,
+                    action_bar: true,
+                },
             },
             trigger: None,
-            bound_params: Default::default(),
+            // The bar acts on the main region; binding it here is what lets a
+            // tap dispatch without asking the user which region they meant.
+            bound_params: ::std::collections::HashMap::from([(
+                "region".to_string(),
+                holon_api::Value::from(holon_api::Region::Main),
+            )]),
             marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
@@ -178,11 +200,22 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Global,
             boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
-            menu_exposure: holon_api::MenuExposure::NotListed {
-                surface: holon_api::NonMenuSurface::Navigation,
+            // Action-bar only: a phone has no keyboard chord for history
+            // navigation, while a desktop user already has one, so this is
+            // deliberately NOT in the slash menu.
+            menu_exposure: holon_api::MenuExposure::Listed {
+                surfaces: holon_api::SurfaceSet {
+                    slash_menu: false,
+                    action_bar: true,
+                },
             },
             trigger: None,
-            bound_params: Default::default(),
+            // The bar acts on the main region; binding it here is what lets a
+            // tap dispatch without asking the user which region they meant.
+            bound_params: ::std::collections::HashMap::from([(
+                "region".to_string(),
+                holon_api::Value::from(holon_api::Region::Main),
+            )]),
             marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,

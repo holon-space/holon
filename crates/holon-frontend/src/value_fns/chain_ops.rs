@@ -1,9 +1,13 @@
-//! `chain_ops(level)` — composition convenience: ops registered for
-//! the URI at the given level of the focus chain.
+//! `chain_ops(level)` — the mobile action bar's row source: the
+//! action-bar-exposed ops of the URI at the given level of the focus chain.
 //!
-//! Equivalent in spirit to `ops_of(focus_chain()[level].uri)`. Takes
-//! one positional integer arg `level` (0 = focused, 1 = parent, ...).
+//! Takes one positional integer arg `level` (0 = focused, 1 = parent, ...).
 //! Returns an empty row set for levels not present in the chain.
+//!
+//! Narrower than `ops_of(focus_chain()[level].uri)`: this is the bar's own
+//! source, so it lists only the ops that opted into the bar
+//! (`SurfaceSet::action_bar`). `ops_of` stays the unfiltered enumeration the
+//! settings integration rows use.
 //!
 //! Composability example used by the mobile action bar:
 //!
@@ -45,7 +49,7 @@ use crate::reactive::BuilderServices;
 use crate::render_context::RenderContext;
 use crate::render_interpreter::RenderInterpreter;
 use crate::render_interpreter::ValueFn;
-use crate::value_fns::ops_of::ops_rows_for_uri;
+use crate::value_fns::ops_of::action_bar_rows_for_uri;
 use crate::value_fns::synthetic::SyntheticRows;
 
 /// `ReactiveRowProvider` projecting the focused-block `Mutable` through
@@ -89,7 +93,7 @@ fn build_rows(
     match chain_uri(focused, level) {
         // The focus chain holds no rendered row; a relation-guarded op reaching
         // here is undecidable and `ops_rows_for_uri` says so.
-        Some(uri) => ops_rows_for_uri(uri.as_str(), services, &DataRow::new()),
+        Some(uri) => action_bar_rows_for_uri(uri.as_str(), services, &DataRow::new()),
         None => Vec::new(),
     }
 }

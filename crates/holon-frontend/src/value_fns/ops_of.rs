@@ -50,7 +50,18 @@ impl ValueFn for OpsOfValueFn {
                 String::new()
             });
 
-        let ops = resolve_ops(&uri, services);
+        // `surface: "action_bar"` narrows to the ops that declared themselves
+        // reachable from the mobile bar. Absent (the settings integration rows)
+        // means every admitted op, which is that surface's whole point.
+        let action_bar_only = args
+            .named
+            .get("surface")
+            .and_then(|v| v.as_string().map(|s| s == ACTION_BAR_SURFACE))
+            .unwrap_or(false);
+        let mut ops = resolve_ops(&uri, services);
+        if action_bar_only {
+            ops.retain(on_action_bar);
+        }
         let row = ctx.row();
         let build = || -> Arc<dyn holon_api::ReactiveRowProvider> {
             Arc::new(SyntheticRows::from_rows(rows_from_ops(&ops, &uri, row)))
@@ -74,9 +85,48 @@ pub fn ops_rows_for_uri(
     rows_from_ops(&resolve_ops(uri, services), uri, row)
 }
 
+/// [`ops_rows_for_uri`] narrowed to the operations that declared themselves
+/// reachable from the mobile action bar (`SurfaceSet::action_bar`).
+///
+/// A block advertises dozens of operations; a phone bar has room for a handful
+/// and every button costs the user a decision. Which ones belong there is the
+/// op's own call, declared at its descriptor next to its slash-menu exposure,
+/// so the two surfaces never drift into parallel lists.
+pub fn action_bar_rows_for_uri(
+    uri: &str,
+    services: &dyn BuilderServices,
+    row: &DataRow,
+) -> Vec<Arc<DataRow>> {
+    let ops: Vec<OperationWiring> = resolve_ops(uri, services)
+        .into_iter()
+        .filter(on_action_bar)
+        .collect();
+    rows_from_ops(&ops, uri, row)
+}
+
+/// The `surface:` value that narrows an enumeration to the mobile action bar.
+pub const ACTION_BAR_SURFACE: &str = "action_bar";
+
+fn on_action_bar(op: &OperationWiring) -> bool {
+    matches!(
+        op.descriptor.menu_exposure,
+        holon_api::MenuExposure::Listed { surfaces } if surfaces.action_bar
+    )
+}
+
 fn rows_from_ops(ops: &[OperationWiring], uri: &str, row: &DataRow) -> Vec<Arc<DataRow>> {
+    // Presentation dedup, one row per operation NAME. The catalog is the
+    // dispatcher's unioned provider set, advertised without dedup — the
+    // structural block ops are knowingly double-advertised by
+    // `SqlBlockOperations` and `LoroBlockOperations` — so an undeduped set
+    // paints every one of them twice. First occurrence wins, which is the same
+    // provider the dispatcher's first-wins routing will actually reach, and the
+    // same rule the slash menu applies in `build_command_items`. Keyed on the
+    // name, never the label: two different ops may share a display label.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     ops.iter()
         .filter(|w| admits(w, row))
+        .filter(|w| seen.insert(w.descriptor.name.as_str()))
         .map(|w| Arc::new(build_row(w, uri)))
         .collect()
 }

@@ -458,6 +458,23 @@ pub fn safe_area_top_px() -> f32 {
     0.0
 }
 
+/// Height of the SOFT KEYBOARD alone, in logical points. `0.0` when it is down.
+///
+/// Deliberately not [`safe_area_bottom_px`]: that is the total unusable bottom
+/// strip, which on every real phone is non-zero with the keyboard down (a home
+/// indicator, a nav bar, a gesture area). Layout wants the total; a caller
+/// asking "is the keyboard up" wants only this. Both platforms publish through
+/// the same `gpui_mobile` signal — iOS from its keyboard notifications, Android
+/// from the IME window inset.
+pub fn keyboard_height_px() -> f32 {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        return gpui_mobile::keyboard_height();
+    }
+    #[allow(unreachable_code)]
+    0.0
+}
+
 pub fn safe_area_bottom_px() -> f32 {
     #[cfg(target_os = "android")]
     {
