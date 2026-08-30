@@ -70,7 +70,7 @@ command -v javac >/dev/null || { echo "ERROR: javac not on PATH (a JDK is requir
 mkdir -p "$BUILD/classes" "$BUILD/dex"
 javac -source 8 -target 8 -cp "$PLATFORM" -d "$BUILD/classes" "${JAVA_SRCS[@]}"
 "$SCRIPT_DIR/check-natives.sh" "$BUILD/classes" "$SO" \
-    "$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-nm"
+    "$(ls -d "$NDK"/toolchains/llvm/prebuilt/*/bin/llvm-nm 2>/dev/null | head -1)"
 "$BT/d8" --min-api 33 --output "$BUILD/dex" "$BUILD/classes"/dev/gpui/mobile/*.class
 cp "$BUILD/dex/classes.dex" "$BUILD/classes.dex"
 
