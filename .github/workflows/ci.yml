@@ -248,6 +248,17 @@ jobs:
       - name: Run di-gated holon-orgmode suites
         run: cargo nextest run -p holon-orgmode --features di
 
+      # (3) The `web-arm`-gated suite. Its one test is `#[ignore]` because it
+      #     drives a real Chrome against a served dioxus-web `dist/` — a
+      #     worker-wasm + trunk build this job does not do — so `--no-tests=pass`
+      #     is expected here and the step's value is compile/link coverage of
+      #     the web-arm dependency graph and of `WebUserDriver` against
+      #     holon-frontend's `UserDriver` contract, NOT browser behaviour.
+      #     Executing the gestures is increment 3 of docs/Testing/WebArmPBT.md,
+      #     which needs its own job with the full web build.
+      - name: Compile-run web-arm gated suite (browser body stays ignored)
+        run: cargo nextest run -p holon-integration-tests --features web-arm --test web_arm_spike --no-tests=pass
+
   # Rust code quality (dependency audit, unused deps, duplication)
   rust-quality:
     name: Rust Quality

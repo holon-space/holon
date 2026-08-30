@@ -105,7 +105,10 @@ for file in "${gated_files[@]}"; do
         fail=1
         continue
     fi
-    count=$(printf '%s\n' "$list_out" | grep -oE '[0-9]+ tests' | grep -oE '[0-9]+' | tail -1)
+    # libtest's summary is singular for a one-test binary ("1 test, 0
+    # benchmarks"), so the plural-only match read every such suite as 0 and
+    # failed it as dead.
+    count=$(printf '%s\n' "$list_out" | grep -oE '[0-9]+ tests?,' | grep -oE '[0-9]+' | tail -1)
     count=${count:-0}
     if [ "$count" -eq 0 ]; then
         echo "FAIL: $pkg/$stem lists 0 tests WITH --features $feat — the gated suite is"
