@@ -133,6 +133,94 @@ async fn matview_base_mismatches(env: &TestEnvironment) -> Vec<(String, i64, i64
         .collect()
 }
 
+/// Every `(block, edge field)` whose hydrated array in the `block` matview
+/// differs, AS A MULTISET, from the base junction's targets for that block.
+///
+/// The row-count assertions above cannot see this class: a corrupt target list
+/// lives INSIDE a single matview row, so `block` still has exactly one row per
+/// id and every count matches while the served array reads
+/// `["block:x","block:x"]`. That is the shape Martin's vault came back in
+/// (bugfunnel `2026-08-30-matview-edge-agg-doubles-every-requires-target`):
+/// the per-junction agg matview doubled every `requires` target while
+/// `block_requires` stayed PK-clean, and org write-back wrote the doubled
+/// `:REQUIRES:` drawer to disk.
+///
+/// Both sides are expanded to their elements and SORTED before comparison, so
+/// this is multiset equality: it catches a doubled target (`[x] -> [x,x]`), a
+/// dropped one, AND a same-length substitution (`[x,y] -> [x,x]`) that a
+/// cardinality check would pass. Order is not semantic for an edge set — the
+/// junction hydration has no `ORDER BY` — so sorting is what makes the
+/// comparison meaningful rather than flaky.
+///
+/// MATVIEW-ANCHORED, deliberately: the scan is `FROM block m` with the junction
+/// read as a correlated subquery, so a junction row whose block is missing from
+/// the `block` matview is not examined here. That direction is already covered
+/// one assertion earlier — `matview_base_mismatches` walks `block_raw` and
+/// fails when a block's matview row-count differs from its base row-count, so a
+/// block dropped from the matview is caught there rather than silently. Making
+/// this query bidirectional would duplicate that check, not add reach.
+///
+/// That hand-off DEPENDS on every junction's `ON DELETE CASCADE` FK to
+/// `block_raw` (block_requires.sql and siblings): it is what keeps a junction
+/// row from outliving its block, so "orphan junction rows" reduces to "a block
+/// the matview lost", which the row-count check sees. Load-bearing rather than
+/// incidental — the fork's deferred-FK/autocommit wart means FK enforcement is
+/// not something to assume — so if those cascades are ever relaxed, this
+/// comparison must gain the reverse direction.
+///
+/// Iterates `EdgeField::ALL` so a fifth edge field cannot be half-covered.
+async fn edge_array_multiset_mismatches(env: &TestEnvironment) -> Vec<String> {
+    let mut out = Vec::new();
+    for field in holon_api::EdgeField::ALL {
+        let (junction, source_col, target_col) = match field {
+            holon_api::EdgeField::Tags => ("block_tags", "block_id", "tag"),
+            holon_api::EdgeField::Requires => ("block_requires", "block_id", "required_id"),
+            holon_api::EdgeField::AdviceSuppressed => {
+                ("advice_suppressed", "anchor_id", "lesson_id")
+            }
+            holon_api::EdgeField::ContributesTo => {
+                ("block_contributes_to", "block_id", "target_id")
+            }
+        };
+        let column = field.column();
+        // `IS NOT` (not `!=`) so a block with no targets on either side — where
+        // both group_concat aggregates are NULL — compares equal.
+        //
+        // Joined on US (0x1f), not the default comma: tags are free-form
+        // strings, so a comma separator makes `{"a,b","c"}` and `{"a","b,c"}`
+        // concat to the same text and any corruption that splits or merges a
+        // target across a comma becomes undetectable.
+        let rows = env
+            .query(
+                &format!(
+                    "SELECT id, mv, base FROM (SELECT m.id AS id, (SELECT group_concat(value, \
+                     char(31)) FROM (SELECT value FROM json_each(m.{column}) ORDER BY value)) AS \
+                     mv, (SELECT group_concat(t, char(31)) FROM (SELECT j.{target_col} AS t FROM \
+                     {junction} j WHERE j.{source_col} = m.id ORDER BY t)) AS base FROM block m) \
+                     WHERE mv IS NOT base"
+                ),
+                QueryLanguage::HolonSql,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("edge-array multiset query for `{column}`: {e:#}"));
+        for r in &rows {
+            let cell = |k: &str| {
+                r.get(k)
+                    .and_then(|v| v.as_string())
+                    .unwrap_or("<empty>")
+                    .to_string()
+            };
+            out.push(format!(
+                "{}.{column}: matview array = [{}], junction = [{}]",
+                cell("id"),
+                cell("mv"),
+                cell("base")
+            ));
+        }
+    }
+    out
+}
+
 /// A `LoroBackend` over the frontend's authority doc — the production
 /// edge-field write path (Loro -> project() -> SQL), mirroring
 /// `matview_duplicate_row_repro`.
@@ -277,6 +365,17 @@ fn block_matview_with_edge_fields_no_duplicates_after_reboot() {
             mismatches.is_empty(),
             "[reboot-edge] `block` matview row-count diverges from `block_raw` per id (id, base, \
              matview): {mismatches:?}\n{}",
+            dump_counts(&env).await
+        );
+
+        // The row counts above all match even when an edge array is corrupt
+        // INSIDE its row, so compare the arrays themselves as multisets.
+        let edge_mismatches = edge_array_multiset_mismatches(&env).await;
+        assert!(
+            edge_mismatches.is_empty(),
+            "[reboot-edge] a hydrated edge array in the `block` matview differs as a multiset \
+             from its base junction after the restart — the vault-doubling class: \
+             {edge_mismatches:?}\n{}",
             dump_counts(&env).await
         );
     });

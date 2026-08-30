@@ -597,6 +597,34 @@ pub(crate) fn node_is_page(tree: &loro::LoroTree, tid: loro::TreeID) -> anyhow::
         .any(|t| t == holon_api::block::PAGE_TAG))
 }
 
+/// Refuse a tag write carrying a character no tag serialization can represent.
+///
+/// Accepting one corrupts the block's WHOLE tag set at the next org round-trip,
+/// not just the offending tag, while the write itself reported success:
+/// `,` makes the rendered tag group `:a:b,c:d:` fail the org tag grammar
+/// outright, so the re-ingest drops every tag (measured against a comma-free
+/// control that survives the same reboot). `:` and whitespace are refused for
+/// the same reason at the same boundary — see
+/// [`Tags::unrepresentable_char`](holon_api::types::Tags::unrepresentable_char)
+/// for what is demonstrated per character. Bugfunnel
+/// `2026-08-30-tag-with-separator-char-loses-whole-set-on-reboot`.
+///
+/// Fail loud at the boundary instead — priority 3 over priority 4. `caller`
+/// names the write path so the error says which one refused.
+fn reject_unrepresentable_tags(caller: &str, block: &str, tags: &[String]) -> anyhow::Result<()> {
+    for tag in tags {
+        if let Some(c) = holon_api::types::Tags::unrepresentable_char(tag) {
+            anyhow::bail!(
+                "{caller}({block}): tag {tag:?} contains {c:?}, which no tag serialization can \
+                 represent — org tag syntax has no escape for it, so storing this would corrupt \
+                 EVERY tag on the block at the next org round-trip. Rejecting the whole write; \
+                 remove the character or use a different tag."
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Read one block-referencing edge field's JSON-encoded target list from a
 /// node's metadata. Each such field lives under its own meta key — like `tags`,
 /// it is an edge field (a junction table), never part of the generic
@@ -1079,6 +1107,17 @@ fn write_new_node(
     request: &NewBlockWithProperties,
     now: i64,
 ) -> anyhow::Result<(Block, loro::TreeID)> {
+    // Guarded HERE rather than at the two call sites because this is the sole
+    // writer of a new node's meta: the create path reaches `tags` through
+    // `request.edges`, never through `set_block_tags`/`set_block_edge_field`,
+    // so guarding only those left `create_block_with_properties` (and
+    // `add_subtask`'s create params) able to store an unrepresentable tag.
+    reject_unrepresentable_tags(
+        "create_block_with_properties",
+        request.id.as_str(),
+        &request.edges.tags.to_vec(),
+    )?;
+
     let stable_id = request.id.id().to_string();
     let parent_tree_id =
         resolve_parent_tree_id_for_create(tree, id_cache, &request.parent_id, &request.id)?;
@@ -3100,6 +3139,9 @@ impl LoroBackend {
         key: &str,
         values: &[String],
     ) -> anyhow::Result<()> {
+        if key == holon_api::EdgeField::Tags.column() {
+            reject_unrepresentable_tags("set_block_edge_field", tree_id_str, values)?;
+        }
         let target = self
             .resolve_write_target_checked(tree_id_str)
             .await
@@ -3125,6 +3167,7 @@ impl LoroBackend {
     /// the list marks the block as a page (formerly `is_document`).
     /// An empty `tags` list deletes the meta key entirely.
     pub async fn set_block_tags(&self, tree_id_str: &str, tags: &[String]) -> anyhow::Result<()> {
+        reject_unrepresentable_tags("set_block_tags", tree_id_str, tags)?;
         let target = self
             .resolve_write_target_checked(tree_id_str)
             .await

@@ -927,6 +927,35 @@ impl Tags {
         self.0.iter().cloned().collect::<Vec<_>>().join(",")
     }
 
+    /// The first character in `tag` that no tag serialization can represent,
+    /// if any.
+    ///
+    /// A tag is stored comma-separated in SQL/properties ([`Tags::to_csv`]) and
+    /// rendered as an org tag group `:a:b:` ([`Tags::to_org`]) — and org "has
+    /// no escape for it" (`split_headline_tags`,
+    /// crates/holon-org-format/src/parser.rs:556-559). Every listed character
+    /// therefore corrupts a write→disk→re-ingest round trip, but NOT all in the
+    /// same way, and each claim below is pinned by a test in this module:
+    ///
+    /// * `,` — outside the org tag grammar, so the whole trailing group stops
+    ///   parsing as tags and the block loses EVERY tag, not just this one
+    ///   (measured end-to-end across a reboot; bugfunnel
+    ///   `2026-08-30-tag-with-separator-char-loses-whole-set-on-reboot`). It is
+    ///   also the CSV storage separator, which splits it independently.
+    /// * `:` — the org tag-group separator itself, so the tag SPLITS into extra
+    ///   tags on re-parse (`:a:b:proj:` reads back as three tags, not two).
+    ///   Different failure from `,`, equally silent.
+    /// * whitespace — terminates the trailing tag group in org headline syntax.
+    ///
+    /// Only characters with a demonstrated failure are listed. The org tag spec
+    /// is narrower still (`[[:alnum:]_@#%]`), but tags such as `some-tag` do
+    /// round-trip today, so rejecting the full spec here would refuse writes
+    /// that currently work.
+    pub fn unrepresentable_char(tag: &str) -> Option<char> {
+        tag.chars()
+            .find(|c| *c == ',' || *c == ':' || c.is_whitespace())
+    }
+
     /// Org-mode tag format: `:tag1:tag2:`
     pub fn to_org(&self) -> String {
         if self.0.is_empty() {
@@ -1445,5 +1474,62 @@ mod tests {
         assert!(Region::ALL.contains(&Region::Main));
         assert!(Region::ALL.contains(&Region::LeftSidebar));
         assert!(Region::ALL.contains(&Region::RightSidebar));
+    }
+
+    /// Each rejected character, and the round-trip it breaks. Bugfunnel
+    /// `2026-08-30-tag-with-separator-char-loses-whole-set-on-reboot`.
+    #[test]
+    fn unrepresentable_char_names_every_separator_and_nothing_else() {
+        // `,` — the CSV storage separator (`to_csv`/`from_csv`) AND outside the
+        // org tag grammar: measured to drop the block's WHOLE tag set.
+        assert_eq!(Tags::unrepresentable_char("a,b"), Some(','));
+        // `:` — the org tag-group separator itself (`to_org` joins on it), so a
+        // tag containing one SPLITS into extra tags on re-parse.
+        assert_eq!(Tags::unrepresentable_char("a:b"), Some(':'));
+        // Whitespace terminates the trailing tag group in org headline syntax.
+        assert_eq!(Tags::unrepresentable_char("a b"), Some(' '));
+        assert_eq!(Tags::unrepresentable_char("a\tb"), Some('\t'));
+
+        // The first offender is reported, so the error can name it.
+        assert_eq!(Tags::unrepresentable_char("ab,c:d"), Some(','));
+
+        // Tags that DO round-trip today stay accepted — the org tag spec is
+        // narrower (`[[:alnum:]_@#%]`) but `some-tag` and friends work, and
+        // rejecting them would refuse writes that currently succeed.
+        for ok in [
+            "proj", "some-tag", "M", "Page", "a_b", "@home", "tag#1", "%x",
+        ] {
+            assert_eq!(
+                Tags::unrepresentable_char(ok),
+                None,
+                "{ok:?} round-trips today and must not be refused"
+            );
+        }
+    }
+
+    /// The `:` claim above, demonstrated rather than asserted: a tag carrying
+    /// the org tag separator does not survive `to_org` -> re-parse as ONE tag.
+    #[test]
+    fn a_colon_in_a_tag_splits_the_org_tag_group() {
+        let tags = Tags::from_tag_iter(vec!["a:b".to_string(), "proj".to_string()]);
+        assert_eq!(tags.len(), 2);
+        let rendered = tags.to_org();
+        assert_eq!(rendered, ":a:b:proj:");
+        // Re-reading that group yields THREE tags, not the two written: the
+        // embedded `:` is indistinguishable from the separator.
+        let reparsed: Vec<&str> = rendered.trim_matches(':').split(':').collect();
+        assert_eq!(
+            reparsed,
+            vec!["a", "b", "proj"],
+            "a `:` inside a tag is silently read back as a tag boundary"
+        );
+    }
+
+    /// The `,` claim: CSV storage splits it the same way.
+    #[test]
+    fn a_comma_in_a_tag_splits_the_csv_storage_form() {
+        let tags = Tags::from_tag_iter(vec!["a,b".to_string(), "proj".to_string()]);
+        assert_eq!(tags.len(), 2);
+        assert_eq!(Tags::from_csv(&tags.to_csv()).len(), 3);
     }
 }
