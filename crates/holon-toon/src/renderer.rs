@@ -92,6 +92,12 @@ fn props_pairs(block: &ToonBlock) -> Vec<(String, String)> {
             encode_list(&id_strings(&block.advice_suppressed)),
         ));
     }
+    if !block.contributes_to.is_empty() {
+        pairs.push((
+            schema::K_CONTRIBUTES.into(),
+            encode_list(&id_strings(&block.contributes_to)),
+        ));
+    }
     if block.collapsed {
         pairs.push((schema::K_COLLAPSED.into(), "t".into()));
     }

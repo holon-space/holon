@@ -129,6 +129,9 @@ pub struct ToonBlock {
     /// Dependency edge — bare block ids this block requires / is blocked by.
     pub requires: Vec<BlockId>,
     pub advice_suppressed: Vec<BlockId>,
+    /// Compass contribution edge — the blocks this block advances
+    /// (`:contributes-to:`, see `docs/Reference/CompassConventions.md`).
+    pub contributes_to: Vec<BlockId>,
     pub collapsed: bool,
     pub widget_only: bool,
     /// Arbitrary `:PROPERTIES:` drawer keys other than `:ID:` and the fields
@@ -154,6 +157,7 @@ impl ToonBlock {
             deadline: None,
             requires: Vec::new(),
             advice_suppressed: Vec::new(),
+            contributes_to: Vec::new(),
             collapsed: false,
             widget_only: false,
             properties: BTreeMap::new(),

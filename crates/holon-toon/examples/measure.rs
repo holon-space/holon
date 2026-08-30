@@ -251,7 +251,8 @@ fn main() {
     let mut rows: Vec<Row> = Vec::new();
     for path in &args {
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path, e));
-        let forest = org_reader::parse_org(&src);
+        let forest =
+            org_reader::parse_org(&src).unwrap_or_else(|e| panic!("parse {}: {}", path, e));
         let name = std::path::Path::new(path)
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())

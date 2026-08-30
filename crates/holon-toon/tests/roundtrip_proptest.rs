@@ -84,7 +84,7 @@ fn text_block() -> impl Strategy<Value = ToonBlock> {
         option::of(adversarial_string(12)),   // scheduled
         option::of(adversarial_string(12)),   // deadline
         id_list(),                            // requires
-        id_list(),                            // advice_suppressed
+        (id_list(), id_list()),               // advice_suppressed, contributes_to
         any::<bool>(),                        // collapsed
         btree_map(prop_key(), adversarial_string(16), 0..3), // props
     )
@@ -99,7 +99,7 @@ fn text_block() -> impl Strategy<Value = ToonBlock> {
                 scheduled,
                 deadline,
                 requires,
-                advice_suppressed,
+                (advice_suppressed, contributes_to),
                 collapsed,
                 properties,
             )| {
@@ -112,6 +112,7 @@ fn text_block() -> impl Strategy<Value = ToonBlock> {
                 b.deadline = deadline;
                 b.requires = requires;
                 b.advice_suppressed = advice_suppressed;
+                b.contributes_to = contributes_to;
                 b.collapsed = collapsed;
                 b.properties = properties;
                 b

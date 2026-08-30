@@ -159,6 +159,29 @@ impl BlockEdges {
         block.contributes_to = self.contributes_to.clone();
     }
 
+    /// Set `field`'s members from the strings a param bag / Loro meta carries:
+    /// tag strings for [`EdgeField::Tags`], raw ids for the reference fields
+    /// (promoted to `block:`-schemed uris).
+    pub fn set_from_raw(&mut self, field: EdgeField, values: Vec<String>) {
+        match field {
+            EdgeField::Tags => self.tags = values.into_iter().collect(),
+            EdgeField::Requires => self.requires = uris_from_raw(values),
+            EdgeField::AdviceSuppressed => self.advice_suppressed = uris_from_raw(values),
+            EdgeField::ContributesTo => self.contributes_to = uris_from_raw(values),
+        }
+    }
+
+    /// `field`'s members in the same string shape [`Self::set_from_raw`] takes,
+    /// after uri normalization.
+    pub fn members(&self, field: EdgeField) -> Vec<String> {
+        match field {
+            EdgeField::Tags => self.tags.to_vec(),
+            EdgeField::Requires => uri_strings(&self.requires),
+            EdgeField::AdviceSuppressed => uri_strings(&self.advice_suppressed),
+            EdgeField::ContributesTo => uri_strings(&self.contributes_to),
+        }
+    }
+
     /// Whether every edge set is empty.
     pub fn is_empty(&self) -> bool {
         self.tags.is_empty()
@@ -166,6 +189,19 @@ impl BlockEdges {
             && self.advice_suppressed.is_empty()
             && self.contributes_to.is_empty()
     }
+}
+
+fn uris_from_raw(values: Vec<String>) -> Vec<EntityUri> {
+    values
+        .iter()
+        // ALLOW(entity_uri_from_raw): edge targets arriving as param-bag /
+        // Loro-meta strings, promoted to schemed uris at this boundary.
+        .map(|s| EntityUri::from_raw(s))
+        .collect()
+}
+
+fn uri_strings(uris: &[EntityUri]) -> Vec<String> {
+    uris.iter().map(|u| u.to_string()).collect()
 }
 
 /// An update to exactly one of a block's edge fields. Carried as a typed value

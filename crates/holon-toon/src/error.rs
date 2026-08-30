@@ -74,6 +74,16 @@ pub enum ToonError {
     #[error("row {row}: task state keyword must be a single whitespace-free word, got {state:?}")]
     BadState { row: usize, state: String },
 
+    #[error(
+        "block {owner}: :{key}: takes bare block IDs, got {slug:?} \
+         (docs/Reference/CompassConventions.md)"
+    )]
+    BadEdgeSlug {
+        owner: String,
+        key: String,
+        slug: String,
+    },
+
     // --- generic tabular codec (`table.rs`) ---
     #[error(
         "table name {name:?} is not representable as a TOON array key (no whitespace, and none of \

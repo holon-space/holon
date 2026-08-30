@@ -41,10 +41,10 @@ keeps the delimiter tax on the common row at five commas instead of a dozen.
 
 `props` is a space-separated `key=value` list packed into one TOON scalar.
 Reserved keys carry a leading `@` sigil (`@pri`, `@tags`, `@kind`, `@lang`,
-`@name`, `@sched`, `@dead`, `@req`, `@adv`, `@col`) so they can **never** collide
-with an arbitrary org drawer key (which is always alphanumeric/dash and never
-starts with `@`). Within a token, ` `, `=`, `,`, `\` are backslash-escaped;
-list-valued fields (`@tags`, `@req`, `@adv`) escape element commas one layer
+`@name`, `@sched`, `@dead`, `@req`, `@adv`, `@con`, `@col`, `@wo`) so they can **never**
+collide with an arbitrary org drawer key (which is always alphanumeric/dash and
+never starts with `@`). Within a token, ` `, `=`, `,`, `\` are backslash-escaped;
+list-valued fields (`@tags`, `@req`, `@adv`, `@con`) escape element commas one layer
 deeper so a comma *inside* a tag survives. The whole cell is then TOON-quoted if
 it contains a structural char (it usually does — timestamps carry `:`).
 
@@ -67,6 +67,7 @@ Example (a claimed-block drawer, same shape as real vault data) becomes one cell
 | **Arbitrary drawer keys** (`:assigned-to:`, `:Effort:`, `:status:`, `:source-file:`) | bare `key=value` tokens in props | **maps cleanly** — case preserved; multiple keys space-joined |
 | **`:REQUIRES:` / `:BLOCKED-BY:` edge** | `@req=id1,id2` in props | **maps cleanly** (converges to one spelling, like the org renderer) |
 | **`:ADVICE_SUPPRESSED:` edge** | `@adv=…` in props | **maps cleanly** |
+| **`:contributes-to:` edge** | `@con=id1,id2` in props; the authored `none` sentinel is dropped per slug, so it never reaches TOON | **maps cleanly** |
 | **`:COLLAPSED:`** | `@col=t` in props | **maps cleanly** |
 | **`:WIDGET_ONLY:`** | `@wo=t` in props | **maps cleanly** |
 | **Multi-line body** (paragraph text under a headline) | `body` column, newlines escaped as `\n` | **maps with escaping cost** — TOON has **no block-scalar / folded form**; every newline becomes a literal `\n` and the whole cell is quoted. A 10-line body becomes one long quoted string. Round-trips losslessly but is far less human-legible than org's native indented text. |

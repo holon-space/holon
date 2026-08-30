@@ -155,6 +155,9 @@ fn apply_props(block: &mut ToonBlock, cell: &str, row: usize) -> Result<()> {
             schema::K_ADVICE => {
                 block.advice_suppressed = parse_id_list(&value, row, &key)?;
             }
+            schema::K_CONTRIBUTES => {
+                block.contributes_to = parse_id_list(&value, row, &key)?;
+            }
             schema::K_COLLAPSED => {
                 if value != "t" {
                     return Err(ToonError::BadReservedProp {

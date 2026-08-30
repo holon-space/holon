@@ -855,40 +855,22 @@ impl CrudOperations<Block> for LoroBlockOperations {
             source_language
         );
 
-        // Edge fields are set-valued
-        // junctions the projector reads from dedicated Loro meta keys, NOT the
-        // `properties` blob. A `delete` inverse restores them by passing them
-        // here; absent (every normal create caller) ⇒ empty, unchanged
-        // behaviour. Routing them into `properties` would silently orphan a
-        // resurrected page (the `Page` tag makes a doc resolvable).
-        let tags: holon_api::Tags = match fields.get("tags") {
-            Some(v) => edge_string_targets(v, "tags")?.into_iter().collect(),
-            None => holon_api::Tags::default(),
-        };
-        let requires: Vec<EntityUri> = match fields.get("requires") {
-            Some(v) => edge_string_targets(v, "requires")?
-                .iter()
-                // ALLOW(entity_uri_from_raw): edge target from create op params dict
-                .map(|s| EntityUri::from_raw(s))
-                .collect(),
-            None => Vec::new(),
-        };
-        let advice_suppressed: Vec<EntityUri> = match fields.get("advice_suppressed") {
-            Some(v) => edge_string_targets(v, "advice_suppressed")?
-                .iter()
-                // ALLOW(entity_uri_from_raw): edge target from create op params dict
-                .map(|s| EntityUri::from_raw(s))
-                .collect(),
-            None => Vec::new(),
-        };
-        let contributes_to: Vec<EntityUri> = match fields.get("contributes_to") {
-            Some(v) => edge_string_targets(v, "contributes_to")?
-                .iter()
-                // ALLOW(entity_uri_from_raw): edge target from create op params dict
-                .map(|s| EntityUri::from_raw(s))
-                .collect(),
-            None => Vec::new(),
-        };
+        // Edge fields are set-valued junctions the projector reads from
+        // dedicated Loro meta keys, NOT the `properties` blob: routing them
+        // into `properties` silently orphans a resurrected page (the `Page` tag
+        // makes a doc resolvable).
+        //
+        // A field absent from the params is empty on a new block and untouched
+        // on an upsert, so `supplied` records which ones the params carry.
+        let mut edges = holon_api::BlockEdges::default();
+        let mut supplied: Vec<holon_api::EdgeField> = Vec::new();
+        for field in holon_api::EdgeField::ALL {
+            let Some(value) = fields.get(field.column()) else {
+                continue;
+            };
+            edges.set_from_raw(field, edge_string_targets(value, field.column())?);
+            supplied.push(field);
+        }
 
         // Build the appropriate BlockContent based on content_type. Image must
         // map to the dedicated variant — otherwise the block is stored in Loro
@@ -939,6 +921,16 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 .update_block(existing.id.as_str(), block_content.clone())
                 .await
                 .map_err(|e| format!("Failed to update existing block: {}", e))?;
+            for field in &supplied {
+                backend
+                    .set_block_edge_field(
+                        existing.id.as_str(),
+                        field.column(),
+                        &edges.members(*field),
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to set {} on upsert: {}", field.column(), e))?;
+            }
             backend
                 .get_block(existing.id.as_str())
                 .await
@@ -955,12 +947,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
                     block_content,
                     block_uri,
                     &HashMap::new(),
-                    &holon_api::BlockEdges {
-                        tags,
-                        requires,
-                        advice_suppressed,
-                        contributes_to,
-                    },
+                    &edges,
                 )
                 .await
                 .map_err(|e| format!("Failed to create block: {}", e))?
@@ -2815,6 +2802,55 @@ mod advice_dismiss_tests {
                 block.properties
             );
         }
+    }
+
+    /// An upsert (`create` on an id that already exists) applies every edge
+    /// param it carries; an edge field it does not mention keeps its stored
+    /// set.
+    #[tokio::test]
+    async fn upsert_applies_supplied_edge_fields_and_keeps_the_unmentioned() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+
+        let c = seed_child(&backend, &anchor, "c", "a step").await;
+        ops.set_field(
+            &c,
+            "requires",
+            Value::Array(vec![Value::String("block:dep".into())]),
+        )
+        .await
+        .expect("seed requires");
+
+        let mut fields: StorageEntity = HashMap::new();
+        fields.insert("id".into(), Value::String(c.clone()));
+        fields.insert("parent_id".into(), Value::String(anchor.clone()));
+        fields.insert("content".into(), Value::String("a step".into()));
+        fields.insert(
+            "tags".into(),
+            Value::Array(vec![Value::String("task".into())]),
+        );
+        fields.insert(
+            "advice_suppressed".into(),
+            Value::Array(vec![Value::String("block:lesson".into())]),
+        );
+        fields.insert(
+            "contributes_to".into(),
+            Value::Array(vec![Value::String("block:goal".into())]),
+        );
+        ops.create(fields).await.expect("upsert");
+
+        let block = backend.get_block(&c).await.expect("read");
+        assert_eq!(block.tags.to_vec(), vec!["task".to_string()]);
+        assert_eq!(
+            uris(&block.advice_suppressed),
+            vec!["block:lesson".to_string()]
+        );
+        assert_eq!(uris(&block.contributes_to), vec!["block:goal".to_string()]);
+        assert_eq!(
+            uris(&block.requires),
+            vec!["block:dep".to_string()],
+            "an edge field the upsert params omit must keep its stored set"
+        );
     }
 
     /// A leaf delete's inverse restores every edge field: the inverse params

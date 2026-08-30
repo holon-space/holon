@@ -31,6 +31,7 @@ pub const K_SCHED: &str = "@sched";
 pub const K_DEADLINE: &str = "@dead";
 pub const K_REQUIRES: &str = "@req";
 pub const K_ADVICE: &str = "@adv";
+pub const K_CONTRIBUTES: &str = "@con";
 pub const K_COLLAPSED: &str = "@col";
 pub const K_WIDGET_ONLY: &str = "@wo";
 

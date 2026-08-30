@@ -83,6 +83,17 @@ fn tags_and_requires_with_awkward_content_roundtrip() {
 }
 
 #[test]
+fn every_edge_field_roundtrips() {
+    let mut b = ToonBlock::text(bid("b1"), "t");
+    b.tags = vec!["task".into()];
+    b.requires = vec![bid("dep-1")];
+    b.advice_suppressed = vec![bid("lesson-1")];
+    b.contributes_to = vec![bid("goal-1"), bid("goal:2")];
+    let forest = Forest::new(vec![BlockNode::leaf(b)]);
+    assert_eq!(parse(&render(&forest)).unwrap(), forest);
+}
+
+#[test]
 fn empty_document_is_an_error() {
     assert_eq!(parse("   \n\n"), Err(ToonError::EmptyDocument));
 }
