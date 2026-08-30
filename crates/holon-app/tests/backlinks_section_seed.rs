@@ -4,25 +4,24 @@
 //! Martin's ruling (2026-07-21): backlinks must NOT be hard-coded in Rust —
 //! they live in the declarative render pipeline (`assets/default/`). The
 //! section is expressed inside the seeded main-panel render block
-//! (`assets/default/index.org`): the page outline (`collection_view()`, the
-//! block's profile-derived tree/table/board switcher) is wrapped in a
-//! `column(...)` followed by `divider()`, a "Linked references" header, and a
-//! `live_query` over the `backlinks` matview scoped to the current page via a
-//! `focus_roots` join.
+//! (`assets/default/index.org`): the page outline is the first child of a
+//! `column(...)`, followed by `divider()` and an `accordion()` titled "Linked
+//! references" wrapping a `live_query` over the `backlinks` matview, scoped to
+//! the current page via a `focus_roots` join.
 //!
-//! The one generic Rust capability this needs is the `collection_view()`
-//! render marker (expanded by `BlockDomain::render_entity` into the block's
-//! default collection view), so the declarative render can compose the outline
-//! with surrounding chrome WITHOUT losing view-mode switching and WITHOUT
-//! hard-coding the tree.
+//! View-mode switching survives that composition without hard-coding the tree:
+//! `BlockDomain::render_entity` wraps the panel in the query-source
+//! `view_mode_switcher`. The outline slot itself is declarative
+//! (`columns(#{item_template: live_block()})` since `dae2cd2c`), so which
+//! widget fills it is asset data, not a Rust capability.
 //!
 //! Guards:
 //!  1. `fresh_seed_places_backlinks_section_below_outline` — the seeded
-//!     main-panel render composes outline → divider → header → backlinks query,
-//!     in order.
+//!     main-panel render composes outline → divider → accordion(backlinks
+//!     query), in order.
 //!  2. `render_entity_expands_collection_view_marker` — rendering the main
-//!     panel expands `collection_view()` into the real view-mode switcher and
-//!     keeps the backlinks `live_query`; no raw marker leaks to the frontend.
+//!     panel yields the real view-mode switcher and keeps the backlinks
+//!     `live_query`.
 //!  3. `backlinks_query_lists_incoming_links_for_focused_page` — with the main
 //!     region focused on a page, the section query returns the blocks linking
 //!     to it; focusing a page with no incoming links returns nothing.
@@ -41,16 +40,23 @@ use std::sync::Arc;
 use fluxdi::Module;
 use fluxdi::Provider;
 use holon::storage::BLOCK_READ_TABLE;
+use holon_api::Arg;
 use holon_api::EntityName;
 use holon_api::EntityRef;
 use holon_api::EntityUri;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::OpOrigin;
+use holon_api::RenderExpr;
 use holon_api::Value;
 use holon_loro_wiring::EventInfraModule;
 
 const MAIN_PANEL_ID: &str = "block:default-main-panel";
+
+/// Widgets that may fill the main panel's outline slot — the block collection
+/// itself, not the chrome around it. `collection_view` is the pre-`dae2cd2c`
+/// marker form, kept because a user-owned legacy layout still parses to it.
+const OUTLINE_WIDGETS: &[&str] = &["columns", "tree", "collection_view"];
 
 /// Extract the backlinks `live_query` SQL from the *seeded* main-panel render
 /// content — the actual shipped query, not a hand-copied duplicate. Binds this
@@ -225,9 +231,51 @@ async fn section_result_ids(db: &holon::storage::DbHandle, sql: &str) -> Vec<Str
         .collect()
 }
 
-/// The seeded main-panel render composes, IN ORDER: the page outline
-/// (`collection_view()`), a divider, the "Linked references" header, then a
-/// `live_query` over the `backlinks` matview scoped by `focus_roots`.
+/// The unnamed arguments of a call, in source order. `make_fn_node`
+/// (`render_dsl.rs:465`) routes a plain `#{...}` map to NAMED args and every
+/// other argument to positional, so a container's children are exactly its
+/// positional args and its props are exactly its named ones.
+fn positional(args: &[Arg]) -> Vec<&RenderExpr> {
+    args.iter()
+        .filter(|a| a.name.is_none())
+        .map(|a| &a.value)
+        .collect()
+}
+
+fn named<'a>(args: &'a [Arg], key: &str) -> Option<&'a RenderExpr> {
+    args.iter()
+        .find(|a| a.name.as_deref() == Some(key))
+        .map(|a| &a.value)
+}
+
+fn expect_call<'a>(expr: &'a RenderExpr, name: &str, what: &str) -> &'a [Arg] {
+    match expr {
+        RenderExpr::FunctionCall { name: n, args } if n == name => args,
+        other => panic!("{what}: expected {name}(...), got {other:?}"),
+    }
+}
+
+fn literal_string(expr: Option<&RenderExpr>, what: &str) -> String {
+    match expr {
+        Some(RenderExpr::Literal {
+            value: Value::String(s),
+        }) => s.clone(),
+        other => panic!("{what}: expected a string literal, got {other:?}"),
+    }
+}
+
+/// The seeded main-panel render composes, IN ORDER: the page outline, a
+/// divider, then the "Linked references" accordion wrapping a `live_query`
+/// over the `backlinks` matview scoped by `focus_roots`.
+///
+/// Asserted against the PARSED tree rather than byte offsets in the source.
+/// The offset form searched for a literal `collection_view(` anywhere in the
+/// content, so when `dae2cd2c` moved the outline to
+/// `columns(#{item_template: live_block()})` this guard failed on a shape that
+/// is correct. The outline slot is therefore pinned by ROLE — any widget in
+/// `OUTLINE_WIDGETS` satisfies it — which keeps the guard toothy against an
+/// outline that is deleted or displaced without re-rotting on the next
+/// deliberate swap.
 #[test]
 fn fresh_seed_places_backlinks_section_below_outline() {
     let rt = runtime();
@@ -244,43 +292,50 @@ fn fresh_seed_places_backlinks_section_below_outline() {
             .await
             .expect("main panel must have a seeded render block after fresh seed");
 
-        let outline_at = content
-            .find("collection_view(")
-            .expect("render must embed the page outline via collection_view()");
-        let divider_at = content
-            .find("divider(")
-            .expect("render must contain a divider() separating outline from backlinks");
-        // The backlinks region is now an `accordion` (bounded, collapsible)
-        // wrapping the live_query — its `title` is the "Linked references"
-        // header, and it is a DIRECT child of the main-panel column (the
-        // placement the fail-loud guard requires).
-        let accordion_at = content
-            .find("accordion(")
-            .expect("backlinks section must be wrapped in an accordion() container");
-        let header_at = content
-            .find("Linked references")
-            .expect("accordion must carry the Linked references title");
-        let query_at = content
-            .find("live_query")
-            .expect("backlinks section must be a live_query (reactive)");
-
+        let root = holon_api::render_dsl::parse_render_dsl(&content)
+            .expect("seeded main-panel render must parse as render DSL");
+        let column = expect_call(&root, "column", "main-panel render root");
+        let children = positional(column);
+        assert_eq!(
+            children.len(),
+            3,
+            "main panel is outline, divider, accordion — got {} children in: {content}",
+            children.len()
+        );
+        let outline = match children[0] {
+            RenderExpr::FunctionCall { name, .. } => name.as_str(),
+            other => panic!("outline slot must hold a widget, got {other:?} in: {content}"),
+        };
         assert!(
-            outline_at < divider_at
-                && divider_at < accordion_at
-                && accordion_at < header_at
-                && header_at < query_at,
-            "order must be: outline, divider, accordion(title, live_query) — got \
-             outline@{outline_at} divider@{divider_at} accordion@{accordion_at} \
-             header@{header_at} query@{query_at} in: {content}"
+            OUTLINE_WIDGETS.contains(&outline),
+            "the FIRST slot must be the page outline (one of {OUTLINE_WIDGETS:?}), \
+             got {outline}(...) in: {content}"
+        );
+        expect_call(children[1], "divider", "second main-panel child");
+
+        let accordion = expect_call(children[2], "accordion", "third main-panel child");
+        assert_eq!(
+            literal_string(named(accordion, "title"), "accordion title"),
+            "Linked references",
+            "accordion must carry the Linked references title: {content}"
         );
         assert!(
-            content.contains("max_height_fraction"),
+            named(accordion, "max_height_fraction").is_some(),
             "accordion must carry a max_height_fraction cap prop: {content}"
         );
+
+        let body = positional(accordion);
+        assert_eq!(
+            body.len(),
+            1,
+            "accordion wraps exactly the backlinks query: {content}"
+        );
+        let live_query = expect_call(body[0], "live_query", "accordion body");
+        let sql = literal_string(named(live_query, "sql"), "live_query sql");
         assert!(
-            content.contains("backlinks") && content.contains("focus_roots"),
+            sql.contains("backlinks") && sql.contains("focus_roots"),
             "section must query the backlinks matview scoped to the current page \
-             via focus_roots: {content}"
+             via focus_roots: {sql}"
         );
     });
 }

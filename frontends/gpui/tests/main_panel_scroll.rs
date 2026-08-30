@@ -1,7 +1,9 @@
 //! Native (non-virtualized) scroll regression for the main panel.
 //!
-//! The seeded main panel renders `column(collection_view(), divider(),
-//! "Linked references", live_query(...))`. Because the outline collection is
+//! The seeded main panel renders `column(columns(#{item_template:
+//! live_block()}), divider(), accordion(#{title: "Linked references", icon:
+//! "link", max_height_fraction: 0.33}, live_query(...)))`. Because the outline
+//! collection is
 //! stacked inside a `column`, `column.rs` renders it EAGERLY at CONTENT height
 //! (`eager_collection_div` / `view_mode_switcher::render_content_height`) — a
 //! plain `div().flex_col().w_full()` with no `gpui::list`, hence no `ListState`

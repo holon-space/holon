@@ -304,7 +304,16 @@ json-aggregation and turso-storage-pbt suites);
 `create_page_from_link::recreating_a_renamed_pages_old_name_yields_a_distinct_page`,
 which names its own reason (interim ADR 0029 D1b refuses what §5.3 requires);
 and
-`holon-app::backlinks_section_seed::fresh_seed_places_backlinks_section_below_outline`.
+`holon-app::backlinks_section_seed::fresh_seed_places_backlinks_section_below_outline`
+— since RESOLVED, and never root-remodel territory: the guard searched the
+seeded render source for a literal `collection_view(`, which `dae2cd2c`
+(2026-08-12, J1' delegation) replaced with `columns(#{item_template:
+live_block()})`. Stale expectation, no product defect. Re-expressed against the
+parsed render tree, with the outline slot pinned by ROLE (any of
+`columns`/`tree`/`collection_view`) so a deleted or displaced outline still
+fails while a deliberate widget swap does not. Inspect the change with
+`git show dae2cd2c` — it is not an ancestor of the linearized HEAD, so
+`git log -- assets/default/index.org` will not list it.
 
 ## Implemented: ruling (a)
 
