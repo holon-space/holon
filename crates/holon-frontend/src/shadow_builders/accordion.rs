@@ -5,6 +5,16 @@ use crate::render_context::LayoutHint;
 /// Default cap fraction when `max_height_fraction` is omitted (§3).
 pub const DEFAULT_MAX_HEIGHT_FRACTION: f64 = 0.4;
 
+/// Available width (logical px) below which an accordion starts collapsed:
+/// on a phone even a capped body costs the panel most of its room, so the
+/// default there is a header row the reader opens on demand.
+///
+/// Width is the app's one mobile axis — the same 600 px `if_space` and the
+/// drawer's Overlay mode key on, so a rotated phone reads as mobile for all
+/// three at once. Height would not separate the two: a portrait phone is
+/// ~850 logical px tall, taller than many desktop windows.
+pub const ACCORDION_MIN_EXPANDED_WIDTH_PX: f32 = 600.0;
+
 /// Where an accordion is placed — parsed once from the `pinned` / `sticky`
 /// props (parse-don't-validate). Each variant needs EXACTLY one capability from
 /// its container, checked fail-loud at build time:
@@ -106,7 +116,13 @@ holon_macros::widget_builder! {
             .unwrap_or_default();
         let icon = ba.args.get_string("icon").map(|s| s.to_string());
         let collapsible = ba.args.get_bool("collapsible").unwrap_or(true);
-        let collapsed = ba.args.get_bool("collapsed").unwrap_or(false);
+        // Unmeasured available space is desktop-first (the `if_space` default):
+        // start expanded.
+        let narrow = ba
+            .ctx
+            .available_space
+            .is_some_and(|s| s.width_px < ACCORDION_MIN_EXPANDED_WIDTH_PX);
+        let collapsed = ba.args.get_bool("collapsed").unwrap_or(narrow);
 
         // An accordion offers nothing: `ba.ctx` already carries
         // `ContainerCapability::None` (the interpreter strips the container's

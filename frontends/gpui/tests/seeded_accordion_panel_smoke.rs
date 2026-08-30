@@ -38,24 +38,10 @@
 //! a bottom footer bounded by `max_h`, the seed's `live_query` is wired INSIDE
 //! that footer, and the outline (collection_view stand-in) renders above it.
 //!
-//! FINDING + FIX — the `live_query` gpui builder wraps its `ReactiveShell` in a
-//! forced `height: relative(1.0)` (greedy) style (live_query.rs:72). A
-//! percentage height needs a DEFINITE parent; the accordion body is
-//! `flex_1 min_h_0` (needed for the internal scroll), which in a
-//! shrink-to-content (`max_h`) region resolves to 0 — so the shell and every
-//! backlink row would collapse to 0 (header-only region). FIX: `render_bounded`
-//! now gives the region a DEFINITE height (`h(relative(f))`, fixed AT the cap)
-//! when it holds a greedy slot child, so the shell fills the cap — capped +
-//! scrollable + VISIBLE (the plan's accepted "no shrink-to-content for
-//! live_query" R4 tradeoff). Text/collection children keep `max_h` and shrink.
-//! This is a LAYOUT fix (sound by the Inc 0 spike's proven `relative`-against-
-//! definite-parent principle). This fast-UI harness still cannot exercise ROW
-//! VISIBILITY (the stub `ReactiveShell` needs the real reactive engine + a
-//! driven runtime), so cap saturation / backlink rows are NOT asserted here;
-//! that is confirmed by dogfood (Inc 6) or a real-backend windowed test
-//! (boot + `seed_default_layout` + render `block:default-main-panel`). What IS
-//! asserted below: the seed parses, the split fires, the accordion is tagged +
-//! bounded, and the `live_query` is wired inside the footer.
+//! What is asserted below: the seed parses, the split fires, the accordion is
+//! tagged + bounded, and the `live_query` is wired inside the footer. How the
+//! footer sizes itself against its row count is
+//! `accordion_sizes_to_content_windowed`'s subject.
 //!
 //! Run: `cargo test -p holon-gpui --test seeded_accordion_panel_smoke`
 
@@ -327,12 +313,6 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
         snap.dump()
     );
 
-    // Bounded: the accordion region never EXCEEDS its `max_h(relative(0.33))`
-    // cap. (Cap SATURATION — the R4 "greedy live_query fills to the cap" claim —
-    // is NOT asserted here: the fast-UI stub cannot render the live_query
-    // `ReactiveShell`'s inner rows, which need the real reactive engine, so the
-    // region reports header height only. See this file's FINDING note and the
-    // real-backend windowed follow-up.)
     assert!(
         acc.height <= cap + EPS,
         "accordion region height {} EXCEEDS cap {} (0.33 x {WINDOW_H}) — the bounded footer \

@@ -233,6 +233,27 @@ impl GpuiRenderContext {
         self
     }
 
+    /// This context with `Nested` placement — for building a child of a
+    /// content-sized container, where a shell that claims `size_full` plus
+    /// `height: relative(1.0)` has no definite parent to resolve against and
+    /// collapses to 0 px.
+    pub(crate) fn nested(&self) -> Self {
+        Self {
+            ctx: self.ctx.clone(),
+            services: self.services.clone(),
+            bounds_registry: self.bounds_registry.clone(),
+            local: self.local.clone(),
+            nav: self.nav.clone(),
+            live_block_ancestors: self.live_block_ancestors.clone(),
+            placement: crate::views::reactive_shell::ShellPlacement::Nested,
+            layout_style: self.layout_style.clone(),
+            gpui: GpuiHandle {
+                window: self.gpui.window,
+                cx: self.gpui.cx,
+            },
+        }
+    }
+
     pub fn with_layout_style(
         mut self,
         style: futures_signals::signal::Mutable<style::LayoutStyle>,

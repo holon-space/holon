@@ -1,4 +1,5 @@
 mod prelude;
+pub use accordion::ACCORDION_MIN_EXPANDED_WIDTH_PX;
 pub use drawer::DEFAULT_DRAWER_WIDTH;
 pub use drawer::DRAWER_TOGGLE_WIDTH;
 

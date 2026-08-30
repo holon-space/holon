@@ -32,10 +32,6 @@ fn is_pinned_to_end(c: &ReactiveViewModel) -> bool {
     c.layout_hint == LayoutHint::PinnedToEnd
 }
 
-fn is_live_query(c: &ReactiveViewModel) -> bool {
-    c.widget_name().as_deref() == Some("live_query")
-}
-
 /// True if `node` has ≥1 direct child pinned to its trailing edge — the trigger
 /// for the flow-panel split (plan §4). A container without such a child takes
 /// the byte-identical original path (sidebar firewall: sidebar columns hold no
@@ -238,6 +234,14 @@ fn push_content_child(container: Div, child: &ReactiveViewModel, ctx: &GpuiRende
         // 2026-07-22 main-panel bug. Render it content-height instead, keeping
         // the mode-switcher chrome as an overlay.
         container.child(super::view_mode_switcher::render_content_height(child, ctx))
+    } else if child.slot.is_some() {
+        // A slot node (`live_query`, `live_block`) mints a `ReactiveShell` at
+        // `ctx.placement`, and the `Panel` shape claims `height: relative(1.0)`.
+        // This container is content-sized, so that percentage has no definite
+        // parent, resolves to 0 px, and takes the whole section with it. The
+        // class is routed here rather than a per-widget list, so a new
+        // shell-bearing widget cannot silently reintroduce the 0-px collapse.
+        container.child(super::render(child, &ctx.nested()))
     } else {
         container.child(super::render(child, ctx))
     }
@@ -302,23 +306,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         container = container.min_h(px(mh as f32));
     }
     for child in children {
-        // This container is content-sized (`flex_col`, no height), so a
-        // `live_query` child's `Panel` shape — shell `size_full` plus
-        // `height: relative(1.0)` — has no definite height to resolve against
-        // and collapses to 0 px, taking the whole section with it (the shipped
-        // sidebar's Integrations rows). Render it content-height instead. The
-        // accordion body keeps the greedy shape: `render_bounded` gives ITS
-        // region a definite height first.
-        container = if is_live_query(child) {
-            container.child(super::tag_node(
-                ctx,
-                "live_query",
-                child,
-                super::live_query::render_content_height(child, ctx),
-            ))
-        } else {
-            push_content_child(container, child, ctx)
-        };
+        container = push_content_child(container, child, ctx);
     }
     container
 }

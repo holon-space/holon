@@ -23,10 +23,6 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
 /// shape the shell claims `size_full` plus `height: relative(1.0)`, which in
 /// such a parent resolves to 0 px and takes every row with it. `Nested` sizes
 /// the shell to its content and leaves the scroll to the enclosing panel.
-///
-/// The counterpart of [`accordion::render_bounded`](super::accordion), which
-/// solves the same hazard the other way round: it HAS a definite height to give
-/// its region, so it pins one and keeps the greedy shell.
 pub(crate) fn render_content_height(
     node: &ReactiveViewModel,
     ctx: &GpuiRenderContext,

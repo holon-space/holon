@@ -214,6 +214,10 @@ pub struct TestServices {
     /// shipped left sidebar has ONE integration row, and a section that is
     /// several viewports tall hides defects that only a short section exposes.
     live_query_rows: std::sync::Mutex<Option<usize>>,
+    /// Root viewport the production seam reads through `viewport_snapshot`.
+    /// `None` reproduces the pre-first-frame state, where the shell has not
+    /// pushed a viewport yet.
+    viewport: std::sync::Mutex<Option<holon_frontend::AvailableSpace>>,
 }
 
 impl TestServices {
@@ -231,6 +235,7 @@ impl TestServices {
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
             editable_cell: None,
             live_query_rows: std::sync::Mutex::new(None),
+            viewport: std::sync::Mutex::new(None),
         })
     }
 
@@ -262,6 +267,7 @@ impl TestServices {
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
             editable_cell: Some(cell),
             live_query_rows: std::sync::Mutex::new(None),
+            viewport: std::sync::Mutex::new(None),
         })
     }
 
@@ -290,6 +296,7 @@ impl TestServices {
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
             editable_cell: None,
             live_query_rows: std::sync::Mutex::new(None),
+            viewport: std::sync::Mutex::new(None),
         })
     }
 
@@ -310,6 +317,7 @@ impl TestServices {
             dispatched_intents: std::sync::Mutex::new(Vec::new()),
             editable_cell: None,
             live_query_rows: std::sync::Mutex::new(None),
+            viewport: std::sync::Mutex::new(None),
         })
     }
 
@@ -320,6 +328,18 @@ impl TestServices {
     /// internally, which masks a short scroll extent in the panel above it.
     pub fn set_live_query_rows(&self, n: usize) {
         *self.live_query_rows.lock().unwrap() = Some(n);
+    }
+
+    /// Publish a root viewport of `width x height` logical px, as the platform
+    /// shell does on launch, resize, and rotation.
+    pub fn set_viewport_size(&self, width_px: f32, height_px: f32) {
+        *self.viewport.lock().unwrap() = Some(holon_frontend::AvailableSpace {
+            width_px,
+            height_px,
+            width_physical_px: width_px,
+            height_physical_px: height_px,
+            scale_factor: 1.0,
+        });
     }
 
     pub fn toggle_drawer(&self, block_id: &str) -> bool {
@@ -558,6 +578,10 @@ impl BuilderServices for TestServices {
             out.insert("view_mode".to_string(), holon_api::Value::String(name));
         }
         out
+    }
+
+    fn viewport_snapshot(&self) -> Option<holon_frontend::AvailableSpace> {
+        *self.viewport.lock().unwrap()
     }
 
     // ── Focus + caret seed (mirrors `UiState`) ─────────────────────────────

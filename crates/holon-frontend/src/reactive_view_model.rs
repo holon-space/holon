@@ -784,8 +784,8 @@ impl ReactiveViewModel {
 
     /// Push updates down to children, preserving matching nodes.
     ///
-    /// At each position: same widget name → update in place + recurse;
-    /// different widget name → adopt fresh. Extra fresh → adopt. Extra old →
+    /// At each position: same widget name AND same logical node → update in
+    /// place + recurse; otherwise adopt fresh. Extra fresh → adopt. Extra old →
     /// drop.
     fn push_down_children(
         old: &[Arc<ReactiveViewModel>],
@@ -795,7 +795,9 @@ impl ReactiveViewModel {
 
         for (i, fresh_child) in fresh.iter().enumerate() {
             if let Some(old_child) = old.get(i) {
-                if old_child.widget_name() == fresh_child.widget_name() {
+                if old_child.widget_name() == fresh_child.widget_name()
+                    && Self::same_logical_node(old_child, fresh_child)
+                {
                     old_child.patch_mutables(fresh_child);
 
                     let pushed =
@@ -854,13 +856,51 @@ impl ReactiveViewModel {
         result
     }
 
+    /// Whether two same-widget nodes at one position are the same LOGICAL node,
+    /// and may therefore hand their state Mutables (`expanded`, `draft`,
+    /// `compose_id`) from old to fresh.
+    ///
+    /// Position alone cannot answer it: reordering siblings puts a different
+    /// section at an index, and carrying state there shows the reader the wrong
+    /// section expanded — worse than losing the expand. Nodes carrying no
+    /// discriminator keep the positional bargain.
+    fn same_logical_node(old: &ReactiveViewModel, fresh: &ReactiveViewModel) -> bool {
+        for key in ["id", "block_id", "title"] {
+            let (o, f) = (old.props.lock_ref(), fresh.props.lock_ref());
+            match (o.get(key), f.get(key)) {
+                (Some(a), Some(b)) => return a == b,
+                (None, None) => continue,
+                _ => return false,
+            }
+        }
+        match (
+            old.data.lock_ref().get("id"),
+            fresh.data.lock_ref().get("id"),
+        ) {
+            (Some(a), Some(b)) => a == b,
+            _ => true,
+        }
+    }
+
     fn push_down_slot(
         old: &Option<ReactiveSlot>,
         fresh: &Option<ReactiveSlot>,
     ) -> Option<ReactiveSlot> {
         match (old, fresh) {
             (Some(old_slot), Some(fresh_slot)) => {
-                old_slot.content.set(fresh_slot.content.get_cloned());
+                // The slot root gets EXACTLY the child rules — identity match,
+                // in-place update, and the keep-the-original-Arc fast path that
+                // lets a live subscription outlive the rebuild — by running as a
+                // one-element list.
+                let old_content = old_slot.content.get_cloned();
+                let fresh_content = fresh_slot.content.get_cloned();
+                let merged = Self::push_down_children(
+                    std::slice::from_ref(&old_content),
+                    std::slice::from_ref(&fresh_content),
+                )
+                .pop()
+                .expect("one child in, one child out");
+                old_slot.content.set(merged);
                 Some(ReactiveSlot {
                     content: old_slot.content.clone(),
                 })
@@ -872,13 +912,17 @@ impl ReactiveViewModel {
         }
     }
 
-    /// Push-down for `LazyReactiveSlot`. Unlike `push_down_slot` we must
-    /// preserve the *old* cache — the fresh slot is always unmaterialised at
-    /// build time, so blindly adopting fresh would wipe out content the user
-    /// already expanded. We adopt the fresh `thunk` + `gate` (they reflect
-    /// the latest captured context) but carry the old `cache` forward when
-    /// it's already populated. New widget instances (no old slot) just adopt
-    /// fresh wholesale; gone-from-fresh drops the lazy_slot entirely.
+    /// Push-down for `LazyReactiveSlot`. The fresh slot is always
+    /// unmaterialised at build time, so the old `cache` is carried forward
+    /// whole and a materialised subtree keeps what the reader built up there.
+    /// `thunk` + `gate` are adopted fresh (they carry the latest captured
+    /// context). New widget instances (no old slot) adopt fresh wholesale;
+    /// gone-from-fresh drops the lazy_slot entirely.
+    ///
+    /// The carried cache keeps the expr/props it was materialised with:
+    /// [`push_down_slot`] merges fresh ones into an eager slot, this does not,
+    /// so a render-expression change reaches a materialised lazy subtree only
+    /// when it is re-materialised.
     fn push_down_lazy_slot(
         old: &Option<LazyReactiveSlot>,
         fresh: &Option<LazyReactiveSlot>,

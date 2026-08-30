@@ -66,7 +66,8 @@ fn header_row(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
 /// child of a flow column). Its `max_h(relative(f))` resolves against the
 /// split's definite-height absolute wrapper (verified by the Inc 0 spike), so
 /// with overflowing content the region caps at `f × panel_height` and its body
-/// is its own scroll viewport; with little content it shrinks to content.
+/// is its own scroll viewport; with little content — or none, or collapsed —
+/// it shrinks to exactly what it renders.
 pub(crate) fn render_bounded(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let fraction = node
         .prop_f64("max_height_fraction")
@@ -74,33 +75,22 @@ pub(crate) fn render_bounded(node: &ReactiveViewModel, ctx: &GpuiRenderContext) 
 
     let expanded = is_expanded(node);
 
-    // A "greedy" child is a slot node (`live_query`/`live_block`) whose
-    // ReactiveShell is styled `height: relative(1.0)` (live_query.rs).
-    // A percentage height needs a DEFINITE parent — inside a shrink-to-content
-    // (`max_h`) region it resolves to 0 and the rows VANISH (the seed's
-    // backlinks). So when the expanded accordion holds a greedy child, fix the
-    // region AT the cap (`h(relative(f))`): the shell then fills the cap,
-    // staying capped + scrollable + VISIBLE. This trades shrink-to-content for
-    // that case (the plan's accepted R4 tradeoff for live_query). A content /
-    // collection child has intrinsic height, so it keeps `max_h` and shrinks.
-    let greedy_child = expanded && node.children.iter().any(|c| c.slot.is_some());
-
-    let mut region = div().flex_shrink_0().w_full().flex().flex_col();
-    region = if greedy_child {
-        region.h(gpui::relative(fraction))
-    } else {
-        region.max_h(gpui::relative(fraction))
-    };
-    region = region.child(header_row(node, ctx));
+    let mut region = div()
+        .flex_shrink_0()
+        .w_full()
+        .flex()
+        .flex_col()
+        .max_h(gpui::relative(fraction))
+        .child(header_row(node, ctx));
 
     if expanded {
         let title = node.prop_str("title").unwrap_or_default();
         let body_id = hashed_id(&format!("accordion-body:{title}"));
         // Body is its own `min_h_0 + overflow_y_scroll` viewport (the April-2026
         // cascade lesson: without `min_h_0` the content height becomes the min
-        // and the internal scroll freezes). A content/collection child renders
-        // at content height; a greedy live_query shell fills the definite region
-        // fixed above.
+        // and the internal scroll freezes). Children render at content height
+        // (`render_children_content_height`), so the region above shrinks to
+        // them until the cap clamps it and this viewport takes over scrolling.
         region = region.child(
             div()
                 .flex_1()
@@ -123,7 +113,7 @@ pub(crate) fn render_bounded(node: &ReactiveViewModel, ctx: &GpuiRenderContext) 
 /// reaching here means the accordion is misplaced: render the standard error
 /// widget (the render-time half of the §3 fail-loud placement guard) rather
 /// than a silently-unbounded region.
-pub fn render(_node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
+pub fn render(_: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     div()
         .p_2()
         .rounded(px(4.0))

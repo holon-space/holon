@@ -13,9 +13,9 @@
 //! needs a DEFINITE parent; the sidebar's `column` is content-sized
 //! (`div().flex().flex_col()`, no height), so the shell resolved to 0 px and
 //! the whole Integrations section vanished — header visible, rows gone — even
-//! with a real `integration_state` row present. The accordion path was already
-//! fixed (`accordion::render_bounded` pins its region at a definite height);
-//! the bare- `column` path was not.
+//! with a real `integration_state` row present. Every content-height container
+//! now routes a `live_query` child through `render_content_height`
+//! (`column::push_content_child`).
 //!
 //! The `integration_state` rows come from `TestServices`' canned
 //! `watch_query_live` (`support/mod.rs`), which recognises the seeded SQL and
