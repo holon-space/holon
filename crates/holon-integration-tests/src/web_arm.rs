@@ -103,10 +103,10 @@ pub fn addressed_blocks(case: &HandAuthoredCase) -> Vec<EntityUri> {
 /// when every named block is reachable by pointer.
 ///
 /// This is a HARD cap today, not a missing gesture: the corpus is authored over
-/// the wide seed (`block:parent`/`c1`/`c2`), and the only way to install that
-/// seed in the browser is the `reset_vault` tool — which rebuilds the worker's
-/// engine but leaves the live page bound to the torn-down one, so the seeded
-/// blocks never reach the DOM. See this module's escalation note.
+/// the wide seed (`block:parent`/`c1`/`c2`), which a browser gets only from the
+/// `reset_vault` tool, and its blocks live under `block:structural-page` — so a
+/// case reaches them only once the boot has both reset the vault and navigated
+/// to that page. `web_arm_reset_vault_rebinds_the_live_page` does both.
 pub fn unaddressable(driver: &WebUserDriver, case: &HandAuthoredCase) -> Option<String> {
     let rendered: std::collections::BTreeSet<String> =
         driver.snapshot().into_iter().map(|n| n.id).collect();
@@ -120,8 +120,8 @@ pub fn unaddressable(driver: &WebUserDriver, case: &HandAuthoredCase) -> Option<
     }
     Some(format!(
         "names block(s) the browser does not render: {missing:?} (rendered: {rendered:?}). The \
-         corpus is authored over the wide seed; `reset_vault` installs it in the worker but the \
-         page keeps rendering the torn-down engine, so those blocks are unreachable by gesture."
+         corpus is authored over the wide seed, which this boot neither installs via \
+         `reset_vault` nor opens by navigating to `block:structural-page`."
     ))
 }
 

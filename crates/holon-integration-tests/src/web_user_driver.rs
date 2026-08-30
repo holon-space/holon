@@ -259,15 +259,7 @@ impl WebUserDriver {
     async fn await_boot(&self) -> Result<()> {
         let deadline = Instant::now() + self.quiescence_timeout;
         loop {
-            let state: String = self
-                .page
-                .evaluate(
-                    "(document.querySelector('[data-boot-state]')||{getAttribute:()=>''})\
-                     .getAttribute('data-boot-state') || ''",
-                )
-                .await?
-                .into_value()
-                .context("reading data-boot-state failed")?;
+            let state = self.boot_state().await?;
             match state.as_str() {
                 "ready" => return Ok(()),
                 "booting" | "" => {}
@@ -306,6 +298,19 @@ impl WebUserDriver {
             );
         }
         Ok(())
+    }
+
+    /// The app's `data-boot-state` marker as it reads right now. Empty when the
+    /// title bar is not mounted.
+    pub async fn boot_state(&self) -> Result<String> {
+        self.page
+            .evaluate(
+                "(document.querySelector('[data-boot-state]')||{getAttribute:()=>''})\
+                 .getAttribute('data-boot-state') || ''",
+            )
+            .await?
+            .into_value()
+            .context("reading data-boot-state failed")
     }
 
     /// Read the rendered set and store it for the sync observation verbs.

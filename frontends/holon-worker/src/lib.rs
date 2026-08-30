@@ -245,6 +245,21 @@ mod backend {
         ENGINE.get_or_init(|| Mutex::new(None))
     }
 
+    /// Bumped by [`install`]; 0 until the first engine lands.
+    static ENGINE_GENERATION: AtomicU32 = AtomicU32::new(0);
+
+    /// Publish `st` as the live engine. Every path that fills the slot goes
+    /// through here: a `watch_view` subscription dies with the engine that
+    /// owned it, and the generation is how a frontend learns to re-subscribe.
+    pub(super) fn install(st: EngineState) {
+        *slot().lock() = Some(st);
+        ENGINE_GENERATION.fetch_add(1, Ordering::Release);
+    }
+
+    pub(super) fn generation() -> u32 {
+        ENGINE_GENERATION.load(Ordering::Acquire)
+    }
+
     /// Initialize the global `BackendEngine` + `FrontendSession` +
     /// `ReactiveEngine` against the OPFS-backed DB at `db_path`.
     /// Idempotent: a second call replaces the state.
@@ -259,7 +274,7 @@ mod backend {
                 .init();
         });
 
-        *slot().lock() = Some(build_engine_state(db_path)?);
+        install(build_engine_state(db_path)?);
         Ok(())
     }
 
@@ -495,18 +510,18 @@ mod backend {
     ///
     /// `budget_ms` bounds the sleep inside `block_on`; the reactor will
     /// still drain any tasks that become ready and then return.
-    pub(super) fn tick(budget_ms: u32) -> napi::Result<()> {
+    pub(super) fn tick(budget_ms: u32) -> napi::Result<u32> {
         // Skip if an MCP dispatch is mid-`block_on` (it drives the reactor
         // itself); a nested `block_on` here would panic-abort the instance.
         if ENGINE_BUSY.load(Ordering::Acquire) {
-            return Ok(());
+            return Ok(generation());
         }
         let (_, runtime) = engine_and_rt("tick")?;
         let budget = std::time::Duration::from_millis(u64::from(budget_ms));
         runtime.block_on(async move {
             tokio::time::sleep(budget).await;
         });
-        Ok(())
+        Ok(generation())
     }
 
     /// Reset local storage (B2): drop the entire engine so Turso closes its
@@ -525,6 +540,7 @@ mod backend {
         // MCP watch tasks hold clones of engine capabilities; clear them too so
         // nothing keeps a live handle into the torn-down engine.
         mcp_watches().lock().clear();
+        crate::subscriptions::clear();
         tracing::info!("[engine_reset_storage] engine torn down; OPFS handles released");
         Ok(())
     }
@@ -1503,6 +1519,7 @@ mod backend {
                     let _ = slot().lock().take();
                 }
                 mcp_watches().lock().clear();
+                crate::subscriptions::clear();
                 let st = build_engine_state(":memory:".to_string())
                     .map_err(|e| anyhow::anyhow!("reset_vault: build_engine_state: {e}"))?;
                 // Seed the structural working page + journals on the NEW state's
@@ -1547,7 +1564,7 @@ mod backend {
                     );
                 }
                 let n = ids.len();
-                *slot().lock() = Some(st);
+                install(st);
                 Ok(serde_json::json!({
                     "reset": true,
                     "block_raw_count": n,
@@ -1704,8 +1721,11 @@ mod engine_exports {
     /// spawned tasks (notably `watch_view` drains) can progress. Must be
     /// called periodically from JS (`setInterval` / `requestAnimationFrame`
     /// / after every RPC) — nothing runs without a `block_on` caller.
+    ///
+    /// Returns the engine generation, which changes when the engine underneath
+    /// the caller has been swapped (`reset_vault`).
     #[napi_derive::napi]
-    pub fn engine_tick(budget_ms: u32) -> napi::Result<()> {
+    pub fn engine_tick(budget_ms: u32) -> napi::Result<u32> {
         backend::tick(budget_ms)
     }
 

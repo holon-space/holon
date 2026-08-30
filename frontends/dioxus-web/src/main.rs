@@ -11,6 +11,7 @@ mod dnd;
 mod editor;
 mod render;
 
+use std::cell::Cell;
 use std::cell::RefCell;
 
 use bridge::WorkerBridge;
@@ -46,6 +47,29 @@ thread_local! {
     static BRIDGE: RefCell<Option<WorkerBridge>> = const { RefCell::new(None) };
     /// Active MCP relay WebSocket. Replaced on reconnect; None when hub is down.
     static MCP_WS: RefCell<Option<web_sys::WebSocket>> = const { RefCell::new(None) };
+    /// Epoch of the bind the page belongs to. See [`claim_bind_epoch`].
+    static BIND_EPOCH: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Start a new bind and supersede every bind already in flight.
+///
+/// A bind is a chain of `await`s and callbacks (`bind_root_view`), and a reset
+/// can land at any point in it. Its continuations therefore outlive it and
+/// would keep writing `boot_state` / `view_model` / `watch_handle` — a `Signal`
+/// takes the LAST writer, whichever bind it belongs to. Each continuation
+/// carries the epoch it was created for and checks [`bind_is_current`] before
+/// writing anything shared.
+fn claim_bind_epoch() -> u64 {
+    BIND_EPOCH.with(|e| {
+        let claimed = e.get() + 1;
+        e.set(claimed);
+        claimed
+    })
+}
+
+/// Whether `epoch`'s bind is still the one the page belongs to.
+fn bind_is_current(epoch: u64) -> bool {
+    BIND_EPOCH.with(|e| e.get()) == epoch
 }
 
 fn main() {
@@ -157,6 +181,10 @@ fn missing_platform_precondition() -> Option<String> {
 fn App() -> Element {
     let mut boot_state = use_signal(|| BootState::Booting);
     let mut view_model: Signal<Option<ViewModel>> = use_signal(|| None);
+    // The engine generation the current subscription belongs to, and that
+    // subscription's handle. The pump compares the generation per tick.
+    let mut bound_generation: Signal<Option<u32>> = use_signal(|| None);
+    let mut watch_handle: Signal<Option<u32>> = use_signal(|| None);
 
     use_future(move || async move {
         let t0 = now_ms();
@@ -224,133 +252,75 @@ fn App() -> Element {
         // close).
         connect_mcp_relay(bridge.clone(), 0);
 
-        // Seed the viewport BEFORE the first watch so the root
-        // `if_space(...)` picks the real breakpoint on the first paint,
-        // then keep it live on window resize.
-        send_viewport(&bridge).await;
+        // Keep the viewport live on window resize; the first push happens
+        // inside the bind, before the first watch.
         install_resize_listener(bridge.clone());
 
-        // The root layout block has a well-known id set by seed_default_layout.
-        let root_val = match bridge
-            .call(
-                "engineExecuteQuery",
-                [format!(
-                    // ALLOW(sql): startup readiness probe before BackendEngine is wired
-                    "SELECT id FROM {BLOCK_READ_TABLE} WHERE id='block:root-layout' LIMIT 1"
-                )
-                .into()],
-            )
-            .await
-        {
-            Ok(v) => v,
+        // Read the generation BEFORE binding, so a swap that lands mid-bind
+        // leaves the pump seeing a newer one and rebinding again.
+        match engine_tick(&bridge).await {
+            Ok(g) => bound_generation.set(Some(g)),
             Err(e) => {
-                boot_state.set(BootState::Failed(format!("root block query: {e}")));
+                boot_state.set(BootState::Failed(format!("engine generation: {e}")));
                 return;
             }
-        };
+        }
 
-        let root_id = match extract_first_id(&root_val) {
-            Some(id) => id,
-            None => {
-                // Engine came up but the root-layout row is absent from the
-                // projection. Do NOT show green "ready" over an empty page
-                // (B3) — surface a loud, recoverable NoRootLayout state that
-                // offers "Reset local data" (B2). BRIDGE was already published
-                // right after spawn, so the reset action can reach the worker.
-                boot_state.set(BootState::NoRootLayout);
-                return;
-            }
-        };
-
-        // Subscribe to ViewModel snapshots for the root block.
-        let handle_val = match bridge
-            .call("engineWatchView", [root_id.clone().into()])
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                boot_state.set(BootState::Failed(format!("engineWatchView: {e}")));
-                return;
-            }
-        };
-
-        // Worker's subscription counter starts at 1; 0 is a sentinel.
-        // Fail loudly rather than binding a listener that can never fire.
-        let handle = match handle_val.as_f64() {
-            Some(h) if h >= 1.0 => h as u32,
-            other => {
-                boot_state.set(BootState::Failed(format!(
-                    "engineWatchView returned bogus handle: {other:?}"
-                )));
-                return;
-            }
-        };
-
-        // B3: "ready" is only truthful once a real projection actually
-        // rendered. Flip BootState::Ready on the FIRST watch envelope, not
-        // eagerly after subscribing — a subscription that never delivers
-        // (failed projection) must not read as green.
-        let ready_marked = std::rc::Rc::new(std::cell::Cell::new(false));
-        let ready_on_snapshot = ready_marked.clone();
-        bridge.on_snapshot(handle, move |json| {
-            match serde_json::from_str::<WatchEnvelope>(&json) {
-                Ok(env) => {
-                    // Focus unchanged → preserve the local caret across the
-                    // re-render (structural remounts blur the old element).
-                    // Focus CHANGED → the worker's word wins (ADR 0010):
-                    // worker_focus moves DOM focus instead, and no stale
-                    // restore may snap it back.
-                    let dom_focus = editor::cursor::save();
-                    if env.focused_block == dom_focus.as_ref().map(|s| s.entity_id.clone()) {
-                        if let Some(saved) = dom_focus {
-                            editor::cursor::enqueue_restore(saved);
-                        }
-                    }
-                    view_model.set(Some(env.view_model));
-                    // Every delivery ends any optimistic view state, whatever
-                    // value it carries — see `render::SNAPSHOT_SEQ`.
-                    *render::SNAPSHOT_SEQ.write() += 1;
-                    editor::worker_focus::apply(env.focused_block, env.caret_offset);
-                    if !ready_on_snapshot.replace(true) {
-                        let cold_start_ms = now_ms().saturating_sub(t0);
-                        boot_state.set(BootState::Ready { cold_start_ms });
-                    }
-                }
-                Err(e) => tracing::error!("[snapshot] deserialize failed: {e}"),
-            }
-        });
-
-        // B3 watchdog: if no projection arrives, don't sit forever on
-        // "booting…" (an equally dishonest not-ready). Fail loud with a
-        // recoverable error after a generous grace period.
-        let ready_watchdog = ready_marked.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            gloo_timers::future::TimeoutFuture::new(WATCH_READY_TIMEOUT_MS).await;
-            if !ready_watchdog.get() {
-                boot_state.set(BootState::Failed(format!(
-                    "root-layout watch produced no projection within {WATCH_READY_TIMEOUT_MS}ms — \
-                     the projection failed to render"
-                )));
-            }
-        });
+        let epoch = claim_bind_epoch();
+        bind_root_view(&bridge, boot_state, view_model, watch_handle, epoch, t0).await;
     });
 
     // Continuous runtime pump. Without this, the worker's current-thread
     // runtime only advances during user-initiated RPCs, so file-watcher /
     // external / delayed events never reach the frontend. ~16ms cadence
     // matches 60fps; the tick itself awaits a 10ms sleep inside the
-    // runtime so the cost is bounded.
+    // runtime so the cost is bounded. It doubles as the swap detector: the
+    // tick reports the engine generation.
     use_future(move || async move {
         loop {
             gloo_timers::future::TimeoutFuture::new(16).await;
             let Some(bridge) = BRIDGE.with(|b| b.borrow().clone()) else {
                 continue;
             };
-            if let Err(e) = bridge.call("engineTick", [JsValue::from_f64(10.0)]).await {
-                tracing::error!("[tick pump] engineTick failed: {e}");
-                // Brief backoff on error so we don't hot-spin on a dead worker.
-                gloo_timers::future::TimeoutFuture::new(250).await;
+            let generation = match engine_tick(&bridge).await {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::error!("[tick pump] engineTick failed: {e}");
+                    // Brief backoff on error so we don't hot-spin on a dead worker.
+                    gloo_timers::future::TimeoutFuture::new(250).await;
+                    continue;
+                }
+            };
+            let Some(bound) = *bound_generation.read() else {
+                continue;
+            };
+            if bound == generation {
+                continue;
             }
+
+            // The engine has been swapped out from under the page
+            // (`reset_vault`); its subscription and its tree died with it.
+            tracing::info!("[rebind] engine generation {bound} → {generation}");
+            // Claimed FIRST: it makes any bind still in flight inert, so nothing
+            // it does later lands on the state cleared just below.
+            let epoch = claim_bind_epoch();
+            if let Some(stale) = *watch_handle.read() {
+                bridge.remove_snapshot_listener(stale);
+            }
+            watch_handle.set(None);
+            view_model.set(None);
+            *render::SNAPSHOT_SEQ.write() += 1;
+            boot_state.set(BootState::Booting);
+            bound_generation.set(Some(generation));
+            bind_root_view(
+                &bridge,
+                boot_state,
+                view_model,
+                watch_handle,
+                epoch,
+                now_ms(),
+            )
+            .await;
         }
     });
 
@@ -449,6 +419,156 @@ fn App() -> Element {
             }
         }
     }
+}
+
+/// Drive the worker runtime one slice and read back the engine generation.
+/// That number changes whenever the engine behind the worker was replaced.
+async fn engine_tick(bridge: &WorkerBridge) -> Result<u32, String> {
+    let value = bridge.call("engineTick", [JsValue::from_f64(10.0)]).await?;
+    value
+        .as_f64()
+        .map(|g| g as u32)
+        .ok_or_else(|| format!("engineTick returned {value:?}, not an engine generation"))
+}
+
+/// Point the page at whichever engine the worker currently holds: push the
+/// viewport, resolve the root layout, subscribe to its `ViewModel`, publish the
+/// subscription handle, and flip `boot_state` to ready on the first envelope.
+///
+/// A subscription belongs to ONE engine instance and dies with it, so this runs
+/// again after every engine swap — see the pump's rebind in [`App`]. Callers
+/// pass the epoch they claimed from [`claim_bind_epoch`]; once superseded this
+/// writes nothing, so a bind the user has moved past can neither publish its
+/// handle nor report its own failure over the page that replaced it.
+async fn bind_root_view(
+    bridge: &WorkerBridge,
+    mut boot_state: Signal<BootState>,
+    mut view_model: Signal<Option<ViewModel>>,
+    mut watch_handle: Signal<Option<u32>>,
+    epoch: u64,
+    t0: u64,
+) {
+    // Every `?`-shaped exit reports through this: a superseded bind's failure
+    // describes an engine nobody is looking at any more.
+    let mut fail = move |state: BootState| {
+        if bind_is_current(epoch) {
+            boot_state.set(state);
+        }
+    };
+
+    // Seed the viewport BEFORE the watch so the root `if_space(...)` picks the
+    // real breakpoint on the first paint.
+    send_viewport(bridge).await;
+    if !bind_is_current(epoch) {
+        return;
+    }
+
+    // The root layout block has a well-known id set by seed_default_layout.
+    let root_val = match bridge
+        .call(
+            "engineExecuteQuery",
+            [format!(
+                // ALLOW(sql): startup readiness probe before BackendEngine is wired
+                "SELECT id FROM {BLOCK_READ_TABLE} WHERE id='block:root-layout' LIMIT 1"
+            )
+            .into()],
+        )
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return fail(BootState::Failed(format!("root block query: {e}"))),
+    };
+
+    let root_id = match extract_first_id(&root_val) {
+        Some(id) => id,
+        // Engine came up but the root-layout row is absent from the
+        // projection. Do NOT show green "ready" over an empty page
+        // (B3) — surface a loud, recoverable NoRootLayout state that
+        // offers "Reset local data" (B2). BRIDGE was already published
+        // right after spawn, so the reset action can reach the worker.
+        None => return fail(BootState::NoRootLayout),
+    };
+
+    // Subscribe to ViewModel snapshots for the root block.
+    let handle_val = match bridge
+        .call("engineWatchView", [root_id.clone().into()])
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return fail(BootState::Failed(format!("engineWatchView: {e}"))),
+    };
+
+    // Worker's subscription counter starts at 1; 0 is a sentinel.
+    // Fail loudly rather than binding a listener that can never fire.
+    let handle = match handle_val.as_f64() {
+        Some(h) if h >= 1.0 => h as u32,
+        other => {
+            return fail(BootState::Failed(format!(
+                "engineWatchView returned bogus handle: {other:?}"
+            )));
+        }
+    };
+
+    // Superseded while the watch RPC was in flight: the engine this handle
+    // belongs to is already torn down, so leave the live bind's handle in place
+    // and register no listener.
+    if !bind_is_current(epoch) {
+        return;
+    }
+    // Published before the listener exists, so whoever supersedes this bind can
+    // always reach the listener it is about to register.
+    watch_handle.set(Some(handle));
+
+    // B3: "ready" is only truthful once a real projection actually
+    // rendered. Flip BootState::Ready on the FIRST watch envelope, not
+    // eagerly after subscribing — a subscription that never delivers
+    // (failed projection) must not read as green.
+    let ready_marked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let ready_on_snapshot = ready_marked.clone();
+    bridge.on_snapshot(handle, move |json| {
+        if !bind_is_current(epoch) {
+            return;
+        }
+        match serde_json::from_str::<WatchEnvelope>(&json) {
+            Ok(env) => {
+                // Focus unchanged → preserve the local caret across the
+                // re-render (structural remounts blur the old element).
+                // Focus CHANGED → the worker's word wins (ADR 0010):
+                // worker_focus moves DOM focus instead, and no stale
+                // restore may snap it back.
+                let dom_focus = editor::cursor::save();
+                if env.focused_block == dom_focus.as_ref().map(|s| s.entity_id.clone()) {
+                    if let Some(saved) = dom_focus {
+                        editor::cursor::enqueue_restore(saved);
+                    }
+                }
+                view_model.set(Some(env.view_model));
+                // Every delivery ends any optimistic view state, whatever
+                // value it carries — see `render::SNAPSHOT_SEQ`.
+                *render::SNAPSHOT_SEQ.write() += 1;
+                editor::worker_focus::apply(env.focused_block, env.caret_offset);
+                if !ready_on_snapshot.replace(true) {
+                    let cold_start_ms = now_ms().saturating_sub(t0);
+                    boot_state.set(BootState::Ready { cold_start_ms });
+                }
+            }
+            Err(e) => tracing::error!("[snapshot] deserialize failed: {e}"),
+        }
+    });
+
+    // B3 watchdog: if no projection arrives, don't sit forever on
+    // "booting…" (an equally dishonest not-ready). Fail loud with a
+    // recoverable error after a generous grace period.
+    let ready_watchdog = ready_marked.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        gloo_timers::future::TimeoutFuture::new(WATCH_READY_TIMEOUT_MS).await;
+        if bind_is_current(epoch) && !ready_watchdog.get() {
+            boot_state.set(BootState::Failed(format!(
+                "root-layout watch produced no projection within {WATCH_READY_TIMEOUT_MS}ms — the \
+                 projection failed to render"
+            )));
+        }
+    });
 }
 
 /// Centered recovery card for the unrecoverable boot states (B2/B3): a muted

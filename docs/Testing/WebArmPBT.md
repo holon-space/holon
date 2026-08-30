@@ -159,15 +159,38 @@ would.
   present but never fired); restoring and rebuilding turns it green.
   `lane-logs/webpbt-inc2-red.log` / `-green.log`.
 
-**Keystone replay is BLOCKED, and the blocker is a defect the arm found.** The
+**Keystone replay was BLOCKED by a defect the arm found, now fixed.** The
 corpus is authored over the wide seed (`block:parent`/`c1`/`c2`), which a
-browser can only get from the `reset_vault` tool — and that tool leaves the
-live page bound to the torn-down engine (BugFunnel 2026-08-16, ENVIRONMENT), so
-its blocks never become gesture-reachable. The replay leg is wired end to end
-against the keystone's own loader and caps all 60 cases with a reason; it
-starts asserting as soon as a page-side rebind-on-reset lands. Second, smaller
-cap: `CreateBlockUnderFocus` pins the created block's id, which no gesture can
+browser can only get from the `reset_vault` tool — and that tool left the live
+page bound to the torn-down engine (BugFunnel 2026-08-16, ENVIRONMENT), so its
+blocks never became gesture-reachable. The rebind lands with
+`web_arm_reset_vault_rebinds_the_live_page`: the worker publishes an engine
+generation on every swap, the page's tick pump detects the change and re-runs
+its root-layout bind against the new engine. A bind is a chain of awaits and
+callbacks that a reset can land inside, so each one carries an epoch and its
+continuations go inert once superseded — without that, a bind the page had
+moved past killed the rebound page ten seconds later (BugFunnel
+2026-08-31-superseded-bind-watchdog-kills-rebound-page), which is what
+`web_arm_superseded_bind_cannot_kill_the_rebound_page` and its spaced-reset
+control now pin. Remaining cap:
+`CreateBlockUnderFocus` pins the created block's id, which no gesture can
 choose, so it needs the composed harness's synthetic→real reconcile.
+
+## 4c. What increment 3 still needs
+
+The replay leg is wired end to end against the keystone's own loader but still
+replays zero cases, because its per-case `boot()` opens a fresh context on the
+OPFS boot vault, which `seed_default_layout` fills — not the wide seed. Two
+steps close it:
+
+1. Per-case `reset_vault` after launch, to install the wide seed the corpus is
+   authored over.
+2. Navigate to `block:structural-page` before the transitions, since
+   `block:parent`/`c1`/`c2` are its children and a gesture only reaches a block
+   the renderer has mounted. `web_arm_reset_vault_rebinds_the_live_page` does
+   both and is the recipe.
+
+Then the D5.a gate wiring (`just keystone-web-smoke`, landing-gate + prepush).
 
 ## 5. Risks
 

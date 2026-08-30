@@ -54,6 +54,12 @@ pub fn remove(handle: u32) {
     registry().lock().remove(&handle);
 }
 
+/// Drop every registry entry. Called where the engine itself is torn down: the
+/// drain tasks belong to that engine's runtime, which goes with it.
+pub fn clear() {
+    registry().lock().clear();
+}
+
 /// Abort and remove the task for `handle`. No-op if already dropped.
 pub fn cancel(handle: u32) {
     if let Some(task) = registry().lock().remove(&handle) {

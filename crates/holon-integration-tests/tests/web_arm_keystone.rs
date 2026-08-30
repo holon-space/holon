@@ -13,7 +13,11 @@
 //!    goes red for exactly that reason.
 //! 2. [`web_arm_dual_oracle_cross_checks_a_split`] — a real gesture, then both
 //!    channels read and cross-checked (plus a third `block_raw` point).
-//! 3. [`web_arm_replays_hand_authored_keystone_cases`] — the keystone corpus,
+//! 3. [`web_arm_reset_vault_rebinds_the_live_page`] — swapping the worker's
+//!    engine under a live page re-points what the page renders, and
+//!    [`web_arm_superseded_bind_cannot_kill_the_rebound_page`] — a swap during
+//!    a rebind leaves nothing behind that can later overwrite the live page.
+//! 4. [`web_arm_replays_hand_authored_keystone_cases`] — the keystone corpus,
 //!    loaded by the keystone's own loader, replayed as gestures.
 //!
 //! Run against a live server:
@@ -211,6 +215,176 @@ async fn web_arm_dual_oracle_cross_checks_a_split() -> Result<()> {
     Ok(())
 }
 
+/// `reset_vault` swaps the worker's engine; the live page must follow it.
+///
+/// The tool tears the old engine down and rebuilds on a fresh in-memory DB, so
+/// the page's `watch_view` subscription dies with the engine that owned it.
+/// Unless the page re-subscribes against the new one it renders the torn-down
+/// vault forever, and the wide seed the keystone corpus is authored over never
+/// becomes gesture-reachable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a served dioxus-web dist and a local Chrome"]
+async fn web_arm_reset_vault_rebinds_the_live_page() -> Result<()> {
+    let oracle = Arc::new(WebRelayOracle::start(&hub_url()));
+    let driver = boot(&oracle).await?;
+
+    let before: std::collections::BTreeSet<String> =
+        driver.snapshot().into_iter().map(|n| n.id).collect();
+    if before.contains("block:structural-page") {
+        bail!(
+            "the boot vault already renders block:structural-page, so this test cannot tell a \
+             rebind from a no-op. Rendered: {before:?}"
+        );
+    }
+
+    let reset = oracle
+        .call("reset_vault", serde_json::json!({ "files": [] }))
+        .await
+        .context("reset_vault failed in the worker")?;
+    println!("[web-arm] reset_vault: {reset}");
+
+    // ENGINE CHANNEL first: unless the worker really did rebuild and seed, a
+    // missing DOM row is the tool's failure, not the page's.
+    let engine = oracle.engine_snapshot().await?;
+    for expected in [
+        "block:structural-page",
+        "block:parent",
+        "block:c1",
+        "block:c2",
+    ] {
+        if !engine.block_ids.iter().any(|id| id == expected) {
+            bail!(
+                "reset_vault reported success but the engine does not hold {expected:?} — the \
+                 rebuild/seed is broken, not the page binding. Engine holds: {:?}",
+                engine.block_ids
+            );
+        }
+    }
+
+    // DOM CHANNEL: the page must re-subscribe and render the NEW vault. Polled
+    // rather than awaited on one signal so the assertion does not depend on how
+    // the rebind is implemented.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut rendered = driver.refresh_snapshot().await?;
+    while Instant::now() < deadline && !rendered.iter().any(|n| n.id == "block:structural-page") {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        rendered = driver.refresh_snapshot().await?;
+    }
+    let rendered_ids: std::collections::BTreeSet<String> =
+        rendered.iter().map(|n| n.id.clone()).collect();
+    if !rendered_ids.contains("block:structural-page") {
+        bail!(
+            "the engine was rebuilt and seeded ({} blocks incl. block:structural-page) but the \
+             page still renders the torn-down engine's vault: {rendered_ids:?} (before the reset: \
+             {before:?}). Nothing rebound the page's subscription to the new engine.",
+            engine.block_ids.len()
+        );
+    }
+
+    // The reason the rebind matters: the seeded blocks become gesture-reachable.
+    let page_uri = EntityUri::parse("block:structural-page")?;
+    driver.click_entity(&page_uri, "sidebar").await?;
+    let reachable: std::collections::BTreeSet<String> = driver
+        .refresh_snapshot()
+        .await?
+        .into_iter()
+        .map(|n| n.id)
+        .collect();
+    let missing: Vec<&str> = ["block:parent", "block:c1", "block:c2"]
+        .into_iter()
+        .filter(|id| !reachable.contains(*id))
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "opening the seeded page renders none of {missing:?} — the corpus's blocks stay \
+             unaddressable. Rendered: {reachable:?}"
+        );
+    }
+
+    println!("[web-arm] rebind OK — seeded vault rendered and block:parent/c1/c2 addressable");
+    driver.close().await?;
+    Ok(())
+}
+
+/// The page's own boot watchdog, mirrored from `WATCH_READY_TIMEOUT_MS` in
+/// frontends/dioxus-web/src/main.rs. A superseded bind's watchdog fires this
+/// long after it armed, so a run that ends sooner cannot see it fire.
+const PAGE_WATCH_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Reset twice, then idle past the page's boot watchdog, and require the page
+/// to be alive and bound to the newest engine.
+///
+/// `spacing` between the resets is the whole experiment: at zero the second
+/// reset lands while the first rebind is still waiting for its first
+/// projection, which is what leaves a superseded bind's continuations running.
+async fn assert_survives_two_resets(
+    oracle: &Arc<WebRelayOracle>,
+    driver: &WebUserDriver,
+    spacing: Duration,
+) -> Result<()> {
+    for i in 1..=2 {
+        oracle
+            .call("reset_vault", serde_json::json!({ "files": [] }))
+            .await
+            .with_context(|| format!("reset_vault #{i} failed in the worker"))?;
+        if i == 1 {
+            tokio::time::sleep(spacing).await;
+        }
+    }
+
+    tokio::time::sleep(PAGE_WATCH_READY_TIMEOUT + Duration::from_secs(3)).await;
+
+    let state = driver.boot_state().await?;
+    let rendered = driver.refresh_snapshot().await?;
+    if state != "ready" || rendered.is_empty() {
+        let engine = oracle.engine_snapshot().await?;
+        bail!(
+            "after two resets {spacing:?} apart the page is boot-state {state:?} with {} rendered \
+             nodes, while the engine is healthy and holds {} blocks. A bind the page has moved \
+             past is still writing to it. Page text: {:?}",
+            rendered.len(),
+            engine.block_ids.len(),
+            driver.body_text().await.unwrap_or_default() /* ALLOW(ok): best-effort diagnostic
+                                                          * enrichment inside a bail! that is
+                                                          * already failing loudly */
+        );
+    }
+    Ok(())
+}
+
+/// Back-to-back resets must not leave a superseded bind able to kill the page.
+///
+/// RED-FIRST TARGET. Each `bind_root_view` arms a watchdog that fails the boot
+/// if no projection arrives. Reset the vault again before a rebind's first
+/// envelope and that bind never delivers — so unless its continuations are
+/// inert once superseded, its watchdog fires ten seconds later and replaces a
+/// healthy, rebound page with the B3 recovery card.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a served dioxus-web dist and a local Chrome"]
+async fn web_arm_superseded_bind_cannot_kill_the_rebound_page() -> Result<()> {
+    let oracle = Arc::new(WebRelayOracle::start(&hub_url()));
+    let driver = boot(&oracle).await?;
+    assert_survives_two_resets(&oracle, &driver, Duration::ZERO).await?;
+    println!("[web-arm] overlapping resets OK — page still ready past the watchdog window");
+    driver.close().await?;
+    Ok(())
+}
+
+/// The same two resets, spaced far enough apart that each rebind completes
+/// before the next reset. Pairs with
+/// [`web_arm_superseded_bind_cannot_kill_the_rebound_page`] to show the overlap
+/// is what matters, not the number of resets.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a served dioxus-web dist and a local Chrome"]
+async fn web_arm_spaced_resets_keep_the_page_alive() -> Result<()> {
+    let oracle = Arc::new(WebRelayOracle::start(&hub_url()));
+    let driver = boot(&oracle).await?;
+    assert_survives_two_resets(&oracle, &driver, Duration::from_millis(300)).await?;
+    println!("[web-arm] spaced resets OK");
+    driver.close().await?;
+    Ok(())
+}
+
 /// Replay the hand-authored keystone corpus in the browser.
 ///
 /// Cases are loaded by the keystone's OWN loader, so the schema guards, the
@@ -321,13 +495,11 @@ async fn web_arm_replays_hand_authored_keystone_cases() -> Result<()> {
              [web-arm] The arm asserted NO application behaviour this run.\n\
              [web-arm] BLOCKER: the corpus is authored over the wide seed\n\
              [web-arm]   (block:parent / c1 / c2), which the browser has only\n\
-             [web-arm]   behind the `reset_vault` tool. That tool rebuilds the\n\
-             [web-arm]   worker's engine on a fresh in-memory DB but leaves the\n\
-             [web-arm]   live page bound to the torn-down one — measured: after\n\
-             [web-arm]   reset_vault the engine holds block:structural-page and\n\
-             [web-arm]   the sidebar still shows only Welcome/Journals, through\n\
-             [web-arm]   a 3s wait AND a navigation click. Until the page\n\
-             [web-arm]   rebinds on reset, no keystone case is gesture-reachable.\n\
+             [web-arm]   behind the `reset_vault` tool, under a page this boot\n\
+             [web-arm]   never opens. `boot` must reset the vault and then\n\
+             [web-arm]   navigate to block:structural-page before any case is\n\
+             [web-arm]   gesture-reachable — the recipe is in\n\
+             [web-arm]   web_arm_reset_vault_rebinds_the_live_page.\n\
              [web-arm] #####################################################\n"
         );
     }

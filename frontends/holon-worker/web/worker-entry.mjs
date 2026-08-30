@@ -203,9 +203,9 @@ self.addEventListener('message', async (e) => {
       case 'engineTick':
         // Drive the current-thread runtime for `budget_ms` so spawned
         // tasks (watch_view drains) make progress. JS side should call
-        // this from a setInterval / rAF loop.
-        mod.engineTick(args[0] ?? 10)
-        value = null
+        // this from a setInterval / rAF loop. The returned engine generation
+        // changes when the engine was swapped under the page.
+        value = mod.engineTick(args[0] ?? 10)
         break
       case 'engineWatchView': {
         // Handle is allocated on the Rust side BEFORE the drain task is
