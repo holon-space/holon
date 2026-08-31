@@ -194,6 +194,21 @@ pub struct IntegrationFileConfig {
     /// [`crate::bundled_sidecars`].
     #[serde(default)]
     pub schema_version: Option<u32>,
+    /// What the Integrations sidebar calls this provider. Absent means derive
+    /// it from the provider name (`IntegrationStateProjector`), so a sidecar
+    /// only carries the key when the derivation would read badly.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// The glyph the sidebar row shows. Parsed against the renderer's table at
+    /// load, because nobody watches an integration row render and a bad name
+    /// would otherwise become a silent bullet.
+    #[serde(default)]
+    pub icon: Option<holon_api::icon_name::IconName>,
+    /// The page `integration.open_default_view` focuses in the main panel — the
+    /// BARE id of a block (org convention, no `block:` prefix). Absent means
+    /// this integration has no view yet and the operation refuses.
+    #[serde(default)]
+    pub default_view: Option<String>,
     pub transport: TransportConfig,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
@@ -740,8 +755,105 @@ fn orphan_state_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 }
 
 fn parse_bundled(bundled: &'static BundledSidecar) -> anyhow::Result<IntegrationFileConfig> {
-    serde_yaml::from_str::<IntegrationFileConfig>(bundled.yaml)
-        .with_context(|| format!("Bundled sidecar '{}' does not parse", bundled.source_path))
+    let config = serde_yaml::from_str::<IntegrationFileConfig>(bundled.yaml)
+        .with_context(|| format!("Bundled sidecar '{}' does not parse", bundled.source_path))?;
+    refuse_machine_specific_command(&config, bundled.source_path)?;
+    Ok(config)
+}
+
+/// Is `command` an absolute filesystem path — a location that exists on the
+/// machine that wrote it and nowhere else?
+///
+/// Judged from the STRING, not from `Path::is_absolute`, which answers for the
+/// host running the check: a `/Users/…` command compiled into a build shipped
+/// to Windows would read as relative there, and the refusal must not depend on
+/// who is compiling.
+fn is_absolute_path(command: &str) -> bool {
+    if command.starts_with('/') {
+        return true;
+    }
+    let bytes = command.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+/// Does `value` name somebody's home directory?
+///
+/// The narrow true subset of "absolute": `/usr/share/dict/words` is the same
+/// file on every machine, but anything under a home root is one person's by
+/// construction. Only the latter is refused, so the gate stays the width of the
+/// defect.
+fn is_home_directory_literal(value: &str) -> bool {
+    let lowered = value.to_ascii_lowercase();
+    if lowered.starts_with("/users/") || lowered.starts_with("/home/") {
+        return true;
+    }
+    // `C:\Users\…` — the drive letter varies, the shape does not.
+    let bytes = lowered.as_bytes();
+    bytes.len() > 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+        && lowered[2..]
+            .trim_start_matches(['\\', '/'])
+            .starts_with("users")
+}
+
+/// A BUNDLED sidecar may not name one machine — not as its child-process
+/// command, and not as a home directory in the env it hands that process.
+///
+/// A bundled sidecar is compiled into the binary and ships to every user, so a
+/// path that resolves on the author's machine makes the integration inert
+/// everywhere else — it spawns ENOENT, the provider registers as unavailable,
+/// and the pages that read it render errors that name none of this (bugfunnel
+/// `2026-08-31-bundled-sidecar-hardcodes-developer-local-binary-path`).
+///
+/// Three portable command forms remain: a bare program name resolved through
+/// `PATH`, a path relative to the working directory, and a `${VAR}` the
+/// environment supplies. For env VALUES only home directories are refused —
+/// `/usr/share/…` is the same file everywhere, so a blanket absolute-path
+/// refusal there would be wider than the defect.
+///
+/// An INSTALLED sidecar under `~/.config/holon/integrations/` is deliberately
+/// NOT checked — it describes one machine on purpose, and its author is the
+/// person whose machine it is.
+fn refuse_machine_specific_command(
+    config: &IntegrationFileConfig,
+    source_path: &str,
+) -> anyhow::Result<()> {
+    let Some(child_process) = config.transport.child_process.as_ref() else {
+        return Ok(());
+    };
+    // `${VAR}` is expanded from the environment later, so a reference that
+    // happens to start with a slash-prefixed variable is still the
+    // environment's answer, not the repository's. The same holds for env
+    // values, which `into_mcp_config_with` expands the same way.
+    // Sorted, because `env` is a HashMap and a sidecar with two bad values
+    // would otherwise name a different one on each run.
+    let mut env: Vec<_> = child_process.env.iter().collect();
+    env.sort();
+    for (key, value) in env {
+        if !value.contains("${") && is_home_directory_literal(value) {
+            anyhow::bail!(
+                "Bundled sidecar '{source_path}' sets env '{key}' to the home-directory literal \
+                 '{value}'. That directory belongs to one person, so the value is wrong on every \
+                 other machine the build reaches. Use ${{HOME}} (or another ${{VAR}} the \
+                 environment supplies) instead."
+            )
+        }
+    }
+    if child_process.command.contains("${") || !is_absolute_path(&child_process.command) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Bundled sidecar '{source_path}' names an absolute command path \
+         '{}'. A bundled sidecar ships to every user, so a path that resolves on one machine \
+         leaves the integration inert on all the others. Use a bare program name (resolved \
+         through PATH), a relative path, or a ${{VAR}} the environment supplies.",
+        child_process.command
+    )
 }
 
 #[cfg(test)]
@@ -1071,5 +1183,199 @@ entities: {}
             AuthMode::StaticToken(t) => assert_eq!(t, "from-settings"),
             other => panic!("expected StaticToken, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod presentation_fields {
+    use super::*;
+
+    const MINIMAL_TRANSPORT: &str = "\ntransport:\n  http:\n    uri: https://example.invalid/mcp\n";
+
+    fn parse(extra: &str) -> Result<IntegrationFileConfig, serde_yaml::Error> {
+        serde_yaml::from_str(&format!("{extra}{MINIMAL_TRANSPORT}"))
+    }
+
+    #[test]
+    fn all_three_presentation_fields_are_optional() {
+        let config = parse("").expect("a sidecar may state none of them");
+        assert_eq!(config.display_name, None);
+        assert_eq!(config.icon, None);
+        assert_eq!(config.default_view, None);
+    }
+
+    #[test]
+    fn a_sidecar_states_its_own_name_glyph_and_view() {
+        let config = parse(
+            "display_name: \"Claude History\"\nicon: robot\ndefault_view: claude-history-view\n",
+        )
+        .expect("all three parse");
+        assert_eq!(config.display_name.as_deref(), Some("Claude History"));
+        assert_eq!(config.icon.as_ref().map(|i| i.as_str()), Some("robot"));
+        assert_eq!(config.default_view.as_deref(), Some("claude-history-view"));
+    }
+
+    /// A glyph name nobody draws would render as a bullet with no reader to
+    /// notice, so it is refused where it enters instead.
+    #[test]
+    fn an_icon_the_renderer_cannot_draw_is_refused_at_parse() {
+        let err = parse("icon: plug\n").expect_err("an unknown glyph name must not parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("plug"),
+            "the refusal must name the bad glyph: {msg}"
+        );
+        assert!(
+            msg.contains("ICON_NAMES"),
+            "the refusal must say where the valid names are: {msg}"
+        );
+    }
+
+    /// The bundled acceptance case, read the way the app reads it.
+    #[test]
+    fn the_bundled_claude_history_sidecar_carries_the_presentation_triple() {
+        let bundled = crate::bundled_sidecars::bundled_sidecar("claude-history")
+            .expect("claude-history is bundled");
+        let config: IntegrationFileConfig =
+            serde_yaml::from_str(bundled.yaml).expect("the bundled sidecar parses");
+        assert_eq!(config.display_name.as_deref(), Some("Claude History"));
+        assert_eq!(config.icon.as_ref().map(|i| i.as_str()), Some("robot"));
+        assert_eq!(config.default_view.as_deref(), Some("claude-history-view"));
+    }
+
+    /// Every other bundled sidecar states nothing, which is what makes the
+    /// projector's derivations the covered path rather than dead code.
+    #[test]
+    fn todoist_states_no_presentation_and_still_parses() {
+        let bundled =
+            crate::bundled_sidecars::bundled_sidecar("todoist").expect("todoist is bundled");
+        let config: IntegrationFileConfig =
+            serde_yaml::from_str(bundled.yaml).expect("the bundled sidecar parses");
+        assert_eq!(config.display_name, None);
+        assert_eq!(config.icon, None);
+        assert_eq!(config.default_view, None);
+    }
+}
+
+#[cfg(test)]
+mod bundled_command_portability {
+    use super::*;
+
+    /// The gate the bugfunnel entry asks for: every sidecar this build ships
+    /// must be spawnable on a machine that is not the author's.
+    #[test]
+    fn every_bundled_sidecar_names_a_portable_command() {
+        for bundled in BUNDLED_SIDECARS {
+            parse_bundled(bundled)
+                .unwrap_or_else(|e| panic!("bundled sidecar '{}': {e:#}", bundled.provider));
+        }
+    }
+
+    /// The shape that shipped: an absolute path into one developer's `target/`
+    /// directory. Refused with a message naming the path and the three forms
+    /// that would have worked.
+    #[test]
+    fn an_absolute_command_in_a_bundled_sidecar_is_refused_by_name() {
+        let config: IntegrationFileConfig = serde_yaml::from_str(
+            "transport:\n  child_process:\n    command: \
+             /Users/someone/Workspaces/ai/claude-code-history-mcp/target/debug/claude-code-history-mcp\n",
+        )
+        .expect("the yaml itself is well-formed");
+
+        let err = refuse_machine_specific_command(&config, "assets/integrations/example.yaml")
+            .expect_err("an absolute command must not survive the bundled boundary")
+            .to_string();
+
+        assert!(
+            err.contains("target/debug"),
+            "the refusal must quote the path: {err}"
+        );
+        assert!(
+            err.contains("PATH"),
+            "the refusal must name the remedy: {err}"
+        );
+    }
+
+    #[test]
+    fn the_three_portable_forms_are_accepted() {
+        for command in [
+            "claude-code-history-mcp",
+            "npx",
+            "./bin/connector",
+            "${CLAUDE_HISTORY_MCP}",
+            "${MCP_BIN_DIR}/connector",
+        ] {
+            let config: IntegrationFileConfig = serde_yaml::from_str(&format!(
+                "transport:\n  child_process:\n    command: \"{command}\"\n"
+            ))
+            .expect("well-formed yaml");
+            refuse_machine_specific_command(&config, "assets/integrations/example.yaml")
+                .unwrap_or_else(|e| panic!("{command:?} is portable and must be accepted: {e:#}"));
+        }
+    }
+
+    /// A Windows drive-letter path is machine-specific too, and the refusal
+    /// must not depend on which platform compiled the check.
+    #[test]
+    fn a_windows_drive_path_is_machine_specific_on_every_host() {
+        assert!(is_absolute_path("C:\\Users\\someone\\connector.exe"));
+        assert!(is_absolute_path("/opt/connector"));
+        assert!(!is_absolute_path("connector"));
+        assert!(!is_absolute_path("./connector"));
+    }
+
+    /// The line `claude-history.yaml` shipped beside the bad command:
+    /// `CLAUDE_DATA_DIR: /Users/martin/.claude`. Reconstructed here rather than
+    /// left in the yaml, so the gate keeps describing the defect after the
+    /// asset is fixed.
+    #[test]
+    fn a_home_directory_env_value_in_a_bundled_sidecar_is_refused_by_name() {
+        let config: IntegrationFileConfig = serde_yaml::from_str(
+            "transport:\n  child_process:\n    command: claude-code-history-mcp\n    env:\n      \
+             CLAUDE_DATA_DIR: \"/Users/martin/.claude\"\n",
+        )
+        .expect("the yaml itself is well-formed");
+
+        let err = refuse_machine_specific_command(&config, "assets/integrations/example.yaml")
+            .expect_err("a home-directory env value must not survive the bundled boundary")
+            .to_string();
+
+        assert!(
+            err.contains("CLAUDE_DATA_DIR"),
+            "the refusal must name the variable: {err}"
+        );
+        assert!(
+            err.contains("/Users/martin/.claude"),
+            "the refusal must quote the value: {err}"
+        );
+        assert!(
+            err.contains("${HOME}"),
+            "the refusal must name the required form: {err}"
+        );
+    }
+
+    /// An absolute env value that is NOT under a home directory stays legal —
+    /// a system path is the same on every machine, and refusing it would be a
+    /// gate wider than the defect.
+    #[test]
+    fn a_system_absolute_env_value_is_left_alone() {
+        for value in ["/usr/share/dict/words", "/etc/ssl/certs", "${HOME}/.claude"] {
+            let config: IntegrationFileConfig = serde_yaml::from_str(&format!(
+                "transport:\n  child_process:\n    command: connector\n    env:\n      DATA: \"{value}\"\n"
+            ))
+            .expect("well-formed yaml");
+            refuse_machine_specific_command(&config, "assets/integrations/example.yaml")
+                .unwrap_or_else(|e| panic!("{value:?} is not machine-specific: {e:#}"));
+        }
+    }
+
+    /// A transport with no child process has no command to judge.
+    #[test]
+    fn an_http_only_sidecar_passes_without_a_command() {
+        let config: IntegrationFileConfig =
+            serde_yaml::from_str("transport:\n  http:\n    uri: https://example.invalid/mcp\n")
+                .expect("well-formed yaml");
+        refuse_machine_specific_command(&config, "assets/integrations/example.yaml")
+            .expect("no child_process means nothing to refuse");
     }
 }

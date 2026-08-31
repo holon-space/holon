@@ -33,6 +33,7 @@ pub mod expr_parser;
 pub mod filter;
 mod hashmap_value_conversions;
 pub mod history;
+pub mod icon_name;
 pub mod identity_minting;
 pub mod identity_recognition;
 pub mod inline_mark;

@@ -730,6 +730,81 @@ fn the_mirror_exposes_exactly_the_designed_columns() {
     });
 }
 
+/// The presentation axis: what the sidebar row calls a provider, the glyph it
+/// wears, and the page its click opens.
+///
+/// `claude-history` states all three in its sidecar and `todoist` states none,
+/// so one rung pins both the sourced and the derived leg. `default_view` is the
+/// only one that stays NULL, because an integration with no view page is a
+/// state the operation refuses on rather than guesses at.
+#[test]
+fn the_mirror_carries_the_presentation_axis() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, _ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        let db = engine.db_handle();
+
+        let state_dir = dir.path().join("integrations");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let store = store_with(&state_dir, &["claude-history", "todoist"]);
+        projector_over(db.clone(), store)
+            .project()
+            .await
+            .expect("projection");
+
+        let rows = db
+            .query(
+                "SELECT provider_name, display_name, icon, default_view FROM integration_state \
+                 ORDER BY provider_name",
+                HashMap::new(),
+            )
+            .await
+            .expect("read the presentation columns");
+
+        let seen: Vec<(String, String, String, Option<String>)> = rows
+            .iter()
+            .map(|r| {
+                let text = |col: &str| {
+                    r.get(col)
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_else(|| panic!("integration_state must project {col}: {r:?}"))
+                        .to_string()
+                };
+                (
+                    text("provider_name"),
+                    text("display_name"),
+                    text("icon"),
+                    r.get("default_view")
+                        .and_then(|v| v.as_string())
+                        .map(str::to_string),
+                )
+            })
+            .collect();
+
+        assert!(
+            seen.contains(&(
+                "claude-history".to_string(),
+                "Claude History".to_string(),
+                "robot".to_string(),
+                Some("claude-history-view".to_string()),
+            )),
+            "claude-history states all three in its sidecar, so the mirror must carry them \
+             verbatim: {seen:?}"
+        );
+        assert!(
+            seen.contains(&(
+                "todoist".to_string(),
+                "Todoist".to_string(),
+                "link".to_string(),
+                None,
+            )),
+            "todoist states none of the three, so the mirror must carry the derivations and a \
+             NULL view: {seen:?}"
+        );
+    });
+}
+
 struct NoBrowser;
 
 impl holon_mcp_client::oauth_bootstrap::BrowserOpener for NoBrowser {
@@ -852,9 +927,9 @@ fn a_drifted_mirror_reconverges_on_the_next_projection() {
         db.execute_values(
             "INSERT INTO integration_state \
              (id, provider_name, enabled, status, config_status, configurable, \
-             configure_progress, updated_at) \
+             configure_progress, display_name, icon, default_view, updated_at) \
              VALUES ('integration:ghost', 'ghost', 1, 'Connected', 'configured', 0, '', \
-             '2026-01-01 00:00:00')",
+             'Ghost', 'link', NULL, '2026-01-01 00:00:00')",
             vec![],
         )
         .await

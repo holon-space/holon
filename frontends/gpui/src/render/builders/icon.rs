@@ -242,3 +242,41 @@ mod icon_char_coverage {
         crate::assert_icon_renderable_on_android(ICON_CHAR_DEFAULT, "icon::<default>");
     }
 }
+
+#[cfg(test)]
+mod shared_name_table_agreement {
+    use holon_api::icon_name::ICON_NAMES;
+
+    use super::ICON_CHARS;
+    use super::icon_svg_name;
+
+    /// `ICON_NAMES` is what a config file — an integration sidecar — is allowed
+    /// to ask for, and asking for a name this renderer cannot draw would put a
+    /// bullet where a glyph belongs with nobody watching. Sweeping it here is
+    /// what keeps the two tables one table.
+    #[test]
+    fn every_shared_name_resolves_to_an_svg_or_a_glyph() {
+        for name in ICON_NAMES {
+            assert!(
+                icon_svg_name(name).is_some() || ICON_CHARS.iter().any(|(n, _)| n == name),
+                "holon_api::icon_name::ICON_NAMES lists {name:?}, which this renderer draws as \
+                 the unknown-name bullet"
+            );
+        }
+    }
+
+    /// The other direction, for the half of the renderer that can be
+    /// enumerated. `icon_svg_name` is a `match` and has no iterator, so an SVG
+    /// name added there without being listed in `ICON_NAMES` stays out of a
+    /// sidecar's reach until somebody notices.
+    #[test]
+    fn every_glyph_name_is_shared() {
+        for (name, _) in ICON_CHARS {
+            assert!(
+                ICON_NAMES.contains(name),
+                "icon.rs draws {name:?} but holon_api::icon_name::ICON_NAMES omits it, so a \
+                 sidecar cannot ask for it"
+            );
+        }
+    }
+}

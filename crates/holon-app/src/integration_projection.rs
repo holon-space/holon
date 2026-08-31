@@ -41,6 +41,9 @@ pub const TABLE_COLUMNS: &[&str] = &[
     "config_status",
     "configurable",
     "configure_progress",
+    "display_name",
+    "icon",
+    "default_view",
     "updated_at",
     "_change_origin",
 ];
@@ -144,13 +147,16 @@ impl IntegrationStateProjector {
                     // column after the row exists.
                     "INSERT INTO integration_state \
                      (id, provider_name, enabled, status, config_status, configurable, \
-                     configure_progress, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                     configure_progress, display_name, icon, default_view, updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT(id) DO UPDATE SET \
                      enabled = excluded.enabled, \
                      config_status = excluded.config_status, \
                      configurable = excluded.configurable, \
                      configure_progress = excluded.configure_progress, \
+                     display_name = excluded.display_name, \
+                     icon = excluded.icon, \
+                     default_view = excluded.default_view, \
                      updated_at = excluded.updated_at",
                     vec![
                         Value::String(integration_row_id(row.provider)),
@@ -160,6 +166,9 @@ impl IntegrationStateProjector {
                         Value::String(config_status_value(row.status).to_string()),
                         Value::Integer(i64::from(row.configurable)),
                         Value::String(self.configure_progress(row.provider)),
+                        Value::String(row.display_name.clone()),
+                        Value::String(row.icon.as_str().to_string()),
+                        row.default_view.clone().map_or(Value::Null, Value::String),
                         Value::String(updated_at.clone()),
                     ],
                 )

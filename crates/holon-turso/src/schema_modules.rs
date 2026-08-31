@@ -916,9 +916,68 @@ impl SchemaModule for IntegrationStateSchemaModule {
         for stmt in sql_statements(include_str!("../sql/schema/integration_state.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
+        add_missing_presentation_columns(db_handle).await?;
         tracing::info!("[IntegrationStateSchemaModule] integration_state table created");
         Ok(())
     }
+}
+
+/// Bring a database created before the presentation axis existed up to the
+/// current shape.
+///
+/// `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so a vault that
+/// booted an earlier build keeps a six-column `integration_state` and every
+/// projector write fails on the unknown column. The columns are purely
+/// additive and the projector rewrites every row from the sidecars on the next
+/// boot, so appending them is the whole migration — the `DEFAULT ''` holds only
+/// until that write lands.
+///
+/// A no-op on a current-shape database (one `PRAGMA table_info` read).
+async fn add_missing_presentation_columns(db_handle: &DbHandle) -> Result<()> {
+    // `PRAGMA table_info` rather than the stored DDL: `ALTER TABLE` rewrites
+    // `sqlite_master.sql` in its own formatting, so a DDL-text probe would stop
+    // recognising the column it had just added and try again on the next boot.
+    let rows = db_handle
+        .query_positional("PRAGMA table_info(integration_state)", vec![])
+        .await?;
+    if rows.is_empty() {
+        return Err(StorageError::SchemaError(
+            "PRAGMA table_info(integration_state) reports no columns immediately after the \
+             table's CREATE — the DDL above did not take effect"
+                .to_string(),
+        ));
+    }
+    let present: Vec<String> = rows
+        .iter()
+        .map(|row| match row.get("name") {
+            Some(holon_api::Value::String(s)) => Ok(s.clone()),
+            other => Err(StorageError::SchemaError(format!(
+                "PRAGMA table_info(integration_state) returned a row whose `name` is {other:?}, \
+                 not TEXT"
+            ))),
+        })
+        .collect::<Result<_>>()?;
+
+    for (column, decl) in [
+        ("display_name", "TEXT NOT NULL DEFAULT ''"),
+        ("icon", "TEXT NOT NULL DEFAULT ''"),
+        ("default_view", "TEXT"),
+    ] {
+        if present.iter().any(|c| c == column) {
+            continue;
+        }
+        tracing::info!(
+            column,
+            "[IntegrationStateSchemaModule] adding a missing presentation column to \
+             integration_state"
+        );
+        db_handle
+            .execute_ddl(&format!(
+                "ALTER TABLE integration_state ADD COLUMN {column} {decl}"
+            ))
+            .await?;
+    }
+    Ok(())
 }
 
 /// Operations schema module for undo/redo persistence.

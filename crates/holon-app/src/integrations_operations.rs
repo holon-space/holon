@@ -1,4 +1,5 @@
-//! The ADR-0024 doors onto an integration: `set_field` and `begin_oauth`.
+//! The ADR-0024 doors onto an integration: `set_field`, `begin_oauth` and
+//! `open_default_view`.
 //!
 //! Enablement is reachable only through this door, so MCP, a test driver and an
 //! agent all take the path the switch takes. `set_field` writes the AUTHORITY
@@ -12,7 +13,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use fluxdi::Injector;
+use holon::navigation::NavigationProvider;
 use holon_api::EntityName;
+use holon_api::EntityUri;
 use holon_api::OperationDescriptor;
 use holon_api::OperationParam;
 use holon_api::TypeHint;
@@ -22,7 +26,9 @@ use holon_core::OperationProvider;
 use holon_core::OperationResult;
 use holon_core::Result;
 use holon_core::storage::types::StorageEntity;
+use holon_filesystem::sync_ports::BlockReader;
 use holon_mcp_client::IntegrationConfigStore;
+use holon_mcp_client::integration_config::provider_content;
 use holon_mcp_client::oauth_bootstrap::BrowserOpener;
 use holon_mcp_client::oauth_bootstrap::DEFAULT_CONSENT_TIMEOUT;
 
@@ -44,10 +50,58 @@ pub const ENABLED_FIELD: &str = "enabled";
 /// The one-time consent flow, as an operation.
 pub const BEGIN_OAUTH: &str = "begin_oauth";
 
+/// Show this integration's view page in the main panel.
+pub const OPEN_DEFAULT_VIEW: &str = "open_default_view";
+
 /// The descriptor set `create_profile_resolver` buckets by entity, and thence
 /// what `find_set_field_op` finds on an `integration:` row.
 pub fn integration_operation_descriptors() -> Vec<OperationDescriptor> {
-    vec![set_field_descriptor(), begin_oauth_descriptor()]
+    vec![
+        set_field_descriptor(),
+        begin_oauth_descriptor(),
+        open_default_view_descriptor(),
+    ]
+}
+
+/// One param, for the reason [`begin_oauth_descriptor`] gives: the sidebar row
+/// dispatches this on a click, and a second required param would make that
+/// click a crash.
+fn open_default_view_descriptor() -> OperationDescriptor {
+    OperationDescriptor {
+        entity_name: ENTITY_NAME.into(),
+        entity_short_name: SHORT_NAME.to_string(),
+        id_column: "id".to_string(),
+        name: OPEN_DEFAULT_VIEW.to_string(),
+        display_name: "Open".to_string(),
+        description: "Show this integration's view page in the main panel".to_string(),
+        required_params: vec![OperationParam {
+            name: "id".to_string(),
+            type_hint: TypeHint::String,
+            description: "Integration row id, 'integration:<provider>'".to_string(),
+        }],
+        affected_fields: vec![],
+        param_mappings: vec![],
+        target_scope: holon_api::TargetScope::Global,
+        boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+        menu_exposure: holon_api::MenuExposure::NotListed {
+            surface: holon_api::NonMenuSurface::PointerGesture,
+        },
+        trigger: None,
+        bound_params: Default::default(),
+        marking_delta: holon_api::marking::MarkingDelta::Undeclared,
+        // No guard on the missing-view case. A guard would make the row
+        // silently unclickable, which is the same nothing-happens the loud
+        // refusal in `open_default_view` exists to replace.
+        guard: holon_api::pattern::OpGuard::None,
+        arcs: holon_api::arcs::TransitionArcs::Declared {
+            reads: vec![holon_api::arcs::ArcPlace::new(ENTITY_NAME, "default_view")],
+            // Nothing on this entity moves. The focus is written by
+            // `navigation.focus`, which declares its own arcs on its own
+            // relation — restating them here would claim a place this op does
+            // not own.
+            emits: vec![],
+        },
+    }
 }
 
 fn set_field_descriptor() -> OperationDescriptor {
@@ -174,6 +228,10 @@ pub struct IntegrationsOperationProvider {
     store: Arc<IntegrationConfigStore>,
     browser: Arc<dyn BrowserOpener>,
     spawner: Arc<dyn Spawner>,
+    /// Resolved lazily, never at construction: this provider is registered into
+    /// the same `dyn OperationProvider` set as the navigation provider it
+    /// dispatches to, so resolving it at wiring time would be a cycle.
+    injector: Injector,
 }
 
 impl IntegrationsOperationProvider {
@@ -182,13 +240,80 @@ impl IntegrationsOperationProvider {
         vm: Arc<IntegrationsSettingsVm>,
         browser: Arc<dyn BrowserOpener>,
         spawner: Arc<dyn Spawner>,
+        injector: Injector,
     ) -> Self {
         Self {
             vm,
             store,
             browser,
             spawner,
+            injector,
         }
+    }
+
+    /// Focus `provider`'s view page in the main panel.
+    ///
+    /// Three loud refusals, because every one of them would otherwise present
+    /// as a click that does nothing: no `default_view` in the sidecar, a
+    /// sidecar that will not read, and a `default_view` naming a block the
+    /// store does not hold.
+    async fn open_default_view(&self, provider: &'static str) -> Result<OperationResult> {
+        let content = provider_content(self.store.dir(), provider).map_err(|e| {
+            format!(
+                "IntegrationsOperationProvider: could not read '{provider}'s sidecar to find its \
+                 default view: {e:#}"
+            )
+        })?;
+        let Some(bare_id) = content.config.default_view else {
+            return Err(format!(
+                "IntegrationsOperationProvider: '{provider}' declares no `default_view`, so \
+                 '{OPEN_DEFAULT_VIEW}' has nothing to open. Add `default_view: <page-block-id>` to \
+                 assets/integrations/{provider}.yaml naming the page this integration should show."
+            )
+            .into());
+        };
+
+        // Org files carry bare ids; the scheme is added at the boundary, and
+        // navigation.focus refuses a target that has none.
+        let target = EntityUri::block(&bare_id);
+        let present = self
+            .injector
+            .resolve_async::<dyn BlockReader>()
+            .await
+            .get_block_authoritative(&target)
+            .await
+            .map_err(|e| {
+                format!(
+                    "IntegrationsOperationProvider: looking up '{provider}'s default view \
+                     `{target}`: {e}"
+                )
+            })?;
+        if present.is_none() {
+            return Err(format!(
+                "IntegrationsOperationProvider: '{provider}' names `{bare_id}` as its \
+                 `default_view`, but no block with that id exists. The page the sidecar points at \
+                 has to be authored (assets/default/index.org) before the row can open it."
+            )
+            .into());
+        }
+
+        let mut params = StorageEntity::new();
+        params.insert("region".into(), Value::String("main".to_string()));
+        params.insert(
+            "block_id".into(),
+            Value::String(target.as_str().to_string()),
+        );
+        // The rule below bans this call as a way to DRIVE navigation in place
+        // of the keyboard pipeline. This is production op composition:
+        // `open_default_view` is the door, and it reaches the focus through the
+        // navigation provider's own operation rather than by writing the
+        // navigation tables itself.
+        self.injector
+            .resolve_async::<NavigationProvider>()
+            .await
+            // ALLOW(navigation_execute_op): production op composition, not a test driver
+            .execute_operation(&EntityName::new("navigation"), "focus", params)
+            .await
     }
 
     /// Start `provider`'s consent flow and return.
@@ -295,10 +420,13 @@ impl OperationProvider for IntegrationsOperationProvider {
                 "a consent grant lives with the provider, not in the content undo stack",
             ));
         }
+        if op_name == OPEN_DEFAULT_VIEW {
+            return self.open_default_view(provider).await;
+        }
         if op_name != "set_field" {
             return Err(format!(
-                "IntegrationsOperationProvider: '{ENTITY_NAME}' exposes 'set_field' and \
-                 '{BEGIN_OAUTH}', got '{op_name}'"
+                "IntegrationsOperationProvider: '{ENTITY_NAME}' exposes 'set_field', \
+                 '{BEGIN_OAUTH}' and '{OPEN_DEFAULT_VIEW}', got '{op_name}'"
             )
             .into());
         }

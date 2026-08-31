@@ -185,6 +185,12 @@ pub mod integration {
     pub const CONFIG_STATUS: &str = "config_status";
     pub const CONFIGURABLE: &str = "configurable";
     pub const CONFIGURE_PROGRESS: &str = "configure_progress";
+    /// The PRESENTATION axis, sourced from the sidecar rather than from the
+    /// enablement store: what the sidebar row says, the glyph it wears, and the
+    /// page `integration.open_default_view` focuses.
+    pub const DISPLAY_NAME: &str = "display_name";
+    pub const ICON: &str = "icon";
+    pub const DEFAULT_VIEW: &str = "default_view";
     pub const UPDATED_AT: &str = "updated_at";
 }
 
@@ -302,6 +308,9 @@ pub const INTEGRATION: EntitySchema = EntitySchema {
         column(integration::CONFIG_STATUS, FieldIntent::Unnamed, true),
         column(integration::CONFIGURABLE, FieldIntent::Unnamed, true),
         column(integration::CONFIGURE_PROGRESS, FieldIntent::Unnamed, true),
+        column(integration::DISPLAY_NAME, FieldIntent::Unnamed, true),
+        column(integration::ICON, FieldIntent::Unnamed, true),
+        column(integration::DEFAULT_VIEW, FieldIntent::Unnamed, true),
         column(integration::UPDATED_AT, FieldIntent::StorageInternal, true),
     ],
 };

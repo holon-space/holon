@@ -30,6 +30,14 @@
 -- replaces (bugfunnel 2026-08-18-integrations-discovery-section-lists-only-orgmode).
 -- `config_status` is the DISPLAY enum only — never `Configuration`, which
 -- carries credential locations.
+--
+-- `display_name`, `icon` and `default_view` are the PRESENTATION axis, sourced
+-- from the sidecar rather than from the enablement store. The first two are NOT
+-- NULL because both have a derivation the projector always has (a humanised
+-- provider name, a default glyph), so a row with no opinion is still a row that
+-- renders. `default_view` is nullable and means it: an integration with no view
+-- page yet is a state `integration.open_default_view` refuses on, not one it
+-- guesses at.
 CREATE TABLE IF NOT EXISTS integration_state (
     id TEXT PRIMARY KEY NOT NULL,
     provider_name TEXT NOT NULL,
@@ -38,6 +46,9 @@ CREATE TABLE IF NOT EXISTS integration_state (
     config_status TEXT NOT NULL,
     configurable INTEGER NOT NULL,
     configure_progress TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    icon TEXT NOT NULL,
+    default_view TEXT,
     updated_at TEXT NOT NULL,
     _change_origin TEXT
 );

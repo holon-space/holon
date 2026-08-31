@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use futures_signals::signal::Mutable;
 use futures_signals::signal::ReadOnlyMutable;
+use holon_api::icon_name::IconName;
 use holon_mcp_client::IntegrationConfigStore;
 use holon_mcp_client::integration_state::Configuration;
 use holon_mcp_client::integration_state::IntegrationState;
@@ -64,6 +65,70 @@ pub struct IntegrationRow {
     /// dead-end button on integrations that authenticate with a static token or
     /// no token at all.
     pub configurable: bool,
+    /// What the row calls this provider: the sidecar's `display_name`, else
+    /// [`humanize_provider_name`].
+    pub display_name: String,
+    /// The glyph the row shows: the sidecar's `icon`, else [`DEFAULT_ICON`].
+    pub icon: IconName,
+    /// The BARE id of the block `integration.open_default_view` focuses, or
+    /// `None` when this provider has no view page yet.
+    pub default_view: Option<String>,
+}
+
+/// The sidecar-sourced half of an [`IntegrationRow`], with the derivations
+/// already applied.
+struct Presentation {
+    display_name: String,
+    icon: IconName,
+    default_view: Option<String>,
+}
+
+/// The glyph a provider that names none gets.
+///
+/// `link` is the only name in the renderer's table that means "a connection to
+/// something outside" — there is no plug, cloud or database glyph to prefer.
+pub const DEFAULT_ICON: &str = "link";
+
+/// The provider id as a title: `claude-history` → `Claude History`.
+///
+/// Splits on `-`, `_` and camelCase humps, so `logseqDb` → `Logseq Db`. This is
+/// a DERIVATION, not a translation — a provider whose real name it gets wrong
+/// says so with `display_name` in its sidecar.
+pub fn humanize_provider_name(provider: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut prev_lower_or_digit = false;
+    for ch in provider.chars() {
+        if ch == '-' || ch == '_' {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            prev_lower_or_digit = false;
+            continue;
+        }
+        if ch.is_uppercase() && prev_lower_or_digit && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        prev_lower_or_digit = ch.is_lowercase() || ch.is_numeric();
+        word.push(ch);
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+        .iter()
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>()
+                        + chars.as_str().to_lowercase().as_str()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Where a provider's one-time consent flow has got to.
@@ -150,14 +215,56 @@ impl IntegrationsSettingsVm {
                 let state = self.store.get(provider).unwrap_or_else(|e| {
                     panic!("Bundled provider '{provider}' has no state cell: {e:#}")
                 });
+                let presentation = self.presentation(provider);
                 IntegrationRow {
                     provider,
                     enabled: state.enabled,
                     status: ConfigStatus::of(&state.configuration),
                     configurable: self.oauth2_config(provider).is_ok(),
+                    display_name: presentation.display_name,
+                    icon: presentation.icon,
+                    default_view: presentation.default_view,
                 }
             })
             .collect()
+    }
+
+    /// `provider`'s presentation triple, resolved against its sidecar.
+    ///
+    /// A sidecar that will not read leaves the row on the derivations and says
+    /// so in the log; it is not silent, because the startup loader reports the
+    /// same file as ignored and this is the second voice on one fact, not the
+    /// only one. Refusing to produce a row here instead would take the whole
+    /// Integrations section down over one unparseable installed file.
+    fn presentation(&self, provider: &'static str) -> Presentation {
+        let derived = || Presentation {
+            display_name: humanize_provider_name(provider),
+            icon: IconName::parse(DEFAULT_ICON)
+                .unwrap_or_else(|e| panic!("DEFAULT_ICON must be a name the renderer draws: {e}")),
+            default_view: None,
+        };
+        match holon_mcp_client::integration_config::provider_content(&self.dir, provider) {
+            Ok(content) => Presentation {
+                display_name: content
+                    .config
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| humanize_provider_name(provider)),
+                icon: content.config.icon.clone().unwrap_or_else(|| {
+                    IconName::parse(DEFAULT_ICON).expect("DEFAULT_ICON is drawable")
+                }),
+                default_view: content.config.default_view.clone(),
+            },
+            Err(e) => {
+                tracing::warn!(
+                    provider,
+                    "[IntegrationsSettingsVm] '{provider}' sidecar did not read ({e:#}); its row \
+                     falls back to the derived name and the default icon, and it has no default \
+                     view"
+                );
+                derived()
+            }
+        }
     }
 
     /// `provider`'s OAuth2 block, or the reason there is no consent flow to
@@ -333,5 +440,37 @@ impl IntegrationsSettingsVm {
                 (provider, state)
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod presentation_derivations {
+    use super::*;
+
+    /// The derivation a sidecar that says nothing falls back to. The three
+    /// cases are the three shapes a provider id takes in this bundle: hyphens,
+    /// one bare word, and a camelCase hump.
+    #[test]
+    fn a_provider_id_derives_a_title() {
+        assert_eq!(humanize_provider_name("claude-history"), "Claude History");
+        assert_eq!(humanize_provider_name("todoist"), "Todoist");
+        assert_eq!(humanize_provider_name("logseqDb"), "Logseq Db");
+        assert_eq!(
+            humanize_provider_name("json_placeholder"),
+            "Json Placeholder"
+        );
+    }
+
+    /// Separators do not become empty words, and a leading capital is not a
+    /// hump — `GCal` is one word, not `G Cal`.
+    #[test]
+    fn separators_and_leading_capitals_do_not_split_into_empties() {
+        assert_eq!(humanize_provider_name("a--b"), "A B");
+        assert_eq!(humanize_provider_name("GCal"), "Gcal");
+    }
+
+    #[test]
+    fn the_default_icon_is_one_the_renderer_draws() {
+        IconName::parse(DEFAULT_ICON).expect("DEFAULT_ICON must be in the shared table");
     }
 }

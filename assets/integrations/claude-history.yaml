@@ -3,11 +3,22 @@
 # (crates/holon-mcp-client/src/bundled_sidecars.rs).
 schema_version: 1
 
+# The Integrations sidebar row: what it says, what glyph it wears, and the page
+# `integration.open_default_view` focuses in the main panel. `default_view` is
+# the BARE id of a block (org convention), authored in assets/default/index.org.
+display_name: "Claude History"
+icon: robot
+default_view: claude-history-view
+
+# This file is COMPILED INTO the binary and ships to every user, so nothing here
+# may name one machine. `command` is resolved through PATH — install the server
+# with `cargo install --path <checkout>` — and the data directory is read from
+# the environment. `parse_bundled` refuses an absolute `command` here.
 transport:
   child_process:
-    command: /Users/martin/Workspaces/ai/claude-code-history-mcp/target/debug/claude-code-history-mcp
+    command: claude-code-history-mcp
     env:
-      CLAUDE_DATA_DIR: "/Users/martin/.claude"
+      CLAUDE_DATA_DIR: "${HOME}/.claude"
 entity_prefix: "cc_"
 
 # Two rules every `live_query` here obeys, both load-bearing for the chat view:

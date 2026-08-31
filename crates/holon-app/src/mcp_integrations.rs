@@ -282,7 +282,7 @@ impl Module for McpIntegrationsModule {
         let ops_store = store.clone();
         let ops_vm = settings_vm.clone();
         let ops_browser = self.browser.clone();
-        injector.provide_into_set::<dyn OperationProvider>(Provider::root(move |_| {
+        injector.provide_into_set::<dyn OperationProvider>(Provider::root(move |inj| {
             Arc::new(
                 crate::integrations_operations::IntegrationsOperationProvider::new(
                     ops_store.clone(),
@@ -295,6 +295,7 @@ impl Module for McpIntegrationsModule {
                              run its consent flow",
                         ),
                     )),
+                    inj.clone(),
                 ),
             ) as Arc<dyn OperationProvider>
         }));

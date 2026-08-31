@@ -185,6 +185,30 @@ keeps the ones the store has enabled, and for each:
    for each entity; the engine maps each JSON record → a `DynamicEntity` (block)
    and writes it to the cache.
 
+### The presentation triple
+
+Three optional top-level keys say how the integration APPEARS in the left
+sidebar's Integrations section. All three are mirrored into `integration_state`
+by `IntegrationStateProjector`, which is what makes them readable from a
+`live_query`.
+
+```yaml
+display_name: "Claude History"     # else: Title Case of the provider name
+icon: robot                        # else: `link`
+default_view: claude-history-view  # else: the row has no view to open
+```
+
+- `display_name` — free text. Omitted, it is derived from the provider id by
+  splitting on `-`, `_` and camelCase humps (`claude-history` → `Claude
+  History`).
+- `icon` — a glyph name from `holon_api::icon_name::ICON_NAMES`. Parsed at load:
+  a name the renderer cannot draw is a hard error, because an unwatched sidecar
+  row would otherwise render a silent bullet.
+- `default_view` — the **bare** id of a page block (org convention, no `block:`
+  prefix), authored in `assets/default/index.org`. Clicking the row dispatches
+  `integration.open_default_view`, which focuses that block in region `main`.
+  Omitted, the operation refuses by name rather than opening nothing.
+
 ---
 
 ## 4. Transports
