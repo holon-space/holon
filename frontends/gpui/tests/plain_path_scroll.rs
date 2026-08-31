@@ -51,7 +51,7 @@ const VIEWPORT_H: f32 = 500.0;
 const LEGACY_SRC: &str = "column(collection_view(), divider(), \
     row(icon(\"link\"), spacer(6), text(\"Linked references\", #{bold: true})), \
     live_query(#{sql: \"SELECT bl.id AS id, bl.content AS content FROM backlinks bl\", \
-    item_template: text(col(\"content\"))}))";
+    item_template: list(#{item_template: text(col(\"content\"))})}))";
 
 fn outline_row(ix: usize) -> ReactiveViewModel {
     let mut data = HashMap::new();

@@ -263,6 +263,13 @@ fn descendants(vm: &ReactiveViewModel, out: &mut Vec<String>) {
     if let Some(slot) = vm.slot.as_ref() {
         descendants(&slot.content.get_cloned(), out);
     }
+    // A collection's rows hang off `collection`, not `children` — a walk that
+    // skips them cannot see the per-row widgets at all.
+    if let Some(collection) = vm.collection.as_ref() {
+        for item in collection.children_snapshot() {
+            descendants(&item, out);
+        }
+    }
 }
 
 /// The load-bearing case: the session chat view materialises a `live_query`
@@ -324,29 +331,36 @@ async fn message_row_renders_as_a_chat_bubble_with_its_text() {
     let template: RenderExpr = serde_json::from_str(&item_template)
         .unwrap_or_else(|e| panic!("item_template must deserialise: {e}\n{item_template}"));
 
-    let mut row = DataRow::new();
-    row.insert("uuid".to_string(), Value::String("m-1".to_string()));
-    row.insert("role".to_string(), Value::String("user".to_string()));
-    row.insert(
-        "content".to_string(),
-        Value::String("HELLO-FROM-THE-TRANSCRIPT".to_string()),
-    );
-    row.insert("ts".to_string(), Value::String("2026-08-03".to_string()));
-    let ctx = RenderContext::default().with_row(Arc::new(row));
+    // TWO rows, never one: a one-row oracle cannot tell a per-row template from
+    // a whole-result one, and that is exactly how the scalar-template defect
+    // passed the test written to cover it.
+    let rows = vec![
+        message_row("m-1", "HELLO-FROM-THE-TRANSCRIPT"),
+        message_row("m-2", "AND-THE-SECOND-MESSAGE"),
+    ];
 
-    let bubble = services.interpret(&template, &ctx);
+    let rendered = holon_frontend::interpret_pure(&template, &rows, &services);
+    let mut names = Vec::new();
+    descendants(&rendered, &mut names);
+    let bubbles = names.iter().filter(|n| n.as_str() == "chat_bubble").count();
+    let painted = rendered.snapshot().pretty_print(0);
     assert_eq!(
-        bubble.widget_name().as_deref(),
-        Some("chat_bubble"),
-        "a message row must render as a chat_bubble"
+        bubbles, 2,
+        "each delivered message must render its own chat_bubble; got {bubbles}\n{painted}"
     );
-    assert_eq!(bubble.prop_str("sender").as_deref(), Some("user"));
-
-    let rendered = bubble.snapshot().pretty_print(0);
     assert!(
-        rendered.contains("HELLO-FROM-THE-TRANSCRIPT"),
-        "the bubble must show the message text; got:\n{rendered}"
+        painted.contains("HELLO-FROM-THE-TRANSCRIPT") && painted.contains("AND-THE-SECOND-MESSAGE"),
+        "every message's text must reach the screen; got:\n{painted}"
     );
+}
+
+fn message_row(uuid: &str, text: &str) -> Arc<DataRow> {
+    let mut row = DataRow::new();
+    row.insert("uuid".to_string(), Value::String(uuid.to_string()));
+    row.insert("role".to_string(), Value::String("user".to_string()));
+    row.insert("content".to_string(), Value::String(text.to_string()));
+    row.insert("ts".to_string(), Value::String("2026-08-03".to_string()));
+    Arc::new(row)
 }
 
 /// Every operation wiring in the tree, including collection items.
@@ -431,4 +445,97 @@ async fn session_chat_view_offers_no_compose_box() {
         !names.iter().any(|n| n == "input_box"),
         "a transcript view must not carry an unaddressable compose box; got {names:?}"
     );
+}
+
+/// Every chat variant delivers a stream of messages, so each must render one
+/// bubble per row. Driven the way the platform layer drives it: ONE
+/// interpretation against ALL delivered rows.
+#[tokio::test]
+async fn every_chat_variant_renders_one_bubble_per_message() {
+    // The sidecar carries the same stream three times — live_session, session
+    // and agent. All three were authored with the same scalar template, so
+    // pinning only the one the session view happens to use lets the other two
+    // rot back independently.
+    for entity in ["live_session", "session", "agent"] {
+        let services = ChatViewServices::new(tokio::runtime::Handle::current());
+        let content = expanded_chat_view(&services, entity);
+
+        let template: RenderExpr = serde_json::from_str(
+            &find(&content, "live_query")
+                .prop_str("render_expr")
+                .expect("live_query publishes its render_expr"),
+        )
+        .expect("render_expr deserialises");
+
+        let rows = vec![
+            message_row("m-1", "FIRST-MESSAGE"),
+            message_row("m-2", "SECOND-MESSAGE"),
+        ];
+        let rendered = holon_frontend::interpret_pure(&template, &rows, &services);
+        let mut names = Vec::new();
+        descendants(&rendered, &mut names);
+        let bubbles = names.iter().filter(|n| n.as_str() == "chat_bubble").count();
+        assert_eq!(
+            bubbles,
+            2,
+            "the `{entity}` chat view must render one bubble per message; got {bubbles}\n{}",
+            rendered.snapshot().pretty_print(0)
+        );
+    }
+}
+
+/// `live_query` interprets its `item_template` ONCE against the whole delivered
+/// row set, so only a collection widget iterates rows. A bare per-row template
+/// silently binds the first row and drops the rest — the defect fixed once in
+/// the integrations section and re-authored three times in the claude-history
+/// sidecar. Refuse it at the DSL boundary instead of rendering a plausible
+/// single row.
+#[tokio::test]
+async fn live_query_refuses_a_non_collection_item_template() {
+    let services = ChatViewServices::new(tokio::runtime::Handle::current());
+    let vm = interpret_with(
+        &services,
+        r#"live_query(#{sql: "SELECT role, content FROM cc_message",
+                       item_template: chat_bubble(#{sender: col("role")}, text(col("content")))})"#,
+        &RenderContext::default(),
+    );
+
+    assert_eq!(
+        vm.widget_name().as_deref(),
+        Some("error"),
+        "a bare per-row template must be refused, not rendered:\n{}",
+        vm.snapshot().pretty_print(0)
+    );
+    let message = vm
+        .prop_str("message")
+        .expect("the refusal carries a message");
+    assert!(
+        message.contains("chat_bubble") && message.contains("collection"),
+        "the refusal must name the offending widget and the requirement; got `{message}`"
+    );
+}
+
+/// A collection template is the supported form and must keep building.
+#[tokio::test]
+async fn live_query_accepts_a_collection_item_template() {
+    let services = ChatViewServices::new(tokio::runtime::Handle::current());
+    let vm = interpret_with(
+        &services,
+        r#"live_query(#{sql: "SELECT role, content FROM cc_message",
+                       item_template: list(#{item_template: text(col("content"))})})"#,
+        &RenderContext::default(),
+    );
+    assert_eq!(vm.widget_name().as_deref(), Some("live_query"));
+}
+
+/// No template at all defaults to `table()`, which is a collection.
+#[tokio::test]
+async fn live_query_without_an_item_template_still_builds() {
+    let services = ChatViewServices::new(tokio::runtime::Handle::current());
+    let vm = interpret_with(
+        &services,
+        r#"live_query(#{sql: "SELECT role FROM cc_message"})"#,
+        &RenderContext::default(),
+    );
+    assert_eq!(vm.widget_name().as_deref(), Some("live_query"));
 }

@@ -14,7 +14,7 @@ entities:
         render: >-
           live_query(#{
             sql: "SELECT title, body FROM mock_note_fdw ORDER BY title",
-            item_template: row(text(col("title")))
+            item_template: list(#{item_template: row(text(col("title")))})
           })
     schema:
       - { name: title, sql_type: TEXT }

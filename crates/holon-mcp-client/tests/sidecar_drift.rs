@@ -46,7 +46,7 @@ entities:
         render: >-
           live_query(#{
             sql: "SELECT uuid, role, content FROM cc_message_fdw WHERE session_id = $context_local_id",
-            item_template: text(col("content"))
+            item_template: list(#{item_template: text(col("content"))})
           })
     schema:
       - name: id

@@ -56,7 +56,7 @@ fn panel_dsl() -> String {
        columns(#{item_template: live_block()}), \
        divider(), \
        accordion(#{title: \"Linked references\", icon: \"link\", max_height_fraction: 0.33}, \
-         live_query(#{sql: \"SELECT * FROM backlinks\", item_template: text(col(\"content\"))})))"
+         live_query(#{sql: \"SELECT * FROM backlinks\", item_template: list(#{item_template: text(col(\"content\"))})})))"
         .to_string()
 }
 

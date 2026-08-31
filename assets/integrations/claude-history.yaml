@@ -99,7 +99,7 @@ entities:
             content: column(
               live_query(#{
                 sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message WHERE session_id = (SELECT ls.session_id FROM cc_live_session ls WHERE ls.id = $context_id) AND role IS NOT NULL ORDER BY timestamp",
-                item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
+                item_template: list(#{item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))})
               }),
               input_box(#{
                 placeholder: "Message this session",
@@ -230,7 +230,7 @@ entities:
             header: row(text(col("first_prompt")), spacer(8), text(col("message_count"))),
             content: live_query(#{
               sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_message WHERE session_id = $context_local_id AND role IS NOT NULL ORDER BY timestamp",
-              item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
+              item_template: list(#{item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))})
             })
           })
     schema:
@@ -362,7 +362,7 @@ entities:
             header: row(text(col("agent_type")), spacer(8), text(col("description"))),
             content: live_query(#{
               sql: "SELECT uuid, role, content, timestamp AS ts FROM cc_agent_message WHERE agent_id = $context_local_id AND role IS NOT NULL ORDER BY timestamp",
-              item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))
+              item_template: list(#{item_template: chat_bubble(#{sender: col("role"), time: col("ts")}, text(col("content")))})
             })
           })
     schema:

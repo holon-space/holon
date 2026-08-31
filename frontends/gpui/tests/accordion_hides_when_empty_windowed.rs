@@ -63,7 +63,7 @@ fn panel_dsl(hide_when_empty: bool) -> String {
            accordion(#{{title: \"Linked references\", icon: \"link\", \
              max_height_fraction: 0.33, hide_when_empty: {hide_when_empty}}}, \
              live_query(#{{sql: \"SELECT * FROM backlinks\", \
-               item_template: text(col(\"content\"))}})))"
+               item_template: list(#{{item_template: text(col(\"content\"))}})}})))"
     )
 }
 

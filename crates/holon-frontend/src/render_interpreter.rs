@@ -737,6 +737,31 @@ pub fn shared_live_query_build<W>(
     // The render expression for interpreting query results comes from the
     // caller's item template, not from the query itself. Default to table()
     // when no template is specified.
+    //
+    // The template is interpreted ONCE against the whole delivered row set, so
+    // only a collection widget iterates rows — a scalar template binds the
+    // first row and drops the rest. Refuse that here rather than render a
+    // plausible single row.
+    if let Some(expr) = item_template {
+        let name = match expr {
+            holon_api::render_types::RenderExpr::FunctionCall { name, .. } => name.as_str(),
+            other => {
+                return Err(format!(
+                    "[live_query item_template must be a collection widget \
+                     (list/tree/table/board/columns/outline); got {other:?} — a bare per-row \
+                     template binds only the first row]"
+                ));
+            }
+        };
+        if !crate::collection_layout::is_layout(name) {
+            return Err(format!(
+                "[live_query item_template must be a collection widget \
+                 (list/tree/table/board/columns/outline); got {name} — a bare per-row template \
+                 binds only the first row. Wrap it: list(#{{item_template: {name}(…)}})]"
+            ));
+        }
+    }
+
     let live_query_render_expr = item_template.cloned().unwrap_or_else(|| {
         holon_api::render_types::RenderExpr::FunctionCall {
             name: "table".to_string(),

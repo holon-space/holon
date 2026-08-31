@@ -26,10 +26,10 @@ const MAX_EXPANSION_DEPTH: usize = 8;
 
 /// Depth alone does not bound WORK — total expansions are `Σ bᵏ` in the
 /// branching factor, and for the ordinary per-row nested query
-/// (`live_query(item_template: live_query(context: col("id")))`) that factor is
-/// the outer query's ROW COUNT. 256 comfortably covers the realistic shapes (a
-/// 100-row outer query with one inner query per row is 101) while refusing the
-/// combinatorial ones.
+/// (`live_query(item_template: list(#{item_template: live_query(context:
+/// col("id"))}))`) that factor is the outer query's ROW COUNT. 256 comfortably
+/// covers the realistic shapes (a 100-row outer query with one inner query per
+/// row is 101) while refusing the combinatorial ones.
 const MAX_TOTAL_EXPANSIONS: usize = 256;
 
 /// Matches the `await_ready` timeout `describe_ui` already applies, so the
