@@ -11,6 +11,7 @@ mod forward_edge_ingest_regression;
 mod idonly_folder_companion_identity_collision;
 mod journals_restart_survival;
 mod junction_survives_reboot_repro;
+mod marks_lengthening_batch_no_quarantine;
 mod mcp_mirrored_entity_write_authority;
 mod phantom_loro_exists_repro;
 mod wiki_link_ingest_marks_junction;

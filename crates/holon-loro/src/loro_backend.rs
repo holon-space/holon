@@ -2385,6 +2385,27 @@ impl LoroBackend {
         let (write_doc, tree_id) = self.target_doc(&target);
         let marks_owned: Vec<holon_api::MarkSpan> = marks.to_vec();
 
+        // Spans index the text THIS call installs. One reaching past its end
+        // means the caller measured the marks against a different (typically
+        // newer, longer) string than `new_text` — name both sides here, since
+        // Loro's own `OutOfBound` names neither the block nor the text.
+        let len_chars = new_text.chars().count();
+        if let Some(bad) = marks_owned
+            .iter()
+            .find(|span| span.start > span.end || span.end > len_chars)
+        {
+            return Err(ApiError::InternalError {
+                message: format!(
+                    "update_block_marked({id}): mark span {}..{} ({}) is out of range for the \
+                     {len_chars}-char text this call installs — the mark set was derived from \
+                     content other than `new_text`",
+                    bad.start,
+                    bad.end,
+                    bad.mark.loro_key(),
+                ),
+            });
+        }
+
         write_doc
             .with_write(|doc| {
                 let tree = doc.get_tree(TREE_NAME);

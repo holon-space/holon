@@ -3,11 +3,12 @@ id: 2026-08-31-marks-written-against-stale-content-quarantines-file
 date: 2026-08-31
 gap: COVERAGE
 secondary: ORACLE
-status: OPEN
+status: FIXED
 summary: >-
   The ingest `marks` field write re-asserts the block's OLD stored content, so
-  mark spans from the new parse fall outside the text and Loro rejects them,
-  failing the ingest and quarantining the file from write-back.
+  mark spans from the new parse miss the text: past its end when the content
+  grew (Loro rejects, the ingest fails and the file is quarantined), or silently
+  shifted to wrong offsets when it shrank.
 ---
 
 ## Bug
@@ -76,15 +77,97 @@ shown up as a log line, not a red.
 
 ## Remedy
 
-Open. Fix direction:
+FIXED.
 
-1. Make the pairing explicit rather than ordering-dependent: `marks` should be
-   written from the batch's content, not from `get_block`. Either write
-   content+marks as one cell (a `content_marked` field), or have
-   `apply_ingest_batch` order `content` before `marks` and assert it.
-2. Add a loud precondition in `update_block_marked` before the `mark` loop —
-   `span.end <= len_chars`, erroring with block id, text length and the span —
-   so the failure names the mismatch instead of surfacing a Loro internal.
-3. Close the coverage gap first: add a keystone transition that appends to a
-   block's content and marks a range inside the appended tail in the same
-   batch. It should go red with this exact `OutOfBound` before the fix.
+**Root fix** — `crates/holon/src/core/sql_block_operations.rs`: the Upstream
+branch of `update_in_tree` decomposes the ingest bag into per-field
+`set_field` calls, and the bag is a `HashMap`, so `content` and `marks` landed
+in per-call RANDOM order. The new `ingest_field_write_order` (same file, just
+above the `BlockOrdering` impl) states the order the pairing needs — `content`
+first, `marks` last, everything else alphabetically in between — so the marks
+write can no longer address the previous revision's text. `content` and `marks`
+always travel in the SAME bag (`build_block_params` emits `content`
+unconditionally), so ordering is a complete fix, not a narrowing.
+
+**Loud precondition** — `crates/holon-loro/src/loro_backend.rs`,
+`update_block_marked`: every span is checked against the text THAT CALL
+installs (`span.end <= new_text.chars().count()`) before Loro sees it. A future
+desync now reads
+
+    update_block_marked(block:…): mark span 9..17 (bold) is out of range for
+    the 12-char text this call installs — the mark set was derived from content
+    other than `new_text`
+
+instead of a Loro-internal `OutOfBound { pos, len }` that names neither the
+block nor the string it was measured against.
+
+Quarantine itself is untouched — it is the correct last resort, and the bug was
+upstream of it.
+
+## The silent variant
+
+The quarantine was only the LOUD half. The same random field order, applied to a
+batch that SHORTENS the content, writes the new spans over the old, LONGER text —
+where they are in bounds, so Loro accepts them, nothing errors, and no file is
+quarantined. The content write that follows then shifts those Peritext anchors,
+leaving the block with marks at offsets it was never given (verifier probe:
+stored `0..7` against a real `4..12`, on 2 of 3 pre-fix runs). The write-order
+rule fixes both directions; the rung `marks-shortening-batch` covers this one.
+
+This bounds the recovery answer above. **Restarting clears the quarantine, but
+nothing repairs mark spans that a pre-fix session already shifted.** A shifted
+span is in bounds and structurally indistinguishable from an authored one, so
+there is no retroactive detection and no migration to write — the corruption is
+silent by construction. Only a re-ingest of the file re-derives the marks from
+the org source, which the fix now makes correct.
+
+## Rungs
+
+- `marks-lengthening-batch`
+  (`crates/holon-integration-tests/tests/boot_suite/marks_lengthening_batch_no_quarantine.rs`)
+  — the missing rung this entry named. Drives the REAL
+  `BlockOrdering::apply_ingest_batch` (Loro/Upstream, params from
+  `holon_orgmode::build_block_params`) with forty successive revisions that each
+  lengthen the content and mark the appended tail. Driving the batch seam
+  directly rather than the file watcher is deliberate: the controller's poll
+  retry re-rolls the `HashMap` order and hid the defect end-to-end.
+- `marks-shortening-batch` (same file) — the SILENT direction: twenty SHORTENING
+  revisions, checked after EVERY one, because a later correctly-ordered revision
+  rewrites the mark set and would paper over an earlier corruption. Green
+  deterministically with the rule; red with probability 1 - 2^-20 without it,
+  measured 3 of 3 runs (rounds 17 / 18 / 19) with the rule bypassed.
+- `marks-span-precondition`
+  (`crates/holon-app/tests/marks_span_precondition.rs`) — the precondition
+  rejects an out-of-range span by name, and still applies an in-range one over
+  the newly installed text.
+- `content_is_written_before_marks`
+  (`sql_block_operations.rs`, `ingest_field_order_tests`) — a hundred fresh bags,
+  deterministic.
+
+Red-for-the-right-reason (fix reverted, rungs in place), round 1 of 40:
+
+    round 1: the ingest batch failed partway, so `FileSyncController` would
+    QUARANTINE this file from write-back … error:
+    BlockCellRegistry::write_field(marks): update_block_marked(block:…): mark
+    span 9..17 (bold) is out of range for the 12-char text this call installs
+
+**Fixture note**: the marked word must CLOSE the block body. A first fixture put
+`" here."` after it — six trailing characters against five characters of growth
+per revision, so the stale text stayed long enough to swallow the span and the
+rung passed green with the fix reverted.
+
+## Recovery of an already-quarantined file
+
+Nothing manual is required, and nothing was lost: quarantine skips WRITE-BACK,
+so the intact file on disk was never overwritten — that is the point of the
+guard.
+
+The quarantine set is `FileSyncController.quarantined`
+(`crates/holon-filesystem/src/file_sync_controller.rs:713`), a plain in-memory
+`HashMap` built empty at construction (`:851`) and never serialized. So it does
+not survive a restart, and within a session the next fully-successful ingest of
+that path clears it and logs `write-back quarantine CLEARED` (`:2073-2080`).
+
+With this fix the re-ingest succeeds, so **restarting Holon is the whole
+recovery**: boot drops the in-memory flag and re-ingests the file cleanly. A
+running instance heals on its own the next time the file is touched.

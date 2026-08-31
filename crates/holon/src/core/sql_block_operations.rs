@@ -436,6 +436,27 @@ impl OrderKeyMinting for SqlBlockOperations {
     }
 }
 
+/// Order one ingest params bag's field writes: `content` first, `marks` last,
+/// everything else alphabetically in between.
+///
+/// `marks` is written as its own cell and re-asserts the block's STORED text
+/// (`BlockCellRegistry::write_field("marks")` → `update_block_marked`), so it
+/// only means what the parse intended once the same batch's `content` has
+/// landed. `StorageEntity` is a `HashMap`: without this the pair lands in
+/// per-call random order, and on the losing half a span from the new (longer)
+/// parse indexes past the old text, Loro rejects the range, and the whole file
+/// is quarantined from write-back.
+fn ingest_field_write_order(params: StorageEntity) -> Vec<(Arc<str>, Value)> {
+    let rank = |field: &str| match field {
+        "content" => 0u8,
+        "marks" => 2,
+        _ => 1,
+    };
+    let mut ordered: Vec<(Arc<str>, Value)> = params.into_iter().collect();
+    ordered.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+    ordered
+}
+
 #[async_trait]
 impl BlockOrdering for SqlBlockOperations {
     /// Loro mode → `write_position` (tree.mov_after). SqlOnly mode →
@@ -670,7 +691,7 @@ impl BlockOrdering for SqlBlockOperations {
             // Content / edge / scalar fields → Loro via set_field. Skip the
             // primary key, the routing hint (not a field), and parent_id +
             // position which `place` owns.
-            for (field, value) in params.into_iter() {
+            for (field, value) in ingest_field_write_order(params) {
                 if &*field == "id"
                     || &*field == "parent_id"
                     || &*field == holon_api::ROUTING_DOC_URI_KEY
@@ -2700,6 +2721,54 @@ mod tests {
                 "V3: after {cut} of {} re-keys the sibling order is {after:?} — this shape was \
                  expected to survive partial application",
                 rekeys.len()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod ingest_field_order_tests {
+    use holon_api::Value;
+    use holon_core::storage::types::StorageEntity;
+
+    use super::ingest_field_write_order;
+
+    /// BugFunnel `2026-08-31-marks-written-against-stale-content-quarantines-file`:
+    /// `marks` re-asserts the block's stored text, so a batch that writes it
+    /// before its own `content` marks the PREVIOUS revision's string. The bag
+    /// is a `HashMap`, so nothing but this ordering keeps the pair honest.
+    #[test]
+    fn content_is_written_before_marks() {
+        // Many keys and many bags: a single `HashMap` could order the pair
+        // correctly by luck, a hundred fresh ones could not.
+        for _ in 0..100 {
+            let mut params = StorageEntity::new();
+            for field in [
+                "marks",
+                "updated_at",
+                "content",
+                "tags",
+                "task_state",
+                "created_at",
+                "requires",
+                "content_type",
+            ] {
+                params.insert(field.into(), Value::String(field.to_string()));
+            }
+
+            let ordered = ingest_field_write_order(params);
+            let order: Vec<&str> = ordered.iter().map(|(field, _)| &**field).collect();
+            let content = order.iter().position(|f| *f == "content").expect("content");
+            let marks = order.iter().position(|f| *f == "marks").expect("marks");
+            assert!(
+                content < marks,
+                "`content` must be written before `marks`; got {order:?}"
+            );
+            assert_eq!(order[0], "content", "`content` leads the batch: {order:?}");
+            assert_eq!(
+                *order.last().expect("non-empty"),
+                "marks",
+                "`marks` trails the batch: {order:?}"
             );
         }
     }
