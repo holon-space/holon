@@ -16,7 +16,7 @@ Design record: `~/.claude/plans/block-generalization-design-2026-08-21.md`
 `~/.claude/plans/block-generalization-next-plan-2026-08-26.md` (premise
 check with file:line evidence, NV/I3 step plan).
 
-Status verified against `main` on 2026-08-31.
+Status verified against `main` on 2026-09-01.
 
 ---
 
@@ -59,56 +59,29 @@ Follow-on rulings that bind open work:
 | **NV-0** | ONE JSON→`Value` parse at the properties boundary; five ad-hoc converters deleted | `7105bfcf` | 2026-08-26 | `crates/holon/src/core/json_value_parse_differential_test.rs`; mutation-proven `stored_containers_keep_their_kind_through_the_merge_leg` |
 | **I3-0** | `Computation` extended to `person_profile.display_name` (D28.a): `Concat`, short-circuit `And`, `IsDefined`, string + unit literals, Eq/Ne-against-Null lowering; `FieldIdent` newtype closes the DDL injection surface | `70ae275a` | 2026-08-26 | `crates/holon-api/tests/derived_field_dual_eval_pbt.rs` (eval-vs-SQL differential oracle); `person_profile_display_name_seat_a.rs` |
 | **NV-2** | Removal intent is an explicit `Value::Removed`, not a null-string sentinel (D27.b) | `25e384ee` | 2026-08-26 | `Value::Removed` wire shape pinned in `crates/holon-pattern/src/value.rs` |
+| **BG-5** | `graph_eav` module, DDL, DI registration and Schema.md section deleted; GQL `validate_typed_shape` refuses unknown labels, untyped edges and unlabelled nodes at compile time, default resolvers pointing at a sentinel table so residual paths fail loud and identically on fresh and legacy files | `0a10b5a5` | 2026-08-31 | fresh-boot inventory over all 14 table names in `crates/holon-app/tests/fresh_db_boot_seed_smoke.rs` |
+| **I3-1** | `ComputedSpec::parse` is the single door: typed parse over `FieldIdent`, tier enforcement in the constructor, registry cross-check that declared types match the owning `TypeDefinition`'s columns; `computed_persisted` lowers through the ONE formatter (`PlantedColumn::select_expr`, duplicate unvalidated sink deleted), `computed_live` evals without Turso behind a boot-once disclosed WARN for out-of-subset fields | `8d07c182` | 2026-09-01 | `crates/holon/tests/computed_tier_dual_path.rs` (dual-path agreement, proptest); `crates/holon-profiles/tests/computed_tier_declaration.rs`; `crates/holon-api/tests/typed_computed_field_declaration.rs` |
+| **NV-1** | Per-block `property_kinds` column records the kind for keys whose JSON spelling is ambiguous; ONE writer (`bag_and_kinds_set_clause`) owns bag and kinds in a single UPDATE across create, update and `set_field` — `set_field` was a third bag writer that bricked rows — with a workspace-wide tripwire keeping it the only `json_set`/`json_remove` site; reads parse at one boundary and a kind/value disagreement is a loud query error; additive sniffed ALTER migration, idempotent, downgrade inert. SQL leg only — the profile claims `date_time`/`json` with the Loro leg disclosed pending S2 | `e19a726f` | 2026-09-01 | `crates/holon/src/core/set_field_property_kinds_test.rs`; `crates/holon-turso/tests/property_kinds_migration.rs`; `crates/holon/tests/capability_certification.rs` (certifier drives the types clause on every live route and PINS the two `set_field` routes as expected-undriven) |
 
 ---
 
 ## 3. Open, in dependency order
 
-### NV-1 — kind fidelity via `property_kinds` (D29.a)
-- **Scope.** A per-block `property_kinds` column carries `DateTime` / `Json`
-  kinds for the schemaless properties bag. The `Value` serde-representation
-  fix (Loro leg S2, derived sidecar S3) is a **separately scheduled** half.
-- **Anchors.** `property_kinds` does not exist in the tree (zero hits).
-  Loss cause: `crates/holon/src/core/sql_operation_provider.rs` re-types
-  `Value::DateTime` to string and parses `Value::Json` into the blob. Claim
-  site: `assets/default/capability/holon-native.yaml` (`types:` omits
-  `date_time`).
-- **Red-first surface.** Flip the two yaml lines; `certify_property_values`
-  (`crates/holon-capability/src/certify.rs`) goes red with named
-  `Violation{clause: TypeDeclared(DateTime|Json)}`. Plus a keystone
-  extension drawing `DateTime`/`Json` payloads through `SetField`.
-- **Blocked by.** Nothing — nv2 has landed (`25e384ee`). **Caveat that
-  gates the yaml claim:** `Value` is `#[serde(untagged)]`
+### NV-1/S2–S3 — kind fidelity on the Loro leg and the derived sidecar
+- **Scope.** The `Value` serde-representation half that `property_kinds` did
+  not buy: S2 the Loro on-disk form, S3 the derived sidecar.
+- **Anchors.** `Value` is `#[serde(untagged)]`
   (`crates/holon-pattern/src/value.rs:54`), so Loro's on-disk form destroys
-  the kind (`crates/holon-loro/src/loro_backend.rs`). `property_kinds`
-  alone buys fidelity on the SQL-authority leg only. **The profile must not
-  claim `date_time`/`json` are representable until both halves are in.**
-- Plan: `~/.claude/plans/d29-property-kinds-plan.md`.
-
-### I3-1 — route the type registry through `Computation`
-- **Scope.** `FieldLifetime::Computed` carries a `Computation` instead of a
-  bare Rhai `CompiledExpr`, with `Computation::Script` as the disclosed
-  fallback. Classify tiers with the existing `DerivedFieldPlan`
-  (`sql_planted` ⇒ `computed_persisted`, `stage_evaluated` ⇒
-  `computed_live`) — do not write a second classifier.
-- **Anchors.** `crates/holon-api/src/entity.rs:115-119` —
-  `FieldLifetime::Computed { expr: holon_expr::CompiledExpr }` is Rhai-only;
-  registry compiles yaml `computed:` straight to Rhai in
-  `crates/holon-profiles/src/type_registry.rs`.
-- **Ruling executed.** BG-4 (a) / D28.a.
-- **Red-first surface.** `crates/holon-integration-tests/src/pbt/typed_entity_schemas.rs:22-29`
-  — `TypedEntitySchema` has `id_column` + `value_columns` only. Add
-  `computed_columns`, evaluate the field's `Computation` in the oracle
-  (`pbt/ref_caps/typed_entities.rs`), compare it in
-  `pbt/composed/invariants/typed_matview_matches_ref.rs`. Expected red: the
-  SUT matview has no such column.
-- **Blocked by.** Two prerequisites: (1) declared column types must be
-  reachable at parse time — typing `+` as numeric `Arith` vs string
-  `Concat` cannot be guessed without them; (2) the S3 sidecar loss —
+  the kind (`crates/holon-loro/src/loro_backend.rs`). S3:
   `crates/holon-turso/src/derived_reconciler.rs:149` stores computed values
   via `serde_json::to_string` over the untagged enum, so a
   `computed_persisted` `DateTime`/`Json` is lossy into its own storage.
-  Fix it or declare the loss explicitly; do not build the tier on it.
+- **Red-first surface.** Extend the certifier's types clause to the Loro
+  route; expected red = the disclosed-pending marker becomes a named
+  `Violation{clause: TypeDeclared(DateTime|Json)}`.
+- **Blocked by.** Nothing. **The profile's `date_time`/`json` claim stays
+  disclosed as SQL-leg-only until S2 lands.**
+- Plan: `~/.claude/plans/d29-property-kinds-plan.md`.
 
 ### I3-2 — enforce the capability clause (2b.6 / CV-E)
 - **Scope.** Declaration-time refusal when a type declares a
@@ -121,10 +94,14 @@ Follow-on rulings that bind open work:
   `crates/holon-org-format/profile.yaml:127`,
   `crates/holon-logseq-db/profile.yaml:183`,
   `crates/holon-capability/src/fixture.rs:146`.
+- **First step.** Wire `TypeDefinition::persisted_derived_plan()`
+  (`crates/holon-api/src/entity.rs:694`) into the production reconciler —
+  I3-1 left the DDL sink exercised through the test harness only, so
+  registration does not yet consume the plan.
 - **Red-first surface.** A test declaring such a type and expecting a named
   refusal; expected red = `declare_type` accepts it.
-- **Blocked by.** **I3-1** — the tier answer comes from `DerivedFieldPlan`.
-  Doing I3-2 first means inventing a second, weaker classifier.
+- **Blocked by.** Nothing — I3-1 has landed (`8d07c182`) and supplies the
+  tier answer via `DerivedFieldPlan`.
 - **Done when.** All four `CV-E lands in 2b.6` citations are gone.
 
 ### 2b.5 — refuse content at the write boundary on profile clauses
@@ -138,27 +115,13 @@ Follow-on rulings that bind open work:
 
 ### 2b.6 — see **I3-2** (same item).
 
-### BG-5 — delete `graph_eav`
-- **Scope.** Delete the unused EAV storage module and its SQL schema; remove
-  the DI registration and the Schema.md section. GQL is unaffected.
-- **Anchors.** `crates/holon-turso/src/schema_modules.rs:1264-1283`
-  (`GraphEavSchemaModule`, `Resource::schema("graph_eav")`),
-  `crates/holon/src/di/schema_providers.rs:134`,
-  `crates/holon-turso/sql/schema/graph_eav.sql`,
-  `docs/Architecture/Schema.md:175-194`.
-- **Ruling executed.** BG-5 (a).
-- **Red-first surface.** None needed — this is a deletion of code with zero
-  readers. The gate is that boot and the keystone stay green with the
-  module and its `DbReady` marker gone.
-- **Blocked by.** Nothing. Independent of everything else in this program.
-
 ### Inc 4 — Loro format adapter
 - **Scope.** Layout inferred from `crdt_backing` metadata (hierarchical →
   tree, flat → map-per-entity; text-fidelity fields → `LoroText`, scalars →
   LWW); a generated per-type projector; adapter capability declarations;
   the OQ-2 authority rule. BG-2's provisional status is re-tested here.
-- **Blocked by.** NV-1's S2 half touches the same on-disk representation —
-  settle the `#[serde(untagged)]` kind loss before generalizing the leg.
+- **Blocked by.** NV-1/S2 touches the same on-disk representation — settle
+  the `#[serde(untagged)]` kind loss before generalizing the leg.
 
 ### Inc 5 — first non-org file adapter (CSV or YAML)
 - **Scope.** Proves the per-format rule end to end. Re-opens C7:
@@ -189,12 +152,11 @@ is lifted opportunistically only.
 
 ---
 
-## 4. Lanes running now (2026-08-31)
+## 4. Lanes running now (2026-09-01)
 
-| Lane | Item | State |
-|---|---|---|
-| `.claude/worktrees/bg-i3-1` | I3-1 | in flight, not landed (working rev empty at check) |
-| `.claude/worktrees/bg-eav` | BG-5 | in flight, not landed (working rev empty at check) |
+No lane in this program is in flight; BG-5, I3-1 and NV-1 have all landed on
+`main`. The only live lane in the tree, `.claude/worktrees/integ-views4`, is
+unrelated to Block Generalization.
 
 ---
 
