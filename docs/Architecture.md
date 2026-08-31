@@ -129,7 +129,7 @@ External (non-workspace) crates, for reference:
 | Crate | Purpose |
 |-------|---------|
 | `gql-parser` (external) | GQL (ISO/IEC 39075) parsing to AST |
-| `gql-transform` (external) | GQL AST → SQL compilation via EAV schema |
+| `gql-transform` (external) | GQL AST → SQL compilation over the typed entity tables |
 
 ## Core Traits
 
@@ -247,7 +247,7 @@ Detailed documentation lives in `docs/Architecture/`:
 | [render-pipeline.md](Architecture/RenderPipeline.md) | Query compilation (PRQL/GQL/SQL), EntityProfile, ReactiveViewModel, Three-Tier Events |
 | [operations.md](Architecture/Operations.md) | Operation System, Action Watcher, Undo/Redo, Procedural Macros |
 | [integrations.md](Architecture/Integrations.md) | External System Pattern, MCP Client, Dependency Injection, Frontend Architecture |
-| [schema.md](Architecture/Schema.md) | Table/view-level schema reference: module registry, block base table + junctions + hydration matview, hierarchy, navigation, sync/operations/links/identity, graph EAV |
+| [schema.md](Architecture/Schema.md) | Table/view-level schema reference: module registry, block base table + junctions + hydration matview, hierarchy, navigation, sync/operations/links/identity |
 | [engine.md](Architecture/Engine.md) | Standalone Petri-Net Engine, Fractional Indexing, Platform Support |
 | [simulation.md](Architecture/Simulation.md) | Hypothetical state: search / alternatives / preview regimes, twin-only search, use-case gallery, PN reification guards |
 | [sync.md](Architecture/Sync.md) | Loro CRDT, CollaborativeDoc, LoroBackend, sync wiring (LiveData<Block> + direct cache feeds), P2P, Consistency Model |

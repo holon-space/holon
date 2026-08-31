@@ -12,8 +12,6 @@ use gql_parser::Clause;
 use gql_parser::PathElement;
 use gql_parser::Query;
 use gql_transform::resolver::ColumnMapping;
-use gql_transform::resolver::EavEdgeResolver;
-use gql_transform::resolver::EavNodeResolver;
 use gql_transform::resolver::EdgeDef;
 use gql_transform::resolver::ForeignKeyEdgeResolver;
 use gql_transform::resolver::GraphSchema;
@@ -222,65 +220,145 @@ impl GraphSchemaRegistry {
         GraphSchema {
             nodes,
             edges,
-            default_node_resolver: Box::new(EavNodeResolver),
-            default_edge_resolver: Box::new(EavEdgeResolver),
+            default_node_resolver: Box::new(MappedNodeResolver {
+                table_name: NO_TYPED_RESOLVER.into(),
+                id_col: "id".into(),
+                label: NO_TYPED_RESOLVER.into(),
+                columns: Vec::new(),
+                extension_column: None,
+                multi_value_properties: HashMap::new(),
+            }),
+            default_edge_resolver: Box::new(ForeignKeyEdgeResolver {
+                fk_table: NO_TYPED_RESOLVER.into(),
+                fk_column: "source_id".into(),
+                target_table: NO_TYPED_RESOLVER.into(),
+                target_id_column: "id".into(),
+            }),
             raw_return: true,
         }
     }
 }
 
-/// Error returned when a GQL query references relationship (edge) types that
-/// are not registered in the `GraphSchema`.
+/// Table named by the `GraphSchema` default resolvers.
 ///
-/// Without this check an unregistered edge name silently falls through to the
-/// EAV `default_edge_resolver`, which joins the (in holon, absent/empty) EAV
-/// `edges` table and yields 0 rows with no error — a "fail loud, never fake"
-/// violation. holon populates NO EAV graph tables; every real edge is
-/// registered via `register_type`/`register_edges`/`register_edge_fields`, so a
-/// named edge absent from the registry is always a typo/unknown, never a valid
-/// EAV lookup.
+/// [`validate_typed_shape`] makes these unreachable from MATCH. A CREATE clause
+/// still reaches them — it is not walked — and then fails uniformly at
+/// execution with `no such table: __holon_no_typed_resolver__`.
+///
+/// `gql-transform` requires the two `default_*_resolver` fields as plain
+/// (non-`Option`) values, so they cannot be removed — only pointed somewhere
+/// harmless. They used to name the generic EAV tables, which meant an
+/// unvalidated shape read `nodes`/`edges`: absent on a fresh database (loud
+/// error) but present-and-empty on one written before BG-5 (silent zero rows) —
+/// the same query giving two answers depending on the database's age. Naming a
+/// table that exists in NO database makes that residual path fail identically
+/// everywhere.
+const NO_TYPED_RESOLVER: &str = "__holon_no_typed_resolver__";
+
+/// A GQL MATCH shape that no typed resolver can serve.
+///
+/// Every such shape used to lower to the generic EAV tables (`nodes`, `edges`,
+/// `node_labels`), which BG-5 deleted. Those tables were empty on every
+/// database that ever existed, so these shapes never returned data — refusing
+/// them by name changes no working behaviour, and replaces a silent empty
+/// result with a compile error.
 #[derive(Debug, thiserror::Error)]
-#[error("unknown GQL edge type(s) {unknown:?} in MATCH pattern; registered edges: {registered:?}")]
-pub struct UnknownEdgeError {
-    pub unknown: Vec<String>,
-    pub registered: Vec<String>,
+pub enum UntypedGqlShape {
+    #[error(
+        "unknown GQL edge type(s) {unknown:?} in MATCH pattern; registered edges: {registered:?}"
+    )]
+    UnknownEdge {
+        unknown: Vec<String>,
+        registered: Vec<String>,
+    },
+
+    #[error(
+        "untyped relationship `-[]->` in MATCH pattern: GQL traverses only typed edges (a \
+         reference field's `edge_name`, or a junction table). Name one of the registered edges: \
+         {registered:?}"
+    )]
+    UntypedEdge { registered: Vec<String> },
+
+    #[error("label `{label}` is not a registered type; registered labels: {registered:?}")]
+    UnknownNodeLabel {
+        label: String,
+        registered: Vec<String>,
+    },
+
+    #[error(
+        "unlabelled node pattern in MATCH: GQL scans only typed tables, so every node must name \
+         a registered label. Registered labels: {registered:?}"
+    )]
+    UnlabelledNode { registered: Vec<String> },
 }
 
-/// Fail loud on any MATCH-clause relationship type absent from `schema`.
+/// Refuse any MATCH shape that has no typed resolver, before transform runs.
 ///
-/// Parse-don't-validate at the GQL compile boundary: reject an unregistered
-/// edge name up front rather than letting it silently lower to the empty EAV
-/// path.
-pub fn validate_referenced_edges(
-    schema: &GraphSchema,
-    query: &Query,
-) -> Result<(), UnknownEdgeError> {
-    let mut unknown: Vec<String> = Vec::new();
+/// Parse-don't-validate at the GQL compile boundary. `GraphSchema` carries a
+/// `default_node_resolver`/`default_edge_resolver` pair that the upstream
+/// `gql-transform` crate requires as plain (non-`Option`) fields; this function
+/// is what keeps a MATCH from reaching them, so the SQL a MATCH emits can only
+/// ever name a typed table. It walks MATCH only: a CREATE clause still reaches
+/// the defaults and fails at execution against the sentinel table.
+pub fn validate_typed_shape(schema: &GraphSchema, query: &Query) -> Result<(), UntypedGqlShape> {
+    let registered_edges = || {
+        let mut v: Vec<String> = schema.edges.keys().cloned().collect();
+        v.sort();
+        v
+    };
+    let registered_labels = || {
+        let mut v: Vec<String> = schema.nodes.keys().cloned().collect();
+        v.sort();
+        v
+    };
+
+    let mut unknown_edges: Vec<String> = Vec::new();
     for clause in &query.clauses {
         let Clause::Match(match_clause) = clause else {
             continue;
         };
         for path in &match_clause.pattern {
             for element in &path.elements {
-                let PathElement::Rel(rel) = element else {
-                    continue;
-                };
-                for rel_type in &rel.rel_types {
-                    if !schema.edges.contains_key(rel_type) && !unknown.contains(rel_type) {
-                        unknown.push(rel_type.clone());
+                match element {
+                    PathElement::Rel(rel) => {
+                        if rel.rel_types.is_empty() {
+                            return Err(UntypedGqlShape::UntypedEdge {
+                                registered: registered_edges(),
+                            });
+                        }
+                        for rel_type in &rel.rel_types {
+                            if !schema.edges.contains_key(rel_type)
+                                && !unknown_edges.contains(rel_type)
+                            {
+                                unknown_edges.push(rel_type.clone());
+                            }
+                        }
+                    }
+                    PathElement::Node(node) => {
+                        if node.labels.is_empty() {
+                            return Err(UntypedGqlShape::UnlabelledNode {
+                                registered: registered_labels(),
+                            });
+                        }
+                        for label in &node.labels {
+                            if !schema.nodes.contains_key(label) {
+                                return Err(UntypedGqlShape::UnknownNodeLabel {
+                                    label: label.clone(),
+                                    registered: registered_labels(),
+                                });
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    if unknown.is_empty() {
+    if unknown_edges.is_empty() {
         return Ok(());
     }
-    let mut registered: Vec<String> = schema.edges.keys().cloned().collect();
-    registered.sort();
-    Err(UnknownEdgeError {
-        unknown,
-        registered,
+    Err(UntypedGqlShape::UnknownEdge {
+        unknown: unknown_edges,
+        registered: registered_edges(),
     })
 }
 
@@ -320,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_registry_builds_with_eav_defaults() {
+    fn empty_registry_builds_with_no_typed_resolvers() {
         let registry = GraphSchemaRegistry::new();
         let schema = registry.build();
         assert!(schema.nodes.is_empty());
@@ -409,14 +487,21 @@ mod tests {
     fn unknown_edge_fails_loud() {
         let schema = schema_with_child_of();
         let query = parse_query("MATCH (a:block)-[:CHILD_OFF]->(b:block) RETURN a");
-        let err = validate_referenced_edges(&schema, &query)
+        let err = validate_typed_shape(&schema, &query)
             .expect_err("unregistered edge must fail loud, not silently return empty");
+        let UntypedGqlShape::UnknownEdge {
+            unknown,
+            registered,
+        } = &err
+        else {
+            panic!("expected UnknownEdge, got {err:?}");
+        };
         assert!(
-            err.unknown.contains(&"CHILD_OFF".to_string()),
+            unknown.contains(&"CHILD_OFF".to_string()),
             "error names the offending edge: {err:?}"
         );
         assert!(
-            err.registered.contains(&"CHILD_OF".to_string()),
+            registered.contains(&"CHILD_OF".to_string()),
             "error names the valid set: {err:?}"
         );
     }
@@ -425,14 +510,66 @@ mod tests {
     fn registered_edge_passes() {
         let schema = schema_with_child_of();
         let query = parse_query("MATCH (a:block)-[:CHILD_OF]->(b:block) RETURN a");
-        validate_referenced_edges(&schema, &query).expect("registered edge compiles");
+        validate_typed_shape(&schema, &query).expect("registered edge compiles");
+    }
+
+    /// An untyped relationship has no typed resolver, so it used to lower to a
+    /// `JOIN edges` over the deleted EAV table. It must be refused by name.
+    #[test]
+    fn untyped_edge_fails_loud() {
+        let schema = schema_with_child_of();
+        let query = parse_query("MATCH (a:block)-[]->(b:block) RETURN a");
+        let err = validate_typed_shape(&schema, &query)
+            .expect_err("an untyped edge has no typed resolver and must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("untyped relationship"),
+            "error names the offending shape: {msg}"
+        );
+        assert!(
+            msg.contains("CHILD_OF"),
+            "error names the supported typed edges: {msg}"
+        );
+    }
+
+    /// A label with no registered type used to lower to `FROM nodes JOIN
+    /// node_labels` over the deleted EAV tables. It must be refused by name.
+    #[test]
+    fn unknown_node_label_fails_loud() {
+        let schema = schema_with_child_of();
+        let query = parse_query("MATCH (a:not_a_registered_label) RETURN a");
+        let err = validate_typed_shape(&schema, &query)
+            .expect_err("an unregistered node label must be refused, not silently returned empty");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not_a_registered_label"),
+            "error names the offending label: {msg}"
+        );
+        assert!(
+            msg.contains("block"),
+            "error names the registered labels: {msg}"
+        );
+    }
+
+    /// An unlabelled node has no typed table to scan; it used to reach the EAV
+    /// `nodes` table via the default resolver.
+    #[test]
+    fn unlabelled_node_fails_loud() {
+        let schema = schema_with_child_of();
+        let query = parse_query("MATCH (a) RETURN a");
+        let err = validate_typed_shape(&schema, &query)
+            .expect_err("an unlabelled node has no typed resolver and must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unlabelled node"),
+            "error names the offending shape: {msg}"
+        );
     }
 
     #[test]
-    fn untyped_edge_passes() {
-        // A relationship with no rel_type legitimately uses the default path.
+    fn registered_node_label_passes() {
         let schema = schema_with_child_of();
-        let query = parse_query("MATCH (a:block)-[]->(b:block) RETURN a");
-        validate_referenced_edges(&schema, &query).expect("untyped edge is not validated");
+        let query = parse_query("MATCH (a:block) RETURN a");
+        validate_typed_shape(&schema, &query).expect("registered label compiles");
     }
 }

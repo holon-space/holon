@@ -108,6 +108,6 @@ These are the strongest visual demonstrations for marketing:
 
 These use cases surface requirements beyond parent-child nesting:
 
-- **Cross-source lateral links** (UC-3, UC-7, UC-10): Not just tree nesting but arbitrary edges between external items. The GQL EAV graph schema can handle this (`todoist:123` → `gmail:abc` edge), but the current design doc focuses on tree structure. This may be a separate feature.
+- **Cross-source lateral links** (UC-3, UC-7, UC-10): Not just tree nesting but arbitrary edges between external items. GQL traverses only TYPED edges (a reference field's `edge_name`, or a junction table), so such an edge needs a declared edge type — the generic EAV graph schema that would have absorbed it was removed under BG-5. The current design doc focuses on tree structure. This may be a separate feature.
 - **Annotation block document ownership** (UC-1, UC-2): Blocks parented under external items have no document in their ancestor chain. They need a home for OrgSync and document-scoped queries.
 - **Multi-source queries** (UC-6): The unified matview must support time-range filtering and cross-source sorting to enable review workflows.

@@ -27,7 +27,6 @@ use super::lifecycle::preload_startup_views;
 use super::schema_providers::BlockHierarchyView;
 use super::schema_providers::CoreTables;
 use super::schema_providers::DbReady;
-use super::schema_providers::GraphEavSchema;
 use super::schema_providers::HistoryTables;
 use super::schema_providers::IdentityTables;
 use super::schema_providers::LinkTables;
@@ -656,8 +655,7 @@ pub fn register_core_services_with_backend(
         .with_dependency::<DbReady<SyncStateTables>>()
         .with_dependency::<DbReady<OperationTables>>()
         .with_dependency::<DbReady<LinkTables>>()
-        .with_dependency::<DbReady<IdentityTables>>()
-        .with_dependency::<DbReady<GraphEavSchema>>(),
+        .with_dependency::<DbReady<IdentityTables>>(),
     );
 
     Ok(())
@@ -711,7 +709,7 @@ mod bundled_gql_query_smoke {
                 return Err("UNION queries not supported".into());
             }
         };
-        crate::storage::graph_schema::validate_referenced_edges(schema, &query)
+        crate::storage::graph_schema::validate_typed_shape(schema, &query)
             .map_err(|e| format!("GQL edge validation error: {e}"))?;
         gql_transform::transform(&query, schema)
             .map(|_| ())

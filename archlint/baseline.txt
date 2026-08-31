@@ -14,9 +14,9 @@
 #   frontend-provider-dep: 1
 #   frontend-raw-sql: 3
 #   loro_doc_escape: 36
-#   no-underscore-params: 38
+#   no-underscore-params: 37
 #   ok: 4
-#   raw_sql_in_frontend: 5
+#   raw_sql_in_frontend: 3
 #   sole_block_writer: 1
 
 deleted_cell_symbol	crates/holon-api/src/block_write_field.rs	"_expected_content".to_string()

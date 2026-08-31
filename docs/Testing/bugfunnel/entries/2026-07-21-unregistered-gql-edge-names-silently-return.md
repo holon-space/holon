@@ -38,11 +38,10 @@ FIXED 2026-07-21 (holon-side, gql-edge-failloud lane):
 boundary (`backend_engine.rs::compile_gql`) on any MATCH rel_type absent
 from the registry, returning `UnknownEdgeError` naming the offending edge(s)
 + the registered set — killing the silent EAV-default swallow.
-EAV-legitimacy analysis: holon populates NO EAV graph tables
-(`graph_eav.sql` is never run in prod init; scout-confirmed), so an
+EAV-legitimacy analysis: holon WRITES no EAV graph tables, so an
 unregistered named edge is ALWAYS a typo/unknown, never a valid EAV lookup —
 validation is safe (untyped `-[]->` edges still use the default path
-unchecked). Same guard woven into the bundled/desk corpus test
+unchecked — no longer true as of BG-5; see below). Same guard woven into the bundled/desk corpus test
 (`registration.rs`) as a no-legit-query-breaks safety net (green).
 Red-then-green in `graph_schema.rs` (`unknown_edge_fails_loud`). gql-to-sql
 FOLLOW-UP (clean home): `GraphSchema::edge_resolver`/`node_resolver` return
@@ -50,3 +49,38 @@ FOLLOW-UP (clean home): `GraphSchema::edge_resolver`/`node_resolver` return
 edges fail loud for ALL callers regardless of pre-validation; node-label
 silent fallback is the symmetric gap, not yet guarded (PR #2 lint substrate
 is the eventual home).
+
+### 2 of 3 residuals CLOSED under BG-5 (2026-08-31); the third stays OPEN
+
+The two shapes this entry left unguarded — the untyped `-[]->` edge and the
+symmetric node-label fallback — are now refused by name.
+`validate_referenced_edges` became `validate_typed_shape`
+(`crates/holon-turso/src/graph_schema.rs`), returning `UntypedGqlShape`
+(`UnknownEdge` / `UntypedEdge` / `UnknownNodeLabel` / `UnlabelledNode`). The `GraphSchema`
+`default_node_resolver`/`default_edge_resolver` no longer name the EAV tables;
+`gql-transform` requires the fields, so they point at a table that exists in no
+database, making any residual path fail identically on fresh and legacy DBs.
+Red-then-green: `untyped_edge_fails_loud`, `unknown_node_label_fails_loud`.
+
+The THIRD residual listed above stays **OPEN**: `GraphSchema::edge_resolver` /
+`node_resolver` still return `&dyn` infallibly, so unknown shapes fail loud only
+for callers that pre-validate. `validate_typed_shape` walks MATCH clauses only,
+which is exactly what that residual predicts — `CREATE (a:not_a_registered_label)`
+is NOT validated and reaches the default resolver at execution time. It now fails
+uniformly and loudly (`no such table: __holon_no_typed_resolver__`) instead of
+inserting into the legacy EAV tables, so this is strictly better than the base
+behaviour, but the shape is still reachable. Extending validation to CREATE (and
+the junk-rows-written-before-failure question it raises) is a follow-up lane.
+
+Two premises in the text above were WRONG and are corrected here (found by
+adversarial verification, not by a test):
+
+- "`graph_eav.sql` is never run in prod init" — false. The DDL ran on EVERY
+  boot (`all_schema_roots()` → `DbReady<GraphEavSchema>`). The tables were
+  created-and-empty, not absent, which is exactly why the fallthrough returned
+  0 rows instead of erroring. BG-5 deleted the schema entirely.
+- Only the WRITE side was ever confirmed absent. A source grep cannot see these
+  readers at all: the SQL naming `nodes`/`edges` is generated inside the
+  external `gql-transform` crate, so no literal `FROM nodes` appears anywhere in
+  `crates/`. The reader must be found by compiling a query through the
+  production `GraphSchema`, not by grepping.

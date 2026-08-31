@@ -131,10 +131,6 @@ impl DbResource for LinkTables {}
 pub struct IdentityTables;
 impl DbResource for IdentityTables {}
 
-/// `graph_eav` schema.
-pub struct GraphEavSchema;
-impl DbResource for GraphEavSchema {}
-
 /// `trust_proposals` supervision matview (C5 trust gate; FROM `block_raw`).
 pub struct TrustProposalsView;
 impl DbResource for TrustProposalsView {}
@@ -413,22 +409,6 @@ pub fn register_schema_providers(injector: &Injector) {
         .with_dependency::<DbReady<CoreTables>>(),
     );
 
-    // -- GraphEavSchema (depends on CoreTables) --
-    injector.provide::<DbReady<GraphEavSchema>>(
-        Provider::root_async(|inj| async move {
-            let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
-            let db = inj.resolve::<dyn DbHandleProvider>();
-            run_schema_module(
-                &holon_turso::schema_modules::GraphEavSchemaModule,
-                &db.handle(),
-            )
-            .await
-            .expect("GraphEavSchema init failed");
-            Shared::new(DbReady::<GraphEavSchema>::new())
-        })
-        .with_dependency::<DbReady<CoreTables>>(),
-    );
-
     // -- FreeStandingTypeViews: every free-standing type's own raw table +
     // read matview, derived from its TypeDefinition by TursoAdapter. No
     // dependency on the block chain — a free-standing type references nothing.
@@ -480,7 +460,6 @@ pub fn all_schema_roots() -> Vec<std::any::TypeId> {
         TypeId::of::<DbReady<IntegrationStateTables>>(),
         TypeId::of::<DbReady<OperationTables>>(),
         TypeId::of::<DbReady<LinkTables>>(),
-        TypeId::of::<DbReady<GraphEavSchema>>(),
         TypeId::of::<DbReady<TrustProposalsView>>(),
         TypeId::of::<DbReady<AutomationsJournalView>>(),
         TypeId::of::<DbReady<JournalDayPagesView>>(),

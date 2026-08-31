@@ -27,9 +27,7 @@ joins the `block` matview, not `block_raw`).
 ## Module registry
 
 Every table/view is owned by exactly one `SchemaModule` (trait in
-`crates/holon-turso/src/schema_module.rs`) — including `graph_eav`, whose
-former "wired directly as DI SQL" exception no longer exists
-(`GraphEavSchemaModule` is a regular module). `provides()`/`requires()`
+`crates/holon-turso/src/schema_module.rs`). `provides()`/`requires()`
 resources are FluxDI `DbReady<R>` markers; the concrete module impls live in
 `crates/holon-turso/src/schema_modules.rs` and are run via
 `run_schema_module` by the `DbReady<R>` providers in
@@ -54,7 +52,6 @@ the `schema_module` trait module, `dynamic_schema_module`, `turso`,
 | `OperationsSchemaModule` | `operation` | (none) | base table |
 | `LinkSchemaModule` | `block_link` | `block` | base table (populated by `LinkEventSubscriber`, not SQL) |
 | `IdentitySchemaModule` | `canonical_entity`, `entity_alias`, `proposal_queue` | (none) | base tables (unpopulated seam) |
-| `GraphEavSchemaModule` | `graph_eav` (`nodes`, `edges`, `node_labels`, `property_keys`, `*_props_*`) | (none) | base tables |
 
 **Runtime-defined types**: `DynamicSchemaModule`
 (`crates/holon-turso/src/dynamic_schema_module.rs`) builds a `SchemaModule`
@@ -172,27 +169,28 @@ pure in-memory UI state.
 merge / propose-merge / accept-proposal operations have a schema seam to
 plug into rather than growing ad-hoc identity columns elsewhere.
 
-## Generic graph: `graph_eav`
+## Generic graph: `graph_eav` (removed)
 
-`graph_eav` (`crates/holon-turso/sql/schema/graph_eav.sql`) is owned by
-`GraphEavSchemaModule` — a regular `SchemaModule` impl
-(`schema_modules.rs`), empty `requires()`, run via `run_schema_module`; only
-the `DbReady<GraphEavSchema>` marker remains DI-side
-(`di/schema_providers.rs`). It is a generic entity-attribute-value graph
-store, independent of the block schema:
+`graph_eav` — a generic entity-attribute-value store (`nodes`, `edges`,
+`node_labels`, `property_keys`, `*_props_*`) — was removed under BG-5: the
+typed tables plus their per-type matviews are the model, and GQL resolves
+nodes and edges over those typed tables (`MappedNodeResolver` /
+`ForeignKeyEdgeResolver`, `crates/holon-turso/src/graph_schema.rs`). See
+[BlockGeneralization](../Plans/BlockGeneralization.md).
 
-| Table | Role |
-|---|---|
-| `nodes` | Node ids (`id` autoincrement). |
-| `edges` | Typed edges between nodes: `source_id`, `target_id`, `type`. |
-| `property_keys` | Interned property key strings. |
-| `node_labels` | Multi-valued labels per node. |
-| `node_props_{int,text,real,bool,json}` | One EAV table per value type, keyed `(node_id, key_id)`. |
-| `edge_props_{int,text,real,bool,json}` | Same shape, keyed `(edge_id, key_id)`. |
+A database written before the removal may still carry the (always empty)
+tables. They are deliberately NOT dropped at boot, and nothing needs them to
+be: a MATCH shape with no typed resolver is refused at COMPILE time by
+`validate_typed_shape` (`crates/holon-turso/src/graph_schema.rs`), before any
+SQL is generated. Fresh and legacy databases therefore answer every query
+identically — no table sniffing, and no query that errors on one install while
+silently returning zero rows on another.
 
-This is a separate concern from the block hierarchy — it is not currently a
-projection of `block`/`block_with_path`. It has no readers and is scheduled
-for deletion under BG-5, see [docs/Plans/BlockGeneralization.md](../Plans/BlockGeneralization.md).
+The two shapes that used to reach the EAV tables are refused by name: an
+unregistered node label (`label X is not a registered type`) and an untyped
+relationship `-[]->` (which names the supported typed-edge forms). Both were
+empty on every database that ever existed, so refusing them removes no working
+behaviour.
 
 ## Directories and files
 
@@ -212,7 +210,7 @@ track the on-disk vault layout independent of block content:
 | `crates/holon-turso/src/dynamic_schema_module.rs` | `DynamicSchemaModule` (runtime-defined types) |
 | `crates/holon-turso/src/schema_modules.rs` | Concrete built-in module implementations (imported as `holon_turso::schema_modules` directly — not re-exported via `crates/holon/src/storage/mod.rs`) |
 | `crates/holon/src/storage/resource.rs` | Re-export of `Resource` (now in `holon-core`) |
-| `crates/holon/src/di/schema_providers.rs` | FluxDI `DbReady<R>` wiring, dependency ordering, `graph_eav` DI registration |
+| `crates/holon/src/di/schema_providers.rs` | FluxDI `DbReady<R>` wiring, dependency ordering |
 | `crates/holon-turso/sql/schema/*.sql` | DDL for every table/matview above |
 | `crates/holon/sql/prql_stdlib.prql` | `children`/`siblings`/`descendants`/context-aware PRQL helpers over `block`/`block_with_path` |
 | `crates/holon-api/src/block.rs` | `Block`, `BlockWire`, `TryFrom<StorageEntity> for Block` |

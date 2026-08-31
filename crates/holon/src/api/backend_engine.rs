@@ -355,9 +355,10 @@ impl BackendEngine {
 
     /// Compile a GQL query to SQL.
     ///
-    /// Uses a `GraphSchema` with mapped relational tables so existing tables
-    /// (blocks, documents) are queryable as graph nodes via GQL, alongside
-    /// the EAV tables for ad-hoc graph data.
+    /// Uses a `GraphSchema` of mapped relational tables, so the typed entity
+    /// tables (blocks, documents) are queryable as graph nodes via GQL. A MATCH
+    /// shape with no typed resolver is refused by `validate_typed_shape` rather
+    /// than compiled.
     pub fn compile_gql(&self, gql: &str) -> Result<String> {
         let parsed = gql_parser::parse(gql)
             .map_err(|e| anyhow::anyhow!("GQL parse error: {}", e.message))?;
@@ -371,8 +372,8 @@ impl BackendEngine {
             .graph_schema_cache
             .read()
             .expect("graph_schema_cache poisoned");
-        crate::storage::graph_schema::validate_referenced_edges(&schema, &query)
-            .map_err(|e| anyhow::anyhow!("GQL edge validation error: {e}"))?;
+        crate::storage::graph_schema::validate_typed_shape(&schema, &query)
+            .map_err(|e| anyhow::anyhow!("GQL validation error: {e}"))?;
         let sql = gql_transform::transform(&query, &schema)
             .map_err(|e| anyhow::anyhow!("GQL transform error: {:?}", e))?;
         Ok(Self::gql_params_to_dollar(&sql))

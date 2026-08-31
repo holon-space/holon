@@ -33,9 +33,8 @@ use anyhow::Result;
 use gql_parser::QueryOrUnion;
 use gql_parser::parse;
 use gql_transform::resolver::ColumnMapping;
-use gql_transform::resolver::EavEdgeResolver;
-use gql_transform::resolver::EavNodeResolver;
 use gql_transform::resolver::EdgeDef;
+use gql_transform::resolver::ForeignKeyEdgeResolver;
 use gql_transform::resolver::GraphSchema;
 use gql_transform::resolver::JoinTableEdgeResolver;
 use gql_transform::resolver::MappedNodeResolver;
@@ -133,14 +132,31 @@ fn build_schema() -> GraphSchema {
         },
     );
 
+    // Same defaults production installs (`holon_turso::graph_schema`): they name
+    // a table no database has, so a MATCH shape with no typed resolver fails
+    // loud instead of silently reading the deleted EAV tables.
     GraphSchema {
         nodes,
         edges,
-        default_node_resolver: Box::new(EavNodeResolver),
-        default_edge_resolver: Box::new(EavEdgeResolver),
+        default_node_resolver: Box::new(MappedNodeResolver {
+            table_name: NO_TYPED_RESOLVER.into(),
+            id_col: "id".into(),
+            label: NO_TYPED_RESOLVER.into(),
+            columns: Vec::new(),
+            extension_column: None,
+            multi_value_properties: HashMap::new(),
+        }),
+        default_edge_resolver: Box::new(ForeignKeyEdgeResolver {
+            fk_table: NO_TYPED_RESOLVER.into(),
+            fk_column: "source_id".into(),
+            target_table: NO_TYPED_RESOLVER.into(),
+            target_id_column: "id".into(),
+        }),
         raw_return: true,
     }
 }
+
+const NO_TYPED_RESOLVER: &str = "__holon_no_typed_resolver__";
 
 fn compile(gql: &str, schema: &GraphSchema) -> Result<String> {
     let parsed = parse(gql).map_err(|e| anyhow::anyhow!("GQL parse error: {}", e.message))?;

@@ -1257,36 +1257,6 @@ impl SchemaModule for IdentitySchemaModule {
     }
 }
 
-/// Graph EAV (entity-attribute-value) schema for typed-entity edges.
-///
-/// Faithful transliteration of the former inline DDL loop in holon's
-/// `di/schema_providers.rs` (`DbReady<GraphEavSchema>` provider): same
-/// statements, same `Resource::schema("graph_eav")` availability marker,
-/// same DDL-then-mark ordering (via `run_schema_module`).
-pub struct GraphEavSchemaModule;
-
-#[async_trait]
-impl SchemaModule for GraphEavSchemaModule {
-    fn name(&self) -> &str {
-        "graph_eav"
-    }
-
-    fn provides(&self) -> Vec<Resource> {
-        vec![Resource::schema("graph_eav")]
-    }
-
-    fn requires(&self) -> Vec<Resource> {
-        vec![]
-    }
-
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
-        for stmt in sql_statements(include_str!("../sql/schema/graph_eav.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

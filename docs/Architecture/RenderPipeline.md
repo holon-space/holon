@@ -14,16 +14,21 @@ SQL string  ──→ (used directly)
 
 All three paths produce pure SQL. Rendering is **decoupled** from query compilation — it is handled by the EntityProfile system at runtime (see [EntityProfile System](#entityprofile-system-render-architecture)).
 
-### EAV Graph Schema
+### Graph Schema
 
-GQL queries operate on an Entity-Attribute-Value schema with 14 tables:
-- `nodes`, `edges` — graph structure
-- `node_labels` — label-based node classification
-- `property_keys` — shared key dictionary
-- `node_props_{int,text,real,bool,json}` — typed node properties
-- `edge_props_{int,text,real,bool,json}` — typed edge properties
+GQL queries operate on the ORDINARY typed tables and their foreign-key
+relations — there is no separate graph store. The mechanism is the
+`GraphSchema` passed to `gql_transform::transform` (cached in
+`BackendEngine::graph_schema_cache`): each type in the registry that declares a
+`graph_label` contributes a `MappedNodeResolver` over its own table, and each
+field carrying an `edge_name` + `reference_target` contributes a
+`ForeignKeyEdgeResolver` (`crates/holon-turso/src/graph_schema.rs`). After
+transform, `gql_params_to_dollar` normalizes GQL `:param` placeholders to
+`$param` — anyone debugging GQL parameters will hit this.
 
-GQL also operates on ordinary tables with foreign key relations — not only the EAV schema. The unifying mechanism is the `GraphSchema` passed to `gql_transform::transform` (cached in `BackendEngine::graph_schema_cache`): it maps relational tables (`blocks`, `documents`) into graph nodes alongside the EAV tables, so both are queryable as one graph. After transform, `gql_params_to_dollar` normalizes GQL `:param` placeholders to `$param` — anyone debugging GQL parameters will hit this. The schema is initialized idempotently (all `IF NOT EXISTS`) during database startup.
+A generic `graph_eav` entity-attribute-value schema (`nodes`, `edges`,
+`node_props_*`, …) was created at boot but never given a resolver; it was
+removed under BG-5. See [Schema](Schema.md).
 
 ### EntityProfile System (Render Architecture)
 
