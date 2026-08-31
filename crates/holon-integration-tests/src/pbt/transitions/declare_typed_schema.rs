@@ -72,13 +72,37 @@ use crate::pbt::transitions::create_typed_entity::TypedColumns;
 const MIN_COLUMNS: usize = 1;
 const MAX_COLUMNS: usize = 4;
 
+/// The `computed_persisted` fields a declaration carries, as
+/// `(field_name, expression_source)` — the same surface a type YAML declares.
+/// A newtype so it can travel through a replay step as compact JSON.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ComputedDecls(pub Vec<(String, String)>);
+
+holon_pbt_core::step_field_via_json!(
+    ComputedDecls,
+    vec![
+        ComputedDecls(Vec::new()),
+        ComputedDecls(vec![(
+            "gen_derived".to_string(),
+            "a + \" \" + b".to_string()
+        )]),
+    ]
+);
+
+/// The name every drawn computed field carries. Underscored and longer than the
+/// column alphabet's 8-character bound, so it can never collide with a drawn
+/// column.
+const DERIVED_FIELD: &str = "gen_derived";
+
 /// Declare a free-standing type named `type_name` with `columns` TEXT value
-/// columns, alongside its `id` primary key.
+/// columns alongside its `id` primary key, plus any `computed` fields planted
+/// into its read matview.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
-#[step_template("I declare a datatype {type_name} with columns {columns}")]
+#[step_template("I declare a datatype {type_name} with columns {columns} computed {computed}")]
 pub struct DeclareTypedSchema {
     pub type_name: String,
     pub columns: TypedColumns,
+    pub computed: ComputedDecls,
 }
 
 impl TransitionFactory<ReferenceState> for DeclareTypedSchema {
@@ -104,7 +128,7 @@ impl TransitionFactory<ReferenceState> for DeclareTypedSchema {
                 proptest::string::string_regex("[a-z]{3,8}").expect("valid regex"),
                 MIN_COLUMNS..=MAX_COLUMNS,
             )
-            .prop_map(move |names| {
+            .prop_flat_map(move |names| {
                 // Sorted for a deterministic column order; keyword-colliding
                 // draws are prefixed rather than dropped, so the column count
                 // stays exactly what was drawn.
@@ -119,16 +143,72 @@ impl TransitionFactory<ReferenceState> for DeclareTypedSchema {
                     })
                     .collect();
                 columns.sort();
-                DeclareTypedSchema {
-                    type_name: type_name.clone(),
-                    columns: TypedColumns(columns),
-                }
+                let type_name = type_name.clone();
+                // A computed field needs two columns to concatenate, so a
+                // one-column draw declares none.
+                let with_computed = columns.len() >= 2;
+                proptest::bool::weighted(if with_computed { 0.5 } else { 0.0 }).prop_map(
+                    move |declare_computed| {
+                        let computed = if declare_computed {
+                            vec![(
+                                DERIVED_FIELD.to_string(),
+                                format!("{} + \" \" + {}", columns[0], columns[1]),
+                            )]
+                        } else {
+                            Vec::new()
+                        };
+                        DeclareTypedSchema {
+                            type_name: type_name.clone(),
+                            columns: TypedColumns(columns.clone()),
+                            computed: ComputedDecls(computed),
+                        }
+                    },
+                )
             })
             .boxed();
             // Lower weight than a create: a run wants several entities per
             // declared type, not a schema per step.
             (3, strat)
         })
+    }
+}
+
+impl DeclareTypedSchema {
+    /// The declared computations, parsed through the SAME door the SUT's
+    /// declaration goes through. The oracle then EVALUATES them where the SUT
+    /// reads the planted matview column, so the two lowerings of one
+    /// declaration are what the invariant compares.
+    fn parsed_computations(&self) -> Vec<(String, holon_api::computation::Computation)> {
+        let engine = holon_api::bounded_engine();
+        let mut types = holon_api::computation::FieldTypes::new();
+        for column in &self.columns.0 {
+            types.insert(
+                column.clone(),
+                holon_api::computation::FieldKind::of_sql_type("TEXT")
+                    .expect("TEXT is a known field kind"),
+            );
+        }
+        self.computed
+            .0
+            .iter()
+            .map(|(name, source)| {
+                let spec = holon_api::ComputedSpec::parse(
+                    name,
+                    source,
+                    holon_api::ComputedTier::ComputedPersisted,
+                    &types,
+                    &engine,
+                )
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "the oracle must parse the same declaration the SUT accepts — \
+                         '{}.{name}' = {source:?}: {e}",
+                        self.type_name
+                    )
+                });
+                (name.clone(), spec.computation().clone())
+            })
+            .collect()
     }
 }
 
@@ -152,9 +232,11 @@ impl TransitionRef<ReferenceState> for DeclareTypedSchema {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state
-            .typed_entities
-            .declare(self.type_name.clone(), self.columns.0.clone());
+        state.typed_entities.declare(
+            self.type_name.clone(),
+            self.columns.0.clone(),
+            self.parsed_computations(),
+        );
     }
 }
 
@@ -162,7 +244,7 @@ crate::cap_transition! {
     DeclareTypedSchema: SutTypedEntity,
     where R: [ RefLifecycle ],
     |me, _state, sut| {
-        sut.declare_typed_schema(&me.type_name, me.columns.0.clone()).await;
+        sut.declare_typed_schema(&me.type_name, me.columns.0.clone(), me.computed.0.clone()).await;
     }
     sql_budget: |_me, _state| {
         // DDL only: the raw table plus the matview reconcile. No row writes.

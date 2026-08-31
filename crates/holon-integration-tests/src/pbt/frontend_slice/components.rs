@@ -6380,14 +6380,46 @@ mod tests {
 // red-for-the-right-reason the keystone datatype axis captures.
 #[async_trait::async_trait(?Send)]
 impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent {
-    async fn declare_typed_schema(&self, type_name: &str, value_columns: Vec<String>) {
+    async fn declare_typed_schema(
+        &self,
+        type_name: &str,
+        value_columns: Vec<String>,
+        computed: Vec<(String, String)>,
+    ) {
         let mut fields = vec![holon_api::FieldSchema::new("id", "TEXT").primary_key()];
         fields.extend(
             value_columns
                 .iter()
                 .map(|c| holon_api::FieldSchema::new(c, "TEXT").nullable()),
         );
-        let type_def = holon_api::TypeDefinition::new(type_name, fields);
+        let mut type_def = holon_api::TypeDefinition::new(type_name, fields);
+
+        // The computed fields are parsed against the stored columns' declared
+        // types, exactly as `TypeRegistry::add_computed_fields` parses a YAML
+        // declaration — `ComputedSpec::parse` is the one door, and it refuses a
+        // persisted-tier field that does not lower to SQL.
+        let engine = holon_api::bounded_engine();
+        let declared = type_def.field_types();
+        for (name, source) in computed {
+            let spec = holon_api::ComputedSpec::parse(
+                &name,
+                &source,
+                holon_api::ComputedTier::ComputedPersisted,
+                &declared,
+                &engine,
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "declare_typed_schema('{type_name}'): computed field '{name}' = {source:?}: {e}"
+                )
+            });
+            type_def.fields.push(holon_api::FieldSchema {
+                name,
+                sql_type: "TEXT".to_string(),
+                lifetime: holon_api::FieldLifetime::Computed { spec },
+                ..Default::default()
+            });
+        }
         let registry = self.injector.resolve::<holon_profiles::TypeRegistry>();
         holon::core::type_declaration::declare_type(
             &type_def,

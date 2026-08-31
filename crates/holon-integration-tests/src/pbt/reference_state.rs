@@ -556,6 +556,10 @@ pub struct TypedEntitiesRefState {
     /// type name -> value columns, in the schema's order (the primary key is
     /// always `id` and is not listed).
     schemas: BTreeMap<String, Vec<String>>,
+    /// type name -> its `computed_persisted` fields, each with the
+    /// `Computation` the declaration compiled into. The oracle EVALUATES these
+    /// where the SUT reads a planted matview column.
+    computed: BTreeMap<String, Vec<(String, holon_api::computation::Computation)>>,
     /// type name -> entity id -> value cells, aligned with `schemas`.
     by_type: BTreeMap<String, BTreeMap<String, Vec<String>>>,
 }
@@ -563,8 +567,27 @@ pub struct TypedEntitiesRefState {
 impl TypedEntitiesRefState {
     /// Declare a type the SUT has serialized. Idempotent per name; the
     /// generator only ever proposes undeclared names.
-    pub fn declare(&mut self, type_name: String, value_columns: Vec<String>) {
-        self.schemas.insert(type_name, value_columns);
+    pub fn declare(
+        &mut self,
+        type_name: String,
+        value_columns: Vec<String>,
+        computed: Vec<(String, holon_api::computation::Computation)>,
+    ) {
+        self.schemas.insert(type_name.clone(), value_columns);
+        self.computed.insert(type_name, computed);
+    }
+
+    /// The full column list for a type: stored columns then computed ones, in
+    /// the order `rows` emits their cells.
+    pub fn columns(&self, type_name: &str) -> Vec<String> {
+        let mut cols = self.schemas.get(type_name).cloned().unwrap_or_default();
+        cols.extend(self.computed_of(type_name).iter().map(|(n, _)| n.clone()));
+        cols
+    }
+
+    /// The type's computed fields, empty for a type that declares none.
+    fn computed_of(&self, type_name: &str) -> &[(String, holon_api::computation::Computation)] {
+        self.computed.get(type_name).map_or(&[], Vec::as_slice)
     }
 
     /// Whether a type has been declared (a create's precondition).
@@ -615,9 +638,16 @@ impl TypedEntitiesRefState {
         self.by_type.get(type_name).map_or(0, BTreeMap::len)
     }
 
-    /// Expected rows for one type as `[id, ..values]`, canonically sorted to
-    /// match the SUT matview read. A declared-but-empty type expects no rows.
+    /// Expected rows for one type as `[id, ..values, ..computed]`, canonically
+    /// sorted to match the SUT matview read. A declared-but-empty type expects
+    /// no rows.
+    ///
+    /// The computed cells are produced by evaluating the declaration's
+    /// `Computation` over the row — deliberately NOT by restating its SQL, so
+    /// the invariant compares Holon's two lowerings of one declaration against
+    /// each other.
     pub fn rows(&self, type_name: &str) -> Vec<Vec<String>> {
+        let value_columns = self.schemas.get(type_name).cloned().unwrap_or_default();
         let mut rows: Vec<Vec<String>> = self
             .by_type
             .get(type_name)
@@ -627,6 +657,7 @@ impl TypedEntitiesRefState {
                     .map(|(id, values)| {
                         let mut row = vec![id.clone()];
                         row.extend(values.iter().cloned());
+                        row.extend(self.computed_cells(type_name, &value_columns, id, values));
                         row
                     })
                     .collect()
@@ -634,6 +665,41 @@ impl TypedEntitiesRefState {
             .unwrap_or_default();
         rows.sort();
         rows
+    }
+
+    /// Evaluate each of the type's computed fields over one row's cells. Every
+    /// value the axis writes is TEXT, so the context is uniformly
+    /// `Value::String` — the same shape the planted SQL sees.
+    fn computed_cells(
+        &self,
+        type_name: &str,
+        value_columns: &[String],
+        id: &str,
+        values: &[String],
+    ) -> Vec<String> {
+        let computed = self.computed_of(type_name);
+        if computed.is_empty() {
+            return Vec::new();
+        }
+        let mut ctx = holon_api::computation::Context::new();
+        ctx.insert("id".to_string(), holon_api::Value::String(id.to_string()));
+        for (column, value) in value_columns.iter().zip(values) {
+            ctx.insert(column.clone(), holon_api::Value::String(value.clone()));
+        }
+        computed
+            .iter()
+            .map(|(name, computation)| {
+                match computation.eval(&ctx).unwrap_or_else(|e| {
+                    panic!("oracle cannot evaluate '{type_name}.{name}' over {ctx:?}: {e}")
+                }) {
+                    holon_api::Value::String(s) => s,
+                    other => panic!(
+                        "oracle expects '{type_name}.{name}' to evaluate to a string — the axis \
+                         reads matview cells as text — but it produced {other:?}"
+                    ),
+                }
+            })
+            .collect()
     }
 
     /// Every id the oracle created, across all types — the identity check
@@ -877,7 +943,11 @@ impl ReferenceState {
                 // `DeclareTypedSchema`.
                 let mut t = TypedEntitiesRefState::default();
                 for schema in crate::pbt::typed_entity_schemas::free_standing_schemas() {
-                    t.declare(schema.type_name.clone(), schema.value_columns.clone());
+                    t.declare(
+                        schema.type_name.clone(),
+                        schema.value_columns.clone(),
+                        schema.computed_columns.clone(),
+                    );
                 }
                 t
             },

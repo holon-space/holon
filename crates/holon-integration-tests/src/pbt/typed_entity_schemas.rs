@@ -16,9 +16,12 @@
 
 use std::sync::LazyLock;
 
+use holon_api::ComputedTier;
+use holon_api::computation::Computation;
+
 /// One free-standing type's comparison shape: the columns the oracle predicts
 /// and the invariant reads back off the matview, `id` first.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TypedEntitySchema {
     pub type_name: String,
     /// The primary-key column (`id` for every type today).
@@ -26,13 +29,21 @@ pub struct TypedEntitySchema {
     /// The remaining persisted columns, in a stable order. A create fills every
     /// one of them, so no column compares NULL-vs-empty-string.
     pub value_columns: Vec<String>,
+    /// The type's `computed_persisted` fields, each with the `Computation` the
+    /// registry compiled it into. The SUT reads these off the matview as
+    /// planted columns; the oracle predicts them by EVALUATING the same
+    /// `Computation` — so the invariant compares the two lowerings of one
+    /// declaration rather than restating the SQL.
+    pub computed_columns: Vec<(String, Computation)>,
 }
 
 impl TypedEntitySchema {
-    /// The full column list the SUT read and the oracle rows share.
+    /// The full column list the SUT read and the oracle rows share: the key,
+    /// the stored columns, then the planted computed ones.
     pub fn columns(&self) -> Vec<String> {
         let mut cols = vec![self.id_column.clone()];
         cols.extend(self.value_columns.iter().cloned());
+        cols.extend(self.computed_columns.iter().map(|(n, _)| n.clone()));
         cols
     }
 }
@@ -64,10 +75,17 @@ pub fn free_standing_schemas() -> &'static [TypedEntitySchema] {
                     .filter(|f| !f.primary_key)
                     .map(|f| f.name.clone())
                     .collect();
+                let computed_columns = type_def
+                    .computed_specs()
+                    .into_iter()
+                    .filter(|(_, spec)| spec.tier() == ComputedTier::ComputedPersisted)
+                    .map(|(name, spec)| (name.to_string(), spec.computation().clone()))
+                    .collect();
                 TypedEntitySchema {
                     type_name: type_def.name.clone(),
                     id_column,
                     value_columns,
+                    computed_columns,
                 }
             })
             .collect();

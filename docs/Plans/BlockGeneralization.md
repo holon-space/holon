@@ -94,10 +94,25 @@ Follow-on rulings that bind open work:
   `crates/holon-org-format/profile.yaml:127`,
   `crates/holon-logseq-db/profile.yaml:183`,
   `crates/holon-capability/src/fixture.rs:146`.
-- **First step.** Wire `TypeDefinition::persisted_derived_plan()`
-  (`crates/holon-api/src/entity.rs:694`) into the production reconciler —
-  I3-1 left the DDL sink exercised through the test harness only, so
-  registration does not yet consume the plan.
+- **Production wiring: DONE.** `TursoAdapter::matview_select` consumes
+  `TypeDefinition::persisted_derived_plan()`, so every registered type's read
+  matview carries its `computed_persisted` columns. Pinned end to end by
+  `crates/holon-app/tests/computed_persisted_boot_column.rs` (a real boot
+  reads `person.display_name` off the matview) and by the keystone, whose
+  datatype axis now compares computed columns against an oracle that
+  EVALUATES the same `Computation`.
+  - The block-scoped sidecar reconciler
+    (`spawn_derived_field_reconciler`) stays test-only DELIBERATELY: it
+    maintains `block_derived` for seat-B fields, and no declaration in the
+    tree routes a `computed_persisted` field to seat B — the tier refuses a
+    computation that does not lower to SQL, so `matview_select` asserts
+    `stage_evaluated` is empty. Spawning it would be a worker over an empty
+    field set. It becomes production wiring when a declaration surface for
+    block-scoped derived fields exists.
+- **Still open.** The capability check itself (below). `declare_type` takes no
+  home, so refusing a `computed_persisted` declaration against a
+  `string_only`/`none` home first needs a ruling on which home a type
+  declaration binds to.
 - **Red-first surface.** A test declaring such a type and expecting a named
   refusal; expected red = `declare_type` accepts it.
 - **Blocked by.** Nothing — I3-1 has landed (`8d07c182`) and supplies the

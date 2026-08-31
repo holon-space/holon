@@ -23,9 +23,9 @@ impl RefTypedEntities for ReferenceState {
         // generated schema is covered the moment it is declared.
         self.typed_entities
             .declared()
-            .map(|(type_name, value_columns)| {
+            .map(|(type_name, _)| {
                 let mut columns = vec!["id".to_string()];
-                columns.extend(value_columns.iter().cloned());
+                columns.extend(self.typed_entities.columns(type_name));
                 (type_name.clone(), columns)
             })
             .collect()

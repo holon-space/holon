@@ -211,6 +211,9 @@ pub use entity::{
 pub use entity_uri::EntityUri;
 // Re-export CompiledExpr from holon-expr for FieldLifetime::Computed
 pub use holon_expr::CompiledExpr;
+// The engine `ComputedSpec::parse` expects, re-exported so a caller declaring a
+// computed field does not need a direct rhai dependency to supply one.
+pub use holon_expr::bounded_engine;
 // Re-export the free-function extractor + its unoptimized-compile engine: the
 // profile boot path proves every entity-lookup a bundled computed field calls
 // is registered on the engine.

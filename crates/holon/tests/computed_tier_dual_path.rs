@@ -2,9 +2,10 @@
 //! as the production registry compiles it, produces the same value in memory
 //! (`Computation::eval`) and as a planted matview column evaluated by SQLite.
 //!
-//! The registry supplies the column plan; this file plants it. Schema
-//! registration does not yet consume `persisted_derived_plan`, so a booted
-//! vault has no `display_name` matview column.
+//! The registry supplies the column plan; this file plants it into a
+//! stand-alone view to compare the two evaluators directly. That the
+//! PRODUCTION matview carries the column is pinned separately, by
+//! `holon-app/tests/computed_persisted_boot_column.rs`.
 
 use std::collections::HashMap;
 

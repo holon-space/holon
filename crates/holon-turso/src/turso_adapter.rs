@@ -247,12 +247,14 @@ impl TursoAdapter {
         }
     }
 
-    /// The matview SELECT: every declared field projected verbatim from the raw
-    /// table.
+    /// The matview SELECT: every persisted field projected verbatim from the
+    /// raw table, then every `computed_persisted` field as a planted column.
     ///
-    /// Planted computed columns are appended by the caller that owns them,
-    /// through [`holon_api::computation::PlantedColumn::select_expr`] — the one
-    /// formatter that parses and quotes the alias.
+    /// The planted aliases come from
+    /// [`holon_api::computation::PlantedColumn::select_expr`] — the one
+    /// formatter that quotes the alias — so a computed field is readable by
+    /// name from the matview exactly like a stored one, and Turso's IVM
+    /// maintains it O(delta).
     pub fn matview_select(type_def: &TypeDefinition) -> String {
         let persisted = type_def.persistent_fields();
         assert!(
@@ -261,10 +263,22 @@ impl TursoAdapter {
             type_def.name
         );
         let raw = Self::raw_table_name(type_def);
-        let columns: Vec<String> = persisted
+        let mut columns: Vec<String> = persisted
             .iter()
             .map(|f| format!("\"{}\"", f.name))
             .collect();
+
+        let plan = type_def.persisted_derived_plan();
+        assert!(
+            plan.stage_evaluated.is_empty(),
+            "Type '{}' declares computed_persisted field(s) that do not lower to SQL: {:?}. \
+             The persisted tier admits only SQL-compilable computations; such a declaration \
+             must be refused at declaration time, not silently dropped from the matview.",
+            type_def.name,
+            plan.stage_evaluated
+        );
+        columns.extend(plan.sql_planted.iter().map(|c| c.select_expr()));
+
         format!("SELECT {} FROM \"{raw}\"", columns.join(", "))
     }
 

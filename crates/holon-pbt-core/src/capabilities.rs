@@ -3597,7 +3597,17 @@ pub trait SutTypedEntity {
     /// This is what makes the axis schema-generic rather than type-generic: the
     /// keystone draws a SHAPE and declares it, instead of relying on types
     /// someone hand-authored in YAML.
-    async fn declare_typed_schema(&self, type_name: &str, value_columns: Vec<String>);
+    ///
+    /// `computed` carries `(field_name, expression_source)` pairs declared at
+    /// the `computed_persisted` tier — the same declaration surface a type YAML
+    /// uses. Each becomes a planted matview column, which
+    /// `typed_entity_rows` then reads back like any stored one.
+    async fn declare_typed_schema(
+        &self,
+        type_name: &str,
+        value_columns: Vec<String>,
+        computed: Vec<(String, String)>,
+    );
 
     /// Insert one row into the type's raw write table (`<type_name>_raw`),
     /// carrying `id` plus each `(column, value)` in `fields`. Fails loud if the
