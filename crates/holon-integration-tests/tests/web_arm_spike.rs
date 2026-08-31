@@ -2,6 +2,12 @@
 //! driving the served dioxus-web app with real clicks and keystrokes, and
 //! measures the per-op latency the design's risk section keys off.
 //!
+//! Settles on the relay oracle like every other rung. It ran on the DOM settle
+//! window alone until 2026-09-01 and reddened about one run in four with
+//! `enter did not split the block`: the worker advances on a 16ms tick pump, so
+//! the DOM sits unchanged mid-flight and a quiet window is not evidence the
+//! gesture landed (WebArmPBT.md §4a).
+//!
 //! Not a keystone replay: a `hand-authored-regressions/keystone.jsonl` case is
 //! a `Fixture<E2ETransition>` over the keystone's reference state and wiring
 //! manifest, which needs the SUT construction increment 2 brings. This is the
@@ -14,6 +20,7 @@
 //!     --test web_arm_spike -- --ignored --nocapture
 #![cfg(feature = "web-arm")]
 
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -23,6 +30,8 @@ use anyhow::bail;
 use holon_api::EntityUri;
 use holon_api::KeyChord;
 use holon_frontend::user_driver::UserDriver;
+use holon_integration_tests::web_relay_oracle::WebRelayOracle;
+use holon_integration_tests::web_relay_oracle::hub_url;
 use holon_integration_tests::web_user_driver::RenderedNode;
 use holon_integration_tests::web_user_driver::WebUserDriver;
 
@@ -40,7 +49,7 @@ fn headless() -> bool {
 
 /// Records one op's wall time so the run can report p50/p95.
 struct Latencies {
-    /// (label, wall time incl. settle padding, gesture→last DOM change)
+    /// (label, wall time incl. the settle wait, gesture→last DOM change)
     samples: Vec<(String, Duration, Duration)>,
 }
 
@@ -75,7 +84,7 @@ impl Latencies {
             )
         };
         let mut out = format!(
-            "ops={}\n  wall (incl. settle padding): {}\n  effect (gesture → last DOM \
+            "ops={}\n  wall (incl. the settle wait): {}\n  effect (gesture → last DOM \
              change):  {}\n",
             self.samples.len(),
             quantiles(self.samples.iter().map(|s| s.1.as_millis()).collect()),
@@ -110,10 +119,13 @@ fn uri(node: &RenderedNode) -> Result<EntityUri> {
 #[ignore = "needs a served dioxus-web dist and a local Chrome"]
 async fn web_arm_spike_drives_the_browser() -> Result<()> {
     let url = app_url();
+    // ONE oracle for the whole test: the hub holds a single `role=browser`
+    // socket, and the two contexts below are strictly sequential.
+    let oracle = Arc::new(WebRelayOracle::start(&hub_url()));
 
     // ── Case reset 1: fresh browser context (OPFS empty) ────────────────────
     let reset_start = Instant::now();
-    let driver = WebUserDriver::launch(&url, headless()).await?;
+    let driver = WebUserDriver::launch_with_oracle(&url, headless(), Arc::clone(&oracle)).await?;
     let boot = reset_start.elapsed();
     let seeded = driver.snapshot();
     println!("[web-arm] case reset (launch + fresh context + boot): {boot:?}");
@@ -271,7 +283,7 @@ async fn web_arm_spike_drives_the_browser() -> Result<()> {
 
     // ── Case reset 2: a second fresh context must not see case 1's edits ────
     let reset2 = Instant::now();
-    let driver2 = WebUserDriver::launch(&url, headless()).await?;
+    let driver2 = WebUserDriver::launch_with_oracle(&url, headless(), Arc::clone(&oracle)).await?;
     let reset2_cost = reset2.elapsed();
     let fresh = driver2.snapshot();
     let case2_dom = driver2.body_text().await?;

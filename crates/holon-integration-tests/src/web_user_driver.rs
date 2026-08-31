@@ -90,6 +90,21 @@ Array.from(document.querySelectorAll('[data-entity-id]')).map(e => ({
 }))
 ";
 
+/// The zone every browser this arm launches runs in — stated, never inherited
+/// from the host.
+///
+/// A harness whose zone happens to agree with UTC computes the same calendar
+/// date whether or not the code under test honours a zone at all, so its date
+/// assertions pass against a build that never worked. That is not theoretical:
+/// it is how the browser minted day pages in UTC for two weeks under a green
+/// suite (bugfunnel
+/// `2026-08-31-wasm-mints-the-day-page-in-utc-not-the-viewer-zone`).
+/// +14:00 is the furthest zone ahead of UTC — the local and UTC dates differ
+/// for the widest part of the day — and it matches the offset the keystone's
+/// own clock declares (`KEYSTONE_CLOCK_UTC_OFFSET_SECONDS`).
+pub const BROWSER_TZ: &str = "Pacific/Kiritimati";
+pub const BROWSER_UTC_OFFSET_SECONDS: i32 = 14 * 3600;
+
 /// How often the DOM is re-read while waiting for a gesture to settle.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -167,12 +182,16 @@ impl WebUserDriver {
         headless: bool,
         oracle: Option<Arc<WebRelayOracle>>,
     ) -> Result<Self> {
-        let mut builder = BrowserConfig::builder().args(vec![
-            // The app needs crossOriginIsolated for wasm-wasip1-threads; the
-            // server sends COOP/COEP, these keep Chrome from vetoing it.
-            "--enable-features=SharedArrayBuffer",
-            "--disable-dev-shm-usage",
-        ]);
+        let mut builder = BrowserConfig::builder()
+            .args(vec![
+                // The app needs crossOriginIsolated for wasm-wasip1-threads; the
+                // server sends COOP/COEP, these keep Chrome from vetoing it.
+                "--enable-features=SharedArrayBuffer",
+                "--disable-dev-shm-usage",
+            ])
+            // Each case launches its own Chrome, so this is per-context in
+            // effect and reaches the worker threads too.
+            .env("TZ", BROWSER_TZ);
         if !headless {
             builder = builder.with_head();
         }
@@ -239,6 +258,7 @@ impl WebUserDriver {
             oracle,
         };
         driver.assert_cross_origin_isolated().await?;
+        driver.assert_browser_zone().await?;
         driver.await_boot().await?;
         // Only now can the oracle prove itself: the page dials the hub during
         // boot, so a liveness check before this point tests the hub, not the
@@ -248,6 +268,34 @@ impl WebUserDriver {
         }
         driver.await_quiescence().await?;
         Ok(driver)
+    }
+
+    /// Fail unless the browser really is in [`BROWSER_TZ`].
+    ///
+    /// Setting `TZ` is a request, not a guarantee — a Chrome that ignored it
+    /// would leave every date assertion in this arm agreeing with UTC by
+    /// accident, which is the exact failure mode the zone exists to prevent.
+    /// Checked before boot so the app's own `engineInit` offset is read under a
+    /// zone this has already proven.
+    async fn assert_browser_zone(&self) -> Result<()> {
+        let offset = self
+            .evaluate_json("new Date().getTimezoneOffset()")
+            .await
+            .context("reading the browser's timezone offset failed")?;
+        let minutes = offset
+            .as_i64()
+            .with_context(|| format!("getTimezoneOffset() returned {offset:?}, not a number"))?;
+        // JS reports minutes WEST of UTC, i.e. the negation of the offset.
+        let seconds = -minutes * 60;
+        if seconds != i64::from(BROWSER_UTC_OFFSET_SECONDS) {
+            bail!(
+                "the browser is at UTC{seconds:+}s but this arm requires {BROWSER_TZ} \
+                 (UTC{:+}s) — TZ did not take, so every date assertion here would be judged \
+                 against the wrong zone",
+                BROWSER_UTC_OFFSET_SECONDS
+            );
+        }
+        Ok(())
     }
 
     /// Block until the app publishes `data-boot-state="ready"`.

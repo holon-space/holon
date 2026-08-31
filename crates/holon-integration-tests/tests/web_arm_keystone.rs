@@ -53,8 +53,14 @@ use holon_integration_tests::pbt::hand_authored::load_cases;
 use holon_integration_tests::web_arm;
 use holon_integration_tests::web_relay_oracle::WebRelayOracle;
 use holon_integration_tests::web_relay_oracle::hub_url;
+use holon_integration_tests::web_user_driver::BROWSER_TZ;
+use holon_integration_tests::web_user_driver::BROWSER_UTC_OFFSET_SECONDS;
 use holon_integration_tests::web_user_driver::RenderedNode;
 use holon_integration_tests::web_user_driver::WebUserDriver;
+
+/// `YYYY-MM-DD` anywhere in a block's content.
+static DATE_LIKE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"\d{4}-\d{2}-\d{2}").expect("valid regex"));
 
 fn app_url() -> String {
     std::env::var("HOLON_WEB_URL").unwrap_or_else(|_| "http://127.0.0.1:8791/".to_string())
@@ -75,10 +81,158 @@ async fn boot(oracle: &Arc<WebRelayOracle>) -> Result<WebUserDriver> {
     WebUserDriver::launch_with_oracle(&app_url(), headless(), Arc::clone(oracle)).await
 }
 
+/// The corpus cases the web arm replays today. A ratchet, not a target: the
+/// cap taxonomy ends in a wildcard over every transition variant, so a case
+/// that stops being gesture-reachable would otherwise be absorbed as a
+/// "declared cap" and the run would stay green having asserted less. Adding a
+/// newly-replayable case here is welcome; removing one needs a comment saying
+/// what became unreachable and why that is acceptable.
+const REPLAYED_CASES: [&str; 9] = [
+    "outdent-page-child-refusal-sqlonly",
+    "split-at-caret-zero-then-enter-sqlonly",
+    "caret-zero-split-reseats-the-caret-in-the-already-open-editor",
+    "delete-backward-merges-previous-block-budget",
+    "backspace-at-document-start-is-a-noop",
+    "backspace-at-document-start-twice-stays-a-noop",
+    "backspace-at-document-start-then-enter-splits-above",
+    "split-then-type-caret-follows-typed-text",
+    "split-then-two-backspaces-caret-follows-second-join",
+];
+
+/// The blocks the hand-authored corpus is authored over. They exist only in the
+/// wide seed, which a browser can reach only through `reset_vault`.
+const WIDE_SEED_PAGE: &str = "block:structural-page";
+const WIDE_SEED_BLOCKS: [&str; 3] = ["block:parent", "block:c1", "block:c2"];
+
+/// Boot a case onto the WIDE seed, the way the corpus expects to find the
+/// vault.
+///
+/// `boot` alone opens the OPFS boot vault, which `seed_default_layout` fills —
+/// it has no `block:parent`/`c1`/`c2`, so every corpus case was unaddressable
+/// and the replay rung asserted nothing. Two steps fix that, and both are
+/// load-bearing: `reset_vault` installs the wide seed, and the navigation
+/// mounts its page, because a gesture can only reach a block the renderer has
+/// actually mounted. The recipe is `web_arm_reset_vault_rebinds_the_live_page`,
+/// which is also what pins the rebind this depends on.
+async fn boot_wide_seed(oracle: &Arc<WebRelayOracle>) -> Result<WebUserDriver> {
+    let driver = boot(oracle).await?;
+
+    oracle
+        .call("reset_vault", serde_json::json!({ "files": [] }))
+        .await
+        .context("reset_vault failed in the worker — the wide seed was never installed")?;
+
+    // ENGINE CHANNEL first: a missing DOM row after a failed seed would read as
+    // a binding bug, which is a different and much longer hunt.
+    let engine = oracle.engine_snapshot().await?;
+    for expected in std::iter::once(WIDE_SEED_PAGE).chain(WIDE_SEED_BLOCKS) {
+        if !engine.block_ids.iter().any(|id| id == expected) {
+            bail!(
+                "reset_vault reported success but the engine does not hold {expected:?}. \
+                 Engine holds: {:?}",
+                engine.block_ids
+            );
+        }
+    }
+
+    // DOM CHANNEL: the page re-binds to the new engine on its own; poll rather
+    // than await one signal so this does not depend on how that is implemented.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut rendered = driver.refresh_snapshot().await?;
+    while Instant::now() < deadline && !rendered.iter().any(|n| n.id == WIDE_SEED_PAGE) {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        rendered = driver.refresh_snapshot().await?;
+    }
+    if !rendered.iter().any(|n| n.id == WIDE_SEED_PAGE) {
+        bail!(
+            "the engine holds the wide seed but the page still renders the torn-down engine's \
+             vault: {:?}",
+            rendered.iter().map(|n| &n.id).collect::<Vec<_>>()
+        );
+    }
+
+    let page_uri = EntityUri::parse(WIDE_SEED_PAGE)?;
+    driver.click_entity(&page_uri, "sidebar").await?;
+
+    let reachable: std::collections::BTreeSet<String> = driver
+        .refresh_snapshot()
+        .await?
+        .into_iter()
+        .map(|n| n.id)
+        .collect();
+    let missing: Vec<&str> = WIDE_SEED_BLOCKS
+        .into_iter()
+        .filter(|id| !reachable.contains(*id))
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "opening {WIDE_SEED_PAGE} renders none of {missing:?}, so the corpus's blocks are \
+             still unaddressable. Rendered: {reachable:?}"
+        );
+    }
+    Ok(driver)
+}
+
 fn find_by_text<'a>(nodes: &'a [RenderedNode], role: &str, text: &str) -> Option<&'a RenderedNode> {
     nodes
         .iter()
         .find(|n| n.role == role && n.text.contains(text))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a served dioxus-web dist and a local Chrome"]
+async fn web_arm_browser_runs_in_a_fixed_non_utc_zone() -> Result<()> {
+    let oracle = Arc::new(WebRelayOracle::start(&hub_url()));
+    let driver = boot(&oracle).await?;
+
+    // `boot` already fails if TZ did not take — that only proves the browser
+    // matches the DECLARED constant. This rung asserts the property the
+    // constant exists for: the zone is not UTC-equivalent, so a date assertion
+    // here cannot pass by coinciding with UTC. Setting both constants to UTC/0
+    // is a one-line "simplification" that would otherwise leave every gate
+    // green and restore the two-week mask.
+    let offset = driver
+        .evaluate_json("new Date().getTimezoneOffset()")
+        .await?
+        .as_i64()
+        .context("getTimezoneOffset() did not return a number")?;
+    if offset != -(i64::from(BROWSER_UTC_OFFSET_SECONDS) / 60) {
+        bail!("browser reports getTimezoneOffset()={offset}, expected {BROWSER_TZ}");
+    }
+
+    // Strongest available evidence: a calendar date that ALREADY disagrees with
+    // UTC's. The two share a date for part of every day even at +14, so when
+    // they agree the offset carries the guarantee instead — never neither.
+    let browser_day = driver
+        .evaluate_json("new Date().toLocaleDateString('en-CA')")
+        .await?
+        .as_str()
+        .context("toLocaleDateString did not return a string")?
+        .to_string();
+    let utc_day = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    if browser_day == utc_day {
+        if offset == 0 {
+            bail!(
+                "the browser is at UTC (offset 0) and its calendar date {browser_day} is UTC's — \
+                 this arm asserts dates, and in a UTC-equivalent zone those assertions pass \
+                 whether or not the code under test honours a zone at all. BROWSER_TZ is \
+                 {BROWSER_TZ:?}; it must name a zone that is not UTC-equivalent."
+            );
+        }
+        println!(
+            "[web-arm] browser zone OK — {BROWSER_TZ}, offset {offset}min; shares UTC's date \
+             {browser_day} at this instant, discriminating at every other"
+        );
+    } else {
+        println!(
+            "[web-arm] browser zone OK — {BROWSER_TZ}: browser day {browser_day} vs UTC day \
+             {utc_day} — date assertions here cannot coincide with UTC"
+        );
+    }
+
+    driver.close().await?;
+    Ok(())
 }
 
 /// The rule engine runs in the browser: navigating to Journals materializes a
@@ -102,7 +256,14 @@ async fn web_arm_rule_engine_materializes_the_day_page() -> Result<()> {
 
     // ENGINE CHANNEL — the authoritative read. A day page is a document block
     // titled with today's date; the rule mints it, nothing else does.
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    // The day page belongs to the VIEWER, so the oracle is the browser's
+    // calendar date, not this process's. Reading the host zone here passed only
+    // while the two happened to agree, which is the same vacuity the browser bug
+    // hid behind.
+    let today = (chrono::Utc::now()
+        + chrono::Duration::seconds(i64::from(BROWSER_UTC_OFFSET_SECONDS)))
+    .format("%Y-%m-%d")
+    .to_string();
     let engine = oracle.engine_snapshot().await?;
     let day_blocks: Vec<(&String, &String)> = engine
         .block_content
@@ -110,10 +271,20 @@ async fn web_arm_rule_engine_materializes_the_day_page() -> Result<()> {
         .filter(|(_, content)| content.contains(&today))
         .collect();
     if day_blocks.is_empty() {
+        // A rule that fired on the WRONG date looks identical to one that never
+        // fired if the message only reports the date it looked for. Naming the
+        // dated blocks that DO exist separates a dead engine from a mis-zoned
+        // one — the distinction this arm's fixed zone exists to expose.
+        let dated: Vec<&String> = engine
+            .block_content
+            .values()
+            .filter(|c| DATE_LIKE.is_match(c))
+            .collect();
         bail!(
-            "the browser engine holds NO block carrying today's date ({today}) after opening \
-             Journals — the `daily_journal` rule never fired, so the rule engine is dead in this \
-             build. Engine holds {} blocks: {:?}",
+            "the browser engine holds NO block carrying the viewer's date ({today}, {BROWSER_TZ}) \
+             after opening Journals. Date-shaped blocks it DOES hold: {dated:?} — if that names \
+             another date the rule fired in the wrong zone; if it is empty the rule never fired. \
+             Engine holds {} blocks: {:?}",
             engine.block_ids.len(),
             engine.block_content.values().collect::<Vec<_>>()
         );
@@ -397,7 +568,7 @@ async fn web_arm_spaced_resets_keep_the_page_alive() -> Result<()> {
 async fn web_arm_replays_hand_authored_keystone_cases() -> Result<()> {
     let oracle = Arc::new(WebRelayOracle::start(&hub_url()));
     let cases = load_cases();
-    let mut replayed = 0usize;
+    let mut replayed: Vec<String> = Vec::new();
     let mut capped: Vec<(String, String)> = Vec::new();
     let mut latencies: Vec<(String, Duration, Option<Duration>)> = Vec::new();
 
@@ -413,8 +584,9 @@ async fn web_arm_replays_hand_authored_keystone_cases() -> Result<()> {
             case.transitions.len()
         );
         // Fresh context per case, exactly as the design's reset rule requires:
-        // a case must never inherit the previous one's OPFS.
-        let driver = boot(&oracle).await?;
+        // a case must never inherit the previous one's OPFS — then onto the
+        // wide seed the corpus is authored over.
+        let driver = boot_wide_seed(&oracle).await?;
         if let Some(reason) = web_arm::unaddressable(&driver, case) {
             capped.push((case.name.clone(), reason));
             driver.close().await?;
@@ -441,7 +613,7 @@ async fn web_arm_replays_hand_authored_keystone_cases() -> Result<()> {
                 })?;
         }
         driver.close().await?;
-        replayed += 1;
+        replayed.push(case.name.clone());
         println!("[web-arm] PASSED case {:?}", case.name);
     }
 
@@ -485,7 +657,30 @@ async fn web_arm_replays_hand_authored_keystone_cases() -> Result<()> {
         );
     }
 
-    if replayed == 0 {
+    // RATCHET. The cap taxonomy's last arm is a wildcard over every transition
+    // variant, present and future, so a case that stops being replayable is
+    // absorbed as a declared cap and the run stays green with less coverage
+    // than before. The wildcard stays — it is honest about what the browser can
+    // realize — and this list is what makes losing a case loud.
+    let missing: Vec<&str> = REPLAYED_CASES
+        .into_iter()
+        .filter(|name| !replayed.iter().any(|r| r == name))
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "case(s) {missing:?} left the replay set — either restore them, or update \
+             REPLAYED_CASES with a comment saying what stopped being reachable and why that is \
+             acceptable. Replayed this run: {replayed:?}"
+        );
+    }
+    assert!(
+        replayed.len() >= REPLAYED_CASES.len(),
+        "replayed {} cases but the pinned floor is {} — coverage went backwards",
+        replayed.len(),
+        REPLAYED_CASES.len()
+    );
+
+    if replayed.is_empty() {
         // DISCLOSED DEGRADED RUN. Loud on purpose: this test currently locks
         // the loader reuse and the cap taxonomy, and asserts NO application
         // behaviour. It starts asserting the moment the blocker below lifts,
@@ -504,9 +699,13 @@ async fn web_arm_replays_hand_authored_keystone_cases() -> Result<()> {
         );
     }
     assert!(
-        !capped.is_empty() || replayed > 0,
+        !capped.is_empty() || !replayed.is_empty(),
         "the corpus loaded but produced neither a replay nor a cap — the loader returned nothing"
     );
-    println!("[web-arm] replayed {replayed} of {} cases", cases.len());
+    println!(
+        "[web-arm] replayed {} of {} cases",
+        replayed.len(),
+        cases.len()
+    );
     Ok(())
 }

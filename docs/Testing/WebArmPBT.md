@@ -125,6 +125,23 @@ settled and the harness observed the new block only on the *next* gesture.
 The settle window is the increment-1 stand-in; the MCP-relay quiescence D4.a
 already rules for is the real fix, and this is empirical support for it.
 
+**STATUS 2026-09-01 — the settle window is gone; the spike settles on the
+relay.** The figures above are historical. The spike kept the DOM-only window
+after increment 2 gave every other rung the relay, and it cost exactly what this
+section predicted: about one run in four reddened with `enter did not split the
+block: 3 → 3` — the split had landed, the quiet DOM window just did not prove
+it. `web_arm_spike` now launches with `launch_with_oracle` like the other rungs.
+Re-measured over the same 30 ops, six consecutive runs green:
+
+| | p50 | p95 | max |
+|---|---|---|---|
+| wall per op (relay quiescence, no padding) | 139ms | 229ms | 413ms |
+| gesture → last DOM change | 63ms | 143ms | 195ms |
+
+Case reset is now ~1.9s (was ~2.5s), and the suite runs in ~8.4s rather than
+~17–23s. Evidence: `lane-logs/webpbt-spike-oracle-run1..6.log`,
+`lane-logs/webpbt-spike-oracle-measured.log`.
+
 ## 4b. Increment 2 result (measured 2026-08-16)
 
 D4.a holds, and the relay quiescence removes the padding §4a predicted it
