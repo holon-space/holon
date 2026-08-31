@@ -7,11 +7,25 @@
 //!   idempotent). Boot day agrees with the SUT `TestClock` by construction via
 //!   the shared `KEYSTONE_CLOCK_BOOT_MS` constant — no read-back side channel.
 
-/// The fixed wall-clock instant the composed frontend boot injects (local noon
-/// on 2026-01-15, timezone-robust). Both the SUT's `TestClock` and the
-/// reference model derive the boot day from this, so they agree by construction
-/// without a side channel.
+/// The fixed wall-clock instant the composed frontend boot injects. With
+/// [`KEYSTONE_CLOCK_UTC_OFFSET_SECONDS`] the boot day is **2026-01-16**. Both
+/// the SUT's `TestClock` and the reference model derive that day from this
+/// pair, so they agree by construction without a side channel.
 pub const KEYSTONE_CLOCK_BOOT_MS: i64 = 1_768_478_400_000; // 2026-01-15T12:00:00Z
+
+/// The zone the keystone's clock runs in, stated rather than inherited: a
+/// harness that ran at UTC would compute the same calendar day whether or not
+/// the code under test honours an offset at all, which is how a browser
+/// day-page bug once survived a green suite
+/// (bugfunnel `2026-08-31-wasm-mints-the-day-page-in-utc-not-the-viewer-zone`).
+/// +14:00 is the furthest zone ahead of UTC, so the local and UTC dates differ
+/// for the widest part of the day.
+pub const KEYSTONE_CLOCK_UTC_OFFSET_SECONDS: i32 = 14 * 3600;
+
+/// The keystone's clock at its boot instant, in the keystone's zone.
+pub fn keystone_boot_clock() -> holon_api::TestClock {
+    holon_api::TestClock::with_utc_offset(KEYSTONE_CLOCK_BOOT_MS, KEYSTONE_CLOCK_UTC_OFFSET_SECONDS)
+}
 
 /// Reference-side calendar-clock model (ADR 0024 §6). Tracks the model's
 /// current day and the set of distinct days the clock has visited, from which
@@ -31,9 +45,7 @@ impl ClockState {
     /// Seed from the fixed boot instant, so the boot day is already visited
     /// (the rule fires once at boot).
     pub fn new() -> Self {
-        let boot =
-            holon_api::CalendarDate::from_clock(&holon_api::TestClock::new(KEYSTONE_CLOCK_BOOT_MS))
-                .ymd();
+        let boot = holon_api::CalendarDate::from_clock(&keystone_boot_clock()).ymd();
         let mut visited_days = std::collections::BTreeSet::new();
         visited_days.insert(boot.clone());
         Self {

@@ -166,7 +166,8 @@
       // std::fs — that's not addressable through the OPFS IO shim. Phase 4
       // will replace the snapshot path with an OPFS-aware writer.
       try {
-        await withTimeout(call('engineInit', ':memory:'), 15000, 'engineInit')
+        const utcOffsetSeconds = -new Date().getTimezoneOffset() * 60
+        await withTimeout(call('engineInit', ':memory:', utcOffsetSeconds), 15000, 'engineInit')
         line('Phase3 engineInit(:memory:) → ok', 'ok')
 
         // Tables are seeded by DI startup; just probe one to prove queries work.

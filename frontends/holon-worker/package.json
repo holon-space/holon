@@ -7,6 +7,7 @@
   "scripts": {
     "napi-build": "napi build --features browser --profile release-official --platform --target wasm32-wasip1-threads --no-js --manifest-path ./Cargo.toml --output-dir .",
     "build": "bash scripts/build.sh",
+    "test:unit": "node --test 'test/*.test.mjs'",
     "serve": "node scripts/serve.mjs"
   },
   "dependencies": {

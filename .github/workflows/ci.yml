@@ -256,6 +256,20 @@ jobs:
       #     holon-frontend's `UserDriver` contract, NOT browser behaviour.
       #     Executing the gestures is increment 3 of docs/Testing/WebArmPBT.md,
       #     which needs its own job with the full web build.
+      #     Listing first is load-bearing: without the feature the binary
+      #     compiles with ZERO tests and `--no-tests=pass` reports success, so
+      #     a dropped `--features` would read as a green gate.
+      - name: Assert the web-arm suite actually compiled its tests
+        run: |
+          set -euo pipefail
+          count=$(cargo nextest list -p holon-integration-tests --features web-arm \
+            --test web_arm_spike --ignore-default-filter -Tjson-pretty \
+            | grep -c '"web_arm_spike_drives_the_browser"' || true)
+          if [ "$count" -eq 0 ]; then
+            echo "ERROR: web_arm_spike compiled no tests — the web-arm feature did not apply"
+            exit 1
+          fi
+
       - name: Compile-run web-arm gated suite (browser body stays ignored)
         run: cargo nextest run -p holon-integration-tests --features web-arm --test web_arm_spike --no-tests=pass
 

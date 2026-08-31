@@ -18,6 +18,7 @@ import {
 } from '@napi-rs/wasm-runtime'
 
 import { OpfsDirectory, opfsWorkerImports } from '/web/opfs-bridge.mjs'
+import { wasmStderrSink } from '/web/wasm-log.mjs'
 
 // Surface fatal worker errors to the parent. The top-level `await` below means
 // any instantiation failure becomes an unhandled rejection whose `error` event
@@ -35,7 +36,7 @@ self.addEventListener('error', (ev) => {
 const __wasi = new __WASI({
   version: 'preview1',
   print: (...args) => console.log('[wasm]', ...args),
-  printErr: (...args) => console.error('[wasm]', ...args),
+  printErr: wasmStderrSink('[wasm]'),
 })
 const __emnapiContext = __emnapiGetDefaultContext()
 const __sharedMemory = new WebAssembly.Memory({
@@ -164,7 +165,7 @@ self.addEventListener('message', async (e) => {
         value = mod.dbQuery(args[0])
         break
       case 'engineInit':
-        value = mod.engineInit(args[0]) ?? null
+        value = mod.engineInit(args[0], args[1]) ?? null
         break
       case 'engineResetStorage': {
         // B2: clear local data. Tear the engine down first (Rust releases the

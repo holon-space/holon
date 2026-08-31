@@ -208,6 +208,12 @@ jobs:
           npx playwright install --with-deps chromium
           trunk build
 
+      # The smoke test's only signal is the console channel, so the sink that
+      # decides what reaches console.error decides what that gate can catch.
+      - name: Run worker log-routing unit tests
+        working-directory: frontends/holon-worker
+        run: npm run test:unit
+
       - name: Run worker smoke test
         working-directory: frontends/dioxus-web
         env:

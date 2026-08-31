@@ -296,8 +296,9 @@ mod tests {
     use super::*;
     use crate::storage::turso::TursoBackend;
 
-    /// millis for local-noon on the given date — timezone-robust (noon UTC
-    /// lands on the same civil date from UTC-12 to UTC+12).
+    /// Millis for noon UTC on the given date. The callers pair it with a
+    /// zero-offset clock, so the civil date they assert is this date; a clock
+    /// carrying a real offset would land these on a neighbouring day.
     fn noon_utc_millis(y: i32, m: u32, d: u32) -> i64 {
         chrono::NaiveDate::from_ymd_opt(y, m, d)
             .unwrap()
@@ -317,7 +318,7 @@ mod tests {
     #[tokio::test]
     async fn day_forward_advance_writes_once_and_emits_one_cdc_update() {
         let handle = booted_clock_db().await;
-        let clock = TestClock::new(noon_utc_millis(2026, 7, 10));
+        let clock = TestClock::with_utc_offset(noon_utc_millis(2026, 7, 10), 0);
 
         // Boot seed: placeholder(1970) -> 2026-07-10.
         let first = reconcile_clock(&handle, &clock).await.unwrap();
@@ -379,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn backwards_day_change_still_writes() {
         let handle = booted_clock_db().await;
-        let clock = TestClock::new(noon_utc_millis(2026, 7, 10));
+        let clock = TestClock::with_utc_offset(noon_utc_millis(2026, 7, 10), 0);
         reconcile_clock(&handle, &clock).await.unwrap();
 
         // DST fall-back / travel west: the local day moves *earlier*.
@@ -409,7 +410,7 @@ mod tests {
     #[tokio::test]
     async fn no_change_tick_writes_nothing() {
         let handle = booted_clock_db().await;
-        let clock = TestClock::new(noon_utc_millis(2026, 7, 10));
+        let clock = TestClock::with_utc_offset(noon_utc_millis(2026, 7, 10), 0);
         reconcile_clock(&handle, &clock).await.unwrap();
 
         // Same day, a few hours later: no day change, no write.
@@ -454,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_materializes_fine_grain_row_absent_otherwise() {
         let handle = booted_clock_db().await;
-        let clock = TestClock::new(noon_utc_millis(2026, 7, 11));
+        let clock = TestClock::with_utc_offset(noon_utc_millis(2026, 7, 11), 0);
         let scheduler = spawn_clock_scheduler(
             handle.clone(),
             Arc::new(clock.clone()) as Arc<dyn Clock>,
@@ -502,7 +503,7 @@ mod tests {
         use holon_api::clock::Recurrence;
 
         let handle = booted_clock_db().await;
-        let clock = TestClock::new(noon_utc_millis(2026, 7, 11));
+        let clock = TestClock::with_utc_offset(noon_utc_millis(2026, 7, 11), 0);
         let scheduler = spawn_clock_scheduler(
             handle.clone(),
             Arc::new(clock.clone()) as Arc<dyn Clock>,

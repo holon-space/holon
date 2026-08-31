@@ -58,7 +58,12 @@ export declare function engineExecuteQuery(sql: string): string
  */
 export declare function engineExecuteSql(sql: string): void
 
-export declare function engineInit(dbPath: string): void
+/**
+ * `utc_offset_seconds` is the viewer's offset from UTC (JS
+ * `-getTimezoneOffset() * 60`). Required, not derived: wasm32 has no tz
+ * database, so the page is the only source of the viewer's calendar day.
+ */
+export declare function engineInit(dbPath: string, utcOffsetSeconds: number): void
 
 /**
  * Dispatch an MCP tool call by name. `args_json` is a JSON object string
@@ -86,22 +91,22 @@ export declare function engineReactiveCheck(): string
 export declare function engineResetStorage(): void
 
 /**
- * Set the in-memory editor focus (ADR 0010). `block_id: None` clears
- * focus; `caret_offset` arms the one-shot caret seed for the editor
- * that mounts for the block.
- */
-export declare function engineSetFocus(blockId?: string | undefined | null, caretOffset?: number | undefined | null): void
-
-/**
  * Record an expand/collapse gesture's view-local leg (the store the
  * `expand_toggle` gate is seeded from). The document leg —
- * `set_field(collapsed)` — goes through `engineDispatchIntents`;
+ * `set_field(collapsed)` — goes through `engine_dispatch_intents`;
  * `holon_frontend::expand_toggle::expand_toggle_effects` decides both.
  *
  * INTERNAL to the expand_toggle affordance — never call it alone; the page
  * sends both legs through `dispatch_expand_toggle`.
  */
 export declare function engineSetBlockExpanded(blockId: string, expanded: boolean): void
+
+/**
+ * Set the in-memory editor focus (ADR 0010). `block_id: None` clears
+ * focus; `caret_offset` arms the one-shot caret seed for the editor
+ * that mounts for the block.
+ */
+export declare function engineSetFocus(blockId?: string | undefined | null, caretOffset?: number | undefined | null): void
 
 /**
  * Switch the active render variant for a watched block. Errors if the
@@ -131,8 +136,11 @@ export declare function engineSnapshotView(blockId: string): string
  * spawned tasks (notably `watch_view` drains) can progress. Must be
  * called periodically from JS (`setInterval` / `requestAnimationFrame`
  * / after every RPC) — nothing runs without a `block_on` caller.
+ *
+ * Returns the engine generation, which changes when the engine underneath
+ * the caller has been swapped (`reset_vault`).
  */
-export declare function engineTick(budgetMs: number): void
+export declare function engineTick(budgetMs: number): number
 
 /**
  * Start watching `block_id` for `ViewModel` changes.

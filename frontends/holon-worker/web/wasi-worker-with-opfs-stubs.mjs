@@ -23,6 +23,7 @@
 // false so the Rust shim's dispatch never picks the sync path on a child.
 
 import { instantiateNapiModuleSync, MessageHandler, WASI } from '@napi-rs/wasm-runtime'
+import { wasmStderrSink } from '/web/wasm-log.mjs'
 
 // Forward fatal child-thread errors up to the main worker (which re-forwards to
 // the page) — child-worker error events are opaque cross-context otherwise.
@@ -58,7 +59,7 @@ const handler = new MessageHandler({
   onLoad({ wasmModule, wasmMemory }) {
     const wasi = new WASI({
       print: (...args) => console.log('[wasm child]', ...args),
-      printErr: (...args) => console.error('[wasm child]', ...args),
+      printErr: wasmStderrSink('[wasm child]'),
     })
     return instantiateNapiModuleSync(wasmModule, {
       childThread: true,

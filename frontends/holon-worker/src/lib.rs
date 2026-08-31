@@ -248,6 +248,28 @@ mod backend {
     /// Bumped by [`install`]; 0 until the first engine lands.
     static ENGINE_GENERATION: AtomicU32 = AtomicU32::new(0);
 
+    /// The viewer's UTC offset, handed in by [`init`] because wasm32 ships no
+    /// tz database. Outlives any one engine so `reset_vault` rebuilds keep it.
+    static UTC_OFFSET_SECONDS: OnceLock<i32> = OnceLock::new();
+
+    /// Wall clock for the browser: system time, plus the page's offset —
+    /// `chrono::Local` is UTC in wasm and would mint the day page on the wrong
+    /// calendar date for every viewer whose zone disagrees with UTC.
+    #[derive(Debug, Clone, Copy)]
+    struct BrowserClock {
+        utc_offset_seconds: i32,
+    }
+
+    impl holon_api::Clock for BrowserClock {
+        fn now_millis(&self) -> i64 {
+            holon_api::SystemClock.now_millis()
+        }
+
+        fn utc_offset_seconds_at(&self, _: i64) -> i32 {
+            self.utc_offset_seconds
+        }
+    }
+
     /// Publish `st` as the live engine. Every path that fills the slot goes
     /// through here: a `watch_view` subscription dies with the engine that
     /// owned it, and the generation is how a frontend learns to re-subscribe.
@@ -263,7 +285,14 @@ mod backend {
     /// Initialize the global `BackendEngine` + `FrontendSession` +
     /// `ReactiveEngine` against the OPFS-backed DB at `db_path`.
     /// Idempotent: a second call replaces the state.
-    pub(super) fn init(db_path: String) -> napi::Result<()> {
+    pub(super) fn init(db_path: String, utc_offset_seconds: i32) -> napi::Result<()> {
+        // A worker serves one page, so re-entering init cannot legitimately
+        // bring a different zone; a mismatch means the caller is wired wrong.
+        let installed = *UTC_OFFSET_SECONDS.get_or_init(|| utc_offset_seconds);
+        assert_eq!(
+            installed, utc_offset_seconds,
+            "engine_init re-entered with a different utc offset"
+        );
         // Install the worker's log sink exactly once (init may be re-entered).
         static TRACING: OnceLock<()> = OnceLock::new();
         TRACING.get_or_init(|| {
@@ -318,6 +347,18 @@ mod backend {
             .block_on(async {
                 create_backend_engine(path, |injector| {
                     use fluxdi::Module as _;
+
+                    let clock = BrowserClock {
+                        utc_offset_seconds: *UTC_OFFSET_SECONDS
+                            .get()
+                            .expect("engine_init installs the utc offset before any engine build"),
+                    };
+                    let injected =
+                        holon_api::InjectedClock(Arc::new(clock) as Arc<dyn holon_api::Clock>);
+                    injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(
+                        move |_| injected.clone().into(),
+                    ));
+
                     holon_loro_wiring::EventInfraModule
                         .configure(injector)
                         .map_err(|e| anyhow::anyhow!("EventInfraModule: {e}"))?;
@@ -1683,9 +1724,12 @@ mod backend {
 mod engine_exports {
     use super::backend;
 
+    /// `utc_offset_seconds` is the viewer's offset from UTC (JS
+    /// `-getTimezoneOffset() * 60`). Required, not derived: wasm32 has no tz
+    /// database, so the page is the only source of the viewer's calendar day.
     #[napi_derive::napi]
-    pub fn engine_init(db_path: String) -> napi::Result<()> {
-        backend::init(db_path)
+    pub fn engine_init(db_path: String, utc_offset_seconds: i32) -> napi::Result<()> {
+        backend::init(db_path, utc_offset_seconds)
     }
 
     /// Tear down the engine so Turso releases its OPFS file handles (B2). Call
@@ -1810,6 +1854,9 @@ mod engine_exports {
     /// `expand_toggle` gate is seeded from). The document leg —
     /// `set_field(collapsed)` — goes through `engine_dispatch_intents`;
     /// `holon_frontend::expand_toggle::expand_toggle_effects` decides both.
+    ///
+    /// INTERNAL to the expand_toggle affordance — never call it alone; the page
+    /// sends both legs through `dispatch_expand_toggle`.
     #[napi_derive::napi]
     pub fn engine_set_block_expanded(block_id: String, expanded: bool) -> napi::Result<()> {
         backend::set_block_expanded(block_id, expanded)

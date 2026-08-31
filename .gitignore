@@ -77,3 +77,7 @@ frontends/gpui/android/build-release-aab/
 # `scripts/bugfunnel.py index`. Committing it would restore the single
 # insertion point that per-entry files exist to remove.
 docs/Testing/bugfunnel/INDEX.md
+
+# Playwright run artifacts (frontends/dioxus-web)
+test-results/
+playwright-report/

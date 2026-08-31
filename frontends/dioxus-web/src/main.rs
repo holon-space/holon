@@ -243,7 +243,14 @@ fn App() -> Element {
             return;
         }
 
-        if let Err(e) = bridge.call("engineInit", [DB_PATH.into()]).await {
+        // The engine mints the day page from the viewer's calendar date, and
+        // wasm32 carries no tz database — the page is the only place that knows
+        // the zone, so it hands the offset over at boot.
+        let utc_offset_seconds = -js_sys::Date::new_0().get_timezone_offset() * 60.0;
+        if let Err(e) = bridge
+            .call("engineInit", [DB_PATH.into(), utc_offset_seconds.into()])
+            .await
+        {
             boot_state.set(BootState::Failed(format!("engineInit: {e}")));
             return;
         }

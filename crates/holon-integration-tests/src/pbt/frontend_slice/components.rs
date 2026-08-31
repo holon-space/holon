@@ -121,9 +121,8 @@ fn soak_deadline(default: Duration) -> Duration {
 /// The fixed wall-clock instant every composed keystone frontend boot injects
 /// as its `TestClock`, so "today" — and therefore the boot auto-create rule's
 /// journal date and its deterministic id — is identical across runs and host
-/// timezones. Noon UTC 2026-01-15 is timezone-robust (noon UTC lands on the
-/// same civil date from UTC-12..+12), matching the directed AdvanceDay
-/// capstone's `noon_millis`.
+/// timezones. Paired with `KEYSTONE_CLOCK_UTC_OFFSET_SECONDS`, which states the
+/// zone rather than inheriting one; the resulting boot day is 2026-01-16.
 pub fn keystone_boot_ms() -> i64 {
     chrono::NaiveDate::from_ymd_opt(2026, 1, 15)
         .expect("valid keystone boot date")
@@ -137,7 +136,10 @@ pub fn keystone_boot_ms() -> i64 {
 /// the composed frontend boot injects so the production `ClockScheduler` seeds
 /// the `clock` day row at a deterministic date.
 pub fn keystone_boot_clock() -> Arc<holon_api::TestClock> {
-    Arc::new(holon_api::TestClock::new(keystone_boot_ms()))
+    Arc::new(holon_api::TestClock::with_utc_offset(
+        keystone_boot_ms(),
+        crate::pbt::clock_state::KEYSTONE_CLOCK_UTC_OFFSET_SECONDS,
+    ))
 }
 
 /// The civil date (`YYYY-MM-DD`) the keystone boot clock reports as "today" —

@@ -122,6 +122,7 @@ module.exports.engineInit = __napiModule.exports.engineInit
 module.exports.engineMcpTool = __napiModule.exports.engineMcpTool
 module.exports.engineReactiveCheck = __napiModule.exports.engineReactiveCheck
 module.exports.engineResetStorage = __napiModule.exports.engineResetStorage
+module.exports.engineSetBlockExpanded = __napiModule.exports.engineSetBlockExpanded
 module.exports.engineSetFocus = __napiModule.exports.engineSetFocus
 module.exports.engineSetVariant = __napiModule.exports.engineSetVariant
 module.exports.engineSetViewport = __napiModule.exports.engineSetViewport

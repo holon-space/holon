@@ -9,6 +9,33 @@ use anyhow::Context;
 pub trait Clock: Send + Sync + std::fmt::Debug {
     /// Milliseconds since the Unix epoch.
     fn now_millis(&self) -> i64;
+
+    /// Seconds to add to UTC for the user's local wall clock at `millis`.
+    /// Carried by the clock rather than read from `chrono::Local` at the use
+    /// site because wasm32 targets ship no tz database: there `chrono::Local`
+    /// silently *is* UTC, which mints the day page on the wrong calendar date
+    /// for every user whose zone disagrees with UTC. Takes the instant so a
+    /// caller that already sampled the clock cannot read a second, later one.
+    fn utc_offset_seconds_at(&self, millis: i64) -> i32;
+}
+
+fn local_offset(clock: &dyn Clock, millis: i64) -> chrono::FixedOffset {
+    let secs = clock.utc_offset_seconds_at(millis);
+    chrono::FixedOffset::east_opt(secs)
+        .unwrap_or_else(|| panic!("clock reported an out-of-range utc offset of {secs}s"))
+}
+
+/// The host's local offset at `millis`, per-instant so a DST boundary between
+/// two readings is honoured. Returns 0 on wasm32, where there is no tz data —
+/// a wasm build must inject an offset instead of relying on this.
+pub fn host_utc_offset_seconds(millis: i64) -> i32 {
+    use chrono::Offset as _;
+    let dt = chrono::DateTime::from_timestamp_millis(millis)
+        .expect("clock now_millis out of DateTime range");
+    dt.with_timezone(&chrono::Local)
+        .offset()
+        .fix()
+        .local_minus_utc()
 }
 
 /// DI seam for the wall-clock authority the `ClockScheduler` ticks on.
@@ -36,19 +63,39 @@ impl Clock for SystemClock {
         // Preserves the exact pre-existing call used across block constructors.
         chrono::Utc::now().timestamp_millis()
     }
+
+    fn utc_offset_seconds_at(&self, millis: i64) -> i32 {
+        host_utc_offset_seconds(millis)
+    }
 }
 
-/// Deterministic clock for tests. Cheap to clone; clones share the same
-/// instant.
+/// Deterministic clock for tests — instant AND zone. Cheap to clone; clones
+/// share the same instant.
+///
+/// The offset defaults to [`TestClock::DEFAULT_UTC_OFFSET_SECONDS`], a fixed
+/// zone that is deliberately NOT UTC: a date assertion written against a
+/// UTC-equivalent clock passes whether or not the code under test honours the
+/// zone at all, which is how the browser day-page bug survived a green suite.
 #[derive(Debug, Clone)]
 pub struct TestClock {
     millis: Arc<AtomicI64>,
+    utc_offset_seconds: i32,
 }
 
 impl TestClock {
+    /// +14:00 (Pacific/Kiritimati) — the furthest zone ahead of UTC, so a
+    /// calendar date computed in UTC differs from the local one for the widest
+    /// part of the day.
+    pub const DEFAULT_UTC_OFFSET_SECONDS: i32 = 14 * 3600;
+
     pub fn new(start_millis: i64) -> Self {
+        Self::with_utc_offset(start_millis, Self::DEFAULT_UTC_OFFSET_SECONDS)
+    }
+
+    pub fn with_utc_offset(start_millis: i64, utc_offset_seconds: i32) -> Self {
         Self {
             millis: Arc::new(AtomicI64::new(start_millis)),
+            utc_offset_seconds,
         }
     }
     pub fn set(&self, millis: i64) {
@@ -63,6 +110,10 @@ impl TestClock {
 impl Clock for TestClock {
     fn now_millis(&self) -> i64 {
         self.millis.load(Ordering::SeqCst)
+    }
+
+    fn utc_offset_seconds_at(&self, _: i64) -> i32 {
+        self.utc_offset_seconds
     }
 }
 
@@ -132,9 +183,10 @@ impl Grain {
     /// and `label` equals [`CalendarDate::ymd`], so the day path is
     /// byte-for-byte the pre-C6 behaviour.
     pub fn sample(self, clock: &dyn Clock) -> GrainSample {
-        let dt = chrono::DateTime::from_timestamp_millis(clock.now_millis())
+        let millis = clock.now_millis();
+        let dt = chrono::DateTime::from_timestamp_millis(millis)
             .expect("clock now_millis out of DateTime range");
-        let naive = dt.with_timezone(&chrono::Local).naive_local();
+        let naive = dt.with_timezone(&local_offset(clock, millis)).naive_local();
         // Treat the local wall-clock reading as if UTC to get a monotone integer
         // that ticks at each *local* grain boundary. `div_euclid` floors toward
         // negative infinity so pre-epoch instants still land in the right bucket.
@@ -248,9 +300,10 @@ impl CalendarDate {
     /// Replaces the SQL `date('now','localtime')` the journal trigger used to
     /// run, sourced from the deterministic injected [`Clock`] instead.
     pub fn from_clock(clock: &dyn Clock) -> Self {
-        let dt = chrono::DateTime::from_timestamp_millis(clock.now_millis())
+        let millis = clock.now_millis();
+        let dt = chrono::DateTime::from_timestamp_millis(millis)
             .expect("clock now_millis out of DateTime range");
-        Self(dt.with_timezone(&chrono::Local).date_naive())
+        Self(dt.with_timezone(&local_offset(clock, millis)).date_naive())
     }
 
     /// Canonical `YYYY-MM-DD` rendering — the `today` column value.
@@ -325,21 +378,56 @@ mod tests {
 
     #[test]
     fn from_clock_matches_local_date() {
-        // Noon UTC lands on the same civil date in every timezone from UTC-12 to
-        // UTC+12, so this stays timezone-robust regardless of the test host's TZ.
         let millis = chrono::NaiveDate::from_ymd_opt(2026, 7, 10)
             .unwrap()
             .and_hms_opt(12, 0, 0)
             .unwrap()
             .and_utc()
             .timestamp_millis();
-        let clock = TestClock::new(millis);
+        // Names its zone rather than inheriting one: the date this asserts is
+        // only meaningful against a stated offset.
+        let clock = TestClock::with_utc_offset(millis, 0);
         let d = CalendarDate::from_clock(&clock);
         assert_eq!(d.ymd(), "2026-07-10");
         assert_eq!(
             d.epoch_day(),
             CalendarDate::parse("2026-07-10").unwrap().epoch_day()
         );
+    }
+
+    /// A clock in a zone ahead of UTC is already on the next calendar day at
+    /// 23:00 UTC. Pins the wasm day-page fix: the offset must come from the
+    /// clock, since `chrono::Local` is UTC there and would report 08-31.
+    #[test]
+    fn calendar_date_follows_the_clocks_offset_not_the_host_zone() {
+        #[derive(Debug)]
+        struct FixedZoneClock(i64, i32);
+        impl Clock for FixedZoneClock {
+            fn now_millis(&self) -> i64 {
+                self.0
+            }
+            fn utc_offset_seconds_at(&self, _: i64) -> i32 {
+                self.1
+            }
+        }
+
+        let millis = chrono::NaiveDate::from_ymd_opt(2026, 8, 31)
+            .unwrap()
+            .and_hms_opt(23, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis();
+
+        let utc = FixedZoneClock(millis, 0);
+        assert_eq!(CalendarDate::from_clock(&utc).ymd(), "2026-08-31");
+        assert_eq!(Grain::Day.sample(&utc).label, "2026-08-31");
+
+        let ahead = FixedZoneClock(millis, 14 * 3600);
+        assert_eq!(CalendarDate::from_clock(&ahead).ymd(), "2026-09-01");
+        assert_eq!(Grain::Day.sample(&ahead).label, "2026-09-01");
+
+        let behind = FixedZoneClock(millis, -8 * 3600);
+        assert_eq!(CalendarDate::from_clock(&behind).ymd(), "2026-08-31");
     }
 
     #[test]
