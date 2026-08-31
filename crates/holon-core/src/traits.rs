@@ -536,6 +536,14 @@ pub trait BlockEntity: MaybeSendSync {
 
     fn parent_id(&self) -> Option<&EntityUri>;
 
+    /// The parent as it is STORED — a block, or the no-parent root sentinel.
+    ///
+    /// [`parent_id`](Self::parent_id) narrows this to `block:` parents because
+    /// its callers feed the answer straight back into `get_by_id`. A move needs
+    /// the unnarrowed value: a block whose parent is the sentinel sits AT the
+    /// root, which is a placement it must be able to leave again.
+    fn stored_parent(&self) -> EntityUri;
+
     /// Get the block content (text content of the block)
     fn content(&self) -> &str;
 
@@ -2397,11 +2405,29 @@ where
             None => {
                 let maybe_block: Option<T> = self.get_by_id(id_str).await?;
                 let block: T = maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found"))?;
-                let old_parent_uri = block
-                    .parent_id()
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("Cannot move root block"))?;
-                (old_parent_uri, block.is_page())
+                // The root sentinel is a legal ORIGIN, not only a legal
+                // destination (root-sentinel ruling, 2026-08-23): a block
+                // sitting at the root is not the root itself, and
+                // `rehome_entity`'s inverse is exactly this move back off it.
+                // Read through `stored_parent`, because `parent_id()` narrows
+                // the sentinel away to `None`.
+                let old_parent_uri = block.stored_parent();
+                // `is_no_parent` tests the SCHEME, so any `sentinel:` uri passes
+                // — harmless while `no_parent` is the only one minted.
+                if !old_parent_uri.is_block() && !old_parent_uri.is_no_parent() {
+                    return Err(anyhow::anyhow!(
+                        "move_block: block '{id_str}' hangs off '{old_parent_uri}', which is \
+                         neither a block nor the no-parent root — there is no placement to move \
+                         it out of",
+                    )
+                    .into());
+                }
+                // Page-ness from the WRITE authority, never from `block`: this
+                // decode defaults every `#[edge_field]` to empty, so a stored
+                // `Page` reads back as a non-page and the guard below could
+                // never fire. `is_page_authoritative` is what page-boundary
+                // guards are required to read.
+                (old_parent_uri, self.is_page_authoritative(id).await?)
             }
         };
         let old_predecessor: Option<EntityUri> = match prefetch.old_predecessor {
@@ -2425,10 +2451,14 @@ where
             Some(is_page) => is_page,
             None if *parent_id == EntityUri::no_parent() => false,
             None => {
+                // Existence from the projection, page-ness from the write
+                // authority. `is_page_authoritative` alone cannot stand in for
+                // the lookup: an absent destination has no tags either, so it
+                // would answer "not a page" instead of refusing the move.
                 let maybe_parent: Option<T> = self.get_by_id(parent_id.as_str()).await?;
-                let parent: T =
+                let _: T =
                     maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found: {parent_id}"))?;
-                parent.is_page()
+                self.is_page_authoritative(parent_id).await?
             }
         };
 
@@ -2736,6 +2766,10 @@ impl BlockEntity for holon_api::block::Block {
         // outdent root block" — that's the right behavior for headings
         // directly under a document.
         self.parent_id.is_block().then_some(&self.parent_id)
+    }
+
+    fn stored_parent(&self) -> EntityUri {
+        self.parent_id.clone()
     }
 
     fn content(&self) -> &str {

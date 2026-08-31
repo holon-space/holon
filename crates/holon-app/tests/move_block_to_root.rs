@@ -13,9 +13,18 @@
 //! keyed on that exact id, and the `false` must still reach the
 //! no-pages-under-non-pages guard.
 //!
+//! The same chokepoint's OTHER contract is pinned here too: the
+//! no-pages-under-non-pages guard has to receive a page-ness that was actually
+//! read. `get_by_id` decodes through the derived `TryFromEntity`, which
+//! defaults every `#[edge_field]` to empty, so a `Page` in the store reads back
+//! as a non-page — a guard fed from there never fires. Both of its inputs come
+//! from `is_page_authoritative` instead.
+//!
 //! @pbt kind harness
 //! @pbt covers move-block-to-root — a leaf reaches root through the production
 //! read path; an unknown destination is still refused; a page is still refused
+//! @pbt covers move-block-page-guard — a page is refused under a non-page from
+//! either side of the tree, root-level and nested alike
 
 use std::sync::Arc;
 
@@ -128,10 +137,7 @@ fn a_leaf_moves_to_root_through_the_production_read_path() {
 
         // The skip is keyed on the root sentinel alone. Every OTHER destination
         // still has to exist, or a move that cannot be honoured would land
-        // silently as an orphan. Checked BEFORE the move to root: once a block
-        // is at root its own `parent_id()` is `None`, and the chokepoint refuses
-        // it earlier with "Cannot move root block" — a different refusal that
-        // would mask this one.
+        // silently as an orphan.
         let unknown = EntityUri::block("no-such-destination");
         let refused = ops
             .move_block(&leaf_id, &unknown, None)
@@ -168,6 +174,24 @@ fn a_leaf_moves_to_root_through_the_production_read_path() {
         assert!(
             page_children.iter().all(|b| b.id != leaf_id),
             "the page must no longer hold the leaf it lost"
+        );
+
+        // And back: root is an ORIGIN as well as a destination. Every move to
+        // root records an inverse that starts here, so a chokepoint that cannot
+        // read a sentinel parent makes the move a one-way door — which is how
+        // undoing `rehome_entity` failed with "Cannot move root block".
+        ops.move_block(&leaf_id, &page_id, None).await.expect(
+            "moving a leaf back off root must succeed — a block AT the root is not the root, and \
+             its inverse move has to be executable",
+        );
+        let back: Block = ops
+            .get_by_id(leaf_id.as_str())
+            .await
+            .expect("read leaf after moving back")
+            .expect("the leaf must still be readable after moving back off root");
+        assert_eq!(
+            back.parent_id, page_id,
+            "after moving back off root the leaf must sit under the page again"
         );
     });
 }
@@ -256,4 +280,119 @@ fn a_page_cannot_be_moved_to_root_because_root_is_not_a_page() {
             "a refused move must leave the page where it was"
         );
     });
+}
+
+/// A page may only nest under a page — pinned for a page starting AT THE ROOT.
+///
+/// This placement was masked before `move_block` could read a sentinel parent:
+/// the old "Cannot move root block" bail fired first, so the guard was never
+/// reached and the hole underneath it never showed.
+#[test]
+fn a_root_level_page_is_refused_under_a_non_page() {
+    page_under_non_page_is_refused(Start::AtRoot);
+}
+
+/// The same rule for a page that starts NESTED under another page.
+///
+/// Nothing masked this one — it was simply never refused, because the guard's
+/// `moved_is_page` came from a decode that always answers false.
+#[test]
+fn a_nested_page_is_refused_under_a_non_page() {
+    page_under_non_page_is_refused(Start::Nested);
+}
+
+/// Where the page under test sits before the move.
+#[derive(Clone, Copy)]
+enum Start {
+    AtRoot,
+    Nested,
+}
+
+/// Move a stored `Page` under a stored non-page through the production wiring
+/// and require the no-pages-under-non-pages guard to refuse it.
+///
+/// Nothing is supplied by prefetch, so the arms under test are the ones that
+/// have to do the reading themselves — which is the whole point: a guard fed
+/// from `get_by_id`'s derived decode sees every page as a non-page and never
+/// fires. Both fixtures assert their page-ness against the stored `tags` first,
+/// so a green here cannot come from a vacuous fixture.
+fn page_under_non_page_is_refused(start: Start) {
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        let (_backend, handle) = TursoBackend::new_in_memory().await.expect("turso init");
+        setup_production_schema(&handle).await;
+        let (provider, ops) = wiring(&handle).await;
+
+        let host_id = EntityUri::block("guard-host-page");
+        let plain_id = EntityUri::block("guard-plain-non-page");
+        let moved_id = EntityUri::block("guard-moved-page");
+
+        let mut host = Block::new_text(host_id.clone(), EntityUri::no_parent(), "Host");
+        host.set_page(true);
+        create(&provider, host).await;
+        // The destination: a stored NON-page, so the refusal under test is the
+        // guard's and not a missing-parent one.
+        create(
+            &provider,
+            Block::new_text(plain_id.clone(), host_id.clone(), "plain"),
+        )
+        .await;
+        let starts_under = match start {
+            Start::AtRoot => EntityUri::no_parent(),
+            Start::Nested => host_id.clone(),
+        };
+        let mut moved = Block::new_text(moved_id.clone(), starts_under.clone(), "Moved");
+        moved.set_page(true);
+        create(&provider, moved).await;
+
+        assert!(
+            stored_tags(&handle, &moved_id).await.contains("Page"),
+            "fixture is vacuous: the block under test must be STORED as a Page"
+        );
+        assert!(
+            !stored_tags(&handle, &plain_id).await.contains("Page"),
+            "fixture is vacuous: the destination must be STORED as a non-page"
+        );
+
+        let refused = match ops.move_block(&moved_id, &plain_id, None).await {
+            Err(e) => e,
+            Ok(_) => panic!(
+                "moving a page under a NON-page was ACCEPTED — the prohibited topology landed in \
+                 the store"
+            ),
+        };
+        let msg = format!("{refused:#}");
+        assert!(
+            msg.contains("refusing to reparent page block")
+                && msg.contains("pages under non-pages are prohibited"),
+            "the refusal must be the no-pages-under-non-pages guard, got: {msg}"
+        );
+
+        let after: Block = ops
+            .get_by_id(moved_id.as_str())
+            .await
+            .expect("read the page after the refused move")
+            .expect("the page must still exist");
+        assert_eq!(
+            after.parent_id, starts_under,
+            "a refused move must leave the page exactly where it was"
+        );
+    });
+}
+
+/// The `tags` column as the STORE holds it — the write authority, not the
+/// derived decode the guard must not trust.
+async fn stored_tags(handle: &holon::storage::turso::DbHandle, id: &EntityUri) -> String {
+    handle
+        .query(
+            &format!("SELECT tags FROM block WHERE id = '{}'", id.as_str()),
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("read the stored tags")
+        .first()
+        .and_then(|r| r.get("tags"))
+        .and_then(|v| v.as_string())
+        .unwrap_or_default()
+        .to_string()
 }

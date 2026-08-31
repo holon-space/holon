@@ -44,6 +44,9 @@ mod tests {
         fn parent_id(&self) -> Option<&EntityUri> {
             self.parent_id.as_ref()
         }
+        fn stored_parent(&self) -> EntityUri {
+            self.parent_id.clone().unwrap_or_else(EntityUri::no_parent)
+        }
         fn content(&self) -> &str {
             &self.content
         }
