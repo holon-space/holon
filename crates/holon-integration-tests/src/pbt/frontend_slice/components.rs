@@ -1395,7 +1395,13 @@ impl HeadlessFrontendComponent {
     /// a stable fixed point (mirrors the `watch_rows` settle loop).
     /// Reaching the fixed point is what makes the `focus_roots` teeth
     /// produce a real `Fail` (not a CDC-lag `Skipped`, V4).
-    async fn settle_focus_matviews(&self) {
+    /// Returns the settled `focus_roots` rows. Callers that need to assert on
+    /// the settled state read them from here rather than issuing their own
+    /// SELECT: these two statements are already the bulk of the pinned
+    /// `PinBlock` read budget (`PIN_BLOCK_CLICK_RESOLVE_READS`), which gates
+    /// RAW reads, so a re-query would spend budget re-reading what this loop
+    /// just read.
+    async fn settle_focus_matviews(&self) -> Vec<holon_api::StorageEntity> {
         let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         let mut last = (usize::MAX, usize::MAX);
         let mut stable = 0u32;
@@ -1406,19 +1412,18 @@ impl HeadlessFrontendComponent {
                 .len();
             let fr = self
                 .sql_query("SELECT region, root_id FROM focus_roots")
-                .await
-                .len();
-            if (cf, fr) == last {
+                .await;
+            if (cf, fr.len()) == last {
                 stable += 1;
                 if stable >= 3 {
-                    break;
+                    return fr;
                 }
             } else {
                 stable = 0;
             }
-            last = (cf, fr);
+            last = (cf, fr.len());
             if tokio::time::Instant::now() >= deadline {
-                break;
+                return fr;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -1526,43 +1531,23 @@ impl HeadlessFrontendComponent {
         )
     }
 
-    /// Main-panel counterpart of [`Self::await_sidebar_intent`], for the block
-    /// bullet's `shift_action` (`focus_pin`). The Main panel renders the
-    /// descendants of `focus_roots(main)` through nested `live_block` watches,
-    /// so the bullet — and with it the shift-intent — streams in after the
-    /// focus that put its doc on screen. `click_entity_with_modifiers` polls
-    /// for only 2s and then degrades to bare focus, exactly as GPUI does for a
-    /// click that binds nothing; without this barrier that degradation is
-    /// silent and surfaces later as an empty `focus_roots`, blaming the matview
-    /// for what was really an unrendered bullet.
-    async fn await_main_click_intent(&self, id: &EntityUri, modifiers: holon_api::ClickModifiers) {
-        self.await_layout_rendered("main").await;
-        let root_uri = holon_api::root_layout_block_uri();
-        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(5));
-        loop {
-            let resolved = self.reactive.snapshot_resolved(&root_uri);
-            if holon_frontend::focus_path::find_click_intent_in_region(
-                &resolved, id, "main", modifiers,
-            )
-            .is_some()
-            {
-                return;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "[await_main_click_intent] Main never bound a click-intent for {id} with \
-                 modifiers {modifiers:?} within 5s — either the Main panel's nested live_block \
-                 watch did not stream the block's bullet (is {id} a descendant of \
-                 focus_roots(main)?), or the bullet's `shift_action` template arg resolves to \
-                 None (check `is_template_arg`). The click would then fall through to a bare \
-                 set_focus, pinning NOTHING.\n  MISS REASON: {}\n  {}",
-                holon_frontend::focus_path::click_intent_miss_reason(
-                    &resolved, id, "main", modifiers
-                ),
-                holon_frontend::reactive::generation_drops::report(),
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+    /// Why a Main-panel modifier click bound no intent for `id`. Diagnosis
+    /// only, for a click that already failed to land: it snapshots the resolved
+    /// tree, so it must never run on the green path — the resolved-tree
+    /// SELECTs it issues are the ones `PIN_BLOCK_CLICK_RESOLVE_READS` pins.
+    fn main_click_miss_reason(
+        &self,
+        id: &EntityUri,
+        modifiers: holon_api::ClickModifiers,
+    ) -> String {
+        let resolved = self
+            .reactive
+            .snapshot_resolved(&holon_api::root_layout_block_uri());
+        format!(
+            "{}\n  {}",
+            holon_frontend::focus_path::click_intent_miss_reason(&resolved, id, "main", modifiers),
+            holon_frontend::reactive::generation_drops::report(),
+        )
     }
 
     /// Modifier-parameterised form of [`Self::await_sidebar_nav_intent`]. The
@@ -3198,8 +3183,6 @@ impl SutNavHistoryDrive for HeadlessFrontendComponent {
         // id would pin a GHOST (the matview's `focus_roots` would then hold
         // the synthetic while the resolved oracle holds the real id → divergence).
         let resolved = self.resolve_id(block_id);
-        self.await_main_click_intent(&resolved, holon_api::ClickModifiers::shift())
-            .await;
         self.driver
             .click_entity_with_modifiers(
                 &resolved,
@@ -3210,7 +3193,26 @@ impl SutNavHistoryDrive for HeadlessFrontendComponent {
             .unwrap_or_else(|e| {
                 panic!("[PinBlock] shift+click on the {resolved} bullet failed: {e:#}")
             });
-        self.settle_focus_matviews().await;
+        // Loud POSTcondition, read from the rows the settle already fetched so
+        // it costs no budgeted read. A shift+click on a bullet the Main panel
+        // never rendered binds no intent and degrades to a bare focus — GPUI
+        // does the same, so the driver is right to allow it, but for a drive
+        // path it means the pin silently did not happen. Asserting here names
+        // that at the click instead of leaving an empty `focus_roots` to look
+        // like a broken matview.
+        let roots = self.settle_focus_matviews().await;
+        let pinned = roots.iter().any(|r| {
+            r.get("root_id").and_then(|v| v.as_string()) == Some(resolved.as_str())
+                && r.get("region").and_then(|v| v.as_string()) == Some("right_sidebar")
+        });
+        assert!(
+            pinned,
+            "[PinBlock] shift+click on {resolved} did not pin it into the right sidebar — \
+             focus_roots holds {roots:?}. The bullet bound no shift-intent and the click \
+             degraded to a bare focus; {resolved} is most likely not a descendant of \
+             focus_roots(main), so the Main panel never rendered its bullet.\n  MISS REASON: {}",
+            self.main_click_miss_reason(&resolved, holon_api::ClickModifiers::shift()),
+        );
     }
 
     /// Cmd/ctrl+click a left-sidebar row — the production open-in-tab gesture.
