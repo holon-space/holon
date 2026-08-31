@@ -202,9 +202,9 @@ pub use clock::TestClock;
 pub use edge_field::{BlockEdges, EdgeField, EdgeFieldUpdate};
 // Re-export entity types (for Entity derive macro)
 pub use entity::{
-    DynamicEntity, FieldLifetime, FieldSchema, IntoEntity, POSITION_AFTER_BLOCK_ID_PARAM,
-    ProfileVariant, ROUTING_DOC_URI_KEY, StorageEntity, TryFromEntity, TypeDefinition, TypeSource,
-    WriteAuthority,
+    ComputedSpec, ComputedTier, DynamicEntity, FieldLifetime, FieldSchema, IntoEntity,
+    POSITION_AFTER_BLOCK_ID_PARAM, ProfileVariant, ROUTING_DOC_URI_KEY, StorageEntity,
+    TryFromEntity, TypeDefinition, TypeSource, WriteAuthority,
 };
 // Re-export entity URI type
 pub use entity_uri::EntityUri;

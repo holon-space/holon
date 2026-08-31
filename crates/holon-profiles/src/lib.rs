@@ -188,6 +188,7 @@ impl LiveEntitySpec {
 // *sources*: YAML/org parsing below and the LiveData-backed ProfileResolver.
 // ---------------------------------------------------------------------------
 
+pub use holon_api::ComputedTier;
 pub use holon_api::entity_profile::CompiledComputedField;
 pub use holon_api::entity_profile::EntityProfile;
 pub use holon_api::entity_profile::ProfileCache;
@@ -222,11 +223,52 @@ pub fn parse_render_text(text: &str) -> Result<RenderExpr> {
 pub struct ParsedProfile {
     pub entity_name: String,
     #[serde(default)]
-    pub computed: BTreeMap<String, String>,
+    pub computed: BTreeMap<String, ComputedFieldDecl>,
     #[serde(default)]
     pub variants: Vec<holon_api::ProfileVariant>,
     #[serde(default)]
     pub virtual_child: Option<VirtualChildConfig>,
+}
+
+/// A computed field as declared in profile YAML. Written either as the bare
+/// expression — which takes the default tier — or as a mapping that names the
+/// tier explicitly:
+///
+/// ```yaml
+/// computed:
+///   is_task: 'task_state != ()'
+///   display_name:
+///     tier: computed_persisted
+///     expr: 'role + " — " + email'
+/// ```
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(from = "ComputedFieldDeclRepr")]
+pub struct ComputedFieldDecl {
+    pub expr: String,
+    pub tier: ComputedTier,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ComputedFieldDeclRepr {
+    Bare(String),
+    Tiered {
+        expr: String,
+        #[serde(default)]
+        tier: ComputedTier,
+    },
+}
+
+impl From<ComputedFieldDeclRepr> for ComputedFieldDecl {
+    fn from(repr: ComputedFieldDeclRepr) -> Self {
+        match repr {
+            ComputedFieldDeclRepr::Bare(expr) => ComputedFieldDecl {
+                expr,
+                tier: ComputedTier::default(),
+            },
+            ComputedFieldDeclRepr::Tiered { expr, tier } => ComputedFieldDecl { expr, tier },
+        }
+    }
 }
 
 /// Parse a YAML entity profile into a `ParsedProfile`.
@@ -238,9 +280,9 @@ pub fn parse_profile_yaml(yaml_content: &str) -> Result<ParsedProfile> {
         serde_yaml::from_str(yaml_content).context("Invalid YAML in entity profile")?;
 
     let engine = RhaiEngine::new();
-    for (name, value) in profile.computed.iter_mut() {
-        *value = strip_rhai_prefix(value);
-        CompiledExpr::compile(&engine, value.as_str())
+    for (name, decl) in profile.computed.iter_mut() {
+        decl.expr = strip_rhai_prefix(&decl.expr);
+        CompiledExpr::compile(&engine, decl.expr.as_str())
             .map_err(|e| anyhow::anyhow!("Failed to compile computed field '{name}': {e}"))?;
     }
 
@@ -260,7 +302,12 @@ impl ParsedProfile {
     /// Convert to the runtime `EntityProfile` representation.
     pub fn to_entity_profile(self) -> Result<EntityProfile> {
         let engine = RhaiEngine::new();
-        let computed_fields = parse_and_sort_computed_fields(&engine, &self.computed)?;
+        let sources: BTreeMap<String, String> = self
+            .computed
+            .iter()
+            .map(|(name, decl)| (name.clone(), decl.expr.clone()))
+            .collect();
+        let computed_fields = parse_and_sort_computed_fields(&engine, &sources)?;
         let variants = profile_variants_to_stored(&self.variants)?;
         Ok(EntityProfile {
             entity_name: EntityName::new(&self.entity_name),
@@ -868,7 +915,7 @@ pub fn validate_lookups_registered(profile: &ParsedProfile) -> Result<()> {
         .collect();
     let engine = holon_api::unoptimized_engine();
     for (field, source) in &profile.computed {
-        let compiled = CompiledExpr::compile(&engine, source.as_str())
+        let compiled = CompiledExpr::compile(&engine, source.expr.as_str())
             .map_err(|e| anyhow::anyhow!("computed field '{field}' failed to compile: {e}"))?;
         for called in holon_api::referenced_functions(&compiled.ast) {
             if RHAI_STDLIB_FREE_FNS.contains(&called.as_str()) || registered.contains(&called) {
@@ -2043,9 +2090,11 @@ variants:
         .unwrap();
         // Prove the `in`→contains lowering + free `len`/`type_of` are actually
         // present in the analysed AST (else the test would pass vacuously).
-        let compiled =
-            CompiledExpr::compile(&holon_api::unoptimized_engine(), &profile.computed["ok"])
-                .unwrap();
+        let compiled = CompiledExpr::compile(
+            &holon_api::unoptimized_engine(),
+            &profile.computed["ok"].expr,
+        )
+        .unwrap();
         let called = holon_api::referenced_functions(&compiled.ast);
         assert!(
             called.contains("contains"),

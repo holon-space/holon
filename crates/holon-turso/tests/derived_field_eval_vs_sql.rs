@@ -31,6 +31,10 @@ use holon_turso::schema_modules::BlockDerivedSchemaModule;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
 
+fn fid(name: &str) -> holon_api::computation::FieldIdent {
+    holon_api::computation::FieldIdent::parse(name).expect("test identifier")
+}
+
 async fn setup() -> DbHandle {
     let (_backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
     std::mem::forget(_backend);
@@ -52,7 +56,7 @@ async fn setup() -> DbHandle {
 /// Plant `comp` as a matview column via `DerivedFieldPlan::plan`, then read the
 /// single derived value SQLite computed.
 async fn plant_and_read(handle: &DbHandle, view: &str, comp: Computation) -> Value {
-    let plan = DerivedFieldPlan::plan(vec![DerivedField::new("d", comp)]);
+    let plan = DerivedFieldPlan::plan(vec![DerivedField::new(fid("d"), comp)]);
     assert_eq!(plan.sql_planted.len(), 1, "expr must plant (seat A)");
     assert!(
         plan.stage_evaluated.is_empty(),
@@ -199,7 +203,7 @@ async fn concat_and_definedness_match_sqlite() {
             .eval(&ctx)
             .unwrap_or_else(|e| panic!("`{src}` must evaluate: {e}"));
 
-        let plan = DerivedFieldPlan::plan(vec![DerivedField::new("d", comp)]);
+        let plan = DerivedFieldPlan::plan(vec![DerivedField::new(fid("d"), comp)]);
         assert_eq!(
             plan.sql_planted.len(),
             1,
@@ -252,7 +256,7 @@ async fn null_role_takes_the_else_branch_in_both_engines() {
     let expected = comp.eval(&ctx).expect("must evaluate");
     assert_eq!(expected, Value::String("ada@x".to_string()));
 
-    let plan = DerivedFieldPlan::plan(vec![DerivedField::new("d", comp)]);
+    let plan = DerivedFieldPlan::plan(vec![DerivedField::new(fid("d"), comp)]);
     let col = &plan.sql_planted[0].sql;
     reconcile_named_view(
         &handle,
@@ -306,7 +310,7 @@ async fn is_defined_eval_and_sql_diverge_on_null() {
     );
 
     // Seat B, on the row itself.
-    let plan = DerivedFieldPlan::plan(vec![DerivedField::new("d", comp)]);
+    let plan = DerivedFieldPlan::plan(vec![DerivedField::new(fid("d"), comp)]);
     let col = &plan.sql_planted[0].sql;
     assert_eq!(col, "(role IS NOT NULL)");
     reconcile_named_view(
@@ -410,7 +414,7 @@ async fn sidecar_value_matches_eval_and_planted_sql() {
         &mgr,
         handle.clone(),
         "SELECT id, xf FROM t",
-        vec![DerivedField::new("d", comp)],
+        vec![DerivedField::new(fid("d"), comp)],
     )
     .await
     .expect("spawn reconciler");

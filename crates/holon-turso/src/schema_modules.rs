@@ -489,7 +489,7 @@ fn block_matview_select_with_computed(
         joins.push(format!("LEFT OUTER JOIN {agg} ON {agg}.source_id = b.id"));
     }
     for c in computed {
-        columns.push(format!("({}) AS {}", c.sql, c.name));
+        columns.push(c.select_expr());
     }
     // Exclude the self-parented `sentinel:no_parent` FK-anchor row — it exists
     // only to satisfy the block_raw parent FK and must never surface as a real
@@ -1345,12 +1345,12 @@ mod tests {
         let sql = block_matview_select_with_computed(
             &[requires_descriptor()],
             &[PlantedColumn {
-                name: "is_done".into(),
+                name: holon_api::computation::FieldIdent::parse("is_done").expect("identifier"),
                 sql: "completed = 1".into(),
             }],
         );
         assert!(sql.contains("COALESCE(block_requires_agg.vals, '[]') AS requires"));
-        assert!(sql.contains("(completed = 1) AS is_done"));
+        assert!(sql.contains(r#"(completed = 1) AS "is_done""#));
         assert!(sql.ends_with("WHERE b.id != 'sentinel:no_parent'"));
     }
 

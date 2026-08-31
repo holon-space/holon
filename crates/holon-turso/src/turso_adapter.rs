@@ -33,15 +33,6 @@ use super::turso::DbHandle;
 /// `<name>` matview — the same split block uses (`block_raw` -> `block`).
 pub const RAW_TABLE_SUFFIX: &str = "_raw";
 
-/// A SQL-planted derived column for a type's matview (increment-3 seam). Each
-/// entry appends `({sql}) AS {name}` to the matview SELECT, so Turso's IVM
-/// maintains the value O(delta) alongside the row. Empty today.
-#[derive(Debug, Clone)]
-pub struct MatviewComputedColumn {
-    pub name: String,
-    pub sql: String,
-}
-
 /// The inventory of Turso objects a single [`TypeDefinition`] owns. Returned by
 /// [`TursoAdapter::register`] and consumed by [`TursoAdapter::teardown`], which
 /// together form the migrate primitive: a type's whole Turso footprint is
@@ -241,9 +232,9 @@ impl TursoAdapter {
     /// `id_references: None`, so no FK is emitted.
     ///
     /// Computed fields are deliberately absent: they are derived, not stored,
-    /// and materialize on the matview through
-    /// [`MatviewComputedColumn`] instead. Emitting one here would create a
-    /// NOT NULL column that no writer ever supplies.
+    /// and materialize as planted matview columns
+    /// ([`holon_api::computation::PlantedColumn`]) instead. Emitting one here
+    /// would create a NOT NULL column that no writer ever supplies.
     pub fn raw_type_def(type_def: &TypeDefinition) -> TypeDefinition {
         TypeDefinition {
             name: Self::raw_table_name(type_def),
@@ -258,16 +249,11 @@ impl TursoAdapter {
 
     /// The matview SELECT: every declared field projected verbatim from the raw
     /// table.
+    ///
+    /// Planted computed columns are appended by the caller that owns them,
+    /// through [`holon_api::computation::PlantedColumn::select_expr`] — the one
+    /// formatter that parses and quotes the alias.
     pub fn matview_select(type_def: &TypeDefinition) -> String {
-        Self::matview_select_with_computed(type_def, &[])
-    }
-
-    /// [`Self::matview_select`] extended with SQL-planted computed columns
-    /// (increment-3 seam). `computed` is empty on every path today.
-    pub fn matview_select_with_computed(
-        type_def: &TypeDefinition,
-        computed: &[MatviewComputedColumn],
-    ) -> String {
         let persisted = type_def.persistent_fields();
         assert!(
             !persisted.is_empty(),
@@ -275,13 +261,10 @@ impl TursoAdapter {
             type_def.name
         );
         let raw = Self::raw_table_name(type_def);
-        let mut columns: Vec<String> = persisted
+        let columns: Vec<String> = persisted
             .iter()
             .map(|f| format!("\"{}\"", f.name))
             .collect();
-        for c in computed {
-            columns.push(format!("({}) AS {}", c.sql, c.name));
-        }
         format!("SELECT {} FROM \"{raw}\"", columns.join(", "))
     }
 
@@ -579,7 +562,7 @@ mod tests {
         let computed: FieldSchema = serde_json::from_value(serde_json::json!({
             "name": "display_name",
             "sql_type": "TEXT",
-            "lifetime": {"computed": {"expr": "email"}},
+            "lifetime": {"computed": {"spec": {"name": "display_name", "tier": "computed_live", "source": "email", "field_types": {}}}},
         }))
         .expect("computed FieldSchema");
 

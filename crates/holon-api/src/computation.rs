@@ -216,6 +216,67 @@ impl fmt::Display for InvalidFieldIdent {
 
 impl std::error::Error for InvalidFieldIdent {}
 
+/// The storage class of a declared column, as far as the subset parser needs
+/// to distinguish it: `+` over text is [`Computation::Concat`], over numbers
+/// [`Computation::Arith`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldKind {
+    Text,
+    Numeric,
+    Boolean,
+}
+
+impl FieldKind {
+    /// The kind a declared SQL type belongs to, by SQLite's affinity rules.
+    /// `None` for a type with no affinity the parser can act on (BLOB, and
+    /// anything unrecognised).
+    pub fn of_sql_type(sql_type: &str) -> Option<Self> {
+        let t = sql_type.to_ascii_uppercase();
+        if t.contains("BOOL") {
+            Some(FieldKind::Boolean)
+        } else if t.contains("CHAR") || t.contains("CLOB") || t.contains("TEXT") {
+            Some(FieldKind::Text)
+        } else if t.contains("INT")
+            || t.contains("REAL")
+            || t.contains("FLOA")
+            || t.contains("DOUB")
+            || t.contains("NUM")
+            || t.contains("DEC")
+        {
+            Some(FieldKind::Numeric)
+        } else {
+            None
+        }
+    }
+}
+
+/// The declared types of the columns an expression may reference.
+///
+/// Supplied by the type registry so `+` is resolved from the schema instead of
+/// from the operands' syntax — over two undeclared fields the syntax alone
+/// cannot tell `a + b` numeric from textual.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FieldTypes(std::collections::BTreeMap<String, FieldKind>);
+
+impl FieldTypes {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, name: impl Into<String>, kind: FieldKind) {
+        self.0.insert(name.into(), kind);
+    }
+
+    pub fn kind(&self, name: &str) -> Option<FieldKind> {
+        self.0.get(name).copied()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// A value-producing computation over a named-value context.
 ///
 /// This type is **not** FRB-exposed (it may carry an opaque Rhai AST). The
@@ -281,10 +342,11 @@ pub enum Computation {
     /// | [`Value::Boolean`] | `"1"` / `"0"` | `"true"` / `"false"` |
     ///
     /// A fourth divergence is about *which* operator is chosen, not rendering:
-    /// `+` is `Concat` by syntax, so a `Case` with one text arm concatenates a
-    /// number the other arm supplies where Rhai adds it
-    /// (`case_armed_concat_of_a_number_diverges_from_rhai`). All four need the
-    /// declared field types to resolve — the I3-1 gap.
+    /// a `Case` with one text arm concatenates a number the other arm supplies
+    /// where Rhai adds it
+    /// (`case_armed_concat_of_a_number_diverges_from_rhai`). Declaring the
+    /// operand columns in [`FieldTypes`] resolves the operator; the three
+    /// rendering axes above remain.
     Concat {
         lhs: Box<Computation>,
         rhs: Box<Computation>,
@@ -1015,25 +1077,34 @@ fn join_predicates(preds: &[Predicate], sep: &str) -> Result<SqlFragment, SqlUns
 /// never a raw string here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DerivedField {
-    pub name: String,
+    pub name: FieldIdent,
     pub computation: Computation,
 }
 
 impl DerivedField {
-    pub fn new(name: impl Into<String>, computation: Computation) -> Self {
-        DerivedField {
-            name: name.into(),
-            computation,
-        }
+    pub fn new(name: FieldIdent, computation: Computation) -> Self {
+        DerivedField { name, computation }
     }
 }
 
 /// A derived field that lowered to SQL and can be planted as a matview column.
-/// `sql` is the inlined, parameter-free column expression (`{sql} AS {name}`).
+/// `sql` is the inlined, parameter-free column expression.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlantedColumn {
-    pub name: String,
+    pub name: FieldIdent,
     pub sql: String,
+}
+
+impl PlantedColumn {
+    /// The `(<expr>) AS "<name>"` select-list entry for this column.
+    ///
+    /// The alias is quoted, matching `TypeDefinition::to_create_table_sql`, so
+    /// a column named with a SQL keyword (`order`, `end`) is expressible. The
+    /// expression is parenthesised so a bare compound `sql` keeps its
+    /// precedence against the `AS`.
+    pub fn select_expr(&self) -> String {
+        format!("({}) AS \"{}\"", self.sql, self.name)
+    }
 }
 
 /// The hybrid-seat routing decision for a set of derived fields (see the module
@@ -1109,7 +1180,7 @@ impl DerivedFieldPlan {
     pub fn evaluate_stage(&self, ctx: &mut Context) -> Result<(), ComputeError> {
         for StageField { field, .. } in &self.stage_evaluated {
             let value = field.computation.eval(ctx)?;
-            ctx.insert(field.name.clone(), value);
+            ctx.insert(field.name.to_string(), value);
         }
         Ok(())
     }
@@ -1121,6 +1192,10 @@ mod tests {
 
     fn engine() -> rhai::Engine {
         bounded_engine()
+    }
+
+    fn fid(name: &str) -> FieldIdent {
+        FieldIdent::parse(name).expect("test identifier")
     }
 
     fn ctx(pairs: &[(&str, Value)]) -> Context {
@@ -1361,7 +1436,7 @@ mod tests {
     fn plan_splits_sql_plantable_from_script() {
         // `weight * 2` lowers to SQL (seat A); a switch script does not (seat B).
         let sql_field = DerivedField::new(
-            "boosted",
+            fid("boosted"),
             Computation::Arith {
                 op: ArithOp::Mul,
                 lhs: Box::new(Computation::Field("weight".into())),
@@ -1369,7 +1444,7 @@ mod tests {
             },
         );
         let script_field = DerivedField::new(
-            "priority_weight",
+            fid("priority_weight"),
             Computation::Script(
                 CompiledExpr::compile(&engine(), "switch priority { 3.0 => 100.0, _ => 1.0 }")
                     .unwrap(),
@@ -1378,11 +1453,14 @@ mod tests {
         let plan = DerivedFieldPlan::plan(vec![sql_field, script_field]);
 
         assert_eq!(plan.sql_planted.len(), 1);
-        assert_eq!(plan.sql_planted[0].name, "boosted");
+        assert_eq!(plan.sql_planted[0].name.as_str(), "boosted");
         assert_eq!(plan.sql_planted[0].sql, "(weight * 2)");
 
         assert_eq!(plan.stage_evaluated.len(), 1);
-        assert_eq!(plan.stage_evaluated[0].field.name, "priority_weight");
+        assert_eq!(
+            plan.stage_evaluated[0].field.name.as_str(),
+            "priority_weight"
+        );
         // Disclosed reason names the offending shape.
         assert!(
             plan.stage_evaluated[0].reason.contains("Rhai script"),
@@ -1396,7 +1474,7 @@ mod tests {
         // A Rhai-only derived field, maintained via seat B. Changing the input
         // recomputes it and REPLACES the old value (never stacks).
         let script_field = DerivedField::new(
-            "priority_weight",
+            fid("priority_weight"),
             Computation::Script(
                 CompiledExpr::compile(
                     &engine(),
@@ -1428,11 +1506,11 @@ mod tests {
     fn plan_stage_eval_is_fail_loud_on_missing_input() {
         // Unlike legacy resolve_computed_fields (which substitutes Null), the seat
         // surfaces a named error for a missing input.
-        let field = DerivedField::new("d", Computation::Field("absent".into()));
+        let field = DerivedField::new(fid("d"), Computation::Field("absent".into()));
         // Field-only computations DO lower to SQL, so force the stage path with a
         // script that references the missing input.
         let script = DerivedField::new(
-            "d",
+            fid("d"),
             Computation::Script(CompiledExpr::compile(&engine(), "absent + 1.0").unwrap()),
         );
         let _ = field;

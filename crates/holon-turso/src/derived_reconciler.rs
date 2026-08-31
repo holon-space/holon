@@ -165,7 +165,7 @@ async fn apply_upsert(db_handle: &DbHandle, fields: &[CompiledDerived], row: &St
                 .to_string(),
             vec![
                 value_to_turso_param(&Value::String(block_id.clone())),
-                value_to_turso_param(&Value::String(compiled.field.name.clone())),
+                value_to_turso_param(&Value::String(compiled.field.name.to_string())),
                 value_to_turso_param(&Value::String(value_json)),
                 value_to_turso_param(&Value::String(compiled.provenance.clone())),
             ],
@@ -281,17 +281,17 @@ mod tests {
     #[test]
     fn provenance_is_computation_only_stable_and_discriminating() {
         let a = DerivedField {
-            name: "score".into(),
+            name: holon_api::computation::FieldIdent::parse("score").expect("identifier"),
             computation: Computation::Field("a".into()),
         };
         // Same computation, different field name => same provenance (hash is
         // over `computation` only).
         let a_renamed = DerivedField {
-            name: "renamed".into(),
+            name: holon_api::computation::FieldIdent::parse("renamed").expect("identifier"),
             computation: Computation::Field("a".into()),
         };
         let b = DerivedField {
-            name: "score".into(),
+            name: holon_api::computation::FieldIdent::parse("score").expect("identifier"),
             computation: Computation::Field("b".into()),
         };
         assert_eq!(provenance_of(&a), provenance_of(&a_renamed));

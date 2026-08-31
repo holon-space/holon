@@ -15,7 +15,7 @@ use std::sync::RwLock;
 
 use anyhow::Context;
 use anyhow::Result;
-use holon_api::CompiledExpr;
+use holon_api::ComputedSpec;
 use holon_api::FieldLifetime;
 use holon_api::TypeDefinition;
 /// A compiled computed field: name + pre-compiled Rhai AST.
@@ -28,6 +28,7 @@ use holon_core::util::expr_references;
 use holon_core::util::topo_sort_kahn;
 use rhai::Engine as RhaiEngine;
 
+use crate::ComputedFieldDecl;
 use crate::EntityProfile;
 use crate::ParsedProfile;
 use crate::VirtualChildConfig;
@@ -133,6 +134,7 @@ impl TypeRegistry {
     /// The key is minted through [`TableName`], never taken raw, so a
     /// hyphenated entity name cannot create a key no scheme lookup will find.
     pub fn register(&self, mut type_def: TypeDefinition) -> Result<()> {
+        check_computed_types_match_columns(&type_def)?;
         topo_sort_fields(&mut type_def);
         let key = TableName::from_scheme(&type_def.name);
         self.types
@@ -144,7 +146,17 @@ impl TypeRegistry {
 
     /// Add computed fields to an existing type definition.
     /// Compiles expressions and recomputes the topo-sorted order.
-    fn add_computed_fields(&self, entity_name: &str, fields: Vec<(String, String)>) -> Result<()> {
+    ///
+    /// Each expression is parsed against the entity's DECLARED column types, so
+    /// `+` over two TEXT columns concatenates where `+` over two numeric ones
+    /// adds. A `computed_persisted` declaration that does not lower to SQL is
+    /// refused here — the tier promises a planted matview column, and there is
+    /// no such column to plant.
+    fn add_computed_fields(
+        &self,
+        entity_name: &str,
+        fields: Vec<(String, ComputedFieldDecl)>,
+    ) -> Result<()> {
         let engine = RhaiEngine::new();
         let mut types = self.types.write().expect("TypeRegistry poisoned");
         let Some(type_def) = types.get_mut(TableName::from_scheme(entity_name).as_str()) else {
@@ -153,22 +165,37 @@ impl TypeRegistry {
             );
         };
 
-        for (name, expr_source) in fields {
-            let expr = CompiledExpr::compile(&engine, &expr_source).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to compile computed field '{name}' on entity '{entity_name}': {e}"
-                )
-            })?;
+        let declared = type_def.field_types();
+        for (name, decl) in fields {
+            let spec = ComputedSpec::parse(&name, &decl.expr, decl.tier, &declared, &engine)
+                .map_err(|e| {
+                    anyhow::anyhow!("computed field '{name}' on entity '{entity_name}': {e}")
+                })?;
             if let Some(existing) = type_def.fields.iter_mut().find(|f| f.name == name) {
-                existing.lifetime = FieldLifetime::Computed { expr };
+                existing.lifetime = FieldLifetime::Computed { spec };
             } else {
                 type_def.fields.push(holon_api::FieldSchema {
                     name,
                     sql_type: "TEXT".to_string(),
-                    lifetime: FieldLifetime::Computed { expr },
+                    lifetime: FieldLifetime::Computed { spec },
                     ..Default::default()
                 });
             }
+        }
+
+        let rhai_only: Vec<&str> = type_def
+            .computed_specs()
+            .into_iter()
+            .filter(|(_, spec)| spec.is_rhai_only())
+            .map(|(name, _)| name)
+            .collect();
+        if !rhai_only.is_empty() {
+            tracing::warn!(
+                entity = entity_name,
+                fields = %rhai_only.join(", "),
+                "computed fields are outside the SQL-compilable subset and are served by Rhai \
+                 alone; they cannot be planted as matview columns"
+            );
         }
 
         // Re-sort fields to maintain topological order
@@ -201,7 +228,7 @@ impl TypeRegistry {
     /// produced by both bundled and org-embedded YAML parsing.
     pub fn apply_parsed_profile(&self, profile: ParsedProfile) -> Result<()> {
         let entity_name = profile.entity_name;
-        let computed: Vec<(String, String)> = profile.computed.into_iter().collect();
+        let computed: Vec<(String, ComputedFieldDecl)> = profile.computed.into_iter().collect();
         if !computed.is_empty() {
             self.add_computed_fields(&entity_name, computed)?;
         }
@@ -257,7 +284,9 @@ impl TypeRegistry {
                 td.fields
                     .iter()
                     .filter_map(|f| match &f.lifetime {
-                        FieldLifetime::Computed { expr } => Some((f.name.clone(), expr.clone())),
+                        FieldLifetime::Computed { spec } => {
+                            Some((f.name.clone(), spec.expr().clone()))
+                        }
                         _ => None,
                     })
                     .collect()
@@ -274,6 +303,35 @@ impl TypeRegistry {
     }
 }
 
+/// Refuse a computed field whose declared column types disagree with the type
+/// that owns them.
+///
+/// The types decide the operator, so a spec carrying `numeric` for a TEXT
+/// column lowers to `+` where `eval` raises — the two seats would disagree
+/// silently. On the profile path the registry derives the types itself; this
+/// guards the path where a `TypeDefinition` arrives already carrying specs.
+fn check_computed_types_match_columns(type_def: &TypeDefinition) -> Result<()> {
+    let declared = type_def.field_types();
+    for (name, spec) in type_def.computed_specs() {
+        for referenced in spec.computation().referenced_fields() {
+            let (Some(owned), Some(carried)) =
+                (declared.kind(&referenced), spec.types().kind(&referenced))
+            else {
+                continue;
+            };
+            if owned != carried {
+                anyhow::bail!(
+                    "computed field '{name}' on entity '{}' declares column '{referenced}' as \
+                     {carried:?}, but the type declares it as {owned:?}; the two seats would \
+                     disagree on the operator",
+                    type_def.name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Reorder computed fields in a TypeDefinition so dependencies come before
 /// dependents. Non-computed fields keep their original order; computed fields
 /// are topo-sorted and placed after all non-computed fields.
@@ -284,7 +342,7 @@ fn topo_sort_fields(type_def: &mut TypeDefinition) {
         .fields
         .iter()
         .filter_map(|f| match &f.lifetime {
-            FieldLifetime::Computed { expr } => Some((f.name.clone(), expr.source.clone())),
+            FieldLifetime::Computed { spec } => Some((f.name.clone(), spec.expr().source.clone())),
             _ => None,
         })
         .collect();
@@ -482,9 +540,22 @@ mod tests {
         assert_eq!(retrieved.fields.len(), 2);
     }
 
-    fn compile(expr: &str) -> CompiledExpr {
-        let engine = RhaiEngine::new();
-        CompiledExpr::compile(&engine, expr).unwrap()
+    fn live(expr: &str) -> ComputedSpec {
+        ComputedSpec::parse(
+            "f",
+            expr,
+            holon_api::ComputedTier::ComputedLive,
+            &holon_api::computation::FieldTypes::new(),
+            &RhaiEngine::new(),
+        )
+        .unwrap()
+    }
+
+    fn decl(expr: &str) -> ComputedFieldDecl {
+        ComputedFieldDecl {
+            expr: expr.to_string(),
+            tier: holon_api::ComputedTier::ComputedLive,
+        }
     }
 
     #[test]
@@ -498,7 +569,7 @@ mod tests {
                     name: "weight".to_string(),
                     sql_type: "REAL".to_string(),
                     lifetime: FieldLifetime::Computed {
-                        expr: compile("priority_score * 2.0"),
+                        spec: live("priority_score * 2.0"),
                     },
                     ..Default::default()
                 },
@@ -506,7 +577,7 @@ mod tests {
                     name: "priority_score".to_string(),
                     sql_type: "REAL".to_string(),
                     lifetime: FieldLifetime::Computed {
-                        expr: compile("priority * 10.0"),
+                        spec: live("priority * 10.0"),
                     },
                     ..Default::default()
                 },
@@ -535,10 +606,8 @@ mod tests {
             ))
             .unwrap();
 
-        let result = registry.add_computed_fields(
-            "bad",
-            vec![("broken".to_string(), "if {{{ invalid".to_string())],
-        );
+        let result = registry
+            .add_computed_fields("bad", vec![("broken".to_string(), decl("if {{{ invalid"))]);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("broken"), "Error should name the field: {err}");
@@ -558,7 +627,7 @@ mod tests {
         registry
             .add_computed_fields(
                 "block",
-                vec![("is_task".to_string(), "task_state != ()".to_string())],
+                vec![("is_task".to_string(), decl("task_state != ()"))],
             )
             .unwrap();
 

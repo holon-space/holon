@@ -16,6 +16,7 @@ use holon_api::Value;
 use holon_api::computation::ArithOp;
 use holon_api::computation::Computation;
 use holon_api::computation::DerivedField;
+use holon_api::computation::FieldIdent;
 use holon_turso::derived_reconciler::spawn_derived_field_reconciler;
 use holon_turso::matview_manager::MatviewManager;
 use holon_turso::schema_module::SchemaModule;
@@ -88,7 +89,7 @@ async fn await_derived(handle: &DbHandle, block_id: &str, field: &str, expected:
 /// in Rust uniformly).
 fn boosted() -> DerivedField {
     DerivedField::new(
-        "boosted",
+        FieldIdent::parse("boosted").expect("identifier"),
         Computation::Arith {
             op: ArithOp::Mul,
             lhs: Box::new(Computation::Field("priority".into())),

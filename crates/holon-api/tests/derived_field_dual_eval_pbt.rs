@@ -41,6 +41,7 @@ use holon_api::Value;
 use holon_api::computation::Computation;
 use holon_api::computation::DerivedField;
 use holon_api::computation::DerivedFieldPlan;
+use holon_api::computation::FieldIdent;
 use holon_api::expr_parser;
 use holon_expr::CompiledExpr;
 use holon_expr::bounded_engine;
@@ -718,15 +719,16 @@ fn concat_of_a_boolean_renders_sql_style_not_rhai_style() {
 ///
 /// `eval` raises `WrongType`; the lowering `(… AND n)` would be read truthily
 /// by SQLite (`1 AND 5` is `1`), so seat A raising where seat B yields a value
-/// is exactly the eval/SQL disagreement the dual oracle exists to forbid. The
-/// subset therefore rejects a `&&` operand that is not boolean by syntax, and
-/// the expression falls back to Rhai — which raises on it too.
+/// is exactly the eval/SQL disagreement the dual oracle exists to forbid. An
+/// operand with no boolean evidence — neither its syntax nor a declared
+/// BOOLEAN column type — therefore leaves the subset and falls back to Rhai,
+/// which raises on it too.
 #[test]
 fn a_non_boolean_and_operand_is_refused_by_both_seats() {
     let src = r#"is_def_var("n") && n"#;
     let err = expr_parser::parse(src).expect_err("must leave the subset");
     assert!(
-        err.message.contains("boolean by syntax"),
+        err.message.contains("is not boolean"),
         "error must name the constraint: {}",
         err.message
     );
@@ -823,7 +825,10 @@ fn default_petri_props_parse_and_plant_to_seat_a() {
         comp.compile_sql()
             .unwrap_or_else(|e| panic!("{name}: compile_sql must succeed: {e}"));
 
-        let plan = DerivedFieldPlan::plan(vec![DerivedField::new(*name, comp)]);
+        let plan = DerivedFieldPlan::plan(vec![DerivedField::new(
+            FieldIdent::parse(name).expect("identifier"),
+            comp,
+        )]);
         assert_eq!(
             plan.sql_planted.len(),
             1,

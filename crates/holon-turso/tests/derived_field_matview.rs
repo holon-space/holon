@@ -16,6 +16,7 @@ use holon_api::computation::ArithOp;
 use holon_api::computation::Computation;
 use holon_api::computation::DerivedField;
 use holon_api::computation::DerivedFieldPlan;
+use holon_api::computation::FieldIdent;
 use holon_turso::matview_manager::reconcile_named_view;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
@@ -89,7 +90,7 @@ async fn planted_computed_column_is_ivm_maintained_and_retracts() {
     // Declaration -> Computation -> plan. `priority * 2` lowers to SQL, so the
     // hybrid seat routes it to seat A (a planted matview column), NOT the stage.
     let plan = DerivedFieldPlan::plan(vec![DerivedField::new(
-        "boosted",
+        FieldIdent::parse("boosted").expect("identifier"),
         Computation::Arith {
             op: ArithOp::Mul,
             lhs: Box::new(Computation::Field("priority".into())),
@@ -103,9 +104,10 @@ async fn planted_computed_column_is_ivm_maintained_and_retracts() {
     );
     let col = &plan.sql_planted[0];
     assert_eq!(col.sql, "(priority * 2)");
+    assert_eq!(col.select_expr(), "((priority * 2)) AS \"boosted\"");
 
     // Plant the column into a matview over the base table.
-    let select = format!("SELECT id, {} AS {} FROM task", col.sql, col.name);
+    let select = format!("SELECT id, {} FROM task", col.select_expr());
     let created = reconcile_named_view(&handle, "task_derived", &select)
         .await
         .expect("planted matview DDL must succeed");

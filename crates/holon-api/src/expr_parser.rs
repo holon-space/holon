@@ -30,7 +30,8 @@
 //! `match_value` being the boolean condition.
 //!
 //! `+` produces [`Computation::Concat`] instead of [`Computation::Arith`] when
-//! either operand is text by syntax (see [`is_string_typed`]); `()` is
+//! either operand is text — a string literal, or a column the caller declared
+//! TEXT in the [`FieldTypes`] passed to [`parse_typed`]. `()` is
 //! [`Value::Null`], the only "nothing" inhabitant `Value` and SQL share.
 //!
 //! This is a **total function that fails loud with a typed error** — it does
@@ -47,6 +48,8 @@ use crate::computation::ArithOp;
 use crate::computation::CmpOp;
 use crate::computation::Computation;
 use crate::computation::FieldIdent;
+use crate::computation::FieldKind;
+use crate::computation::FieldTypes;
 
 /// A subset-parse failure. Not a user error on its own: the derived-field
 /// pipeline falls back to Rhai on `Err`. Carries a message for disclosure.
@@ -75,8 +78,22 @@ impl std::error::Error for ExprParseError {}
 /// Rhai subset into a typed [`Computation`]. `Err` means "not in the subset";
 /// the caller falls back to Rhai.
 pub fn parse(src: &str) -> Result<Computation, ExprParseError> {
+    parse_typed(src, &FieldTypes::new())
+}
+
+/// Parse `src` against the declared types of the columns it may reference.
+///
+/// The types decide `+` (text operands concatenate, numeric operands add) and
+/// admit a declared boolean column as an `&&` operand. With an empty
+/// [`FieldTypes`] only the operands' syntax is available, so a field reference
+/// carries no type evidence.
+pub fn parse_typed(src: &str, types: &FieldTypes) -> Result<Computation, ExprParseError> {
     let tokens = tokenize(src)?;
-    let mut parser = Parser { tokens, pos: 0 };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        types: types.clone(),
+    };
     let expr = parser.parse_expr()?;
     if parser.pos != parser.tokens.len() {
         return Err(ExprParseError::new(format!(
@@ -319,6 +336,7 @@ fn next_is(bytes: &[u8], i: usize, b: u8) -> bool {
 struct Parser {
     tokens: Vec<Tok>,
     pos: usize,
+    types: FieldTypes,
 }
 
 impl Parser {
@@ -362,8 +380,8 @@ impl Parser {
         while matches!(self.peek(), Some(Tok::AndAnd)) {
             self.bump();
             let rhs = self.parse_comparison()?;
-            require_boolean_typed(&lhs, "`&&` left operand")?;
-            require_boolean_typed(&rhs, "`&&` right operand")?;
+            self.require_boolean_typed(&lhs, "`&&` left operand")?;
+            self.require_boolean_typed(&rhs, "`&&` right operand")?;
             lhs = Computation::And {
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
@@ -512,7 +530,9 @@ impl Parser {
             };
             self.bump();
             let rhs = self.parse_multiplicative()?;
-            lhs = if op == ArithOp::Add && (is_string_typed(&lhs) || is_string_typed(&rhs)) {
+            lhs = if op == ArithOp::Add
+                && (self.is_string_typed(&lhs) || self.is_string_typed(&rhs))
+            {
                 Computation::Concat {
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
@@ -655,44 +675,52 @@ impl Parser {
 /// A raise where seat B silently yields a value. Neither seat may accept what
 /// the other rejects, so such an expression leaves the subset entirely and
 /// falls back to Rhai, which raises on a non-boolean `&&` operand too.
-///
-/// The cost is that a boolean COLUMN (`is_source && is_focused`) carries no
-/// syntactic evidence of its type and so cannot ride seat A yet — the same
-/// missing-declared-types gap as [`is_string_typed`], closed by the same I3-1
-/// work.
-fn require_boolean_typed(c: &Computation, position: &str) -> Result<(), ExprParseError> {
-    if is_boolean_typed(c) {
-        return Ok(());
+impl Parser {
+    fn require_boolean_typed(&self, c: &Computation, position: &str) -> Result<(), ExprParseError> {
+        if self.is_boolean_typed(c) {
+            return Ok(());
+        }
+        Err(ExprParseError::new(format!(
+            "{position} is not boolean; the subset requires a comparison, `&&`, `is_def_var`, a \
+             boolean literal, or a column declared BOOLEAN so that in-memory and SQL evaluation \
+             agree"
+        )))
     }
-    Err(ExprParseError::new(format!(
-        "{position} is not boolean by syntax; the subset requires a comparison, `&&`, \
-         `is_def_var`, or a boolean literal so that in-memory and SQL evaluation agree"
-    )))
-}
 
-/// Does this sub-expression produce a boolean *by syntax alone*? The mirror of
-/// [`is_string_typed`], on the same syntactic-evidence principle.
-fn is_boolean_typed(c: &Computation) -> bool {
-    match c {
-        Computation::Compare { .. }
-        | Computation::And { .. }
-        | Computation::IsDefined(_)
-        | Computation::Predicate(_)
-        | Computation::Lit(Value::Boolean(_)) => true,
-        Computation::Case {
-            branches, else_, ..
-        } => is_boolean_typed(else_) && branches.iter().all(|(_, r)| is_boolean_typed(r)),
-        _ => false,
+    /// Does this sub-expression produce a boolean? A field reference qualifies
+    /// only through its declared type.
+    fn is_boolean_typed(&self, c: &Computation) -> bool {
+        match c {
+            Computation::Compare { .. }
+            | Computation::And { .. }
+            | Computation::IsDefined(_)
+            | Computation::Predicate(_)
+            | Computation::Lit(Value::Boolean(_)) => true,
+            Computation::Field(name) => self.types.kind(name) == Some(FieldKind::Boolean),
+            Computation::Case {
+                branches, else_, ..
+            } => {
+                self.is_boolean_typed(else_)
+                    && branches.iter().all(|(_, r)| self.is_boolean_typed(r))
+            }
+            _ => false,
+        }
     }
-}
 
-fn is_string_typed(c: &Computation) -> bool {
-    match c {
-        Computation::Lit(Value::String(_)) | Computation::Concat { .. } => true,
-        Computation::Case {
-            branches, else_, ..
-        } => is_string_typed(else_) || branches.iter().any(|(_, r)| is_string_typed(r)),
-        _ => false,
+    /// Does this sub-expression produce text? A field reference qualifies only
+    /// through its declared type, which is what makes `first + last` over two
+    /// TEXT columns a [`Computation::Concat`] rather than an addition.
+    fn is_string_typed(&self, c: &Computation) -> bool {
+        match c {
+            Computation::Lit(Value::String(_)) | Computation::Concat { .. } => true,
+            Computation::Field(name) => self.types.kind(name) == Some(FieldKind::Text),
+            Computation::Case {
+                branches, else_, ..
+            } => {
+                self.is_string_typed(else_) || branches.iter().any(|(_, r)| self.is_string_typed(r))
+            }
+            _ => false,
+        }
     }
 }
 

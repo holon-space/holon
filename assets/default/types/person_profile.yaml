@@ -1,7 +1,9 @@
 entity_name: person
 
 computed:
-  display_name: 'if is_def_var("role") && role != () { role + " — " + email } else { email }'
+  display_name:
+    tier: computed_persisted
+    expr: 'if is_def_var("role") && role != () { role + " — " + email } else { email }'
 
 variants:
   - name: default

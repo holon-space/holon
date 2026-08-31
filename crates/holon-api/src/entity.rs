@@ -12,6 +12,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::Value;
+use crate::computation::Computation;
+use crate::computation::FieldTypes;
 
 /// Result type for entity operations
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -116,10 +118,183 @@ pub enum FieldLifetime {
     #[default]
     Persistent,
     Computed {
-        expr: holon_expr::CompiledExpr,
+        spec: ComputedSpec,
     },
     Transient,
     Historical,
+}
+
+/// Where a computed field's value is produced.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputedTier {
+    /// Planted as a column of the type's materialized view and maintained by
+    /// IVM. A declaration whose computation cannot lower to SQL is refused.
+    ComputedPersisted,
+    /// Recomputed at read time. Accepts the whole Rhai surface, so it is also
+    /// the seat for expressions outside the SQL-compilable subset.
+    #[default]
+    ComputedLive,
+}
+
+/// A declared computed field: its name, tier, the Rhai source as authored, and
+/// the [`Computation`] parsed from it.
+///
+/// Both compiled forms are always present: [`Self::computation`] serves
+/// in-memory `eval` and `compile_sql` from one declaration, [`Self::expr`]
+/// serves the Rhai read path and dependency ordering. A source outside the
+/// subset parses to [`Computation::Script`], which evaluates but does not lower
+/// to SQL.
+///
+/// [`Self::types`] is part of the declaration, not a parse-time convenience:
+/// the same source means concatenation over TEXT columns and addition over
+/// numeric ones, so a spec that lost its types would change meaning.
+/// The fields are private: [`Self::parse`] is the only constructor, so the
+/// tier's promise cannot be skipped by building the struct directly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComputedSpec {
+    name: crate::computation::FieldIdent,
+    tier: ComputedTier,
+    expr: holon_expr::CompiledExpr,
+    computation: Computation,
+    types: FieldTypes,
+}
+
+impl ComputedSpec {
+    /// Parse a declaration for both seats.
+    ///
+    /// The name is parsed too: it reaches planted DDL in identifier position,
+    /// where it cannot be parameterised. Rhai compilation failing is an error —
+    /// neither seat could serve the field. The subset parser failing is not:
+    /// the field is served by Rhai alone, reported through
+    /// [`Self::is_rhai_only`], unless the declared tier promised a planted
+    /// column.
+    pub fn parse(
+        name: &str,
+        source: &str,
+        tier: ComputedTier,
+        types: &FieldTypes,
+        engine: &rhai::Engine,
+    ) -> std::result::Result<Self, String> {
+        let name = crate::computation::FieldIdent::parse(name)
+            .map_err(|e| format!("computed field name: {e}"))?;
+        let expr = holon_expr::CompiledExpr::compile(engine, source)?;
+        let computation = match crate::expr_parser::parse_typed(source, types) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(
+                    field = %name,
+                    source = source,
+                    reason = %e,
+                    "computed field is outside the SQL-compilable subset"
+                );
+                Computation::Script(expr.clone())
+            }
+        };
+        let spec = ComputedSpec {
+            name,
+            tier,
+            expr,
+            computation,
+            types: types.clone(),
+        };
+        if tier == ComputedTier::ComputedPersisted {
+            spec.require_sql_plantable()?;
+        }
+        Ok(spec)
+    }
+
+    /// Refuse a `computed_persisted` declaration that cannot become a matview
+    /// column, naming the construct that stopped it.
+    fn require_sql_plantable(&self) -> std::result::Result<(), String> {
+        let reason = match self.computation.compile_sql() {
+            Ok(frag) => match frag.inline_sql() {
+                Ok(_) => return Ok(()),
+                Err(e) => e.to_string(),
+            },
+            Err(e) => e.to_string(),
+        };
+        Err(format!(
+            "computed field '{}' is declared computed_persisted but does not lower to SQL: \
+             {reason}. Source: {}",
+            self.name, self.expr.source
+        ))
+    }
+
+    /// Is this field served by Rhai alone — no structured computation, so no
+    /// SQL lowering and no dependency walk?
+    pub fn is_rhai_only(&self) -> bool {
+        matches!(self.computation, Computation::Script(_))
+    }
+
+    pub fn name(&self) -> &crate::computation::FieldIdent {
+        &self.name
+    }
+
+    pub fn tier(&self) -> ComputedTier {
+        self.tier
+    }
+
+    /// The Rhai form, for the read path and dependency ordering.
+    pub fn expr(&self) -> &holon_expr::CompiledExpr {
+        &self.expr
+    }
+
+    /// The dual-compile form: in-memory `eval` and `compile_sql`.
+    pub fn computation(&self) -> &Computation {
+        &self.computation
+    }
+
+    /// The column types this declaration was resolved against.
+    pub fn types(&self) -> &FieldTypes {
+        &self.types
+    }
+}
+
+/// The serialized form of a [`ComputedSpec`]: the declaration as authored,
+/// including the column types it was resolved against. The compiled forms are
+/// derived on the way back in, so a stored schema can never disagree with the
+/// source it names, and re-parsing cannot change the meaning.
+/// Every field is required. A document omitting `field_types` would re-resolve
+/// `+` from syntax alone and silently mean something else, so it is refused.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ComputedSpecRepr {
+    name: String,
+    tier: ComputedTier,
+    source: String,
+    field_types: FieldTypes,
+}
+
+impl Serialize for ComputedSpec {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        ComputedSpecRepr {
+            name: self.name.to_string(),
+            tier: self.tier,
+            source: self.expr.source.clone(),
+            field_types: self.types.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ComputedSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let repr = ComputedSpecRepr::deserialize(deserializer)?;
+        ComputedSpec::parse(
+            &repr.name,
+            &repr.source,
+            repr.tier,
+            &repr.field_types,
+            &holon_expr::bounded_engine(),
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 // =============================================================================
@@ -471,12 +646,74 @@ impl TypeDefinition {
     /// Fields with `Computed` lifetime, returned as `(name, CompiledExpr)`
     /// pairs.
     pub fn computed_fields(&self) -> Vec<(&str, &holon_expr::CompiledExpr)> {
+        self.computed_specs()
+            .into_iter()
+            .map(|(name, spec)| (name, &spec.expr))
+            .collect()
+    }
+
+    /// Every computed field, in declared (topologically sorted) order.
+    pub fn computed_specs(&self) -> Vec<(&str, &ComputedSpec)> {
         self.fields
             .iter()
             .filter_map(|f| match &f.lifetime {
-                FieldLifetime::Computed { expr } => Some((f.name.as_str(), expr)),
+                FieldLifetime::Computed { spec } => Some((f.name.as_str(), spec)),
                 _ => None,
             })
+            .collect()
+    }
+
+    /// The declaration of one computed field.
+    pub fn computed_spec(&self, name: &str) -> Option<&ComputedSpec> {
+        self.computed_specs()
+            .into_iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, spec)| spec)
+    }
+
+    /// The declared types of every non-computed column, for the subset parser.
+    pub fn field_types(&self) -> FieldTypes {
+        let mut types = FieldTypes::new();
+        for field in &self.fields {
+            if matches!(field.lifetime, FieldLifetime::Computed { .. }) {
+                continue;
+            }
+            if let Some(kind) = crate::computation::FieldKind::of_sql_type(&field.sql_type) {
+                types.insert(field.name.clone(), kind);
+            }
+        }
+        types
+    }
+
+    /// The seat routing for the `computed_persisted` fields — the columns to
+    /// plant into this type's materialized view.
+    ///
+    /// Every declaration reaching here has already been checked to lower to
+    /// SQL, so `stage_evaluated` being non-empty means a field was admitted
+    /// without that check.
+    pub fn persisted_derived_plan(&self) -> crate::computation::DerivedFieldPlan {
+        crate::computation::DerivedFieldPlan::plan(
+            self.computed_specs()
+                .into_iter()
+                .filter(|(_, spec)| spec.tier == ComputedTier::ComputedPersisted)
+                .map(|(_, spec)| {
+                    crate::computation::DerivedField::new(
+                        spec.name.clone(),
+                        spec.computation().clone(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// Computed fields served by Rhai alone — no structured computation, so
+    /// they cannot be planted, walked for dependencies, or certified against a
+    /// home's `computed_persisted` capability.
+    pub fn rhai_only_computed_fields(&self) -> Vec<&str> {
+        self.computed_specs()
+            .into_iter()
+            .filter(|(_, spec)| spec.is_rhai_only())
+            .map(|(name, _)| name)
             .collect()
     }
 
@@ -525,10 +762,10 @@ impl TypeDefinition {
         }
 
         for field in &self.fields {
-            let FieldLifetime::Computed { expr } = &field.lifetime else {
+            let FieldLifetime::Computed { spec } = &field.lifetime else {
                 continue;
             };
-            match engine.eval_ast_with_scope::<rhai::Dynamic>(&mut scope, &expr.ast) {
+            match engine.eval_ast_with_scope::<rhai::Dynamic>(&mut scope, &spec.expr.ast) {
                 Ok(result) => {
                     let value = dynamic_to_value(result.clone());
                     scope.push(field.name.clone(), result);
@@ -795,14 +1032,21 @@ mod mutation_gap_tests {
     #[test]
     fn type_definition_lifetime_projections_and_index_sql() {
         let engine = rhai::Engine::new();
-        let expr = holon_expr::CompiledExpr::compile(&engine, "a + 1").unwrap();
+        let spec = ComputedSpec::parse(
+            "score",
+            "a + 1",
+            ComputedTier::ComputedLive,
+            &FieldTypes::new(),
+            &engine,
+        )
+        .unwrap();
 
         let td = TypeDefinition::new(
             "thing",
             vec![
                 FieldSchema::new("id", "TEXT").primary_key().indexed(),
                 FieldSchema::new("title", "TEXT").indexed(),
-                FieldSchema::new("score", "INTEGER").lifetime(FieldLifetime::Computed { expr }),
+                FieldSchema::new("score", "INTEGER").lifetime(FieldLifetime::Computed { spec }),
                 FieldSchema::new("cache", "TEXT")
                     .indexed()
                     .lifetime(FieldLifetime::Transient),
