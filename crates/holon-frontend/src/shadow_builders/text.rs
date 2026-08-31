@@ -4,7 +4,7 @@ use super::prelude::*;
 use crate::reactive_view_model::DropTask;
 
 holon_macros::widget_builder! {
-    fn text(content: String, #[default = false] bold: bool, #[default = 14.0] size: f32, color: Option<String>, style: Option<String>) {
+    fn text(content: String, #[default = false] bold: bool, #[default = 14.0] size: f32, color: Option<String>, style: Option<String>, #[default = false] truncate: bool) {
         // When positional 0 is a `col("foo")` ref, capture the field name so we
         // can re-derive `content` on every CDC write to the row. The macro's
         // auto-extracted `content: String` is just the snapshot at build time;
@@ -36,6 +36,13 @@ holon_macros::widget_builder! {
         __props.insert("content".to_string(), Value::String(content));
         __props.insert("bold".to_string(), Value::Boolean(bold));
         __props.insert("size".to_string(), Value::Float(size as f64));
+        // `#{truncate: true}` = "this label yields when its row is short of
+        // room" — it may shrink below its content width and clip, with an
+        // ellipsis. Declared per call site rather than inferred: a label in a
+        // plain `row` shares its width with siblings that must not be pushed
+        // out, while a `table` cell is already inside a column box that sizes
+        // it, and making that one nowrap silently retires its wrapping.
+        __props.insert("truncate".to_string(), Value::Boolean(truncate));
         if let Some(ref s) = style {
             __props.insert("style".to_string(), Value::String(s.clone()));
         }

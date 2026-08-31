@@ -58,7 +58,7 @@ pub const SETTINGS_SQL: &str = "SELECT id, provider_name, enabled, config_status
 pub const SIDEBAR_ITEM_TEMPLATE: &str = concat!(
     "list(#{item_template: selectable(row(#{gap: 8, align: \"center\"}, ",
     "icon(col(\"icon\")), ",
-    "text(col(\"display_name\")), ",
+    "text(col(\"display_name\"), #{truncate: true}), ",
     "spacer(#{grow: true}), ",
     "integration_status(col(\"status\"))), ",
     "#{action: integration_open_default_view(#{id: col(\"id\")})})})"

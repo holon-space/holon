@@ -69,17 +69,20 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     // and sizes to its content as before.
     if let Some(box_width) = node.prop_f64("width") {
         el = el.w(px(box_width as f32)).flex_shrink_0().text_center();
-    } else if node.prop_str("field").is_some_and(|f| f != "content") {
-        // A LABEL read from a data column (a sidebar row's name) must yield
-        // when its row runs out of width. A flex item's automatic minimum is
-        // its min-content width, so without this a long label pushes whatever
-        // follows it — the status glyph — past the row's edge instead of
-        // clipping itself. Scoped to column-bound labels: a block's own
-        // `content` text keeps the width behaviour the editor expects.
+    } else if node.prop_bool("truncate").unwrap_or(false) {
+        // A label that DECLARED it yields. A flex item's automatic minimum is
+        // its min-content width, so without this a long label takes the room it
+        // wants and pushes whatever follows it — in the sidebar's integration
+        // row, the status glyph — past the row's edge.
         //
         // `truncate()` (clip + nowrap + …) rather than a bare clip: a name cut
         // off mid-glyph with no mark reads as the whole name, so the ellipsis
         // is what makes the shortening visible instead of silent.
+        //
+        // Opt-in, NOT inferred from the bound column: every `table` cell is a
+        // column-bound label too, and applying this there both retired their
+        // wrapping and changed which partially-scrolled rows report painted
+        // geometry (`settings_integrations_row_op_alignment_windowed`).
         el = el.min_w(px(0.0)).truncate();
     }
     if bold {
