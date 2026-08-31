@@ -2,6 +2,7 @@ mod prelude;
 pub use accordion::ACCORDION_MIN_EXPANDED_WIDTH_PX;
 pub use drawer::DEFAULT_DRAWER_WIDTH;
 pub use drawer::DRAWER_TOGGLE_WIDTH;
+pub use integration_status::status_symbol_and_color;
 
 use crate::reactive_view_model::ReactiveViewModel;
 use crate::render_context::ContainerCapability;

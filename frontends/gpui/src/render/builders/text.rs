@@ -62,6 +62,26 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     if content.is_empty() {
         el = el.min_w(px(1.0));
     }
+    // A fixed box for a glyph that has to line up down a column. Glyph advances
+    // differ (`⚠` is wider than `●`), so a content-sized box would put each
+    // row's symbol at its own x. Set by widgets that EMIT text nodes as a
+    // column cell (`integration_status`); a plain `text(...)` leaves it unset
+    // and sizes to its content as before.
+    if let Some(box_width) = node.prop_f64("width") {
+        el = el.w(px(box_width as f32)).flex_shrink_0().text_center();
+    } else if node.prop_str("field").is_some_and(|f| f != "content") {
+        // A LABEL read from a data column (a sidebar row's name) must yield
+        // when its row runs out of width. A flex item's automatic minimum is
+        // its min-content width, so without this a long label pushes whatever
+        // follows it — the status glyph — past the row's edge instead of
+        // clipping itself. Scoped to column-bound labels: a block's own
+        // `content` text keeps the width behaviour the editor expects.
+        //
+        // `truncate()` (clip + nowrap + …) rather than a bare clip: a name cut
+        // off mid-glyph with no mark reads as the whole name, so the ellipsis
+        // is what makes the shortening visible instead of silent.
+        el = el.min_w(px(0.0)).truncate();
+    }
     if bold {
         el = el.font_weight(FontWeight::SEMIBOLD);
     }
@@ -85,21 +105,25 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         _ => el.child(display.clone()).into_any_element(),
     };
 
-    // When this `text(...)` resolved a `col("content")` against a live row,
-    // expose the on-screen string via `BoundsRegistry` so the PBT
-    // `inv-displayed-text` invariant catches non-editable text widgets that
-    // diverge from `block.content_text()`. Skip tracking for static labels
-    // (no row id) AND for col-bindings to other columns — `inv-displayed-text`
-    // hard-compares against `block.content_text()`, so a widget reading
-    // `col("name")` is *correct* but would compare wrong.
+    // When this `text(...)` resolved a `col(...)` against a live row, expose the
+    // on-screen string via `BoundsRegistry` so the PBT `inv-displayed-text`
+    // invariant catches non-editable text widgets that diverge from
+    // `block.content_text()`. Static labels (no row id) have nothing to bind to.
     let Some(row_id) = node.row_id() else {
         return inner;
     };
-    let bound_field = node.prop_str("field");
-    if bound_field.as_deref() != Some("content") {
+    let Some(field) = node.prop_str("field") else {
+        return inner;
+    };
+    // That invariant compares against the BLOCK's content, so a block row's
+    // non-`content` binding (`text(col("name"))`) is right on screen yet wrong
+    // under that oracle, and stays untracked. A row of another entity — an
+    // `integration:` mirror row — has no block content to be compared against,
+    // so what it paints is left readable for the rungs that read it.
+    if field != "content" && row_id.starts_with("block:") {
         return inner;
     }
-    let el_id = format!("text-{row_id}-content");
+    let el_id = format!("text-{row_id}-{field}");
     let has_content = !content.is_empty();
     let mut tracker = crate::geometry::tracked(
         el_id,

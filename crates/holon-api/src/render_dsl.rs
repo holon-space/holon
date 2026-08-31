@@ -304,6 +304,11 @@ pub fn create_render_engine_with_names(widget_names: &[impl AsRef<str>]) -> Rhai
     register_widget_fn_aliased(&mut engine, "navigation_open_tab", "navigation.open_tab");
     register_widget_fn_aliased(
         &mut engine,
+        "integration_open_default_view",
+        "integration.open_default_view",
+    );
+    register_widget_fn_aliased(
+        &mut engine,
         "answer_question",
         "pending_question.answer_question",
     );

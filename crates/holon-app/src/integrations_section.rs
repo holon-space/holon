@@ -22,8 +22,14 @@
 
 /// Discovery: the integrations that are switched on, and how far their boot
 /// connect got.
-pub const SIDEBAR_SQL: &str = "SELECT id, provider_name, status FROM integration_state WHERE \
-                               enabled = 1 ORDER BY provider_name ASC";
+///
+/// `provider_name` is projected but never painted: it is the stable technical
+/// key, and the tests that assert WHICH integrations the section lists identify
+/// them by it (`integration_state_projection.rs`). What the row shows is
+/// `display_name` — pinned by the windowed rung, which fails if the technical
+/// name reaches the screen.
+pub const SIDEBAR_SQL: &str = "SELECT id, provider_name, display_name, icon, status FROM \
+                               integration_state WHERE enabled = 1 ORDER BY display_name ASC";
 
 /// Control: every bundled provider, enabled or not — the presence axis in
 /// full, because a list filtered to the enabled ones would offer no way to
@@ -35,14 +41,28 @@ pub const SETTINGS_SQL: &str = "SELECT id, provider_name, enabled, config_status
                                 configurable, configure_progress FROM integration_state ORDER BY \
                                 provider_name ASC";
 
-/// A read-only line: the provider and its live status, and nothing to click.
+/// One line per integration: its icon, the name a person would use for it, and
+/// its live status as a single glyph held against the row's trailing edge by an
+/// elastic `spacer`. Every row of the list is equally wide, so the glyphs line
+/// up down the column without any row measuring another — the discovery list
+/// reads as a table with no rules drawn.
 ///
-/// No `selectable`, because `navigation.focus` refuses a target whose scheme is
-/// not `block` — a click would surface as a refusal banner rather than as
-/// navigation.
-pub const SIDEBAR_ITEM_TEMPLATE: &str = "list(#{item_template: row(#{gap: 8, align: \"center\"}, \
-                                         text(col(\"provider_name\")), text(col(\"status\"), \
-                                         #{muted: true}))})";
+/// `display_name`, not `provider_name`: the technical name is the sidecar's
+/// file name and the row's id, and no surface a person reads should show it.
+///
+/// The line is `selectable`, and the click opens the integration's own view.
+/// Not `navigation.focus`: that refuses a target whose scheme is not `block`,
+/// and an integration is not one — `integration.open_default_view` is the op
+/// that knows what an integration's default view is (and refuses loudly when it
+/// has none).
+pub const SIDEBAR_ITEM_TEMPLATE: &str = concat!(
+    "list(#{item_template: selectable(row(#{gap: 8, align: \"center\"}, ",
+    "icon(col(\"icon\")), ",
+    "text(col(\"display_name\")), ",
+    "spacer(#{grow: true}), ",
+    "integration_status(col(\"status\"))), ",
+    "#{action: integration_open_default_view(#{id: col(\"id\")})})})"
+);
 
 /// Every bundled integration as one row of a columnar table, columns aligned
 /// across the header and all rows (Integration / Config / Status / Enabled /

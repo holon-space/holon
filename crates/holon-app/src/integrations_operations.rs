@@ -93,14 +93,18 @@ fn open_default_view_descriptor() -> OperationDescriptor {
         // silently unclickable, which is the same nothing-happens the loud
         // refusal in `open_default_view` exists to replace.
         guard: holon_api::pattern::OpGuard::None,
-        arcs: holon_api::arcs::TransitionArcs::Declared {
-            reads: vec![holon_api::arcs::ArcPlace::new(ENTITY_NAME, "default_view")],
-            // Nothing on this entity moves. The focus is written by
-            // `navigation.focus`, which declares its own arcs on its own
-            // relation — restating them here would claim a place this op does
-            // not own.
-            emits: vec![],
-        },
+        // `Undeclared`, which fails closed: this op resolves the view page from
+        // the SIDECAR CONFIG STORE on disk, and an `ArcPlace` names a
+        // `relation.field` cell — there is none for a file. Declaring
+        // `reads: [integration.default_view]` pointed at the mirror COLUMN,
+        // which is presentation-only: writing that cell changes nothing about
+        // where this op navigates, so the declaration told a simulator the one
+        // thing that is not true. Refusing to simulate beats simulating wrong.
+        //
+        // What is lost by not saying `emits: []`: nothing on this entity moves
+        // either — the focus is written by `navigation.focus`, which declares
+        // its own arcs on its own relation.
+        arcs: holon_api::arcs::TransitionArcs::Undeclared,
     }
 }
 
@@ -252,6 +256,11 @@ impl IntegrationsOperationProvider {
     }
 
     /// Focus `provider`'s view page in the main panel.
+    ///
+    /// Resolves the page from the SIDECAR CONFIG STORE. The mirror's
+    /// `integration_state.default_view` column is presentation-only — a
+    /// projection of the same sidecar value for surfaces that can only read
+    /// SQL — so writing that column does not change where this op navigates.
     ///
     /// Three loud refusals, because every one of them would otherwise present
     /// as a click that does nothing: no `default_view` in the sidecar, a

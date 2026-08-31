@@ -39,6 +39,9 @@ use holon::storage::BLOCK_READ_TABLE;
 use holon_loro_wiring::EventInfraModule;
 
 const LEFT_SIDEBAR_ID: &str = "block:default-left-sidebar";
+/// The block `claude-history.yaml`'s `default_view` names, scheme-prefixed as
+/// the store holds it.
+const CLAUDE_HISTORY_VIEW_ID: &str = "block:claude-history-view";
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     Arc::new(
@@ -201,16 +204,122 @@ fn the_seeded_section_embeds_the_shared_list_source_verbatim() {
     });
 }
 
-/// `navigation.focus` refuses a target whose scheme is not `block`, so a
-/// clickable sidebar row would paint a refusal banner instead of navigating.
+/// The sidebar row IS clickable, and the click opens the integration's own
+/// view.
+///
+/// The navigation ops stay forbidden: `navigation.focus` refuses a target whose
+/// scheme is not `block`, so wiring the row to one would paint a refusal banner
+/// instead of navigating. `integration.open_default_view` is the op that knows
+/// what an integration's default view is.
 #[test]
-fn the_sidebar_row_carries_no_navigation_action() {
+fn the_sidebar_row_opens_the_integrations_default_view() {
     let template = holon_app::integrations_section::SIDEBAR_ITEM_TEMPLATE;
-    for forbidden in ["selectable", "navigation_focus", "navigation_open_tab"] {
+    for required in ["selectable", "integration_open_default_view", "col(\"id\")"] {
+        assert!(
+            template.contains(required),
+            "the sidebar integration row must carry {required} so a click opens the \
+             integration's view.\n  template: {template}"
+        );
+    }
+    for forbidden in ["navigation_focus", "navigation_open_tab"] {
         assert!(
             !template.contains(forbidden),
             "the sidebar integration row must carry no {forbidden}: an `integration:` id is not a \
              focusable target.\n  template: {template}"
+        );
+    }
+}
+
+/// The block a `default_view` names must exist in the seed, under exactly that
+/// id.
+///
+/// `integration_state.default_view` holds a BARE block id as plain text — a
+/// string no type checks and no foreign key joins. `claude-history.yaml` names
+/// `claude-history-view`, and the only thing keeping that name pointing at
+/// something is this test: rename the headline's `:ID:` and the click starts
+/// refusing, with the mismatch visible nowhere else.
+#[test]
+fn the_seeded_layout_carries_the_claude_history_default_view() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        holon_app::seed_default_layout(&engine, ordering, false, false)
+            .await
+            .expect("seed_default_layout must complete on a fresh file DB");
+
+        let rows = engine
+            .db_handle()
+            .query(
+                &format!(
+                    "SELECT content FROM {BLOCK_READ_TABLE} WHERE parent_id = \
+                     '{CLAUDE_HISTORY_VIEW_ID}' AND source_language = 'render'"
+                ),
+                HashMap::new(),
+            )
+            .await
+            .expect("query the default view's render block");
+        let content = rows
+            .first()
+            .and_then(|r| r.get("content"))
+            .and_then(|v| v.as_string())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{CLAUDE_HISTORY_VIEW_ID} must be seeded with a render child — \
+                     claude-history.yaml's `default_view` names it, and the op that opens it \
+                     resolves the bare id to exactly this block"
+                )
+            })
+            .to_string();
+
+        assert!(
+            content.contains("cc_session"),
+            "the Claude History view must list the integration's sessions: {content}"
+        );
+        // A `live_query` interprets its item_template ONCE against the whole row
+        // set, so only a collection widget iterates it — a scalar template
+        // renders ONE session and looks merely quiet.
+        assert!(
+            content.contains("list(#{item_template:"),
+            "the per-row template must be wrapped in a collection or the view paints a single \
+             row (bugfunnel 2026-08-18-integrations-section-renders-one-of-four-rows): {content}"
+        );
+    });
+}
+
+/// Every status word the projection can store has a glyph.
+///
+/// The word is written by `IntegrationStatus::label()` here and read by
+/// `holon_frontend`'s `integration_status` widget, which cannot depend on this
+/// crate — so the two tables are joined from this side. A status added there
+/// and forgotten here would paint the disclosed `?` marker on a real row.
+#[test]
+fn every_integration_status_word_has_a_glyph() {
+    use holon_app::integration_projection::IntegrationStatus;
+
+    let all = [
+        IntegrationStatus::Pending,
+        IntegrationStatus::Connected,
+        IntegrationStatus::NeedsAuth,
+        IntegrationStatus::Unavailable,
+    ];
+    // Exhaustiveness tripwire: a new variant makes this match — and so this
+    // test — fail to compile, which is the point. Extend `all` above with it.
+    fn _covers(status: IntegrationStatus) {
+        match status {
+            IntegrationStatus::Pending
+            | IntegrationStatus::Connected
+            | IntegrationStatus::NeedsAuth
+            | IntegrationStatus::Unavailable => {}
+        }
+    }
+
+    for status in all {
+        let label = status.label();
+        assert!(
+            holon_frontend::shadow_builders::status_symbol_and_color(label).is_some(),
+            "status {label:?} has no glyph — the sidebar would paint the disclosed unknown \
+             marker. Add it to holon_frontend::shadow_builders::integration_status."
         );
     }
 }

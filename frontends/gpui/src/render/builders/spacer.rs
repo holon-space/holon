@@ -6,8 +6,18 @@ pub fn render(node: &ReactiveViewModel, _: &GpuiRenderContext) -> Div {
     let width = node.prop_f64("width").unwrap_or(0.0) as f32;
     let height = node.prop_f64("height").unwrap_or(0.0) as f32;
     let color = node.prop_str("color").map(|s| s.to_string());
+    let grow = node.prop_bool("grow").unwrap_or(false);
 
     let mut el = div();
+    if grow {
+        // Elastic gap: absorbs the row's slack so everything after it sits at
+        // the trailing edge. `flex_basis(0)` keeps the share independent of the
+        // declared `width`, which an elastic spacer leaves at 0 anyway.
+        let style = el.style();
+        style.flex_grow = Some(1.0);
+        style.flex_basis = Some(px(0.0).into());
+        return el;
+    }
     if width > 0.0 {
         el = el.w(px(width)).flex_shrink_0();
     }

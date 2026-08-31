@@ -38,6 +38,11 @@
 -- renders. `default_view` is nullable and means it: an integration with no view
 -- page yet is a state `integration.open_default_view` refuses on, not one it
 -- guesses at.
+--
+-- All three are DISPLAY-ONLY, `default_view` included: the op reads the sidecar
+-- config store, not this cell, so an `UPDATE integration_state SET default_view
+-- = …` changes what a surface SHOWS and nothing about where a click goes. To
+-- move the view page, edit `assets/integrations/<provider>.yaml`.
 CREATE TABLE IF NOT EXISTS integration_state (
     id TEXT PRIMARY KEY NOT NULL,
     provider_name TEXT NOT NULL,
