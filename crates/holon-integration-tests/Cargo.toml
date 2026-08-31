@@ -17,6 +17,9 @@ path = "src/lib.rs"
 [features]
 default = ["test-infra", "pbt"]
 test-infra = [
+    # The SLO gate rungs prove their own teeth by slowing the real CDC apply
+    # path; nothing else in the workspace enables this.
+    "holon-api?/slo-fault-injection",
     "dep:holon",
     "dep:holon-frontend",
     "dep:holon-app",

@@ -508,6 +508,19 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 // correlator AFTER apply below.
                 let touched = crate::latency_e2e::touched_entities(source_name, &changes);
                 let t_rows = std::time::Instant::now();
+                // Falsification hook for the latency-SLO gate: disarmed in
+                // every real run (one relaxed atomic load), armed only by
+                // `latency_slo_gate.rs` to prove its rungs can go red.
+                //
+                // Scaled by the batch's row count, so the armed delay models a
+                // pipeline where each WRITE costs more. A flat per-batch sleep
+                // does not: CDC delivers many rows per batch, so it barely moves
+                // a per-write throughput measurement — the slowed arm once
+                // measured FASTER than the clean one.
+                #[cfg(feature = "slo-fault-injection")]
+                if let Some(d) = crate::latency_slo::fault_injection::delivery_delay() {
+                    std::thread::sleep(d * change_count.max(1) as u32);
+                }
                 live.apply_changes_with_origins(changes, &origins);
                 crate::latency_e2e::rows_delivered(
                     source_name,

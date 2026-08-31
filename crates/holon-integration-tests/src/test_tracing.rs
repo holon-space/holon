@@ -647,6 +647,17 @@ impl SpanCollector {
                 ),
             );
 
+            // Latency-SLO probe: the `stage="e2e"` stream the gate rungs score.
+            // Same `holon_latency` pin as the reseed observer above, and inert
+            // (one atomic load per event) until a rung arms it.
+            #[cfg(feature = "pbt")]
+            let registry = registry.with(
+                crate::pbt::composed::slo_probe::SloProbeLayer.with_filter(
+                    tracing_subscriber::filter::Targets::new()
+                        .with_target("holon_latency", tracing::Level::DEBUG),
+                ),
+            );
+
             // tokio-console async-wait profiler. `spawn()` starts the gRPC
             // aggregator on its own background thread+runtime (no ambient
             // runtime required) so the `tokio-console` TUI can attach. Only

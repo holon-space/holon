@@ -9,6 +9,14 @@ publish = false
 [package.metadata.cargo-machete]
 ignored = ["workspace-hack"]
 
+[features]
+# Compiles the latency-SLO fault injector (`latency_slo::fault_injection`) and
+# the delay it drives in the CDC apply path. OFF by default, so a release build
+# has no injector to call and no branch in `LiveData::subscribe`'s hot loop.
+# Enabled only by `holon-integration-tests`, whose SLO gate rungs are the one
+# caller.
+slo-fault-injection = []
+
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true

@@ -3,13 +3,19 @@ id: 2026-08-31-set-field-e2e-latency-exceeds-slo-on-empty-vault
 date: 2026-08-31
 gap: ORACLE
 secondary: ENVIRONMENT
-status: OPEN
+status: PARTIAL
 summary: >-
   Typing into a block measured p50 216ms / p95 356ms interaction-to-visible on a
   20-block vault against a 200ms p95 SLO, and no gate fails on it. A/B against
   pre-wave main shows the number is PRE-EXISTING and is 95% queue wait: writes
   arrive ~4x faster than the pipeline drains them, and `stage="e2e"` bills every
   interaction for the ones queued ahead of it.
+
+  PARTIAL (2026-08-31): the ORACLE half is FIXED — the SLO is now two gated
+  rungs (service-time p95, throughput floor) scored by one type that the
+  runtime oracle and the land gate share, so a breach fails a build instead of
+  painting a banner. The ENVIRONMENT half — the ~19ms per-write drain itself —
+  stays OPEN; see Remedy.
 ---
 
 ## Bug
@@ -191,14 +197,123 @@ rungs is the open work, not the shape of them.
 
 ## Remedy
 
-Open; nothing is fixed. Three parts:
+### 1-2. Instrumentation — PARTIALLY DONE
 
-1. Instrument the unattributed `backend.execute_operation` → `live_data.apply_batch`
-   gap so the ~11ms service cost has a name, and make the `projection` stage
-   actually fire.
-2. Emit the in-flight interaction count alongside each `stage="e2e"` event, so
-   any consumer — gate, oracle or report — can tell a queued measurement from a
-   quiet one instead of silently conflating them.
-3. Build the two D50.a rungs — a service-time p95 and a throughput floor — as a
-   gate rather than only a banner, and propose N for the floor. The composed
-   keystone already has the per-tick accounting window the live sweep lacks.
+The `e2e` event now carries `in_flight` (queue depth at dispatch) and `backlog`
+(queue depth after delivery), which is remedy item 2: any consumer can tell a
+queued measurement from a quiet one. `crates/holon-api/src/latency_e2e.rs`.
+
+Item 1 — naming the unattributed `backend.execute_operation` →
+`live_data.apply_batch` gap and making the `projection` stage fire — is NOT
+done. Still open, and still worth doing: at ~11ms it does not breach the SLO,
+but it is the only un-named span on the write path.
+
+### 3. The two D50.a rungs — DONE (the ORACLE half)
+
+`crates/holon-integration-tests/tests/latency_slo_gate.rs`, three tests:
+
+| rung | what it scores |
+|---|---|
+| `latency_slo_rung_service_time_p95` | paced drive, p95 of samples alone in the pipeline for their whole life, against the 200ms SLO — GATED |
+| `latency_slo_rung_throughput_floor` | 150-write burst through the production fire-and-forget door, deliveries/second across saturated intervals — REPORT-ONLY on the rate |
+| `a_slowed_pipeline_moves_the_service_statistic` | wiring: arms a per-row delay in the real CDC apply path, asserts the service statistic moves (p50 22-45ms clean → 112-125ms slowed) |
+
+The VERDICT-FLIP half of falsification lives in `holon_api::latency_slo`'s unit
+tests (`service_rung_fails_on_a_slow_paced_pipeline`,
+`throughput_rung_fails_a_slow_drain`, plus pins for both false-red estimators
+this lane shipped and lost). It is not asserted at integration level after
+measurement: across injected per-row delays of 60/250/300ms and drives of
+30/40/80 writes, any injection strong enough to flip a verdict also destroys the
+sample population the verdict needs (service samples fell to n=0/6/19/28 against
+a floor of 30; the burst delivered 0 of 150 writes at EVERY delay tried, 60ms
+and 250ms alike). A flip assertion there would report INCONCLUSIVE on an
+unmodified tree. The shipped injection is 250ms/row on the paced arm only.
+
+Both rungs score `holon_api::latency_slo::SloWindow`, and the runtime
+`latency-slo` oracle was rewritten to score the SAME type — so the banner and
+the gate cannot report different numbers. The oracle is now edge-triggered on a
+rung turning red rather than firing per event; the five banners this entry
+records off one queue ramp can no longer be produced (pinned by
+`a_queue_ramp_paints_no_service_violation` in `crates/holon-oracles/src/latency.rs`).
+
+`just latency-slo-gate` is step 9 of `just landing-gate`.
+
+Measured on an unmodified tree, headless debug: service p95
+25/27/30/34/38/45/47/48/53/58/63/68/69ms against the 200ms budget, plus one
+admitted run at 183ms — so the contention covariate does not capture every
+source of load the service rung is sensitive to, and a red there is worth one
+re-run on a confirmed idle host before it is believed. Both rungs refuse to
+score a run whose mean boot `matview_ddl` exceeds 30ms, reusing the covariate
+and cut `just latency-gate` already uses; a refused run panics with INVALID
+rather than passing, so "too busy to judge" can never read as green.
+
+**The throughput rung is REPORT-ONLY on its rate.** On admitted hosts an
+unmodified tree measured 42.8 / 64.4 / 460.3 / 460.7 / 809.6 / 1021.4 writes/s
+with the current estimator — a 24x spread that no floor can straddle. (Earlier 7.7-27.0/s figures
+came from a since-replaced estimator and are void.) The rate is printed every run and cannot fail
+a build; what still fails is a burst that saturated nothing, sampled nothing, or
+lost more than its stated share of writes. Same treatment
+`docs/Testing/latency-ceilings.txt` gives its SplitBlock rungs. Promotion needs
+the spread attributed and five agreeing admitted runs — condition stated at
+`THROUGHPUT_FLOOR_WRITES_PER_SEC`.
+
+**Burst write loss (disclosed, harness artifact).** 150 dispatched writes yield
+~62 deliveries; the fire-and-forget door returns `Ok` regardless, so the rung
+now counts landed/dispatched, prints the loss on every run, and fails above a
+budget. Cause is a Loro store whose backing tempdir is dropped immediately after
+construction (`crates/holon-integration-tests/src/pbt/composed/builder.rs:660-663`,
+whose comment asserts the loro-only config "never persists"), so `save_all` →
+`write_atomic` (`crates/holon-loro/src/loro_document.rs:332`) hits ENOENT under a
+burst. `write_atomic` propagates the error correctly and the paced rung — same
+wiring, same blocks — never trips it. Fixture lifetime bug, not a product
+defect: NO bugfunnel entry filed, recorded here because it bounds what the
+throughput number means.
+
+**Verifier's ruling on promotion (2026-08-31):** the throughput floor must NOT
+be promoted to a gate until this ENOENT artifact is fixed, no matter how many
+quiet-host runs agree. A lost write still consumes denominator wall time while
+contributing no delivery, so every rate measured today is depressed by an
+amount that varies with the loss — a floor calibrated on those numbers would
+encode the artifact, not the pipeline.
+
+**Known blind spot in the BANNER (not the gate).** Rung 1 scores only samples
+that were alone in the pipeline for their whole life. A pipeline slow enough to
+be worth catching is slow enough to build a queue, and a queued sample is
+excluded — so in production the service rung trends toward `Unjudged`/`Pass`
+exactly when things are worst. Measured: 30 fast quiet samples plus 10 genuine
+900ms queued ones score `p95=10ms Pass`, all ten dropped. For the GATE this is
+harmless (the harness settles between transitions, so pacing holds by
+construction and the exclusion removes only contamination). For the oracle it is
+a real under-report, and closing it needs a queue-aware service estimator — not
+a looser filter. Follow-up, not fixed here.
+
+**Where the fault injector is compiled.** `holon-api`'s `slo-fault-injection`
+feature is enabled only through `holon-integration-tests/test-infra`, which is a
+DEFAULT feature of that crate — so anything building it compiles the injector,
+including the `diag_harness` example (`justfile:537`, `just heap-profile`). That
+is a diagnostic harness, not a shipped frontend; no frontend or release binary
+enables the feature, and the sleep is `#[cfg]`-compiled out of them entirely.
+
+**Coverage gap closed alongside this.** The oracle's THROUGHPUT banner branch
+had no test — all six existing ones exercised the service branch — so a
+regression that stopped the drain-rate half raising would have gone unnoticed.
+`a_slow_drain_paints_a_throughput_banner` now drives that arm.
+
+**A third consumer is still on the refuted estimator.** `just soak`
+(`justfile:518`) judges the same 200ms SLO via
+`scripts/measure_latency.py --fail-over-p95 200`, i.e. raw `stage="e2e"` `ms`
+under load — the measurement this entry proves is queue depth, not latency.
+Flagged rather than fixed: the soak drives a deliberately saturated 5-10k-block
+workload, so pointing it at `SloWindow` means deciding what a service-time
+statistic even means there, which is its own ruling.
+
+### The ENVIRONMENT half — STILL OPEN
+
+The ~18.7ms drain (roughly 53 writes/s in the app) is unchanged; nothing here
+made a write cheaper. What changed is that it is now NAMED and gated, so a
+regression against it fails a build. Reducing it is follow-up work:
+
+* Coalesce the org write-back — ~74 `org.on_block_changed` file writes per 64
+  writes, starting ~9ms AFTER `stage="e2e"` closes, so it caps throughput.
+* Instrument the `execute_operation` → `apply_batch` gap (remedy item 1 above).
+* Re-measure in a release build; every number in this entry is debug.

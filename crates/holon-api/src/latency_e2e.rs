@@ -73,7 +73,12 @@
 //!   [`touched_entities`]). Closes the matching entries and emits, per closure:
 //!
 //!   `tracing::info!(target="holon_latency", stage="e2e", action, block,
-//!   source, ms)`
+//!   source, ms, in_flight, backlog)`
+//!
+//! `ms` alone is service time plus queue wait. `in_flight` (queue depth at
+//! dispatch) and `backlog` (queue depth after this delivery) are what let a
+//! consumer separate the two — see [`crate::latency_slo`], which both the
+//! runtime oracle and the land gate score through.
 //!
 //! # SLO endpoint: projection-visible, deliberately NOT frame-present
 //!
@@ -174,6 +179,11 @@ struct Pending {
     /// the op carried one).
     observable: Observable,
     t0: Instant,
+    /// Interactions in flight the moment this one was dispatched, itself
+    /// included. `1` means nothing was queued ahead of it, so its measurement
+    /// is service time rather than service time plus queue wait — the
+    /// distinction [`crate::latency_slo`] gates on.
+    in_flight: usize,
 }
 
 /// One closed correlation, ready to emit. Returned by the pure
@@ -183,6 +193,11 @@ struct Closed {
     action: String,
     target: String,
     ms: u64,
+    in_flight: usize,
+    /// Interactions still pending after this one closed. `> 0` means the
+    /// pipeline was saturated at this delivery, so the wait until the next
+    /// delivery is drain time and not the driver idling.
+    backlog: usize,
 }
 
 static PENDING_LEN: AtomicUsize = AtomicUsize::new(0);
@@ -262,11 +277,13 @@ pub fn interaction_dispatched(action: &str, target: &str, observable: Observable
     if pending.len() >= MAX_PENDING {
         pending.remove(0);
     }
+    let in_flight = pending.len() + 1;
     pending.push(Pending {
         action: action.to_string(),
         target: target.to_string(),
         observable,
         t0: now,
+        in_flight,
     });
     PENDING_LEN.store(pending.len(), Ordering::Release);
 }
@@ -482,6 +499,10 @@ pub fn rows_delivered<'a>(
         // NOT at GPU frame-present (see the module-level "SLO endpoint"
         // disclosure). This is the stage the latency-slo oracle judges. Prod
         // counterpart of the harness-only `action_total` stage.
+        // `in_flight` / `backlog` are what let a consumer tell a queued sample
+        // from a quiet one. Without them `ms` conflates service time with queue
+        // wait, and an agent typing faster than a human turns a healthy pipeline
+        // into a wall of SLO banners (BugFunnel 2026-08-31).
         tracing::info!(
             target: "holon_latency",
             stage = "e2e",
@@ -489,6 +510,8 @@ pub fn rows_delivered<'a>(
             block = %c.target,
             source = source,
             ms = c.ms,
+            in_flight = c.in_flight,
+            backlog = c.backlog,
             "holon_latency",
         );
     }
@@ -584,11 +607,19 @@ fn close_delivered<S: AsRef<str>>(
             action: pending[winner].action.clone(),
             target: pending[winner].target.clone(),
             ms: now.duration_since(winner_t0).as_millis() as u64,
+            in_flight: pending[winner].in_flight,
+            backlog: 0,
         });
         // Remove the winner and all OLDER entries of the same (target, kind)
         // (superseded). A different kind on the same target is a different
         // interaction awaiting its own delivery — never collateral.
         pending.retain(|p| p.target != target || p.observable.kind() != kind || p.t0 > winner_t0);
+    }
+    // Backlog is what survives the WHOLE batch, so it is stamped once the loop
+    // has closed every target this delivery named.
+    let backlog = pending.len();
+    for c in &mut closed {
+        c.backlog = backlog;
     }
     closed
 }
@@ -603,6 +634,7 @@ mod tests {
             target: target.to_string(),
             observable: Observable::BlockRow(seq.map(WriteSeq::from_i64)),
             t0,
+            in_flight: 1,
         }
     }
 
@@ -613,6 +645,7 @@ mod tests {
             target: target.to_string(),
             observable: Observable::FocusRoot,
             t0,
+            in_flight: 1,
         }
     }
 

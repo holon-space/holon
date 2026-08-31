@@ -445,6 +445,31 @@ latency-gate ceilings='docs/Testing/latency-ceilings.txt':
     fi
     exit "$gate"
 
+# The latency SLO as a GATE (Martin's ruling D50.a) — two rungs plus their own
+# wiring check, three tests in one headless binary; step 9 of `landing-gate`.
+# Distinct from `latency-gate`
+# above: that one is a per-rung REGRESSION RATCHET against ceilings that only
+# move down, this one judges the fixed 200ms SLO and a throughput floor. A tree
+# can regress within its ratchet and still be inside the SLO, or blow the SLO
+# without moving a p50 — neither gate subsumes the other.
+#
+# Serialized (`--test-threads=1`): the rungs measure wall-clock latency, so two
+# of them running at once would each measure the other's load.
+latency-slo-gate *FLAGS:
+    #!/usr/bin/env bash
+    # pipefail so a `tee`'d failure cannot report success (see `hand-authored`).
+    set -euo pipefail
+    mkdir -p target/gate-logs
+    # Tree assertion: a failed `cd` must never yield a green that ran nothing
+    # (a gate exited 0 having run 0 tests in the WRONG tree, 2026-07-25).
+    for f in crates/holon-integration-tests/tests/latency_slo_gate.rs \
+             crates/holon-api/src/latency_slo.rs; do
+        [ -f "$f" ] || { echo "latency-slo-gate: wrong tree — missing $f" >&2; exit 2; }
+    done
+    cargo test -p holon-integration-tests --features pbt --test latency_slo_gate \
+        -- --nocapture --test-threads=1 {{FLAGS}} 2>&1 \
+        | tee target/gate-logs/latency-slo-gate.log
+
 # Scale-soak: drive the REAL pipeline against a seeded 5–10k-block vault WITH CRDT on,
 # measuring per-action latency vs the p95<200ms SLO plus RSS growth. Boots the keystone
 # (`general_e2e_composed_pbt`, forced to the full_headless/CRDT wiring) over a synthetic
@@ -1079,22 +1104,24 @@ prepush:
 landing-gate:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== landing [1/8]: fmt =="
+    echo "== landing [1/9]: fmt =="
     cargo fmt --all -- --check
-    echo "== landing [2/8]: typecheck incl. every test target =="
+    echo "== landing [2/9]: typecheck incl. every test target =="
     just gate-compile
-    echo "== landing [3/8]: browser-target typecheck =="
+    echo "== landing [3/9]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== landing [4/8]: out-of-workspace browser frontend =="
+    echo "== landing [4/9]: out-of-workspace browser frontend =="
     just check-dioxus-web-wasm
-    echo "== landing [5/8]: out-of-workspace wasi worker =="
+    echo "== landing [5/9]: out-of-workspace wasi worker =="
     just check-worker-wasm
-    echo "== landing [6/8]: architecture rules =="
+    echo "== landing [6/9]: architecture rules =="
     just gate-arch
-    echo "== landing [7/8]: keystone smoke =="
+    echo "== landing [7/9]: keystone smoke =="
     just keystone-smoke
-    echo "== landing [8/8]: hand-authored regressions =="
+    echo "== landing [8/9]: hand-authored regressions =="
     just hand-authored
+    echo "== landing [9/9]: latency SLO (D50.a) =="
+    just latency-slo-gate
     echo "== landing gate PASS =="
 
 # --- Observability ----------------------------------------------------------
