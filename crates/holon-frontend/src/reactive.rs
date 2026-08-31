@@ -2684,6 +2684,11 @@ impl ReactiveEngine {
         let ctx = RenderContext {
             data_rows: rows.into(),
             data_source: Some(results.clone()),
+            // Width-derived defaults (the accordion's collapse rule, `if_space`)
+            // resolve here too, so this path needs the same measured space
+            // `snapshot_resolved` reads. The structural signal re-fires on
+            // `viewport_generation`, so a resize re-interprets with the new one.
+            available_space: services.viewport_snapshot(),
             context_entity: Some(block_id.to_string()),
             ..Default::default()
         };
@@ -2702,6 +2707,7 @@ impl ReactiveEngine {
                 let ctx = RenderContext {
                     data_rows: rows.to_vec().into(),
                     data_source: Some(results_for_signal.clone()),
+                    available_space: services_for_signal.viewport_snapshot(),
                     context_entity: Some(block_id_for_signal.to_string()),
                     ..Default::default()
                 };
@@ -3275,6 +3281,7 @@ impl ReactiveEngine {
         let ctx = RenderContext {
             data_rows: rows.into(),
             data_source: Some(results.clone()),
+            available_space: services.viewport_snapshot(),
             context_entity: context_entity.clone(),
             ..Default::default()
         };
@@ -3288,6 +3295,7 @@ impl ReactiveEngine {
                 let ctx = RenderContext {
                     data_rows: rows.to_vec().into(),
                     data_source: Some(results_for_signal.clone()),
+                    available_space: services_for_signal.viewport_snapshot(),
                     context_entity: context_entity.clone(),
                     ..Default::default()
                 };

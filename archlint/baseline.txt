@@ -5,7 +5,7 @@
 # as debt-free. Ratchet DOWN: as violations are fixed, regenerate with
 #   ./archlint/archlint --update-baseline
 # See archlint/BURNDOWN.md for the category table and burn-down priority.
-# Snapshot total: 114 violation(s) across 11 rule(s).
+# Snapshot total: 113 violation(s) across 11 rule(s).
 #
 #   deleted_cell_symbol: 2
 #   entity_uri_from_raw: 9
@@ -121,7 +121,6 @@ no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_document(&s
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn sync_document_metadata(&self, _parsed: &Block, _persisted: &mut Block) -> bool {
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn sync_document_metadata(&self, _parsed: &Block, _persisted: &mut Block) -> bool {
-no-underscore-params	frontends/gpui/src/render/builders/accordion.rs	pub fn render(_node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
 no-underscore-params	frontends/gpui/src/render/builders/divider.rs	pub fn render(_node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
 ok	crates/holon-frontend/src/advice_weaver.rs	let rows = query_engine
 ok	crates/holon-loro/src/multi_peer.rs	let meta = tree.get_meta(node).ok()?;

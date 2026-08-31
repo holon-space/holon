@@ -328,6 +328,21 @@ impl ReactiveShell {
         self.block_id.as_deref()
     }
 
+    /// Rows this shell currently holds — its own items in collection mode, and
+    /// the item counts of every collection inside the watched tree in block
+    /// mode. The streaming driver updates those `MutableVec`s in place, so a
+    /// caller reading this during a render pass sees the current row set.
+    pub fn row_count(&self) -> usize {
+        if self.reactive_view.is_some() {
+            return self.items.len();
+        }
+        let mut views = Vec::new();
+        if let Some(ref tree) = self.current_tree {
+            walk_for_collections(tree, &mut views);
+        }
+        views.iter().map(|v| v.children_snapshot().len()).sum()
+    }
+
     /// Row index of the item bound to `uri` in this collection-mode shell,
     /// in the GPUI `list`'s row coordinate space (`visible_indices`
     /// position) — what `ListState::scroll_to_reveal_item` expects, NOT the

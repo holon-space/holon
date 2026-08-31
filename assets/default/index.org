@@ -20,7 +20,7 @@ SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = 
 :WIDGET_ONLY: t
 :END:
 #+BEGIN_SRC render :id default-main-panel::render::0
-column(columns(#{item_template: live_block()}), divider(), accordion(#{title: "Linked references", icon: "link", max_height_fraction: 0.33}, live_query(#{sql: "SELECT bl.* FROM backlinks bl JOIN focus_roots fr ON bl.target_id = fr.root_id JOIN navigation_cursor nc ON nc.region = fr.region AND nc.history_id = fr.history_id WHERE fr.region = 'main' ORDER BY bl.content ASC", item_template: selectable(row(icon("orgmode"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})))
+column(columns(#{item_template: live_block()}), divider(), accordion(#{title: "Linked references", icon: "link", max_height_fraction: 0.33, hide_when_empty: true}, live_query(#{sql: "SELECT bl.* FROM backlinks bl JOIN focus_roots fr ON bl.target_id = fr.root_id JOIN navigation_cursor nc ON nc.region = fr.region AND nc.history_id = fr.history_id WHERE fr.region = 'main' ORDER BY bl.content ASC", item_template: list(#{item_template: selectable(row(icon("orgmode"), spacer(6), text(col("content"))), #{action: navigation_focus(#{region: "main", block_id: col("id")})})})})))
 #+END_SRC
 #+BEGIN_SRC holon_sql :id default-main-panel::src::0
 SELECT root.*

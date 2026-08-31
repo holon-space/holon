@@ -3,7 +3,7 @@ id: 2026-08-31-accordion-paints-one-of-four-backlink-rows
 date: 2026-08-31
 gap: ENVIRONMENT
 secondary: PERCEPTION
-status: OPEN
+status: FIXED
 summary: >-
   The expanded "Linked references" accordion paints one backlink row while its
   own query returns four, and never grows or scrolls to reveal the rest.
@@ -41,25 +41,33 @@ room for all four rows), and it does not shrink-wrap four rows either.
 
 ## Root cause
 
-Not root-caused from this channel — two mechanisms are consistent with the
-evidence and the fix must discriminate between them:
+Neither candidate above. Measured against a real booted window
+(`frontends/gpui/tests/accordion_real_mount_windowed.rs`): with four blocks
+linking to the focused page, the section's own SQL returns all four straight
+from the store, while the painted region holds none of them.
 
-1. A height clamp: `accordion::render_bounded`
-   (`frontends/gpui/src/render/builders/accordion.rs:70-105`) gives the body
-   `flex_1().min_h_0().overflow_y_scroll()` inside a `max_h(relative(fraction))`
-   region. If the region resolves against an indefinite height the body settles
-   at roughly one row and clips.
-2. The body's collection never streams past its first row — the same class as
-   `2026-08-31-root-layout-collections-never-stream`, where a collection in the
-   root-layout tree had its reactive driver never started.
+```
+SELECT bl.id FROM backlinks bl JOIN focus_roots fr ... WHERE fr.region = 'main'
+-> block:accordion-ref-1 .. block:accordion-ref-4
+```
 
-This is the mirror of `2026-08-30-accordion-fixed-at-cap-not-content-sized`
-(the region was pinned AT the cap regardless of content); the shrink-to-content
-branch introduced there now under-sizes instead.
+The section's `item_template` was a per-ROW template with no collection around
+it:
 
-`describe_ui` cannot arbitrate: it reports the whole accordion subtree as
-`{"widget":"empty"}` — see
-`2026-08-31-describe-ui-erases-accordion-subtree`.
+```
+live_query(#{sql: "...", item_template: selectable(row(icon("orgmode"), ...))})
+```
+
+A `live_query`'s `item_template` is interpreted as the WHOLE tree the shell
+renders (`ReactiveEngine::watch_query_live`), so a bare row template binds the
+first data row and nothing else — one row when the snapshot has rows, none when
+it does not, and no per-row diffs afterwards because a non-collection tree has
+no `ReactiveView` to stream into. The default template is `table()` and the left
+sidebar wraps its own rows in `list(#{item_template: ...})`; this one section
+did neither.
+
+The height is a consequence, not a cause: the region shrink-wraps what it is
+given, and it was given one row.
 
 ## Missing piece
 
@@ -74,7 +82,17 @@ non-streaming collection introduced at the mount seam cannot make them red.
 
 ## Remedy
 
-Open. Closing the gap means driving the assertion through the production
-`live_block` mount — the same window the dogfood pass used — rather than a
-hand-built panel VM, and asserting the painted ROW COUNT against the query's
-row count, not only `region_h`.
+FIXED. `assets/default/index.org` wraps the section's row template in a
+collection (`item_template: list(#{item_template: selectable(...)})`), the form
+the left sidebar already uses, so the shell renders a streaming collection and
+every query row reaches the screen.
+
+Locked by `every_backlink_the_query_returns_is_painted`
+(`frontends/gpui/tests/accordion_real_mount_windowed.rs`), which boots a real
+window over a `TestEnvironment`, seeds four linking blocks BEFORE the window
+opens, and asserts the painted row count equals the query's row count — plus
+that the region grows to hold them and stays under `max_height_fraction`.
+
+Open point: a bare per-row `item_template` still degrades silently for the next
+author. Making that loud needs the interpreter to classify which widgets produce
+collections, which is a wider design call than this fix.

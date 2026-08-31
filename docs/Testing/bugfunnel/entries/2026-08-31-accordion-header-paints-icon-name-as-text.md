@@ -3,7 +3,7 @@ id: 2026-08-31-accordion-header-paints-icon-name-as-text
 date: 2026-08-31
 gap: PERCEPTION
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   The accordion header renders its `icon` prop as the literal string, so the
   linked-references section reads "link Linked references" instead of showing a
@@ -63,6 +63,12 @@ observable there.
 
 ## Remedy
 
-Open. Route the prop through the shared `icon()` builder so the glyph, the
-theme colour and the Android substitution table all apply, and add a header
-assertion — text content, not only geometry — to the windowed accordion test.
+FIXED. The header routes its `icon` prop through `icon::render_icon`, so the
+glyph lookup, the theme tint and the Android substitution table all apply. The
+element carries the entity id `accordion-icon:{title}`, which is what makes it
+observable to a windowed assertion at all.
+
+Locked by `the_header_paints_the_icon_through_the_icon_builder`
+(`frontends/gpui/tests/accordion_real_mount_windowed.rs`): the tracked icon
+element must exist in a real booted window, and no painted element may display
+the icon NAME as its text.

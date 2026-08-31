@@ -326,13 +326,27 @@ fn render_main_body(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     if gap > 0.0 {
         container = container.gap(px(gap));
     }
-    for child in &node.children {
-        if is_pinned_to_end(child) {
+    for (ix, child) in node.children.iter().enumerate() {
+        if is_pinned_to_end(child) || introduces_nothing(node, ix, ctx) {
             continue;
         }
         container = push_main_child(container, child, ctx);
     }
     container
+}
+
+/// True for a divider whose whole remainder is pinned children that this frame
+/// does not paint — a full-width rule introducing nothing. The split asks the
+/// footer itself whether it is painting; the divider knows nothing about rows.
+fn introduces_nothing(node: &ReactiveViewModel, ix: usize, ctx: &GpuiRenderContext) -> bool {
+    if node.children[ix].widget_name().as_deref() != Some("divider") {
+        return false;
+    }
+    let rest = &node.children[ix + 1..];
+    !rest.is_empty()
+        && rest
+            .iter()
+            .all(|c| is_pinned_to_end(c) && super::accordion::is_hidden(c, ctx))
 }
 
 /// Render a slice of children as a content-height `flex_col` (used for the

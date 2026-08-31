@@ -34,6 +34,19 @@ pub(crate) fn render_content_height(
     )
 }
 
+/// The shell already streaming this node's rows, if a frame has created one.
+/// The key routing matches [`render_placed`]'s, so both reach the same cache
+/// entry from the same render pass.
+pub(crate) fn cached_shell(
+    node: &ReactiveViewModel,
+    ctx: &GpuiRenderContext,
+) -> Option<gpui::Entity<ReactiveShell>> {
+    let query = node.prop_str("query")?;
+    let key = super::live_query_key(&query, node.prop_str("query_context_id").as_deref());
+    ctx.local
+        .get_typed::<ReactiveShell>(&crate::entity_view_registry::CacheKey::LiveQuery(key))
+}
+
 /// The `blocks_with_paths` path of `id` — what a context-dependent query
 /// matches its `$context_path_prefix` against. An unresolvable path is an
 /// `Err`, painted by the caller as a visible degraded banner: there is no

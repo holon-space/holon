@@ -33,7 +33,14 @@ fn header_row(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         .text_color(tc(ctx, |t| t.foreground))
         .child(div().text_sm().child(glyph));
     if !icon.is_empty() {
-        header = header.child(div().child(icon));
+        // Through the icon builder, like every other header: it owns the glyph
+        // lookup and the Android substitution table.
+        header = header.child(super::tag_with_entity_id(
+            ctx,
+            "icon",
+            Some(&format!("accordion-icon:{title}")),
+            super::icon::render_icon(&icon, 0.0, ctx),
+        ));
     }
     if !title.is_empty() {
         header = header.child(
@@ -61,6 +68,84 @@ fn header_row(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     }
 }
 
+/// Rows the accordion's content currently holds: the collections rendered
+/// directly beneath it, plus the row sets of the `live_query` shells it
+/// contains. A shell no frame has created yet counts zero.
+///
+/// `None` when nothing beneath the accordion produces rows at all — static
+/// content, for which "empty" has no meaning.
+fn content_rows(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Option<usize> {
+    let own = node
+        .collection
+        .as_ref()
+        .map(|v| v.children_snapshot().len());
+    let streamed = (node.widget_name().as_deref() == Some("live_query")).then(|| {
+        super::live_query::cached_shell(node, ctx)
+            .map(|shell| ctx.with_gpui(|_, cx| shell.read(cx).row_count()))
+            .unwrap_or(0)
+    });
+    node.children
+        .iter()
+        .filter_map(|c| content_rows(c, ctx))
+        .chain(own)
+        .chain(streamed)
+        .reduce(|a, b| a + b)
+}
+
+/// What this frame does with the accordion.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Visibility {
+    Paint,
+    /// A `hide_when_empty` accordion whose content currently has no rows.
+    Hide,
+    /// `hide_when_empty` on content that can never produce a row count. Hiding
+    /// it would be permanent and silent, so the frame says so instead.
+    NoRowSource,
+}
+
+/// Emptiness is the content's own row count, so no second query decides it.
+fn visibility(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Visibility {
+    if !node.prop_bool("hide_when_empty").unwrap_or(false) {
+        return Visibility::Paint;
+    }
+    match content_rows(node, ctx) {
+        None => Visibility::NoRowSource,
+        Some(0) => Visibility::Hide,
+        Some(_) => Visibility::Paint,
+    }
+}
+
+/// Whether the split must treat this accordion as absent — it paints nothing,
+/// so the chrome that introduces it has nothing to introduce.
+pub(crate) fn is_hidden(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> bool {
+    visibility(node, ctx) == Visibility::Hide
+}
+
+/// The standard NAMED error widget, so the no-error-widget oracles see this
+/// the way they see every other invalid accordion.
+fn no_row_source_error(ctx: &GpuiRenderContext) -> Div {
+    let node = ReactiveViewModel::error(
+        "accordion",
+        "accordion hide_when_empty needs content that produces rows",
+    );
+    div().w_full().child(super::render(&node, ctx))
+}
+
+/// Zero-height clip holding the content that a hidden accordion does not show.
+/// Rendering it is what creates and keeps the shell whose rows decide the next
+/// frame's [`is_hidden`], so the section reappears when a row arrives.
+fn hidden_carrier(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
+    div()
+        .flex_shrink_0()
+        .w_full()
+        .h(px(0.0))
+        .overflow_hidden()
+        .child(super::column::render_children_content_height(
+            &node.children,
+            ctx,
+        ))
+}
+
 /// The bounded-footer accordion element (plan §4). Called by the flow-panel
 /// split in `columns.rs`/`column.rs` for a correctly-placed accordion (direct
 /// child of a flow column). Its `max_h(relative(f))` resolves against the
@@ -69,6 +154,12 @@ fn header_row(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
 /// is its own scroll viewport; with little content — or none, or collapsed —
 /// it shrinks to exactly what it renders.
 pub(crate) fn render_bounded(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
+    match visibility(node, ctx) {
+        Visibility::Hide => return hidden_carrier(node, ctx),
+        Visibility::NoRowSource => return no_row_source_error(ctx),
+        Visibility::Paint => {}
+    }
+
     let fraction = node
         .prop_f64("max_height_fraction")
         .unwrap_or(DEFAULT_MAX_HEIGHT_FRACTION as f64) as f32;
@@ -156,6 +247,12 @@ pub(crate) fn render_sticky(
 ) -> AnyElement {
     use holon_frontend::geometry::GeometryProvider;
     use holon_frontend::sticky_accordion as sa;
+
+    match visibility(node, ctx) {
+        Visibility::Hide => return hidden_carrier(node, ctx).into_any_element(),
+        Visibility::NoRowSource => return no_row_source_error(ctx).into_any_element(),
+        Visibility::Paint => {}
+    }
 
     let fraction = node
         .prop_f64("max_height_fraction")

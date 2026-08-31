@@ -123,6 +123,7 @@ holon_macros::widget_builder! {
             .available_space
             .is_some_and(|s| s.width_px < ACCORDION_MIN_EXPANDED_WIDTH_PX);
         let collapsed = ba.args.get_bool("collapsed").unwrap_or(narrow);
+        let hide_when_empty = ba.args.get_bool("hide_when_empty").unwrap_or(false);
 
         // An accordion offers nothing: `ba.ctx` already carries
         // `ContainerCapability::None` (the interpreter strips the container's
@@ -142,6 +143,12 @@ holon_macros::widget_builder! {
         __props.insert("max_height_fraction".to_string(), Value::Float(fraction));
         __props.insert("collapsible".to_string(), Value::Boolean(collapsible));
         __props.insert("collapsed".to_string(), Value::Boolean(collapsed));
+        // Opt-in: with no content rows the renderer paints nothing at all,
+        // not even the title row.
+        __props.insert(
+            "hide_when_empty".to_string(),
+            Value::Boolean(hide_when_empty),
+        );
         // The renderer routes on this: pinned → split footer, in_flow → inline,
         // sticky → occlude overlay.
         __props.insert(

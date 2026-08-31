@@ -3,7 +3,7 @@ id: 2026-08-31-accordion-starts-expanded-on-first-paint-below-600px
 date: 2026-08-31
 gap: ENVIRONMENT
 secondary: PERCEPTION
-status: OPEN
+status: FIXED
 summary: >-
   Below 600px the "Linked references" accordion paints EXPANDED on the first
   frame after boot; the default-collapsed rule only takes effect once a
@@ -31,7 +31,7 @@ frame is wrong and the later frame is right.
 
 ## Root cause
 
-`shadow_builders/accordion.rs:120-125` derives the default from measured space:
+`shadow_builders/accordion.rs` derives the default from measured space:
 
 ```rust
 let narrow = ba.ctx.available_space
@@ -39,19 +39,12 @@ let narrow = ba.ctx.available_space
 let collapsed = ba.args.get_bool("collapsed").unwrap_or(narrow);
 ```
 
-`available_space` comes from `BuilderServices::viewport_snapshot()`
-(`crates/holon-frontend/src/reactive.rs:4156`), which maps
-`ui_state.viewport()` — `None` until the window publishes its first viewport.
-The comment at accordion.rs:121 states the intent plainly: "Unmeasured
-available space is desktop-first … start expanded."
-
-The root layout is re-interpreted once the viewport is known — the narrow
-branch of `if_space(600, bottom_dock(…), …)`
-(`crates/holon-api/src/perspective.rs:325`) IS active in the first
-`describe_ui`, and the sidebars are already `mode:"overlay"`. The main panel's
-own render source (`block:default-main-panel::render::0`), which is where the
-accordion lives, is interpreted on the `live_block` path and evidently keeps
-the pre-viewport node until something forces a rebuild.
+`available_space` never arrived on this path at all — not merely at boot.
+`ReactiveEngine::watch_live` and `watch_query_live` build their `RenderContext`
+with `..Default::default()`, which leaves `available_space` at `None`, while
+`snapshot_resolved` fills it from `viewport_snapshot()`. Everything interpreted
+through a `live_block` — the main panel, and so the accordion — therefore took
+the unmeasured desktop-first branch at every width, on every frame.
 
 ## Missing piece
 
@@ -64,6 +57,15 @@ accordion's state in the FIRST painted frame after boot.
 
 ## Remedy
 
-Open. The gap closes with a windowed assertion on frame one — interpret with
-`available_space: None`, publish the phone viewport, and require the accordion
-to be collapsed before any navigation occurs.
+FIXED. Both live-block interpret paths (`ReactiveEngine::watch_live` and
+`watch_query_live`, initial tree and structural re-interpretation alike) now
+take `available_space` from `services.viewport_snapshot()`, the same seam
+`snapshot_resolved` uses. The structural signal already re-fires on
+`viewport_generation`, so a resize re-interprets against the new space and
+`with_update` keeps the reader's own expand.
+
+Locked by `a_narrow_first_frame_starts_collapsed`
+(`frontends/gpui/tests/accordion_real_mount_windowed.rs`): a real window booted
+at `HOLON_INITIAL_WINDOW_SIZE=560x850` with backlinks already in the store must
+paint no section rows on the first settled frame, with no navigation performed
+against the window.
