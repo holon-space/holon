@@ -4765,10 +4765,10 @@ mod tests {
     ///
     /// Mechanism: `block_exists("Journals/{today}")` compiles to a NAME match
     /// (`pattern.rs::block_exists_sql` joins on `name_column`), so renaming the
-    /// boot journal frees the name "2026-01-15". Rolling the clock forward a
-    /// day and back re-evaluates the rule for 2026-01-15, whose name no
-    /// longer resolves, so the action re-creates a page named "2026-01-15".
-    /// Its deterministic id `PageId::for_path("Journals/2026-01-15")` is
+    /// boot journal frees the boot day's name. Rolling the clock forward a
+    /// day and back re-evaluates the rule for that day, whose name no
+    /// longer resolves, so the action re-creates a page under that name.
+    /// Its deterministic id `PageId::for_path("Journals/{boot day}")` is
     /// the SAME id the renamed page still holds, so `block.create` lands on
     /// `INSERT ... ON CONFLICT(id) DO UPDATE SET <every non-id column>` and
     /// overwrites the renamed title back to the date (and drops the Page tag).
@@ -4864,8 +4864,8 @@ mod tests {
 
         // Re-fire TODAY's journal rule: roll the clock forward one day (creates
         // that day's journal) and back to the boot day. The return CDC
-        // re-evaluates `not block_exists("Journals/2026-01-15")` -- now TRUE, the
-        // name was renamed away -- so the action re-creates "2026-01-15" at the
+        // re-evaluates `not block_exists("Journals/{boot day}")` -- now TRUE, the
+        // name was renamed away -- so the action re-creates that name at the
         // SAME deterministic id the renamed page holds.
         let d1 = comp.advance_clock_days(1).await;
         eprintln!("[journal-clobber] rolled forward to {d1}");
@@ -5011,8 +5011,8 @@ mod tests {
 
         // Re-fire TODAY's journal rule: roll the clock forward one day and back to
         // the boot day. The return CDC re-evaluates `not block_exists(
-        // "Journals/2026-01-15")` -- now TRUE, the name was renamed away -- so the
-        // action re-creates "2026-01-15" at the SAME deterministic id the renamed
+        // "Journals/{boot day}")` -- now TRUE, the name was renamed away -- so the
+        // action re-creates that name at the SAME deterministic id the renamed
         // page holds.
         let d1 = comp.advance_clock_days(1).await;
         eprintln!("[journal-clobber-loro] rolled forward to {d1}");
@@ -5066,7 +5066,7 @@ mod tests {
         )
         .await;
 
-        // The boot journal DATE PAGE (own `Journals/2026-01-15.org` materialized).
+        // The boot journal DATE PAGE (own `Journals/{boot day}.org` materialized).
         let boot_days = wait_for_journal_days(&comp, 1, Duration::from_secs(10)).await;
         let page_id = boot_days[0].0.clone();
         assert_eq!(boot_days[0].1, boot_date);

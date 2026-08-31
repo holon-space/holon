@@ -887,8 +887,8 @@ mod teeth {
     /// This is the deterministic, env-independent (not via
     /// `folder_companion_enabled`) composed-keystone reproduction the
     /// plan's §5 item 4 / §7 item 4 calls for. The date `2026-07-11` is off
-    /// the fixed keystone boot clock (`2026-01-15`) so the auto-create rule
-    /// never touches it.
+    /// the fixed keystone boot clock (`keystone_boot_journal_date`) so the
+    /// auto-create rule never touches it.
     #[tokio::test(flavor = "multi_thread")]
     async fn folder_companion_subdir_fileless_materializes_and_deinlines() {
         use holon_pbt_core::composition::CapInvariant;
@@ -1592,7 +1592,7 @@ mod teeth {
         const C2_RAW: &str = "See [[Linked Page]] here";
 
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        // Pin the boot clock to the fixed keystone day (2026-01-15) so the boot
+        // Pin the boot clock to the fixed keystone day so the boot
         // auto-create rule mints a DETERMINISTIC journal day-page id
         // (`keystone_boot_journal_id`) — not one keyed on the host's real date.
         // The plain `new` boot uses the OS `SystemClock`, whose date-dependent

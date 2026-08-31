@@ -461,7 +461,7 @@ pub fn seed_folder_companion(state: &mut ReferenceState) {
 // and the B2 boot sweep does the materialization + `last_projection` echo-seed.
 //
 // The date `2026-07-11` is chosen to NOT collide with the fixed keystone boot
-// clock (`2026-01-15`, `keystone_boot_journal_date`) so the auto-create rule's
+// clock (`keystone_boot_journal_date`) so the auto-create rule's
 // `when: 'not block_exists("Journals/{today}")'` never touches it.
 
 /// The `#+ID:` doc-root id of the fileless SUBDIR journal date page — nested
