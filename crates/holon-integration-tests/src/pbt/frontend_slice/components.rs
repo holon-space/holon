@@ -1526,6 +1526,45 @@ impl HeadlessFrontendComponent {
         )
     }
 
+    /// Main-panel counterpart of [`Self::await_sidebar_intent`], for the block
+    /// bullet's `shift_action` (`focus_pin`). The Main panel renders the
+    /// descendants of `focus_roots(main)` through nested `live_block` watches,
+    /// so the bullet — and with it the shift-intent — streams in after the
+    /// focus that put its doc on screen. `click_entity_with_modifiers` polls
+    /// for only 2s and then degrades to bare focus, exactly as GPUI does for a
+    /// click that binds nothing; without this barrier that degradation is
+    /// silent and surfaces later as an empty `focus_roots`, blaming the matview
+    /// for what was really an unrendered bullet.
+    async fn await_main_click_intent(&self, id: &EntityUri, modifiers: holon_api::ClickModifiers) {
+        self.await_layout_rendered("main").await;
+        let root_uri = holon_api::root_layout_block_uri();
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(5));
+        loop {
+            let resolved = self.reactive.snapshot_resolved(&root_uri);
+            if holon_frontend::focus_path::find_click_intent_in_region(
+                &resolved, id, "main", modifiers,
+            )
+            .is_some()
+            {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[await_main_click_intent] Main never bound a click-intent for {id} with \
+                 modifiers {modifiers:?} within 5s — either the Main panel's nested live_block \
+                 watch did not stream the block's bullet (is {id} a descendant of \
+                 focus_roots(main)?), or the bullet's `shift_action` template arg resolves to \
+                 None (check `is_template_arg`). The click would then fall through to a bare \
+                 set_focus, pinning NOTHING.\n  MISS REASON: {}\n  {}",
+                holon_frontend::focus_path::click_intent_miss_reason(
+                    &resolved, id, "main", modifiers
+                ),
+                holon_frontend::reactive::generation_drops::report(),
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// Modifier-parameterised form of [`Self::await_sidebar_nav_intent`]. The
     /// primary click resolves `navigation.focus`, cmd/ctrl resolve
     /// `navigation.open_tab`; both stream in on the same nested `live_block`
@@ -3159,6 +3198,8 @@ impl SutNavHistoryDrive for HeadlessFrontendComponent {
         // id would pin a GHOST (the matview's `focus_roots` would then hold
         // the synthetic while the resolved oracle holds the real id → divergence).
         let resolved = self.resolve_id(block_id);
+        self.await_main_click_intent(&resolved, holon_api::ClickModifiers::shift())
+            .await;
         self.driver
             .click_entity_with_modifiers(
                 &resolved,
@@ -5544,46 +5585,49 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn headless_nav_history_ops_dispatch() {
         let doc0 = "#+ID: ref-doc-0\n* Doc zero heading\n";
-        let doc1 = "#+ID: ref-doc-1\n* Doc one heading\n";
+        let doc1 = "#+ID: ref-doc-1\n* Doc one heading\n:PROPERTIES:\n:ID: ref-block-1\n:END:\n";
         let comp = HeadlessFrontendComponent::new(
             &[("doc0.org", doc0), ("doc1.org", doc1)],
             Duration::from_millis(300),
         )
         .await;
 
-        let rows = comp
-            .engine
-            .db_handle()
-            .query("SELECT id FROM block_raw", std::collections::HashMap::new())
-            .await
-            .expect("[nav-history-probe] block_raw query");
-        let target_id = rows
-            .iter()
-            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
-            .find(|id| id.contains("ref-doc-1"))
-            .expect("[nav-history-probe] no doc block carrying 'ref-doc-1' in block_raw");
+        let target_id = "block:ref-block-1".to_string();
         let target = EntityUri::parse(&target_id).expect("[nav-history-probe] target id parses");
 
+        // Focus Main on the containing doc: `pin_block` is the production
+        // shift+click on the bullet, and Main renders only the descendants of
+        // `focus_roots(main)`, so the bullet must be on screen to carry its
+        // `shift_action`.
+        comp.dispatch_navigation(
+            "focus",
+            holon_api::Region::Main,
+            Some("block:ref-doc-1".to_string()),
+            None,
+        )
+        .await;
+
         // `focus_pin` (shift+click in production) — reachable headlessly with an
-        // observable matview effect (it focuses + pins the block).
-        SutNavHistoryDrive::pin_block(&comp, holon_api::Region::Main, &target).await;
+        // observable matview effect. The bullet's `shift_action` pins into the
+        // RIGHT sidebar, so that is where the effect shows up.
+        SutNavHistoryDrive::pin_block(&comp, holon_api::Region::RightSidebar, &target).await;
         let root_rows = comp
-            .engine
-            .db_handle()
-            .query(
-                "SELECT region, root_id FROM focus_roots WHERE region = 'main'",
-                std::collections::HashMap::new(),
-            )
-            .await
-            .expect("[nav-history-probe] focus_roots query");
-        eprintln!(
-            "[nav-history-probe] focus_roots(main) rows = {}",
-            root_rows.len()
-        );
+            .sql_query("SELECT region, root_id FROM focus_roots WHERE region = 'right_sidebar'")
+            .await;
+        let roots: Vec<String> = root_rows
+            .iter()
+            .filter_map(|r| {
+                r.get("root_id")
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+            })
+            .collect();
+        eprintln!("[nav-history-probe] focus_roots(right_sidebar) = {roots:?}");
         assert!(
-            !root_rows.is_empty(),
+            roots.contains(&target_id),
             "[nav-history-probe] focus_pin through the headless session must populate \
-             focus_roots(main) — the nav matview did not update without a window"
+             focus_roots(right_sidebar) — the nav matview did not update without a window; got \
+             {roots:?}"
         );
 
         // `go_back` / `go_forward` — the historically-doubted ops. Assert they
@@ -5664,6 +5708,18 @@ mod tests {
              stable id (so the nav slice can name it by constant), got {pin_id}"
         );
         let pin_uri = EntityUri::parse(&pin_id).expect("[pin-probe] pin id parses");
+
+        // Focus Main on the containing doc first: `pin_block` shift+clicks the
+        // bullet in the Main panel, and Main renders only the descendants of
+        // `focus_roots(main)`. Without this the bullet carries no `shift_action`
+        // and the click degrades to bare focus, exactly as it would in GPUI.
+        comp.dispatch_navigation(
+            "focus",
+            holon_api::Region::Main,
+            Some("block:ref-doc-0".to_string()),
+            None,
+        )
+        .await;
 
         // Dispatch focus_pin into the RIGHT sidebar (PinBlock's region) and assert it
         // populates `focus_roots(right_sidebar)` headlessly — the make-or-break:

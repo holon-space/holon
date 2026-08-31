@@ -331,6 +331,15 @@ pub fn pbt_contribution() -> PbtContribution {
 /// (`run_selected` runs every selected invariant), so this is byte-identical in
 /// effect to the former hand-maintained `Vec`.
 pub fn composed_invariant_catalog() -> Vec<Box<dyn CapInvariant>> {
+    // `inv-no-observed-errors` lives in this catalog and reads the calling
+    // thread's observability window, which only `ComposedSut::init_test` and
+    // `MetricsSut::new` open. The slice and `teeth` harnesses build the catalog
+    // and run it directly through `run_selected` / `run_focus_only`, so without
+    // this they read a window nobody opened and `current_scope` fails the case
+    // on harness wiring. `ensure_test_scope` yields any scope the thread
+    // already owns, so a case that DID go through those two keeps its window
+    // and its registered runtime workers.
+    crate::test_tracing::ensure_test_scope();
     fold_catalog([
         pbt_contribution(),
         holon_loro_testing::pbt_contribution(),

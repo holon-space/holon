@@ -41,7 +41,7 @@ async fn sql_slice_runs_structural_block_invariants_over_turso() {
 
     let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
-    // With no reference wired, only the three `SutBackend`-only structural
+    // With no reference wired, only the `SutBackend`-only structural
     // invariants run (`no-orphan-blocks` became ref-free when its CDC-lag gate
     // was removed); everything ref-comparing (and the Loro invariants) is
     // deselected — disclosed, not faked.
@@ -52,6 +52,7 @@ async fn sql_slice_runs_structural_block_invariants_over_turso() {
         [
             "inv-filter-spec-resolves",
             "inv-mark-bounds-within-content",
+            "inv-net-totality",
             "inv-no-orphan-blocks",
             "inv-no-parent-cycles",
             "inv-source-language-iff-source",
