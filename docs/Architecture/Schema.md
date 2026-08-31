@@ -191,7 +191,8 @@ store, independent of the block schema:
 | `edge_props_{int,text,real,bool,json}` | Same shape, keyed `(edge_id, key_id)`. |
 
 This is a separate concern from the block hierarchy — it is not currently a
-projection of `block`/`block_with_path`.
+projection of `block`/`block_with_path`. It has no readers and is scheduled
+for deletion under BG-5, see [docs/Plans/BlockGeneralization.md](../Plans/BlockGeneralization.md).
 
 ## Directories and files
 
