@@ -1243,17 +1243,26 @@ mod presentation_fields {
         assert_eq!(config.default_view.as_deref(), Some("claude-history-view"));
     }
 
-    /// Every other bundled sidecar states nothing, which is what makes the
-    /// projector's derivations the covered path rather than dead code.
+    /// D53.c: every bundled sidecar states all three, so every Integrations
+    /// row wears a glyph, reads as a name, and opens a page. The fields stay
+    /// optional for a user's own sidecar —
+    /// `all_three_presentation_fields_are_optional` covers that path.
     #[test]
-    fn todoist_states_no_presentation_and_still_parses() {
-        let bundled =
-            crate::bundled_sidecars::bundled_sidecar("todoist").expect("todoist is bundled");
-        let config: IntegrationFileConfig =
-            serde_yaml::from_str(bundled.yaml).expect("the bundled sidecar parses");
-        assert_eq!(config.display_name, None);
-        assert_eq!(config.icon, None);
-        assert_eq!(config.default_view, None);
+    fn every_bundled_sidecar_carries_the_presentation_triple() {
+        for bundled in crate::bundled_sidecars::BUNDLED_SIDECARS {
+            let config: IntegrationFileConfig = serde_yaml::from_str(bundled.yaml)
+                .unwrap_or_else(|e| panic!("{} parses: {e}", bundled.source_path));
+            assert!(
+                config.display_name.is_some()
+                    && config.icon.is_some()
+                    && config.default_view.is_some(),
+                "{} must state display_name, icon and default_view — got {:?}/{:?}/{:?}",
+                bundled.source_path,
+                config.display_name,
+                config.icon,
+                config.default_view,
+            );
+        }
     }
 }
 

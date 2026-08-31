@@ -3,6 +3,13 @@
 # (crates/holon-mcp-client/src/bundled_sidecars.rs).
 schema_version: 1
 
+# The Integrations sidebar row: what it says, what glyph it wears, and the page
+# `integration.open_default_view` focuses in the main panel. `default_view` is
+# the BARE id of a block (org convention), authored in assets/default/index.org.
+display_name: "Google Calendar"
+icon: calendar
+default_view: gcal-view
+
 # Google Calendar — direct REST API (`transport: rest`) + generic OAuth2.
 #
 # WHY REST (not an MCP server): the `rest` transport is pure in-app HTTP with no

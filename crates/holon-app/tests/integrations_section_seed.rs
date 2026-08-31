@@ -39,9 +39,8 @@ use holon::storage::BLOCK_READ_TABLE;
 use holon_loro_wiring::EventInfraModule;
 
 const LEFT_SIDEBAR_ID: &str = "block:default-left-sidebar";
-/// The block `claude-history.yaml`'s `default_view` names, scheme-prefixed as
-/// the store holds it.
-const CLAUDE_HISTORY_VIEW_ID: &str = "block:claude-history-view";
+/// The perspective block whose children ARE the layout's columns.
+const ROOT_LAYOUT_ID: &str = "block:root-layout";
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     Arc::new(
@@ -230,16 +229,23 @@ fn the_sidebar_row_opens_the_integrations_default_view() {
     }
 }
 
-/// The block a `default_view` names must exist in the seed, under exactly that
-/// id.
+/// Every bundled integration opens a page that actually lists its own data.
 ///
-/// `integration_state.default_view` holds a BARE block id as plain text — a
-/// string no type checks and no foreign key joins. `claude-history.yaml` names
-/// `claude-history-view`, and the only thing keeping that name pointing at
-/// something is this test: rename the headline's `:ID:` and the click starts
-/// refusing, with the mismatch visible nowhere else.
+/// Martin's D53.c ruling: a sidebar row that opens nothing is worse than no
+/// row. Three ways that breaks, all invisible until someone clicks:
+///
+///  1. the sidecar states no `default_view`, so the op refuses;
+///  2. it names one, but `integration_state.default_view` holds a BARE block id
+///     as plain text — a string no type checks and no foreign key joins — so
+///     renaming the headline's `:ID:` silently unhooks it;
+///  3. the page exists but queries the wrong integration's tables, or wraps its
+///     per-row template in nothing, so it paints one row and looks merely
+///     quiet.
+///
+/// Swept from `BUNDLED_SIDECARS` rather than a hardcoded list, so a provider
+/// added to the bundle joins the claim instead of slipping past it.
 #[test]
-fn the_seeded_layout_carries_the_claude_history_default_view() {
+fn every_bundled_integration_has_a_seeded_default_view() {
     let rt = runtime();
     rt.clone().block_on(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -248,41 +254,112 @@ fn the_seeded_layout_carries_the_claude_history_default_view() {
             .await
             .expect("seed_default_layout must complete on a fresh file DB");
 
-        let rows = engine
-            .db_handle()
-            .query(
-                &format!(
-                    "SELECT content FROM {BLOCK_READ_TABLE} WHERE parent_id = \
-                     '{CLAUDE_HISTORY_VIEW_ID}' AND source_language = 'render'"
-                ),
-                HashMap::new(),
-            )
-            .await
-            .expect("query the default view's render block");
-        let content = rows
-            .first()
-            .and_then(|r| r.get("content"))
-            .and_then(|v| v.as_string())
-            .unwrap_or_else(|| {
-                panic!(
-                    "{CLAUDE_HISTORY_VIEW_ID} must be seeded with a render child — \
-                     claude-history.yaml's `default_view` names it, and the op that opens it \
-                     resolves the bare id to exactly this block"
+        // Collected rather than panicked on: with five providers swept, the
+        // first failure alone would hide how many others share it.
+        let mut problems: Vec<String> = Vec::new();
+
+        for bundled in holon_mcp_client::BUNDLED_SIDECARS {
+            let provider = bundled.provider;
+            let config: holon_mcp_client::IntegrationFileConfig =
+                serde_yaml::from_str(bundled.yaml)
+                    .unwrap_or_else(|e| panic!("{} must parse: {e}", bundled.source_path));
+            let Some(view) = config.default_view else {
+                problems.push(format!(
+                    "{} declares no `default_view`, so the Integrations row for '{provider}' \
+                     opens nothing — every bundled integration gets an authored page (D53.c)",
+                    bundled.source_path
+                ));
+                continue;
+            };
+
+            let view_id = format!("block:{view}");
+
+            // A view page is a top-level PAGE, never a child of the root
+            // layout. `PerspectiveSpec` turns every root-layout child that
+            // carries a render into a layout COLUMN, so a view parented there
+            // is both a permanent extra column and — once there are enough of
+            // them — a layout the synthesizer refuses outright, leaving the
+            // whole window on its loading state.
+            let parent = engine
+                .db_handle()
+                .query(
+                    &format!("SELECT parent_id FROM {BLOCK_READ_TABLE} WHERE id = '{view_id}'"),
+                    HashMap::new(),
                 )
-            })
-            .to_string();
+                .await
+                .expect("read the view block's parent")
+                .first()
+                .and_then(|r| r.get("parent_id"))
+                .and_then(|v| v.as_string())
+                .unwrap_or_default()
+                .to_string();
+            if parent == ROOT_LAYOUT_ID {
+                problems.push(format!(
+                    "the '{provider}' view {view_id} is parented to {ROOT_LAYOUT_ID}, which \
+                     makes it a layout column rather than a page — author it as a top-level \
+                     headline in assets/default/index.org"
+                ));
+            }
+
+            let rows = engine
+                .db_handle()
+                .query(
+                    &format!(
+                        "SELECT content FROM {BLOCK_READ_TABLE} WHERE parent_id = '{view_id}' \
+                         AND source_language = 'render'"
+                    ),
+                    HashMap::new(),
+                )
+                .await
+                .expect("query the default view's render block");
+            let Some(content) = rows
+                .first()
+                .and_then(|r| r.get("content"))
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+            else {
+                problems.push(format!(
+                    "{view_id} must be seeded with a render child — {}'s `default_view` names \
+                     it, and the op that opens it resolves the bare id to exactly this block",
+                    bundled.source_path
+                ));
+                continue;
+            };
+
+            // The page must read THIS integration's tables. Table names are
+            // `{entity_prefix}{entity key}`, so the sidecar itself says which
+            // names count — a page pointed at another provider's data reads as
+            // plausible in review and is wrong in the window.
+            let prefix = config.entity_prefix.unwrap_or_default();
+            let tables: Vec<String> = config
+                .entities
+                .keys()
+                .map(|name| format!("{prefix}{name}"))
+                .collect();
+            if !tables.iter().any(|t| content.contains(t.as_str())) {
+                problems.push(format!(
+                    "the '{provider}' view must query one of its own tables {tables:?}: {content}"
+                ));
+            }
+
+            // A `live_query` interprets its item_template ONCE against the whole
+            // row set, so only a collection widget iterates it — a scalar
+            // template renders ONE row and looks merely quiet.
+            if !content.contains("list(#{item_template:") {
+                problems.push(format!(
+                    "the '{provider}' view's per-row template must be wrapped in a collection \
+                     or it paints a single row (bugfunnel \
+                     2026-08-18-integrations-section-renders-one-of-four-rows): {content}"
+                ));
+            }
+        }
 
         assert!(
-            content.contains("cc_session"),
-            "the Claude History view must list the integration's sessions: {content}"
-        );
-        // A `live_query` interprets its item_template ONCE against the whole row
-        // set, so only a collection widget iterates it — a scalar template
-        // renders ONE session and looks merely quiet.
-        assert!(
-            content.contains("list(#{item_template:"),
-            "the per-row template must be wrapped in a collection or the view paints a single \
-             row (bugfunnel 2026-08-18-integrations-section-renders-one-of-four-rows): {content}"
+            problems.is_empty(),
+            "{} of {} bundled integrations do not open an authored page:\n  - {}",
+            problems.len(),
+            holon_mcp_client::BUNDLED_SIDECARS.len(),
+            problems.join("\n  - "),
         );
     });
 }

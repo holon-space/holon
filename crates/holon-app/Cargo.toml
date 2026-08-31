@@ -38,6 +38,7 @@ holon = { workspace = true, features = ["test-helpers"] }
 holon-block-roundtrip-testing.workspace = true
 holon-org-format.workspace = true
 proptest.workspace = true
+serde_yaml.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 uuid.workspace = true

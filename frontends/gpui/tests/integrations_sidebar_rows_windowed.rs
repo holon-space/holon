@@ -20,9 +20,10 @@
 //!      seeded template into the window;
 //!   4. the row wears the integration's icon and the name a PERSON reads, and
 //!      the technical name appears nowhere in it;
-//!   5. clicking the row opens that integration's default view in the main
-//!      panel — the whole point of making the row clickable, and the only claim
-//!      here that exercises the op end to end.
+//!   5. clicking a row opens THAT integration's default view in the main panel
+//!      — the whole point of making the row clickable, and the only claim here
+//!      that exercises the op end to end. Two rows are clicked, so a hardcoded
+//!      destination cannot satisfy it.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
 //! integrations_sidebar_rows_windowed -- --test-threads=1`
@@ -79,6 +80,15 @@ const CLAUDE_HISTORY_DISPLAY: &str = "Claude History";
 /// The page `claude-history.yaml` names as its `default_view`, scheme-prefixed
 /// as `navigation.focus` stores it.
 const CLAUDE_HISTORY_VIEW: &str = "block:claude-history-view";
+
+/// A SECOND provider through the same click path (D53.c: every bundled
+/// integration opens its own page, not one page the op happens to know). Two
+/// rows are what separates "the op resolves the clicked row's `default_view`"
+/// from "the op opens the one view somebody hardcoded"; the remaining three
+/// providers would only re-buy that at another windowed boot's runtime, so the
+/// headless sweep in `holon-app::integrations_section_seed` covers them.
+const TODOIST: &str = "todoist";
+const TODOIST_VIEW: &str = "block:todoist-view";
 
 /// Sub-pixel layout rounding is allowed; anything a reader could see as a
 /// stagger is not.
@@ -529,6 +539,21 @@ fn integration_rows_show_name_icon_aligned_status_and_open_their_view() {
              {before:?} before the click and is {after:?} now. The row dispatches \
              `integration.open_default_view(id)`, which resolves \
              `integration_state.default_view` ({CLAUDE_HISTORY_VIEW}) and focuses it."
+        );
+
+        // The same path from a DIFFERENT row: main must land on Todoist's own
+        // page, so the op is reading the clicked row's `default_view` rather
+        // than opening one view it knows about.
+        let todoist_row = visible(&bounds, &selectable_id(TODOIST))
+            .expect("the Todoist row must be painted to be clicked");
+        click_at(&mut app, window, center_of(&todoist_row), "the Todoist row");
+        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+
+        let after_todoist = focus_of_main();
+        assert_eq!(
+            after_todoist, TODOIST_VIEW,
+            "clicking the Todoist row must open ITS default view. Main was {after:?} (Claude \
+             History) before this click and is {after_todoist:?} now."
         );
     }));
 

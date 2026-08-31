@@ -3,6 +3,13 @@
 # (crates/holon-mcp-client/src/bundled_sidecars.rs).
 schema_version: 1
 
+# The Integrations sidebar row: what it says, what glyph it wears, and the page
+# `integration.open_default_view` focuses in the main panel. `default_view` is
+# the BARE id of a block (org convention), authored in assets/default/index.org.
+display_name: "JSONPlaceholder"
+icon: document_text
+default_view: jsonplaceholder-view
+
 # JSONPlaceholder integration — a read-only `rest`-transport example.
 #
 # JSONPlaceholder (https://jsonplaceholder.typicode.com) is a free public fake
@@ -37,6 +44,12 @@ entities:
   jp_posts:
     short_name: post
     id_column: id
+    # `render_entity()` resolves a row to its entity's profile and paints
+    # NOTHING when there is none, so the default view needs this variant to be
+    # a list rather than a blank page.
+    profile_variants:
+      - name: default
+        render: 'row(text(col("title")))'
     schema:
       - { name: id,     sql_type: INTEGER, primary_key: true }
       - { name: userId, sql_type: INTEGER, indexed: true }

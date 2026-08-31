@@ -41,13 +41,6 @@ tree(#{parent_id: col("parent_id"), sortkey: col("sort_key"), item_template: ren
 #+BEGIN_SRC holon_gql :id default-right-sidebar::src::0
 MATCH (fr:focus_root), (root:block)<-[:CHILD_OF*0..20]-(d:block) WHERE fr.region = 'right_sidebar' AND root.id = fr.root_id RETURN d, fr.history_id AS added_ts ORDER BY fr.history_id DESC, d.sort_key
 #+END_SRC
-** Claude History
-:PROPERTIES:
-:ID: claude-history-view
-:END:
-#+BEGIN_SRC render :id claude-history-view::render::0
-column(text("Recent sessions, newest first", #{muted: true}), live_query(#{sql: "SELECT id, project_path, first_prompt, message_count, modified FROM cc_session ORDER BY modified DESC LIMIT 25", item_template: list(#{item_template: render_entity()})}))
-#+END_SRC
 ** Advice Rules
 :PROPERTIES:
 :ID: default-advice-rules
@@ -64,4 +57,39 @@ candidates:
     source:
       has_tag: lesson
 k: 5
+#+END_SRC
+* Claude History
+:PROPERTIES:
+:ID: claude-history-view
+:END:
+#+BEGIN_SRC render :id claude-history-view::render::0
+column(text("Recent sessions, newest first", #{muted: true}), live_query(#{sql: "SELECT id, project_path, first_prompt, message_count, modified FROM cc_session ORDER BY modified DESC LIMIT 25", item_template: list(#{item_template: render_entity()})}))
+#+END_SRC
+* Google Calendar
+:PROPERTIES:
+:ID: gcal-view
+:END:
+#+BEGIN_SRC render :id gcal-view::render::0
+column(text("Calendar events, latest first", #{muted: true}), live_query(#{sql: "SELECT id, summary, start, end_time, location FROM gcal_event ORDER BY start DESC LIMIT 25", item_template: list(#{item_template: render_entity()})}))
+#+END_SRC
+* Gmail
+:PROPERTIES:
+:ID: gmail-view
+:END:
+#+BEGIN_SRC render :id gmail-view::render::0
+column(text("Unread threads, newest first", #{muted: true}), live_query(#{sql: "SELECT id, snippet, history_id FROM gmail_thread ORDER BY history_id DESC LIMIT 25", item_template: list(#{item_template: render_entity()})}))
+#+END_SRC
+* JSONPlaceholder
+:PROPERTIES:
+:ID: jsonplaceholder-view
+:END:
+#+BEGIN_SRC render :id jsonplaceholder-view::render::0
+column(text("Posts, newest first", #{muted: true}), live_query(#{sql: "SELECT id, userId, title, body FROM jp_posts ORDER BY id DESC LIMIT 25", item_template: list(#{item_template: render_entity()})}))
+#+END_SRC
+* Todoist
+:PROPERTIES:
+:ID: todoist-view
+:END:
+#+BEGIN_SRC render :id todoist-view::render::0
+column(text("Open tasks, most urgent first", #{muted: true}), live_query(#{sql: "SELECT id, content, priority, dueDate FROM todoist_tasks WHERE checked = 0 ORDER BY priority ASC, dueDate ASC LIMIT 25", item_template: list(#{item_template: render_entity()})}))
 #+END_SRC

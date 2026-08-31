@@ -268,12 +268,13 @@ fn seeded_section_lists_exactly_the_enabled_integrations() {
             providers_of(db, &sql).await,
             vec![
                 "claude-history".to_string(),
-                "gcal".to_string(),
                 "gmail".to_string(),
+                "gcal".to_string(),
                 "todoist".to_string(),
             ],
             "the seeded Integrations section must list exactly the enabled integrations, \
-             alphabetically — query was: {sql}"
+             ordered by the name a person READS (so `gmail` precedes `gcal`: \"Gmail\" before \
+             \"Google Calendar\") — query was: {sql}"
         );
     });
 }
@@ -544,8 +545,8 @@ fn the_section_carries_each_integrations_boot_status() {
         assert_eq!(
             providers_and_statuses(db, &sql).await,
             vec![
-                ("gcal".to_string(), "Pending".to_string()),
                 ("gmail".to_string(), "Pending".to_string()),
+                ("gcal".to_string(), "Pending".to_string()),
                 ("todoist".to_string(), "Pending".to_string()),
             ],
             "a freshly projected, not-yet-connected integration reads as Pending"
@@ -565,8 +566,8 @@ fn the_section_carries_each_integrations_boot_status() {
         assert_eq!(
             providers_and_statuses(db, &sql).await,
             vec![
-                ("gcal".to_string(), "Needs auth".to_string()),
                 ("gmail".to_string(), "Unavailable".to_string()),
+                ("gcal".to_string(), "Needs auth".to_string()),
                 ("todoist".to_string(), "Connected".to_string()),
             ],
             "each enabled integration shows the status its boot connect reached"
@@ -796,11 +797,12 @@ fn the_mirror_carries_the_presentation_axis() {
             seen.contains(&(
                 "todoist".to_string(),
                 "Todoist".to_string(),
-                "link".to_string(),
-                None,
+                "checkbox".to_string(),
+                Some("todoist-view".to_string()),
             )),
-            "todoist states none of the three, so the mirror must carry the derivations and a \
-             NULL view: {seen:?}"
+            "todoist states all three too (D53.c: every bundled integration opens a page), so \
+             the mirror must carry them verbatim — `checkbox`, not the DEFAULT_ICON derivation: \
+             {seen:?}"
         );
     });
 }

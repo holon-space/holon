@@ -5228,6 +5228,7 @@ dependencies = [
  "holon-profiles",
  "holon-turso",
  "proptest 1.11.0",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "tokio-stream",
