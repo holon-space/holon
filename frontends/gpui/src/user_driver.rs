@@ -612,7 +612,20 @@ impl GpuiUserDriver {
         timeout: Duration,
     ) -> Result<(f32, f32)> {
         let deadline = tokio::time::Instant::now() + timeout;
+        // An already-painted row resolves on the first read, so that read
+        // costs no frame. Only a MISS has to drive one.
+        let mut drive_a_frame = false;
         loop {
+            if drive_a_frame {
+                // Bounds are render-derived, so a wait that has already missed
+                // must DRAW the frame it reads — the same contract
+                // `await_editor_window_focus` holds. A write that arrived off
+                // the input path (an MCP `execute_operation` dispatches no
+                // platform event) schedules no frame of its own, so a passive
+                // poll waits out its whole budget on a row that has been ready
+                // to paint the entire time.
+                self.dispatch_event(InteractionEvent::ForceFrame).await?;
+            }
             // `require_click_center` reads via `FlushOnReadGeometry`, which
             // promotes the last completed render's staged buffer before every
             // lookup — so this succeeds as soon as the producing frame paints.
@@ -621,6 +634,7 @@ impl GpuiUserDriver {
                 Err(e) if tokio::time::Instant::now() >= deadline => return Err(e),
                 Err(_) => {}
             }
+            drive_a_frame = true;
             let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
         }
     }
