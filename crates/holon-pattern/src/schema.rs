@@ -142,6 +142,9 @@ pub mod block {
     pub const SOURCE_LANGUAGE: &str = "source_language";
     pub const SOURCE_NAME: &str = "source_name";
     pub const PROPERTIES: &str = "properties";
+    /// Per-key kind map for the `properties` bag — see
+    /// [`crate::PropertyKinds`]. Engine-owned: authoring it is refused.
+    pub const PROPERTY_KINDS: &str = "property_kinds";
     pub const MARKS: &str = "marks";
     pub const COLLAPSED: &str = "collapsed";
     pub const WIDGET_ONLY: &str = "widget_only";
@@ -208,6 +211,9 @@ pub const BLOCK: EntitySchema = EntitySchema {
         column(block::SOURCE_LANGUAGE, FieldIntent::Writable, true),
         column(block::SOURCE_NAME, FieldIntent::Writable, true),
         column(block::PROPERTIES, FieldIntent::Writable, true),
+        // Written only by the properties write leg, alongside the bag it
+        // describes. `StorageInternal` so no `set_field` intent can name it.
+        column(block::PROPERTY_KINDS, FieldIntent::StorageInternal, false),
         column(block::MARKS, FieldIntent::Writable, true),
         column(block::COLLAPSED, FieldIntent::Writable, true),
         column(block::WIDGET_ONLY, FieldIntent::Writable, true),

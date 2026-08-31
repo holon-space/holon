@@ -11,6 +11,10 @@ CREATE TABLE IF NOT EXISTS block_raw (
     source_language TEXT,
     source_name TEXT,
     properties TEXT,
+    -- Per-key kind map for `properties`, holding an entry only where the JSON
+    -- form is ambiguous (DateTime looks like a string, Json like an object).
+    -- NULL means every key reads back at its JSON-evident kind.
+    property_kinds TEXT,
     marks TEXT,
     collapsed INTEGER NOT NULL DEFAULT 0,
     widget_only INTEGER NOT NULL DEFAULT 0,

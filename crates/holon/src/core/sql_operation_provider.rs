@@ -15,6 +15,7 @@ use holon_api::OperationDescriptor;
 use holon_api::OperationParam;
 use holon_api::PAGE_TAG;
 use holon_api::ParentNotFound;
+use holon_api::PropertyKinds;
 use holon_api::TypeDefinition;
 use holon_api::TypeHint;
 use holon_api::Value;
@@ -30,6 +31,8 @@ use holon_core::block_ordering::ORDER_REKEYS_PARAM;
 use holon_core::storage::types::StorageEntity;
 
 use crate::core::merge_blocks_plan;
+use crate::core::properties_bag_write::BagEntry;
+use crate::core::properties_bag_write::bag_and_kinds_set_clause;
 use crate::storage::schema_module::EdgeFieldDescriptor;
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::DbHandle;
@@ -63,6 +66,15 @@ pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
                 .map(|(k, v)| (k.clone(), value_to_json(v)))
                 .collect(),
         ),
+    }
+}
+
+/// The `property_kinds` SQL literal for a bag's kinds — NULL when no key needs
+/// an entry, so the common bag stores nothing.
+fn kinds_sql(kinds: &PropertyKinds) -> String {
+    match kinds.to_column() {
+        None => "NULL".to_string(),
+        Some(json) => format!("'{}'", json.replace('\'', "''")),
     }
 }
 
@@ -1354,16 +1366,19 @@ impl SqlOperationProvider {
             // `Value::REMOVED` props are removal sentinels (see
             // `prepare_update`); on create there is nothing to remove, so they
             // are dropped. A `Value::Null` is a real value and IS stored.
+            let carried: Vec<(String, Value)> = extra_props
+                .into_iter()
+                .filter(|(_, v)| !v.is_removed())
+                .collect();
+            let kinds = PropertyKinds::of(carried.iter().map(|(k, v)| (k.as_str(), v)));
             let props_json = properties_to_canonical_json(
-                extra_props
-                    .into_iter()
-                    .filter(|(_, v)| !v.is_removed())
-                    .map(|(k, v)| (k, value_to_json(&v))),
+                carried.iter().map(|(k, v)| (k.clone(), value_to_json(v))),
             );
             sql_fields.push((
                 "properties".to_string(),
                 format!("'{}'", props_json.replace('\'', "''")),
             ));
+            sql_fields.push(("property_kinds".to_string(), kinds_sql(&kinds)));
         }
 
         if let Some(old_row) = held {
@@ -1502,7 +1517,7 @@ impl SqlOperationProvider {
             // it fires CDC with the OLD column value. Full replacement ensures
             // IVM sees the actual new value.
             let select_props_sql = format!(
-                "SELECT properties FROM {} WHERE id = '{}'",
+                "SELECT properties, property_kinds FROM {} WHERE id = '{}'",
                 self.table_name,
                 id.replace('\'', "''")
             );
@@ -1513,10 +1528,15 @@ impl SqlOperationProvider {
                 .map_err(|e| {
                     format!("prepare_update: read existing properties for {}: {}", id, e)
                 })?;
-            let mut existing: serde_json::Map<String, serde_json::Value> = match rows
-                .into_iter()
-                .next()
-            {
+            let existing_row = rows.into_iter().next();
+            // The kinds already on the row: an update names only the keys it
+            // touches, so the untouched keys keep the kinds they were stored
+            // with.
+            let held_kinds = PropertyKinds::parse_column(
+                existing_row.as_ref().and_then(|r| r.get("property_kinds")),
+            )
+            .map_err(|e| format!("prepare_update: property_kinds for {}: {}", id, e))?;
+            let mut existing: serde_json::Map<String, serde_json::Value> = match &existing_row {
                 None => serde_json::Map::new(),
                 Some(row) => match row.get("properties").cloned() {
                     None | Some(Value::Null) => serde_json::Map::new(),
@@ -1557,6 +1577,17 @@ impl SqlOperationProvider {
             let merged_json = properties_to_canonical_json(existing);
             let props_sql = format!("'{}'", merged_json.replace('\'', "''"));
             update_pairs.push(("properties".to_string(), props_sql));
+
+            let merged_kinds = held_kinds.merged_with(
+                PropertyKinds::of(
+                    extra_props
+                        .iter()
+                        .filter(|(_, v)| !v.is_removed())
+                        .map(|(k, v)| (k.as_str(), v)),
+                ),
+                extra_props.iter().map(|(k, _)| k.as_str()),
+            );
+            update_pairs.push(("property_kinds".to_string(), kinds_sql(&merged_kinds)));
         }
 
         if update_pairs.is_empty() && edge_field_params.is_empty() {
@@ -2124,7 +2155,7 @@ impl SqlOperationProvider {
     /// Read one block's plan-relevant columns. `None` when the row is absent.
     async fn read_merge_side(&self, id: &str) -> Result<Option<(String, Value, i64)>> {
         let sql = format!(
-            "SELECT content, properties, created_at FROM {} WHERE id = '{}'",
+            "SELECT content, properties, property_kinds, created_at FROM {} WHERE id = '{}'",
             self.table_name,
             id.replace('\'', "''")
         );
@@ -2151,8 +2182,8 @@ impl SqlOperationProvider {
     /// a dedupe collapse over a minted id.
     async fn read_merge_children(&self, parent: &str) -> Result<Vec<merge_blocks_plan::PlanChild>> {
         let sql = format!(
-            "SELECT id, content, properties, created_at FROM {} WHERE parent_id = '{}' ORDER BY \
-             sort_key",
+            "SELECT id, content, properties, property_kinds, created_at FROM {} WHERE parent_id = \
+             '{}' ORDER BY sort_key",
             self.table_name,
             parent.replace('\'', "''")
         );
@@ -2356,7 +2387,7 @@ impl SqlOperationProvider {
         }
 
         let sql = format!(
-            "SELECT properties FROM {table} WHERE id = '{id}'",
+            "SELECT properties, property_kinds FROM {table} WHERE id = '{id}'",
             table = self.table_name,
             id = id.replace('\'', "''"),
         );
@@ -3274,55 +3305,53 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         write_seq_pair.as_deref().unwrap_or(""),
                         id.replace('\'', "''")
                     )
-                } else if value.is_removed() {
-                    // REMOVED means "delete this property" — use json_remove so we
-                    // leave no {"key": null} entry behind (a stored null is a
-                    // different, real value under D27.b). `task_state`
-                    // removal also removes its `task_state_category` sidecar (the
-                    // pair invariant `Block::set_task_state` establishes).
-                    if field == "task_state" {
-                        format!(
-                            "UPDATE {} SET properties = json_remove(COALESCE(properties, '{{}}'), \
-                             '$.task_state', '$.task_state_category') WHERE id = '{}'",
-                            self.table_name,
-                            id.replace('\'', "''")
-                        )
-                    } else {
-                        format!(
-                            "UPDATE {} SET properties = json_remove(COALESCE(properties, '{{}}'), \
-                             '$.{}') WHERE id = '{}'",
-                            self.table_name,
-                            field.replace('\'', "''"),
-                            id.replace('\'', "''")
-                        )
-                    }
-                } else if field == "task_state" {
-                    // A bare keyword write gets its `task_state_category` sidecar
-                    // derived and written in the SAME statement — otherwise every
-                    // UI cycle dropped/staled the category and a DONE keyword could
-                    // read back as Active (see `TaskState::category_str_for_keyword`).
-                    let keyword = value.as_string().ok_or_else(|| {
-                        format!(
-                            "set_field('task_state'): expected String or Value::REMOVED, got \
-                             {value:?}"
-                        )
-                    })?;
-                    let category = holon_api::TaskState::category_str_for_keyword(keyword);
-                    format!(
-                        "UPDATE {} SET properties = json_set(COALESCE(properties, '{{}}'), \
-                         '$.task_state', {}, '$.task_state_category', '{}') WHERE id = '{}'",
-                        self.table_name,
-                        sql_value(),
-                        category,
-                        id.replace('\'', "''")
-                    )
                 } else {
+                    // Every bag write goes through `bag_and_kinds_set_clause`,
+                    // which assigns `property_kinds` in the SAME statement. A
+                    // json_set here that skipped it would leave a kind entry
+                    // describing a value the bag no longer holds, and the read
+                    // boundary refuses such a row.
+                    let entries = if value.is_removed() {
+                        // REMOVED means "delete this property" — a removal, not a
+                        // {"key": null} entry (a stored null is a different, real
+                        // value under D27.b). `task_state` removal also removes
+                        // its `task_state_category` sidecar (the pair invariant
+                        // `Block::set_task_state` establishes).
+                        if field == "task_state" {
+                            vec![
+                                BagEntry::remove("task_state"),
+                                BagEntry::remove("task_state_category"),
+                            ]
+                        } else {
+                            vec![BagEntry::remove(field)]
+                        }
+                    } else if field == "task_state" {
+                        // A bare keyword write gets its `task_state_category`
+                        // sidecar derived and written in the SAME statement —
+                        // otherwise every UI cycle dropped/staled the category and
+                        // a DONE keyword could read back as Active (see
+                        // `TaskState::category_str_for_keyword`).
+                        let keyword = value.as_string().ok_or_else(|| {
+                            format!(
+                                "set_field('task_state'): expected String or Value::REMOVED, got \
+                                 {value:?}"
+                            )
+                        })?;
+                        let category = holon_api::TaskState::category_str_for_keyword(keyword);
+                        vec![
+                            BagEntry::set("task_state", sql_value(), &value),
+                            BagEntry::set_derived(
+                                "task_state_category",
+                                format!("'{}'", category.replace('\'', "''")),
+                            ),
+                        ]
+                    } else {
+                        vec![BagEntry::set(field, sql_value(), &value)]
+                    };
                     format!(
-                        "UPDATE {} SET properties = json_set(COALESCE(properties, '{{}}'), \
-                         '$.{}', {}) WHERE id = '{}'",
+                        "UPDATE {} SET {} WHERE id = '{}'",
                         self.table_name,
-                        field.replace('\'', "''"),
-                        sql_value(),
+                        bag_and_kinds_set_clause(&entries),
                         id.replace('\'', "''")
                     )
                 };
@@ -4441,6 +4470,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
 mod sql_operation_provider_diff_test;
 
 #[cfg(test)]
+#[path = "set_field_property_kinds_test.rs"]
+mod set_field_property_kinds_test;
+
+#[cfg(test)]
 #[path = "json_value_parse_differential_test.rs"]
 mod json_value_parse_differential_test;
 
@@ -5211,7 +5244,8 @@ mod tag_op_tests {
             .expect("in-memory turso");
         db.execute(
             "CREATE TABLE block_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, sort_key \
-             TEXT, properties TEXT, created_at INTEGER, updated_at INTEGER)",
+             TEXT, properties TEXT, property_kinds TEXT, created_at INTEGER, updated_at \
+             INTEGER)",
             vec![],
         )
         .await

@@ -41,6 +41,46 @@ pub fn block_raw_schema_sql() -> &'static str {
     include_str!("../sql/schema/blocks.sql")
 }
 
+/// Add `property_kinds` to a `block_raw` created before NV-1.
+///
+/// `CREATE TABLE IF NOT EXISTS` leaves an existing table at its old shape, and
+/// the `block` matview's synthesized SELECT names every declared column — so
+/// without this the first query against a pre-NV-1 database fails on a missing
+/// column. The added column is NULL for every existing row, which is the
+/// truthful reading of those rows: nothing was ever stored at a kind JSON
+/// cannot show.
+async fn add_missing_property_kinds_column(db_handle: &DbHandle) -> Result<()> {
+    let already_declared = db_handle
+        .query_positional(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'block_raw'",
+            vec![],
+        )
+        .await?
+        .first()
+        .and_then(|r| r.get("sql"))
+        .and_then(|v| v.as_string().map(str::to_string))
+        .ok_or_else(|| {
+            StorageError::SchemaError(
+                "block_raw is missing from sqlite_master right after its CREATE TABLE".to_string(),
+            )
+        })?
+        .contains(holon_api::schema::block::PROPERTY_KINDS);
+
+    if already_declared {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        "[CoreSchemaModule] MIGRATING `block_raw`: it predates the `property_kinds` column, so \
+         DateTime and Json property values stored before now read back at their JSON kind. \
+         Adding the column; existing rows keep the kinds JSON shows."
+    );
+    db_handle
+        .execute_ddl("ALTER TABLE block_raw ADD COLUMN property_kinds TEXT")
+        .await?;
+    Ok(())
+}
+
 /// Core schema module providing the fundamental tables: block_raw, files, and
 /// the `clock` relation.
 ///
@@ -72,6 +112,8 @@ impl SchemaModule for CoreSchemaModule {
             db_handle.execute_ddl(stmt).await?;
         }
         tracing::debug!("[CoreSchemaModule] block_raw table + index created");
+
+        add_missing_property_kinds_column(db_handle).await?;
 
         // Seed the self-parented `sentinel:no_parent` row so root blocks
         // (parent_id = 'sentinel:no_parent') satisfy the block_raw parent FK.
@@ -1331,7 +1373,8 @@ mod tests {
         assert_eq!(
             block_matview_select(&[requires_descriptor()]),
             "SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
-             b.source_language, b.source_name, b.properties, b.marks, b.collapsed, b.widget_only, \
+             b.source_language, b.source_name, b.properties, b.property_kinds, b.marks, \
+             b.collapsed, b.widget_only, \
              b.completed, \
              b.block_type, b.created_at, b.updated_at, b._change_origin, b.write_seq, \
              COALESCE(block_requires_agg.vals, '[]') AS requires FROM block_raw b \

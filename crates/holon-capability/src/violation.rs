@@ -46,8 +46,14 @@ pub enum Clause {
     /// be refused by a message that names it — on EVERY author-reachable write
     /// route into the leg, which is why the route is part of the finding.
     EngineOwnedKey { route: &'static str },
-    /// `property_values.types` lists this kind.
-    TypeDeclared(ValueKind),
+    /// `property_values.types` lists this kind — and the claim must hold on
+    /// EVERY author-reachable write route into the leg, not just the one the
+    /// first probe happened to drive, which is why the route is part of the
+    /// finding.
+    TypeDeclared {
+        kind: ValueKind,
+        route: &'static str,
+    },
     /// `property_values.empty_string` says this.
     EmptyString,
     /// `ordering.property_order` says this.
@@ -118,7 +124,10 @@ impl std::fmt::Display for Clause {
                 f,
                 "property_keys.engine_owned_keys lists the key (write route: {route})"
             ),
-            Self::TypeDeclared(kind) => write!(f, "property_values.types lists {kind:?}"),
+            Self::TypeDeclared { kind, route } => write!(
+                f,
+                "property_values.types lists {kind:?} (write route: {route})"
+            ),
             Self::EmptyString => write!(f, "property_values.empty_string"),
             Self::PropertyOrder => write!(f, "ordering.property_order"),
             Self::CarrierDisagreement => write!(f, "identity.carrier_disagreement"),

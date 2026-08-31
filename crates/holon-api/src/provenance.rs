@@ -41,7 +41,15 @@ pub const PROVENANCE_PROPERTY: &str = "_provenance";
 /// either: the engine re-dispatches `_proposed_by` through its own operation
 /// boundary when promoting a proposal, so reserving it would refuse
 /// `accept_proposal`.
-pub const ENGINE_OWNED_PARAM_KEYS: &[&str] = &[PROVENANCE_PROPERTY];
+///
+/// `property_kinds` joins the list because it became a real `block_raw`
+/// column: an authored param of that name would land in the column and
+/// overwrite the kind map the write leg derives, re-typing every property the
+/// forged map names.
+pub const ENGINE_OWNED_PARAM_KEYS: &[&str] = &[
+    PROVENANCE_PROPERTY,
+    holon_pattern::schema::block::PROPERTY_KINDS,
+];
 
 // Field keys inside the nested `_provenance` object. Named constants so the
 // SQL/JSON query surface (`json_extract(properties, '$._provenance.origin')`)

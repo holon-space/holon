@@ -45,7 +45,8 @@ impl SinkReader for TursoSinkReader {
     async fn read_blocks(&self) -> Result<HashMap<String, SnapshotBlock>> {
         let sql = format!(
             "SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, b.source_language, \
-             b.source_name, b.properties, b.marks, b.created_at, b.updated_at, COALESCE((SELECT \
+             b.source_name, b.properties, b.property_kinds, b.marks, b.created_at, b.updated_at, \
+             COALESCE((SELECT \
              json_group_array(tag) FROM block_tags WHERE block_id = b.id), '[]') AS tags, \
              COALESCE((SELECT json_group_array(required_id) FROM block_requires WHERE block_id = \
              b.id), '[]') AS requires, COALESCE((SELECT json_group_array(lesson_id) FROM \
@@ -106,6 +107,7 @@ mod tests {
                     source_language TEXT,
                     source_name TEXT,
                     properties TEXT,
+                    property_kinds TEXT,
                     marks TEXT,
                     collapsed INTEGER NOT NULL DEFAULT 0,
                     widget_only INTEGER NOT NULL DEFAULT 0,

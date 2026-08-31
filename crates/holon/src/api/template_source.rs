@@ -51,7 +51,7 @@ impl TursoTemplateSource {
     async fn fetch_children(&self, parent_id: &str) -> Result<Vec<TemplateNode>> {
         let sql = format!(
             "SELECT id, parent_id, content, content_type, block_type, sort_key, collapsed, \
-             widget_only, completed, source_language, source_name, properties, marks FROM {} WHERE parent_id = \
+             widget_only, completed, source_language, source_name, properties, property_kinds, marks FROM {} WHERE parent_id = \
              '{}' ORDER BY sort_key, id",
             self.table_name,
             parent_id.replace('\'', "''"),
@@ -84,7 +84,7 @@ impl TemplateSource for TursoTemplateSource {
     async fn load_subtree(&self, root_id: &str) -> Result<Vec<TemplateNode>> {
         let sql = format!(
             "SELECT id, parent_id, content, content_type, block_type, sort_key, collapsed, \
-             widget_only, completed, source_language, source_name, properties, marks FROM {} WHERE id = '{}'",
+             widget_only, completed, source_language, source_name, properties, property_kinds, marks FROM {} WHERE id = '{}'",
             self.table_name,
             root_id.replace('\'', "''"),
         );

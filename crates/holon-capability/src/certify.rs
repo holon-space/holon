@@ -437,6 +437,11 @@ pub struct CertificationReport {
     /// the harness at a DIFFERENT valid profile, whose report looks just as
     /// clean; printing the input is what tells the two apart.
     pub profile_path: Option<PathBuf>,
+    /// Author-reachable write routes into a leg that this wiring cannot drive,
+    /// so a clause certified over the OTHER routes is not certified over these.
+    /// Reported rather than bailed on: the clause is genuinely driven where the
+    /// routes write, and the shortfall belongs in the output, not in silence.
+    pub undriven_routes: Vec<String>,
     /// Clauses certified against a MOVING upstream, with the range each was
     /// measured against. Driven-with-expiry, never an excuse.
     pub provisional: BTreeMap<ClauseId, String>,
@@ -553,6 +558,9 @@ impl CertificationReport {
                 "MARKER     {clause} is NOT certified — {reason}\n"
             ));
         }
+        for route in &self.undriven_routes {
+            out.push_str(&format!("UNDRIVEN   {route}\n"));
+        }
         out
     }
 }
@@ -617,6 +625,9 @@ fn specimen(kind: ValueKind) -> Value {
         ValueKind::Null => Value::Null,
     }
 }
+
+/// The route `round_trip_property` drives — the leg's primary author path.
+const CREATE_ROUTE: &str = "create";
 
 const ALL_KINDS: &[ValueKind] = &[
     ValueKind::String,
@@ -913,32 +924,77 @@ fn certify_property_values(
     report.probed.insert(ClauseId::PropertyValuesEmptyString);
     certify_value_shape(format, profile, carrier, report)?;
 
+    // CONTROL, per EXTRA author route. A route that cannot carry a plain
+    // string cannot say anything about kinds, and judging kinds over it would
+    // report every one of them Dropped for a reason that is not about kinds.
+    // Refused rather than skipped: silently narrowing the clause to the routes
+    // that happen to work is how a claim comes to be certified on one of three.
+    let control = Value::String("carried".to_string());
+    let mut live_routes: Vec<&'static str> = Vec::new();
+    for RouteReadback { route, readback } in format
+        .extra_property_write_routes(carrier, key, &control)?
+        .unwrap_or_default()
+    {
+        if readback == Readback::Present(control.clone()) {
+            live_routes.push(route);
+        } else {
+            // NOT silence and NOT a bail: the clause IS driven on the routes
+            // that write, and a route that cannot carry a plain string can say
+            // nothing about kinds. What must not happen is the reader believing
+            // the claim was proven on every author path, so the shortfall is
+            // printed with the report.
+            report.undriven_routes.push(format!(
+                "{leg}/{route}: does not carry an ordinary string in this wiring (answered \
+                 {readback:?}), so property_values.types is NOT driven over it",
+                leg = carrier.leg
+            ));
+        }
+    }
+
     for &kind in ALL_KINDS {
         let sent = specimen(kind);
-        let readback = format.round_trip_property(carrier, key, &sent)?;
-        match judge(axis.types.contains(&kind), &sent, &readback) {
-            Judgement::Confirmed => report.confirmed += 1,
-            Judgement::Broken(outcome) => report.violations.push(Violation {
-                profile: profile.id().clone(),
-                rev: profile.revision().clone(),
-                axis: Axis::PropertyValues,
-                clause: Clause::TypeDeclared(kind),
-                leg: carrier.leg,
-                key: key.to_string(),
-                sent: sent.clone(),
-                outcome,
-            }),
-            Judgement::UnderClaimed(_) => report.prompts.push(TighteningPrompt {
-                profile: profile.id().clone(),
-                axis: Axis::PropertyValues,
-                leg: carrier.leg,
-                key: key.to_string(),
-                sent: sent.clone(),
-                note: format!(
-                    "{kind:?} is undeclared but round-trips intact — property_values.types is \
-                     narrower than the format"
-                ),
-            }),
+        // EVERY author-reachable route into the leg, not just `create`: a kind
+        // recorded by one write leg and dropped by another is exactly the
+        // half-true claim this clause exists to refuse.
+        let mut routes = vec![RouteReadback {
+            route: CREATE_ROUTE,
+            readback: format.round_trip_property(carrier, key, &sent)?,
+        }];
+        if !live_routes.is_empty() {
+            routes.extend(
+                format
+                    .extra_property_write_routes(carrier, key, &sent)?
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|r| live_routes.contains(&r.route)),
+            );
+        }
+
+        for RouteReadback { route, readback } in routes {
+            match judge(axis.types.contains(&kind), &sent, &readback) {
+                Judgement::Confirmed => report.confirmed += 1,
+                Judgement::Broken(outcome) => report.violations.push(Violation {
+                    profile: profile.id().clone(),
+                    rev: profile.revision().clone(),
+                    axis: Axis::PropertyValues,
+                    clause: Clause::TypeDeclared { kind, route },
+                    leg: carrier.leg,
+                    key: key.to_string(),
+                    sent: sent.clone(),
+                    outcome,
+                }),
+                Judgement::UnderClaimed(_) => report.prompts.push(TighteningPrompt {
+                    profile: profile.id().clone(),
+                    axis: Axis::PropertyValues,
+                    leg: carrier.leg,
+                    key: key.to_string(),
+                    sent: sent.clone(),
+                    note: format!(
+                        "{kind:?} is undeclared but round-trips intact on route {route} — \
+                         property_values.types is narrower than the format"
+                    ),
+                }),
+            }
         }
     }
 
@@ -2588,7 +2644,15 @@ mod tests {
         let v = report
             .violations
             .iter()
-            .find(|v| v.clause == Clause::TypeDeclared(ValueKind::String))
+            .find(|v| {
+                matches!(
+                    v.clause,
+                    Clause::TypeDeclared {
+                        kind: ValueKind::String,
+                        ..
+                    }
+                )
+            })
             .unwrap_or_else(|| {
                 panic!(
                     "a declared-carried type that is REFUSED must be red:\n{}",

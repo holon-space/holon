@@ -51,7 +51,7 @@ const SELECT_COLS: &str = "entity_name, block_id, op_name, origin, transition_id
 /// stamp, ordered deterministically by `(at_millis, id)` so the rebuilt
 /// relation is byte-identical across runs. `properties` comes back structured
 /// (the query path parses the known JSON column into an `Object`).
-const REBUILD_SELECT_SQL: &str = "SELECT id, properties FROM block_raw WHERE \
+const REBUILD_SELECT_SQL: &str = "SELECT id, properties, property_kinds FROM block_raw WHERE \
                                   json_extract(properties, '$._provenance') IS NOT NULL ORDER BY \
                                   json_extract(properties, '$._provenance.at_millis') ASC, id ASC";
 

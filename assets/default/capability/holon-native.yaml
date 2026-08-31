@@ -162,20 +162,26 @@ fidelity_axes:
     # create params, and banning the prefix would refuse the vault's own write
     # leg. Enforced by `reject_engine_owned_keys`
     # (crates/holon/src/api/operation_engine.rs) and DRIVEN below.
-    engine_owned_keys: [_provenance]
+    engine_owned_keys: [_provenance, property_kinds]
     collision: last_wins
     schema_required: open
 
   property_values:
-    # MEASURED against the production write path. The first draft claimed
-    # date_time and json as well, and the run said otherwise:
-    #   * DateTime came back String("2026-08-22T10:00:00Z") — JSON has no date
-    #     kind, so the substrate keeps the TEXT and loses the KIND.
-    #   * Json("{\"a\":1}") came back Object({"a": Integer(1)}) — it is parsed
-    #     into the blob rather than carried as an opaque document.
-    # Both are re-typings, not losses; the value survives and the KIND does not,
-    # which is exactly what this clause is about.
-    types: [string, integer, float, boolean, array, object]
+    # MEASURED against the production write path. date_time and json were the
+    # two re-typings this clause used to exclude — JSON has no date kind and no
+    # opaque-document kind, so DateTime came back String and Json came back
+    # Object. NV-1 carries the KIND beside the bag in the `property_kinds`
+    # column, so both now round-trip on the leg this profile certifies.
+    #
+    # SQL leg faithful since NV-1; Loro leg pending S2. The certified carrier is
+    # `block_properties_json` — the SQL properties column. The Loro leg still
+    # serializes `Value` untagged (holon-pattern/src/value.rs) and loses these
+    # two kinds across a restart; when it gains a Carrier here, it will need S2
+    # first or this clause goes red for that leg.
+    #
+    # The `json` kind carries the DOCUMENT, not its byte formatting:
+    # Json("{ \"a\": 1 }") reads back as the canonical Json("{\"a\":1}").
+    types: [string, integer, float, boolean, array, object, date_time, json]
     empty_string: representable
     # Ruling D27.b: `Value::Null` is a REAL value here. Removal is spelled
     # `Value::Removed`, so the substrate stores and reads back an explicit null

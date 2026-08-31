@@ -27,6 +27,7 @@ async fn make_provider_with_block(
                 content TEXT NOT NULL DEFAULT '',
                 content_type TEXT NOT NULL DEFAULT 'text',
                 properties TEXT,
+                property_kinds TEXT,
                 created_at INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL DEFAULT 0
             )",

@@ -296,7 +296,7 @@ impl HolonNative {
         // boundary (MEASURED: the first read missed every row), so the read
         // must ask for the stored form.
         let sql = format!(
-            "SELECT properties FROM block_raw WHERE id = 'block:{}'",
+            "SELECT properties, property_kinds FROM block_raw WHERE id = 'block:{}'",
             id.replace('\'', "''")
         );
         let rows = self
@@ -332,22 +332,20 @@ impl HolonNative {
             .get("properties")
             .cloned()
             .context("block_raw must expose a properties column")?;
-        let blob = match &stored_column {
+        // The production read boundary (`normalize_known_json_columns`) has
+        // already parsed the blob and restored the kinds `property_kinds`
+        // records, so the bag is read as it stands. Re-serializing it to text
+        // and parsing that back would undo exactly the retyping under test.
+        let bag = match &stored_column {
             // NULL is the honest empty blob: the row exists and carries no
             // properties at all.
-            Value::Null => "{}".to_string(),
-            Value::String(s) => s.clone(),
-            Value::Object(_) => {
-                let json: serde_json::Value = stored_column.clone().into();
-                serde_json::to_string(&json).expect("Value→JSON cannot fail")
-            }
+            Value::Null => Default::default(),
+            Value::Object(map) => map.clone(),
             other => anyhow::bail!("the properties column came back as {other:?}"),
         };
-        let stored: serde_json::Value = serde_json::from_str(&blob)
-            .with_context(|| format!("the stored properties blob must be JSON: {blob}"))?;
-        Ok(match stored.get(key) {
+        Ok(match bag.get(key) {
             None => Readback::Absent,
-            Some(found) => Readback::Present(from_json(found)),
+            Some(found) => Readback::Present(found.clone()),
         })
     }
 }
@@ -398,15 +396,6 @@ async fn block_engine() -> anyhow::Result<Arc<BackendEngine>> {
     })
     .await
     .context("the certification engine must boot with the block provider")
-}
-
-/// A stored JSON value as the `Value` vocabulary sees it.
-///
-/// The blob is JSON, so a kind the substrate does not model natively comes
-/// back as whatever JSON kept — which is precisely what the `types` clause is
-/// asking about.
-fn from_json(value: &serde_json::Value) -> Value {
-    Value::from_json_value(value.clone())
 }
 
 /// A distinct block id per probe: two probes sharing one id would certify the
@@ -683,4 +672,128 @@ fn moving_between_the_two_certified_homes_has_a_price_in_both_directions() {
             .any(|l| l.clause == ClauseId::PropertyValuesReferenceValues),
         "org carries references; the substrate declares none, so the LINK is the price:\n{to_native:#?}"
     );
+}
+
+/// NV-1 (ruling D29.a): the two kinds JSON cannot spell survive the schemaless
+/// bag, because `property_kinds` carries the kind beside it.
+///
+/// Drives the production write path (`execute_op("block", "create", …)`) and
+/// the production read boundary, so a kind that survives only inside the test's
+/// own head cannot pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn date_time_and_json_keep_their_kind_across_the_properties_bag() -> anyhow::Result<()> {
+    let native = HolonNative::load().await?;
+
+    let when = Value::DateTime("2026-08-22T10:00:00Z".to_string());
+    assert_eq!(
+        native
+            .write_then_read("nv1-datetime", "when", &when)
+            .await?,
+        Readback::Present(when.clone()),
+        "a DateTime must not come back as the String JSON kept"
+    );
+
+    let doc = Value::Json(r#"{"a":1}"#.to_string());
+    assert_eq!(
+        native.write_then_read("nv1-json", "doc", &doc).await?,
+        Readback::Present(doc.clone()),
+        "a Json document must not come back as the Object JSON parsed it into"
+    );
+
+    // The neighbours must not be dragged along: a plain string that merely
+    // LOOKS like a timestamp has no kind entry and stays a String.
+    assert_eq!(
+        native
+            .write_then_read(
+                "nv1-plain",
+                "looks-like-a-date",
+                &Value::String("2026-08-22T10:00:00Z".to_string()),
+            )
+            .await?,
+        Readback::Present(Value::String("2026-08-22T10:00:00Z".to_string())),
+        "only the keys the kind map names may be re-typed"
+    );
+    Ok(())
+}
+
+/// A kind entry the stored value cannot inhabit is corruption, and the read
+/// boundary says so instead of handing back a plausible `Value::String`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kind_map_disagreeing_with_its_bag_fails_the_read_loudly() -> anyhow::Result<()> {
+    let native = HolonNative::load().await?;
+    let id = "nv1-corrupt";
+    native
+        .write_then_read(
+            id,
+            "when",
+            &Value::DateTime("2026-08-22T10:00:00Z".to_string()),
+        )
+        .await?;
+
+    // Overwrite the VALUE while leaving the kind map claiming a date_time —
+    // the shape a partial or foreign write would leave behind.
+    // ALLOW(sole_block_writer): fabricates the corrupt state under test.
+    native
+        .ctx
+        .engine()
+        .db_handle()
+        .execute_values(
+            &format!(
+                "UPDATE block_raw SET properties = '{{\"when\":\"not a date\"}}' WHERE id = \
+                 'block:{id}'"
+            ),
+            vec![],
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("the corrupting write must land: {e}"))?;
+
+    let err = native
+        .read_stored(id, "when")
+        .await
+        .expect_err("a date_time kind over a non-date must fail the read, not read as a String");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("when") && rendered.contains("date_time"),
+        "the error must name the key and the kind that disagree, got: {rendered}"
+    );
+    Ok(())
+}
+
+/// The routes this wiring CANNOT drive, pinned exactly.
+///
+/// `undriven_routes` is printed with the report, and an ordinary captured
+/// `cargo nextest` run swallows a passing test's stdout — so the disclosure is
+/// invisible in the normal gate. Asserting the set makes GROWTH fail: a route
+/// that silently stops writing later, and so stops certifying the types clause,
+/// turns this red instead of quietly shrinking coverage.
+///
+/// `set_field` and the bag form both reach `SqlBlockOperations`, which offers
+/// the write to the `BlockCellRegistry` and returns `Ok` with no synchronous
+/// SQL write, so `SqlOperationProvider::set_field` is never reached here. That
+/// leg is driven directly in
+/// `holon::core::sql_operation_provider::set_field_property_kinds_test`.
+#[tokio::test(flavor = "multi_thread")]
+async fn exactly_the_two_set_field_routes_are_undriven() -> anyhow::Result<()> {
+    let format = HolonNative::load().await?;
+    let report = certify(&format).context("the certification harness must run")?;
+
+    let mut got: Vec<String> = report
+        .undriven_routes
+        .iter()
+        .map(|r| r.split(':').next().unwrap_or(r).to_string())
+        .collect();
+    got.sort();
+
+    assert_eq!(
+        got,
+        vec![
+            "block_properties_json/set_field".to_string(),
+            "block_properties_json/set_field(properties bag)".to_string(),
+        ],
+        "the undriven-route set changed. A route that GAINED coverage is good news — update \
+         this list. A route that LOST it means the types clause is now certified over fewer \
+         author paths than the profile claims:\n{}",
+        report.render()
+    );
+    Ok(())
 }

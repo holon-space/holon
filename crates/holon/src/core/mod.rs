@@ -1,6 +1,7 @@
 pub mod block_to_page_plan;
 pub mod merge_blocks_plan;
 pub mod operation_log;
+pub(crate) mod properties_bag_write;
 pub mod queryable_cache;
 pub mod sql_block_operations;
 pub mod sql_operation_provider;

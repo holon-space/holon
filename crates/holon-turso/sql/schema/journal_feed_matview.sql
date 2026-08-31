@@ -22,6 +22,7 @@ SELECT
     source_language,
     source_name,
     properties,
+    property_kinds,
     marks,
     collapsed,
     widget_only,

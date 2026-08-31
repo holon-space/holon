@@ -13,9 +13,13 @@
 pub mod arcs;
 pub mod marking;
 pub mod pattern;
+mod property_kinds;
 pub mod schema;
 mod value;
 
+pub use property_kinds::AmbiguousKind;
+pub use property_kinds::PropertyKinds;
+pub use property_kinds::PropertyKindsError;
 pub use value::REMOVED_MARKER_KEY;
 pub use value::RemovedTag;
 pub use value::Value;

@@ -1531,7 +1531,10 @@ fn parse_json_object(value: Value) -> Option<HashMap<String, Value>> {
 /// - `data`: synthesized by the UNION-query rewriter (`json_object(*) AS data`,
 ///   see sql_parser.rs) — parsed and flattened into top-level fields.
 /// - `properties`: the JSON object column on `block_raw` — parsed into
-///   `Value::Object` (Null / non-object becomes an empty Object).
+///   `Value::Object` (Null / non-object becomes an empty Object), then re-typed
+///   by the row's `property_kinds` so `DateTime` and `Json` values come back at
+///   the kind they were written at rather than at the kind JSON kept. A row
+///   whose SELECT omits `property_kinds` reads at the JSON-evident kinds.
 ///
 /// Everything else stays exactly as stored (parse-don't-validate: the JSON
 /// column set comes from what our schema/rewriter declare, not from content
@@ -1540,7 +1543,9 @@ fn parse_json_object(value: Value) -> Option<HashMap<String, Value>> {
 /// via `require_string_array`, the PBT row parsers) strictly parse that JSON
 /// at their own boundary and already accepted TEXT because the CDC path
 /// never sniffed.
-fn normalize_known_json_columns(entity: &mut StorageEntity) {
+fn normalize_known_json_columns(
+    entity: &mut StorageEntity,
+) -> std::result::Result<(), holon_api::PropertyKindsError> {
     if let Some(data_value) = entity.remove("data")
         && let Some(obj) = parse_json_object(data_value)
     {
@@ -1550,14 +1555,11 @@ fn normalize_known_json_columns(entity: &mut StorageEntity) {
     }
 
     if let Some(props) = entity.remove("properties") {
-        entity.insert(
-            "properties".into(),
-            match parse_json_object(props) {
-                Some(obj) => Value::Object(obj),
-                None => Value::Object(HashMap::new()),
-            },
-        );
+        let bag = parse_json_object(props).unwrap_or_default();
+        let kinds = holon_api::PropertyKinds::parse_column(entity.get("property_kinds"))?;
+        entity.insert("properties".into(), Value::Object(kinds.retype(bag)?));
     }
+    Ok(())
 }
 
 // ============================================================================
@@ -2215,7 +2217,7 @@ impl TursoBackend {
     pub fn parse_row_values_with_schema(
         values: &[turso_core::Value],
         columns: &[Arc<str>],
-    ) -> StorageEntity {
+    ) -> std::result::Result<StorageEntity, holon_api::PropertyKindsError> {
         let mut entity = StorageEntity::with_capacity(values.len());
 
         for (idx, value) in values.iter().enumerate() {
@@ -2242,9 +2244,9 @@ impl TursoBackend {
             entity.insert(column_name, our_value);
         }
 
-        normalize_known_json_columns(&mut entity);
+        normalize_known_json_columns(&mut entity)?;
 
-        entity
+        Ok(entity)
     }
 
     pub fn value_to_sql_param(&self, value: &Value) -> String {
@@ -2351,7 +2353,21 @@ impl TursoBackend {
                 DatabaseChangeType::Insert { .. } => match change.parse_record() {
                     Ok(values) => {
                         let mut data =
-                            TursoBackend::parse_row_values_with_schema(&values, &columns);
+                            match TursoBackend::parse_row_values_with_schema(&values, &columns) {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    note_parse_failure(
+                                        &mut parse_failures,
+                                        &event.relation_name,
+                                        "Insert",
+                                        change.id,
+                                        columns.len(),
+                                        "row omitted from this batch entirely",
+                                        &e,
+                                    );
+                                    continue;
+                                }
+                            };
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
                         let origin = extract_change_origin_from_data(&data);
                         record(&mut origins, &origin);
@@ -2373,7 +2389,21 @@ impl TursoBackend {
                 DatabaseChangeType::Update { .. } => match change.parse_record() {
                     Ok(values) => {
                         let mut data =
-                            TursoBackend::parse_row_values_with_schema(&values, &columns);
+                            match TursoBackend::parse_row_values_with_schema(&values, &columns) {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    note_parse_failure(
+                                        &mut parse_failures,
+                                        &event.relation_name,
+                                        "Update",
+                                        change.id,
+                                        columns.len(),
+                                        "row omitted from this batch entirely",
+                                        &e,
+                                    );
+                                    continue;
+                                }
+                            };
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
                         let origin = extract_change_origin_from_data(&data);
                         record(&mut origins, &origin);
@@ -2406,7 +2436,21 @@ impl TursoBackend {
                 DatabaseChangeType::Delete { .. } => match change.parse_record() {
                     Ok(values) => {
                         let mut data =
-                            TursoBackend::parse_row_values_with_schema(&values, &columns);
+                            match TursoBackend::parse_row_values_with_schema(&values, &columns) {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    note_parse_failure(
+                                        &mut parse_failures,
+                                        &event.relation_name,
+                                        "Delete",
+                                        change.id,
+                                        columns.len(),
+                                        "row omitted from this batch entirely",
+                                        &e,
+                                    );
+                                    continue;
+                                }
+                            };
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
                         let entity_id = data
                             .get("id")
@@ -2851,7 +2895,9 @@ impl TursoBackend {
                 entity.insert(Arc::clone(col_name), turso_value_to_value(value.into()));
             }
 
-            normalize_known_json_columns(&mut entity);
+            normalize_known_json_columns(&mut entity).map_err(|e| {
+                StorageError::QueryError(format!("stored property kinds are corrupt: {e}"))
+            })?;
 
             results.push(entity);
         }
@@ -2895,7 +2941,9 @@ impl TursoBackend {
                 entity.insert(Arc::clone(col_name), turso_value_to_value(value.into()));
             }
 
-            normalize_known_json_columns(&mut entity);
+            normalize_known_json_columns(&mut entity).map_err(|e| {
+                StorageError::QueryError(format!("stored property kinds are corrupt: {e}"))
+            })?;
 
             results.push(entity);
         }
@@ -4305,7 +4353,8 @@ mod tests {
             Arc::from("properties"),
         ];
 
-        let entity = TursoBackend::parse_row_values_with_schema(&values, &columns);
+        let entity = TursoBackend::parse_row_values_with_schema(&values, &columns)
+            .expect("the fixture row carries no property kinds");
 
         assert_eq!(
             entity.get("content"),
