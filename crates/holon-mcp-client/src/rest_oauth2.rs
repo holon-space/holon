@@ -21,7 +21,10 @@
 //!   redacts every credential; error messages redact token-request URLs' query
 //!   strings and never include the request body (which carries the refresh
 //!   token + client secret) or a success response body (which carries the
-//!   access token).
+//!   access token). The client secret, the refresh token, and every minted
+//!   access token are also registered with the shared
+//!   [`crate::redaction::Redactor`], which strips them from anything the `rest`
+//!   transport emits — see that module for the full contract.
 //! - **Credential files must be private.** A refresh-token (or client-secret)
 //!   file that is group/world-accessible is *refused loudly* at startup — a
 //!   readable secret is a compromised secret.
@@ -45,6 +48,7 @@ use tracing::warn;
 
 use crate::integration_config::UnresolvedVar;
 use crate::integration_config::VarLookup;
+use crate::redaction::Redactor;
 
 /// OAuth2 refresh-token-grant configuration, as declared under
 /// `transport.rest.auth.oauth2` in a sidecar.
@@ -154,6 +158,9 @@ pub struct OAuth2TokenProvider {
     scopes: Vec<String>,
     client: reqwest::Client,
     cached: Mutex<Option<CachedToken>>,
+    /// Shared with the transport this provider authenticates, so a token minted
+    /// here is stripped from messages emitted there.
+    redactor: Redactor,
 }
 
 impl std::fmt::Debug for OAuth2TokenProvider {
@@ -180,7 +187,11 @@ impl OAuth2TokenProvider {
     /// an ambiguous/absent source choice, a group/world-readable credential
     /// file, an unusable keychain, an unreadable or empty credential — is a
     /// hard error with an actionable message.
-    pub fn from_config(cfg: &RestOAuth2Config, lookup: &VarLookup<'_>) -> anyhow::Result<Self> {
+    pub fn from_config(
+        cfg: &RestOAuth2Config,
+        lookup: &VarLookup<'_>,
+        redactor: &Redactor,
+    ) -> anyhow::Result<Self> {
         if cfg.token_url.trim().is_empty() {
             anyhow::bail!("oauth2.token_url must not be empty");
         }
@@ -208,6 +219,11 @@ impl OAuth2TokenProvider {
         )?;
         let refresh_token = read_refresh_token(&cfg.refresh_token_file)?;
 
+        // These two reach the wire in the token-grant POST body. Registering
+        // them covers a provider that echoes a submitted field back in an error.
+        redactor.register(&client_secret);
+        redactor.register(&refresh_token);
+
         Ok(Self {
             token_url: cfg.token_url.clone(),
             client_id,
@@ -216,6 +232,7 @@ impl OAuth2TokenProvider {
             scopes: cfg.scopes.clone(),
             client: reqwest::Client::new(),
             cached: Mutex::new(None),
+            redactor: redactor.clone(),
         })
     }
 
@@ -236,6 +253,7 @@ impl OAuth2TokenProvider {
             scopes: Vec::new(),
             client,
             cached: Mutex::new(None),
+            redactor: Redactor::new(),
         }
     }
 
@@ -326,6 +344,10 @@ impl OAuth2TokenProvider {
             );
         }
 
+        // The token now goes out on every request's `Authorization` header, so a
+        // server that echoes that header into an error body would disclose it.
+        self.redactor.register_minted(&parsed.access_token);
+
         // Refresh proactively at 90% of the lifetime so a request never rides an
         // about-to-expire token.
         let lifetime = Duration::from_secs(parsed.expires_in.max(1));
@@ -377,8 +399,11 @@ pub(crate) fn resolve_client_credentials(
 pub fn build_provider(
     cfg: &RestOAuth2Config,
     lookup: &VarLookup<'_>,
+    redactor: &Redactor,
 ) -> anyhow::Result<Arc<OAuth2TokenProvider>> {
-    Ok(Arc::new(OAuth2TokenProvider::from_config(cfg, lookup)?))
+    Ok(Arc::new(OAuth2TokenProvider::from_config(
+        cfg, lookup, redactor,
+    )?))
 }
 
 // ---------------------------------------------------------------------------

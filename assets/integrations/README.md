@@ -169,6 +169,28 @@ auth:
 resolver) at connect time and **fail loud if unset** — the secret never lives in
 the file.
 
+**Resolved `${VAR}` values are redacted from errors and logs.** Referencing a
+variable is what marks its value secret, so every expanded value is stripped
+from anything the connector prints — error messages, log lines, toasts — no
+matter where it sits. That covers a credential in a URL *path* segment (the
+capability-URL shape, `base_url: https://host/c/${CAP_TOKEN}`), which no
+query-string stripping would reach, and one an upstream error body echoes back
+at us. The match survives URL encoding, so an escaped or partially escaped form
+is stripped too. The OAuth2 client secret, refresh token, and minted access
+tokens are covered the same way.
+
+Two limits worth knowing when you choose what to put in a variable:
+
+- **Values shorter than 8 bytes are NOT redacted.** A short value collides with
+  ordinary words in a message, and rewriting every occurrence of it would make
+  errors unreadable while protecting nothing. Do not put a credential that
+  short in a sidecar — and if an API issues one, treat its appearance in a log
+  as expected.
+- **Redaction is deliberately greedy.** A `base_url` that is *entirely* a
+  `${VAR}` means errors say `<redacted>/things` instead of naming the host. If
+  you want the host to stay readable in diagnostics, put only the secret part
+  in the variable (`https://host/c/${CAP_TOKEN}`), not the whole URL.
+
 ---
 
 ## 3. What the engine does with a sidecar

@@ -19,6 +19,7 @@ use crate::mcp_integration::McpTransport;
 use crate::mcp_sidecar::EntityConfig;
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sidecar::ToolConfig;
+use crate::redaction::Redactor;
 use crate::rest_oauth2::RestOAuth2Config;
 use crate::rest_transport::RestAuth;
 
@@ -120,14 +121,14 @@ impl RestAuthConfig {
     /// running the 0600 checks) for the OAuth2 arm. Fails loud on an
     /// ambiguous or empty arm; surfaces [`UnresolvedVar`] when an OAuth2
     /// integration is simply not configured yet (disclosed skip).
-    fn resolve(self, lookup: &VarLookup<'_>) -> anyhow::Result<RestAuth> {
+    fn resolve(self, lookup: &VarLookup<'_>, redactor: &Redactor) -> anyhow::Result<RestAuth> {
         match (self.header, self.value, self.oauth2) {
             (Some(header), Some(value), None) => Ok(RestAuth::Static {
                 header,
-                value: expand_vars(&value, lookup)?,
+                value: expand_vars(&value, lookup, redactor)?,
             }),
             (None, None, Some(oauth2)) => {
-                let provider = crate::rest_oauth2::build_provider(&oauth2, lookup)?;
+                let provider = crate::rest_oauth2::build_provider(&oauth2, lookup, redactor)?;
                 Ok(RestAuth::OAuth2(provider))
             }
             (None, None, None) => anyhow::bail!(
@@ -298,27 +299,42 @@ impl IntegrationFileConfig {
         provider_name: String,
         lookup: &VarLookup<'_>,
     ) -> anyhow::Result<McpIntegrationConfig> {
+        // Every `${VAR}` value is a secret by construction, so expansion and
+        // registration are the same pass. The transport and the OAuth2 provider
+        // share this one `Redactor`, so a token minted mid-request joins the set
+        // that guards every message either of them emits.
+        let redactor = Redactor::new();
+
+        let auth_mode = match self.auth {
+            Some(AuthConfig {
+                static_token: Some(token),
+                ..
+            }) => AuthMode::StaticToken(expand_vars(&token, lookup, &redactor)?),
+            // OAuth needs a credential store — caller must upgrade this.
+            _ => AuthMode::None,
+        };
+
         let transport = if let Some(cp) = self.transport.child_process {
             McpTransport::ChildProcess {
-                command: expand_vars(&cp.command, lookup)?,
+                command: expand_vars(&cp.command, lookup, &redactor)?,
                 args: cp
                     .args
                     .iter()
-                    .map(|a| expand_vars(a, lookup))
+                    .map(|a| expand_vars(a, lookup, &redactor))
                     .collect::<anyhow::Result<Vec<_>>>()?,
                 env: cp
                     .env
                     .iter()
-                    .map(|(k, v)| Ok((k.clone(), expand_vars(v, lookup)?)))
+                    .map(|(k, v)| Ok((k.clone(), expand_vars(v, lookup, &redactor)?)))
                     .collect::<anyhow::Result<HashMap<_, _>>>()?,
             }
         } else if let Some(http) = self.transport.http {
             McpTransport::Http {
-                uri: expand_vars(&http.uri, lookup)?,
+                uri: expand_vars(&http.uri, lookup, &redactor)?,
             }
         } else if let Some(rest) = self.transport.rest {
             let auth = match rest.auth {
-                Some(a) => a.resolve(lookup)?,
+                Some(a) => a.resolve(lookup, &redactor)?,
                 None => RestAuth::None,
             };
             let mut calls = HashMap::with_capacity(rest.calls.len());
@@ -335,25 +351,18 @@ impl IntegrationFileConfig {
                     },
                 );
             }
+            let base_url = expand_vars(&rest.base_url, lookup, &redactor)?;
             McpTransport::Rest {
                 manual: crate::rest_transport::RestManual {
-                    base_url: expand_vars(&rest.base_url, lookup)?,
+                    base_url,
                     auth,
                     calls,
+                    redactor,
                 },
                 poll_interval: rest.poll_interval,
             }
         } else {
             anyhow::bail!("TransportConfig must set exactly one of child_process, http, or rest");
-        };
-
-        let auth_mode = match self.auth {
-            Some(AuthConfig {
-                static_token: Some(token),
-                ..
-            }) => AuthMode::StaticToken(expand_vars(&token, lookup)?),
-            // OAuth needs a credential store — caller must upgrade this.
-            _ => AuthMode::None,
         };
 
         let sidecar = McpSidecar {
@@ -376,12 +385,13 @@ impl IntegrationFileConfig {
     }
 }
 
-/// Expand `${VAR}` references in a config string using `lookup`.
+/// Expand `${VAR}` references in a config string using `lookup`, registering
+/// each resolved value with `redactor`.
 ///
 /// Only the `${VAR}` form is recognized; a bare `$` (or `$VAR` without braces)
 /// is left untouched. Fails loudly if a referenced variable is unresolved or
 /// the `${` is unterminated — never silently substitutes a default.
-fn expand_vars(input: &str, lookup: &VarLookup<'_>) -> anyhow::Result<String> {
+fn expand_vars(input: &str, lookup: &VarLookup<'_>, redactor: &Redactor) -> anyhow::Result<String> {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
     while let Some(start) = rest.find("${") {
@@ -396,6 +406,7 @@ fn expand_vars(input: &str, lookup: &VarLookup<'_>) -> anyhow::Result<String> {
                 var: var.to_string(),
             })
         })?;
+        redactor.register(&value);
         out.push_str(&value);
         rest = &after[end + 1..];
     }
@@ -1153,12 +1164,16 @@ entities: {}
 
     #[test]
     fn no_env_refs_pass_through_unchanged() {
+        let redactor = Redactor::new();
         assert_eq!(
-            expand_vars("plain-token", &env_var_lookup).unwrap(),
+            expand_vars("plain-token", &env_var_lookup, &redactor).unwrap(),
             "plain-token"
         );
         // bare $ (no braces) is left untouched
-        assert_eq!(expand_vars("$HOME/x", &env_var_lookup).unwrap(), "$HOME/x");
+        assert_eq!(
+            expand_vars("$HOME/x", &env_var_lookup, &redactor).unwrap(),
+            "$HOME/x"
+        );
     }
 
     #[test]

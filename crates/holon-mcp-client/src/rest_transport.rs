@@ -36,8 +36,8 @@ use serde::Serialize;
 use tracing::warn;
 
 use crate::mcp_call_surface::McpCallSurface;
+use crate::redaction::Redactor;
 use crate::rest_oauth2::OAuth2TokenProvider;
-use crate::rest_oauth2::redact_url;
 
 /// A single HTTP endpoint, resolved from the sidecar's `transport.rest.calls`.
 ///
@@ -149,10 +149,15 @@ pub enum ResponseFormat {
 /// keychain / files.
 #[derive(Clone)]
 pub struct RestManual {
+    /// May itself be secret: a capability URL carries its credential in a path
+    /// segment, so it is never displayed except through [`Self::redactor`].
     pub base_url: String,
     /// How requests authenticate ([`RestAuth::None`] for a public API).
     pub auth: RestAuth,
     pub calls: HashMap<String, RestCall>,
+    /// The `${VAR}` values this manual resolved. Every string the transport
+    /// logs or returns as an error passes through it.
+    pub redactor: Redactor,
 }
 
 impl std::fmt::Debug for RestManual {
@@ -160,7 +165,7 @@ impl std::fmt::Debug for RestManual {
         // Manual (not derived) so the auth secret never lands in a debug/log
         // line even when a `McpTransport::Rest { .. }` is printed in a panic.
         f.debug_struct("RestManual")
-            .field("base_url", &self.base_url)
+            .field("base_url", &self.redactor.redact(&self.base_url))
             .field("auth", &self.auth)
             .field("calls", &self.calls.keys().collect::<Vec<_>>())
             .finish()
@@ -176,7 +181,10 @@ pub struct RestCallSurface {
 impl std::fmt::Debug for RestCallSurface {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RestCallSurface")
-            .field("base_url", &self.manual.base_url)
+            .field(
+                "base_url",
+                &self.manual.redactor.redact(&self.manual.base_url),
+            )
             .field("auth", &self.manual.auth)
             .field("calls", &self.manual.calls.keys().collect::<Vec<_>>())
             .finish()
@@ -195,6 +203,23 @@ impl RestCallSurface {
     /// a specific timeout, and to avoid a per-surface client in hot paths).
     pub fn with_client(manual: RestManual, client: reqwest::Client) -> Self {
         Self { manual, client }
+    }
+
+    /// The single exit for everything this transport says out loud. `msg` may
+    /// carry a request URL, an echoed response body, or an upstream error
+    /// string; each can contain a resolved secret, so all of them leave through
+    /// here.
+    fn safe(&self, msg: String) -> String {
+        self.manual.redactor.redact(&msg)
+    }
+
+    /// A request URL, safe to place inside a [`Self::safe`] message.
+    fn safe_url(&self, url: &str) -> String {
+        self.manual.redactor.redact_url(url)
+    }
+
+    fn err(&self, msg: String) -> anyhow::Error {
+        anyhow::Error::msg(self.safe(msg))
     }
 
     async fn do_call(&self, params: CallToolRequestParam) -> anyhow::Result<serde_json::Value> {
@@ -247,10 +272,10 @@ impl RestCallSurface {
             ResponseFormat::Json => {
                 let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
                     let preview: String = body.chars().take(200).collect();
-                    anyhow::anyhow!(
+                    self.err(format!(
                         "rest transport: GET {} body is not JSON: {e} (body: {preview})",
-                        redact_url(&url)
-                    )
+                        self.safe_url(&url)
+                    ))
                 })?;
                 // Wrap non-object bodies so a `sync.extract_path` can select them.
                 match &call.result_key {
@@ -264,7 +289,7 @@ impl RestCallSurface {
             }
             ResponseFormat::Atom | ResponseFormat::Rss => {
                 let entries = parse_feed(call.format, &body).map_err(|e| {
-                    anyhow::anyhow!("rest transport: GET {}: {e}", redact_url(&url))
+                    self.err(format!("rest transport: GET {}: {e}", self.safe_url(&url)))
                 })?;
                 // A feed is inherently a collection; always wrap under the key so
                 // `sync.extract_path` can select it (default `entries`).
@@ -302,19 +327,19 @@ impl RestCallSurface {
             }
         };
         let resp = req.send().await.map_err(|e| {
-            anyhow::anyhow!(
+            self.err(format!(
                 "rest transport: GET {} failed: {}",
-                redact_url(url),
+                self.safe_url(url),
                 e.without_url()
-            )
+            ))
         })?;
         let status = resp.status();
         let body = resp.text().await.map_err(|e| {
-            anyhow::anyhow!(
+            self.err(format!(
                 "rest transport: reading body of GET {}: {}",
-                redact_url(url),
+                self.safe_url(url),
                 e.without_url()
-            )
+            ))
         })?;
         Ok((status, body))
     }
@@ -331,27 +356,30 @@ impl RestCallSurface {
         let (status, body) = self.send_get(url, query, false).await?;
         if status == reqwest::StatusCode::UNAUTHORIZED && self.manual.auth.is_oauth2() {
             warn!(
-                "rest transport: call '{name}' GET {} returned 401 — refreshing OAuth2 token and \
-                 retrying once",
-                redact_url(url)
+                "{}",
+                self.safe(format!(
+                    "rest transport: call '{name}' GET {} returned 401 — refreshing OAuth2 token \
+                     and retrying once",
+                    self.safe_url(url)
+                ))
             );
             let (status2, body2) = self.send_get(url, query, true).await?;
             if !status2.is_success() {
                 let preview: String = body2.chars().take(200).collect();
-                anyhow::bail!(
+                return Err(self.err(format!(
                     "rest transport: call '{name}' GET {} still failed after token refresh: HTTP \
                      {status2}: {preview}",
-                    redact_url(url)
-                );
+                    self.safe_url(url)
+                )));
             }
             return Ok(body2);
         }
         if !status.is_success() {
             let preview: String = body.chars().take(200).collect();
-            anyhow::bail!(
+            return Err(self.err(format!(
                 "rest transport: call '{name}' GET {} returned HTTP {status}: {preview}",
-                redact_url(url)
-            );
+                self.safe_url(url)
+            )));
         }
         Ok(body)
     }
@@ -382,10 +410,10 @@ impl RestCallSurface {
             let body = self.get_with_auth_retry(name, url, &query).await?;
             let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
                 let preview: String = body.chars().take(200).collect();
-                anyhow::anyhow!(
+                self.err(format!(
                     "rest transport: GET {} body is not JSON: {e} (body: {preview})",
-                    redact_url(url)
-                )
+                    self.safe_url(url)
+                ))
             })?;
             let obj = parsed.as_object().ok_or_else(|| {
                 anyhow::anyhow!(
