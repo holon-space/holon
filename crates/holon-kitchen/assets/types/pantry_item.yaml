@@ -1,34 +1,39 @@
-name: ingredient_use
+name: pantry_item
 default_lifetime: persistent
 primary_key: id
-graph_label: IngredientUse
+graph_label: PantryItem
 source: pre_configured
 fields:
   - name: id
     sql_type: TEXT
     primary_key: true
     indexed: true
-  - name: recipe_id
+  # What the user stocked, in their own words. This is the cookable-now join
+  # key against `ingredient_use.raw_name`: people stock "flour", not a product
+  # id. `product_id` takes over as the key once Inc D's alias table can bind
+  # both sides.
+  - name: name
     sql_type: TEXT
     indexed: true
-  # Verbatim cooklang ingredient text. Never normalised away — it is what the
-  # unmatched-ingredient affordance shows the user.
-  - name: raw_name
-    sql_type: TEXT
   - name: quantity
     sql_type: REAL
-    nullable: true
+  # Nullable so a countable staple stocked without one ("salt") can still
+  # satisfy a bare `@salt`. A NULL unit matches only another NULL unit.
   - name: unit
     sql_type: TEXT
     nullable: true
-  # Filled by Inc D's product binding. NULL here means UNMATCHED, and stays
-  # visible as such — it is never treated as zero in a rollup.
+  # Inc D's product binding slot, present from the start so that increment adds
+  # no migration. NULL until then, and NULL never means zero.
   - name: product_id
     sql_type: TEXT
     nullable: true
     indexed: true
-  - name: step_index
-    sql_type: INTEGER
+  - name: opened_at
+    sql_type: TEXT
+    nullable: true
+  - name: best_before
+    sql_type: TEXT
+    nullable: true
   # The overflow bag every authoring write needs: the engine stamps
   # `_provenance` onto each `create`, and a type with nowhere to put it is
   # refused at the write boundary rather than written without its origin.

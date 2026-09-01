@@ -125,6 +125,10 @@ name = "e2e_backend_engine_test"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "kitchen_cookable_now_e2e"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "json_aggregation_e2e_test"
 required-features = ["test-helpers"]
 

@@ -1518,6 +1518,20 @@ impl Module for OperationModule {
                 });
             }
 
+            // The pantry's `consume` sits beside the derived authority rather
+            // than replacing it: the generic create/set_field/delete stay the
+            // write path, and consume adds only the read-modify-write the
+            // pantry needs to refuse going negative.
+            if dispatcher.has_provider("pantry_item") {
+                let pantry: Arc<dyn OperationProvider> =
+                    Arc::new(crate::core::pantry_operations::PantryOperations::new(
+                        db_handle_provider.handle(),
+                    ));
+                dispatcher.register_provider(pantry).unwrap_or_else(|e| {
+                    panic!("[OperationModule] registering the pantry consume authority: {e}")
+                });
+            }
+
             // Fail loud if a block pipeline is wired without its content-write
             // ops (the EventInfraModule-only trap). A silent "No provider" drop
             // of every create/set_field/delete is worse than a startup crash.

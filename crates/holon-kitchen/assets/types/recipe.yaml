@@ -21,3 +21,15 @@ fields:
   - name: course
     sql_type: TEXT
     nullable: true
+  # The overflow bag every authoring write needs: the engine stamps
+  # `_provenance` onto each `create`, and a type with nowhere to put it is
+  # refused at the write boundary rather than written without its origin.
+  - name: properties
+    sql_type: TEXT
+    nullable: true
+    jsonb: true
+  # `properties`' companion: it records each key's value KIND so a stored NULL
+  # stays distinguishable from an absent key on read-back.
+  - name: property_kinds
+    sql_type: TEXT
+    nullable: true

@@ -12,6 +12,7 @@
 //! Inc-5's C7 and stays out of scope (see docs/Plans/Kitchen.md R1).
 
 pub mod cook;
+pub mod cookable;
 pub mod file_format;
 pub mod params;
 
@@ -21,6 +22,9 @@ pub use cook::IngredientUse;
 pub use cook::STEP_NUMBER_KEY;
 pub use cook::ingredient_uses;
 pub use cook::parse_recipe;
+pub use cookable::COOK_BLOCKERS_SQL;
+pub use cookable::COOKABLE_RECIPES_SQL;
+pub use cookable::CookBlockReason;
 pub use file_format::CookFormatAdapter;
 use holon_api::entity::TypeDefinition;
 use holon_profiles::parse_profile_yaml;
@@ -28,6 +32,7 @@ use holon_profiles::type_registry::TypeRegistry;
 
 pub const RECIPE_TYPE_YAML: &str = include_str!("../assets/types/recipe.yaml");
 pub const INGREDIENT_USE_TYPE_YAML: &str = include_str!("../assets/types/ingredient_use.yaml");
+pub const PANTRY_ITEM_TYPE_YAML: &str = include_str!("../assets/types/pantry_item.yaml");
 pub const RECIPE_PROFILE_YAML: &str = include_str!("../assets/types/recipe_profile.yaml");
 
 /// Register the kitchen datatypes and the recipe page's render profile.
@@ -38,6 +43,7 @@ pub fn register_kitchen_types(registry: &TypeRegistry) -> Result<()> {
     for (name, yaml) in [
         ("recipe", RECIPE_TYPE_YAML),
         ("ingredient_use", INGREDIENT_USE_TYPE_YAML),
+        ("pantry_item", PANTRY_ITEM_TYPE_YAML),
     ] {
         let type_def: TypeDefinition = serde_yaml::from_str(yaml)
             .with_context(|| format!("Failed to parse kitchen type '{name}'"))?;
