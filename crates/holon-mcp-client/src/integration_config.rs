@@ -62,13 +62,14 @@ pub struct HttpTransport {
 }
 
 /// Direct HTTP-API transport (UTCP-manual style). Describes a plain JSON API by
-/// its base URL and a set of named `calls`, each a GET endpoint. A
+/// its base URL and a set of named `calls`. A
 /// [`crate::rest_transport::RestCallSurface`] serves these calls behind the
 /// same [`McpCallSurface`](crate::mcp_call_surface::McpCallSurface) seam the
 /// MCP transports use, so the rest of the connector engine is unchanged.
 ///
-/// Read-only for now: only `GET` methods are accepted (write/mutation and lease
-/// semantics are out of scope).
+/// Reads and writes: a call declares its method, an optional JSON request-body
+/// template and an optional response-version path, so a write leg is authored
+/// in YAML rather than in connector code.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestTransport {
@@ -150,12 +151,13 @@ impl RestAuthConfig {
     }
 }
 
-/// A single GET endpoint. `path` and `query` values may contain `{arg}`
+/// A single endpoint. `path`, `query` and `body` values may contain `{arg}`
 /// placeholders filled from the tool-call arguments at request time.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestCallConfig {
-    /// HTTP method. Only `GET` is supported today (fails loud otherwise).
+    /// HTTP method: `GET`, `POST`, `PUT`, `PATCH` or `DELETE`,
+    /// case-insensitive.
     pub method: String,
     /// Path appended to `base_url`, e.g. `/posts` or `/users/{id}/posts`.
     pub path: String,
@@ -177,6 +179,20 @@ pub struct RestCallConfig {
     /// `max_pages`.
     #[serde(default)]
     pub pagination: Option<crate::rest_transport::Pagination>,
+    /// JSON request-body template for a writing method. Every string leaf is
+    /// placeholder-filled; a leaf that is EXACTLY one placeholder takes the
+    /// argument's own JSON value, so an array or object argument arrives with
+    /// its type intact. A body on `GET` is a configuration error.
+    #[serde(default)]
+    pub body: Option<serde_json::Value>,
+    /// Dotted path to the version/cursor token in the response of an
+    /// optimistic-concurrency API. When set, the value found there is
+    /// re-emitted under [`crate::rest_transport::RESPONSE_VERSION_KEY`], so
+    /// a caller feeds it into the next request without knowing this
+    /// provider's field name. A declared path that finds nothing fails
+    /// loud.
+    #[serde(default)]
+    pub response_version_path: Option<String>,
 }
 
 /// Authentication configuration (only meaningful for HTTP transport).
@@ -364,15 +380,27 @@ impl IntegrationFileConfig {
             };
             let mut calls = HashMap::with_capacity(rest.calls.len());
             for (name, c) in rest.calls {
+                let method = crate::rest_transport::HttpMethod::parse(&c.method)
+                    .with_context(|| format!("transport.rest.calls.{name}.method"))?;
+                // A GET carrying a request body is a mistake in the YAML, not a
+                // request anyone meant to make; refusing it here means no call
+                // site downstream has to consider the combination.
+                anyhow::ensure!(
+                    !(method == crate::rest_transport::HttpMethod::Get && c.body.is_some()),
+                    "transport.rest.calls.{name} declares a request `body` on a GET; a body \
+                     belongs on POST/PUT/PATCH"
+                );
                 calls.insert(
                     name,
                     crate::rest_transport::RestCall {
-                        method: c.method,
+                        method,
                         path: c.path,
                         query: c.query,
                         format: c.format,
                         result_key: c.result_key,
                         pagination: c.pagination,
+                        body: c.body,
+                        response_version_path: c.response_version_path,
                     },
                 );
             }

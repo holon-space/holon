@@ -7,26 +7,32 @@ display_name: "Shopping list"
 icon: list
 default_view: shopping-view
 
-# Shopping-list peer — the READ leg of a bidirectional sync (Holon is a peer,
-# never the master; docs/Plans/Kitchen.md §4).
+# Shopping-list peer — both legs of a bidirectional sync (Holon is a peer, never
+# the master; docs/Plans/Kitchen.md §4). The wire contract is
+# docs/Plans/ThatShoppingList-API-2026-09-01.md.
 #
-# `GET /list/{listId}` answers `{ "data": { "items": [ ... ] } }` where an item
-# is `{ name, cat, count? }`. There is no item id, no timestamp and no etag, so
-# the ingest is keyed on `(name, cat)` and runs through
-# `holon_kitchen::shopping::ShoppingReconciler` rather than the generic entity
-# mirror, which requires a server-issued id. That is why this file declares no
-# `entities`: the sidecar supplies the transport manual, and the kitchen crate
-# owns identity and reconciliation.
+# `SHOPPING_LIST_URL` IS THE WHOLE SHARE LINK of one list, ending in the list id:
+# `<scheme>://<host>/!<token>/api/list/<listId>`. That is the string the user pastes,
+# exactly as the app hands it out — Holon derives nothing from it and parses none
+# of it. Both calls are plain relative paths off that base, which is why this
+# connector needs no list-id setting of its own.
 #
-# NOT WIRED TO A LIVE POLL. The production target is the phone API in
-# docs/Plans/ThatShoppingList-API-2026-09-01.md; that swap, its rotating-token
-# auth, the live wiring and the `/commit` write leg are the next lane, pending a
-# token-refresh handshake capture.
+# The list call answers `{items, pickedItems, version, options}`. There is no
+# item id, no per-item timestamp and no etag, so the ingest is keyed
+# on `(name, cat)` and runs through `holon_kitchen::shopping::ShoppingReconciler`
+# rather than the generic entity mirror, which requires a server-issued id. That
+# is why this file declares no `entities`: the sidecar supplies the transport
+# manual, and the kitchen crate owns identity and reconciliation.
+#
+# `POST <base>/commit` is a batched-command write. The envelope is
+# declared here so a second connector gains a write leg by authoring YAML; the
+# `commands` array is the reconciler's output, passed through as a whole value.
 #
 # THE BASE URL IS THE CREDENTIAL for this endpoint: no auth header, an opaque
-# token in a PATH segment. Referencing it as `${VAR}` is what marks it secret,
-# which is what strips it from every error, log line and toast the connector
-# emits (assets/integrations/README.md §2). Never write a resolved URL here.
+# `!`-prefixed token in a PATH segment, stable per list. Referencing it as
+# `${VAR}` is what marks it secret, which is what strips it from every error, log
+# line and toast the connector emits (assets/integrations/README.md §2). Never
+# write a resolved URL here.
 
 transport:
   rest:
@@ -37,7 +43,31 @@ transport:
     calls:
       list-items:
         method: GET
-        path: /list/{listId}
+        # Empty: the base URL already names this list. The captured request
+        # carries the version it last saw plus a cache-buster, and the
+        # cache-buster is load-bearing — the write leg re-reads to check its own
+        # commit landed, and a cached body there reports a write as missing and
+        # gets it sent twice.
+        path: ""
+        query:
+          oldVersion: "{oldVersion}"
+          version: "{version}"
+          _nocache: "{nocache}"
+      commit-items:
+        method: POST
+        path: /commit
+        query:
+          version: "{version}"
+        body:
+          oldVersion: "{version}"
+          oldPickedItemsVersion: "{pickedItemsVersion}"
+          device:
+            id: "{deviceId}"
+          lang: en
+          commands: "{commands}"
+        # The peer's own name for the new list version. Re-emitted under the
+        # transport's neutral key so the caller carries no field name of its own.
+        response_version_path: version
 
 entities: {}
 

@@ -795,6 +795,26 @@ impl Module for McpIntegrationsModule {
             ));
         }
 
+        // The shopping peer's own operation, registered into the SAME provider
+        // set. It is not one of the sidecar's operations — the sidecar declares
+        // no entities, because the generic mirror needs a server-issued item id
+        // this peer does not give — so it is wired here, where the connected
+        // integration's call surface can be reached by name.
+        injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
+            move |resolver| async move {
+                let registry = resolver.resolve_async::<McpIntegrationRegistry>().await;
+                let db_handle = resolver
+                    .resolve_async::<dyn holon::di::DbHandleProvider>()
+                    .await
+                    .handle();
+                Arc::new(crate::shopping_operations::ShoppingOperations::new(
+                    registry,
+                    db_handle,
+                    crate::shopping_operations::device_id(),
+                )) as Arc<dyn OperationProvider>
+            },
+        ));
+
         Ok(())
     }
 }

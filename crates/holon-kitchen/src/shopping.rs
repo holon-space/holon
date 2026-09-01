@@ -1,20 +1,17 @@
-//! The shopping-list peer's read leg: the wire vocabulary, the `(name, cat)`
+//! The shopping-list peer: the per-list wire vocabulary, the `(name, cat)`
 //! ingest key, and the reconciler that turns one complete remote snapshot into
-//! intents against the local rows.
+//! intents against the local rows and commands for the peer.
 //!
 //! Holon is a peer here, never the master. The peer issues no item id and no
-//! timestamp, so identity is the `(name, cat)` pair and absence inside a
-//! *complete* fetch is the only deletion signal there is. Both consequences are
-//! spelled out in `docs/Plans/Kitchen.md` §4, which this module implements.
+//! per-item timestamp, so identity is the `(name, cat)` pair and absence inside
+//! a *complete* fetch is the only deletion signal there is. Both consequences
+//! are spelled out in `docs/Plans/Kitchen.md` §4, which this module implements.
 //!
-//! **This parses the Garmin-watch endpoint and is not wired to a live poll.**
-//! The production target is the phone API in
-//! `docs/Plans/ThatShoppingList-API-2026-09-01.md` (`{items, pickedItems,
-//! version, options}`); swapping to it, together with its rotating-token auth,
-//! the live wiring and the `/commit` write leg, is the next lane and waits on a
-//! token-refresh handshake capture. Everything below the response parsing — the
-//! key, the snapshot type, the reconciler and its intents — is shared by both
-//! shapes.
+//! The wire contract is `docs/Plans/ThatShoppingList-API-2026-09-01.md`:
+//! `{items, pickedItems, version, options}`. `items` is the ACTIVE list and
+//! `pickedItems` the checked-off ones keyed by name, so membership IS the
+//! checked flag; `options.cats` is THAT list's category vocabulary; `version`
+//! carries the optimistic concurrency the write leg commits against.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -25,176 +22,168 @@ use chrono::DateTime;
 use chrono::Duration;
 use chrono::FixedOffset;
 
-/// Where the peer puts its item array inside a `list-items` response body.
-pub const ITEMS_PATH: &str = "data.items";
-
-/// The peer's published category vocabulary, code and English label together so
-/// the two cannot drift apart.
-macro_rules! known_categories {
-    ($($variant:ident => $code:literal, $label:literal;)+) => {
-        /// A category code in the peer's published vocabulary.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub enum KnownCategory {
-            $(#[doc = $label] $variant,)+
-        }
-
-        impl KnownCategory {
-            /// Every code this build knows, in declaration order.
-            pub const ALL: &'static [KnownCategory] = &[$(KnownCategory::$variant,)+];
-
-            /// The code as the peer writes it on the wire.
-            pub fn code(self) -> &'static str {
-                match self { $(KnownCategory::$variant => $code,)+ }
-            }
-
-            /// The peer's own English label for this aisle.
-            pub fn label(self) -> &'static str {
-                match self { $(KnownCategory::$variant => $label,)+ }
-            }
-
-            fn from_code(code: &str) -> Option<Self> {
-                match code { $($code => Some(KnownCategory::$variant),)+ _ => None }
-            }
-        }
-    };
-}
-
-known_categories! {
-    FuV => "FuV", "Fruits - Vegetables - Nuts";
-    Ca  => "Ca",  "Canned Food";
-    MuF => "MuF", "Meat - Seafoods";
-    D   => "D",   "Beverages - Spirits";
-    DuH => "DuH", "Household - Toiletries - Baby - Pet";
-    F   => "F",   "Frozen Food";
-    R   => "R",   "Refrigerated - Dairy";
-    P   => "P",   "Pasta - Rice";
-    B   => "B",   "Bakery";
-    S   => "S",   "Spread";
-    C   => "C",   "Muesli - Cornflakes - Cereals";
-    Cu  => "Cu",  "Cuisine - Baking";
-    Sn  => "Sn",  "Sweets - Snacks";
-    SuD => "SuD", "Sauces - Spices - Dressings - Oil";
-    I   => "I",   "Ready meals - Broth - Gravies";
-    CuT => "CuT", "Coffee - Tea";
-    DIY => "DIY", "DIY - Electrical - Fixtures";
-    O   => "O",   "Others";
-    PH  => "PH",  "High priority";
-    PM  => "PM",  "Medium priority";
-    PL  => "PL",  "Low priority";
-    Fw  => "Fw",  "Plants";
-    Pa  => "Pa",  "Painting supplies";
-    Gr  => "Gr",  "Garden";
-    Pt  => "Pt",  "Electrical appliances";
-    El  => "El",  "Electrics";
-    Wo  => "Wo",  "Wood";
-    Ro  => "Ro",  "Roof";
-    Pi  => "Pi",  "Plumbing supplies";
-    Sa  => "Sa",  "Sanitary";
-    Br  => "Br",  "Building materials";
-    Ws  => "Ws",  "Occupational safety";
-    To  => "To",  "Tools";
-    Ir  => "Ir",  "Hardware";
-    Car => "Car", "Car - Bicycle";
-}
-
-/// The code half of a `cat` value.
+/// One entry of a list's `options.cats`.
 ///
-/// A code outside [`KnownCategory`] is an expected state, not corruption: the
-/// peer's own reference consumer displays an unrecognized code rather than
-/// rejecting the item, and its shipped aisle order already names one (`Fish`)
-/// that its label table omits. The wire text is kept verbatim so nothing is
-/// lost and nothing is guessed onto a neighbouring aisle.
-///
-/// The phone API serves each list its OWN vocabulary in `options.cats`, so the
-/// next lane replaces this fixed set with that per-list data.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum CategoryCode {
-    Known(KnownCategory),
-    Unrecognized(String),
+/// The wire text is `<code>` or `<code>_<icon>_<color>`
+/// (`Kleidung_clothes_1976D2`); the leading segment is what an item's `cat`
+/// names and the rest is presentation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CategoryEntry {
+    code: String,
+    icon: Option<String>,
+    color: Option<String>,
 }
 
-impl CategoryCode {
-    pub fn as_wire(&self) -> &str {
-        match self {
-            CategoryCode::Known(k) => k.code(),
-            CategoryCode::Unrecognized(raw) => raw,
-        }
-    }
-
-    /// What to show a reader: the peer's label for a known code, the raw code
-    /// itself for one this build does not know.
-    pub fn label(&self) -> &str {
-        match self {
-            CategoryCode::Known(k) => k.label(),
-            CategoryCode::Unrecognized(raw) => raw,
-        }
-    }
-}
-
-/// A `cat` field exactly as the peer issues it: a vocabulary code, optionally
-/// followed by `_<qualifier>`.
-///
-/// The qualifier is carried rather than discarded because it is part of the
-/// item's identity — two items that differ only in qualifier are two items to
-/// the peer, and the write leg will have to send back the value it was given.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ShoppingCategory {
-    code: CategoryCode,
-    qualifier: Option<String>,
-}
-
-impl ShoppingCategory {
-    /// Parse a wire `cat`. Total by construction: every string denotes some
-    /// category, known or not, so one new aisle on the peer can never fail a
-    /// fetch and take the whole list down with it.
+impl CategoryEntry {
+    /// Parse one `options.cats` entry. Total: an entry with more or fewer
+    /// segments than the observed two decorations still yields a usable code,
+    /// because a list whose owner added a category must not fail the fetch.
     pub fn parse(raw: &str) -> Self {
-        let (code, qualifier) = match raw.split_once('_') {
-            Some((code, qualifier)) => (code, Some(qualifier.to_string())),
-            None => (raw, None),
-        };
-        let code = match KnownCategory::from_code(code) {
-            Some(known) => CategoryCode::Known(known),
-            None => CategoryCode::Unrecognized(code.to_string()),
-        };
-        Self { code, qualifier }
+        let mut segments = raw.split('_');
+        let code = segments.next().unwrap_or_default().to_string();
+        Self {
+            code,
+            icon: segments.next().map(str::to_string),
+            color: segments.next().map(str::to_string),
+        }
     }
 
-    pub fn code(&self) -> &CategoryCode {
+    pub fn code(&self) -> &str {
         &self.code
     }
 
-    pub fn qualifier(&self) -> Option<&str> {
-        self.qualifier.as_deref()
+    pub fn icon(&self) -> Option<&str> {
+        self.icon.as_deref()
     }
 
-    /// Whether this build recognizes the code. A view shows an unrecognized
-    /// category as degraded rather than pretending it understood it.
+    pub fn color(&self) -> Option<&str> {
+        self.color.as_deref()
+    }
+}
+
+/// The category vocabulary of ONE list, as that list published it.
+///
+/// There is no compiled-in aisle table: each list carries its own
+/// `options.cats` and two lists need not agree, so a fixed enum would mislabel
+/// one of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CategoryVocabulary {
+    by_code: BTreeMap<String, CategoryEntry>,
+}
+
+impl CategoryVocabulary {
+    /// Build from a list's `options.cats` array.
+    ///
+    /// Two entries sharing a code is a construction error rather than a
+    /// last-one-wins: the code is what an item's `cat` resolves through, so an
+    /// ambiguous vocabulary would silently label items from the wrong aisle.
+    pub fn from_entries<S: AsRef<str>>(entries: &[S]) -> Result<Self> {
+        let mut by_code = BTreeMap::new();
+        for raw in entries {
+            let entry = CategoryEntry::parse(raw.as_ref());
+            anyhow::ensure!(
+                !entry.code().is_empty(),
+                "`options.cats` holds an entry with no category code: '{}'",
+                raw.as_ref()
+            );
+            anyhow::ensure!(
+                by_code.insert(entry.code().to_string(), entry).is_none(),
+                "`options.cats` declares the category code twice: '{}'",
+                raw.as_ref()
+            );
+        }
+        Ok(Self { by_code })
+    }
+
+    /// Resolve an item's `cat` against this list's vocabulary.
+    ///
+    /// Total by construction: a code the list did not publish yields an
+    /// unrecognized category carrying the wire text verbatim, so one new aisle
+    /// can never fail a fetch and take the whole list down with it. A view
+    /// shows such a category as degraded rather than pretending it
+    /// understood it.
+    pub fn resolve(&self, raw: &str) -> ShoppingCategory {
+        ShoppingCategory {
+            wire: raw.to_string(),
+            entry: self.by_code.get(raw).cloned(),
+        }
+    }
+
+    pub fn codes(&self) -> impl Iterator<Item = &str> {
+        self.by_code.keys().map(String::as_str)
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_code.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_code.is_empty()
+    }
+}
+
+/// An item's `cat`, resolved against the list that served it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ShoppingCategory {
+    wire: String,
+    entry: Option<CategoryEntry>,
+}
+
+impl PartialOrd for CategoryEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CategoryEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.code.cmp(&other.code)
+    }
+}
+
+impl std::hash::Hash for CategoryEntry {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.code.hash(state);
+    }
+}
+
+impl ShoppingCategory {
+    /// A category outside any vocabulary — for a local row read back from SQL,
+    /// where the `cat` column holds the wire text and no list is at hand.
+    pub fn unresolved(raw: &str) -> Self {
+        Self {
+            wire: raw.to_string(),
+            entry: None,
+        }
+    }
+
+    /// The exact string the peer sent. This is the identity half that goes back
+    /// on the wire, so it is stored and round-tripped verbatim.
+    pub fn as_wire(&self) -> &str {
+        &self.wire
+    }
+
+    /// Whether the serving list published this code.
     pub fn is_recognized(&self) -> bool {
-        matches!(self.code, CategoryCode::Known(_))
+        self.entry.is_some()
     }
 
-    /// The exact string the peer sent, rebuilt.
-    pub fn as_wire(&self) -> String {
-        match &self.qualifier {
-            Some(q) => format!("{}_{}", self.code.as_wire(), q),
-            None => self.code.as_wire().to_string(),
-        }
+    pub fn entry(&self) -> Option<&CategoryEntry> {
+        self.entry.as_ref()
     }
 
-    /// Reader-facing text: the aisle label, with any qualifier appended.
-    pub fn label(&self) -> String {
-        match &self.qualifier {
-            Some(q) => format!("{} ({q})", self.code.label()),
-            None => self.code.label().to_string(),
-        }
+    /// Reader-facing text: the list's own code, which is also its label — the
+    /// vocabulary publishes no separate display string.
+    pub fn label(&self) -> &str {
+        &self.wire
     }
 }
 
 /// The reconciliation key. The peer issues no id, so the pair below IS the
-/// identity — with the two costs `docs/Plans/Kitchen.md` §4 states, both since
+/// identity — with the two costs `docs/Plans/Kitchen.md` §4 states, both
 /// confirmed against the phone API: duplicate names in one category collapse
 /// into one item, and a rename is emitted as `del` + `add`, so local-only state
-/// attached to the old key cannot survive it.
+/// attached to the old key cannot survive it (R4, accepted as disclosed).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ItemKey {
     pub name: String,
@@ -205,7 +194,7 @@ impl ItemKey {
     pub fn new(name: impl Into<String>, category: &ShoppingCategory) -> Self {
         Self {
             name: name.into(),
-            cat: category.as_wire(),
+            cat: category.as_wire().to_string(),
         }
     }
 
@@ -224,6 +213,9 @@ pub struct RemoteShoppingItem {
     pub name: String,
     pub category: ShoppingCategory,
     pub count: Option<f64>,
+    /// True iff the peer carried this item in `pickedItems` rather than
+    /// `items`.
+    pub checked: bool,
 }
 
 impl RemoteShoppingItem {
@@ -232,7 +224,22 @@ impl RemoteShoppingItem {
     }
 }
 
-/// Every item one COMPLETE fetch carried, duplicate-folded on [`ItemKey`].
+/// The optimistic-concurrency token of one list.
+///
+/// The peer versions the active list and the picked-items map separately and a
+/// commit must echo both. A read response carries only `version`; the
+/// `pickedItemsVersion` a commit answers with is therefore the only place the
+/// second number is observed, and a snapshot that has not seen one reuses
+/// `version` — stated here because it is a reading of the capture, not a
+/// measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListVersion {
+    pub list: i64,
+    pub picked: i64,
+}
+
+/// Every item one COMPLETE fetch carried, duplicate-folded on [`ItemKey`],
+/// together with the vocabulary and version that fetch published.
 ///
 /// Only a fetch that succeeded and parsed in full can produce one. That is what
 /// licenses the reconciler to read absence as deletion: a truncated, failed or
@@ -240,73 +247,68 @@ impl RemoteShoppingItem {
 #[derive(Debug, Clone)]
 pub struct CompleteSnapshot {
     items: BTreeMap<ItemKey, RemoteShoppingItem>,
+    vocabulary: CategoryVocabulary,
+    version: ListVersion,
     fetched_at: String,
 }
 
 impl CompleteSnapshot {
-    /// Parse one whole `list-items` response body.
+    /// Parse one whole list response.
     ///
     /// The generic entity mirror cannot do this job: it keys rows on a
     /// server-issued id column and fails loud without one, and this peer issues
-    /// none. So the item array is selected here and identity is decided by
-    /// [`ItemKey`].
+    /// none. So the two item collections are selected here and identity is
+    /// decided by [`ItemKey`].
     pub fn from_response(
         response: &serde_json::Map<String, serde_json::Value>,
         fetched_at: impl Into<String>,
     ) -> Result<Self> {
-        let items = response
-            .get("data")
-            .and_then(|d| d.as_object())
-            .and_then(|d| d.get("items"))
-            .ok_or_else(|| anyhow::anyhow!("response has no `{ITEMS_PATH}` array"))?
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("`{ITEMS_PATH}` is not an array"))?;
-        let records = items
-            .iter()
-            .map(|v| {
-                v.as_object()
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("`{ITEMS_PATH}` holds a non-object entry: {v}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Self::from_records(&records, fetched_at)
-    }
+        let vocabulary = parse_vocabulary(response)?;
+        let version = ListVersion {
+            list: required_int(response, "version")?,
+            picked: match response.get("pickedItemsVersion") {
+                None | Some(serde_json::Value::Null) => required_int(response, "version")?,
+                Some(_) => required_int(response, "pickedItemsVersion")?,
+            },
+        };
 
-    /// Parse the records a completed item-array extraction yielded.
-    ///
-    /// A record missing `name`/`cat`, or carrying them at the wrong JSON type,
-    /// fails the whole snapshot. Skipping the bad record would silently turn
-    /// it into a deletion of a real item, which is the one outcome absence-as-
-    /// deletion must never produce from bad input.
-    pub fn from_records(
-        records: &[serde_json::Map<String, serde_json::Value>],
-        fetched_at: impl Into<String>,
-    ) -> Result<Self> {
         let mut items: BTreeMap<ItemKey, RemoteShoppingItem> = BTreeMap::new();
-        for (index, record) in records.iter().enumerate() {
-            let item = parse_record(record)
+        for (index, value) in required_array(response, "items")?.iter().enumerate() {
+            let record = value.as_object().ok_or_else(|| {
+                anyhow::anyhow!("`items` holds a non-object entry at #{index}: {value}")
+            })?;
+            let item = parse_active_item(record, &vocabulary)
                 .with_context(|| format!("shopping item #{index} in the fetched list"))?;
-            let key = item.key();
-            match items.get_mut(&key) {
-                // Two rows under one key are one item to us; folding their
-                // counts is the only reading that does not lose a unit. An
-                // absent count means one of the thing.
-                Some(held) => {
-                    held.count = Some(held.count.unwrap_or(1.0) + item.count.unwrap_or(1.0));
-                }
-                None => {
-                    items.insert(key, item);
-                }
-            }
+            fold(&mut items, item);
         }
+
+        for (name, value) in required_object(response, "pickedItems")? {
+            let record = value.as_object().ok_or_else(|| {
+                anyhow::anyhow!("`pickedItems['{name}']` is not an object: {value}")
+            })?;
+            let item = parse_picked_item(name, record, &vocabulary)
+                .with_context(|| format!("checked-off shopping item '{name}'"))?;
+            fold(&mut items, item);
+        }
+
         Ok(Self {
             items,
+            vocabulary,
+            version,
             fetched_at: fetched_at.into(),
         })
     }
 
     pub fn items(&self) -> impl Iterator<Item = &RemoteShoppingItem> {
         self.items.values()
+    }
+
+    pub fn vocabulary(&self) -> &CategoryVocabulary {
+        &self.vocabulary
+    }
+
+    pub fn version(&self) -> ListVersion {
+        self.version
     }
 
     pub fn len(&self) -> usize {
@@ -324,30 +326,131 @@ impl CompleteSnapshot {
     }
 }
 
-fn parse_record(record: &serde_json::Map<String, serde_json::Value>) -> Result<RemoteShoppingItem> {
-    let name = match record.get("name") {
-        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => s.clone(),
+/// Merge one wire row into the keyed set.
+///
+/// Two rows under one key are one item to us; folding their counts is the only
+/// reading that does not lose a unit, and an absent count means one of the
+/// thing. Checked wins over unchecked for the same reason §4 gives the rule its
+/// asymmetry: a wrong check costs a skipped item, a wrong uncheck costs a
+/// repeated purchase every trip until someone notices.
+fn fold(items: &mut BTreeMap<ItemKey, RemoteShoppingItem>, item: RemoteShoppingItem) {
+    let key = item.key();
+    match items.get_mut(&key) {
+        Some(held) => {
+            held.count = Some(held.count.unwrap_or(1.0) + item.count.unwrap_or(1.0));
+            held.checked |= item.checked;
+        }
+        None => {
+            items.insert(key, item);
+        }
+    }
+}
+
+fn parse_vocabulary(
+    response: &serde_json::Map<String, serde_json::Value>,
+) -> Result<CategoryVocabulary> {
+    let options = required_object(response, "options")?;
+    let cats = required_array(options, "cats")?;
+    let entries = cats
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("`options.cats` holds a non-string entry: {v}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    CategoryVocabulary::from_entries(&entries)
+}
+
+/// Parse an `items[]` record — an item the list still wants bought.
+///
+/// A record missing `name`/`cat`, or carrying them at the wrong JSON type,
+/// fails the whole snapshot. Skipping the bad record would silently turn it
+/// into a deletion of a real item, which is the one outcome absence-as-deletion
+/// must never produce from bad input.
+fn parse_active_item(
+    record: &serde_json::Map<String, serde_json::Value>,
+    vocabulary: &CategoryVocabulary,
+) -> Result<RemoteShoppingItem> {
+    Ok(RemoteShoppingItem {
+        name: required_name(record.get("name"))?,
+        category: vocabulary.resolve(&required_cat(record.get("cat"))?),
+        count: optional_count(record.get("count"))?,
+        checked: false,
+    })
+}
+
+/// Parse a `pickedItems` entry — the map is keyed by NAME and the value carries
+/// the category, so the two halves of the key come from different places.
+fn parse_picked_item(
+    name: &str,
+    record: &serde_json::Map<String, serde_json::Value>,
+    vocabulary: &CategoryVocabulary,
+) -> Result<RemoteShoppingItem> {
+    Ok(RemoteShoppingItem {
+        name: required_name(Some(&serde_json::Value::String(name.to_string())))?,
+        category: vocabulary.resolve(&required_cat(record.get("cat"))?),
+        count: optional_count(record.get("count"))?,
+        checked: true,
+    })
+}
+
+fn required_name(value: Option<&serde_json::Value>) -> Result<String> {
+    match value {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Ok(s.clone()),
         Some(other) => anyhow::bail!("`name` must be a non-empty string, got {other}"),
         None => anyhow::bail!("`name` is missing"),
-    };
-    let cat = match record.get("cat") {
-        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => s.as_str(),
+    }
+}
+
+fn required_cat(value: Option<&serde_json::Value>) -> Result<String> {
+    match value {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Ok(s.clone()),
         Some(other) => anyhow::bail!("`cat` must be a non-empty string, got {other}"),
         None => anyhow::bail!("`cat` is missing"),
-    };
-    let count = match record.get("count") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::Number(n)) => Some(
-            n.as_f64()
-                .ok_or_else(|| anyhow::anyhow!("`count` is not representable as a number: {n}"))?,
-        ),
+    }
+}
+
+fn optional_count(value: Option<&serde_json::Value>) -> Result<Option<f64>> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(n)) => {
+            Ok(Some(n.as_f64().ok_or_else(|| {
+                anyhow::anyhow!("`count` is not representable as a number: {n}")
+            })?))
+        }
         Some(other) => anyhow::bail!("`count` must be a number, got {other}"),
-    };
-    Ok(RemoteShoppingItem {
-        name,
-        category: ShoppingCategory::parse(cat),
-        count,
-    })
+    }
+}
+
+fn required_array<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<&'a Vec<serde_json::Value>> {
+    object
+        .get(key)
+        .ok_or_else(|| anyhow::anyhow!("the list response has no `{key}`"))?
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("`{key}` is not an array"))
+}
+
+fn required_object<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>> {
+    object
+        .get(key)
+        .ok_or_else(|| anyhow::anyhow!("the list response has no `{key}`"))?
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("`{key}` is not an object"))
+}
+
+fn required_int(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> Result<i64> {
+    object
+        .get(key)
+        .ok_or_else(|| anyhow::anyhow!("the list response has no `{key}`"))?
+        .as_i64()
+        .ok_or_else(|| anyhow::anyhow!("`{key}` is not a whole number"))
 }
 
 /// A row of the local `shopping_item` table.
@@ -357,9 +460,9 @@ pub struct LocalShoppingItem {
     pub name: String,
     pub category: ShoppingCategory,
     pub count: Option<f64>,
-    /// Local-only here: this endpoint carries no checked state. The phone API
-    /// does, as membership of its `pickedItems` map, so the next lane fills
-    /// this column from the wire.
+    /// Filled from the peer's `pickedItems` membership on the way in, and never
+    /// pushed on the way out: the commit encoding for a check toggle is the one
+    /// command shape the capture did not isolate (see [`PushIntent`]).
     pub checked: bool,
     /// Local-only: filled by the product binding, never sent to the peer.
     pub product_id: Option<String>,
@@ -401,14 +504,26 @@ pub enum LocalIntent {
     ReapTombstone {
         id: String,
     },
+    /// The peer reports the item checked off and we do not.
+    ///
+    /// There is deliberately no un-check intent. With no timestamp to arbitrate
+    /// with, §4 rules check-off wins over un-check on asymmetric cost: a wrong
+    /// check skips one item, a wrong uncheck re-buys it every trip until
+    /// someone notices. Making the losing direction unrepresentable is
+    /// cheaper than remembering the rule at each call site.
+    Check {
+        id: String,
+    },
 }
 
-/// A change the peer needs and that only the write leg can deliver.
+/// A change the peer needs, delivered as a `/commit` command.
 ///
-/// Nothing sends these yet. They are computed regardless, because the
-/// reconciler cannot decide the local side without them: a row the peer has
-/// never carried is a pending addition, and deleting it on absence would
-/// destroy a local edit rather than mirror a remote one.
+/// A local check carries no variant. The peer moves an item between `items` and
+/// `pickedItems` with a command shape the capture recorded only alongside an
+/// add/del pair, so sending a guessed encoding risks deleting the item instead
+/// of ticking it. Until an isolated check/uncheck capture pins it, `checked`
+/// travels inbound only — stated in `docs/Plans/Kitchen.md` §4 and asserted in
+/// the reconciler tests.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PushIntent {
     Add(LocalShoppingItem),
@@ -500,6 +615,13 @@ impl ShoppingReconciler {
                                 count: remote.count,
                             });
                         }
+                        // One-way by §4: a peer-side check reaches the row, a
+                        // peer-side un-check never clears a local one.
+                        if remote.checked && !row.checked {
+                            outcome
+                                .local
+                                .push(LocalIntent::Check { id: row.id.clone() });
+                        }
                         outcome.local.push(LocalIntent::TouchLastSeenRemote {
                             id: row.id.clone(),
                             at: snapshot.fetched_at().to_string(),
@@ -545,7 +667,7 @@ fn row_from(
         name: remote.name.clone(),
         category: remote.category.clone(),
         count: remote.count,
-        checked: false,
+        checked: remote.checked,
         product_id: None,
         deleted_at: None,
         last_seen_remote: Some(snapshot.fetched_at().to_string()),

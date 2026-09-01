@@ -5580,12 +5580,14 @@ name = "holon-kitchen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "cooklang",
  "holon-api",
  "holon-core",
  "holon-mcp-client",
  "holon-profiles",
+ "proptest 1.11.0",
  "rmcp",
  "serde_json",
  "serde_yaml",

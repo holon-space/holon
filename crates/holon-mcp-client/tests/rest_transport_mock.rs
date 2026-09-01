@@ -447,30 +447,6 @@ async fn rest_transport_read_resource_fails_loud() {
     );
 }
 
-#[tokio::test]
-async fn rest_transport_rejects_non_get_method() {
-    let mock = start_mock().await;
-    let yaml = format!(
-        "transport:\n  rest:\n    base_url: {base}\n    calls:\n      mutate:\n        method: \
-         POST\n        path: /posts\nentities: {{}}\ntools: {{}}\n",
-        base = mock.base_url
-    );
-    let surface = surface_from(&yaml, "p", &|_| None);
-    use holon_mcp_client::mcp_call_surface::McpCallSurface;
-    use rmcp::model::CallToolRequestParam;
-    let err = surface
-        .call_tool(CallToolRequestParam {
-            name: "mutate".into(),
-            arguments: None,
-        })
-        .await
-        .expect_err("POST must be rejected");
-    assert!(
-        err.to_string().contains("only GET is supported"),
-        "unexpected error: {err}"
-    );
-}
-
 #[test]
 fn shipped_jsonplaceholder_sidecar_parses_as_rest() {
     // The committed example file is a valid rest-transport sidecar.

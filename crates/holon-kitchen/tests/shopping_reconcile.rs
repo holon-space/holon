@@ -1,6 +1,11 @@
-//! The `(name, cat)` reconciler's rules, including the ones that exist only so
-//! the write leg can be added without reshaping anything
-//! (`docs/Plans/Kitchen.md` §4).
+//! The `(name, cat)` reconciler's rules against the phone API's wire shape
+//! (`docs/Plans/Kitchen.md` §4,
+//! `docs/Plans/ThatShoppingList-API-2026-09-01.md`).
+//!
+//! Every snapshot here is built by parsing a whole response body, not by
+//! assembling the parsed type: the checked flag comes from `pickedItems`
+//! membership and the categories from the list's own `options.cats`, so a test
+//! that skipped the parser would be testing a shape the peer never sends.
 
 use chrono::Duration;
 use holon_kitchen::shopping::CompleteSnapshot;
@@ -13,27 +18,57 @@ use holon_kitchen::shopping::ShoppingReconciler;
 
 const FETCHED_AT: &str = "2026-09-01T10:00:00Z";
 
-fn snapshot(items: &[(&str, &str, Option<f64>)]) -> CompleteSnapshot {
-    let records: Vec<_> = items
+/// The vocabulary the fixture lists publish. `Kleidung_clothes_1976D2` carries
+/// the icon/colour decoration the capture recorded.
+const CATS: &[&str] = &["R", "B", "Ca", "Ir", "Kleidung_clothes_1976D2"];
+
+/// Build a whole list response: active items, checked-off items, and a version.
+fn body(
+    items: &[(&str, &str, Option<f64>)],
+    picked: &[(&str, &str)],
+    version: i64,
+) -> serde_json::Map<String, serde_json::Value> {
+    let items: Vec<serde_json::Value> = items
         .iter()
-        .map(|(name, cat, count)| {
-            let mut record = serde_json::Map::new();
-            record.insert("name".into(), serde_json::Value::String((*name).into()));
-            record.insert("cat".into(), serde_json::Value::String((*cat).into()));
-            if let Some(c) = count {
-                record.insert(
-                    "count".into(),
-                    serde_json::Value::Number(serde_json::Number::from_f64(*c).unwrap()),
-                );
-            }
-            record
+        .map(|(name, cat, count)| match count {
+            Some(c) => serde_json::json!({"name": name, "cat": cat, "count": c}),
+            None => serde_json::json!({"name": name, "cat": cat}),
         })
         .collect();
-    CompleteSnapshot::from_records(&records, FETCHED_AT).expect("well-formed records")
+    let picked: serde_json::Map<String, serde_json::Value> = picked
+        .iter()
+        .map(|(name, cat)| {
+            (
+                (*name).to_string(),
+                serde_json::json!({"cat": cat, "date": "2026-09-01T08:00:00Z"}),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "items": items,
+        "pickedItems": picked,
+        "version": version,
+        "options": {"prices": false, "cats": CATS},
+    })
+    .as_object()
+    .cloned()
+    .expect("the fixture body is an object")
+}
+
+fn snapshot(items: &[(&str, &str, Option<f64>)]) -> CompleteSnapshot {
+    CompleteSnapshot::from_response(&body(items, &[], 7), FETCHED_AT).expect("well-formed response")
+}
+
+fn snapshot_with_picked(
+    items: &[(&str, &str, Option<f64>)],
+    picked: &[(&str, &str)],
+) -> CompleteSnapshot {
+    CompleteSnapshot::from_response(&body(items, picked, 7), FETCHED_AT)
+        .expect("well-formed response")
 }
 
 fn local(name: &str, cat: &str, count: Option<f64>) -> LocalShoppingItem {
-    let category = ShoppingCategory::parse(cat);
+    let category = ShoppingCategory::unresolved(cat);
     LocalShoppingItem {
         id: ItemKey::new(name, &category).row_id(),
         name: name.to_string(),
@@ -45,6 +80,143 @@ fn local(name: &str, cat: &str, count: Option<f64>) -> LocalShoppingItem {
         last_seen_remote: Some("2026-08-31T10:00:00Z".into()),
     }
 }
+
+// ---------------------------------------------------------------------------
+// The list's own vocabulary
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_vocabulary_comes_from_the_list_not_from_this_build() {
+    let snapshot = snapshot(&[("Milk", "R", None)]);
+    let vocabulary = snapshot.vocabulary();
+    assert_eq!(vocabulary.len(), CATS.len());
+    // The decoration is stripped off the code, so an item's plain `Kleidung`
+    // resolves against the decorated entry.
+    assert!(vocabulary.codes().any(|c| c == "Kleidung"));
+
+    let resolved = vocabulary.resolve("Kleidung");
+    assert!(resolved.is_recognized());
+    assert_eq!(resolved.entry().and_then(|e| e.icon()), Some("clothes"));
+    assert_eq!(resolved.entry().and_then(|e| e.color()), Some("1976D2"));
+}
+
+#[test]
+fn a_code_the_list_never_published_is_carried_not_rejected() {
+    // A list gaining an aisle must not take the whole fetch down: the code is
+    // kept verbatim and marked unrecognized, never mapped to a neighbour.
+    let snapshot = snapshot(&[("Salmon", "Fish", Some(1.0))]);
+    let item = snapshot.items().next().expect("the item survived");
+    assert_eq!(item.category.as_wire(), "Fish");
+    assert!(!item.category.is_recognized());
+}
+
+#[test]
+fn a_duplicate_category_code_is_a_construction_error() {
+    let mut response = body(&[("Milk", "R", None)], &[], 7);
+    response.insert(
+        "options".into(),
+        serde_json::json!({"prices": false, "cats": ["R", "R_shed_ABCDEF"]}),
+    );
+    let err = CompleteSnapshot::from_response(&response, FETCHED_AT)
+        .expect_err("an ambiguous vocabulary would mislabel items");
+    assert!(format!("{err:#}").contains("twice"), "{err:#}");
+}
+
+// ---------------------------------------------------------------------------
+// checked = pickedItems membership
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_checked_off_item_arrives_from_picked_items() {
+    let snapshot = snapshot_with_picked(&[("Milk", "R", None)], &[("Bread", "B")]);
+    let bread = snapshot
+        .items()
+        .find(|i| i.name == "Bread")
+        .expect("the checked item is part of the list");
+    assert!(bread.checked);
+    assert!(
+        !snapshot
+            .items()
+            .find(|i| i.name == "Milk")
+            .expect("Milk")
+            .checked
+    );
+}
+
+#[test]
+fn a_peer_side_check_reaches_a_row_we_already_hold() {
+    let held = local("Bread", "B", None);
+    let outcome = ShoppingReconciler::default()
+        .reconcile(
+            &[held.clone()],
+            &snapshot_with_picked(&[], &[("Bread", "B")]),
+        )
+        .expect("reconcile");
+
+    assert!(
+        outcome.local.contains(&LocalIntent::Check {
+            id: held.id.clone()
+        }),
+        "the peer's check did not reach the row: {:?}",
+        outcome.local
+    );
+    assert!(outcome.push.is_empty());
+}
+
+#[test]
+fn a_peer_side_uncheck_never_clears_a_local_check() {
+    // §4's asymmetric rule: a wrong check skips one item, a wrong uncheck
+    // re-buys it every trip. With no timestamp to arbitrate, check-off wins.
+    let mut held = local("Bread", "B", None);
+    held.checked = true;
+
+    let outcome = ShoppingReconciler::default()
+        .reconcile(&[held.clone()], &snapshot(&[("Bread", "B", None)]))
+        .expect("reconcile");
+
+    assert_eq!(
+        outcome.local,
+        vec![LocalIntent::TouchLastSeenRemote {
+            id: held.id,
+            at: FETCHED_AT.into(),
+        }],
+        "the pull cleared a local check"
+    );
+}
+
+#[test]
+fn a_local_check_is_never_pushed() {
+    // DISCLOSED LIMITATION: the peer moves an item between `items` and
+    // `pickedItems` with a command shape the capture never isolated, so sending
+    // a guessed encoding risks deleting the item instead of ticking it.
+    // `checked` therefore travels inbound only.
+    let mut held = local("Bread", "B", None);
+    held.checked = true;
+
+    let outcome = ShoppingReconciler::default()
+        .reconcile(&[held], &snapshot(&[("Bread", "B", None)]))
+        .expect("reconcile");
+
+    assert!(
+        outcome.push.is_empty(),
+        "a check was pushed on an unpinned command encoding: {:?}",
+        outcome.push
+    );
+}
+
+#[test]
+fn an_item_in_both_collections_counts_as_checked() {
+    let snapshot = snapshot_with_picked(&[("Bread", "B", None)], &[("Bread", "B")]);
+    assert_eq!(snapshot.len(), 1, "the two halves are one item");
+    assert!(
+        snapshot.items().next().expect("Bread").checked,
+        "a contradictory pair resolved against the asymmetric rule"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Both-sides mutation
+// ---------------------------------------------------------------------------
 
 #[test]
 fn a_key_the_peer_dropped_is_deleted() {
@@ -73,6 +245,32 @@ fn a_local_row_the_peer_never_carried_is_pushed_not_deleted() {
         outcome.local
     );
     assert_eq!(outcome.push, vec![PushIntent::Add(added)]);
+}
+
+#[test]
+fn both_sides_adding_different_items_converges_in_one_round() {
+    let mut mine = local("Oat milk", "R", Some(1.0));
+    mine.last_seen_remote = None;
+    let held = local("Bread", "B", None);
+
+    let outcome = ShoppingReconciler::default()
+        .reconcile(
+            &[mine.clone(), held.clone()],
+            &snapshot(&[("Bread", "B", None), ("Butter", "Ca", Some(2.0))]),
+        )
+        .expect("reconcile");
+
+    // Theirs comes in, mine goes out, and neither deletes the other.
+    let inserted: Vec<&str> = outcome
+        .local
+        .iter()
+        .filter_map(|i| match i {
+            LocalIntent::Insert(row) => Some(row.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(inserted, vec!["Butter"]);
+    assert_eq!(outcome.push, vec![PushIntent::Add(mine)]);
 }
 
 #[test]
@@ -175,8 +373,10 @@ fn an_unchanged_item_only_moves_its_watermark() {
 
 #[test]
 fn a_peer_side_rename_arrives_as_a_delete_and_an_add() {
-    // The peer emits a rename as `del <old>` + `add <new>` in one commit, so
-    // local-only state on the old key cannot survive it. Disclosed, not a bug.
+    // R4, ACCEPTED as a disclosed limitation (docs/Plans/Kitchen.md §7): the
+    // peer emits a rename as `del <old>` + `add <new>` in one commit, so
+    // local-only state on the old key cannot survive it. There is no fix
+    // without a server-issued item id. This is the EXPECTED outcome, asserted.
     let mut held = local("Milk", "R", Some(1.0));
     held.checked = true;
     held.product_id = Some("product:milk".into());
@@ -203,17 +403,36 @@ fn a_peer_side_rename_arrives_as_a_delete_and_an_add() {
         }
     }
     assert_eq!((deletes, inserts), (1, 1));
+    assert!(
+        outcome.push.is_empty(),
+        "a peer-side rename must not be echoed back at the peer: {:?}",
+        outcome.push
+    );
 }
+
+// ---------------------------------------------------------------------------
+// Bad input
+// ---------------------------------------------------------------------------
 
 #[test]
 fn a_record_without_a_name_fails_the_whole_snapshot() {
-    let mut record = serde_json::Map::new();
-    record.insert("cat".into(), serde_json::Value::String("B".into()));
+    let mut response = body(&[], &[], 7);
+    response.insert("items".into(), serde_json::json!([{"cat": "B"}]));
 
-    let err = CompleteSnapshot::from_records(&[record], FETCHED_AT)
+    let err = CompleteSnapshot::from_response(&response, FETCHED_AT)
         .expect_err("a nameless item has no identity");
     // Skipping it would silently turn a real item into a deletion.
     assert!(format!("{err:#}").contains("`name` is missing"), "{err:#}");
+}
+
+#[test]
+fn a_response_without_a_version_fails_the_whole_snapshot() {
+    let mut response = body(&[("Milk", "R", None)], &[], 7);
+    response.remove("version");
+
+    let err = CompleteSnapshot::from_response(&response, FETCHED_AT)
+        .expect_err("a snapshot with no version cannot base a commit");
+    assert!(format!("{err:#}").contains("version"), "{err:#}");
 }
 
 #[test]

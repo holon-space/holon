@@ -284,6 +284,14 @@ pub struct McpSyncEngine {
 }
 
 impl McpSyncEngine {
+    /// The transport's call surface, for a caller that issues its own calls
+    /// against this integration rather than going through the sync pipeline —
+    /// a connector whose identity or reconciliation the generic entity mirror
+    /// cannot serve.
+    pub fn call_surface(&self) -> Arc<dyn McpCallSurface> {
+        self.surface.clone()
+    }
+
     #[allow(clippy::too_many_arguments)] // wires up the full sync pipeline; each arg is a distinct subsystem
     pub fn new(
         surface: Arc<dyn McpCallSurface>,

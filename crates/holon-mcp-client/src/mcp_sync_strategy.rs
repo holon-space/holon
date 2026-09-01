@@ -127,7 +127,7 @@ impl Projection {
 
 /// Look up a dotted JSON path (`a.b.c`) within a record. Returns `None` if any
 /// segment is missing or a non-object is traversed.
-fn lookup_dotted<'a>(
+pub(crate) fn lookup_dotted<'a>(
     record: &'a serde_json::Map<String, serde_json::Value>,
     path: &str,
 ) -> Option<&'a serde_json::Value> {

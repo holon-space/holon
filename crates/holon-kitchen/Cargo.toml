@@ -14,16 +14,21 @@ holon-api.workspace = true
 holon-core.workspace = true
 holon-profiles.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 cooklang = "0.18"
+# The shopping peer speaks the `rest` transport's call surface directly: the
+# endpoint, the commit envelope and the version path are sidecar declarations,
+# and this crate supplies the peer semantics behind them.
+holon-mcp-client = { path = "../holon-mcp-client" }
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["client"] }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 tempfile.workspace = true
-# The shopping read leg is exercised end-to-end over the real `rest` transport
-# against a local mock HTTP server.
-holon-mcp-client = { path = "../holon-mcp-client" }
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["client"] }
+proptest.workspace = true
+# Both legs are exercised end-to-end over the real `rest` transport against a
+# local mock HTTP server.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net"] }

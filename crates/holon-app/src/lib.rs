@@ -43,6 +43,7 @@ pub mod ordered_block_crud;
 pub mod rehome_entity;
 pub mod seed;
 pub mod session;
+pub mod shopping_operations;
 pub mod turso_seams;
 pub mod type_admission;
 pub mod wiring;

@@ -11,9 +11,12 @@
 //! extraction, schema mapping, cache writing — is unchanged. One connector
 //! engine, plural transports.
 //!
-//! Read-only for now: only `GET` calls are accepted. Write/mutation (and the
-//! lease-governed external-effect question) are deliberately out of scope; a
-//! non-GET method fails loud rather than silently issuing a mutating request.
+//! Reads and writes: `GET`, `POST`, `PUT`, `PATCH` and `DELETE`, with an
+//! optional JSON request-body template and an optional response-version path
+//! for an optimistic-concurrency API. All three are declared in the sidecar, so
+//! a provider gains a write leg without engine work. The method is parsed into
+//! [`HttpMethod`] at startup, so an unknown one is refused where the YAML is
+//! read rather than at the first call.
 //!
 //! Secrets are never inlined: `base_url` and the optional auth header value are
 //! `${VAR}`-expanded from the environment at startup (see
@@ -47,7 +50,7 @@ use crate::rest_oauth2::OAuth2TokenProvider;
 /// `{arg}` is per-call data, `${VAR}` is a secret/config reference.
 #[derive(Debug, Clone)]
 pub struct RestCall {
-    pub method: String,
+    pub method: HttpMethod,
     pub path: String,
     pub query: HashMap<String, String>,
     /// How to decode the response body before extraction. `json` is the default
@@ -67,6 +70,72 @@ pub struct RestCall {
     /// follows the provider's continuation token across pages, concatenating
     /// each page's item array, up to a hard, fail-loud `max_pages` bound.
     pub pagination: Option<Pagination>,
+    /// JSON request-body template, placeholder-filled per call. See
+    /// [`crate::integration_config::RestCallConfig::body`].
+    pub body: Option<serde_json::Value>,
+    /// Dotted path to this provider's version/cursor token in the response. See
+    /// [`crate::integration_config::RestCallConfig::response_version_path`].
+    pub response_version_path: Option<String>,
+}
+
+/// The key an extracted [`RestCall::response_version_path`] is re-emitted
+/// under, the same for every provider so a caller carries no provider-specific
+/// field name into its own concurrency handling.
+pub const RESPONSE_VERSION_KEY: &str = "_version";
+
+/// The HTTP methods this transport issues, parsed from the sidecar's `method`
+/// string once at startup so no call site can be reached with a method the
+/// request builder cannot serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpMethod {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl HttpMethod {
+    pub fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw.to_ascii_uppercase().as_str() {
+            "GET" => Ok(Self::Get),
+            "POST" => Ok(Self::Post),
+            "PUT" => Ok(Self::Put),
+            "PATCH" => Ok(Self::Patch),
+            "DELETE" => Ok(Self::Delete),
+            _ => anyhow::bail!(
+                "'{raw}' is not a method the rest transport issues (GET, POST, PUT, PATCH, DELETE)"
+            ),
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Patch => "PATCH",
+            Self::Delete => "DELETE",
+        }
+    }
+}
+
+impl std::fmt::Display for HttpMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<HttpMethod> for reqwest::Method {
+    fn from(method: HttpMethod) -> Self {
+        match method {
+            HttpMethod::Get => reqwest::Method::GET,
+            HttpMethod::Post => reqwest::Method::POST,
+            HttpMethod::Put => reqwest::Method::PUT,
+            HttpMethod::Patch => reqwest::Method::PATCH,
+            HttpMethod::Delete => reqwest::Method::DELETE,
+        }
+    }
 }
 
 /// Response-token pagination for a `json` [`RestCall`] (e.g. Google's
@@ -231,22 +300,19 @@ impl RestCallSurface {
             )
         })?;
 
-        if !call.method.eq_ignore_ascii_case("GET") {
-            anyhow::bail!(
-                "rest transport: call '{name}' uses method '{}', but only GET is supported \
-                 (write/mutation and lease semantics are out of scope)",
-                call.method
-            );
-        }
-
         let args = params.arguments.unwrap_or_default();
         let path = fill_placeholders(&call.path, &args)
             .map_err(|e| anyhow::anyhow!("rest transport: call '{name}' path: {e}"))?;
-        let url = format!(
-            "{}/{}",
-            self.manual.base_url.trim_end_matches('/'),
-            path.trim_start_matches('/')
-        );
+        // An EMPTY path addresses the base URL itself, which is how a sidecar
+        // whose `base_url` already names one resource declares its read call —
+        // appending a bare separator there would ask for a different URL.
+        let base = self.manual.base_url.trim_end_matches('/');
+        let relative = path.trim_start_matches('/');
+        let url = if relative.is_empty() {
+            base.to_string()
+        } else {
+            format!("{base}/{relative}")
+        };
 
         let mut query: Vec<(String, String)> = Vec::with_capacity(call.query.len());
         for (k, v) in &call.query {
@@ -266,14 +332,25 @@ impl RestCallSurface {
             return self.fetch_paginated(name, &url, &query, pg).await;
         }
 
-        let body = self.get_with_auth_retry(name, &url, &query).await?;
+        let request_body =
+            match &call.body {
+                Some(template) => Some(fill_body(template, &args).map_err(|e| {
+                    anyhow::anyhow!("rest transport: call '{name}' request body: {e}")
+                })?),
+                None => None,
+            };
+
+        let body = self
+            .send_with_auth_retry(name, call.method, &url, &query, request_body.as_ref())
+            .await?;
 
         let structured = match call.format {
             ResponseFormat::Json => {
                 let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
                     let preview: String = body.chars().take(200).collect();
                     self.err(format!(
-                        "rest transport: GET {} body is not JSON: {e} (body: {preview})",
+                        "rest transport: {} {} body is not JSON: {e} (body: {preview})",
+                        call.method,
                         self.safe_url(&url)
                     ))
                 })?;
@@ -289,7 +366,11 @@ impl RestCallSurface {
             }
             ResponseFormat::Atom | ResponseFormat::Rss => {
                 let entries = parse_feed(call.format, &body).map_err(|e| {
-                    self.err(format!("rest transport: GET {}: {e}", self.safe_url(&url)))
+                    self.err(format!(
+                        "rest transport: {} {}: {e}",
+                        call.method,
+                        self.safe_url(&url)
+                    ))
                 })?;
                 // A feed is inherently a collection; always wrap under the key so
                 // `sync.extract_path` can select it (default `entries`).
@@ -299,19 +380,61 @@ impl RestCallSurface {
                 serde_json::Value::Object(obj)
             }
         };
-        Ok(structured)
+        self.attach_response_version(name, call, structured, &url)
     }
 
-    /// Issue one GET, attaching auth per [`RestAuth`]. `force_token_refresh`
-    /// forces a fresh OAuth2 access token (used on a 401 retry). Returns the
-    /// response status and body; never includes a bearer token in any error.
-    async fn send_get(
+    /// Re-emit the value at the call's declared `response_version_path` under
+    /// [`RESPONSE_VERSION_KEY`]. A declared path that finds nothing is a loud
+    /// failure: the caller asked for a concurrency token, and continuing
+    /// without one would let the next write be based on a version nobody
+    /// read.
+    fn attach_response_version(
         &self,
+        name: &str,
+        call: &RestCall,
+        structured: serde_json::Value,
+        url: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let Some(path) = &call.response_version_path else {
+            return Ok(structured);
+        };
+        let mut object = match structured {
+            serde_json::Value::Object(o) => o,
+            other => {
+                return Err(self.err(format!(
+                    "rest transport: call '{name}' declares response_version_path '{path}', but                      {} answered a non-object body ({other})",
+                    self.safe_url(url)
+                )));
+            }
+        };
+        let found = crate::mcp_sync_strategy::lookup_dotted(&object, path)
+            .cloned()
+            .ok_or_else(|| {
+                self.err(format!(
+                    "rest transport: call '{name}' declares response_version_path '{path}', but                      the response from {} carries nothing there",
+                    self.safe_url(url)
+                ))
+            })?;
+        object.insert(RESPONSE_VERSION_KEY.to_string(), found);
+        Ok(serde_json::Value::Object(object))
+    }
+
+    /// Issue one request, attaching auth per [`RestAuth`] and the JSON body
+    /// when the call declares one. `force_token_refresh` forces a fresh
+    /// OAuth2 access token (used on a 401 retry). Returns the response
+    /// status and body; never includes a bearer token in any error.
+    async fn send_request(
+        &self,
+        method: HttpMethod,
         url: &str,
         query: &[(String, String)],
+        body: Option<&serde_json::Value>,
         force_token_refresh: bool,
     ) -> anyhow::Result<(reqwest::StatusCode, String)> {
-        let mut req = self.client.get(url).query(query);
+        let mut req = self.client.request(method.into(), url).query(query);
+        if let Some(body) = body {
+            req = req.json(body);
+        }
         req = match &self.manual.auth {
             RestAuth::None => req,
             RestAuth::Static { header, value } => req.header(header.as_str(), value.as_str()),
@@ -328,7 +451,7 @@ impl RestCallSurface {
         };
         let resp = req.send().await.map_err(|e| {
             self.err(format!(
-                "rest transport: GET {} failed: {}",
+                "rest transport: {method} {} failed: {}",
                 self.safe_url(url),
                 e.without_url()
             ))
@@ -336,7 +459,7 @@ impl RestCallSurface {
         let status = resp.status();
         let body = resp.text().await.map_err(|e| {
             self.err(format!(
-                "rest transport: reading body of GET {}: {}",
+                "rest transport: reading body of {method} {}: {}",
                 self.safe_url(url),
                 e.without_url()
             ))
@@ -344,44 +467,50 @@ impl RestCallSurface {
         Ok((status, body))
     }
 
-    /// A GET that, for OAuth2 auth, transparently refreshes the token once on a
-    /// 401 and retries — recovering from a token the server rejected before we
-    /// thought it expired. Non-2xx (after any retry) fails loud.
-    async fn get_with_auth_retry(
+    /// A request that, for OAuth2 auth, transparently refreshes the token once
+    /// on a 401 and retries — recovering from a token the server rejected
+    /// before we thought it expired. Non-2xx (after any retry) fails loud.
+    ///
+    /// The retry re-sends the body, which is safe only because it is rebuilt
+    /// from the same arguments and the peer never saw the first attempt: a 401
+    /// means the request was rejected before it was applied.
+    async fn send_with_auth_retry(
         &self,
         name: &str,
+        method: HttpMethod,
         url: &str,
         query: &[(String, String)],
+        body: Option<&serde_json::Value>,
     ) -> anyhow::Result<String> {
-        let (status, body) = self.send_get(url, query, false).await?;
+        let (status, text) = self.send_request(method, url, query, body, false).await?;
         if status == reqwest::StatusCode::UNAUTHORIZED && self.manual.auth.is_oauth2() {
             warn!(
                 "{}",
                 self.safe(format!(
-                    "rest transport: call '{name}' GET {} returned 401 — refreshing OAuth2 token \
-                     and retrying once",
+                    "rest transport: call '{name}' {method} {} returned 401 — refreshing OAuth2 \
+                     token and retrying once",
                     self.safe_url(url)
                 ))
             );
-            let (status2, body2) = self.send_get(url, query, true).await?;
+            let (status2, text2) = self.send_request(method, url, query, body, true).await?;
             if !status2.is_success() {
-                let preview: String = body2.chars().take(200).collect();
+                let preview: String = text2.chars().take(200).collect();
                 return Err(self.err(format!(
-                    "rest transport: call '{name}' GET {} still failed after token refresh: HTTP \
-                     {status2}: {preview}",
+                    "rest transport: call '{name}' {method} {} still failed after token refresh: \
+                     HTTP {status2}: {preview}",
                     self.safe_url(url)
                 )));
             }
-            return Ok(body2);
+            return Ok(text2);
         }
         if !status.is_success() {
-            let preview: String = body.chars().take(200).collect();
+            let preview: String = text.chars().take(200).collect();
             return Err(self.err(format!(
-                "rest transport: call '{name}' GET {} returned HTTP {status}: {preview}",
+                "rest transport: call '{name}' {method} {} returned HTTP {status}: {preview}",
                 self.safe_url(url)
             )));
         }
-        Ok(body)
+        Ok(text)
     }
 
     /// Follow a continuation token across pages, concatenating each page's
@@ -407,7 +536,9 @@ impl RestCallSurface {
             if let Some(t) = &token {
                 query.push((pg.token_param.clone(), t.clone()));
             }
-            let body = self.get_with_auth_retry(name, url, &query).await?;
+            let body = self
+                .send_with_auth_retry(name, HttpMethod::Get, url, &query, None)
+                .await?;
             let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
                 let preview: String = body.chars().take(200).collect();
                 self.err(format!(
@@ -538,6 +669,50 @@ fn fill_placeholders(
     }
     out.push_str(rest);
     Ok(out)
+}
+
+/// Fill a JSON request-body template from the tool-call arguments.
+///
+/// Every string leaf is placeholder-filled as elsewhere in the manual, with one
+/// addition: a leaf that is EXACTLY one argument placeholder is replaced by
+/// that argument's own JSON value, so an array or object argument keeps its
+/// type instead of being stringified. A now-token is always rendered as text,
+/// since it has no argument to take a type from.
+fn fill_body(
+    template: &serde_json::Value,
+    args: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<serde_json::Value> {
+    match template {
+        serde_json::Value::String(text) => match sole_argument_placeholder(text)? {
+            Some(key) => args.get(key).cloned().ok_or_else(|| {
+                anyhow::anyhow!("no argument named '{key}' for the placeholder '{{{key}}}'")
+            }),
+            None => Ok(serde_json::Value::String(fill_placeholders(text, args)?)),
+        },
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| fill_body(item, args))
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map(serde_json::Value::Array),
+        serde_json::Value::Object(fields) => fields
+            .iter()
+            .map(|(k, v)| Ok((k.clone(), fill_body(v, args)?)))
+            .collect::<anyhow::Result<serde_json::Map<_, _>>>()
+            .map(serde_json::Value::Object),
+        other => Ok(other.clone()),
+    }
+}
+
+/// The argument name of a string that is nothing but one `{placeholder}`, or
+/// `None` when the string is literal text, mixed text, or a now-token.
+fn sole_argument_placeholder(text: &str) -> anyhow::Result<Option<&str>> {
+    let Some(inner) = text.strip_prefix('{').and_then(|t| t.strip_suffix('}')) else {
+        return Ok(None);
+    };
+    if inner.contains('{') || inner.contains('}') {
+        return Ok(None);
+    }
+    Ok(render_now_token(inner)?.is_none().then_some(inner))
 }
 
 /// Render a now-relative time token to an RFC 3339 UTC timestamp
