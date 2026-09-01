@@ -2,11 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-#[cfg(feature = "iroh-sync")]
-use holon_loro::IrohSyncAdapter;
 use holon_loro::LoroDocument;
-#[cfg(feature = "iroh-sync")]
-use serial_test::serial;
 use tokio::time::sleep;
 
 #[tokio::test]
@@ -108,126 +104,6 @@ async fn test_snapshot_after_many_updates() -> Result<()> {
 
     assert_eq!(text1, text2);
     assert_eq!(text1.len(), 100);
-
-    Ok(())
-}
-
-#[cfg(feature = "iroh-sync")]
-#[tokio::test]
-#[serial]
-async fn test_connection_without_accept() -> Result<()> {
-    let doc1 = LoroDocument::new("no-accept".to_string())?;
-    let doc2 = LoroDocument::new("no-accept".to_string())?;
-
-    doc1.insert_text("editor", 0, "Test")?;
-
-    let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
-    let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
-    let peer1_addr = adapter1.addr();
-
-    let result = tokio::time::timeout(
-        Duration::from_secs(5),
-        adapter2.sync_with_peer(&doc2, peer1_addr),
-    )
-    .await;
-
-    assert!(
-        result.is_err() || result.unwrap().is_err(),
-        "Connection should timeout or fail if peer is not accepting"
-    );
-
-    Ok(())
-}
-
-#[cfg(feature = "iroh-sync")]
-#[tokio::test]
-#[serial]
-async fn test_accept_without_connection() -> Result<()> {
-    let doc = LoroDocument::new("no-connect".to_string())?;
-
-    let adapter = IrohSyncAdapter::new("loro-sync").await?;
-    let doc = Arc::new(doc);
-    let doc_clone = doc.clone();
-
-    let result = tokio::time::timeout(
-        Duration::from_secs(3),
-        tokio::spawn(async move { adapter.accept_sync(&doc_clone).await }),
-    )
-    .await;
-
-    assert!(result.is_err(), "Accept should timeout if no peer connects");
-
-    Ok(())
-}
-
-#[cfg(feature = "iroh-sync")]
-#[tokio::test]
-#[serial]
-async fn test_multiple_sequential_accepts() -> Result<()> {
-    let doc1 = Arc::new(LoroDocument::new("multi-accept".to_string())?);
-    let doc2 = LoroDocument::new("multi-accept".to_string())?;
-    let doc3 = LoroDocument::new("multi-accept".to_string())?;
-
-    doc1.insert_text("editor", 0, "Hub")?;
-    doc2.insert_text("editor", 0, "Client2")?;
-    doc3.insert_text("editor", 0, "Client3")?;
-
-    let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
-    let peer1_addr = adapter1.addr();
-
-    let doc1_clone = doc1.clone();
-    let accept1 = tokio::spawn(async move { adapter1.accept_sync(&doc1_clone).await });
-
-    sleep(Duration::from_millis(500)).await;
-    let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
-    adapter2.sync_with_peer(&doc2, peer1_addr.clone()).await?;
-    sleep(Duration::from_millis(200)).await;
-    let _ = accept1.await?;
-
-    let adapter1b = IrohSyncAdapter::new("loro-sync").await?;
-    let peer1b_addr = adapter1b.addr();
-
-    let doc1_clone = doc1.clone();
-    let accept2 = tokio::spawn(async move { adapter1b.accept_sync(&doc1_clone).await });
-
-    sleep(Duration::from_millis(500)).await;
-    let adapter3 = IrohSyncAdapter::new("loro-sync").await?;
-    adapter3.sync_with_peer(&doc3, peer1b_addr).await?;
-    sleep(Duration::from_millis(200)).await;
-    let _ = accept2.await?;
-
-    let text1 = doc1.get_text("editor")?;
-    assert!(text1.contains("Client2") || text1.contains("Client3"));
-
-    Ok(())
-}
-
-#[cfg(feature = "iroh-sync")]
-#[tokio::test]
-#[serial]
-async fn test_update_after_sync() -> Result<()> {
-    let doc1 = LoroDocument::new("update-post-sync".to_string())?;
-    let doc2 = LoroDocument::new("update-post-sync".to_string())?;
-
-    doc1.insert_text("editor", 0, "Initial")?;
-
-    let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
-    let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
-
-    let doc1 = Arc::new(doc1);
-    let doc1_clone = doc1.clone();
-    let peer1_addr = adapter1.addr();
-
-    let accept_handle = tokio::spawn(async move { adapter1.accept_sync(&doc1_clone).await });
-
-    sleep(Duration::from_millis(500)).await;
-    adapter2.sync_with_peer(&doc2, peer1_addr).await?;
-    sleep(Duration::from_millis(200)).await;
-    let _ = accept_handle.await?;
-
-    doc1.insert_text("editor", 7, " after sync")?;
-    let text = doc1.get_text("editor")?;
-    assert_eq!(text, "Initial after sync");
 
     Ok(())
 }
@@ -390,35 +266,6 @@ async fn test_multiple_documents_isolated() -> Result<()> {
     assert_eq!(text1, "Doc1");
     assert_eq!(text2, "Doc2");
     assert_ne!(text1, text2);
-
-    Ok(())
-}
-
-#[cfg(feature = "iroh-sync")]
-#[tokio::test]
-#[serial]
-async fn test_sync_with_empty_peer() -> Result<()> {
-    let doc1 = LoroDocument::new("empty-peer-test".to_string())?;
-    let doc2 = LoroDocument::new("empty-peer-test".to_string())?;
-
-    doc1.insert_text("editor", 0, "Non-empty")?;
-
-    let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
-    let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
-
-    let doc1 = Arc::new(doc1);
-    let doc1_clone = doc1.clone();
-    let peer1_addr = adapter1.addr();
-
-    let accept_handle = tokio::spawn(async move { adapter1.accept_sync(&doc1_clone).await });
-
-    sleep(Duration::from_millis(500)).await;
-    adapter2.sync_with_peer(&doc2, peer1_addr).await?;
-    sleep(Duration::from_millis(200)).await;
-    let _ = accept_handle.await?;
-
-    let text2 = doc2.get_text("editor")?;
-    assert_eq!(text2, "Non-empty");
 
     Ok(())
 }

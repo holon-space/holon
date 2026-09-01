@@ -32,10 +32,8 @@
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod adapter {
-    use std::collections::BTreeSet;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::Mutex;
     use std::sync::RwLock;
     use std::time::Duration;
 
@@ -51,7 +49,6 @@ mod adapter {
     use tracing::info;
     use tracing::warn;
 
-    use crate::loro_document::LoroDocument;
     use crate::shared_tree::SharedTreeStore;
 
     const MAX_MSG_SIZE: usize = 10 * 1024 * 1024;
@@ -452,138 +449,6 @@ mod adapter {
         Ok(())
     }
 
-    // -- Legacy LoroDocument adapter (kept for backwards compat) --
-
-    pub struct IrohSyncAdapter {
-        endpoint: Arc<Endpoint>,
-        alpn_prefix: String,
-        /// Every ALPN this adapter has accepted for. `Endpoint::set_alpns`
-        /// REPLACES the endpoint's protocol set, so accepting for a second
-        /// document would otherwise un-register the first one's.
-        registered_alpns: Mutex<BTreeSet<Vec<u8>>>,
-    }
-
-    impl IrohSyncAdapter {
-        pub async fn new(alpn_prefix: &str) -> Result<Self> {
-            let endpoint = Endpoint::builder().bind().await?;
-            Ok(Self {
-                endpoint: Arc::new(endpoint),
-                alpn_prefix: alpn_prefix.to_string(),
-                registered_alpns: Mutex::new(BTreeSet::new()),
-            })
-        }
-
-        pub async fn new_with_alpns(alpn_prefix: &str, accepted_ids: &[&str]) -> Result<Self> {
-            let alpns: BTreeSet<Vec<u8>> = accepted_ids
-                .iter()
-                .map(|id| format!("{}/{}", alpn_prefix, id).into_bytes())
-                .collect();
-            let endpoint = Endpoint::builder()
-                .alpns(alpns.iter().cloned().collect())
-                .bind()
-                .await?;
-            Ok(Self {
-                endpoint: Arc::new(endpoint),
-                alpn_prefix: alpn_prefix.to_string(),
-                registered_alpns: Mutex::new(alpns),
-            })
-        }
-
-        /// Advertise `doc_id`'s ALPN in addition to every one already accepted
-        /// for.
-        fn register_alpn(&self, doc_id: &str) {
-            let mut registered = self
-                .registered_alpns
-                .lock()
-                .expect("IrohSyncAdapter ALPN set poisoned");
-            registered.insert(self.alpn(doc_id));
-            self.endpoint
-                .set_alpns(registered.iter().cloned().collect());
-        }
-
-        fn alpn(&self, doc_id: &str) -> Vec<u8> {
-            format!("{}/{}", self.alpn_prefix, doc_id).into_bytes()
-        }
-
-        pub fn set_peer_id_from_node(&self, doc: &mut LoroDocument) -> Result<()> {
-            let id = self.endpoint.id();
-            let id_bytes = id.as_bytes();
-            let peer_id = u64::from_le_bytes(id_bytes[0..8].try_into()?);
-            doc.set_peer_id(peer_id)?;
-            Ok(())
-        }
-
-        pub fn addr(&self) -> EndpointAddr {
-            self.endpoint.addr()
-        }
-
-        pub fn endpoint(&self) -> &Arc<Endpoint> {
-            &self.endpoint
-        }
-
-        /// Legacy full-snapshot sync for LoroDocument.
-        pub async fn sync_with_peer(
-            &self,
-            doc: &LoroDocument,
-            peer_addr: EndpointAddr,
-        ) -> Result<()> {
-            let doc_id = doc.doc_id();
-            let alpn = self.alpn(doc_id);
-            let conn = self.endpoint.connect(peer_addr, &alpn).await?;
-
-            let snapshot = doc.export_snapshot()?;
-            let mut send_stream = conn.open_uni().await?;
-            send_stream.write_all(&snapshot).await?;
-            send_stream.finish()?;
-
-            let mut recv_stream = conn.accept_uni().await?;
-            let buffer = recv_stream.read_to_end(MAX_MSG_SIZE).await?;
-            if !buffer.is_empty() {
-                doc.apply_update(&buffer)?;
-            }
-
-            Ok(())
-        }
-
-        /// Legacy full-snapshot accept for LoroDocument.
-        pub async fn accept_sync(&self, doc: &LoroDocument) -> Result<()> {
-            let doc_id = doc.doc_id();
-            // The doc to accept for is only known here, so `new()` cannot have
-            // registered its ALPN: without this the endpoint advertises none and
-            // every peer is rejected at the handshake.
-            self.register_alpn(doc_id);
-            let incoming = self
-                .endpoint
-                .accept()
-                .await
-                .ok_or_else(|| anyhow::anyhow!("No incoming connection"))?;
-
-            let conn = incoming.await?;
-            let alpn = conn.alpn();
-            let expected = self.alpn(doc_id);
-            if alpn != expected.as_slice() {
-                anyhow::bail!(
-                    "Wrong document! Expected '{}', got ALPN: {:?}",
-                    doc_id,
-                    String::from_utf8_lossy(alpn)
-                );
-            }
-
-            let mut recv_stream = conn.accept_uni().await?;
-            let buffer = recv_stream.read_to_end(MAX_MSG_SIZE).await?;
-            if !buffer.is_empty() {
-                doc.apply_update(&buffer)?;
-            }
-
-            let snapshot = doc.export_snapshot()?;
-            let mut send_stream = conn.open_uni().await?;
-            send_stream.write_all(&snapshot).await?;
-            send_stream.finish()?;
-            sleep(Duration::from_millis(100)).await;
-            Ok(())
-        }
-    }
-
     // -- SyncBackend trait --
 
     /// Abstraction over how two LoroDoc instances sync.
@@ -781,23 +646,6 @@ mod adapter {
                 .context("sync_doc_initiate failed")?;
             // _conn + ep1 kept alive while acceptor finishes reading
             handle.await?.context("sync_doc_accept failed")?;
-            Ok(())
-        }
-
-        #[tokio::test]
-        async fn test_create_adapter() -> Result<()> {
-            let adapter = IrohSyncAdapter::new("loro-sync").await?;
-            let _addr = adapter.addr();
-            Ok(())
-        }
-
-        #[tokio::test]
-        async fn test_set_peer_id_from_node() -> Result<()> {
-            let adapter = IrohSyncAdapter::new("loro-sync").await?;
-            let mut doc = LoroDocument::new("test".to_string())?;
-            let original_peer_id = doc.peer_id();
-            adapter.set_peer_id_from_node(&mut doc)?;
-            assert_ne!(doc.peer_id(), original_peer_id);
             Ok(())
         }
 
@@ -1039,8 +887,6 @@ mod adapter {
 pub use adapter::DirectSync;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use adapter::IrohSync;
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub use adapter::IrohSyncAdapter;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use adapter::SharedTreeSyncManager;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]

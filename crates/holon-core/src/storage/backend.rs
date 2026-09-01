@@ -27,12 +27,6 @@ pub trait StorageBackend: Send + Sync {
     /// thread-safe.
     async fn delete(&self, entity: &str, id: &str) -> Result<()>;
 
-    async fn get_version(&self, entity: &str, id: &str) -> Result<Option<String>>;
-
-    /// Set version for a row. Uses interior mutability - implementations should
-    /// be thread-safe.
-    async fn set_version(&self, entity: &str, id: &str, version: String) -> Result<()>;
-
     async fn get_children(
         &self,
         entity: &str,

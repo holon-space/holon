@@ -119,7 +119,7 @@ impl LoroDocument {
         self.peer_id
     }
 
-    /// Override the peer_id (used by IrohSyncAdapter to set Iroh-derived ID).
+    /// Override the peer_id (used to set an Iroh-derived ID).
     pub fn set_peer_id(&mut self, peer_id: PeerID) -> Result<()> {
         self.peer_id = peer_id;
         self.doc.set_peer_id(peer_id)?;
@@ -253,8 +253,8 @@ impl LoroDocument {
     /// mode `shared_tree::gc_after_extraction` uses). Safe for Holon because
     /// undo replays the persistent inverse-command log, not Loro history.
     /// Peers whose version vector predates the trim cannot receive an
-    /// incremental delta; `IrohSyncAdapter` detects that and ships a full
-    /// snapshot instead.
+    /// incremental delta; `export_delta_or_full_snapshot` detects that and
+    /// ships a full snapshot instead.
     /// Takes the WRITE guard, not the read guard: the leading `commit()`
     /// flushes a pending batch and fires subscribers.
     pub fn export_compact_snapshot(&self) -> Result<Vec<u8>> {

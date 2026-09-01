@@ -3882,30 +3882,6 @@ impl StorageBackend for TursoBackend {
         Ok(())
     }
 
-    async fn get_version(&self, entity: &str, id: &str) -> Result<Option<String>> {
-        let query = format!("SELECT _version FROM {} WHERE id = ?", entity);
-        let params = vec![turso::Value::Text(id.to_string())];
-        let results = self.handle().query_positional(&query, params).await?;
-        if let Some(row) = results.into_iter().next() {
-            return match row.get("_version") {
-                Some(Value::String(s)) => Ok(Some(s.clone())),
-                Some(Value::Null) | None => Ok(None),
-                _ => Ok(None),
-            };
-        }
-        Ok(None)
-    }
-
-    async fn set_version(&self, entity: &str, id: &str, version: String) -> Result<()> {
-        let update_sql = format!("UPDATE {} SET _version = ? WHERE id = ?", entity);
-        let params = vec![
-            turso::Value::Text(version.clone()),
-            turso::Value::Text(id.to_string()),
-        ];
-        self.handle().execute(&update_sql, params).await?;
-        Ok(())
-    }
-
     async fn get_children(
         &self,
         entity: &str,

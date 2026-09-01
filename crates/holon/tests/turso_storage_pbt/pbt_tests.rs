@@ -10,8 +10,6 @@
 //! - **CRUD Operations**: Insert, Update, Delete, Get
 //! - **Query Operations**: Query with all filter types (Eq, In, And, Or,
 //!   IsNull, IsNotNull)
-//! - **Dirty Tracking**: MarkDirty, MarkClean, GetDirty
-//! - **Version Management**: SetVersion, GetVersion
 //! - **CDC Operations**: Enable CDC, track changes, verify CDC records
 //! - **Materialized Views**: Create views, verify incremental updates on
 //!   insert/update/delete
@@ -116,7 +114,6 @@ pub struct ReferenceState {
     /// Entity name -> (id -> Entity) mapping
     pub entities: HashMap<String, HashMap<String, StorageEntity>>,
     /// Entity name -> (id -> version) mapping
-    pub versions: HashMap<String, HashMap<String, Option<String>>>,
     /// View name -> (entity_id -> rowid) mapping for materialized view tracking
     /// Each view has its own ROWID space, starting from 1
     pub view_rowids: HashMap<String, HashMap<String, i64>>,
@@ -145,7 +142,6 @@ impl Clone for ReferenceState {
     fn clone(&self) -> Self {
         Self {
             entities: self.entities.clone(),
-            versions: self.versions.clone(),
             view_rowids: self.view_rowids.clone(),
             next_view_rowid: self.next_view_rowid.clone(),
             cdc_enabled: self.cdc_enabled,
@@ -165,7 +161,6 @@ impl Default for ReferenceState {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => Self {
                 entities: HashMap::new(),
-                versions: HashMap::new(),
                 view_rowids: HashMap::new(),
                 next_view_rowid: HashMap::new(),
                 cdc_enabled: false,
@@ -200,7 +195,6 @@ impl Default for ReferenceState {
                 let handle = runtime.handle().clone();
                 Self {
                     entities: HashMap::new(),
-                    versions: HashMap::new(),
                     view_rowids: HashMap::new(),
                     next_view_rowid: HashMap::new(),
                     cdc_enabled: false,
@@ -246,11 +240,6 @@ pub enum StorageTransition {
     Get {
         entity: String,
         id: String,
-    },
-    SetVersion {
-        entity: String,
-        id: String,
-        version: String,
     },
     EnableCDC,
     CreateMaterializedView {
@@ -536,20 +525,6 @@ impl StorageTest {
                     .map_err(|e| format!("Database error: {}", e))?;
                 Ok(())
             }
-            StorageTransition::SetVersion {
-                entity,
-                id,
-                version,
-            } => {
-                let sql = format!(
-                    "UPDATE {} SET _version = '{}' WHERE id = '{}'",
-                    entity, version, id
-                );
-                conn.execute(&sql, ())
-                    .await
-                    .map_err(|e| format!("Database error: {}", e))?;
-                Ok(())
-            }
             _ => Err(format!(
                 "Operation {:?} not supported in transaction batch",
                 op
@@ -616,7 +591,6 @@ fn apply_to_reference(
     match transition {
         StorageTransition::CreateEntity { name } => {
             state.entities.entry(name.clone()).or_default();
-            state.versions.entry(name.clone()).or_default();
             None
         }
         StorageTransition::Insert {
@@ -635,18 +609,12 @@ fn apply_to_reference(
                 },
             );
             data.insert("value".into(), Value::String(value.clone()));
-            data.insert("_version".into(), Value::Null); // Turso adds _version column
 
             state
                 .entities
                 .get_mut(entity)
                 .unwrap()
                 .insert(id.clone(), data.clone());
-            state
-                .versions
-                .get_mut(entity)
-                .unwrap()
-                .insert(id.clone(), None);
             if let Some(deleted) = state.deleted_ids.get_mut(entity) {
                 deleted.remove(id);
             }
@@ -743,7 +711,6 @@ fn apply_to_reference(
             // In concurrent batches, the entity may have already been deleted
             let entities = state.entities.get_mut(entity).unwrap();
             entities.remove(id)?;
-            state.versions.get_mut(entity).unwrap().remove(id);
             state
                 .deleted_ids
                 .entry(entity.clone())
@@ -813,69 +780,6 @@ fn apply_to_reference(
             let entities = state.entities.get(entity).unwrap();
             let result = entities.get(id).cloned();
             Some(result.into_iter().collect())
-        }
-        StorageTransition::SetVersion {
-            entity,
-            id,
-            version,
-        } => {
-            // In concurrent batches, the entity may have been deleted
-            // Only set version if entity still exists
-            let entity_exists = state
-                .entities
-                .get(entity)
-                .map(|e| e.contains_key(id))
-                .unwrap_or(false);
-
-            if !entity_exists {
-                return None; // Entity was deleted by concurrent operation
-            }
-
-            state
-                .versions
-                .get_mut(entity)
-                .unwrap()
-                .insert(id.clone(), Some(version.clone()));
-
-            // Update _version in the entity data
-            if let Some(entities) = state.entities.get_mut(entity)
-                && let Some(data) = entities.get_mut(id)
-            {
-                data.insert("_version".into(), Value::String(version.clone()));
-
-                // Track view change notifications for views monitoring this entity
-                for (view_name, (view_entity, _count)) in &state.materialized_views {
-                    if view_entity == entity
-                        && let Some(changes_vec) = state.view_stream_changes.get(view_name)
-                    {
-                        // Look up the ROWID for this entity in this view
-                        // In concurrent batches, the ROWID may not exist
-                        let Some(rowid) = state
-                            .view_rowids
-                            .get(view_name)
-                            .and_then(|rowids| rowids.get(id))
-                        else {
-                            continue;
-                        };
-
-                        let mut data_with_rowid = data.clone();
-                        data_with_rowid.insert("_rowid".into(), Value::String(rowid.to_string()));
-                        let change = RowChange {
-                            relation_name: view_name.clone(),
-                            change: ChangeData::Updated {
-                                id: rowid.to_string(),
-                                data: data_with_rowid,
-                                origin: ChangeOrigin::Remote {
-                                    operation_id: None,
-                                    trace_id: None,
-                                },
-                            },
-                        };
-                        changes_vec.lock().unwrap().push(change);
-                    }
-                }
-            }
-            None
         }
         StorageTransition::EnableCDC => {
             state.cdc_enabled = true;
@@ -1011,17 +915,6 @@ async fn apply_to_turso_inner(
         StorageTransition::Get { entity, id } => {
             let result = backend.get(entity, id).await.map_err(|e| e.to_string())?;
             Ok(Some(result.into_iter().collect()))
-        }
-        StorageTransition::SetVersion {
-            entity,
-            id,
-            version,
-        } => {
-            backend
-                .set_version(entity, id, version.clone())
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(None)
         }
         StorageTransition::EnableCDC => {
             // This requires test state - should not be called concurrently
@@ -1181,17 +1074,6 @@ async fn apply_to_turso(
             let result = backend.get(entity, id).await.map_err(|e| e.to_string())?;
             Ok(Some(result.into_iter().collect()))
         }
-        StorageTransition::SetVersion {
-            entity,
-            id,
-            version,
-        } => {
-            backend
-                .set_version(entity, id, version.clone())
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(None)
-        }
         StorageTransition::EnableCDC => {
             // CDC is now enabled by default via the DatabaseActor
             // Just return success
@@ -1264,9 +1146,7 @@ fn check_preconditions(state: &ReferenceState, transition: &StorageTransition) -
             // Entity must exist
             state.entities.contains_key(entity)
         }
-        StorageTransition::Update { entity, id, .. }
-        | StorageTransition::Delete { entity, id }
-        | StorageTransition::SetVersion { entity, id, .. } => {
+        StorageTransition::Update { entity, id, .. } | StorageTransition::Delete { entity, id } => {
             // Entity and id must exist
             state
                 .entities
@@ -1316,7 +1196,7 @@ fn verify_states_match(
 
             let turso_data = turso_data.unwrap();
 
-            // Compare values (ignoring internal fields like _dirty, _version)
+            // Compare values (ignoring internal fields, which start with `_`)
             for (key, ref_value) in ref_data {
                 if !key.starts_with('_') {
                     let turso_value = turso_data.get(key);
@@ -1331,22 +1211,6 @@ fn verify_states_match(
                         turso_value
                     );
                 }
-            }
-        }
-
-        // Check version tracking
-        if let Some(ref_versions) = reference.versions.get(entity_name) {
-            for (id, ref_version) in ref_versions {
-                let turso_version = tokio::task::block_in_place(|| {
-                    handle.block_on(turso.get_version(entity_name, id))
-                })
-                .expect("Failed to get version from Turso");
-
-                assert_eq!(
-                    turso_version, *ref_version,
-                    "Version mismatch for {}/{}: expected {:?}, got {:?}",
-                    entity_name, id, ref_version, turso_version
-                );
             }
         }
     }
@@ -1561,14 +1425,6 @@ fn generate_transitions(state: &ReferenceState) -> BoxedStrategy<StorageTransiti
         .prop_map(|(entity, id)| StorageTransition::Delete { entity, id })
         .boxed();
 
-    let set_version = (prop::sample::select(existing_ids), "[a-z0-9]{1,10}")
-        .prop_map(|((entity, id), version)| StorageTransition::SetVersion {
-            entity,
-            id,
-            version,
-        })
-        .boxed();
-
     // CDC operation
     let enable_cdc = Just(StorageTransition::EnableCDC).boxed();
 
@@ -1590,7 +1446,6 @@ fn generate_transitions(state: &ReferenceState) -> BoxedStrategy<StorageTransiti
         (8, delete),
         (12, query),
         (10, get),
-        (10, set_version),
     ];
 
     // Add CDC if not enabled
@@ -1771,7 +1626,6 @@ fn check_batch_preconditions(state: &ReferenceState, batch: &TransitionBatch) ->
                 StorageTransition::Insert { .. }
                     | StorageTransition::Update { .. }
                     | StorageTransition::Delete { .. }
-                    | StorageTransition::SetVersion { .. }
             )
         });
         if !all_transactionable {

@@ -134,7 +134,7 @@ Open reds here: `task-state-storage-coherence`.
 | Page identity / name chains | A page's file path is its chain of **page** ancestors | `RenamePage`, `BlockToPage`, `CreatePageAtFreedPath`; `inv-no-page-under-non-page`, `inv-every-page-has-its-own-file`, `inv-companion-has-no-child-page-headings` | [Model.md §Page identity](Model.md) (Martin ruled Option A, keep-the-refusal) | File adapter | `crates/holon-filesystem/src/sync_ports.rs` |
 | Documents & directories | Creating, renaming, deleting docs and dirs on disk | `CreateDocument`, `RenameDocument`, `DeleteDocument`, `CreateDirectory`; `inv-no-write-outside-vault-root` | [0011](../adr/0011-filesystem-port-trait.md) | File adapter | `crates/holon-filesystem/src/` |
 | Tombstones | A tombstone outlives every registered replica's base | *(no keystone invariant)* | Model.md inv 9 | Storage | [Replication.md](Replication.md) |
-| P2P sync | Iroh transport carrying Loro deltas between devices | `AddPeer`, `PeerEdit`, `PeerCharEdit`, `SyncWithPeer`, `MergeFromPeer`, `SyncNow` | [0001](../adr/0001-hybrid-sync-architecture.md); Model.md inv 11 | Transport | `crates/holon-loro/src/iroh_sync_adapter.rs` |
+| P2P sync | Iroh transport carrying Loro deltas between devices | `AddPeer`, `PeerEdit`, `PeerCharEdit`, `SyncWithPeer`, `MergeFromPeer`, `SyncNow` | [0001](../adr/0001-hybrid-sync-architecture.md); Model.md inv 11 | Transport | `crates/holon-loro/src/iroh_advertiser.rs` |
 | Git / jj vault init | Initializing version control over the vault directory | `GitInit`, `JjGitInit` | — | File adapter | `crates/holon-filesystem/src/` |
 
 Open reds here: `org-blocks-ref-diverge`, `page-without-own-file`, `loro-frontier-height`.

@@ -271,7 +271,7 @@ See also [wiki/overview.md](../wiki/overview.md) for the navigational layer and 
 | `crates/holon/src/api/ui_watcher.rs` | watch_ui: merge_triggers → switch_map → UiEvent stream |
 | `crates/holon-turso/src/turso.rs` | Turso backend + CDC |
 | `crates/holon/src/sync/loro_module.rs` | Standalone Loro DI module (independent of OrgMode) |
-| `crates/holon-loro/src/iroh_sync_adapter.rs` | Iroh P2P sync adapter (transport only) |
+| `crates/holon-loro/src/iroh_sync_adapter.rs` | Iroh P2P sync primitives: endpoints, ALPNs, `sync_doc_*`, `SharedTreeSyncManager` |
 | `crates/holon-loro/src/loro_share_backend.rs` | Loro document sharing (P2P) |
 | `crates/holon-loro/src/multi_peer.rs` | Shared multi-peer Loro sync infrastructure for property-based testing (PeerState/GroupState/GroupTransition) |
 | `crates/holon-loro/src/loro_block_operations.rs` | OperationProvider routing writes through Loro CRDT |

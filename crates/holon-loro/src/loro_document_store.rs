@@ -206,7 +206,7 @@ impl LoroDocumentStore {
             // sessions) write a shallow snapshot instead of a full one.
             // Holon undo replays the inverse-command log, so trimmed Loro
             // history is never needed locally; stale P2P peers get a full
-            // snapshot via IrohSyncAdapter's delta-export guard.
+            // snapshot via the delta-export guard in `iroh_sync_adapter`.
             // Kill-switch: HOLON_LORO_COMPACT=off.
             const COMPACT_EVERY: u64 = 64;
             let n = self.save_counter.fetch_add(1, Ordering::Relaxed);

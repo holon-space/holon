@@ -318,7 +318,7 @@ mod tests {
     /// above shows working.
     ///
     /// Consequence for sharing: a multi-peer vault's on-disk snapshot, and the
-    /// full snapshot `IrohSyncAdapter` ships to a peer below the shallow base
+    /// full snapshot `sync_doc_*` ships to a peer below the shallow base
     /// (`iroh_sync_adapter.rs:86`), still carry deleted plaintext. Closing it
     /// needs a loro-side shallow-export change, not a Holon call site.
     #[tokio::test]

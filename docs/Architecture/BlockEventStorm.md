@@ -87,7 +87,7 @@ the wired DI graph* — see ✅ H10 (the two arms are now pinned equivalent).
 
 ### Lane C — a peer syncs over Iroh
 ```
-🔵 sync_doc_initiate(peer_vv)                     🟡 IrohSyncAdapter (QUIC, ALPN = prefix/shared_tree_id)
+🔵 sync_doc_initiate(peer_vv)                     🟡 IrohAdvertiser (QUIC, ALPN = prefix/shared_tree_id)
 🟠 DeltaExported (ExportMode::updates(peer_vv))    🟣 fall back to full Snapshot if peer behind compacted log (disclosed warn!)
 🔵 apply_update(bytes)
 🟠 PeerUpdateImported

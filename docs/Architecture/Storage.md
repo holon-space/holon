@@ -233,7 +233,6 @@ The `StorageBackend` trait implementation provides standard operations:
 - `get(entity, id)` - Retrieves single row by primary key
 - `query(entity, filter)` - Queries with `Filter` predicates (`Eq`, `In`, `And`, `Or`, `IsNull`, `IsNotNull`)
 - `insert/update/delete` - Standard DML operations
-- `get_version/set_version` - Optimistic locking support via `_version` column (implemented; currently exercised only by the storage PBTs, not wired into any production write path)
 
 ### Change Data Capture (CDC)
 

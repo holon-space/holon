@@ -420,3 +420,187 @@ cb6fda0dc8293f8ca7e9b3525319334d0eaf6bd3042ea8d534bdd5c3999fb6b5  crates/holon/t
 1df73df8f418b01e87e56311fbce334c5671a5c81b91721dec08d531c905d8dd  crates/holon/tests/json_aggregation_e2e_test.rs
 db433c23a7e4b0128745bd260a20ad94de22af1b7346abac61c8656cbdaee257  frontends/holon-worker/Cargo.lock
 ```
+
+---
+
+# Third-round re-verification — 2026-09-02 (D65.a / D66.a / test-group)
+
+`@` = `48b59272`, `@-` = `0b1c8df4` (the lane's round-2 commit), chain reaches
+`ed38a4dae833`. Delta: 22 files, +127/−1400. Base caller counts were measured
+against a tree extracted with `git -C <primary repo> archive 0b1c8df4dd9c`
+(sentinel-asserted non-empty), per the jj-workspace archive hazard.
+
+**Verdict: two claims REFUTED — the lane cannot land as-is.** `cargo fmt
+--all --check` fails, and a deleted API is still documented as implemented.
+Everything else holds; the deletion itself is clean.
+
+## T1. Production sharing unaffected — CONFIRMED
+
+Mechanical public-surface diff of the kept file (`grep -oE "pub (async fn|fn|struct|enum|trait|use) …"`,
+base vs now). **Removed — 9 items, all `IrohSyncAdapter`'s:**
+
+| Removed pub item | prod call sites at base | test/example call sites at base |
+|---|---|---|
+| `pub struct IrohSyncAdapter` | 0 | 54 name hits |
+| `pub async fn new` | 0 | (of the 54) |
+| `pub async fn new_with_alpns` | **0** | **0** |
+| `pub fn set_peer_id_from_node` | 0 | 1 |
+| `pub fn addr` | 0 | (of the 54) |
+| `pub fn endpoint` | 0 | (of the 54) |
+| `pub async fn sync_with_peer` | 0 | 26 |
+| `pub async fn accept_sync` | 0 | 28 |
+| `pub use adapter::IrohSyncAdapter` | re-export only | — |
+
+Plus `pub use iroh_sync_adapter::IrohSyncAdapter` in `lib.rs`. **Added: none.**
+
+The 8 apparent "production" `IrohSyncAdapter` hits at base are all doc-comments
+plus the re-export (`loro_document.rs:122,256`, `deleted_container_purge.rs:321`,
+`import_atomicity_probe.rs:12`, `loro_document_store.rs:209`,
+`loro_backend.rs:4393` ×2, `lib.rs:163`) — **zero call sites**; every one is
+updated or removed by this delta. The 27 "production" `sync_with_peer` hits are
+`apply_sync_with_peer`, an unrelated PBT capability method (name collision),
+untouched.
+
+Kept and still exported: `create_endpoint`, `create_endpoint_with_key`,
+`make_alpn`, `sync_doc_initiate`, `sync_doc_initiate_enrolled`,
+`sync_doc_accept`, `sync_doc_handle_connection`, `connection_remote_addr`,
+`IrohSync`, `SharedTreeSyncManager`, `SyncBackend`, `DirectSync`.
+`cargo check --workspace --all-targets` compiles with **0 errors**
+(`lane-logs/verify/v3-check.txt`, `Finished dev profile … in 29.73s`), so
+`iroh_advertiser.rs` and `loro_share_backend.rs` still build against them. No
+production path lost a function.
+
+## T2. The 28 kept Loro-only tests still run — CONFIRMED
+
+Counted from my own full run (`lane-logs/verify/v3-full.nextest.txt`):
+`integration_tests` 7, `reliability_tests` 16, `stress_tests` 5 = **28**, all
+PASS. Every name is Loro-document-only — convergence, peer-id, snapshot, utf8,
+boundary/invalid positions, idempotency, isolation, stability, memory — none
+touches a P2P endpoint. No adapter-driven test survived, and no Loro-only test
+was collaterally deleted.
+
+## T3. Residual references — REFUTED
+
+The brief's pattern is too broad to be diagnostic (`_version\b` alone matches
+426 lines: `schema_version`, `get_current_version`, `picked_items_version`,
+`change_version`, `RESPONSE_VERSION_KEY`, `model_version`, `cli_version` — all
+unrelated and untouched). Targeted greps on the actually-deleted identifiers:
+
+- `IrohSyncAdapter` — 2 hits, both current-state docs (the deliverable and the
+  bugfunnel entry, describing the fixed/deleted state). OK.
+- `new_with_alpns` — 2 hits, same two docs. OK.
+- `SetVersion` — 1 hit, the deliverable. OK. `"_dirty"` — **0**. OK.
+- `peer_discovery` — 1 hit, the deliverable. OK.
+
+**The refutation — `docs/Architecture/Storage.md:236`:**
+
+```
+- `get_version/set_version` - Optimistic locking support via `_version` column
+  (implemented; currently exercised only by the storage PBTs, not wired into
+  any production write path)
+```
+
+That is a present-tense "implemented" claim about an API this delta deleted. It
+is neither unrelated nor current-state. The lane updated four architecture docs
+(`Architecture.md`, `Architecture/Sync.md`, `Architecture/FeatureMap.md`,
+`Architecture/BlockEventStorm.md`) and missed this one — the single doc that
+described the *storage* half of D65.a. Secondary, lower severity:
+`crates/holon/src/storage/TODO.md:140` still records
+`✅ Updated get_version() and set_version() to use prepared statements`.
+
+## T4. The nextest group binds to the right test — CONFIRMED
+
+`cargo nextest show-config test-groups -p holon -p holon-app`
+(`lane-logs/verify/v3-testgroups.txt`) resolves the override to exactly one test:
+
+```
+group: vault-scale-latency (max threads = 1)
+  * override for default profile with filter 'test(cursor_filtered_main_panel_delivers_at_vault_scale)':
+      holon::turso_storage_repros:
+          tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale
+```
+
+The `#[ignore]` reason names the ADR verbatim
+(`create_page_from_link.rs:602`):
+`#[ignore = "ADR 0029 D1b end-state pending: unique-random recreate not implemented"]`.
+Skipped count moved 5 → 6 in the full run, consistent.
+
+## T5. `concurrent_keystrokes_keep_every_undo_step` — NOT REPRODUCED; classification DISPUTED
+
+6/6 green for me: 5 isolated runs (`lane-logs/verify/v3-undo.txt` — PASS at
+1.894s, 1.929s, 1.878s, 1.942s, 1.888s, load average 5.7–6.6) and 1 pass inside
+the full `-p holon -p holon-app` run. I cannot reproduce the 7-vs-3 failure.
+
+**It is not load-sensitive "like row 19", and should not be treated that way.**
+Row 19's oracle is a wall-clock budget — a slower machine legitimately means a
+slower number, so pinning concurrency removes noise without removing signal.
+This test's oracle is a *correctness equality*: the undo walk after concurrent
+typing must equal the walk after sequential typing
+(`undo_concurrent_keystrokes.rs:203`). Its subject **is** concurrency —
+`type_word_as_the_editor_does` deliberately spawns un-awaited writes 1 ms apart
+to provoke interleavings. A differing step count under load is therefore either
+a real race in the inverse-command log or an over-specified oracle; in neither
+case is a `max-threads = 1` group the answer, because that pin would delete the
+only condition under which the property is exercised at all. Recommend a
+bugfunnel entry plus a high-repeat run (the failing step counts are the lead),
+not a latency-style group.
+
+## T6. Gates — fmt REFUTED, the rest CONFIRMED
+
+**`cargo fmt --all --check` FAILS** (`lane-logs/verify/v3-fmt.clean.txt`), one
+file, introduced by this delta's comment rewrite —
+`crates/holon-loro/src/loro_document.rs:253`:
+
+```
+-    /// incremental delta; `export_delta_or_full_snapshot` detects that and ships a full
+-    /// snapshot instead.
++    /// incremental delta; `export_delta_or_full_snapshot` detects that and
++    /// ships a full snapshot instead.
+```
+
+Renaming `IrohSyncAdapter` → `export_delta_or_full_snapshot` in that doc comment
+pushed the line past the width limit and it was not re-wrapped. This is a hard
+land-gate failure; `set -euo pipefail` aborted my gate script on it, so I re-ran
+the remainder separately.
+
+- `cargo check --workspace --all-targets` — **0 errors**, warnings only
+  (pre-existing `unused_must_use` in `holon-filesystem`).
+- Full run (`lane-logs/verify/v3-full.nextest.txt`):
+  `Summary [ 243.654s] 687 tests run: 681 passed (5 slow), 6 failed, 6 skipped`,
+  `real 246.83`. Failures:
+  1-5. the five `e2e_backend_engine_test` matview known reds
+  (`test_create_and_delete_workflow`, `test_basic_query_execution`,
+  `test_multiple_operations_sequence`, `test_operation_triggers_stream_update`,
+  `test_query_and_watch_stream`);
+  6. `sync_suite … subtree_share_round_trip_pbt` — the known flake, its **second
+  occurrence in three full runs** this session (green 3/3 isolated in round 2).
+  Both previously-remaining reds are gone: the `_version` dead suite is deleted,
+  the ADR 0029 D1b pin is ignored.
+- `jj status` — only the 22 intended files. `frontends/holon-worker/Cargo.lock`
+  is **not** in `jj diff -r @ --stat` (0 hits); I did not run
+  `check-worker-wasm` this pass, so the round-1 finding about that gate
+  re-dirtying it still stands unaddressed.
+
+## Additional finding — leftover `#[cfg]` from the deletion
+
+`crates/holon-loro/src/iroh_sync_adapter.rs:890-891` now carries two identical
+attributes back to back:
+
+```rust
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub use adapter::SharedTreeSyncManager;
+```
+
+The deletion removed `pub use adapter::IrohSyncAdapter;` but not the `#[cfg]`
+that guarded it. Rust ANDs stacked `cfg`s, so it compiles (confirmed by the
+clean `cargo check`) — cosmetic cruft, but it is the visible trace of an
+incomplete deletion and should go with the fmt fix.
+
+## Blocking list for the orchestrator
+
+1. `cargo fmt --all --check` red — `loro_document.rs:253`.
+2. `docs/Architecture/Storage.md:236` documents deleted API as implemented.
+3. (minor) duplicate `#[cfg]` at `iroh_sync_adapter.rs:890`.
+4. (minor) `crates/holon/src/storage/TODO.md:140` stale reference.
+5. (open, not this lane's) the `subtree_share_round_trip_pbt` flake rate.

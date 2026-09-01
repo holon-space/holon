@@ -9,7 +9,7 @@
 //!
 //! The probe runs the REAL sync granularity: doc A writes through
 //! `LoroBackend::create_block_with_properties` / `move_block`, exports
-//! `ExportMode::updates(&b.oplog_vv())` — the mode `IrohSyncAdapter`'s
+//! `ExportMode::updates(&b.oplog_vv())` — the mode
 //! `export_delta_or_full_snapshot` uses (`iroh_sync_adapter.rs:93`) — and doc B
 //! `import`s it (`iroh_sync_adapter.rs:303,417`) while a raw `std::thread`
 //! hammers doc B's tree.

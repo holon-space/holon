@@ -211,7 +211,7 @@ See [ADR 0001: Hybrid Sync Architecture](../adr/0001-hybrid-sync-architecture.md
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| `IrohSyncAdapter` | `crates/holon-loro/src/iroh_sync_adapter.rs` | Transport-only Iroh adapter: exports snapshots, applies updates, manages `iroh::Endpoint` |
+| `SharedTreeSyncManager` / `sync_doc_*` | `crates/holon-loro/src/iroh_sync_adapter.rs` | Transport-only Iroh primitives: export snapshots, apply updates, manage `iroh::Endpoint` and its ALPNs |
 | `LoroShareBackend` | `crates/holon-loro/src/loro_share_backend.rs` | Coordinates document sharing over P2P; produces / consumes Loro export bytes |
 | `multi_peer` (module) | `crates/holon-loro/src/multi_peer.rs` | Multi-peer session management (`DirectSync`, `PeerState`, `GroupState`) |
 
@@ -249,7 +249,7 @@ pub struct LoroBackend {
 3. **Change Notification**: Emits changes to subscribers for reactive UI updates
 4. **Cycle Detection**: Prevents moving a block under its own descendant via `is_ancestor()` check
 5. **Batch Operations**: Supports `get_blocks`, `create_blocks`, `delete_blocks` for efficiency
-6. **P2P Coordination**: Delegates P2P operations to `IrohSyncAdapter` / `LoroShareBackend`
+6. **P2P Coordination**: Delegates P2P operations to `IrohAdvertiser` / `LoroShareBackend`
 
 **Component Interaction (Authority + Projection):**
 
@@ -508,7 +508,7 @@ keeps only shared vocabulary (re-exports of `EventOrigin`, `PublishErrorTracker`
   (writes via cell layer)                       │
         │                                         │
         ▼                                         ▼
-  LoroBlockOperations                     IrohSyncAdapter / Iroh apply
+  LoroBlockOperations                     sync_doc_* / Iroh apply
   (Loro mutation + commit)                (CRDT merge into LoroDoc)
         │                                         │
         └──────────────────┬──────────────────────┘

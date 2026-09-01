@@ -50,3 +50,16 @@ slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
 [[profile.default.overrides]]
 filter = "binary(turso_storage_pbt)"
 slow-timeout = { period = "60s", terminate-after = 40 }  # 40 min hard cap
+
+# The vault-scale main-panel guard asserts a 5s wall-clock budget on a cold
+# matview create + first read (~70 pages). It measures the machine as much as
+# the query, so it needs a core to itself: 853ms alone on a quiet machine,
+# 4.74s alone at load-average 46, 7.52s inside an 885-test run — the last one
+# a FAIL that reads as a latency regression and is not one. The budget stays
+# where it is; the concurrency is what gets pinned.
+[test-groups]
+vault-scale-latency = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "test(cursor_filtered_main_panel_delivers_at_vault_scale)"
+test-group = "vault-scale-latency"

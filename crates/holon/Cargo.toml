@@ -19,9 +19,9 @@ path = "src/lib.rs"
 [features]
 default = ["iroh-sync"]
 # Dev-facing ONLY. `holon`'s library needs no iroh — the P2P transport moved out
-# with `loro_module.rs`. The two/three-peer sync, reconnect and stress tests in
-# `tests/` drive `holon_loro::IrohSyncAdapter`, which `holon-loro` gates behind
-# its own `iroh-sync`, so this feature reaches nothing but the dev-dependency.
+# with `loro_module.rs`. The sync-suite PBT in `tests/` drives
+# `holon_loro::iroh_sync_adapter::IrohSync`, which `holon-loro` gates behind its
+# own `iroh-sync`, so this feature reaches nothing but the dev-dependency.
 iroh-sync = ["holon-loro/iroh-sync"]
 # Enable test helpers for integration tests that need access to test utilities
 test-helpers = ["dep:tempfile", "testing", "test-yield"]

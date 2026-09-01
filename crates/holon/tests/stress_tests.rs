@@ -3,11 +3,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Result;
-#[cfg(feature = "iroh-sync")]
-use holon_loro::IrohSyncAdapter;
 use holon_loro::LoroDocument;
-#[cfg(feature = "iroh-sync")]
-use serial_test::serial;
 use tokio::time::sleep;
 
 #[tokio::test]
@@ -37,86 +33,6 @@ async fn test_high_frequency_updates() -> Result<()> {
     let text2 = doc2.get_text("editor")?;
     assert_eq!(text1, text2);
     assert_eq!(text1.len(), 1000);
-
-    Ok(())
-}
-
-#[cfg(feature = "iroh-sync")]
-#[tokio::test]
-#[serial]
-async fn test_large_batch_sync() -> Result<()> {
-    let doc1 = LoroDocument::new("large-batch".to_string())?;
-    let doc2 = LoroDocument::new("large-batch".to_string())?;
-
-    let start = Instant::now();
-    let chunk = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(100);
-    for i in 0..100 {
-        doc1.insert_text("editor", i * chunk.len(), &chunk)?;
-    }
-    let creation_time = start.elapsed();
-    println!("Created large document in {:?}", creation_time);
-
-    let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
-    let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
-
-    let doc1 = Arc::new(doc1);
-    let doc1_clone = doc1.clone();
-    let peer1_addr = adapter1.addr();
-
-    let accept_handle = tokio::spawn(async move { adapter1.accept_sync(&doc1_clone).await });
-
-    sleep(Duration::from_millis(500)).await;
-
-    let sync_start = Instant::now();
-    adapter2.sync_with_peer(&doc2, peer1_addr).await?;
-    sleep(Duration::from_millis(500)).await;
-    let sync_time = sync_start.elapsed();
-
-    let _ = accept_handle.await?;
-
-    println!("Synced large document in {:?}", sync_time);
-    assert!(
-        sync_time.as_secs() < 30,
-        "Large sync should complete in under 30 seconds"
-    );
-
-    let text2 = doc2.get_text("editor")?;
-    assert!(text2.len() > 100000);
-
-    Ok(())
-}
-
-#[cfg(feature = "iroh-sync")]
-#[tokio::test]
-#[serial]
-async fn test_many_small_containers() -> Result<()> {
-    let doc1 = LoroDocument::new("many-containers".to_string())?;
-    let doc2 = LoroDocument::new("many-containers".to_string())?;
-
-    for i in 0..100 {
-        let container_name = format!("container_{}", i);
-        doc1.insert_text(&container_name, 0, &format!("Content {}", i))?;
-    }
-
-    let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
-    let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
-
-    let doc1 = Arc::new(doc1);
-    let doc1_clone = doc1.clone();
-    let peer1_addr = adapter1.addr();
-
-    let accept_handle = tokio::spawn(async move { adapter1.accept_sync(&doc1_clone).await });
-
-    sleep(Duration::from_millis(500)).await;
-    adapter2.sync_with_peer(&doc2, peer1_addr).await?;
-    sleep(Duration::from_millis(500)).await;
-    let _ = accept_handle.await?;
-
-    for i in 0..100 {
-        let container_name = format!("container_{}", i);
-        let text = doc2.get_text(&container_name)?;
-        assert_eq!(text, format!("Content {}", i));
-    }
 
     Ok(())
 }
@@ -184,92 +100,6 @@ async fn test_memory_efficiency_large_doc() -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "iroh-sync")]
-#[tokio::test]
-async fn test_parallel_sync_operations() -> Result<()> {
-    let hub = Arc::new(LoroDocument::new("parallel-hub".to_string())?);
-    hub.insert_text("editor", 0, "Hub content")?;
-
-    let hub_adapter = IrohSyncAdapter::new("loro-sync").await?;
-    let peer_addr = hub_adapter.addr();
-
-    // The clients all dial `peer_addr`, so the accepts must run on that same
-    // adapter — one at a time, since `accept_sync` takes a single connection.
-    let hub_clone = hub.clone();
-    let accept_handle = tokio::spawn(async move {
-        for _ in 0..5 {
-            hub_adapter.accept_sync(&hub_clone).await?;
-        }
-        anyhow::Ok(())
-    });
-
-    sleep(Duration::from_millis(500)).await;
-
-    let mut connect_handles = Vec::new();
-    for i in 0..5 {
-        let addr = peer_addr.clone();
-        let connect_handle = tokio::spawn(async move {
-            let doc = LoroDocument::new("parallel-hub".to_string()).ok()?;
-            doc.insert_text("editor", 0, &format!("Client {}", i))
-                .ok()?;
-            let adapter = IrohSyncAdapter::new("loro-sync").await.ok()?;
-            sleep(Duration::from_millis(100)).await;
-            adapter.sync_with_peer(&doc, addr).await.ok()?;
-            Some(doc)
-        });
-        connect_handles.push(connect_handle);
-    }
-
-    sleep(Duration::from_millis(500)).await;
-
-    for handle in connect_handles {
-        let _ = handle.await;
-    }
-
-    accept_handle.await??;
-
-    let hub_text = hub.get_text("editor")?;
-    assert!(!hub_text.is_empty());
-
-    Ok(())
-}
-
-#[cfg(feature = "iroh-sync")]
-#[tokio::test]
-#[serial]
-async fn test_sync_latency_measurement() -> Result<()> {
-    let doc1 = LoroDocument::new("latency-test".to_string())?;
-    let doc2 = LoroDocument::new("latency-test".to_string())?;
-
-    doc1.insert_text("editor", 0, "Initial")?;
-
-    let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
-    let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
-
-    let doc1 = Arc::new(doc1);
-    let doc1_clone = doc1.clone();
-    let peer1_addr = adapter1.addr();
-
-    let accept_handle = tokio::spawn(async move { adapter1.accept_sync(&doc1_clone).await });
-
-    sleep(Duration::from_millis(500)).await;
-
-    let start = Instant::now();
-    adapter2.sync_with_peer(&doc2, peer1_addr).await?;
-    let latency = start.elapsed();
-
-    sleep(Duration::from_millis(200)).await;
-    let _ = accept_handle.await?;
-
-    println!("Sync latency: {:?}", latency);
-    assert!(
-        latency.as_secs() < 5,
-        "Initial sync should complete in under 5 seconds"
-    );
-
-    Ok(())
-}
-
 #[tokio::test]
 async fn test_update_size_efficiency() -> Result<()> {
     let doc = LoroDocument::new("update-size".to_string())?;
@@ -284,32 +114,6 @@ async fn test_update_size_efficiency() -> Result<()> {
         update2.len() < large_text.len() * 2,
         "Update should not be excessively larger than content"
     );
-
-    Ok(())
-}
-
-#[cfg(feature = "iroh-sync")]
-#[tokio::test]
-async fn test_rapid_peer_connections() -> Result<()> {
-    let hub = Arc::new(LoroDocument::new("rapid-conn".to_string())?);
-    hub.insert_text("editor", 0, "Hub")?;
-
-    for _ in 0..10 {
-        let hub_clone = hub.clone();
-        let hub_adapter = IrohSyncAdapter::new("loro-sync").await?;
-        let addr = hub_adapter.addr();
-
-        tokio::spawn(async move { hub_adapter.accept_sync(&hub_clone).await });
-
-        sleep(Duration::from_millis(100)).await;
-
-        let doc = LoroDocument::new("rapid-conn".to_string())?;
-        doc.insert_text("editor", 0, "Client")?;
-        let client_adapter = IrohSyncAdapter::new("loro-sync").await?;
-        let _ = client_adapter.sync_with_peer(&doc, addr).await;
-
-        sleep(Duration::from_millis(100)).await;
-    }
 
     Ok(())
 }

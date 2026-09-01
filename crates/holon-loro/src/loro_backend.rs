@@ -4390,13 +4390,13 @@ impl P2POperations for LoroBackend {
 
     async fn connect_to_peer(&self, _: String) -> Result<(), ApiError> {
         Err(ApiError::NetworkError {
-            message: "P2P sync requires IrohSyncAdapter (not wired to LoroBackend)".to_string(),
+            message: "P2P sync requires the iroh advertiser (not wired to LoroBackend)".to_string(),
         })
     }
 
     async fn accept_connections(&self) -> Result<(), ApiError> {
         Err(ApiError::NetworkError {
-            message: "P2P sync requires IrohSyncAdapter (not wired to LoroBackend)".to_string(),
+            message: "P2P sync requires the iroh advertiser (not wired to LoroBackend)".to_string(),
         })
     }
 }

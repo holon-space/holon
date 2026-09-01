@@ -160,7 +160,6 @@ pub use holon_core::CanonicalPath;
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
-pub use iroh_sync_adapter::IrohSyncAdapter;
 pub use live_value::LiveValue;
 pub use loro_backend::CONTENT_RAW;
 pub use loro_backend::CONTENT_TYPE;

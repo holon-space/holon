@@ -137,7 +137,6 @@ Added `test_view_change_stream_receives_events_from_backend_operations` in `turs
 - ✅ Refactored `delete()` to use prepared statements (lines 563-577)
 - ✅ Refactored `build_where_clause()` to bind values as parameters (lines 267-303)
 - ✅ Added `value_to_turso_param()` helper method (lines 236-246)
-- ✅ Updated `get_version()` and `set_version()` to use prepared statements (lines 580-624)
 - ✅ All methods now use parameterized queries with `Vec<turso::Value>` or arrays
 
 **Result**: SQL injection vulnerabilities eliminated, query plan caching enabled
