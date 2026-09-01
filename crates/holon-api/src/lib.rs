@@ -226,6 +226,7 @@ pub use holon_pattern::REMOVED_MARKER_KEY;
 pub use holon_pattern::RemovedTag;
 pub use holon_pattern::Value;
 pub use holon_pattern::arcs;
+pub use holon_pattern::kind_envelope;
 pub use holon_pattern::marking;
 pub use holon_pattern::pattern;
 pub use holon_pattern::schema;

@@ -755,9 +755,7 @@ pub(crate) fn read_scalar_field_from_meta(meta: &loro::LoroMap, key: &str) -> Op
                 .as_string()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| panic!("Property {key:?} is not a JSON string: {v:?}"));
-            let parsed = serde_json::from_str(&json)
-                .unwrap_or_else(|e| panic!("Corrupt property JSON for {key:?}: {json:?}: {e}"));
-            return Some(parsed);
+            return Some(decode_property_json(key, &json));
         }
         if let Some(loro::ValueOrContainer::Container(_)) = map.get(key) {
             panic!("Property {key:?} unexpectedly holds a container, not a JSON string");
@@ -784,9 +782,40 @@ fn encode_property_value(key: &str, value: &Value) -> anyhow::Result<loro::LoroV
     if let Err(e) = value.reject_reserved_marker(key) {
         anyhow::bail!(e);
     }
-    Ok(loro::LoroValue::from(
-        serde_json::to_string(value)?.as_str(),
-    ))
+    // Same discipline, second reserved shape: an authored look-alike of the
+    // kind envelope would read back as a kind the author never wrote, and
+    // refusing it here is what lets `decode_property_json` stay strict.
+    if let Err(e) = value.reject_kind_envelope_shape(key) {
+        anyhow::bail!(e);
+    }
+    // `Value` is untagged, so `DateTime` and `Json` would go out as bare
+    // strings and read back as `String`. Those two travel inside an envelope
+    // that names the kind; every other kind keeps the exact bytes it has
+    // always had, so an existing document needs no migration.
+    let json = match holon_api::kind_envelope::encode(value) {
+        Some(envelope) => serde_json::to_string(&envelope)?,
+        None => serde_json::to_string(value)?,
+    };
+    Ok(loro::LoroValue::from(json.as_str()))
+}
+
+/// Parse one stored property JSON string back into its `Value`, restoring the
+/// kind an envelope carries.
+///
+/// A value CLAIMING to be an envelope is decoded strictly: a malformed one is
+/// corruption, never a plain object. The write leg refuses to store an
+/// authored look-alike, so nothing legitimate can produce one — falling back
+/// would silently serve the wrong value for a key whose kind was declared.
+fn decode_property_json(key: &str, json: &str) -> Value {
+    let parsed: serde_json::Value = serde_json::from_str(json)
+        .unwrap_or_else(|e| panic!("Corrupt property JSON for {key:?}: {json:?}: {e}"));
+    if holon_api::kind_envelope::claims_envelope(&parsed) {
+        return holon_api::kind_envelope::decode(&parsed).unwrap_or_else(|e| {
+            panic!("Corrupt kind envelope for property {key:?}: {json:?}: {e}")
+        });
+    }
+    serde_json::from_value(parsed)
+        .unwrap_or_else(|e| panic!("Corrupt property JSON for {key:?}: {json:?}: {e}"))
 }
 
 /// Decode the nested per-property `LoroMap` back into a property map. Each
@@ -804,9 +833,7 @@ fn decode_properties_map(map: &loro::LoroMap) -> HashMap<String, Value> {
                 panic!("Property {key:?} unexpectedly holds a container, not a JSON string")
             }
         };
-        let parsed = serde_json::from_str(&json)
-            .unwrap_or_else(|e| panic!("Corrupt property JSON for {key:?}: {json:?}: {e}"));
-        out.insert(key.to_string(), parsed);
+        out.insert(key.to_string(), decode_property_json(key, &json));
     });
     out
 }
@@ -4622,6 +4649,107 @@ mod diff_checkout_race_tests {
         assert!(
             msg.contains("cfg.nested"),
             "the refusal must name the offending key PATH so the author can find it: {msg}"
+        );
+    }
+
+    /// The kinds JSON cannot spell must survive the on-disk form, not merely
+    /// the in-memory one: S2's whole claim is about what comes back after a
+    /// RESTART, so this saves a snapshot, reopens it from the bytes, and reads
+    /// through the production projection.
+    ///
+    /// Before S2 both came back `Value::String` — `Value` is untagged, so
+    /// `DateTime`/`Json` serialize as bare JSON strings and the first matching
+    /// variant on the way back is `String`.
+    #[tokio::test]
+    async fn date_time_and_json_keep_their_kind_across_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("restart.loro");
+
+        let when = Value::DateTime("2026-08-22T10:00:00Z".to_string());
+        let doc_json = Value::Json(r#"{"a":1}"#.to_string());
+        // A plain string that LOOKS like a timestamp: the envelope must record
+        // what the author MEANT, so this one must NOT come back a DateTime.
+        let looks_like = Value::String("2026-08-22T10:00:00Z".to_string());
+        let props = HashMap::from([
+            ("when".to_string(), when.clone()),
+            ("doc".to_string(), doc_json.clone()),
+            ("plain".to_string(), looks_like.clone()),
+        ]);
+
+        let doc = Arc::new(LoroDocument::new("restart".to_string()).unwrap());
+        let backend = LoroBackend::from_document(doc.clone());
+        backend
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::text("host"),
+                Some(EntityUri::block("restart-host")),
+                &props,
+                &holon_api::BlockEdges::default(),
+            )
+            .await
+            .expect("seed block");
+        doc.save_to_file(&path).expect("snapshot must save");
+
+        let reopened = Arc::new(
+            LoroDocument::load_from_file(&path, "restart".to_string()).expect("snapshot reloads"),
+        );
+        let block = LoroBackend::from_document(reopened)
+            .get_block("block:restart-host")
+            .await
+            .expect("the reloaded block must read");
+
+        assert_eq!(
+            block.properties.get("when"),
+            Some(&when),
+            "a DateTime must not degrade to String across a restart"
+        );
+        assert_eq!(
+            block.properties.get("doc"),
+            Some(&doc_json),
+            "a Json document must not degrade to String across a restart"
+        );
+        assert_eq!(
+            block.properties.get("plain"),
+            Some(&looks_like),
+            "a plain string that looks like a timestamp must stay a String"
+        );
+    }
+
+    /// An authored object wearing the envelope's marker key is REFUSED at the
+    /// write, which is what lets the read decode envelopes strictly.
+    #[tokio::test]
+    async fn an_authored_kind_envelope_look_alike_is_refused() {
+        let (_doc, backend) = make_backend().await;
+        backend
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::text("host"),
+                Some(EntityUri::block("envelope-host")),
+                &HashMap::new(),
+                &holon_api::BlockEdges::default(),
+            )
+            .await
+            .expect("seed block");
+
+        let props = HashMap::from([(
+            "cfg".to_string(),
+            Value::Object(HashMap::from([(
+                "nested".to_string(),
+                Value::Object(HashMap::from([(
+                    holon_api::kind_envelope::KIND_ENVELOPE_KEY.to_string(),
+                    Value::String("date_time".to_string()),
+                )])),
+            )])),
+        )]);
+
+        let err = backend
+            .update_block_properties("block:envelope-host", &props)
+            .await
+            .expect_err("an authored kind envelope must be REFUSED, not stored");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("cfg.nested"),
+            "the refusal must name the offending key PATH: {msg}"
         );
     }
 

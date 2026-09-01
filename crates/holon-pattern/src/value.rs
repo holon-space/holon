@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::kind_envelope;
+
 /// The key carrying [`RemovedTag`] on the wire.
 pub const REMOVED_MARKER_KEY: &str = "__holon_removed";
 
@@ -236,17 +238,45 @@ impl Value {
     /// depth it is found, so a guard that only inspects the root is a guard the
     /// hazard walks around inside a nested object.
     pub fn reserved_marker_path(&self) -> Option<String> {
-        fn walk(v: &Value, prefix: &str, out: &mut Option<String>) {
+        self.path_to(&|v| {
+            matches!(v, Value::Object(map)
+                if map.len() == 1 && map.get(REMOVED_MARKER_KEY) == Some(&Value::Boolean(true)))
+        })
+    }
+
+    /// The dotted key path at which this value wears the kind-envelope marker,
+    /// at ANY depth — `None` when it is clean.
+    ///
+    /// The envelope is how a JSON-only storage leg carries a `DateTime`/`Json`
+    /// kind ([`crate::kind_envelope`]), so an AUTHORED object of that shape
+    /// would read back as a different kind than it was written. Same hazard as
+    /// the removal marker, same closure: refuse it at the write.
+    pub fn kind_envelope_path(&self) -> Option<String> {
+        self.path_to(&|v| {
+            matches!(v, Value::Object(map) if map.contains_key(kind_envelope::KIND_ENVELOPE_KEY))
+        })
+    }
+
+    /// The dotted key path of the first value satisfying `offends`, at any
+    /// depth. Shared by the reserved-shape guards so a new one cannot forget
+    /// to recurse — a guard that only inspects the root is a guard the hazard
+    /// walks around inside a nested object.
+    fn path_to(&self, offends: &dyn Fn(&Value) -> bool) -> Option<String> {
+        fn walk(
+            v: &Value,
+            prefix: &str,
+            out: &mut Option<String>,
+            offends: &dyn Fn(&Value) -> bool,
+        ) {
             if out.is_some() {
+                return;
+            }
+            if offends(v) {
+                *out = Some(prefix.to_string());
                 return;
             }
             match v {
                 Value::Object(map) => {
-                    if map.len() == 1 && map.get(REMOVED_MARKER_KEY) == Some(&Value::Boolean(true))
-                    {
-                        *out = Some(prefix.to_string());
-                        return;
-                    }
                     // Sorted so the reported path is deterministic when more
                     // than one branch offends.
                     let mut keys: Vec<&String> = map.keys().collect();
@@ -257,19 +287,19 @@ impl Value {
                         } else {
                             format!("{prefix}.{k}")
                         };
-                        walk(&map[k], &path, out);
+                        walk(&map[k], &path, out, offends);
                     }
                 }
                 Value::Array(items) => {
                     for (i, item) in items.iter().enumerate() {
-                        walk(item, &format!("{prefix}[{i}]"), out);
+                        walk(item, &format!("{prefix}[{i}]"), out, offends);
                     }
                 }
                 _ => {}
             }
         }
         let mut out = None;
-        walk(self, "", &mut out);
+        walk(self, "", &mut out, offends);
         out
     }
 
@@ -290,6 +320,32 @@ impl Value {
                 };
                 Err(format!(
                     "property '{full}' is the reserved removal marker                      {{\"{REMOVED_MARKER_KEY}\": true}} and cannot be stored as a value — it                      would read back as a removal instruction"
+                ))
+            }
+        }
+    }
+
+    /// Refuse this value if it wears the kind-envelope marker at any depth,
+    /// naming the full key path under the property `key`.
+    ///
+    /// Storing an authored look-alike would make the read either re-type it
+    /// into a `DateTime`/`Json` the author never wrote, or — since the read is
+    /// strict — fail loudly on data that was legal when it went in. Refusing
+    /// here, where the author is present, is what lets the read stay strict.
+    pub fn reject_kind_envelope_shape(&self, key: &str) -> Result<(), String> {
+        match self.kind_envelope_path() {
+            None => Ok(()),
+            Some(path) => {
+                let full = if path.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{key}.{path}")
+                };
+                Err(format!(
+                    "property '{full}' carries the reserved key \
+                     '{}' and cannot be stored as a value — it would read back as a kind \
+                     envelope rather than the object it is",
+                    kind_envelope::KIND_ENVELOPE_KEY
                 ))
             }
         }

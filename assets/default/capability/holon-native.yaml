@@ -173,11 +173,34 @@ fidelity_axes:
     # Object. NV-1 carries the KIND beside the bag in the `property_kinds`
     # column, so both now round-trip on the leg this profile certifies.
     #
-    # SQL leg faithful since NV-1; Loro leg pending S2. The certified carrier is
-    # `block_properties_json` — the SQL properties column. The Loro leg still
-    # serializes `Value` untagged (holon-pattern/src/value.rs) and loses these
-    # two kinds across a restart; when it gains a Carrier here, it will need S2
-    # first or this clause goes red for that leg.
+    # BOTH durable legs are measured: `block_properties_json` (the SQL
+    # properties column, faithful since NV-1) and `loro_properties_map` (the
+    # per-property JSON string in the Loro tree, faithful since S2). The Loro
+    # leg carries the kind INSIDE the value — an envelope, not a map beside the
+    # bag — because a kind map and a value map are two CRDT registers that
+    # merge independently (holon-pattern/src/kind_envelope.rs).
+    #
+    # The Loro leg is driven by `the_loro_leg_keeps_every_declared_kind` rather
+    # than by a second `Carrier`: `certify` runs EVERY clause over every
+    # carrier, and `property_keys.engine_owned_keys` asks about the AUTHORING
+    # boundary, which a storage-leg probe cannot reach. See that test.
+    #
+    # DISCLOSED, and not a regression: while an OLD build writes, it never
+    # envelopes, so a new build reads its date_time/json back as string. That
+    # is the pre-S2 loss, not one S2 introduces, and it cannot be closed from
+    # the reading side. It matters because the sharing leg pairs peers on
+    # different release cadences, so mixed versions are a real state rather
+    # than a hypothetical.
+    #
+    # "No migration" is forward-looking: a pre-S2 vault that ALREADY held a
+    # literal `__holon_kind`-shaped object property is re-interpreted (or
+    # refused, if malformed) rather than migrated — near-zero reachability for
+    # a key this change invented, same exposure NV-2 accepted for
+    # `__holon_removed`.
+    #
+    # Still ambiguous at DEPTH: a date_time inside an array or object is not
+    # enveloped on either leg (S2.3), so nested kinds still read back as
+    # string. The certifier drives top-level kinds only.
     #
     # The `json` kind carries the DOCUMENT, not its byte formatting:
     # Json("{ \"a\": 1 }") reads back as the canonical Json("{\"a\":1}").

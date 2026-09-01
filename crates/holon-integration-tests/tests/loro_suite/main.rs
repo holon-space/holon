@@ -2,6 +2,7 @@
 //! tests.
 
 mod loro_create_persists_prod_session;
+mod loro_kind_fidelity_through_projection;
 mod loro_live_entity_wiring;
 mod loro_memory_start_app;
 mod loro_projection_atomic_advance;

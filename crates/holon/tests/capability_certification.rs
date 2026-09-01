@@ -25,6 +25,7 @@ use holon::storage::BLOCK_WRITE_TABLE;
 use holon::testing::E2ETestContext;
 use holon_api::Value;
 use holon_api::block::Block;
+use holon_api::repository::CoreOperations;
 use holon_capability::CapabilityProfile;
 use holon_capability::Carrier;
 use holon_capability::CertifiableFormat;
@@ -35,14 +36,26 @@ use holon_capability::RouteReadback;
 use holon_capability::certify;
 use holon_capability::clause::ClauseId;
 use holon_core::OperationProvider;
+use holon_loro::LoroBackend;
 use holon_turso::schema_module::SchemaModule;
 use holon_turso::schema_modules::BlockSchemaModule;
 use tokio::runtime::Handle;
 
-/// The substrate's one property carrier: the JSON blob on `block_raw`.
+/// The substrate's SQL property carrier: the JSON blob on `block_raw`.
 const BLOB_LEG: Carrier = Carrier {
     leg: Leg("block_properties_json"),
     description: "the properties JSON column the SQL operation provider writes",
+};
+
+/// The substrate's CRDT property carrier: the per-property JSON string in the
+/// Loro tree's properties map.
+///
+/// A second leg, not a second route on `BLOB_LEG`: it is a different on-disk
+/// form with a different failure mode, and it is the form that survives a
+/// restart.
+const LORO_LEG: Carrier = Carrier {
+    leg: Leg("loro_properties_map"),
+    description: "the per-property JSON string the Loro backend writes into a node's meta",
 };
 
 /// FK anchor the production core schema seeds; every root block needs it.
@@ -51,6 +64,7 @@ const ROOT_PARENT: &str = "sentinel:no_parent";
 struct HolonNative {
     profile: CapabilityProfile,
     ctx: E2ETestContext,
+    loro: Arc<LoroBackend>,
 }
 
 impl HolonNative {
@@ -61,10 +75,15 @@ impl HolonNative {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("../../assets/default/capability/holon-native.yaml")
             });
+        let doc = Arc::new(
+            holon_loro::LoroDocument::new("certify".to_string())
+                .map_err(|e| anyhow::anyhow!("the certification Loro doc must open: {e:?}"))?,
+        );
         let native = Self {
             profile: CapabilityProfile::from_path(&path)
                 .context("the holon-native profile must load")?,
             ctx: E2ETestContext::from_engine(block_engine().await?),
+            loro: Arc::new(LoroBackend::from_document(doc)),
         };
         // CONTROL, and it is load-bearing: without it a broken WRITE PATH
         // reaches the report as `Readback::Refused` and reads exactly like a
@@ -290,6 +309,83 @@ impl HolonNative {
         self.read_stored(id, key).await
     }
 
+    /// Write one property through the Loro create path and read it back off
+    /// the tree — the CRDT leg's own author path, not the SQL one.
+    async fn loro_write_then_read(
+        &self,
+        id: &str,
+        key: &str,
+        value: &Value,
+    ) -> anyhow::Result<Readback> {
+        let props = HashMap::from([(key.to_string(), value.clone())]);
+        if let Err(e) = self
+            .loro
+            .create_block_with_properties(
+                holon_api::EntityUri::no_parent(),
+                holon_api::block::BlockContent::text("certify"),
+                Some(holon_api::EntityUri::block(id)),
+                &props,
+                &holon_api::BlockEdges::default(),
+            )
+            .await
+        {
+            return Ok(Readback::Refused {
+                reason: format!("{e:?}"),
+            });
+        }
+        self.loro_read(id, key).await
+    }
+
+    /// The SECOND author route into the same leg: `update_block_properties`
+    /// MERGES rather than replacing, so it reaches the encode choke point
+    /// through a different writer than `create` does.
+    async fn loro_update_then_read(
+        &self,
+        id: &str,
+        key: &str,
+        value: &Value,
+    ) -> anyhow::Result<Readback> {
+        self.loro
+            .create_block_with_properties(
+                holon_api::EntityUri::no_parent(),
+                holon_api::block::BlockContent::text("certify"),
+                Some(holon_api::EntityUri::block(id)),
+                &HashMap::new(),
+                &holon_api::BlockEdges::default(),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("the Loro update probe's anchor must be creatable: {e:?}")
+            })?;
+        let props = HashMap::from([(key.to_string(), value.clone())]);
+        if let Err(e) = self
+            .loro
+            .update_block_properties(&format!("block:{id}"), &props)
+            .await
+        {
+            return Ok(Readback::Refused {
+                reason: format!("{e:?}"),
+            });
+        }
+        self.loro_read(id, key).await
+    }
+
+    async fn loro_read(&self, id: &str, key: &str) -> anyhow::Result<Readback> {
+        let block = self
+            .loro
+            .get_block(&format!("block:{id}"))
+            .await
+            // NOT `Absent`: an unreadable block is a harness fault, and
+            // reporting it as a lost property would blame the leg for it.
+            .map_err(|e| {
+                anyhow::anyhow!("the Loro probe wrote {id:?} but cannot read it: {e:?}")
+            })?;
+        Ok(match block.properties.get(key) {
+            None => Readback::Absent,
+            Some(found) => Readback::Present(found.clone()),
+        })
+    }
+
     /// Read one property back out of the stored blob.
     async fn read_stored(&self, id: &str, key: &str) -> anyhow::Result<Readback> {
         // The write path promotes a bare id to its `block:` URI at the
@@ -411,18 +507,33 @@ impl CertifiableFormat for HolonNative {
         &self.profile
     }
 
+    /// `LORO_LEG` is deliberately NOT here — see
+    /// `the_loro_leg_keeps_every_declared_kind`, which drives it directly.
+    ///
+    /// `certify` runs EVERY clause over every carrier, including
+    /// `property_keys.engine_owned_keys`. That clause asks whether AUTHORING
+    /// `_provenance` is refused, and the refusal lives at the operation engine
+    /// (`operation_engine.rs:400`), which then STAMPS the key itself
+    /// (`:423-426`) — so every storage leg must accept it. `BLOB_LEG` drives
+    /// the clause honestly because its probe goes through `execute_op`; a
+    /// storage-leg probe cannot, and adding one here would report the engine's
+    /// own stamp as a violation of the leg.
     fn carriers(&self) -> &'static [Carrier] {
         &[BLOB_LEG]
     }
 
     fn round_trip_property(
         &self,
-        _: Carrier,
+        carrier: Carrier,
         key: &str,
         value: &Value,
     ) -> anyhow::Result<Readback> {
         let id = probe_id(key, value);
-        self.blocking(self.write_then_read(&id, key, value))
+        if carrier.leg == LORO_LEG.leg {
+            self.blocking(self.loro_write_then_read(&id, key, value))
+        } else {
+            self.blocking(self.write_then_read(&id, key, value))
+        }
     }
 
     /// `block_properties_json` has TWO authored write routes, and the second
@@ -432,10 +543,19 @@ impl CertifiableFormat for HolonNative {
     /// axis probe through an operation that cannot create a block.
     fn extra_property_write_routes(
         &self,
-        _: Carrier,
+        carrier: Carrier,
         key: &str,
         value: &Value,
     ) -> anyhow::Result<Option<Vec<RouteReadback>>> {
+        if carrier.leg == LORO_LEG.leg {
+            // The Loro leg's own second author route. `set_field` and the bag
+            // route below are SQL-side operations and say nothing about it.
+            let up = format!("{}-loro-up", probe_id(key, value));
+            return Ok(Some(vec![RouteReadback {
+                route: "update_block_properties",
+                readback: self.blocking(self.loro_update_then_read(&up, key, value))?,
+            }]));
+        }
         let sf = format!("{}-sf", probe_id(key, value));
         let bag = format!("{}-bag", probe_id(key, value));
         Ok(Some(vec![
@@ -553,6 +673,70 @@ async fn the_native_profile_declares_only_restrictions_that_are_real() -> anyhow
         report.render()
     );
     Ok(())
+}
+
+/// S2 — the profile's `types` claim holds on the LORO leg too, on every one of
+/// its author routes.
+///
+/// The claim is a claim about the substrate, and the substrate has two durable
+/// property legs. Before S2 the Loro leg answered `String` for `date_time` and
+/// `json`: `Value` is untagged, so both serialize as bare JSON strings and the
+/// first matching variant on the way back is `String`. The kinds now travel in
+/// an envelope inside the value (`holon-pattern/src/kind_envelope.rs`).
+///
+/// Driven here rather than through `carriers()` for the reason given on
+/// `HolonNative::carriers` — this drives the clause `carriers()` cannot.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_loro_leg_keeps_every_declared_kind() -> anyhow::Result<()> {
+    let format = HolonNative::load().await?;
+    // Read from the PROFILE, so a kind added to the yaml is driven here
+    // without anyone remembering to add it.
+    let declared = &format.profile().property_values().types;
+    assert!(
+        declared.contains(&holon_capability::axes::ValueKind::DateTime)
+            && declared.contains(&holon_capability::axes::ValueKind::Json),
+        "this test exists for the two ambiguous kinds; the profile no longer declares them"
+    );
+
+    let key = "Probe";
+    for kind in declared {
+        let sent = specimen(*kind);
+        let mut routes = vec![RouteReadback {
+            route: "create",
+            readback: format.round_trip_property(LORO_LEG, key, &sent)?,
+        }];
+        routes.extend(
+            format
+                .extra_property_write_routes(LORO_LEG, key, &sent)?
+                .unwrap_or_default(),
+        );
+        for RouteReadback { route, readback } in routes {
+            assert_eq!(
+                readback,
+                Readback::Present(sent.clone()),
+                "the profile declares {kind:?} carried, but the Loro leg answered {readback:?} \
+                 on route {route}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// One inhabitant per declared kind. A local copy of the certifier's own
+/// specimens, which are private to it.
+fn specimen(kind: holon_capability::axes::ValueKind) -> Value {
+    use holon_capability::axes::ValueKind;
+    match kind {
+        ValueKind::String => Value::String("plain".to_string()),
+        ValueKind::Integer => Value::Integer(42),
+        ValueKind::Float => Value::Float(1.5),
+        ValueKind::Boolean => Value::Boolean(true),
+        ValueKind::DateTime => Value::DateTime("2026-08-22T10:00:00Z".to_string()),
+        ValueKind::Json => Value::Json(r#"{"a":1}"#.to_string()),
+        ValueKind::Array => Value::Array(vec![Value::String("one".to_string())]),
+        ValueKind::Object => Value::Object(Default::default()),
+        ValueKind::Null => Value::Null,
+    }
 }
 
 /// Ruling D5.a at the production write boundary: the engine mints
