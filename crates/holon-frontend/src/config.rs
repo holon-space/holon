@@ -968,15 +968,20 @@ mod tests {
         let err = load_config(dir.path(), HolonConfig::default())
             .expect_err("a key set twice must not load")
             .to_string();
-        // The whole rendered sentence: a wrapped literal that keeps its source
-        // indentation reads as a run of spaces in the terminal.
+        // Two separate claims, because `toml` wraps a custom deserializer error
+        // in its own span rendering: that the refusal came from the preference
+        // probe, and that the prose inside it names the key and both values.
+        assert!(
+            err.contains(crate::preferences::DUPLICATE_PREFERENCE_KEY),
+            "the refusal must carry the probe's marker, not be a generic parse failure: {err}"
+        );
         assert!(
             err.contains(
                 "preference \"shopping.list_url\" is set twice in holon.toml — once as a dotted \
-                 key and once as a nested table (the earlier value was \"https://b.example/2\"). \
-                 Keep one of the two."
+                 key and once as a nested table, with values \"https://a.example/1\" and \
+                 \"https://b.example/2\". Keep one of the two."
             ),
-            "the error must name the offending key and read as prose: {err}"
+            "the error must name the offending key and both values, as prose: {err}"
         );
     }
 

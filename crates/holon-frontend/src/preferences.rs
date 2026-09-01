@@ -105,10 +105,17 @@ where
                 // Both shapes can name one key, and nothing downstream could
                 // tell which value it got — a credential silently decided by
                 // map iteration order. Refuse the load instead.
-                if let Some(existing) = out.insert(key, scalar) {
+                if let Some(existing) = out.insert(key.clone(), scalar) {
+                    // Which shape the map saw first depends on whether `toml`
+                    // iterates a table in document or sorted order (its
+                    // `preserve_order` feature), so name both values rather
+                    // than calling one of them the earlier.
+                    let mut values = [existing.to_string(), out[&key].to_string()];
+                    values.sort();
+                    let [first, second] = values;
                     return Err(serde::de::Error::custom(format!(
                         "preference {prefix:?} {DUPLICATE_PREFERENCE_KEY} — once as a dotted key \
-                         and once as a nested table (the earlier value was {existing}). Keep one \
+                         and once as a nested table, with values {first} and {second}. Keep one \
                          of the two."
                     )));
                 }
