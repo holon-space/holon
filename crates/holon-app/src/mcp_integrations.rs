@@ -800,20 +800,33 @@ impl Module for McpIntegrationsModule {
         // no entities, because the generic mirror needs a server-issued item id
         // this peer does not give — so it is wired here, where the connected
         // integration's call surface can be reached by name.
-        injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
-            move |resolver| async move {
-                let registry = resolver.resolve_async::<McpIntegrationRegistry>().await;
-                let db_handle = resolver
-                    .resolve_async::<dyn holon::di::DbHandleProvider>()
-                    .await
-                    .handle();
-                Arc::new(crate::shopping_operations::ShoppingOperations::new(
-                    registry,
-                    db_handle,
-                    crate::shopping_operations::device_id(),
-                )) as Arc<dyn OperationProvider>
-            },
-        ));
+        //
+        // Registered only when the sidecar IS configured, like every provider
+        // above. An unconditional factory resolves the integration registry in
+        // EVERY container that configures this module, and resolving it pulls in
+        // the composition root's unconditional services — the degraded-signal
+        // bus, the sync gate — which a container wiring only this module does not
+        // have. That is both connect work nobody asked for and a dependency
+        // chain this module has no business imposing.
+        if configs
+            .iter()
+            .any(|(name, _)| name == crate::shopping_operations::PROVIDER)
+        {
+            injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
+                move |resolver| async move {
+                    let registry = resolver.resolve_async::<McpIntegrationRegistry>().await;
+                    let db_handle = resolver
+                        .resolve_async::<dyn holon::di::DbHandleProvider>()
+                        .await
+                        .handle();
+                    Arc::new(crate::shopping_operations::ShoppingOperations::new(
+                        registry,
+                        db_handle,
+                        crate::shopping_operations::device_id(),
+                    )) as Arc<dyn OperationProvider>
+                },
+            ));
+        }
 
         Ok(())
     }

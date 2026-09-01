@@ -32,7 +32,7 @@ use crate::mcp_integrations::McpIntegrationRegistry;
 const ENTITY: &str = "shopping_item";
 const TABLE: &str = "shopping_item_raw";
 /// The sidecar this operation drives, by provider name.
-const PROVIDER: &str = "shopping";
+pub const PROVIDER: &str = "shopping";
 
 /// What Holon calls itself on the peer's commits. The peer uses it for its own
 /// bookkeeping only; two Holon installs sharing one list are indistinguishable
