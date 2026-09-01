@@ -1,0 +1,8 @@
+entity_name: recipe
+
+variants:
+  # The recipe page. A render profile on the type itself — the page is the
+  # type's default view, so nothing seeds a block into the root layout and the
+  # top-level-page placement hazard never arises.
+  - name: default
+    render: 'col(text(col("title")), text(col("course")), live_query("from ingredient_use | filter recipe_id == $id"))'

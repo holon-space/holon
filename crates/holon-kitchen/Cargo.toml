@@ -1,0 +1,22 @@
+[package]
+name = "holon-kitchen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
+[dependencies]
+holon-api.workspace = true
+holon-core.workspace = true
+holon-profiles.workspace = true
+anyhow.workspace = true
+serde_yaml.workspace = true
+cooklang = "0.18"
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[dev-dependencies]
+tempfile.workspace = true

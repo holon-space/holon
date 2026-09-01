@@ -1,0 +1,23 @@
+name: recipe
+default_lifetime: persistent
+primary_key: id
+graph_label: Recipe
+source: pre_configured
+fields:
+  - name: id
+    sql_type: TEXT
+    primary_key: true
+    indexed: true
+  # Vault-relative path of the authoritative `.cook` file. The file is the
+  # source of truth; this column is the link back to it, never a copy of it.
+  - name: source_path
+    sql_type: TEXT
+    indexed: true
+  - name: title
+    sql_type: TEXT
+  - name: servings
+    sql_type: INTEGER
+    nullable: true
+  - name: course
+    sql_type: TEXT
+    nullable: true

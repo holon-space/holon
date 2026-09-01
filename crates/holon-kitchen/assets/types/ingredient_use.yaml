@@ -1,0 +1,31 @@
+name: ingredient_use
+default_lifetime: persistent
+primary_key: id
+graph_label: IngredientUse
+source: pre_configured
+fields:
+  - name: id
+    sql_type: TEXT
+    primary_key: true
+    indexed: true
+  - name: recipe_id
+    sql_type: TEXT
+    indexed: true
+  # Verbatim cooklang ingredient text. Never normalised away — it is what the
+  # unmatched-ingredient affordance shows the user.
+  - name: raw_name
+    sql_type: TEXT
+  - name: quantity
+    sql_type: REAL
+    nullable: true
+  - name: unit
+    sql_type: TEXT
+    nullable: true
+  # Filled by Inc D's product binding. NULL here means UNMATCHED, and stays
+  # visible as such — it is never treated as zero in a rollup.
+  - name: product_id
+    sql_type: TEXT
+    nullable: true
+    indexed: true
+  - name: step_index
+    sql_type: INTEGER

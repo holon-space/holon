@@ -17,6 +17,7 @@ members = [
   "crates/holon-toon",
   "crates/holon-orgmode",
   "crates/holon-markdown",
+  "crates/holon-kitchen",
   "crates/holon-filesystem",
   "crates/holon-frontend",
   "crates/holon-app",

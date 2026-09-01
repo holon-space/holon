@@ -1,0 +1,234 @@
+# Kitchen — recipes / pantry / shopping / nutrition (plan, 2026-09-01)
+
+Driving use case for custom datatypes (BG) and the wife-adoption/sharing driver.
+Rulings K1–K5 (`~/.claude/projects/-Users-martin-Workspaces-pkm-holon/memory/kitchen-feature-rulings-2026-09-01.md`) are BINDING and are cited inline.
+
+## 1. Goals / non-goals
+
+| | |
+|---|---|
+| **G1** | `.cook` files in the vault are AUTHORITATIVE for recipes (K1). Holon parses, projects, renders; never becomes a second source of truth. |
+| **G2** | ALL kitchen datatypes + logic in a separate `holon-kitchen` crate (K1) — the first crate to own domain datatypes. |
+| **G3** | Pantry inventory + a live "what can I cook now" query. |
+| **G4** | Shopping list bidirectional with Martin's shopping app as a **peer** (K4) — item-level reconciliation, Holon is NOT master. |
+| **G5** | Nutrition on a `product` datatype (static bundled table); calorie/macro rollups via **aggregates grown into the Computation dual-compile subset** (K3), not chained matviews. |
+| **G6** | Thermomix = structured guided steps (temp/speed/time) rendered as mobile step cards. |
+| **NG1** | **No Cookidoo import/scraping.** Ever, in this plan. |
+| **NG2** | **No site importers** (K5). Manual copy/paste → `.cook` now. |
+| **NG3** | **No sharing implementation.** The shared Kitchen container is named as the future driver for BG-6 and is OUT of scope here. |
+| **NG4** | No OpenFoodFacts network lookup (K3: "later"). Bundled static table only. |
+| **NG5** | No barcode scanning, no meal planning calendar, no recipe scaling UI beyond what cooklang gives free. |
+
+## 2. Premise table
+
+Every row is an anchor a reviewer can check. `UNVERIFIED` rows must be closed before the increment that depends on them starts.
+
+| # | Premise | Anchor / status |
+|---|---|---|
+| P1 | Sidecar transports today are `child_process`, `http`, `rest` — three optional fields on one struct, NOT an enum. | `crates/holon-mcp-client/src/integration_config.rs:39-43`; dispatch `:286-320`, `crates/holon-mcp-client/src/mcp_integration.rs:383-434` |
+| P2 | **K2's "first-class `http` transport" ALREADY EXISTS as `rest`** — a UTCP-manual-style direct-API transport, base_url + named `calls`. `http` means MCP-over-HTTP (historical name). gmail + gcal ALREADY converge on `rest`. | `integration_config.rs:71-89` and its doc comment at `:30-37`; `assets/integrations/gmail.yaml:118-125`, `gcal.yaml` |
+| P3 | **`rest` is READ-ONLY: `GET` only, no request body.** This is the actual gap for K4, not the transport's existence. | `RestCallConfig` `integration_config.rs:149-172` — `method` doc says "Only `GET` is supported today (fails loud otherwise)"; `RestTransport` doc `:66-70` "Read-only for now" |
+| P4 | Write machinery (effect classes `idempotent`/`once_only`, `undo`, `triggered_by`, `affected_fields`, `WritesPolicy`, `OnceOnlyAuthorization`) already exists at the sidecar level and is transport-agnostic. | `integration_config.rs:224-231`; example `assets/integrations/todoist.yaml:78-115` |
+| P5 | Sync is **upsert + tombstone, identity-keyed; convergence from the engine, never a diff**. | `crates/holon-mcp-client/src/mcp_vtable.rs:58, 878-891` |
+| P6 | Auth: static header or OAuth2 refresh-grant, credentials by env/file/keychain reference only, 0600 enforced, Debug redacted. | `integration_config.rs:104-115`, `crates/holon-mcp-client/src/rest_oauth2.rs:20-27, 60-108` |
+| P7 | A free-standing type is a pure YAML data declaration (name, primary_key, fields with sql_type/nullable/indexed). Registered at boot from `BUNDLED_TYPES`. | `assets/default/types/person.yaml`, `organization.yaml`; `crates/holon-profiles/src/type_registry.rs:335-344, 348-400` |
+| P8 | **There is NO general typed-reference / FK field in a type yaml.** Only `id_references` — an FK on the PRIMARY KEY, the extension-table shape. A `product_id` column would be plain TEXT with no declared relation. | `crates/holon-api/src/entity.rs:282`; `organization.yaml:4` |
+| P9 | Declaring a type creates BOTH a `<name>_raw` write table and a `<name>` derived matview. | `crates/holon-turso/src/turso_adapter.rs:306-361` |
+| P10 | `computed_persisted` IS already expressible in a `*_profile.yaml` as `tier: computed_persisted`. | `assets/default/types/person_profile.yaml:4-6` |
+| P11 | **I3-2 is what makes P10 real in production**: its first step wires `TypeDefinition::persisted_derived_plan()` (`crates/holon-api/src/entity.rs:694`) into the production reconciler; I3-1 left the DDL sink test-harness-only. | `docs/Plans/BlockGeneralization.md:86-105` |
+| P12 | `Computation` variants are a CLOSED set: `Lit, Field, Arith, Compare, Case, Concat, And, IsDefined, Predicate, Script`. No aggregates, no method calls, no field access. | `crates/holon-api/src/computation.rs:225-327` |
+| P13 | **The language is strictly ROW-SCOPED**: `pub type Context = HashMap<String, Value>`. Eval cannot reach another row. | `computation.rs:64`, eval entry `:537` |
+| P14 | There is **no function registry** — one hardcoded call form, `is_def_var("x")`. | `crates/holon-api/src/expr_parser.rs:614-637` |
+| P15 | SQL seat: `compile_sql() -> SqlFragment` (`computation.rs:641`); plantable iff `compile_sql` AND `inline_sql` succeed (`:1065-1094`); planted as `({sql}) AS {name}` into the matview SELECT. **The sink accepts any parameter-free scalar SQL expression — a correlated subquery qualifies.** | `crates/holon-turso/src/schema_modules.rs:477-502` |
+| P16 | Rhai fallback is live: subset parse first, Rhai on `ExprParseError`, both errors reported loudly if both fail. | `crates/holon-petri/src/lib.rs:350-363` |
+| P17 | `FileFormatAdapter` exists and is **Block-shaped, org-only** today (`parse`/`render_document`/`render_blocks`/`build_block_params`). | `crates/holon-core/src/file_format.rs:60-171` |
+| P18 | **BG Inc-5 (first non-org adapter) is BLOCKED BY Inc-4 (Loro adapter), itself blocked by NV-1/S2.** K1 names cooklang as the Inc-5 vehicle — this is a real ordering conflict, see §6/R1. | `docs/Plans/BlockGeneralization.md:118-133` |
+| P19 | `cooklang` is NOT in `Cargo.lock` — a brand-new external dependency, subject to `deny.toml`. | `Cargo.lock` (no match) |
+| P20 | cooklang-rs is **MIT, actively maintained**; parser yields ingredients/cookware/timers/metadata/steps; extensions include aliases, advanced units + ranges, ingredient/recipe references, intermediate preparations, modes. VERIFIED in-tree at `cooklang 0.18.7`: entry `cooklang::parse(&str) -> PassResult<Recipe>`; `Recipe{metadata, sections, ingredients, cookware, timers, inline_quantities}`; `Section.content: Vec<Content>`; `Content::{Step,Text}`; `Step{items, number}`; `Item::{Text,Ingredient,Cookware,Timer,InlineQuantity}` (component variants carry an INDEX into the recipe-level vec, not the value). Only 4 transitive deps. | RESOLVED. Registry source read directly. |
+| P21 | Thermomix temp/speed have **no native cooklang syntax**. RULED: Inc E encodes them as OUR inline step convention, parsed at the Holon boundary into typed step fields. Files stay canonical cooklang, so other tools see plain text. | RULED by team-lead. Inc E's concern, NOT Inc A's. |
+| P29 | **cooklang SILENTLY LOSES quantities AND whole ingredients on a misplaced brace.** FIVE MEASURED shapes at 0.18.7, none producing an error or warning: (a) unclosed `@flour{200%g` → quantity dropped; (b) `@flour{200%g @sugar}` → unit `"g @sugar"`, `@sugar` gone; (c) `@flour{200%g with a }` → unit `"g with a"`; (d) `@flour{200 @sugar}` → the sigil lands in the VALUE, `Text("200 @sugar")` with NO unit at all; (e) `#pot{1 @salt}` → COOKWARE swallows the ingredient, recipe ends with an EMPTY ingredient list. (b)–(e) all have BALANCED braces, so no counting guard can see them. Inc A refuses (a) by source scan and (b)–(e) by post-parse validation over ingredients AND cookware, across both the unit and a text value. | `crates/holon-kitchen/src/cook.rs` (`reject_unclosed_component_brace`, `reject_swallowed_components`); pinned by `an_unclosed_quantity_brace_...`, `a_late_closing_brace_that_swallows_a_component_is_refused`, `..._swallows_prose_is_refused`, `a_sigil_swallowed_into_the_value_is_refused`, `a_component_swallowed_by_cookware_is_refused` |
+| P34 | `~{10 @salt}` — the timer form of the same swallow — is a HARD cooklang parse error ("Timer value is text"), so it needs no guard arm. | MEASURED at 0.18.7; noted in `a_component_swallowed_by_cookware_is_refused` |
+| P33 | The swallow guard's word-count rule is a **stated bound, not a proof**: a two-word swallow (`{200%g with}`) still passes, because real units reach two words (`fl oz`) and over-refusing a valid recipe is worse than the narrow miss. The SIGIL rule has no such gap — a swallowed component always carries its sigil. | Pinned deliberately by `a_two_word_swallow_is_a_known_miss` and `a_two_word_unit_is_accepted` |
+| P30 | A bare `@word` captures **one word only**; multi-word ingredients need `@maple syrup{}`. Recipes authored without the braces silently ingest a truncated ingredient name. | MEASURED at 0.18.7. Authoring hazard, not a code defect. |
+| P31 | **There is NO multi-adapter routing.** `FileSyncController` holds ONE `format: Arc<dyn FileFormatAdapter>`; the watcher filter is hardcoded to `.org`; no registry type exists anywhere. The `FormatRegistry` is a PROPOSAL only. | `crates/holon-filesystem/src/file_sync_controller.rs:604`; `crates/holon-orgmode/src/file_watcher.rs:79-81`; proposal `docs/Proposals/ForeignVaultCompat-2026-07-12.md:93-102` |
+| P32 | The landed PRECEDENT for a non-org adapter is `holon-markdown`: obsidian + logseq implement `FileFormatAdapter`, are exercised ONLY by their own crate's tests, and are wired into no production routing. Read-only tiers panic/bail loudly on every write method. | `crates/holon-markdown/src/obsidian.rs:120,342-393`; `crates/holon-markdown/tests/obsidian_ingest.rs` |
+| P22 | **Shopping READ leg MEASURED** (source: Martin's Garmin watch app, a read-only consumer): `GET /list/{listId}` → `{data:{items:[…]}}`. | `ShoppingItemSyncDelegate.mc:8,25`, `GarminShoppingView.mc:60-71` in `/Users/martin/Workspaces/garmin/garmin-shopping-list` |
+| P23 | Item shape: `name` string (required) · `cat` string category code (enumerated: MuF/FuV/DuH/R/D/P/B/S/CuT/SuD/Ca/I/C/Sn/F/Cu/O) · `count` number (optional). **No id. No timestamp. No etag. No `checked` field.** | same anchors as P22 |
+| P24 | **The BASE URL IS A CREDENTIAL** — no auth headers; an opaque token segment is embedded in the URL PATH. | same anchors as P22. This plan never quotes the URL. |
+| P25 | `base_url` already supports `${VAR}` expansion, so credential-in-URL is mechanically supported today with no engine change. | `integration_config.rs:73`, expansion at `:340` |
+| P26 | **`redact_url` strips ONLY the query string** (`split_once('?')`) — a token in a PATH segment survives redaction into every error and log line. Eight call sites in the REST path would leak it. | `crates/holon-mcp-client/src/rest_oauth2.rs:571-576` (+ test `:603-609` pinning query-only); call sites `rest_transport.rs:252,267,307,315,336,344,353,387` |
+| P27 | Observed sync model is **fetch-all-replace**: an unpaginated full snapshot of one list, no incremental cursor. | P22 anchors |
+| P28 | **WRITE LEG UNKNOWN** — add/check/delete endpoints, item identity, and whether `checked` exists server-side at all. The watch app never writes. | Martin has been asked for the write-side spec. Hard block on C2. |
+
+## 3. Data model
+
+New crate `holon-kitchen` ships type yamls + profile yamls (P7) plus the cooklang adapter. Nutrition reference unit is **decided below**; relations are plain TEXT columns until P8 is closed (§7 R2).
+
+### 3.1 Types
+
+| Type | Fields (sql_type) | Notes |
+|---|---|---|
+| `product` | `id` TEXT pk · `name` TEXT idx · `brand` TEXT? · `kcal_per_100g` REAL? · `protein_per_100g` REAL? · `fat_per_100g` REAL? · `carb_per_100g` REAL? · `density_g_per_ml` REAL? · `unit_weight_g` REAL? | Static bundled table (K3). |
+| `recipe` | `id` TEXT pk · `title` TEXT · `source_path` TEXT idx · `servings` INTEGER? · `total_time_min` INTEGER? | Projected from a `.cook` file; `source_path` is the authority link (G1). |
+| `ingredient_use` | `id` TEXT pk · `recipe_id` TEXT idx · `raw_name` TEXT · `quantity` REAL? · `unit` TEXT? · `product_id` TEXT? idx · `step_index` INTEGER | The child relation Inc D aggregates over. |
+| `pantry_item` | `id` TEXT pk · `product_id` TEXT idx · `quantity` REAL · `unit` TEXT · `opened_at` TEXT? · `best_before` TEXT? | |
+| `shopping_item` | `id` TEXT pk · `name` TEXT idx · `cat` TEXT · `count` REAL? · `product_id` TEXT? · `checked` INTEGER · `deleted_at` TEXT? · `last_seen_remote` TEXT? | **No `remote_id` — the peer issues none (P23).** `name` + `cat` mirror the wire shape verbatim; `checked`/`product_id` are LOCAL-ONLY until P28 resolves. `deleted_at` is the local tombstone; `last_seen_remote` is the timestamp of the last complete fetch that contained this item (§4). |
+| `meal_log` | `id` TEXT pk · `recipe_id` TEXT? · `product_id` TEXT? · `servings` REAL · `eaten_at` TEXT idx | Exactly one of recipe_id/product_id set — asserted at the write boundary, fail-loud. |
+
+### 3.2 Decisions
+
+**D1 — nutrition reference unit: per 100 g, mass-canonical, no alternatives.** Every nutrition figure is per 100 grams. Volume units convert via `density_g_per_ml`; count units (`1 egg`) via `unit_weight_g`. Rejected: storing per-serving or per-package (forces a second reference field and a units war inside every aggregate). **A conversion with no factor is NOT zero and NOT skipped** — it is a loud unconvertible state (§3.4).
+
+**D2 — how a cooklang `@ingredient` binds to a `product`: an explicit mapping table, never a fuzzy match at read time.** `ingredient_use.raw_name` always holds the cooklang text verbatim. `product_id` is filled from a `product_alias` mapping (`alias TEXT pk · product_id TEXT`) shipped bundled and extended by the user. **An unmatched ingredient leaves `product_id` NULL and the recipe renders a visible "unmatched ingredient" affordance** — per fail-loud, it never silently drops from a nutrition rollup and never guesses. Any rollup over a recipe with an unmatched or unconvertible ingredient is reported as *incomplete*, not as a smaller number (§3.4).
+
+**D3 — recipe identity.** `recipe.id` derives from the `.cook` file's stable id the same way org files derive theirs (`doc_id_from_content`, P17); absent one, from the vault-relative path. Re-parse is upsert-keyed on that id (P5).
+
+### 3.3 Computed fields
+
+| Type.field | Tier | Expression shape |
+|---|---|---|
+| `ingredient_use.grams` | computed (row-scoped, EXISTS TODAY) | `Case` over `unit` × `density_g_per_ml`/`unit_weight_g` — expressible in P12's subset **only if** the product's factors are on the row; they are not (P8/P13). See R2. |
+| `recipe.kcal_total` | computed_persisted | **`Sum(ingredient_use, kcal_of_use)` — NOT expressible today.** This is Inc D. |
+| `recipe.protein_total` / `fat_total` / `carb_total` | computed_persisted | same shape |
+| `recipe.unmatched_count` | computed_persisted | `Count(ingredient_use, product_id == ())` — drives D2's incompleteness banner |
+| `pantry_item.grams_on_hand` | computed | same conversion shape as `ingredient_use.grams` |
+
+### 3.4 What the aggregate subset must grow (Inc D)
+
+Minimal growth — two new `Computation` variants, one grammar rule, both seats:
+
+```
+Agg { kind: AggKind, rel: RelName, inner: Box<Computation>, filter: Option<Box<Computation>> }
+AggKind = Sum | Count
+```
+
+* **Grammar** (`expr_parser.rs`, extends the single `is_def_var` call form at P14 into a *small closed* call table — still no open registry): `sum(<rel>, <expr>)`, `count(<rel>)`, `count(<rel>, <pred>)`. `<rel>` is a bare identifier naming a declared child relation of the enclosing type.
+* **Eval seat** (P13 is the breaking change): `Context = HashMap<String,Value>` becomes a two-part scope — the outer row map plus a relation resolver yielding the child rows' own `Context`s. `inner` evaluates in the CHILD context. Every other variant keeps evaluating against the outer map unchanged, so this is additive.
+* **SQL seat** (P15 makes this cheap): lower to a scalar correlated subquery
+  `(SELECT COALESCE(SUM(<inner_sql>),0) FROM <child_table> c WHERE c.<fk> = <outer>.id [AND <filter_sql>])`.
+  Parameter-free and inlinable ⇒ it plants into the matview SELECT with **no change to `schema_modules.rs:477-502`**. That is the single largest reason to prefer this shape over chained matviews (K3 already rules chained matviews out).
+* **Relation declaration**: `rel` must resolve to `(child_table, fk_column)`. This is exactly the gap in P8 — closing R2 is a hard prerequisite of Inc D, not an optional cleanup.
+* **Fail-loud, no zero-substitution**: `COALESCE(...,0)` is legitimate only over rows that are all convertible. The incompleteness signal is carried by `unmatched_count`, and the UI must refuse to present a total as authoritative when it is non-zero (D2).
+* **Rhai burn-down alignment** (K3): aggregates in the subset must NOT be reachable via `Script` fallback, or the two seats silently diverge. `Agg` inside a `Script` is a loud refusal.
+
+## 4. K4 — shopping app peer sync
+
+Holon is a peer, never master. Poll-based. **The measured contract (P22–P28) removes the two things a clean reconciler normally stands on: a server-side item id and any timestamp.** Everything below is shaped by that.
+
+| Concern | Rule |
+|---|---|
+| Identity | **`(name, cat)` is the reconciliation key** — there is no id (P23). Chosen over `(name)` alone because `cat` is always present and makes "Milk/DuH" and "Milk/Ca" distinct items rather than a collision. |
+| What name-keying BREAKS — state it plainly | (a) **Duplicate names collapse.** Two "Milk" entries in the same category are indistinguishable; Holon will see one item. Mitigation: fold duplicates into `count` on ingest, and never round-trip a second row with the same key. (b) **A rename is indistinguishable from a delete + add.** Editing "Milk"→"Oat milk" on the peer arrives as one removal and one addition, so any local-only state attached to the old key (`checked`, `product_id`) is LOST. There is no fix without a server id; it is a disclosed limitation, not a bug to chase. (c) **`checked` and `product_id` cannot survive a peer-side rename** for the same reason. |
+| Reconciliation | Item-keyed, field-wise, over the upsert+tombstone contract (P5). |
+| Both sides add | Key present remotely, absent locally ⇒ local insert. Key present locally, absent remotely ⇒ push (C2 only; in C1 it simply cannot happen, see Inc C). |
+| Absence vs deletion — the P5 tension | P5 says absence is never deletion, but the peer offers **fetch-all-replace with no tombstones** (P27), so absence is the ONLY deletion signal it can give. Resolution: absence is authoritative deletion **only within a fetch that completed successfully and in full**. A failed, partial, or truncated fetch is discarded whole and changes nothing — it never reaches the reconciler. `last_seen_remote` records the last complete fetch that carried the item, so "absent" is always evaluated against a known-good snapshot rather than against silence. |
+| Local deletes | Still need a local tombstone (`deleted_at`, window ≥ 2× poll interval, proposed 7 days) so a local delete is not immediately resurrected by the next pull before it has been pushed. |
+| `checked` | **May not exist server-side at all (P23/P28).** The observed schema has no such field, so checking an item on the peer may simply BE removal from the list. Until P28 lands, `checked` is local-only and never pushed. IF the write leg exposes it, the rule is **check-off wins over un-check** — the cost of a wrong check ("you skip something you have") is far below a wrong uncheck ("you re-buy every trip until someone notices"). Asymmetric cost, so an asymmetric rule rather than last-write-wins. |
+| `count` | Last-writer-wins; there is no timestamp to arbitrate with, so the LOCAL write wins only if it is newer than the last complete fetch, else the remote value is taken. |
+| Cadence | `rest.poll_interval` (P2), proposed 60s while the shopping view is open, 5m otherwise. |
+| What the certifier can certify | For C2's sidecar: `writes: enabled`, per-tool `effect` classes (`add-item` = `once_only`, `check-item` = `idempotent`, `delete-item` = `once_only`), `undo.reversible`. **The certifier cannot certify the conflict rule, the name-keying, or the complete-fetch discipline** — all three are Holon-side reconciler logic, not profile clauses. They need their own PBT; claiming certifier coverage here would be false comfort. |
+
+**Security — credential-in-URL (P24/P26).** The URL is the only secret and it lives in a path segment. Two obligations, both in C1:
+1. The sidecar takes it as `base_url: ${SHOPPING_LIST_URL}` (P25 — works today). The bundled sidecar in `assets/integrations/` carries the `${VAR}` reference ONLY, never a resolved URL, so bundled-sidecar portability (`bundled_sidecars.rs` generation rules) is preserved and the token never enters the repo, a config export, or a support bundle.
+2. **`redact_url` must learn to redact path segments before any shopping traffic runs** (P26). Today it strips only `?query`, so all eight REST error/log sites would print the token verbatim. This is a prerequisite of C1, not a follow-up — it is the one place where a plain error message becomes a credential leak. Proposed shape: for a URL whose sidecar declared it credential-bearing, redact ALL path segments (`https://host/<redacted>`); do not attempt to guess which segment is the token.
+3. Corollary: the credential-bearing URL must never be quoted in a bugfunnel entry, a PBT fixture, or a plan. Fixtures use a synthetic localhost URL.
+
+## 5. Increments
+
+Risk-eliminating order. Each is independently landable with a red-first surface (`holon-feature` skill: red-for-the-right-reason BEFORE implementation).
+
+### Inc A — cooklang read adapter + recipe types + recipe page — **LANDED (this lane)**
+* **Scope.** New crate `holon-kitchen`; `cooklang 0.18` dependency; `recipe` + `ingredient_use` type yamls + `recipe_profile.yaml`; `CookFormatAdapter: FileFormatAdapter` (P17) claiming `.cook`; the recipe page as the type's default render variant.
+* **What of the per-format adapter architecture it de-risks (K1/BG Inc-5) — R1 GRANTED, PARTIAL claim.** It proves, on a real second format: **extension claiming, document identity, and round-trip (read) authority**. It **explicitly does NOT** discharge C7 — making `FileFormatAdapter`/`FileFormatParseResult` type-generic — nor does it wire multi-adapter routing (P31). BG's doc takes this wording at landing.
+* **Scope correction from P31/P32.** "`.cook` files in the vault are authoritative" is the DURABLE design statement, not something Inc A can deliver: no routing exists to carry a `.cook` file to any adapter. Inc A therefore proves the adapter through crate-level tests exactly as `holon-markdown` does (P32) — the landed precedent for this staging. Live vault ingest arrives with the `FormatRegistry`, not here.
+* **Read-only tier.** `render_document`/`render_blocks` panic and `writeback_drops` bails, mirroring `ObsidianMarkdownAdapter` — Inc A ships no cooklang renderer, so a write would be loss, not a round trip.
+* **Riskiest thing (retired).** cooklang-rs API + license — RESOLVED, see P20.
+* **Red-first (captured).** `lane-logs/red1-adapter-missing.log`: every rung fails as `unresolved import holon_kitchen::{CookFormatAdapter, IngredientUse, ingredient_uses, RECIPE_TYPE_YAML, …}`. Green: 15/15.
+* **Out of scope, held.** Ingredient→product binding stays NULL and visibly unmatched (Inc D).
+
+### Inc B — pantry + ops + cookable-now live query
+* **Scope.** `pantry_item` type; add/consume/adjust ops; the "what can I cook now" live query (a recipe is cookable iff every `ingredient_use` has a `pantry_item` with sufficient converted quantity).
+* **Riskiest thing.** The cookable-now predicate is an aggregate in disguise ("ALL children satisfy…"). **It must be written as a query, not as a computed field**, or it silently front-runs Inc D and forces the language growth early. Ruling for the executor: query.
+* **Red-first.** Keystone: pantry stocked → recipe appears in the cookable list; consume one ingredient → it leaves.
+
+### Inc C — shopping peer. **SPLIT: C1 read-only (startable now) / C2 write+reconcile (blocked).**
+Per P2/P3 neither half is a new transport kind.
+
+#### C1 — read-only pull (contract known, CAN START)
+* **Scope.** `shopping_item` type; `assets/integrations/shopping.yaml` using the EXISTING `rest` GET transport (P2/P3) with `base_url: ${SHOPPING_LIST_URL}` (P24/P25); one call `GET /list/{listId}`; `sync.extract_path: data.items`; ingest keyed on `(name, cat)` (§4) with duplicate-folding; a read-only shopping view. **Plus the `redact_url` path-segment fix (P26) — a hard prerequisite, not a follow-up.**
+* **Why it is worth landing alone.** It proves the credential-in-URL pattern, the category vocabulary, the complete-fetch discipline, and the `(name, cat)` key against the real peer — every one of which C2 would otherwise have to debug simultaneously with write semantics.
+* **Riskiest thing.** The credential leak through `redact_url` (P26) — a plain error message today prints the token.
+* **Red-first.** Keystone against a mock HTTP server: a served list projects `shopping_item` rows; a truncated/failing response changes nothing (complete-fetch discipline). Expected red: no shopping sidecar exists, zero rows. Second red: assert no log or error line contains the token path segment — expected red because `redact_url` keeps it.
+* **Designed so C2 slots in without rework.** C1 must, from the start: (a) put reconciliation in a `ShoppingReconciler` seam that takes `(local_rows, complete_remote_snapshot)` and returns intents — C1 simply has no push intents to emit, rather than having no seam; (b) store `checked`/`product_id` as local-only columns already present in the schema, so C2 adds no migration; (c) write local tombstones on local delete even though nothing pushes them yet; (d) keep the category codes (P23) as a parsed enum, not strings, per parse-don't-validate.
+
+#### C2 — write leg + bidirectional reconcile (**BLOCKED on P28**)
+* **Scope.** Grow `RestCallConfig` beyond `GET` (POST/PATCH/DELETE, request-body template, response-id extraction), then bind the `writes`/`tools`/`effect` machinery (P4) and turn on the §4 push intents.
+* **Generic enough for gmail/gcal convergence (K2).** The write leg is declared in the sidecar, not in kitchen code — gmail "mark as read" or gcal "create event" become authorable with zero further engine work. That is the reason to spend the increment on the transport rather than a bespoke shopping client.
+* **BLOCKED — Martin must supply the write-side spec** (add/check/delete endpoints, item identity, whether `checked` exists). K1: code against it if locked down, else wait. Do not start C2 on a guessed API.
+* **Riskiest thing.** Bidirectional conflict semantics under a key that is not an id (§4) — no existing sidecar exercises anything like it, and the rename-loses-local-state hole (§4) may prove unacceptable to Martin, which would force asking the peer's author for an id field.
+* **Red-first.** Mock-HTTP PBT: both peers mutate the same item across a poll; assert §4's rules incl. the rename limitation as an EXPECTED, asserted outcome. Expected red: `rest` refuses a non-GET method loudly.
+
+### Inc D — product/nutrition + AGGREGATE GROWTH (riskiest increment)
+* **D.0 — LANGUAGE-DESIGN SPIKE FIRST, before any nutrition code.** Deliverable: the `Agg` variant, the grammar rule, the two seats, and the relation-declaration answer (R2) prototyped end-to-end on ONE throwaway field, with the SQL seat proven to plant into a real matview. If the eval-seat scope change (P13) proves invasive, that is the moment to escalate — not after the nutrition tables exist.
+* **Then.** `product` type + bundled nutrition table + `product_alias`; the §3.3 computed_persisted fields; the D2 unmatched banner.
+* **Inc A left a stated seam Inc D must close (D6).** `IngredientUse` is a parse-time value, NOT yet a row: its `name` field maps to the schema's `raw_name` column, and it carries no `id` or `recipe_id` at all. Inc A never persists ingredient uses, so the gap is inert there; Inc D is what writes them and must supply the id minting, the `recipe_id` foreign key (per R2's `fields[].references`), and the `name`→`raw_name` rename at the boundary. Anchors: `crates/holon-kitchen/src/cook.rs` (`IngredientUse`) vs `crates/holon-kitchen/assets/types/ingredient_use.yaml`.
+* **Riskiest thing.** The eval-seat scope change (P13) — it touches every `Computation` consumer, and getting it wrong desynchronizes the two seats, which is precisely the class of bug the dual-compile design exists to prevent.
+* **Red-first.** A differential PBT asserting eval and SQL agree on `sum(...)` over generated recipes — the standing dual-seat oracle.
+* **Depends on I3-2** (P11) for `computed_persisted` to reach production at all.
+
+### Inc E — cook-this composite op + Thermomix step rendering
+* **Scope.** `cook_this(recipe, servings)` = decrement pantry by each converted `ingredient_use`, append a `meal_log`, in ONE transaction. Plus step cards from cooklang steps/timers.
+* **Riskiest thing.** Thermomix temp/speed have no native syntax (P21) — the encoding decision. Second: `cook_this` must be atomic and undoable as a unit, and partial application on an unconvertible ingredient is a loud refusal, not a partial decrement.
+* **Red-first.** GPUI PBT for step cards; keystone for the transactional op incl. the refusal path.
+
+## 6. Dependencies
+
+```
+   Inc A (LANDED) ──> A2 FormatRegistry (R6, NEW) ──> Inc B
+                                                             │
+   redact_url path fix (P26) ──> C1 (READY NOW) ──> C2       ├──> Inc E
+                                        [Martin: write spec]─┘     ▲
+   I3-2 (BG:86-105) ──┐                                            │
+                      ├──> R2 (relation decl) ──> Inc D ───────────┘
+```
+C1 is on NO critical path — it is startable today and independent of A/B/D.
+
+| Dependency | Kind | Note |
+|---|---|---|
+| I3-2 landing | internal, concurrent lane | Inc D's `computed_persisted` fields are inert without it (P11). Name it in Inc D's PR. |
+| R2 relation declaration | internal, this plan | Hard prerequisite of Inc D's aggregates AND of `ingredient_use.grams` (§3.3). |
+| `redact_url` path redaction | internal, security | Hard prerequisite INSIDE C1 (P26). |
+| Shopping **write-side** spec | **external, Martin** | Hard block on C2 ONLY (P28). C1 is unblocked. |
+| cooklang-rs | **external, network** | Hard block on Inc A start (P19/P20). `deny.toml` license review required. |
+| BG Inc-4 / NV-1/S2 | internal | Only if Inc A attempts C7 — which it does not, by R1. |
+
+## 7. Open risks / rulings needed
+
+* **R1 — GRANTED.** Inc A claims PARTIAL Inc-5 de-risking (extension claiming, identity, read authority), explicitly not C7. Wording lands in the BG doc.
+* **R2 — APPROVED in direction**: `fields[].references` typed FK; detail belongs to Inc D's spike.
+* **R6 (NEW, from P31) — the `FormatRegistry` is now on the kitchen critical path.** Nothing in the vault can reach `CookFormatAdapter` until `FileSyncController` takes a registry and the watcher filter becomes the union of adapters' `extensions()`. It is a prerequisite of Inc B's "cookable now over MY recipes" being real rather than fixture-driven. *Recommendation:* size it as its own increment (A2) before Inc B, since it is shared infrastructure — obsidian and logseq are waiting on the identical unlock, so three adapters convert from dead code to live on one change.
+* **R3 — the check-off-wins rule (§4) is asserted, not measured**, and may be moot: the observed schema has no `checked` field at all (P23). It is a product judgment; if Martin disagrees, only the reconciler PBT changes.
+* **R4 — name-keying loses local state on a peer-side rename (§4).** No fix exists without a server-issued item id. *Recommendation:* accept it as a disclosed limitation for C1/C2 and, in parallel, ask the shopping app's author whether an `id` field can be added — that single field would delete this entire risk class. Needs Martin's call on whether the rename hole is acceptable before C2 is designed around it.
+* **R5 — `redact_url` is a live credential-leak hazard the moment a path-token URL is configured (P26)**, and it is not kitchen-specific: any future sidecar using a capability URL inherits it. Fixing it in C1 is correct, but it may deserve landing on its own ahead of C1.
+
+## 8. Stays out of scope
+
+Cookidoo (NG1) · site importers (NG5/K5) · OpenFoodFacts network (NG4) · sharing / BG-6 (NG3) · barcode scan · meal planning calendar · webhook push for Inc C · making the certifier cover the conflict rule (§4, last row).
+
+## 9. Staleness guard — re-run before acting on this plan
+
+| Claim | Guard |
+|---|---|
+| P2/P3 `rest` GET-only | `grep -n "Only \`GET\` is supported" crates/holon-mcp-client/src/integration_config.rs` |
+| P8 no general FK | `grep -rn "id_references\|reference_target" crates/holon-api/src/entity.rs` |
+| P12/P14 closed variant set, no registry | `grep -n "pub enum Computation" -A 110 crates/holon-api/src/computation.rs` · `grep -n "is_def_var" crates/holon-api/src/expr_parser.rs` |
+| P13 row-scoped Context | `grep -n "pub type Context" crates/holon-api/src/computation.rs` |
+| P15 matview plant sink | `grep -n "block_matview_select_with_computed" -A 30 crates/holon-turso/src/schema_modules.rs` |
+| P11 I3-2 open | `grep -n "I3-2" -A 20 docs/Plans/BlockGeneralization.md` |
+| P18 Inc-5 blocked | `grep -n "Inc 5" -A 8 docs/Plans/BlockGeneralization.md` |
+| P19 cooklang absent | `grep -in cooklang Cargo.lock` |
+| P25 base_url ${VAR} | `grep -n "base_url" crates/holon-mcp-client/src/integration_config.rs` |
+| P26 redact_url query-only | `grep -n "fn redact_url" -A 8 crates/holon-mcp-client/src/rest_oauth2.rs` — if it still only splits on `'?'`, the leak stands |
+| P31 no adapter routing | `grep -n "format: Arc<dyn FileFormatAdapter>" crates/holon-filesystem/src/file_sync_controller.rs` · `grep -rn "FormatRegistry\|adapter_for" crates/` — a hit means R6 has landed |
+| P32 markdown precedent unwired | `grep -rn "ObsidianMarkdownAdapter" crates/ \| grep -v holon-markdown` — hits outside its own crate/tests mean it went live |
+| P29 brace guard | `cargo nextest run -p holon-kitchen -E 'test(unclosed_quantity_brace)'` |
