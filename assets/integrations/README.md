@@ -308,7 +308,9 @@ transport:
         token_url: https://oauth2.googleapis.com/token
         client_id_env: GCAL_CLIENT_ID           # or client_id_file
         client_secret_env: GCAL_CLIENT_SECRET   # or client_secret_file
-        refresh_token_file: ~/.config/holon/gcal-refresh-token   # mode 0600
+        # ${CONFIG_DIR} is the config dir of the profile that is running
+        # (HOLON_CONFIG_DIR when set). A path outside it is refused at load.
+        refresh_token_file: ${CONFIG_DIR}/gcal-refresh-token   # mode 0600
         scopes: [https://www.googleapis.com/auth/calendar.readonly]  # informational
 ```
 

@@ -10,6 +10,8 @@ use crate::bundled_sidecars::BUNDLED_SIDECARS;
 use crate::bundled_sidecars::BundledSidecar;
 use crate::bundled_sidecars::SIDECAR_SCHEMA_VERSION;
 use crate::bundled_sidecars::bundled_sidecar;
+use crate::credential_path::CredentialRoot;
+use crate::integration_state::Configuration;
 use crate::integration_state::ENABLE_COMMAND;
 use crate::integration_state::IntegrationConfigStore;
 use crate::integration_state::enabling_state_file;
@@ -121,14 +123,19 @@ impl RestAuthConfig {
     /// running the 0600 checks) for the OAuth2 arm. Fails loud on an
     /// ambiguous or empty arm; surfaces [`UnresolvedVar`] when an OAuth2
     /// integration is simply not configured yet (disclosed skip).
-    fn resolve(self, lookup: &VarLookup<'_>, redactor: &Redactor) -> anyhow::Result<RestAuth> {
+    fn resolve(
+        self,
+        lookup: &VarLookup<'_>,
+        redactor: &Redactor,
+        root: &CredentialRoot,
+    ) -> anyhow::Result<RestAuth> {
         match (self.header, self.value, self.oauth2) {
             (Some(header), Some(value), None) => Ok(RestAuth::Static {
                 header,
                 value: expand_vars(&value, lookup, redactor)?,
             }),
             (None, None, Some(oauth2)) => {
-                let provider = crate::rest_oauth2::build_provider(&oauth2, lookup, redactor)?;
+                let provider = crate::rest_oauth2::build_provider(&oauth2, lookup, redactor, root)?;
                 Ok(RestAuth::OAuth2(provider))
             }
             (None, None, None) => anyhow::bail!(
@@ -275,6 +282,19 @@ impl std::fmt::Display for UnresolvedVar {
 impl std::error::Error for UnresolvedVar {}
 
 impl IntegrationFileConfig {
+    /// This provider's OAuth2 arm, if it has one.
+    ///
+    /// Its presence is what makes the CONFIGURATION axis mean something: only
+    /// an OAuth provider is credentialed by the consent flow, so only it can be
+    /// held back for want of one.
+    pub fn oauth2(&self) -> Option<&RestOAuth2Config> {
+        self.transport
+            .rest
+            .as_ref()
+            .and_then(|rest| rest.auth.as_ref())
+            .and_then(|auth| auth.oauth2.as_ref())
+    }
+
     /// Convert into the runtime config, expanding `${VAR}` references in
     /// transport and auth string fields from the process environment.
     ///
@@ -285,8 +305,12 @@ impl IntegrationFileConfig {
     /// `static_token: "${TODOIST_API_KEY}"`) are kept out of the YAML and
     /// resolved here at startup, so a missing var is surfaced rather than
     /// silently producing an unauthenticated connection.
-    pub fn into_mcp_config(self, provider_name: String) -> anyhow::Result<McpIntegrationConfig> {
-        self.into_mcp_config_with(provider_name, &env_var_lookup)
+    pub fn into_mcp_config(
+        self,
+        provider_name: String,
+        root: &CredentialRoot,
+    ) -> anyhow::Result<McpIntegrationConfig> {
+        self.into_mcp_config_with(provider_name, &env_var_lookup, root)
     }
 
     /// Like [`into_mcp_config`](Self::into_mcp_config) but with a
@@ -298,6 +322,7 @@ impl IntegrationFileConfig {
         self,
         provider_name: String,
         lookup: &VarLookup<'_>,
+        root: &CredentialRoot,
     ) -> anyhow::Result<McpIntegrationConfig> {
         // Every `${VAR}` value is a secret by construction, so expansion and
         // registration are the same pass. The transport and the OAuth2 provider
@@ -334,7 +359,7 @@ impl IntegrationFileConfig {
             }
         } else if let Some(rest) = self.transport.rest {
             let auth = match rest.auth {
-                Some(a) => a.resolve(lookup, &redactor)?,
+                Some(a) => a.resolve(lookup, &redactor, root)?,
                 None => RestAuth::None,
             };
             let mut calls = HashMap::with_capacity(rest.calls.len());
@@ -459,12 +484,34 @@ pub enum IgnoredReason {
     NotBundled,
 }
 
+/// A bundled integration that is switched ON but that this build refuses to
+/// run, because the one-time credential setup its sidecar requires has not
+/// happened in THIS profile.
+///
+/// Carried out of the loader as data for the same reason as
+/// [`IgnoredSidecar`]: an integration that silently does nothing is
+/// indistinguishable from one that is quietly reaching a real account, which
+/// is precisely the confusion that let a sandbox sync a live calendar.
+#[derive(Debug, Clone)]
+pub struct InertIntegration {
+    pub provider: String,
+    /// The state file whose `configuration` axis says `unconfigured`.
+    pub state_path: PathBuf,
+    /// Why it is inert, in the reader's terms.
+    pub reason: String,
+    /// The one affordance that makes it configured.
+    pub remedy: String,
+}
+
 /// What a scan of the integrations directory yielded.
 #[derive(Debug)]
 pub struct LoadedIntegrations {
     pub configs: Vec<(String, IntegrationFileConfig)>,
     pub superseded: Vec<SupersededSidecar>,
     pub ignored: Vec<IgnoredSidecar>,
+    /// Enabled providers held back for want of credentials — nothing was
+    /// connected and nothing was synced for these.
+    pub inert: Vec<InertIntegration>,
 }
 
 /// Resolve which integrations run, and with what content.
@@ -567,11 +614,13 @@ pub fn provider_content(dir: &Path, provider: &str) -> anyhow::Result<ProviderCo
 pub fn load_integration_configs(
     dir: &Path,
     store: &IntegrationConfigStore,
+    root: &CredentialRoot,
 ) -> anyhow::Result<LoadedIntegrations> {
     let installed = scan_installed_sidecars(dir)?;
     let mut configs = Vec::new();
     let mut superseded = Vec::new();
     let mut ignored = Vec::new();
+    let mut inert: Vec<InertIntegration> = Vec::new();
 
     for bundled in BUNDLED_SIDECARS {
         let provider = bundled.provider;
@@ -609,6 +658,40 @@ pub fn load_integration_configs(
         }
 
         let (config, incompatibility) = choose_content(bundled, file)?;
+
+        // Where a provider's secrets may live is decided HERE, at load, before
+        // anything is built that could open one. A sidecar naming a location
+        // outside the active profile fails the whole load: booting past it
+        // would let this instance authenticate as whoever owns that file.
+        if let Some(oauth2) = config.oauth2() {
+            oauth2.confine(root).with_context(|| {
+                format!(
+                    "Integration '{provider}' declares a credential outside this profile's \
+                     config directory ('{}')",
+                    root.path().display()
+                )
+            })?;
+
+            // CONFIGURATION is a gate, not a label. Enabled says the user wants
+            // this integration; only a completed consent flow says this profile
+            // may act on the account. Held back here rather than at connect
+            // time so no transport exists to reach the network with ambient
+            // credentials, and so the registry never reports it Connected.
+            if store.get(provider)?.configuration == Configuration::Unconfigured {
+                inert.push(InertIntegration {
+                    provider: provider.to_string(),
+                    state_path: store.state_path(provider)?,
+                    reason: format!(
+                        "'{provider}' authenticates with OAuth2 and this profile has not \
+                         completed its consent flow, so it is switched on but inert: nothing was \
+                         connected and nothing was synced."
+                    ),
+                    remedy: CONFIGURE_REMEDY.to_string(),
+                });
+                continue;
+            }
+        }
+
         if let Some(incompatibility) = incompatibility {
             let (path, _) = file.expect("only an installed file can be incompatible");
             superseded.push(SupersededSidecar {
@@ -658,8 +741,15 @@ pub fn load_integration_configs(
         configs,
         superseded,
         ignored,
+        inert,
     })
 }
+
+/// The one affordance that runs a provider's consent flow. Named by every
+/// inert-integration disclosure so the remedy is a place in the app rather
+/// than a file the user has to hand-write.
+pub const CONFIGURE_REMEDY: &str = "Settings → Integrations → Configure…, which runs the provider's consent flow and records \
+     the credentials for this profile";
 
 /// The exact command that writes `provider`'s state file INTO `dir`.
 ///
@@ -978,7 +1068,12 @@ entities:
     id_column: id
 "#;
         let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let mcp_config = config.into_mcp_config("test-provider".into()).unwrap();
+        let mcp_config = config
+            .into_mcp_config(
+                "test-provider".into(),
+                &CredentialRoot::new("/tmp/holon-test-config"),
+            )
+            .unwrap();
 
         assert_eq!(mcp_config.provider_name, "test-provider");
         match &mcp_config.transport {
@@ -1006,7 +1101,12 @@ auth:
 entities: {}
 "#;
         let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let mcp_config = config.into_mcp_config("http-provider".into()).unwrap();
+        let mcp_config = config
+            .into_mcp_config(
+                "http-provider".into(),
+                &CredentialRoot::new("/tmp/holon-test-config"),
+            )
+            .unwrap();
 
         match &mcp_config.transport {
             McpTransport::Http { uri } => assert_eq!(uri, "https://example.com/mcp"),
@@ -1036,7 +1136,8 @@ entities: {}
         std::fs::write(dir.path().join("readme.txt"), "ignore me").unwrap();
 
         let store = IntegrationConfigStore::load(dir.path()).unwrap();
-        let loaded = load_integration_configs(dir.path(), &store).unwrap();
+        let loaded =
+            load_integration_configs(dir.path(), &store, &CredentialRoot::new(dir.path())).unwrap();
         assert!(loaded.configs.is_empty());
         assert_eq!(loaded.ignored.len(), 1, "the .txt is not a sidecar at all");
         assert_eq!(loaded.ignored[0].installed_path, installed);
@@ -1053,7 +1154,7 @@ entities: {}
         std::fs::write(&bad_path, "not: [valid: yaml: config").unwrap();
 
         let store = IntegrationConfigStore::load(dir.path()).unwrap();
-        let loaded = load_integration_configs(dir.path(), &store)
+        let loaded = load_integration_configs(dir.path(), &store, &CredentialRoot::new(dir.path()))
             .expect("a file that can enable nothing cannot break the boot either");
         assert!(loaded.configs.is_empty());
         assert_eq!(loaded.ignored[0].installed_path, bad_path);
@@ -1063,7 +1164,12 @@ entities: {}
     fn load_configs_missing_directory() {
         let dir = tempfile::tempdir().unwrap();
         let store = IntegrationConfigStore::load(dir.path()).unwrap();
-        let loaded = load_integration_configs(Path::new("/nonexistent/path"), &store).unwrap();
+        let loaded = load_integration_configs(
+            Path::new("/nonexistent/path"),
+            &store,
+            &CredentialRoot::new("/nonexistent/path"),
+        )
+        .unwrap();
         assert!(loaded.configs.is_empty());
         assert!(loaded.ignored.is_empty());
     }
@@ -1075,7 +1181,7 @@ entities: {}
         std::fs::write(dir.path().join("gcal.yml"), "entities: {}\n").unwrap();
 
         let store = IntegrationConfigStore::load(dir.path()).unwrap();
-        let err = load_integration_configs(dir.path(), &store)
+        let err = load_integration_configs(dir.path(), &store, &CredentialRoot::new(dir.path()))
             .expect_err("two files claiming one provider has no winner");
         assert!(format!("{err:#}").contains("installed sidecars"));
     }
@@ -1107,7 +1213,12 @@ entities: {}
 "#;
         unsafe { std::env::set_var("HOLON_TEST_TODOIST_HOST", "ai.todoist.net") };
         let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let mcp_config = config.into_mcp_config("todoist".into()).unwrap();
+        let mcp_config = config
+            .into_mcp_config(
+                "todoist".into(),
+                &CredentialRoot::new("/tmp/holon-test-config"),
+            )
+            .unwrap();
 
         match &mcp_config.transport {
             McpTransport::Http { uri } => assert_eq!(uri, "https://ai.todoist.net/mcp"),
@@ -1132,7 +1243,9 @@ auth:
 entities: {}
 "#;
         let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
-        let err = match config.into_mcp_config("p".into()) {
+        let err = match config
+            .into_mcp_config("p".into(), &CredentialRoot::new("/tmp/holon-test-config"))
+        {
             Ok(_) => panic!("expected error for unset env var"),
             Err(e) => e,
         };
@@ -1154,7 +1267,7 @@ entities: {}
 "#;
         let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
         let err = config
-            .into_mcp_config("p".into())
+            .into_mcp_config("p".into(), &CredentialRoot::new("/tmp/holon-test-config"))
             .expect_err("missing transport must be a hard error");
         assert!(
             err.downcast_ref::<UnresolvedVar>().is_none(),
@@ -1192,7 +1305,11 @@ entities: {}
 "#;
         let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
         let mcp_config = config
-            .into_mcp_config_with("todoist".into(), &lookup)
+            .into_mcp_config_with(
+                "todoist".into(),
+                &lookup,
+                &CredentialRoot::new("/tmp/holon-test-config"),
+            )
             .unwrap();
         match &mcp_config.auth_mode {
             AuthMode::StaticToken(t) => assert_eq!(t, "from-settings"),

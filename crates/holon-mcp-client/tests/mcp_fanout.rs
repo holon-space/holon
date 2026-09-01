@@ -894,29 +894,13 @@ filter_mapping:
     assert_eq!(peer.tool_calls().len(), 1);
 }
 
-/// Round-trip the canonical github.yaml at ~/.config/holon/integrations/
-/// through `IntegrationFileConfig` deserialization. Catches schema drift
-/// between the YAML and the Rust types. Skipped silently if the file
-/// is absent (CI / fresh checkouts).
-#[test]
-fn github_yaml_parses_as_integration_file_config() {
-    let path = std::path::Path::new(env!("HOME")).join(".config/holon/integrations/github.yaml");
-    if !path.exists() {
-        eprintln!("skip: {} not present", path.display());
-        return;
-    }
-    let body = std::fs::read_to_string(&path).expect("read github.yaml");
-    let cfg: IntegrationFileConfig =
-        serde_yaml::from_str(&body).expect("github.yaml parses as IntegrationFileConfig");
-    assert_eq!(cfg.entity_prefix.as_deref(), Some("gh_"));
-    for ent in ["repository", "issue", "pull_request"] {
-        let entry = cfg
-            .entities
-            .get(ent)
-            .unwrap_or_else(|| panic!("missing entity '{ent}'"));
-        assert!(entry.vtable.is_some(), "entity '{ent}' must declare vtable");
-    }
-}
+// The `github.yaml` schema-drift check that used to live here is gone. It read
+// `$HOME/.config/holon/integrations/github.yaml` — a file that exists on one
+// developer's machine and in no checkout — so it silently did nothing in CI
+// and, where it did run, read the real user's config. `sidecar_conformance.rs`
+// (`every_sidecar_parses_strictly`) already parses every SHIPPED sidecar
+// against `IntegrationFileConfig`, three of which declare `vtable`, so the
+// drift it aimed at is covered by fixtures the repo owns.
 
 // ---------------------------------------------------------------------------
 // Phase 3: bounded, filterable, incrementally-refreshable fan-out

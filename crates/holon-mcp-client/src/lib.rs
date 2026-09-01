@@ -12,6 +12,7 @@
 
 pub mod bundled_sidecars;
 pub mod command_resolution;
+pub mod credential_path;
 pub mod credential_store;
 pub mod entity_mirror;
 pub mod integration_config;
@@ -37,9 +38,13 @@ pub use bundled_sidecars::BUNDLED_SIDECARS;
 pub use bundled_sidecars::BundledSidecar;
 pub use bundled_sidecars::SIDECAR_SCHEMA_VERSION;
 pub use bundled_sidecars::bundled_sidecar;
+pub use credential_path::CONFIG_DIR_VAR;
+pub use credential_path::ConfinedPath;
+pub use credential_path::CredentialRoot;
 pub use holon_core::SyncGate;
 pub use integration_config::IgnoredReason;
 pub use integration_config::IgnoredSidecar;
+pub use integration_config::InertIntegration;
 pub use integration_config::IntegrationFileConfig;
 pub use integration_config::LoadedIntegrations;
 pub use integration_config::SupersededSidecar;

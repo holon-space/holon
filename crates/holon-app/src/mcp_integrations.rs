@@ -13,8 +13,10 @@ use holon_core::SyncTokenStore;
 use holon_loro::DegradedSignalBus;
 use holon_loro::ShareDegraded;
 use holon_loro::ShareDegradedReason;
+use holon_mcp_client::CredentialRoot;
 use holon_mcp_client::IgnoredReason;
 use holon_mcp_client::IgnoredSidecar;
+use holon_mcp_client::InertIntegration;
 use holon_mcp_client::IntegrationConfigStore;
 use holon_mcp_client::LoadedIntegrations;
 use holon_mcp_client::McpIntegration;
@@ -199,6 +201,33 @@ fn log_ignored_sidecar(s: &IgnoredSidecar) {
     }
 }
 
+/// Log and disclose a provider that is switched on but has no credentials in
+/// this profile.
+///
+/// Its pages render blank exactly like a failed connect, and from the user's
+/// side the switch is ON — so saying nothing here is the silent-degradation
+/// this module exists to refuse. It reads as `Unavailable` rather than
+/// `Connected`, because nothing was connected.
+fn log_inert_integration(i: &InertIntegration) {
+    warn!(
+        "[McpIntegrationsModule] {} It stays inert until it is configured: {}. Its state file is \
+         '{}'.",
+        i.reason,
+        i.remedy,
+        i.state_path.display()
+    );
+}
+
+fn disclose_inert_integration(i: &InertIntegration, bus: &DegradedSignalBus) {
+    bus.emit(ShareDegraded {
+        shared_tree_id: i.provider.clone(),
+        reason: ShareDegradedReason::IntegrationConnectFailed {
+            integration: i.provider.clone(),
+            error: format!("{} Remedy: {}", i.reason, i.remedy),
+        },
+    });
+}
+
 /// Holds all running MCP integrations so their services stay alive.
 ///
 /// Integrations are keyed by provider name (`names[i]` belongs to
@@ -245,6 +274,11 @@ pub struct McpIntegrationsModule {
     /// through the module-registration `Result` instead of being swallowed
     /// here.
     loaded: Result<(Arc<IntegrationConfigStore>, LoadedIntegrations), String>,
+    /// The active profile's config directory — the only place a sidecar's
+    /// credential files may live. Established here, at the one boot site that
+    /// knows which profile is running, and passed to every surface that
+    /// resolves a credential.
+    root: CredentialRoot,
     /// Where `integration.begin_oauth` sends the user to consent. The default
     /// is the desktop's own URL handler; a test supplies one that opens
     /// nothing.
@@ -259,10 +293,11 @@ impl McpIntegrationsModule {
     /// cannot be read, or that holds two files for one provider, is a hard
     /// error: it is captured here and returned from `configure()` (fail loud,
     /// never boot on a half-read integrations directory).
-    pub fn from_dir(dir: &Path) -> Self {
+    pub fn from_dir(dir: &Path, config_dir: &Path) -> Self {
+        let root = CredentialRoot::new(config_dir);
         let loaded = IntegrationConfigStore::load(dir)
             .map(Arc::new)
-            .and_then(|store| load_integration_configs(dir, &store).map(|l| (store, l)))
+            .and_then(|store| load_integration_configs(dir, &store, &root).map(|l| (store, l)))
             .map_err(|e| format!("{e:#}"));
         if let Ok((_, loaded)) = &loaded {
             // Logged here, not at disclosure time: the registry singleton is
@@ -283,6 +318,9 @@ impl McpIntegrationsModule {
             for s in &loaded.ignored {
                 log_ignored_sidecar(s);
             }
+            for i in &loaded.inert {
+                log_inert_integration(i);
+            }
             info!(
                 "[McpIntegrationsModule] {} integration(s) enabled from '{}' ({} installed \
                  sidecar(s) superseded by the bundled copy, {} enabling nothing)",
@@ -294,6 +332,7 @@ impl McpIntegrationsModule {
         }
         Self {
             loaded,
+            root,
             browser: Arc::new(holon_mcp_client::oauth_bootstrap::SystemBrowser),
         }
     }
@@ -318,7 +357,10 @@ impl Module for McpIntegrationsModule {
         // surface is the user's only way to switch one on.
         let store_di = store.clone();
         injector.provide::<IntegrationConfigStore>(Provider::root(move |_| store_di.clone()));
-        let settings_vm = Arc::new(IntegrationsSettingsVm::new(store.clone()));
+        let settings_vm = Arc::new(IntegrationsSettingsVm::new(
+            store.clone(),
+            self.root.clone(),
+        ));
         let settings_vm_di = settings_vm.clone();
         injector.provide::<IntegrationsSettingsVm>(Provider::root(move |_| settings_vm_di.clone()));
 
@@ -350,12 +392,13 @@ impl Module for McpIntegrationsModule {
         let configs = &loaded.configs;
         let superseded = Arc::new(loaded.superseded.clone());
         let ignored = Arc::new(loaded.ignored.clone());
+        let inert = Arc::new(loaded.inert.clone());
         // Nothing to run AND nothing to say: leave the container untouched, so a
         // build with no integrations directory keeps resolving no MCP services
         // at all. Files that enabled nothing are the opposite case — the
         // registry factory is where the disclosure reaches the bus, so it must
         // be registered even when no integration runs.
-        if configs.is_empty() && ignored.is_empty() {
+        if configs.is_empty() && ignored.is_empty() && inert.is_empty() {
             return Ok(());
         }
 
@@ -403,6 +446,7 @@ impl Module for McpIntegrationsModule {
 
         let configs_for_registry = configs.clone();
         let settings_vm_for_registry = settings_vm.clone();
+        let credential_root = self.root.clone();
 
         // Register the registry as an async singleton — resolved in parallel with other
         // DI services.
@@ -413,6 +457,8 @@ impl Module for McpIntegrationsModule {
             let pending_writes = pending_writes_for_registry.clone();
             let superseded = superseded.clone();
             let ignored = ignored.clone();
+            let inert = inert.clone();
+            let credential_root = credential_root.clone();
             async move {
                 // Every non-connected integration is disclosed on this bus so
                 // the resulting blank pages are attributable. A container that
@@ -437,6 +483,9 @@ impl Module for McpIntegrationsModule {
                 }
                 for s in ignored.iter() {
                     disclose_ignored_sidecar(s, &degraded_bus);
+                }
+                for i in inert.iter() {
+                    disclose_inert_integration(i, &degraded_bus);
                 }
 
                 let db_handle = resolver
@@ -472,6 +521,26 @@ impl Module for McpIntegrationsModule {
                          refused and the Integrations section would read Pending forever."
                     )
                 });
+
+                // An integration held back for want of credentials never
+                // reaches the connect loop, so it would sit at `Pending`
+                // forever and read as if the boot had not finished with it.
+                // `Unavailable` is the honest word: switched on, not running.
+                let attribution = (*resolver
+                    .resolve::<holon_core::integration_attribution::IntegrationAttribution>(
+                ))
+                .clone();
+
+                for i in inert.iter() {
+                    record_status(
+                        &db_handle,
+                        &attribution,
+                        &i.provider,
+                        crate::integration_projection::IntegrationStatus::Unavailable,
+                        &i.reason,
+                    )
+                    .await;
+                }
 
                 let cache_factory = resolver
                     .resolve_async::<dyn holon_core::CacheFactory>()
@@ -509,10 +578,6 @@ impl Module for McpIntegrationsModule {
                 let mut names = Vec::new();
                 let mut integrations = Vec::new();
 
-                let attribution = (*resolver
-                    .resolve::<holon_core::integration_attribution::IntegrationAttribution>(
-                ))
-                .clone();
                 let display_names: HashMap<String, String> = settings_vm
                     .rows()
                     .into_iter()
@@ -534,10 +599,11 @@ impl Module for McpIntegrationsModule {
                     });
                     declare_entity_tables(&attribution, name, &display_name, config);
 
-                    let mcp_config = match config
-                        .clone()
-                        .into_mcp_config_with(name.clone(), &var_lookup)
-                    {
+                    let mcp_config = match config.clone().into_mcp_config_with(
+                        name.clone(),
+                        &var_lookup,
+                        &credential_root,
+                    ) {
                         Ok(c) => c,
                         // Disclosed skip: the config references a `${VAR}` that is
                         // set neither in the environment nor in settings — the

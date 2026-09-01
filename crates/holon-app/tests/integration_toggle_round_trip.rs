@@ -121,9 +121,12 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
                         )) as Arc<dyn holon_core::OperationProvider>
                     }),
                 );
-                holon_app::mcp_integrations::McpIntegrationsModule::from_dir(&state_dir_for_module)
-                    .configure(injector)
-                    .map_err(|e| anyhow::anyhow!("configure McpIntegrationsModule: {e}"))
+                holon_app::mcp_integrations::McpIntegrationsModule::from_dir(
+                    &state_dir_for_module,
+                    &state_dir_for_module,
+                )
+                .configure(injector)
+                .map_err(|e| anyhow::anyhow!("configure McpIntegrationsModule: {e}"))
             },
             |injector| async move {
                 (
@@ -147,7 +150,12 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
         // into the mirror with nobody asking it to.
         Arc::new(IntegrationStateProjector::new(
             db.clone(),
-            Arc::new(holon_app::integrations_settings::IntegrationsSettingsVm::new(store)),
+            Arc::new(
+                holon_app::integrations_settings::IntegrationsSettingsVm::new(
+                    store.clone(),
+                    holon_mcp_client::CredentialRoot::new(store.dir()),
+                ),
+            ),
         ))
         .start()
         .await

@@ -4,7 +4,12 @@
 # Runs the OAuth2 "installed app" loopback flow: opens Google's consent page,
 # captures the redirect on 127.0.0.1, exchanges the authorization code for a
 # long-lived REFRESH token, and writes ONLY that refresh token to
-# ~/.config/holon/<provider>-refresh-token with mode 0600.
+# <config-dir>/<provider>-refresh-token with mode 0600.
+#
+# <config-dir> is $HOLON_CONFIG_DIR when set, ~/.config/holon otherwise — the
+# same directory the sidecar's ${CONFIG_DIR} resolves to, so the token lands in
+# the profile that will read it. A token written for one profile is not
+# readable by another, by design.
 #
 # SECURITY:
 #   * The refresh token is NEVER printed to the terminal, a log, or argv — it is
@@ -42,9 +47,10 @@ die() {
 PROVIDER="$1"
 SCOPE="$2"
 
-TOKEN_FILE="${HOLON_REFRESH_TOKEN_FILE:-$HOME/.config/holon/${PROVIDER}-refresh-token}"
-CLIENT_ID_FILE="${HOLON_CLIENT_ID_FILE:-$HOME/.config/holon/${PROVIDER}-client-id}"
-CLIENT_SECRET_FILE="${HOLON_CLIENT_SECRET_FILE:-$HOME/.config/holon/${PROVIDER}-client-secret}"
+CONFIG_DIR="${HOLON_CONFIG_DIR:-$HOME/.config/holon}"
+TOKEN_FILE="${HOLON_REFRESH_TOKEN_FILE:-$CONFIG_DIR/${PROVIDER}-refresh-token}"
+CLIENT_ID_FILE="${HOLON_CLIENT_ID_FILE:-$CONFIG_DIR/${PROVIDER}-client-id}"
+CLIENT_SECRET_FILE="${HOLON_CLIENT_SECRET_FILE:-$CONFIG_DIR/${PROVIDER}-client-secret}"
 PORT="${HOLON_OAUTH_PORT:-8765}"
 REDIRECT_URI="http://127.0.0.1:${PORT}"
 AUTH_ENDPOINT="https://accounts.google.com/o/oauth2/v2/auth"

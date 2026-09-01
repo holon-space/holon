@@ -36,16 +36,17 @@
 //!   an actionable message. Nothing silently degrades.
 
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::Context;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Mutex;
-use tracing::warn;
 
+use crate::credential_path::ConfinedPath;
+use crate::credential_path::CredentialRoot;
 use crate::integration_config::UnresolvedVar;
 use crate::integration_config::VarLookup;
 use crate::redaction::Redactor;
@@ -100,8 +101,9 @@ pub struct RestOAuth2Config {
     #[serde(default)]
     pub client_secret_keychain: Option<KeychainRef>,
     /// Path to the long-lived refresh token. Written by the user's one-time
-    /// bootstrap helper (never by Holon), enforced to be mode 0600. A leading
-    /// `~/` is expanded to the user's home directory.
+    /// bootstrap helper (never by Holon), enforced to be mode 0600. Resolved
+    /// against the active profile's config directory
+    /// ([`crate::credential_path`]), so write `${CONFIG_DIR}/<file>`.
     pub refresh_token_file: String,
     /// The scopes the refresh token is consented for. Not sent on the refresh
     /// grant (RFC 6749 §6 reuses the original grant's scopes), but load-bearing
@@ -109,6 +111,48 @@ pub struct RestOAuth2Config {
     /// request.
     #[serde(default)]
     pub scopes: Vec<String>,
+}
+
+/// The credential files of one OAuth2 arm, each proved to sit inside the
+/// active profile's config directory.
+///
+/// Every credential read below takes these rather than the declared strings,
+/// so a location outside the profile cannot reach a `File::open` at all — the
+/// refusal happens once, here, instead of being a check each reader has to
+/// remember.
+#[derive(Debug, Clone)]
+pub struct ConfinedOAuth2Files {
+    pub client_id: Option<ConfinedPath>,
+    pub client_secret: Option<ConfinedPath>,
+    pub refresh_token: ConfinedPath,
+}
+
+impl RestOAuth2Config {
+    /// Parse this arm's declared credential locations against `root`.
+    ///
+    /// Fails loudly on a declaration that names anywhere else. A sidecar that
+    /// points at `$HOME` makes every instance on the machine — a sandbox
+    /// launched with `HOLON_CONFIG_DIR` included — authenticate as the same
+    /// account, which is exactly the isolation break this refuses.
+    pub fn confine(&self, root: &CredentialRoot) -> anyhow::Result<ConfinedOAuth2Files> {
+        let confine_opt =
+            |field: &str, declared: &Option<String>| -> anyhow::Result<Option<ConfinedPath>> {
+                declared
+                    .as_deref()
+                    .map(|d| {
+                        root.confine(d)
+                            .with_context(|| format!("oauth2: `{field}` is not usable"))
+                    })
+                    .transpose()
+            };
+        Ok(ConfinedOAuth2Files {
+            client_id: confine_opt("client_id_file", &self.client_id_file)?,
+            client_secret: confine_opt("client_secret_file", &self.client_secret_file)?,
+            refresh_token: root
+                .confine(&self.refresh_token_file)
+                .context("oauth2: `refresh_token_file` is not usable")?,
+        })
+    }
 }
 
 /// Where a credential sits in the OS keychain.
@@ -191,15 +235,17 @@ impl OAuth2TokenProvider {
         cfg: &RestOAuth2Config,
         lookup: &VarLookup<'_>,
         redactor: &Redactor,
+        root: &CredentialRoot,
     ) -> anyhow::Result<Self> {
         if cfg.token_url.trim().is_empty() {
             anyhow::bail!("oauth2.token_url must not be empty");
         }
+        let files = cfg.confine(root)?;
         let client_id = resolve_secret(
             "client_id",
             SecretSources {
                 env: cfg.client_id_env.as_deref(),
-                file: cfg.client_id_file.as_deref(),
+                file: files.client_id.as_ref(),
                 keychain: cfg.client_id_keychain.as_ref(),
             },
             lookup,
@@ -210,14 +256,14 @@ impl OAuth2TokenProvider {
             "client_secret",
             SecretSources {
                 env: cfg.client_secret_env.as_deref(),
-                file: cfg.client_secret_file.as_deref(),
+                file: files.client_secret.as_ref(),
                 keychain: cfg.client_secret_keychain.as_ref(),
             },
             lookup,
             &holon_secrets::platform_keychain,
             /* enforce_private_file */ true,
         )?;
-        let refresh_token = read_refresh_token(&cfg.refresh_token_file)?;
+        let refresh_token = read_refresh_token(&files.refresh_token)?;
 
         // These two reach the wire in the token-grant POST body. Registering
         // them covers a provider that echoes a submitted field back in an error.
@@ -369,12 +415,14 @@ impl OAuth2TokenProvider {
 pub(crate) fn resolve_client_credentials(
     cfg: &RestOAuth2Config,
     lookup: &VarLookup<'_>,
+    root: &CredentialRoot,
 ) -> anyhow::Result<(String, String)> {
+    let files = cfg.confine(root)?;
     let client_id = resolve_secret(
         "client_id",
         SecretSources {
             env: cfg.client_id_env.as_deref(),
-            file: cfg.client_id_file.as_deref(),
+            file: files.client_id.as_ref(),
             keychain: cfg.client_id_keychain.as_ref(),
         },
         lookup,
@@ -385,7 +433,7 @@ pub(crate) fn resolve_client_credentials(
         "client_secret",
         SecretSources {
             env: cfg.client_secret_env.as_deref(),
-            file: cfg.client_secret_file.as_deref(),
+            file: files.client_secret.as_ref(),
             keychain: cfg.client_secret_keychain.as_ref(),
         },
         lookup,
@@ -400,9 +448,10 @@ pub fn build_provider(
     cfg: &RestOAuth2Config,
     lookup: &VarLookup<'_>,
     redactor: &Redactor,
+    root: &CredentialRoot,
 ) -> anyhow::Result<Arc<OAuth2TokenProvider>> {
     Ok(Arc::new(OAuth2TokenProvider::from_config(
-        cfg, lookup, redactor,
+        cfg, lookup, redactor, root,
     )?))
 }
 
@@ -413,7 +462,7 @@ pub fn build_provider(
 /// The three places one credential may be declared. Exactly one may be set.
 struct SecretSources<'a> {
     env: Option<&'a str>,
-    file: Option<&'a str>,
+    file: Option<&'a ConfinedPath>,
     keychain: Option<&'a KeychainRef>,
 }
 
@@ -500,15 +549,14 @@ fn read_keychain_entry(
 /// Read the long-lived refresh token from its file. Absent file → not
 /// provisioned yet (disclosed skip); present file → 0600-enforced, trimmed,
 /// non-empty.
-fn read_refresh_token(path: &str) -> anyhow::Result<String> {
+fn read_refresh_token(path: &ConfinedPath) -> anyhow::Result<String> {
     read_credential_file(path, /* enforce_private_file */ true).map_err(|e| {
         // Enrich the "not provisioned" case with the bootstrap pointer while
         // preserving the typed UnresolvedVar so the caller still disclosed-skips.
         if e.downcast_ref::<UnresolvedVar>().is_some() {
             anyhow::Error::new(UnresolvedVar {
                 var: format!(
-                    "refresh token file {} (run scripts/google-oauth-bootstrap.sh to create it)",
-                    expand_tilde(path).display()
+                    "refresh token file {path} (run scripts/google-oauth-bootstrap.sh to create it)"
                 ),
             })
         } else {
@@ -520,19 +568,45 @@ fn read_refresh_token(path: &str) -> anyhow::Result<String> {
 /// Read a credential file's trimmed contents.
 ///
 /// Absent file → [`UnresolvedVar`] (a disclosed skip; the integration is simply
-/// not provisioned yet). Present but group/world-accessible → hard refusal.
-/// Present but unreadable/empty → hard error.
-fn read_credential_file(path: &str, enforce_private_file: bool) -> anyhow::Result<String> {
-    let expanded = expand_tilde(path);
-    if !expanded.exists() {
-        return Err(anyhow::Error::new(UnresolvedVar {
-            var: format!("credential file {}", expanded.display()),
-        }));
-    }
+/// not provisioned yet). A symbolic link, or a present but
+/// group/world-accessible file → hard refusal. Present but unreadable/empty →
+/// hard error.
+///
+/// The link refusal is what makes [`ConfinedPath`] mean anything at the point
+/// of use: `exists`, `metadata` and `read_to_string` all follow links, so a
+/// link placed at a credential's NAME reads a file the confined path does not
+/// name — another profile's token, whose own 0600 mode passes the privacy
+/// check. The write leg never creates a credential through a link either
+/// (`O_EXCL` + 0600), so refusing here makes the two halves agree.
+fn read_credential_file(path: &ConfinedPath, enforce_private_file: bool) -> anyhow::Result<String> {
+    let expanded = path.path();
+    // `symlink_metadata` describes the NAME, not what it points at — the whole
+    // point of the check below.
+    let meta = match std::fs::symlink_metadata(expanded) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(anyhow::Error::new(UnresolvedVar {
+                var: format!("credential file {}", expanded.display()),
+            }));
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "oauth2: cannot stat credential file {}: {e}",
+                expanded.display()
+            )
+        }
+    };
+    anyhow::ensure!(
+        !meta.file_type().is_symlink(),
+        "oauth2: credential file {} is a symbolic link. A credential is read from the profile that \
+         owns it, never through a link that can point at another profile's secret. Replace the \
+         link with the credential itself, or point the sidecar at where it really lives.",
+        expanded.display()
+    );
     if enforce_private_file {
-        assert_file_private(&expanded)?;
+        assert_file_private(expanded, &meta)?;
     }
-    let contents = std::fs::read_to_string(&expanded).map_err(|e| {
+    let contents = std::fs::read_to_string(expanded).map_err(|e| {
         anyhow::anyhow!(
             "oauth2: failed to read credential file {}: {e}",
             expanded.display()
@@ -549,14 +623,8 @@ fn read_credential_file(path: &str, enforce_private_file: bool) -> anyhow::Resul
 /// other. A secret the rest of the machine can read is a compromised secret, so
 /// this is a hard, loud refusal rather than a warning.
 #[cfg(unix)]
-fn assert_file_private(path: &Path) -> anyhow::Result<()> {
+fn assert_file_private(path: &Path, meta: &std::fs::Metadata) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let meta = std::fs::metadata(path).map_err(|e| {
-        anyhow::anyhow!(
-            "oauth2: cannot stat credential file {}: {e}",
-            path.display()
-        )
-    })?;
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
         anyhow::bail!(
@@ -573,23 +641,12 @@ fn assert_file_private(path: &Path) -> anyhow::Result<()> {
 /// On non-Unix we cannot verify POSIX permissions, so we refuse rather than
 /// silently skip the security control.
 #[cfg(not(unix))]
-fn assert_file_private(path: &Path) -> anyhow::Result<()> {
+fn assert_file_private(path: &Path, _: &std::fs::Metadata) -> anyhow::Result<()> {
     anyhow::bail!(
         "oauth2: refusing to read credential file {} on a non-Unix platform where its private \
          (0600) permissions cannot be verified",
         path.display()
     )
-}
-
-/// Expand a leading `~/` to `$HOME`. Any other path is returned unchanged.
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-        warn!("oauth2: cannot expand '~' in '{path}' — $HOME is unset; using the literal path");
-    }
-    PathBuf::from(path)
 }
 
 /// Strip any query string from a URL so it is safe to log.
@@ -810,11 +867,12 @@ mod tests {
 
     #[test]
     fn resolve_secret_both_sources_is_hard_error() {
+        let y = confined(Path::new("/tmp"), "y");
         let err = resolve_secret(
             "client_id",
             SecretSources {
                 env: Some("X"),
-                file: Some("/tmp/y"),
+                file: Some(&y),
                 keychain: None,
             },
             &|_| None,
@@ -845,7 +903,7 @@ mod tests {
         f.write_all(b"1//refresh").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        let err = read_credential_file(path.to_str().unwrap(), true).unwrap_err();
+        let err = read_credential_file(&confined(dir.path(), "refresh-token"), true).unwrap_err();
         assert!(
             err.downcast_ref::<UnresolvedVar>().is_none(),
             "a bad-perms file is a HARD error, not a disclosed skip"
@@ -866,12 +924,20 @@ mod tests {
         f.write_all(b"  1//refresh\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-        let got = read_credential_file(path.to_str().unwrap(), true).unwrap();
+        let got = read_credential_file(&confined(dir.path(), "refresh-token"), true).unwrap();
         assert_eq!(got, "1//refresh", "contents trimmed");
     }
 
+    /// A credential path confined to `root_dir`, which the unit tests use as
+    /// the profile's config directory.
+    fn confined(root_dir: &Path, name: &str) -> ConfinedPath {
+        CredentialRoot::new(root_dir)
+            .confine(name)
+            .expect("a bare name under the root confines")
+    }
+
     #[cfg(unix)]
-    fn write_file(mode: u32, contents: &[u8]) -> (tempfile::TempDir, String) {
+    fn write_file(mode: u32, contents: &[u8]) -> (tempfile::TempDir, ConfinedPath) {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -879,7 +945,8 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(contents).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-        (dir, path.to_str().unwrap().to_string())
+        let confined = confined(dir.path(), "cred");
+        (dir, confined)
     }
 
     // The `client_secret_file` variant flows through resolve_secret with
@@ -944,7 +1011,11 @@ mod tests {
 
     #[test]
     fn absent_credential_file_is_disclosed_skip() {
-        let err = read_credential_file("/nonexistent/holon/refresh-token", true).unwrap_err();
+        let err = read_credential_file(
+            &confined(Path::new("/nonexistent/holon"), "refresh-token"),
+            true,
+        )
+        .unwrap_err();
         assert!(
             err.downcast_ref::<UnresolvedVar>().is_some(),
             "an absent (not-yet-provisioned) file must be a disclosed skip"
@@ -959,7 +1030,7 @@ mod tests {
         let path = dir.path().join("refresh-token");
         std::fs::File::create(&path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let err = read_credential_file(path.to_str().unwrap(), true).unwrap_err();
+        let err = read_credential_file(&confined(dir.path(), "refresh-token"), true).unwrap_err();
         assert!(err.downcast_ref::<UnresolvedVar>().is_none());
         assert!(err.to_string().contains("is empty"));
     }

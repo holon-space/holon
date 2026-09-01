@@ -239,8 +239,23 @@ fn lookup(name: &str) -> Option<String> {
 
 fn surface_from(yaml: &str) -> RestCallSurface {
     let cfg: IntegrationFileConfig = serde_yaml::from_str(yaml).expect("sidecar parses");
+    // These fixtures write their credential files into a tempdir and name it
+    // absolutely, so that tempdir IS the profile's config dir.
+    let root = cfg
+        .oauth2()
+        .map(|o| {
+            std::path::Path::new(&o.refresh_token_file)
+                .parent()
+                .expect("the fixture names an absolute refresh-token path")
+                .to_path_buf()
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/holon-rest-oauth2-mock"));
     let mcp = cfg
-        .into_mcp_config_with("gcal".to_string(), &lookup)
+        .into_mcp_config_with(
+            "gcal".to_string(),
+            &lookup,
+            &holon_mcp_client::CredentialRoot::new(root),
+        )
         .expect("into_mcp_config");
     match mcp.transport {
         McpTransport::Rest { manual, .. } => RestCallSurface::new(manual),
@@ -401,14 +416,17 @@ fn shipped_gcal_sidecar_shape() {
     let oauth2 = auth.oauth2.as_ref().expect("oauth2 arm");
     assert_eq!(oauth2.token_url, "https://oauth2.googleapis.com/token");
     // Credentials are file-sourced (Holon is a GUI app; env vars don't reach it
-    // cleanly). The env variant stays documented in the yaml as the alternative.
+    // cleanly), and named RELATIVE TO THE RUNNING PROFILE — a `~/` path would
+    // make a sandbox instance authenticate with the real account
+    // (`credential_confinement.rs`). The env variant stays documented in the
+    // yaml as the alternative.
     assert_eq!(
         oauth2.client_id_file.as_deref(),
-        Some("~/.config/holon/gcal-client-id")
+        Some("${CONFIG_DIR}/gcal-client-id")
     );
     assert_eq!(
         oauth2.client_secret_file.as_deref(),
-        Some("~/.config/holon/gcal-client-secret")
+        Some("${CONFIG_DIR}/gcal-client-secret")
     );
     assert!(
         oauth2.client_id_env.is_none() && oauth2.client_secret_env.is_none(),

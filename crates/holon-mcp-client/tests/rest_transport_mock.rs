@@ -36,6 +36,12 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
+/// These fixtures declare no credential files, so the root only has to exist;
+/// the confinement it enforces is exercised in `credential_confinement.rs`.
+fn test_credential_root() -> holon_mcp_client::CredentialRoot {
+    holon_mcp_client::CredentialRoot::new("/tmp/holon-rest-transport-mock-config")
+}
+
 // ---------------------------------------------------------------------------
 // Minimal mock HTTP server
 // ---------------------------------------------------------------------------
@@ -185,7 +191,7 @@ fn surface_from(
 ) -> RestCallSurface {
     let cfg: IntegrationFileConfig = serde_yaml::from_str(yaml).expect("sidecar parses");
     let mcp_cfg = cfg
-        .into_mcp_config_with(entity.to_string(), lookup)
+        .into_mcp_config_with(entity.to_string(), lookup, &test_credential_root())
         .expect("into_mcp_config");
     match mcp_cfg.transport {
         McpTransport::Rest { manual, .. } => RestCallSurface::new(manual),
@@ -475,7 +481,7 @@ fn shipped_jsonplaceholder_sidecar_parses_as_rest() {
     let yaml = std::fs::read_to_string(path).expect("read jsonplaceholder.yaml");
     let cfg: IntegrationFileConfig = serde_yaml::from_str(&yaml).expect("example parses");
     let mcp_cfg = cfg
-        .into_mcp_config("jsonplaceholder".to_string())
+        .into_mcp_config("jsonplaceholder".to_string(), &test_credential_root())
         .expect("into_mcp_config");
     match mcp_cfg.transport {
         McpTransport::Rest {
@@ -517,7 +523,7 @@ tools: {}
 "#;
     let cfg: IntegrationFileConfig = serde_yaml::from_str(yaml).expect("parse");
     let mcp_cfg = cfg
-        .into_mcp_config("p".to_string())
+        .into_mcp_config("p".to_string(), &test_credential_root())
         .expect("into_mcp_config");
     match mcp_cfg.transport {
         McpTransport::Rest { poll_interval, .. } => {
@@ -816,7 +822,7 @@ async fn rest_poll_runner_syncs_reuses_mirror_and_survives_failure() {
     let sidecar: McpSidecar = serde_yaml::from_str(&yaml).expect("parse sidecar");
 
     let manual = match cfg
-        .into_mcp_config_with("jp".to_string(), &|_| None)
+        .into_mcp_config_with("jp".to_string(), &|_| None, &test_credential_root())
         .expect("into_mcp_config")
         .transport
     {

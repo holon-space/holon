@@ -31,6 +31,7 @@ use std::sync::Arc;
 use holon_app::integrations_settings::ConfigStatus;
 use holon_app::integrations_settings::ConfigureProgress;
 use holon_app::integrations_settings::IntegrationsSettingsVm;
+use holon_mcp_client::CredentialRoot;
 use holon_mcp_client::IntegrationConfigStore;
 use holon_mcp_client::integration_state::Configuration;
 use holon_mcp_client::integration_state::CredentialRef;
@@ -49,7 +50,10 @@ const BUNDLED: &[&str] = &[
 
 fn vm_over(dir: &Path) -> (IntegrationsSettingsVm, Arc<IntegrationConfigStore>) {
     let store = Arc::new(IntegrationConfigStore::load(dir).expect("store loads over a clean dir"));
-    (IntegrationsSettingsVm::new(store.clone()), store)
+    (
+        IntegrationsSettingsVm::new(store.clone(), CredentialRoot::new(dir)),
+        store,
+    )
 }
 
 /// What an OAuth bootstrap leaves behind on the configuration axis.
@@ -191,7 +195,7 @@ fn the_settings_list_is_registered_even_when_no_integration_runs() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let injector = fluxdi::Injector::root();
-    holon_app::McpIntegrationsModule::from_dir(dir.path())
+    holon_app::McpIntegrationsModule::from_dir(dir.path(), dir.path())
         .configure(&injector)
         .expect("an empty integrations directory is not a wiring failure");
 
@@ -234,7 +238,7 @@ fn an_unreadable_state_file_fails_the_module_wiring_loud() {
     std::fs::write(dir.path().join("todoist.state.toml"), "enabled = ").expect("write junk");
 
     let injector = fluxdi::Injector::root();
-    let err = holon_app::McpIntegrationsModule::from_dir(dir.path())
+    let err = holon_app::McpIntegrationsModule::from_dir(dir.path(), dir.path())
         .configure(&injector)
         .err()
         .expect("a corrupt state file must fail the module, not configure an empty container");
@@ -261,18 +265,19 @@ fn an_unreadable_state_file_fails_the_module_wiring_loud() {
 fn install_sandboxed_gcal(dir: &Path) {
     let bundled =
         holon_mcp_client::bundled_sidecars::bundled_sidecar("gcal").expect("gcal is bundled");
-    let sandboxed = bundled.yaml.replace(
-        "~/.config/holon/",
-        &format!("{}/", dir.join("creds").display()),
-    );
-    std::fs::write(dir.join("gcal.yaml"), sandboxed).expect("install sandboxed sidecar");
+    // Installed verbatim: the sidecar names its credentials `${CONFIG_DIR}/…`,
+    // so pointing the rig's config dir at a tempdir sandboxes them by
+    // construction. Rewriting the paths here is what a rig had to do back when
+    // they resolved against `$HOME` — and a rig that forgot read the real
+    // user's credentials.
+    std::fs::write(dir.join("gcal.yaml"), bundled.yaml).expect("install sidecar");
 }
 
 /// Provision the client id/secret the sandboxed sidecar points at, so a flow
 /// gets past credential resolution and parks in the loopback wait.
 fn provision_sandboxed_client_credentials(dir: &Path) {
-    let creds = dir.join("creds");
-    std::fs::create_dir_all(&creds).expect("creds dir");
+    // `dir` IS the rig's config dir, which is where `${CONFIG_DIR}` resolves.
+    let creds = dir;
     for (name, value) in [
         ("gcal-client-id", "sandbox-client-id.apps.example.com"),
         ("gcal-client-secret", "sandbox-client-secret"),
@@ -306,7 +311,7 @@ fn a_second_consent_flow_for_the_same_provider_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     install_sandboxed_gcal(dir.path());
     provision_sandboxed_client_credentials(dir.path());
-    let vm = Arc::new(IntegrationsSettingsVm::over_dir(dir.path()).expect("vm"));
+    let vm = Arc::new(IntegrationsSettingsVm::over_dir(dir.path(), dir.path()).expect("vm"));
 
     // Park a REAL first flow in its loopback wait, through the public API.
     //
@@ -360,7 +365,7 @@ fn a_second_consent_flow_for_the_same_provider_is_refused() {
 fn an_in_flight_flow_does_not_block_a_different_provider() {
     let dir = tempfile::tempdir().expect("tempdir");
     install_sandboxed_gcal(dir.path());
-    let vm = Arc::new(IntegrationsSettingsVm::over_dir(dir.path()).expect("vm"));
+    let vm = Arc::new(IntegrationsSettingsVm::over_dir(dir.path(), dir.path()).expect("vm"));
 
     // `gmail` has no provisioned credentials, so it refuses on its own merits —
     // what matters is that the refusal is about credentials, not about `gcal`.

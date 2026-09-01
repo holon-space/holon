@@ -23,6 +23,14 @@ default_view: gcal-view
 # ONE-TIME SETUP
 # ─────────────────────────────────────────────────────────────────────────────
 #
+# These commands write into the config directory of the PROFILE you are setting
+# up: $HOLON_CONFIG_DIR when it is set, ~/.config/holon otherwise. The sidecar
+# below reads its credentials as ${CONFIG_DIR}/... , which resolves to that same
+# directory — so an instance launched with its own HOLON_CONFIG_DIR gets its own
+# credentials and can never reach another profile's. Point the shell at the
+# profile you mean before you start:
+#       CFG="${HOLON_CONFIG_DIR:-$HOME/.config/holon}"; mkdir -p "$CFG"
+#
 # Steps 1-3:
 #  1. Create an OAuth client in Google Cloud (one-time):
 #       a. https://console.cloud.google.com → create/pick a project.
@@ -32,35 +40,35 @@ default_view: gcal-view
 #          ".../auth/calendar.readonly" is enough.
 #       d. APIs & Services → Credentials → Create credentials → OAuth client ID →
 #          Application type: **Desktop app**. "Download JSON" → save it as
-#          ~/.config/holon/gcal-client.json (chmod 600).
+#          "$CFG"/gcal-client.json (chmod 600).
 #
 #  2. Extract the client id/secret into the 0600 files this sidecar reads (they
 #     stay OUT of this file — it references paths only). Needs `jq`:
 #       umask 077
-#       jq -r '.installed.client_id'     ~/.config/holon/gcal-client.json > ~/.config/holon/gcal-client-id
-#       jq -r '.installed.client_secret' ~/.config/holon/gcal-client.json > ~/.config/holon/gcal-client-secret
-#       chmod 600 ~/.config/holon/gcal-client-id ~/.config/holon/gcal-client-secret
+#       jq -r '.installed.client_id'     "$CFG"/gcal-client.json > "$CFG"/gcal-client-id
+#       jq -r '.installed.client_secret' "$CFG"/gcal-client.json > "$CFG"/gcal-client-secret
+#       chmod 600 "$CFG"/gcal-client-id "$CFG"/gcal-client-secret
 #     (Google nests these under `.installed` for Desktop-app clients; some
 #     exports use `.web` — adjust the jq path if so.)
 #
 #  3. Run the one-time consent flow to mint a long-lived refresh token. The
 #     helper opens the Google consent page, captures the redirect on
 #     127.0.0.1, exchanges the code, and writes ONLY the refresh token to
-#     ~/.config/holon/gcal-refresh-token with mode 0600. It NEVER prints the
+#     "$CFG"/gcal-refresh-token with mode 0600. It NEVER prints the
 #     token to the terminal, and Holon NEVER writes this file itself:
-#       HOLON_OAUTH_CLIENT_ID=$(cat ~/.config/holon/gcal-client-id) \
-#       HOLON_OAUTH_CLIENT_SECRET=$(cat ~/.config/holon/gcal-client-secret) \
+#       HOLON_OAUTH_CLIENT_ID=$(cat "$CFG"/gcal-client-id) \
+#       HOLON_OAUTH_CLIENT_SECRET=$(cat "$CFG"/gcal-client-secret) \
 #         scripts/google-oauth-bootstrap.sh gcal \
 #           https://www.googleapis.com/auth/calendar.readonly
 #     Verify the file is private (must print `-rw-------`):
-#       ls -l ~/.config/holon/gcal-refresh-token
+#       ls -l "$CFG"/gcal-refresh-token
 #     (If a credential file is group/world-readable, Holon REFUSES to start this
 #     integration and tells you to `chmod 600` it — a readable secret is a
 #     compromised one.)
 #
 #  4. Switch the integration on. Step 3 already did this — it calls
 #     scripts/holon-integration-enable.sh, which writes
-#     ~/.config/holon/integrations/gcal.state.toml with `enabled = true`.
+#     "$CFG"/integrations/gcal.state.toml with `enabled = true`.
 #     Copying this YAML anywhere enables NOTHING: the sidecar this build runs
 #     is compiled in, and the state file is the switch. To toggle by hand:
 #       scripts/holon-integration-enable.sh gcal
@@ -125,11 +133,14 @@ transport:
         #   client_secret_env: GCAL_CLIENT_SECRET
         # Alternative (OS keychain — macOS, Windows, Linux Secret Service):
         #   client_secret_keychain: { service: space.holon.gcal, account: client-secret }
-        client_id_file: ~/.config/holon/gcal-client-id
-        client_secret_file: ~/.config/holon/gcal-client-secret
+        client_id_file: ${CONFIG_DIR}/gcal-client-id
+        client_secret_file: ${CONFIG_DIR}/gcal-client-secret
         # Written by scripts/google-oauth-bootstrap.sh (mode 0600, never by Holon).
-        # A leading ~/ expands to $HOME.
-        refresh_token_file: ~/.config/holon/gcal-refresh-token
+        # ${CONFIG_DIR} is the config directory of the profile that is RUNNING
+        # (HOLON_CONFIG_DIR when set, the default otherwise). A path outside it
+        # — a `~/` reference included — is refused at load: it would let a
+        # sandbox instance authenticate with the real profile's account.
+        refresh_token_file: ${CONFIG_DIR}/gcal-refresh-token
         # Informational only (documents what the refresh token was consented
         # for; not sent on the refresh grant).
         scopes:

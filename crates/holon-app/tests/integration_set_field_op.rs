@@ -68,7 +68,7 @@ async fn engine_over_with_browser(
     let (engine, (store, vm)) = holon::di::create_backend_engine_with_extras(
         db_path,
         move |injector| {
-            holon_app::mcp_integrations::McpIntegrationsModule::from_dir(&state_dir)
+            holon_app::mcp_integrations::McpIntegrationsModule::from_dir(&state_dir, &state_dir)
                 .with_browser(browser.clone())
                 .configure(injector)
                 .map_err(|e| anyhow::anyhow!("configure McpIntegrationsModule for op test: {e}"))
@@ -324,20 +324,18 @@ fn an_unwritable_state_directory_is_refused() {
     });
 }
 
-/// Install a `gcal` sidecar whose credential paths sit inside `dir`, plus the
-/// client credentials it points at, so a consent flow gets past credential
-/// resolution and parks at the loopback instead of failing early.
+/// Install the `gcal` sidecar plus the client credentials it points at, so a
+/// consent flow gets past credential resolution and parks at the loopback
+/// instead of failing early.
+///
+/// Nothing is rewritten: the sidecar names its credentials `${CONFIG_DIR}/…`,
+/// so `dir` being this rig's config dir is what sandboxes them.
 fn install_provisioned_gcal(dir: &std::path::Path) {
     let bundled =
         holon_mcp_client::bundled_sidecars::bundled_sidecar("gcal").expect("gcal is bundled");
-    let sandboxed = bundled.yaml.replace(
-        "~/.config/holon/",
-        &format!("{}/", dir.join("creds").display()),
-    );
-    std::fs::write(dir.join("gcal.yaml"), sandboxed).expect("install sandboxed sidecar");
+    std::fs::write(dir.join("gcal.yaml"), bundled.yaml).expect("install sidecar");
 
-    let creds = dir.join("creds");
-    std::fs::create_dir_all(&creds).expect("creds dir");
+    let creds = dir;
     for (name, value) in [
         ("gcal-client-id", "sandbox-client-id.apps.example.com"),
         ("gcal-client-secret", "sandbox-client-secret"),

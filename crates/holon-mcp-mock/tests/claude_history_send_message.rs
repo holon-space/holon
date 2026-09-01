@@ -80,7 +80,10 @@ async fn connect_scenario(db: &DbHandle, scenario: &str) -> McpIntegration {
         .insert("MOCK_MCP_SCENARIO".to_string(), scenario.to_string());
 
     let mcp_config = cfg
-        .into_mcp_config("claude-history".to_string())
+        .into_mcp_config(
+            "claude-history".to_string(),
+            &holon_mcp_client::CredentialRoot::new("/tmp/holon-mcp-mock-config"),
+        )
         .expect("sidecar into_mcp_config");
     let result = build_mcp_integration(
         mcp_config,

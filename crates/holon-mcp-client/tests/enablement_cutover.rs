@@ -18,7 +18,11 @@ use holon_mcp_client::integration_state::IntegrationState;
 /// Load through a store rooted at the same directory — the production pairing.
 fn load(dir: &Path) -> anyhow::Result<LoadedIntegrations> {
     let store = IntegrationConfigStore::load(dir)?;
-    holon_mcp_client::load_integration_configs(dir, &store)
+    holon_mcp_client::load_integration_configs(
+        dir,
+        &store,
+        &holon_mcp_client::CredentialRoot::new(dir),
+    )
 }
 
 fn enable(dir: &Path, provider: &str) {
@@ -36,14 +40,18 @@ fn enable(dir: &Path, provider: &str) {
 
 /// THE CUTOVER RED. No YAML anywhere, yet the provider runs: enablement comes
 /// from the store, so nothing on disk needs to be copied to turn one on.
+///
+/// Uses `todoist` rather than an OAuth provider: an OAuth sidecar has a SECOND
+/// axis to satisfy before it runs (`unconfigured_is_a_gate.rs`), and this test
+/// is about enablement alone.
 #[test]
 fn a_bundled_provider_enabled_in_the_store_loads_without_any_installed_file() {
     let dir = tempfile::tempdir().unwrap();
-    enable(dir.path(), "gcal");
+    enable(dir.path(), "todoist");
 
     let loaded = load(dir.path()).expect("load");
     assert!(
-        loaded.configs.iter().any(|(n, _)| n == "gcal"),
+        loaded.configs.iter().any(|(n, _)| n == "todoist"),
         "enabled + bundled must load with no YAML on disk — got {:?}",
         loaded.configs.iter().map(|(n, _)| n).collect::<Vec<_>>()
     );

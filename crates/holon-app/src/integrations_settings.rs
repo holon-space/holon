@@ -17,6 +17,7 @@ use std::time::Duration;
 use futures_signals::signal::Mutable;
 use futures_signals::signal::ReadOnlyMutable;
 use holon_api::icon_name::IconName;
+use holon_mcp_client::CredentialRoot;
 use holon_mcp_client::IntegrationConfigStore;
 use holon_mcp_client::integration_state::Configuration;
 use holon_mcp_client::integration_state::IntegrationState;
@@ -172,16 +173,21 @@ pub struct IntegrationsSettingsVm {
     /// The directory the sidecars and state files live in — what the consent
     /// flow needs to read a provider's OAuth endpoints.
     dir: PathBuf,
+    /// The active profile's config directory. The consent flow WRITES a refresh
+    /// token, so it must land in the profile that asked for it and nowhere
+    /// else.
+    root: CredentialRoot,
     /// Per-provider consent-flow progress, keyed by provider id.
     progress: Mutex<HashMap<String, Mutable<ConfigureProgress>>>,
 }
 
 impl IntegrationsSettingsVm {
-    pub fn new(store: Arc<IntegrationConfigStore>) -> Self {
+    pub fn new(store: Arc<IntegrationConfigStore>, root: CredentialRoot) -> Self {
         let dir = store.dir().to_path_buf();
         Self {
             store,
             dir,
+            root,
             progress: Mutex::new(HashMap::new()),
         }
     }
@@ -190,8 +196,11 @@ impl IntegrationsSettingsVm {
     /// own. The composition root uses [`Self::new`] instead, because there the
     /// boot loader must read the SAME store — two stores over one directory
     /// share the files but not the signals.
-    pub fn over_dir(dir: &Path) -> anyhow::Result<Self> {
-        Ok(Self::new(Arc::new(IntegrationConfigStore::load(dir)?)))
+    pub fn over_dir(dir: &Path, config_dir: &Path) -> anyhow::Result<Self> {
+        Ok(Self::new(
+            Arc::new(IntegrationConfigStore::load(dir)?),
+            CredentialRoot::new(config_dir),
+        ))
     }
 
     /// Where `provider`'s decision is stored — what a disclosure names when the
@@ -422,6 +431,7 @@ impl IntegrationsSettingsVm {
             &holon_mcp_client::integration_config::env_var_lookup,
             browser,
             timeout,
+            &self.root,
         )
         .await
     }

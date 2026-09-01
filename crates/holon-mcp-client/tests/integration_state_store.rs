@@ -280,14 +280,26 @@ fn state_files_are_invisible_to_the_sidecar_scan() {
             .expect("set");
     }
 
-    let loaded = holon_mcp_client::load_integration_configs(dir.path(), &store)
-        .expect("scan must not choke");
-    let mut loaded_names: Vec<&str> = loaded.configs.iter().map(|(n, _)| n.as_str()).collect();
-    loaded_names.sort_unstable();
+    let loaded = holon_mcp_client::load_integration_configs(
+        dir.path(),
+        &store,
+        &holon_mcp_client::CredentialRoot::new(dir.path()),
+    )
+    .expect("scan must not choke");
+    // Every provider is accounted for: it either runs, or (for an OAuth
+    // provider left unconfigured) is held back and disclosed. What must never
+    // appear is a provider named after a state FILE.
+    let mut seen: Vec<&str> = loaded
+        .configs
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .chain(loaded.inert.iter().map(|i| i.provider.as_str()))
+        .collect();
+    seen.sort_unstable();
     let mut expected = store.providers();
     expected.sort_unstable();
     assert_eq!(
-        loaded_names, expected,
+        seen, expected,
         "a `gcal.state.toml` enables `gcal`, and is never itself read as a \
          provider named `gcal.state`"
     );

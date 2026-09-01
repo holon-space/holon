@@ -22,6 +22,14 @@ default_view: gmail-view
 # ONE-TIME SETUP
 # ─────────────────────────────────────────────────────────────────────────────
 #
+# These commands write into the config directory of the PROFILE you are setting
+# up: $HOLON_CONFIG_DIR when it is set, ~/.config/holon otherwise. The sidecar
+# below reads its credentials as ${CONFIG_DIR}/... , which resolves to that same
+# directory — so an instance launched with its own HOLON_CONFIG_DIR gets its own
+# credentials and can never reach another profile's. Point the shell at the
+# profile you mean before you start:
+#       CFG="${HOLON_CONFIG_DIR:-$HOME/.config/holon}"; mkdir -p "$CFG"
+#
 #  1. Create (or reuse) an OAuth client in Google Cloud:
 #       a. https://console.cloud.google.com → create/pick a project. The SAME
 #          project as the Calendar integration is fine.
@@ -32,18 +40,18 @@ default_view: gmail-view
 #          ".../auth/gmail.readonly".
 #       d. APIs & Services → Credentials → an OAuth client ID of type
 #          **Desktop app**. The gcal Desktop client works here too — one client
-#          may hold many scopes. "Download JSON" → ~/.config/holon/gmail-client.json
+#          may hold many scopes. "Download JSON" → "$CFG"/gmail-client.json
 #          (chmod 600) if you are creating a new one.
 #
 #  2. Put the client id/secret in the 0600 files this sidecar reads (they stay
 #     OUT of this file — it references paths only). From a fresh download:
 #       umask 077
-#       jq -r '.installed.client_id'     ~/.config/holon/gmail-client.json > ~/.config/holon/gmail-client-id
-#       jq -r '.installed.client_secret' ~/.config/holon/gmail-client.json > ~/.config/holon/gmail-client-secret
-#       chmod 600 ~/.config/holon/gmail-client-id ~/.config/holon/gmail-client-secret
+#       jq -r '.installed.client_id'     "$CFG"/gmail-client.json > "$CFG"/gmail-client-id
+#       jq -r '.installed.client_secret' "$CFG"/gmail-client.json > "$CFG"/gmail-client-secret
+#       chmod 600 "$CFG"/gmail-client-id "$CFG"/gmail-client-secret
 #     Reusing the gcal client instead: copy the values across.
-#       cp ~/.config/holon/gcal-client-id     ~/.config/holon/gmail-client-id
-#       cp ~/.config/holon/gcal-client-secret ~/.config/holon/gmail-client-secret
+#       cp "$CFG"/gcal-client-id     "$CFG"/gmail-client-id
+#       cp "$CFG"/gcal-client-secret "$CFG"/gmail-client-secret
 #     The REFRESH TOKEN is never shared: a token is bound to the scopes it was
 #     consented for, so a calendar.readonly token grants no Gmail access. Each
 #     integration also stays independently revocable, and a missing token skips
@@ -51,21 +59,21 @@ default_view: gmail-view
 #
 #  3. Mint the Gmail refresh token. The helper opens the Google consent page,
 #     captures the redirect on 127.0.0.1, exchanges the code, and writes ONLY
-#     the refresh token to ~/.config/holon/gmail-refresh-token with mode 0600.
+#     the refresh token to "$CFG"/gmail-refresh-token with mode 0600.
 #     It NEVER prints the token, and Holon NEVER writes this file itself:
-#       HOLON_OAUTH_CLIENT_ID=$(cat ~/.config/holon/gmail-client-id) \
-#       HOLON_OAUTH_CLIENT_SECRET=$(cat ~/.config/holon/gmail-client-secret) \
+#       HOLON_OAUTH_CLIENT_ID=$(cat "$CFG"/gmail-client-id) \
+#       HOLON_OAUTH_CLIENT_SECRET=$(cat "$CFG"/gmail-client-secret) \
 #         scripts/google-oauth-bootstrap.sh gmail \
 #           https://www.googleapis.com/auth/gmail.readonly
 #     Verify the file is private (must print `-rw-------`):
-#       ls -l ~/.config/holon/gmail-refresh-token
+#       ls -l "$CFG"/gmail-refresh-token
 #     (If a credential file is group/world-readable, Holon REFUSES to start this
 #     integration and tells you to `chmod 600` it — a readable secret is a
 #     compromised one.)
 #
 #  4. Switch the integration on. Step 3 already did this — it calls
 #     scripts/holon-integration-enable.sh, which writes
-#     ~/.config/holon/integrations/gmail.state.toml with `enabled = true`.
+#     "$CFG"/integrations/gmail.state.toml with `enabled = true`.
 #     Copying this YAML anywhere enables NOTHING: the sidecar this build runs
 #     is compiled in, and the state file is the switch. To toggle by hand:
 #       scripts/holon-integration-enable.sh gmail
@@ -149,11 +157,14 @@ transport:
         # Alternative (env / app-settings): drop the *_file keys and use
         #   client_id_env: GMAIL_CLIENT_ID
         #   client_secret_env: GMAIL_CLIENT_SECRET
-        client_id_file: ~/.config/holon/gmail-client-id
-        client_secret_file: ~/.config/holon/gmail-client-secret
+        client_id_file: ${CONFIG_DIR}/gmail-client-id
+        client_secret_file: ${CONFIG_DIR}/gmail-client-secret
         # Written by scripts/google-oauth-bootstrap.sh (mode 0600, never by Holon).
-        # A leading ~/ expands to $HOME.
-        refresh_token_file: ~/.config/holon/gmail-refresh-token
+        # ${CONFIG_DIR} is the config directory of the profile that is RUNNING
+        # (HOLON_CONFIG_DIR when set, the default otherwise). A path outside it
+        # — a `~/` reference included — is refused at load: it would let a
+        # sandbox instance authenticate with the real profile's account.
+        refresh_token_file: ${CONFIG_DIR}/gmail-refresh-token
         # Informational only (documents what the refresh token was consented
         # for; not sent on the refresh grant).
         #

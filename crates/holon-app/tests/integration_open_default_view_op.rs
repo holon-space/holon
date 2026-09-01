@@ -90,7 +90,7 @@ async fn engine_over(
                         as Arc<dyn holon_filesystem::sync_ports::BlockReader>
                 }),
             );
-            holon_app::mcp_integrations::McpIntegrationsModule::from_dir(&state_dir)
+            holon_app::mcp_integrations::McpIntegrationsModule::from_dir(&state_dir, &state_dir)
                 .with_browser(Arc::new(NoBrowser))
                 .configure(injector)
                 .map_err(|e| anyhow::anyhow!("configure McpIntegrationsModule for op test: {e}"))

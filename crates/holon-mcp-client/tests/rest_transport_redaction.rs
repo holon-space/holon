@@ -12,6 +12,7 @@ use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::Once;
 
+use holon_mcp_client::CredentialRoot;
 use holon_mcp_client::IntegrationFileConfig;
 use holon_mcp_client::McpTransport;
 use holon_mcp_client::mcp_call_surface::McpCallSurface;
@@ -213,10 +214,14 @@ fn lookup(name: &str) -> Option<String> {
     }
 }
 
-fn surface_from(yaml: &str) -> RestCallSurface {
+/// The config dir the sidecar's credential files are confined to. The static
+/// arms below declare no credential file at all, so they pass a root nothing is
+/// ever read from; the OAuth2 arms pass the tempdir holding their refresh
+/// token.
+fn surface_from(yaml: &str, root: &CredentialRoot) -> RestCallSurface {
     let cfg: IntegrationFileConfig = serde_yaml::from_str(yaml).expect("sidecar parses");
     let mcp = cfg
-        .into_mcp_config_with("capability".to_string(), &lookup)
+        .into_mcp_config_with("capability".to_string(), &lookup, root)
         .expect("into_mcp_config");
     match mcp.transport {
         McpTransport::Rest { manual, .. } => RestCallSurface::new(manual),
@@ -271,6 +276,12 @@ tools: {{}}
     )
 }
 
+/// A root for sidecars that declare no credential file: confinement has
+/// nothing to resolve, so the directory is never opened.
+fn no_credential_root() -> CredentialRoot {
+    CredentialRoot::new(std::env::temp_dir().join("holon-redaction-no-credentials"))
+}
+
 fn temp_refresh_token(contents: &str) -> (tempfile::TempDir, String) {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -319,7 +330,7 @@ fn assert_redacted_marker(what: &str, text: &str) {
 #[tokio::test]
 async fn http_error_hides_a_capability_token_in_the_url_path() {
     let base = start_mock(Mode::EchoUrlIn500).await;
-    let surface = surface_from(&capability_yaml(&base));
+    let surface = surface_from(&capability_yaml(&base), &no_credential_root());
 
     let err = call_err(&surface).await;
     // The failure stays actionable...
@@ -332,7 +343,10 @@ async fn http_error_hides_a_capability_token_in_the_url_path() {
 #[tokio::test]
 async fn a_partially_encoded_capability_token_is_hidden_in_an_echoed_body() {
     let base = start_mock(Mode::EchoUrlIn500).await;
-    let surface = surface_from(&capability_yaml_with(&base, CAP_TOKEN_MIXED_VAR));
+    let surface = surface_from(
+        &capability_yaml_with(&base, CAP_TOKEN_MIXED_VAR),
+        &no_credential_root(),
+    );
 
     let err = call_err(&surface).await;
     assert!(err.contains("500"), "status missing from error: {err}");
@@ -349,7 +363,10 @@ async fn a_partially_encoded_capability_token_is_hidden_in_an_echoed_body() {
 #[tokio::test]
 async fn a_backslash_capability_token_is_hidden_in_an_echoed_body() {
     let base = start_mock(Mode::EchoUrlIn500).await;
-    let surface = surface_from(&capability_yaml_with(&base, CAP_TOKEN_BACKSLASH_VAR));
+    let surface = surface_from(
+        &capability_yaml_with(&base, CAP_TOKEN_BACKSLASH_VAR),
+        &no_credential_root(),
+    );
 
     let err = call_err(&surface).await;
     assert!(err.contains("500"), "status missing from error: {err}");
@@ -367,7 +384,7 @@ async fn a_backslash_capability_token_is_hidden_in_an_echoed_body() {
 #[tokio::test]
 async fn non_json_body_error_hides_a_capability_token_in_the_url_path() {
     let base = start_mock(Mode::EchoUrlInNonJson).await;
-    let surface = surface_from(&capability_yaml(&base));
+    let surface = surface_from(&capability_yaml(&base), &no_credential_root());
 
     let err = call_err(&surface).await;
     assert!(
@@ -381,7 +398,7 @@ async fn non_json_body_error_hides_a_capability_token_in_the_url_path() {
 #[tokio::test]
 async fn debug_of_the_manual_hides_a_capability_token_in_the_base_url() {
     let base = start_mock(Mode::EchoUrlIn500).await;
-    let surface = surface_from(&capability_yaml(&base));
+    let surface = surface_from(&capability_yaml(&base), &no_credential_root());
 
     let shown = format!("{surface:?}");
     assert_no_leak("RestCallSurface's Debug", &shown);
@@ -393,7 +410,10 @@ async fn oauth2_401_retry_log_hides_a_capability_token_in_the_url_path() {
     init_log_capture();
     let base = start_mock(Mode::Always401).await;
     let (_dir, refresh_file) = temp_refresh_token("refresh-abc\n");
-    let surface = surface_from(&oauth_capability_yaml(&base, &refresh_file));
+    let surface = surface_from(
+        &oauth_capability_yaml(&base, &refresh_file),
+        &CredentialRoot::new(_dir.path()),
+    );
 
     let err = call_err(&surface).await;
     assert!(
@@ -416,7 +436,10 @@ async fn oauth2_401_retry_log_hides_a_capability_token_in_the_url_path() {
 async fn an_echoed_bearer_header_hides_the_token_minted_at_runtime() {
     let base = start_mock(Mode::EchoBearerIn500).await;
     let (_dir, refresh_file) = temp_refresh_token("refresh-tok-3Wq8zRc5NvKd\n");
-    let surface = surface_from(&oauth_capability_yaml(&base, &refresh_file));
+    let surface = surface_from(
+        &oauth_capability_yaml(&base, &refresh_file),
+        &CredentialRoot::new(_dir.path()),
+    );
 
     let err = call_err(&surface).await;
     assert!(err.contains("500"), "status missing from error: {err}");
@@ -430,7 +453,10 @@ async fn an_echoed_bearer_header_hides_the_token_minted_at_runtime() {
 #[tokio::test]
 async fn a_percent_encoded_capability_token_is_hidden_in_an_echoed_body() {
     let base = start_mock(Mode::EchoUrlIn500).await;
-    let surface = surface_from(&capability_yaml_with(&base, CAP_TOKEN_ODD_VAR));
+    let surface = surface_from(
+        &capability_yaml_with(&base, CAP_TOKEN_ODD_VAR),
+        &no_credential_root(),
+    );
 
     let err = call_err(&surface).await;
     assert!(err.contains("500"), "status missing from error: {err}");

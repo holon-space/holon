@@ -26,7 +26,11 @@ fn load_with_enabled(dir: &std::path::Path, provider: &str) -> anyhow::Result<Lo
             configuration: Configuration::Unconfigured,
         },
     )?;
-    holon_mcp_client::load_integration_configs(dir, &store)
+    holon_mcp_client::load_integration_configs(
+        dir,
+        &store,
+        &holon_mcp_client::CredentialRoot::new(dir),
+    )
 }
 
 /// A faithfully-shaped pre-`fetch_contract` `claude-history.yaml`: the

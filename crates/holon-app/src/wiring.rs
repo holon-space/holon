@@ -350,7 +350,7 @@ impl FrontendInjectorExt for Injector {
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(ref dir) = mcp_integrations_dir {
-            let module = crate::mcp_integrations::McpIntegrationsModule::from_dir(dir);
+            let module = crate::mcp_integrations::McpIntegrationsModule::from_dir(dir, &config_dir);
             module
                 .configure(self)
                 .map_err(|e| anyhow::anyhow!("Failed to register McpIntegrationsModule: {}", e))?;

@@ -62,7 +62,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -708,21 +707,25 @@ fn write_refresh_token(path: &Path, _: &str) -> anyhow::Result<()> {
 
 /// The credential locations a completed flow records, derived from the
 /// sidecar's declared arms (never from where the flow "felt like" writing).
-pub fn recorded_credentials(cfg: &RestOAuth2Config) -> anyhow::Result<Credentials> {
+pub fn recorded_credentials(
+    cfg: &RestOAuth2Config,
+    root: &crate::credential_path::CredentialRoot,
+) -> anyhow::Result<Credentials> {
+    let files = cfg.confine(root)?;
     Ok(Credentials {
         client_id: readable_ref(
             "client_id",
             cfg.client_id_env.as_deref(),
-            cfg.client_id_file.as_deref(),
+            files.client_id.as_ref(),
             cfg.client_id_keychain.as_ref(),
         )?,
         client_secret: readable_ref(
             "client_secret",
             cfg.client_secret_env.as_deref(),
-            cfg.client_secret_file.as_deref(),
+            files.client_secret.as_ref(),
             cfg.client_secret_keychain.as_ref(),
         )?,
-        refresh_token_file: expand_tilde(&cfg.refresh_token_file),
+        refresh_token_file: files.refresh_token.path().to_path_buf(),
     })
 }
 
@@ -735,7 +738,7 @@ pub fn recorded_credentials(cfg: &RestOAuth2Config) -> anyhow::Result<Credential
 fn readable_ref(
     field: &str,
     env: Option<&str>,
-    file: Option<&str>,
+    file: Option<&crate::credential_path::ConfinedPath>,
     keychain: Option<&KeychainRef>,
 ) -> anyhow::Result<CredentialRef> {
     match (env, file, keychain) {
@@ -743,7 +746,7 @@ fn readable_ref(
             var: var.to_string(),
         }),
         (None, Some(path), None) => Ok(CredentialRef::File {
-            path: expand_tilde(path),
+            path: path.path().to_path_buf(),
         }),
         (None, None, Some(entry)) => Ok(CredentialRef::Keychain {
             service: entry.service.clone(),
@@ -776,6 +779,7 @@ pub async fn configure_integration(
     lookup: &crate::integration_config::VarLookup<'_>,
     browser: &dyn BrowserOpener,
     timeout: Duration,
+    root: &crate::credential_path::CredentialRoot,
 ) -> anyhow::Result<()> {
     let http = &reqwest::Client::new();
     // Everything that can be known before the user is involved is checked
@@ -791,10 +795,10 @@ pub async fn configure_integration(
     // providers commonly withhold a second refresh token until a manual revoke.
     parse_secure_endpoint("token_url", &cfg.token_url)
         .with_context(|| format!("cannot start the consent flow for '{provider}'"))?;
-    let credentials = recorded_credentials(cfg)
+    let credentials = recorded_credentials(cfg, root)
         .with_context(|| format!("cannot start the consent flow for '{provider}'"))?;
-    let (client_id, client_secret) = crate::rest_oauth2::resolve_client_credentials(cfg, lookup)
-        .with_context(|| {
+    let (client_id, client_secret) =
+        crate::rest_oauth2::resolve_client_credentials(cfg, lookup, root).with_context(|| {
             format!(
                 "'{provider}' has no usable OAuth client credentials yet. Create an OAuth client \
                  in the provider's console and provision the client_id/client_secret where the \
@@ -842,15 +846,4 @@ pub async fn configure_integration(
     )?;
     tracing::info!(provider, "OAuth consent flow completed");
     Ok(())
-}
-
-/// Expand a leading `~/` to `$HOME`, matching the sidecar path convention.
-fn expand_tilde(path: &str) -> PathBuf {
-    match path.strip_prefix("~/") {
-        Some(rest) => match std::env::var_os("HOME") {
-            Some(home) => Path::new(&home).join(rest),
-            None => PathBuf::from(path),
-        },
-        None => PathBuf::from(path),
-    }
 }

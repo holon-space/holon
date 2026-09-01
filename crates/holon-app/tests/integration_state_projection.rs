@@ -222,7 +222,13 @@ fn projector_over(
     db: holon::storage::DbHandle,
     store: Arc<IntegrationConfigStore>,
 ) -> IntegrationStateProjector {
-    IntegrationStateProjector::new(db, Arc::new(IntegrationsSettingsVm::new(store)))
+    IntegrationStateProjector::new(
+        db,
+        Arc::new(IntegrationsSettingsVm::new(
+            store.clone(),
+            holon_mcp_client::CredentialRoot::new(store.dir()),
+        )),
+    )
 }
 
 /// A store over `dir` with exactly `enabled` switched on.
@@ -815,17 +821,16 @@ impl holon_mcp_client::oauth_bootstrap::BrowserOpener for NoBrowser {
     }
 }
 
-/// Install a `gcal` sidecar whose credential paths sit inside `dir`, so the
-/// consent flow reads no developer's `~/.config/holon/*` and fails on this
-/// rig's own missing credentials rather than on the machine it runs on.
+/// Install the `gcal` sidecar, so the consent flow reads no developer's
+/// `~/.config/holon/*` and fails on this rig's own missing credentials rather
+/// than on the machine it runs on.
+///
+/// The sidecar names its credentials `${CONFIG_DIR}/…`, so `dir` being this
+/// rig's config dir is what sandboxes them — there is nothing to rewrite.
 fn install_sandboxed_gcal(dir: &std::path::Path) {
     let bundled =
         holon_mcp_client::bundled_sidecars::bundled_sidecar("gcal").expect("gcal is bundled");
-    let sandboxed = bundled.yaml.replace(
-        "~/.config/holon/",
-        &format!("{}/", dir.join("creds").display()),
-    );
-    std::fs::write(dir.join("gcal.yaml"), sandboxed).expect("install sandboxed sidecar");
+    std::fs::write(dir.join("gcal.yaml"), bundled.yaml).expect("install sidecar");
 }
 
 /// Read one column of `provider`'s mirror row.
@@ -863,7 +868,10 @@ fn an_in_flight_consent_flow_reaches_the_projected_row() {
         std::fs::create_dir_all(&state_dir).expect("state dir");
         install_sandboxed_gcal(&state_dir);
         let store = store_with(&state_dir, &["gcal"]);
-        let vm = Arc::new(IntegrationsSettingsVm::new(store));
+        let vm = Arc::new(IntegrationsSettingsVm::new(
+            store.clone(),
+            holon_mcp_client::CredentialRoot::new(store.dir()),
+        ));
         Arc::new(IntegrationStateProjector::new(db.clone(), vm.clone()))
             .start()
             .await

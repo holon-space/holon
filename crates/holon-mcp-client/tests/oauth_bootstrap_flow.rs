@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use holon_mcp_client::CredentialRoot;
 use holon_mcp_client::IntegrationConfigStore;
 use holon_mcp_client::integration_state::Configuration;
 use holon_mcp_client::integration_state::CredentialRef;
@@ -616,7 +617,11 @@ fn a_credential_ref_records_the_keychain_arm_when_the_sidecar_declares_it() {
         account: "client-secret".to_string(),
     });
 
-    let recorded = holon_mcp_client::oauth_bootstrap::recorded_credentials(&cfg).unwrap();
+    let recorded = holon_mcp_client::oauth_bootstrap::recorded_credentials(
+        &cfg,
+        &CredentialRoot::new(dir.path()),
+    )
+    .unwrap();
     assert_eq!(
         recorded.client_secret,
         CredentialRef::Keychain {
@@ -657,6 +662,7 @@ async fn a_completed_flow_writes_the_refresh_token_and_records_configured_state(
         &no_env_lookup,
         &browser,
         Duration::from_secs(10),
+        &CredentialRoot::new(creds_dir.path()),
     )
     .await
     .unwrap();
@@ -741,6 +747,7 @@ async fn the_state_file_records_locations_and_never_secret_material() {
         &no_env_lookup,
         &browser,
         Duration::from_secs(10),
+        &CredentialRoot::new(creds_dir.path()),
     )
     .await
     .unwrap();
@@ -790,6 +797,7 @@ async fn a_failed_flow_records_nothing() {
         &no_env_lookup,
         &browser,
         Duration::from_secs(10),
+        &CredentialRoot::new(creds_dir.path()),
     )
     .await
     .unwrap_err();
@@ -827,6 +835,7 @@ async fn a_flow_without_provisioned_client_credentials_refuses_before_opening_a_
         &no_env_lookup,
         &browser,
         Duration::from_secs(10),
+        &CredentialRoot::new(creds_dir.path()),
     )
     .await
     .unwrap_err();
@@ -1017,6 +1026,7 @@ async fn a_refused_callback_records_nothing() {
         &no_env_lookup,
         &browser,
         Duration::from_secs(10),
+        &CredentialRoot::new(creds_dir.path()),
     )
     .await
     .expect_err("a refused callback must fail the flow");
@@ -1073,6 +1083,7 @@ async fn a_failed_write_preserves_the_previous_refresh_token() {
         &no_env_lookup,
         &browser,
         Duration::from_secs(10),
+        &CredentialRoot::new(creds_dir.path()),
     )
     .await;
 
@@ -1153,6 +1164,7 @@ async fn a_cleartext_token_url_is_refused_before_the_browser_opens() {
         &no_env_lookup,
         &browser,
         Duration::from_secs(5),
+        &CredentialRoot::new(creds_dir.path()),
     )
     .await
     .expect_err("a cleartext token endpoint must fail the flow");

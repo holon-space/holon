@@ -45,6 +45,17 @@ impl SyncTokenStore for MemTokenStore {
     }
 }
 
+/// The probe is a standalone binary with no frontend, so it takes the config
+/// dir straight from the environment the app would read.
+fn holon_frontend_config_dir() -> PathBuf {
+    std::env::var_os("HOLON_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").expect("HOME is set for the probe");
+            PathBuf::from(home).join(".config").join("holon")
+        })
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     let yaml_path: PathBuf = std::env::args()
@@ -58,7 +69,13 @@ async fn main() -> Result<()> {
         serde_yaml::from_str(&yaml).with_context(|| format!("parse {}", yaml_path.display()))?;
 
     // into_mcp_config performs the ${VAR} env-expansion on uri + static_token.
-    let runtime_cfg = cfg.clone().into_mcp_config("todoist".into())?;
+    // The probe's config dir is where a credential file would have to live; the
+    // todoist sidecar has none, so this only satisfies the resolver.
+    let config_dir = holon_frontend_config_dir();
+    let runtime_cfg = cfg.clone().into_mcp_config(
+        "todoist".into(),
+        &holon_mcp_client::CredentialRoot::new(&config_dir),
+    )?;
     let uri = match &runtime_cfg.transport {
         McpTransport::Http { uri } => uri.clone(),
         _ => bail!("todoist.yaml must use http transport"),

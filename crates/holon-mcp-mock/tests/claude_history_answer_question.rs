@@ -87,7 +87,11 @@ async fn connect_shipped_sidecar(db: &DbHandle) -> McpIntegration {
     );
 
     let mcp_config = cfg
-        .into_mcp_config("claude-history".to_string())
+        .into_mcp_config(
+            "claude-history".to_string(),
+            // The claude-history sidecar declares no credential files.
+            &holon_mcp_client::CredentialRoot::new("/tmp/holon-mcp-mock-config"),
+        )
         .expect("sidecar into_mcp_config");
     let result = build_mcp_integration(
         mcp_config,

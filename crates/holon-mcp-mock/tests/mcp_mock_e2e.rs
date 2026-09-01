@@ -98,7 +98,11 @@ async fn connect(
         cp.env
             .insert("MOCK_MCP_SCENARIO".to_string(), s.to_string());
     }
-    let mcp_config = cfg.into_mcp_config("mock".to_string())?;
+    let mcp_config = cfg.into_mcp_config(
+        "mock".to_string(),
+        // The mock sidecar declares no credential files; the root only has to exist.
+        &holon_mcp_client::CredentialRoot::new("/tmp/holon-mcp-mock-config"),
+    )?;
     let cache_factory = Arc::new(DbHandleCacheFactory::new(db.clone()));
     let token_store: Arc<dyn SyncTokenStore> = Arc::new(InMemorySyncTokenStore::new());
     let pending = PendingOAuthFlows::new();

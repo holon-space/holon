@@ -324,7 +324,10 @@ fn real_provider_command(cfg: &IntegrationFileConfig) -> Option<String> {
 /// over and measure nothing.
 async fn connect_real(cfg: IntegrationFileConfig, db: &DbHandle) {
     let mcp_config = cfg
-        .into_mcp_config("claude-history".to_string())
+        .into_mcp_config(
+            "claude-history".to_string(),
+            &holon_mcp_client::CredentialRoot::new("/tmp/holon-mcp-mock-config"),
+        )
         .expect("sidecar into_mcp_config");
     let result = build_mcp_integration(
         mcp_config,
@@ -517,7 +520,10 @@ async fn connect_fixture(fixture: &str) -> anyhow::Result<McpConnectionResult> {
 
     let (backend, db) = TursoBackend::new_in_memory().await.expect("in-memory db");
     std::mem::forget(backend);
-    let mcp_config = cfg.into_mcp_config("mock".to_string())?;
+    let mcp_config = cfg.into_mcp_config(
+        "mock".to_string(),
+        &holon_mcp_client::CredentialRoot::new("/tmp/holon-mcp-mock-config"),
+    )?;
     build_mcp_integration(
         mcp_config,
         db.clone(),
