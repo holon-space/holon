@@ -506,7 +506,7 @@ into hooks with `scripts/install-git-hooks.sh` (bypass a run with `--no-verify`)
 |------|---------|------|-----------|
 | 1 | `just precommit` | every commit | justfile pipefail guard · defensive-code ratchet · `just gate-compile` · `check-frontend-wasm` · out-of-workspace worker |
 | 2 | `just prepush` | every push | `just gate-arch` · `just check-frontend-wasm` · the full keystone (`PROPTEST_CASES=16`, incl. persisted regression seeds) |
-| L | `just landing-gate` | before reporting a lane done, and before weaving | fmt · `gate-compile` · `check-frontend-wasm` · `gate-arch` · `keystone-smoke` · `hand-authored` |
+| L | `just landing-gate` | before reporting a lane done, and before weaving | fmt · `gate-compile` · `check-frontend-wasm` · `gate-arch` · `keystone-smoke` · `loro-suite` · `hand-authored` |
 
 Notes:
 

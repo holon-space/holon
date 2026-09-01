@@ -142,6 +142,21 @@ pbt name='general' cases='64' *FLAGS:
 keystone-smoke:
     just pbt general 1
 
+# Land-gate battery member: the Loro consolidator suite (projection atomicity,
+# kind fidelity, unseeded-vault split, consolidator-epoch restart). It was in no
+# gate recipe until 2026-09-01, so two of its tests sat red on `main` — a stale
+# edge-column mirror and an invariant-10 epoch flip — with nothing to catch
+# them. Seconds of runtime; run it wherever `keystone-smoke` runs.
+loro-suite:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/gate-logs
+    L=target/gate-logs/loro-suite.log
+    cargo nextest run -p holon-integration-tests --features holon-integration-tests/pbt \
+        --test loro_suite --no-fail-fast 2>&1 | tee "$L"
+    grep -qE 'Summary \[.*\b[1-9][0-9]* tests run' "$L" \
+        || { echo "loro-suite: ran 0 tests — the filter or target is wrong"; exit 1; }
+
 # LogSeq-DB write gate: the two round-trip legs that judge Holon's bytes with
 # LOGSEQ'S OWN validator and graph diff. They are `#[ignore]`d so a plain
 # `cargo test` can never report them as passing when the oracle is absent, and
@@ -446,7 +461,8 @@ latency-gate ceilings='docs/Testing/latency-ceilings.txt':
     exit "$gate"
 
 # The latency SLO as a GATE (Martin's ruling D50.a) — two rungs plus their own
-# wiring check, three tests in one headless binary; step 9 of `landing-gate`.
+# wiring check, three tests in one headless binary; the last step of
+# `landing-gate`.
 # Distinct from `latency-gate`
 # above: that one is a per-rung REGRESSION RATCHET against ceilings that only
 # move down, this one judges the fixed 200ms SLO and a throughput floor. A tree
@@ -1104,23 +1120,25 @@ prepush:
 landing-gate:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== landing [1/9]: fmt =="
+    echo "== landing [1/10]: fmt =="
     cargo fmt --all -- --check
-    echo "== landing [2/9]: typecheck incl. every test target =="
+    echo "== landing [2/10]: typecheck incl. every test target =="
     just gate-compile
-    echo "== landing [3/9]: browser-target typecheck =="
+    echo "== landing [3/10]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== landing [4/9]: out-of-workspace browser frontend =="
+    echo "== landing [4/10]: out-of-workspace browser frontend =="
     just check-dioxus-web-wasm
-    echo "== landing [5/9]: out-of-workspace wasi worker =="
+    echo "== landing [5/10]: out-of-workspace wasi worker =="
     just check-worker-wasm
-    echo "== landing [6/9]: architecture rules =="
+    echo "== landing [6/10]: architecture rules =="
     just gate-arch
-    echo "== landing [7/9]: keystone smoke =="
+    echo "== landing [7/10]: keystone smoke =="
     just keystone-smoke
-    echo "== landing [8/9]: hand-authored regressions =="
+    echo "== landing [8/10]: loro consolidator suite =="
+    just loro-suite
+    echo "== landing [9/10]: hand-authored regressions =="
     just hand-authored
-    echo "== landing [9/9]: latency SLO (D50.a) =="
+    echo "== landing [10/10]: latency SLO (D50.a) =="
     just latency-slo-gate
     echo "== landing gate PASS =="
 

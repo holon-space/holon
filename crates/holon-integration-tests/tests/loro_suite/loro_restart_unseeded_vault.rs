@@ -7,14 +7,24 @@
 //! `[loro] enabled = true` — the same `test.db` + org filesystem are then
 //! reopened by a Loro-enabled session.
 //!
+//! Flipping the consolidator is an EPOCH change (Model.md invariant 10), so the
+//! phase-2 boot is refused unless the operator acknowledges it with
+//! `HOLON_CONSOLIDATOR_MIGRATE=1`. That acknowledgement is today's only
+//! supported handover (the state-preserving migration is spec 0008 Phase 4.1,
+//! unbuilt): it wipes every component's durable state — the Turso db and the
+//! CRDT dir — and the new consolidator re-seeds from the surviving vault org
+//! files. Phase 2 drives exactly that path.
+//!
 //! Phase 2 asserts the upgrade contract:
-//! 1. the restart works at all (Turso actor shut down cleanly, WAL not held),
-//! 2. SQL state survives intact,
-//! 3. the re-seed pass adopts phase-1 blocks into the Loro tree: the
-//!    consolidator tag in `projection_hash` forces a full re-ingest on the
-//!    first Loro-enabled boot, and the org-scan diff loop `create_in_tree`s
-//!    every pre-existing block the tree is missing (parent-first via DFS
-//!    document order),
+//! 1. the acknowledged flip boots at all (Turso actor shut down cleanly, WAL
+//!    not held, the wipe can unlink the db),
+//! 2. the phase-1 blocks come back — re-ingested from the org files the wipe
+//!    left behind, under their authored ids,
+//! 3. the re-seed pass adopts those blocks into the Loro tree: the consolidator
+//!    tag in `projection_hash` forces a full re-ingest on the first
+//!    Loro-enabled boot, and the org-scan diff loop `create_in_tree`s every
+//!    pre-existing block the tree is missing (parent-first via DFS document
+//!    order),
 //! 4. splitting a phase-1 block through the real engine then flows through Loro
 //!    (node count grows by exactly the new half) — never the poisoned-tree
 //!    "Block not found" / placeholder-root path. If the re-seed ever declines
@@ -104,22 +114,47 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
     env.stop_app().await.expect("stop_app after phase 1");
 
     // ── Phase 2: same vault, Loro enabled ────────────────────────────────
+    // The consolidator flips `direct` → `projected`, so the invariant-10 epoch
+    // guard refuses the boot until acknowledged. Acknowledge it for this boot
+    // only; the guard reads the variable once, inside `add_frontend`.
     env.set_enable_loro(true);
-    env.start_app(true)
-        .await
-        .expect("phase-2 start_app over the same test.db must succeed");
+    // SAFETY: nextest runs each test in its own process, so no other thread of
+    // this process observes the variable.
+    unsafe { std::env::set_var("HOLON_CONSOLIDATOR_MIGRATE", "1") };
+    let started = env.start_app(true).await;
+    unsafe { std::env::remove_var("HOLON_CONSOLIDATOR_MIGRATE") };
+    started.expect("phase-2 start_app over the acknowledged consolidator flip must succeed");
 
-    let rows = env
-        .query_sql("SELECT id FROM block_raw")
-        .await
-        .expect("phase 2: query block_raw");
-    for r in &phase1_rows {
-        let id = r.get("id").and_then(|v| v.as_string()).expect("id column");
+    // The wipe removed the Turso db; the vault org files survived it, so the
+    // phase-1 blocks must be re-ingested under their authored ids. Poll — the
+    // org scan is asynchronous.
+    let reingest_deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let rows = env
+            .query_sql("SELECT id FROM block_raw")
+            .await
+            .expect("phase 2: query block_raw");
+        let missing: Vec<&str> = phase1_rows
+            .iter()
+            .map(|r| r.get("id").and_then(|v| v.as_string()).expect("id column"))
+            .filter(|id| {
+                !rows
+                    .iter()
+                    .any(|row| row.get("id").and_then(|v| v.as_string()) == Some(*id))
+            })
+            .collect();
+        if missing.is_empty() {
+            break;
+        }
         assert!(
+            std::time::Instant::now() < reingest_deadline,
+            "phase 2: phase-1 blocks {missing:?} never came back after the migrate wipe; SQL has \
+             {:?}",
             rows.iter()
-                .any(|row| row.get("id").and_then(|v| v.as_string()) == Some(id)),
-            "phase 2: phase-1 block {id} missing from SQL after restart"
+                .filter_map(|r| r.get("id").and_then(|v| v.as_string()))
+                .collect::<Vec<_>>()
         );
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     // Observe the tree state the upgrade produced (give the org rescan a
@@ -141,6 +176,29 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
         tokio::time::sleep(Duration::from_millis(200)).await;
         target_seeded = backend.resolve_to_tree_id(&target_id).await.is_some();
     }
+    // The target appearing does not mean the re-seed FINISHED — the org-scan
+    // diff loop walks in document order, so later nodes can still be arriving.
+    // Baseline the count only once it holds still, or the split's "+1 node"
+    // assertion measures the seed's tail instead of the split.
+    let mut nodes_before = backend.snapshot_blocks().await.len();
+    let mut stable_samples = 0;
+    let settle_deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while stable_samples < 3 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let n = backend.snapshot_blocks().await.len();
+        stable_samples = if n == nodes_before {
+            stable_samples + 1
+        } else {
+            0
+        };
+        nodes_before = n;
+        assert!(
+            std::time::Instant::now() < settle_deadline,
+            "phase 2: the Loro tree never stopped growing (last count {nodes_before}) — the \
+             re-seed does not settle"
+        );
+    }
+    env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
     let nodes_before = backend.snapshot_blocks().await.len();
     eprintln!("[restart-vault] phase-2 tree: target_seeded={target_seeded} nodes={nodes_before}");
 

@@ -29,6 +29,7 @@ use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use holon_api::EdgeField;
 use holon_api::EntityName;
 use holon_api::OperationDescriptor;
 use holon_api::SnapshotBlock;
@@ -102,12 +103,13 @@ impl SinkReader for ToggleFailSink {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "A0".to_string());
             // `block_to_params` writes only `block_raw`; the junction-synthesized
-            // edge columns (`tags`/`requires`/`advice_suppressed`) are absent.
-            // The real SQL reader COALESCEs them to `'[]'` — mirror that so the
-            // strict `Block::try_from` decode succeeds.
+            // edge columns are absent. `TursoSinkReader` COALESCEs every one of
+            // them to `'[]'` — mirror that over `EdgeField::ALL` so the strict
+            // `Block::try_from` decode succeeds and a newly added edge field
+            // cannot leave this stub behind.
             let mut row = params.clone();
-            for col in ["tags", "requires", "advice_suppressed"] {
-                row.entry(col.into())
+            for field in EdgeField::ALL {
+                row.entry(field.column().into())
                     .or_insert_with(|| Value::String("[]".to_string()));
             }
             let block = Block::try_from(row)?;
