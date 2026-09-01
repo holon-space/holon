@@ -392,7 +392,7 @@ async fn ingest_file(
         Arc::new(store.clone()),
         Arc::new(RealFileSystem),
     );
-    let result = controller.on_file_changed(&path).await;
+    let result = controller.on_file_changed(&path).await.map(|_| ());
     let on_disk = std::fs::read_to_string(&path).unwrap();
     (result, on_disk)
 }

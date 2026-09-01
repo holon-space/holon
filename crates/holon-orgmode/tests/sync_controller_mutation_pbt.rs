@@ -3252,7 +3252,9 @@ mod atomic_rename_tests {
                 Some(FileEvent::Renamed { from, to }) => {
                     fx.controller.on_file_renamed(&from, &to).await.unwrap()
                 }
-                Some(FileEvent::Changed(p)) => fx.controller.on_file_changed(&p).await.unwrap(),
+                Some(FileEvent::Changed(p)) => {
+                    fx.controller.on_file_changed(&p).await.unwrap();
+                }
                 None => {}
             }
         }

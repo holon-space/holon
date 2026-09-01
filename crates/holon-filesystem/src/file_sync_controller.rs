@@ -250,6 +250,49 @@ const IMAGE_PATH_SITE: &str = "image-file-path-derivation";
 const DUPLICATE_ID_SITE: &str = "duplicate-doc-id";
 const UNSETTLED_IDENTITY_SITE: &str = "unsettled-doc-identity";
 
+/// What an ingest attempt leaves behind for the NEXT attempt at the same file.
+///
+/// The discovery pump re-walks the whole vault on every tick, so it needs to
+/// know what would have to change before re-reading a file could produce a
+/// different answer. Only a refusal names such a condition, and it is the
+/// poller's cue to stop reading the file until that condition moves (bugfunnel
+/// `2026-08-31-refused-duplicate-id-file-re-ingests-every-poll-forever`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub enum IngestOutcome {
+    /// The attempt is complete: the file ingested, or it was skipped for a
+    /// reason outside its own content that a later attempt may resolve.
+    Ingested,
+    /// The file was refused because the carried `#+ID:` — the payload — is
+    /// claimed by ANOTHER file that is still on disk. The poller re-checks the
+    /// two endings it can observe: this file is edited, or the claimant leaves
+    /// disk, which hands the id over (see
+    /// [`live_claimant_of`](FileSyncController::live_claimant_of)).
+    ///
+    /// A third ending is NOT observed today — the claimant keeps its path but
+    /// takes a fresh `#+ID:`, releasing this one — because the recorded home is
+    /// only stat'ed, never re-read for the id it still carries. Such a file
+    /// stays refused for the rest of the session. See bugfunnel
+    /// `2026-09-01-duplicate-id-refusal-outlives-the-claimant-releasing-the-id`.
+    RefusedWhileClaimed(EntityUri),
+}
+
+/// Why `poll_new_files` is skipping a file it rediscovered, and what ends the
+/// skip. Recorded per path in
+/// [`ingest_quarantine`](FileSyncController::ingest_quarantine).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IngestSkip {
+    /// The `(mtime, size)` the file carried when the skip was recorded. Any
+    /// change re-attempts it — the poller stats every candidate anyway.
+    sig: (std::time::SystemTime, u64),
+    /// Set when the skip is a duplicate-`#+ID:` REFUSAL: the id another file
+    /// claims. The refusal outlives the bytes but not the claimant, so the
+    /// poller re-checks that the claimant is still on disk before honoring the
+    /// skip — deleting or moving the winner is how a user hands the id to this
+    /// file, and it changes nothing about this file for a signature to catch.
+    claimed_id: Option<EntityUri>,
+}
+
 /// Why a caller is resolving an id to a page-file path.
 ///
 /// Only a document about to render ITSELF over a file can lose a contest
@@ -779,17 +822,16 @@ pub struct FileSyncController {
     writeback_readonly: HashSet<CanonicalPath>,
 
     /// Ingest quarantine for NEW-file discovery (`poll_new_files`, Inc 3b). A
-    /// freshly-discovered file whose ingest FAILED is recorded here keyed by
-    /// the exact `(mtime, size)` signature it failed at. `poll_new_files`
-    /// skips a path still carrying its recorded signature, so a single
-    /// poisoned org file is NOT re-attempted (and NOT re-logged) on every
-    /// discovery tick -- before this, one poison aborted the whole walk
+    /// freshly-discovered file whose ingest FAILED — or that was REFUSED for a
+    /// duplicate `#+ID:` — is recorded here as an [`IngestSkip`], so a single
+    /// poisoned or refused org file is NOT re-attempted (and NOT re-logged) on
+    /// every discovery tick -- before this, one poison aborted the whole walk
     /// with `?`, so every later healthy file was never ingested and each
-    /// tick re-hit the same poison first. The entry is dropped the moment
-    /// the file CHANGES (signature no longer matches -> re-attempted) or
-    /// re-ingests cleanly. This is the disk->DB (ingest-side) counterpart
+    /// tick re-hit the same poison first. The entry is dropped the moment the
+    /// file CHANGES, re-ingests cleanly, or — for a refusal — its claimant
+    /// leaves disk. This is the disk->DB (ingest-side) counterpart
     /// of the DB->disk write-back [`quarantined`](Self::quarantined) set.
-    ingest_quarantine: HashMap<CanonicalPath, (std::time::SystemTime, u64)>,
+    ingest_quarantine: HashMap<CanonicalPath, IngestSkip>,
     /// Files already reported once for an identity problem, keyed by
     /// `(path, condition)`. By path, not by id: two strays can collide with the
     /// same owner, and each is its own thing for the user to fix. By condition
@@ -1738,6 +1780,33 @@ impl FileSyncController {
         }
     }
 
+    /// Whether the refusal recorded against `candidate` still holds: is the
+    /// file recorded as `doc_id`'s home still on disk? (It answers the claim
+    /// question only as far as [`live_claimant_of`] does — a home that kept its
+    /// path but released the id still reads as claiming it; see the bugfunnel
+    /// entry on [`IngestOutcome::RefusedWhileClaimed`].)
+    ///
+    /// Costs a map lookup and one stat of the claimant, never a read of
+    /// `candidate` — which is the whole point of asking here instead of
+    /// re-running the ingest. A stat we cannot read leaves the question open,
+    /// so the refusal stands (adopting an id on an unreadable claim is the
+    /// outcome that merges two documents); that is disclosed loudly once, and
+    /// the next tick asks again.
+    async fn claimant_still_holds(
+        &mut self,
+        doc_id: &EntityUri,
+        path: &Path,
+        candidate: &CanonicalPath,
+    ) -> bool {
+        match self.live_claimant_of(doc_id, candidate).await {
+            Ok(claimant) => claimant.is_some(),
+            Err(e) => {
+                self.disclose_unsettled_identity(doc_id, path, candidate, &e);
+                true
+            }
+        }
+    }
+
     /// Disclose a file whose identity could not be SETTLED — we could not read
     /// whether another file still claims its `#+ID:`.
     ///
@@ -1939,7 +2008,8 @@ impl FileSyncController {
                 from.display(),
                 to.display()
             );
-            return self.on_file_changed(to).await;
+            self.on_file_changed(to).await?;
+            return Ok(());
         };
         let document_uri = document.id.clone();
 
@@ -2030,7 +2100,7 @@ impl FileSyncController {
     /// data-loss guard). A successful ingest clears the quarantine. The
     /// `Err` is still propagated so the caller's degraded-mode
     /// banner / survival logic is unchanged.
-    pub async fn on_file_changed(&mut self, path: &Path) -> Result<()> {
+    pub async fn on_file_changed(&mut self, path: &Path) -> Result<IngestOutcome> {
         let canonical = CanonicalPath::new(path);
         // Post-boot pre-ingest steps, in INVARIANT ORDER. A vanished file reads
         // as `None` — that is an external deletion, which `ingest_file` handles.
@@ -2055,7 +2125,7 @@ impl FileSyncController {
                     // projection sink, exactly the direction the invariant
                     // forbids.
                     if self.skip_registered_mount(path, &disk_content).await? {
-                        return Ok(());
+                        return Ok(IngestOutcome::Ingested);
                     }
                     // Store-health seam (BugFunnel row 295): a runtime file-watch
                     // reingest of a title-less doc-root heals it through the SAME
@@ -2066,11 +2136,15 @@ impl FileSyncController {
             }
         }
         match self.ingest_file(path).await {
-            Ok(()) => {
+            Ok(outcome) => {
                 // Clears EITHER cause: an ingest that fully succeeded proves
                 // the DB matches the file, which is strictly stronger evidence
-                // than the grounded render that retires a veto entry.
-                if self.quarantined.remove(&canonical).is_some() {
+                // than the grounded render that retires a veto entry. A REFUSED
+                // file proves nothing of the sort — nothing of it was read into
+                // the store — so its quarantine stands.
+                if outcome == IngestOutcome::Ingested
+                    && self.quarantined.remove(&canonical).is_some()
+                {
                     self.quarantine_skip_logged
                         .lock()
                         .expect("quarantine_skip_logged poisoned")
@@ -2081,7 +2155,7 @@ impl FileSyncController {
                         path.display()
                     );
                 }
-                Ok(())
+                Ok(outcome)
             }
             Err(e) => {
                 // Partial ingest: the DB now holds only a PREFIX of this file's
@@ -2470,7 +2544,7 @@ impl FileSyncController {
     /// Otherwise, diff against last_projection to compute create/update/delete
     /// ops.
     #[tracing::instrument(skip(self), name = "org.ingest_file", fields(path = %path.display()))]
-    async fn ingest_file(&mut self, path: &Path) -> Result<()> {
+    async fn ingest_file(&mut self, path: &Path) -> Result<IngestOutcome> {
         // Model.md invariant 11: skip (only) a byte-syncer conflict artifact that
         // appears at runtime — ingesting it would create a duplicate-ID document.
         // Disclosed, never silent; normal files are unaffected.
@@ -2482,7 +2556,7 @@ impl FileSyncController {
                  (Syncthing/iCloud/Dropbox) on the vault is out of contract; cross-device \
                  convergence must go through Loro/P2P."
             );
-            return Ok(());
+            return Ok(IngestOutcome::Ingested);
         }
         let canonical = CanonicalPath::new(path);
         let disk_content = match self.fs.read_to_string(path).await {
@@ -2492,7 +2566,8 @@ impl FileSyncController {
                 // its document's blocks cascade — but a page rename's retire also
                 // removes a file, so `on_file_deleted` proves the vanished path
                 // owned the document before deleting anything.
-                return self.on_file_deleted(path, &canonical).await;
+                self.on_file_deleted(path, &canonical).await?;
+                return Ok(IngestOutcome::Ingested);
             }
             Err(e) => {
                 return Err(e).with_context(|| {
@@ -2518,14 +2593,14 @@ impl FileSyncController {
                 "[FileSyncController] Skipping {} — matches last_projection",
                 path.display()
             );
-            return Ok(());
+            return Ok(IngestOutcome::Ingested);
         }
 
         // Model.md invariant 11 (see `skip_registered_mount`). Reached on the
         // paths that do not run the pre-ingest steps — the initial scan, and
         // `ingest_file`'s other callers.
         if self.skip_registered_mount(path, &disk_content).await? {
-            return Ok(());
+            return Ok(IngestOutcome::Ingested);
         }
 
         // Phase 1 cold-boot fast-path: when `last_projection` has no entry
@@ -2566,12 +2641,12 @@ impl FileSyncController {
             match self.live_claimant_of(root, &canonical).await {
                 Ok(Some(claimant)) => {
                     self.disclose_duplicate_doc_id(root, &claimant, path, &canonical);
-                    return Ok(());
+                    return Ok(IngestOutcome::RefusedWhileClaimed(root.clone()));
                 }
                 Ok(None) => {}
                 Err(e) => {
                     self.disclose_unsettled_identity(root, path, &canonical, &e);
-                    return Ok(());
+                    return Ok(IngestOutcome::Ingested);
                 }
             }
         }
@@ -2612,7 +2687,7 @@ impl FileSyncController {
                     registrar.register_alias(root, path).await;
                 }
                 self.last_projection.insert(canonical.clone(), disk_content);
-                return Ok(());
+                return Ok(IngestOutcome::Ingested);
             }
         }
 
@@ -4025,7 +4100,7 @@ impl FileSyncController {
                 .insert(canonical.clone(), disk_content.to_string());
             self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
                 .await;
-            return Ok(());
+            return Ok(IngestOutcome::Ingested);
         }
 
         // Foreign-page subtrees were skipped above, so a re-render from this
@@ -4047,7 +4122,7 @@ impl FileSyncController {
                 .insert(canonical.clone(), disk_content.to_string());
             self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
                 .await;
-            return Ok(());
+            return Ok(IngestOutcome::Ingested);
         }
 
         // Structural changes occurred — re-project from cache so the file reflects
@@ -4108,7 +4183,7 @@ impl FileSyncController {
                     .insert(canonical.clone(), disk_content.to_string());
                 self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
                     .await;
-                return Ok(());
+                return Ok(IngestOutcome::Ingested);
             }
             // Checked BEFORE the drop verdict, mirroring the block-driven
             // boundary's `veto_ungrounded_removals`: an absent block whose
@@ -4162,7 +4237,7 @@ impl FileSyncController {
                         now.len(),
                     );
                     self.last_projection.insert(canonical.clone(), disk_content);
-                    return Ok(());
+                    return Ok(IngestOutcome::Ingested);
                 }
                 Ok(_) => {
                     // The normalization write-back re-renders org bytes over the
@@ -4183,7 +4258,7 @@ impl FileSyncController {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // File deleted since we parsed it. Nothing to do.
-                    return Ok(());
+                    return Ok(IngestOutcome::Ingested);
                 }
                 Err(e) => {
                     return Err(e).with_context(|| {
@@ -4207,7 +4282,7 @@ impl FileSyncController {
         // Update last_projection
         self.last_projection.insert(canonical.clone(), rendered);
 
-        Ok(())
+        Ok(IngestOutcome::Ingested)
     }
 
     /// Update `last_projection_hash` in memory and persist to
@@ -5041,17 +5116,34 @@ impl FileSyncController {
                 }
             };
 
-            // Still the exact poisoned bytes we already reported loudly once:
-            // skip WITHOUT re-attempting or re-logging at ERROR, so one broken
-            // file does not storm the log every discovery tick (mirrors the
-            // write-back quarantine's once-per-episode disclosure).
-            if self.ingest_quarantine.get(&canonical) == Some(&sig) {
-                tracing::debug!(
-                    path = %path.display(),
-                    "[poll_new_files] skipping ingest-quarantined new file (unchanged since its \
-                     failure was reported); re-attempted when its content changes",
-                );
-                continue;
+            // A skip we already reported loudly once still stands: don't
+            // re-attempt or re-log at ERROR, so one broken or refused file does
+            // not storm the log every discovery tick (mirrors the write-back
+            // quarantine's once-per-episode disclosure). Whether it still
+            // stands takes the stat above plus, for a refusal, one stat of the
+            // CLAIMANT — never a read of this file.
+            let recorded = self.ingest_quarantine.get(&canonical).cloned();
+            if let Some(skip) = recorded {
+                let stands = skip.sig == sig
+                    && match &skip.claimed_id {
+                        Some(id) => self.claimant_still_holds(id, &path, &canonical).await,
+                        None => true,
+                    };
+                if stands {
+                    tracing::debug!(
+                        path = %path.display(),
+                        "[poll_new_files] skipping ingest-quarantined new file (nothing has \
+                         changed since its failure was reported); re-attempted when its content \
+                         changes, or when the file claiming its `#+ID:` leaves disk",
+                    );
+                    continue;
+                }
+                // The file was edited, or the claimant that beat it is gone.
+                // Either way this is a fresh decision, and its faults are the
+                // user's to see again — re-arm the once-per-file identity
+                // disclosures so a still-broken file is reported loudly rather
+                // than at DEBUG.
+                self.duplicate_id_disclosed.retain(|(p, _)| p != &canonical);
             }
 
             info!(
@@ -5067,18 +5159,38 @@ impl FileSyncController {
             // error (Fail Loud, fall back VISIBLY), quarantine the file at its
             // current signature, and CONTINUE so healthy files still ingest.
             match self.on_file_changed(&path).await {
-                Ok(()) => {
+                Ok(IngestOutcome::Ingested) => {
                     if self.ingest_quarantine.remove(&canonical).is_some() {
                         info!(
                             "[FileSyncController] poll_new_files: ingest quarantine CLEARED for {} \
-                             (re-ingest succeeded after the file changed)",
+                             (re-ingest succeeded)",
                             path.display()
                         );
                     }
                     ingested += 1;
                 }
+                // A refusal leaves the file untracked, so without an entry here
+                // the walk would rediscover, re-read and re-parse it on every
+                // tick forever. It was already disclosed at its refusal site;
+                // record it with the id that beat it — the skip lifts when this
+                // file changes OR when that claimant leaves disk.
+                Ok(IngestOutcome::RefusedWhileClaimed(claimed_id)) => {
+                    self.ingest_quarantine.insert(
+                        canonical.clone(),
+                        IngestSkip {
+                            sig,
+                            claimed_id: Some(claimed_id),
+                        },
+                    );
+                }
                 Err(e) => {
-                    self.ingest_quarantine.insert(canonical.clone(), sig);
+                    self.ingest_quarantine.insert(
+                        canonical.clone(),
+                        IngestSkip {
+                            sig,
+                            claimed_id: None,
+                        },
+                    );
                     tracing::error!(
                         path = %path.display(),
                         error = %format!("{e:#}"),

@@ -18,14 +18,24 @@
 //!         (mtime, content) changes — the user fixing the file un-quarantines
 //!         it, and a clean re-ingest clears the quarantine loudly.
 //!
+//! A REFUSAL — a file whose `#+ID:` another file on disk already claims — is
+//! gated by the same quarantine: refusing is correct and permanent for those
+//! bytes, so the work must stop until the file changes, not just the log
+//! (bugfunnel
+//! `2026-08-31-refused-duplicate-id-file-re-ingests-every-poll-forever`:
+//! one file re-read and re-parsed 61,654 times in 18 hours behind a log
+//! dedupe).
+//!
 //! `InMemoryFileSystem` is used deliberately: its `scan_directory` returns
 //! files in sorted (`BTreeMap`) order, so the poison (`a_poison.org`) is
 //! GUARANTEED to be iterated before the healthy file (`z_healthy.org`) — the
-//! exact ordering that made the old `?`-abort starve the healthy file.
+//! exact ordering that made the old `?`-abort starve the healthy file, and the
+//! ordering that makes `a_owner.org` the claimant of the shared `#+ID:`.
 
 #![cfg(feature = "di")]
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -39,8 +49,10 @@ use holon_core::block_ordering::BlockOrdering;
 use holon_core::traits::Result as OrderingResult;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
+use holon_filesystem::FileMeta;
 use holon_filesystem::FileSystem;
 use holon_filesystem::InMemoryFileSystem;
+use holon_filesystem::ScannedEntries;
 use holon_orgmode::file_sync_controller::new_org_sync_controller;
 use tracing::field::Field;
 use tracing::field::Visit;
@@ -231,6 +243,69 @@ impl DocumentManager for FaultDocManager {
     }
 }
 
+/// Filesystem decorator counting `read_to_string` per path — the side effect a
+/// storm-gate has to stop. `metadata` is deliberately NOT counted: the poller
+/// stats every candidate on every tick to decide freshness, and that is the
+/// cheap part it is supposed to keep doing.
+struct CountingFs {
+    inner: Arc<InMemoryFileSystem>,
+    reads: Mutex<HashMap<PathBuf, usize>>,
+}
+
+impl CountingFs {
+    fn new(inner: Arc<InMemoryFileSystem>) -> Self {
+        Self {
+            inner,
+            reads: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn reads_of(&self, rel: &str) -> usize {
+        let path = std::path::Path::new(ROOT).join(rel);
+        *self.reads.lock().unwrap().get(&path).unwrap_or(&0)
+    }
+}
+
+#[async_trait]
+impl FileSystem for CountingFs {
+    async fn read_to_string(&self, path: &std::path::Path) -> std::io::Result<String> {
+        *self
+            .reads
+            .lock()
+            .unwrap()
+            .entry(path.to_path_buf())
+            .or_insert(0) += 1;
+        self.inner.read_to_string(path).await
+    }
+    async fn read(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+        self.inner.read(path).await
+    }
+    async fn write(&self, path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+        self.inner.write(path, contents).await
+    }
+    async fn remove(&self, path: &std::path::Path) -> std::io::Result<()> {
+        self.inner.remove(path).await
+    }
+    async fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        self.inner.rename(from, to).await
+    }
+    async fn create_dir_all(&self, path: &std::path::Path) -> std::io::Result<()> {
+        self.inner.create_dir_all(path).await
+    }
+    async fn scan_directory(&self, root: &std::path::Path) -> std::io::Result<ScannedEntries> {
+        self.inner.scan_directory(root).await
+    }
+    async fn metadata(&self, path: &std::path::Path) -> std::io::Result<FileMeta> {
+        self.inner.metadata(path).await
+    }
+    fn exists(&self, path: &std::path::Path) -> bool {
+        self.inner.exists(path)
+    }
+    fn canonicalize(&self, path: &std::path::Path) -> std::io::Result<PathBuf> {
+        self.inner.canonicalize(path)
+    }
+}
+
 const ROOT: &str = "/holon-virtual/inc3b";
 
 async fn write_file(fs: &InMemoryFileSystem, rel: &str, content: &str) {
@@ -239,6 +314,13 @@ async fn write_file(fs: &InMemoryFileSystem, rel: &str, content: &str) {
 }
 
 fn build(fs: Arc<InMemoryFileSystem>, dm: FaultDocManager) -> holon_filesystem::FileSyncController {
+    build_with_fs(fs, dm)
+}
+
+fn build_with_fs(
+    fs: Arc<dyn FileSystem>,
+    dm: FaultDocManager,
+) -> holon_filesystem::FileSyncController {
     new_org_sync_controller(
         Arc::new(EmptyReader),
         Arc::new(dm),
@@ -381,4 +463,223 @@ async fn quarantined_file_reattempted_only_after_it_changes() {
         "after the fix the formerly-poisoned file must ingest"
     );
     assert!(ingested >= 1);
+}
+
+// ── Duplicate-`#+ID:` refusal: the storm-gate for REFUSED files. ────────────
+
+const SHARED_ID: &str = "3f1c9b52-6f7a-4d21-9b0e-2a8c4d5e6f70";
+
+fn duplicate_id_errors(errs: &[String]) -> Vec<&String> {
+    errs.iter()
+        .filter(|e| e.contains("DUPLICATE DOCUMENT ID") && e.contains("z_dupe"))
+        .collect()
+}
+
+/// Two files carry the same `#+ID:`. The one scanned first claims it; the
+/// second is REFUSED — correctly, and permanently for those bytes. THE BUG: the
+/// refusal deduped its LOG but not its WORK, so every discovery tick re-read
+/// and re-parsed the refused file forever (61,654 times in one 18h session).
+///
+/// The refusal must be recorded at the file's freshness signature, so a second
+/// poll over an unchanged tree does no ingest work at all, and an EDIT — the
+/// user giving the file a fresh id — re-ingests it.
+#[tokio::test]
+async fn refused_duplicate_id_file_is_not_re_ingested_while_unchanged() {
+    let cap = ErrorCapture::default();
+    let _g = tracing::subscriber::set_default(tracing_subscriber::registry().with(cap.clone()));
+
+    let disk = Arc::new(InMemoryFileSystem::new());
+    disk.mkdir_all(std::path::Path::new(ROOT));
+    write_file(
+        &disk,
+        "a_owner.org",
+        &format!("#+TITLE: A Owner\n#+ID: {SHARED_ID}\n"),
+    )
+    .await;
+    write_file(
+        &disk,
+        "z_dupe.org",
+        &format!("#+TITLE: Z Dupe\n#+ID: {SHARED_ID}\n"),
+    )
+    .await;
+
+    let fs = Arc::new(CountingFs::new(disk.clone()));
+    let dm = FaultDocManager::new("no-poison-here");
+    let mut controller = build_with_fs(fs.clone(), dm.clone());
+
+    // Tick 1: the owner ingests and claims the id; the dupe is read, refused,
+    // and disclosed by exactly one loud ERROR.
+    controller.poll_new_files().await.expect("tick 1");
+    assert_eq!(
+        dm.pages_titled("a_owner").len(),
+        1,
+        "the first file to present the id owns it"
+    );
+    assert!(
+        dm.pages_titled("z_dupe").is_empty(),
+        "the duplicate must NOT be ingested — its blocks would merge into the claimant"
+    );
+    assert_eq!(
+        duplicate_id_errors(&cap.errors()).len(),
+        1,
+        "the refusal is disclosed loudly ONCE; got {:?}",
+        cap.errors()
+    );
+    let reads_after_refusal = fs.reads_of("z_dupe.org");
+    assert!(
+        reads_after_refusal >= 1,
+        "deciding the refusal requires reading the file once"
+    );
+
+    // Tick 2: nothing changed on disk, so re-deciding cannot change the outcome.
+    // No read, no parse, no new disclosure — the storm-gate.
+    controller.poll_new_files().await.expect("tick 2");
+    assert_eq!(
+        fs.reads_of("z_dupe.org"),
+        reads_after_refusal,
+        "a refused file whose bytes have not changed must NOT be re-read on the next \
+         discovery tick — the refusal is permanent until the file changes"
+    );
+    assert_eq!(
+        duplicate_id_errors(&cap.errors()).len(),
+        1,
+        "no re-disclosure for an unchanged refused file"
+    );
+
+    // The user fixes it: a fresh id. The signature changes, so the file is
+    // re-attempted and now ingests.
+    write_file(
+        &disk,
+        "z_dupe.org",
+        "#+TITLE: Z Dupe\n#+ID: 8b2d0e41-77aa-4c33-a1d5-99e0f1c2b3a4\n",
+    )
+    .await;
+    controller.poll_new_files().await.expect("tick 3");
+    assert!(
+        fs.reads_of("z_dupe.org") > reads_after_refusal,
+        "an edited file must be re-attempted"
+    );
+    assert_eq!(
+        dm.pages_titled("z_dupe").len(),
+        1,
+        "with a fresh id the formerly-refused file ingests"
+    );
+}
+
+/// The refusal stays loud once per CONTENT VERSION, not once per session: a
+/// user who edits the file without fixing the collision gets told again, and
+/// the gate re-arms at the new bytes.
+#[tokio::test]
+async fn an_edited_still_duplicate_file_is_re_disclosed_then_gated_again() {
+    let cap = ErrorCapture::default();
+    let _g = tracing::subscriber::set_default(tracing_subscriber::registry().with(cap.clone()));
+
+    let disk = Arc::new(InMemoryFileSystem::new());
+    disk.mkdir_all(std::path::Path::new(ROOT));
+    write_file(
+        &disk,
+        "a_owner.org",
+        &format!("#+TITLE: A Owner\n#+ID: {SHARED_ID}\n"),
+    )
+    .await;
+    write_file(
+        &disk,
+        "z_dupe.org",
+        &format!("#+TITLE: Z Dupe\n#+ID: {SHARED_ID}\n"),
+    )
+    .await;
+
+    let fs = Arc::new(CountingFs::new(disk.clone()));
+    let dm = FaultDocManager::new("no-poison-here");
+    let mut controller = build_with_fs(fs.clone(), dm.clone());
+
+    controller.poll_new_files().await.expect("tick 1");
+    assert_eq!(duplicate_id_errors(&cap.errors()).len(), 1);
+
+    // Edited, but the id still collides.
+    write_file(
+        &disk,
+        "z_dupe.org",
+        &format!("#+TITLE: Z Dupe\n#+ID: {SHARED_ID}\n\n* an edit that does not fix the id\n"),
+    )
+    .await;
+    controller.poll_new_files().await.expect("tick 2");
+    assert_eq!(
+        duplicate_id_errors(&cap.errors()).len(),
+        2,
+        "a NEW version of a still-colliding file is disclosed loudly again"
+    );
+
+    let reads = fs.reads_of("z_dupe.org");
+    controller.poll_new_files().await.expect("tick 3");
+    assert_eq!(
+        fs.reads_of("z_dupe.org"),
+        reads,
+        "the gate re-arms at the new bytes"
+    );
+    assert_eq!(duplicate_id_errors(&cap.errors()).len(), 2);
+}
+
+/// The refusal is NOT a property of the refused file's bytes: it holds only
+/// while ANOTHER file on disk claims the id. `disclose_duplicate_doc_id` tells
+/// the user the winner is whichever file the session happened to ingest first,
+/// which invites them to delete the stray copy that won — so deleting the
+/// claimant must hand the id over. Nothing about the refused file changes when
+/// that happens, so a gate keyed on its signature alone would make the remedy a
+/// silent dead end for the rest of the session.
+#[tokio::test]
+async fn refusal_lifts_when_the_claimant_leaves_disk() {
+    let cap = ErrorCapture::default();
+    let _g = tracing::subscriber::set_default(tracing_subscriber::registry().with(cap.clone()));
+
+    let disk = Arc::new(InMemoryFileSystem::new());
+    disk.mkdir_all(std::path::Path::new(ROOT));
+    write_file(
+        &disk,
+        "a_owner.org",
+        &format!("#+TITLE: A Owner\n#+ID: {SHARED_ID}\n"),
+    )
+    .await;
+    write_file(
+        &disk,
+        "z_dupe.org",
+        &format!("#+TITLE: Z Dupe\n#+ID: {SHARED_ID}\n"),
+    )
+    .await;
+
+    let fs = Arc::new(CountingFs::new(disk.clone()));
+    let dm = FaultDocManager::new("no-poison-here");
+    let mut controller = build_with_fs(fs.clone(), dm.clone());
+
+    controller.poll_new_files().await.expect("tick 1");
+    let refused_reads = fs.reads_of("z_dupe.org");
+    assert_eq!(duplicate_id_errors(&cap.errors()).len(), 1);
+
+    // The user resolves the collision the way the ERROR suggests: delete the
+    // copy that won. The refused file itself is untouched — same mtime, same
+    // size — so only the claimant's absence can lift the gate.
+    disk.remove_file(&std::path::Path::new(ROOT).join("a_owner.org"))
+        .unwrap();
+
+    controller.poll_new_files().await.expect("tick 2");
+    assert!(
+        fs.reads_of("z_dupe.org") > refused_reads,
+        "with the claimant gone the id is free: the refused file must be re-read and \
+         adopted, not gated on its unchanged bytes for the rest of the session"
+    );
+
+    // Adopted means TRACKED: the next tick no longer rediscovers it, which is
+    // what separates a real adoption from a re-read that refuses again.
+    let adopted_reads = fs.reads_of("z_dupe.org");
+    controller.poll_new_files().await.expect("tick 3");
+    assert_eq!(
+        fs.reads_of("z_dupe.org"),
+        adopted_reads,
+        "an adopted file is tracked, so the discovery walk leaves it alone"
+    );
+    assert_eq!(
+        duplicate_id_errors(&cap.errors()).len(),
+        1,
+        "adopting the id is not a new fault to report"
+    );
 }

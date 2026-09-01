@@ -345,7 +345,11 @@ async fn ingest_mount_file(
     registry: Option<Arc<StubMountRegistry>>,
 ) -> (FakeStore, anyhow::Result<()>) {
     let mut vault = mount_vault(store, registry);
-    let result = vault.controller.on_file_changed(&vault.path).await;
+    let result = vault
+        .controller
+        .on_file_changed(&vault.path)
+        .await
+        .map(|_| ());
     (vault.store.clone(), result)
 }
 

@@ -54,6 +54,7 @@ pub use file::File;
 pub use file_sync_controller::BlockDelta;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::FileSyncController;
+pub use file_sync_controller::IngestOutcome;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::RENDERER_VERSION;
 #[cfg(not(target_arch = "wasm32"))]
