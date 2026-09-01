@@ -22,12 +22,12 @@ use holon_kitchen::shopping::ItemKey;
 use holon_kitchen::shopping::LocalShoppingItem;
 use holon_kitchen::shopping::ShoppingCategory;
 use holon_kitchen::shopping::ShoppingReconciler;
-use holon_kitchen::shopping_rest::RestShoppingPeer;
 use holon_kitchen::shopping_sync::ShoppingRowReader;
 use holon_kitchen::shopping_sync::local_intent_operation;
 use holon_kitchen::shopping_sync::sync_once;
 
 use crate::mcp_integrations::McpIntegrationRegistry;
+use crate::shopping_rest::RestShoppingPeer;
 
 const ENTITY: &str = "shopping_item";
 const TABLE: &str = "shopping_item_raw";

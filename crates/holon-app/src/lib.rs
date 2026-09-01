@@ -44,6 +44,7 @@ pub mod rehome_entity;
 pub mod seed;
 pub mod session;
 pub mod shopping_operations;
+pub mod shopping_rest;
 pub mod turso_seams;
 pub mod type_admission;
 pub mod wiring;

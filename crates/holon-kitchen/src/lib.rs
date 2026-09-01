@@ -18,7 +18,6 @@ pub mod cookable;
 pub mod file_format;
 pub mod params;
 pub mod shopping;
-pub mod shopping_rest;
 pub mod shopping_sync;
 
 use anyhow::Context as _;

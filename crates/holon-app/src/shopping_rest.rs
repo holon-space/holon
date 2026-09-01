@@ -14,14 +14,13 @@ use std::sync::atomic::Ordering;
 use anyhow::Context as _;
 use anyhow::Result;
 use async_trait::async_trait;
+use holon_kitchen::shopping::CompleteSnapshot;
+use holon_kitchen::shopping_sync::CommitAck;
+use holon_kitchen::shopping_sync::CommitBatch;
+use holon_kitchen::shopping_sync::ShoppingPeer;
 use holon_mcp_client::mcp_call_surface::McpCallSurface;
 use holon_mcp_client::rest_transport::RESPONSE_VERSION_KEY;
 use rmcp::model::CallToolRequestParam;
-
-use crate::shopping::CompleteSnapshot;
-use crate::shopping_sync::CommitAck;
-use crate::shopping_sync::CommitBatch;
-use crate::shopping_sync::ShoppingPeer;
 
 /// The sidecar call that fetches one whole list.
 pub const LIST_CALL: &str = "list-items";

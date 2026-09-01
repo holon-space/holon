@@ -21,6 +21,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use holon_app::shopping_rest::RestShoppingPeer;
 use holon_kitchen::shopping::ItemKey;
 use holon_kitchen::shopping::ListVersion;
 use holon_kitchen::shopping::LocalIntent;
@@ -28,7 +29,6 @@ use holon_kitchen::shopping::LocalShoppingItem;
 use holon_kitchen::shopping::PushIntent;
 use holon_kitchen::shopping::ShoppingCategory;
 use holon_kitchen::shopping::ShoppingReconciler;
-use holon_kitchen::shopping_rest::RestShoppingPeer;
 use holon_kitchen::shopping_sync::CommitBatch;
 use holon_kitchen::shopping_sync::ShoppingPeer;
 use holon_kitchen::shopping_sync::ShoppingRowReader;

@@ -26,9 +26,15 @@ holon-loro.workspace = true
 holon-loro-wiring.workspace = true
 holon-turso.workspace = true
 holon-mcp-client.workspace = true
+# The shopping peer binds the `rest` transport's call surface, whose signatures
+# are rmcp types. It lives here, not in holon-kitchen: that crate is in the
+# worker's wasm graph, and rmcp's child-process transport pulls tokio features
+# wasm refuses.
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["client"] }
 serde_json.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 fluxdi.workspace = true
 futures-signals.workspace = true
 tokio.workspace = true
@@ -42,5 +48,7 @@ holon-org-format.workspace = true
 proptest.workspace = true
 serde_yaml.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# `io-util`/`net`: the shopping tests drive the real `rest` transport against a
+# hand-rolled local mock HTTP server, so no HTTP-server dependency is pulled in.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net"] }
 uuid.workspace = true
