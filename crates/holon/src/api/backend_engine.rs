@@ -73,6 +73,11 @@ pub struct BackendEngine {
     /// error in place. Empty until an advice reconciler is installed (see
     /// `create_initialized_engine`).
     advice_status: holon_advice::AdviceRuleStatusHandle,
+    /// Which integration owns each MCP entity table, and how far it got at
+    /// boot. Written by the integration registry, read by the UI watcher so a
+    /// view over an unavailable integration's tables discloses the integration
+    /// instead of a matview hash. Empty in a wiring with no integrations.
+    integration_attribution: holon_core::integration_attribution::IntegrationAttribution,
     /// Reactive-rule (ADR 0024 WP3) compilation/runtime status. Written by the
     /// action watcher (deprecation / parse / compile / exec outcomes), read by
     /// the render path and MCP so a broken or deprecated rule surfaces its
@@ -137,6 +142,8 @@ impl BackendEngine {
             graph_schema_registry: Arc::new(std::sync::RwLock::new(graph_schema_registry)),
             graph_schema_cache: Arc::new(std::sync::RwLock::new(graph_schema)),
             advice_status: holon_advice::AdviceRuleStatusHandle::new(),
+            integration_attribution:
+                holon_core::integration_attribution::IntegrationAttribution::new(),
             rule_status: crate::api::rule_status::RuleStatusHandle::new(),
             accepted_rules: crate::api::accepted_rules::AcceptedRuleHandle::new(),
             _advice_reconciler: None,
@@ -161,6 +168,22 @@ impl BackendEngine {
     /// replace a broken rule block's render with its error.
     pub fn advice_status(&self) -> &holon_advice::AdviceRuleStatusHandle {
         &self.advice_status
+    }
+
+    /// Which integration owns each MCP entity table (see the field).
+    pub fn integration_attribution(
+        &self,
+    ) -> &holon_core::integration_attribution::IntegrationAttribution {
+        &self.integration_attribution
+    }
+
+    /// Share the attribution map the integration registry declares into.
+    /// Called once during engine initialization.
+    pub fn install_integration_attribution(
+        &mut self,
+        attribution: holon_core::integration_attribution::IntegrationAttribution,
+    ) {
+        self.integration_attribution = attribution;
     }
 
     /// Install the advice reconciler: share the status handle the reconciler
@@ -654,15 +677,17 @@ impl BackendEngine {
             Err(e) if Self::is_permanent_matview_conversion_error(&e) => {
                 tracing::warn!(
                     sql = %sql_with_params.chars().take(160).collect::<String>(),
-                    "[query_and_watch] matview CREATE refused permanently ({e}); serving by eager \
-                     re-execution in disclosed degraded mode (predicate did not foresee this shape)"
+                    "[query_and_watch] matview CREATE refused permanently ({e:#}); serving by \
+                     eager re-execution in disclosed degraded mode (predicate did not foresee \
+                     this shape)"
                 );
                 return self
                     .eager_requery_stream(
                         sql_with_params,
                         format!(
-                            "Live results served by re-execution — the engine cannot maintain this \
-                             query as a materialized view ({e}). Rows are recomputed on each change."
+                            "Live results served by re-execution — the engine cannot maintain \
+                             this query as a materialized view ({e:#}). Rows are recomputed on \
+                             each change."
                         ),
                     )
                     .await;

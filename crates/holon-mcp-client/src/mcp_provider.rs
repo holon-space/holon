@@ -24,7 +24,6 @@ use rmcp::service::Peer;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::TokioChildProcess;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-use tokio::process::Command;
 use tracing::info;
 
 use crate::mcp_schema_mapping::input_schema_to_params;
@@ -137,8 +136,10 @@ pub async fn connect_mcp_child_with_handler<H: ClientHandler>(
     env: &HashMap<String, String>,
     handler: H,
 ) -> anyhow::Result<(Peer<RoleClient>, McpRunningService)> {
-    let mut cmd = Command::new(command);
-    cmd.args(args);
+    // On unix this resolves BEFORE spawning: `Command::new` searches only the
+    // parent's PATH, which for a Finder-launched `.app` is launchd's minimal
+    // one, and reports every miss as the same nameless ENOENT.
+    let mut cmd = crate::command_resolution::build_command(command, args)?;
     for (k, v) in env {
         cmd.env(k, v);
     }

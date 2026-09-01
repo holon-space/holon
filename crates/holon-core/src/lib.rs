@@ -24,6 +24,7 @@ pub mod downstream_projection;
 pub mod entity_cache;
 pub mod file_format;
 pub mod fractional_index;
+pub mod integration_attribution;
 pub mod memstats;
 pub mod operation_log;
 pub mod operation_subset;

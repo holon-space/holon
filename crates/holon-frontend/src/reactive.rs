@@ -3413,8 +3413,8 @@ impl ReactiveEngine {
                             return;
                         }
                         Err(e) => {
-                            tracing::warn!("watch_query failed, retrying in {backoff:?}: {e}");
-                            reactive.set_error(format!("query failed: {e}"));
+                            tracing::warn!("watch_query failed, retrying in {backoff:?}: {e:#}");
+                            reactive.set_error(format!("query failed: {e:#}"));
                             tokio::time::sleep(backoff).await;
                             backoff = (backoff * 2).min(Duration::from_secs(5));
                         }

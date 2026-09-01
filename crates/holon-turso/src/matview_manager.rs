@@ -917,14 +917,14 @@ impl MatviewManager {
         self.db_handle
             .execute_ddl_with_deps(&create_view_sql, provides, requires, priority::DDL_MATVIEW)
             .await
-            // The inner error is spelled into the message, not only chained:
-            // every consumer of this Err logs it with `{}`, so a `.context()`
-            // source left the actual Turso/DDL-queue failure unrecorded and the
-            // ledger blamed the statement instead of the cause.
+            // Chained, not spelled into the message: the render path downcasts
+            // to `StorageError::MissingDependencies` to name the integration
+            // that owns the missing tables. Every consumer of this Err formats
+            // it with `{:#}`, so the cause is still recorded.
             .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to create materialized view {view_name}: {create_view_sql} — cause: {e}"
-                )
+                anyhow::Error::new(e).context(format!(
+                    "Failed to create materialized view {view_name}: {create_view_sql}"
+                ))
             })?;
 
         self.ddl_creates.fetch_add(1, Ordering::Relaxed);

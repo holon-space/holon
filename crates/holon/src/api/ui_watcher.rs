@@ -291,15 +291,56 @@ async fn render_and_forward(
             forward_data_stream(data_stream, tx, profile_resolver, generation).await;
         }
         Err(e) => {
+            let verdict = missing_table_verdict(engine.integration_attribution(), &e);
+            if let Some(verdict) = verdict.as_ref().filter(|v| v.is_fully_explained()) {
+                // WARN, not ERROR: every one of these tables belongs to an
+                // integration whose failure was already disclosed at boot with
+                // its real cause. Raising it again per block is the flood, not
+                // the signal.
+                tracing::warn!(
+                    "[UiWatcher] render_entity('{}') reads tables of integrations that are not \
+                     connected: {}",
+                    block_id,
+                    verdict.disclosures().join(" · ")
+                );
+                let _ = tx
+                    .send(UiEvent::Structure {
+                        render_expr: disclosed_render_expr(verdict),
+                        candidates: Vec::new(),
+                        generation,
+                    })
+                    .await;
+                return;
+            }
+
+            // Anything the inert half does not fully explain stays loud, and
+            // carries BOTH the unexplained owners and any inert integrations
+            // that co-occurred — dropping either would hide the half the user
+            // can act on.
+            let notes = verdict.map(|v| v.notes()).unwrap_or_default();
+            let attribution = if notes.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", notes.join("; "))
+            };
             // ERROR, not WARN: WARN is the disclosed-degradation tier and is
             // deliberately not read by `inv-no-observed-errors`. A block that
             // failed to render is a real failure, so it must reach the
             // error-capture oracles. The error widget below stays: it is the
             // visible, disclosed surface for the same failure.
-            tracing::error!("[UiWatcher] render_entity('{}') failed: {}", block_id, e);
+            //
+            // `{:#}`, not `{}`: the matview error chains its cause rather than
+            // spelling it in, and plain Display prints only the outermost
+            // context — which would drop the missing table names entirely.
+            tracing::error!(
+                "[UiWatcher] render_entity('{}') failed: {:#}{}",
+                block_id,
+                e,
+                attribution
+            );
             let _ = tx
                 .send(UiEvent::Structure {
-                    render_expr: error_render_expr(&format!("{e:#}")),
+                    render_expr: error_render_expr(&format!("{e:#}{attribution}")),
                     candidates: Vec::new(),
                     generation,
                 })
@@ -448,6 +489,58 @@ pub fn enrich_stream(
 // Tests for the old flatten_properties function were removed — the behavior
 // is now part of EnrichedRow::from_raw and tested at that level.
 
+/// How a render failure's missing tables split across integration ownership,
+/// or `None` when the failure names no tables at all.
+fn missing_table_verdict(
+    attribution: &holon_core::integration_attribution::IntegrationAttribution,
+    error: &anyhow::Error,
+) -> Option<holon_core::integration_attribution::MissingTableVerdict> {
+    let holon_core::storage::types::StorageError::MissingDependencies { missing, .. } =
+        error.downcast_ref::<holon_core::storage::types::StorageError>()?
+    else {
+        return None;
+    };
+    Some(attribution.classify_missing(missing.iter().map(String::as_str)))
+}
+
+/// The disclosure for a failure fully explained by integrations that are not
+/// running.
+///
+/// Deliberately the `error` widget, not a new widget kind: every frontend
+/// already renders `error`, and a kind none of them knows falls through to
+/// `ViewKind::Empty` — which paints NOTHING on dioxus-web and is invisible to
+/// every headless oracle. The `degraded_disclosure` prop follows
+/// `annotate_degraded`'s convention so a renderer can style it calmly, and the
+/// message carries the same sentence for the ones that do not.
+fn disclosed_render_expr(
+    verdict: &holon_core::integration_attribution::MissingTableVerdict,
+) -> holon_api::RenderExpr {
+    let disclosure = verdict.disclosures().join(" · ");
+    let integrations = verdict
+        .inert
+        .iter()
+        .map(|o| o.integration.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    RenderExpr::FunctionCall {
+        name: "error".to_string(),
+        args: vec![
+            string_arg("message", &disclosure),
+            string_arg("degraded_disclosure", &disclosure),
+            string_arg("integration", &integrations),
+        ],
+    }
+}
+
+fn string_arg(name: &str, value: &str) -> Arg {
+    Arg {
+        name: Some(name.to_string()),
+        value: RenderExpr::Literal {
+            value: holon_api::Value::String(value.to_string()),
+        },
+    }
+}
+
 /// Create an error RenderExpr for render failures.
 fn error_render_expr(message: &str) -> holon_api::RenderExpr {
     RenderExpr::FunctionCall {
@@ -458,5 +551,142 @@ fn error_render_expr(message: &str) -> holon_api::RenderExpr {
                 value: holon_api::Value::String(message.to_string()),
             },
         }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use holon_core::integration_attribution::IntegrationAttribution;
+    use holon_core::integration_attribution::IntegrationStatus;
+    use holon_core::integration_attribution::TableOwner;
+    use holon_core::storage::types::StorageError;
+
+    use super::*;
+
+    fn owner(integration: &str, display: &str, status: IntegrationStatus) -> TableOwner {
+        TableOwner {
+            integration: integration.to_string(),
+            display_name: display.to_string(),
+            status,
+            cause: "binary 'claude-history-mcp' not found on PATH".to_string(),
+        }
+    }
+
+    fn claude_history(status: IntegrationStatus) -> IntegrationAttribution {
+        let attribution = IntegrationAttribution::new();
+        for table in ["cc_session", "cc_message"] {
+            attribution.declare(table, owner("claude-history", "Claude History", status));
+        }
+        attribution
+    }
+
+    /// The real shape: `MatviewManager::ensure_view` wraps the actor's typed
+    /// error in a context layer before the watcher ever sees it.
+    fn missing_tables(tables: &[&str]) -> anyhow::Error {
+        anyhow::Error::new(StorageError::MissingDependencies {
+            sql_preview: "CREATE MATERIALIZED VIEW watch_view_2ed15df4 AS SELECT …".to_string(),
+            missing: tables.iter().map(|t| t.to_string()).collect(),
+        })
+        .context("Failed to create materialized view watch_view_2ed15df4")
+    }
+
+    fn arg_str(expr: &RenderExpr, name: &str) -> Option<String> {
+        let RenderExpr::FunctionCall { args, .. } = expr else {
+            panic!("expected a function call, got {expr:?}");
+        };
+        let arg = args.iter().find(|a| a.name.as_deref() == Some(name))?;
+        let RenderExpr::Literal {
+            value: holon_api::Value::String(s),
+        } = &arg.value
+        else {
+            panic!("`{name}` is not a string literal in {expr:?}");
+        };
+        Some(s.clone())
+    }
+
+    fn widget_name(expr: &RenderExpr) -> &str {
+        let RenderExpr::FunctionCall { name, .. } = expr else {
+            panic!("expected a function call");
+        };
+        name
+    }
+
+    #[test]
+    fn a_view_over_a_dead_integrations_tables_discloses_it_on_a_node_every_frontend_renders() {
+        let attribution = claude_history(IntegrationStatus::Unavailable);
+        let verdict =
+            missing_table_verdict(&attribution, &missing_tables(&["cc_session", "cc_message"]))
+                .expect("a MissingDependencies failure must be classified");
+        assert!(verdict.is_fully_explained());
+
+        let expr = disclosed_render_expr(&verdict);
+
+        // `error`, not a bespoke kind: an unknown widget name falls through to
+        // ViewKind::Empty, which paints nothing on dioxus-web and is invisible
+        // to every headless oracle.
+        assert_eq!(widget_name(&expr), "error");
+        assert_eq!(
+            arg_str(&expr, "integration").as_deref(),
+            Some("claude-history")
+        );
+        let expected = "Claude History is not connected — status: Unavailable (binary \
+                        'claude-history-mcp' not found on PATH)";
+        assert_eq!(arg_str(&expr, "message").as_deref(), Some(expected));
+        assert_eq!(
+            arg_str(&expr, "degraded_disclosure").as_deref(),
+            Some(expected),
+            "the disclosure prop is what lets a renderer style this calmly"
+        );
+    }
+
+    /// The masking bug: a dead integration sharing the failure with a genuine
+    /// one must not turn the genuine one into a calm banner.
+    #[test]
+    fn a_mixed_failure_stays_loud_and_names_every_owner() {
+        let attribution = claude_history(IntegrationStatus::Unavailable);
+        attribution.declare(
+            "td_task",
+            owner("todoist", "Todoist", IntegrationStatus::Connected),
+        );
+
+        let error = missing_tables(&["cc_session", "td_task", "blocks"]);
+        let verdict = missing_table_verdict(&attribution, &error).expect("classified");
+
+        assert!(
+            !verdict.is_fully_explained(),
+            "a connected owner and an unowned table must keep this loud"
+        );
+        assert_eq!(
+            verdict.notes(),
+            vec![
+                "td_task belongs to integration 'todoist' (status: Connected)".to_string(),
+                "blocks belongs to no integration".to_string(),
+                "Claude History is not connected — status: Unavailable (binary \
+                 'claude-history-mcp' not found on PATH)"
+                    .to_string(),
+            ],
+            "the loud error must name the connected owner, the unowned table, AND still carry \
+             the inert disclosure"
+        );
+    }
+
+    #[test]
+    fn a_failure_that_names_no_tables_is_left_alone() {
+        let attribution = claude_history(IntegrationStatus::Unavailable);
+        let unrelated = anyhow::anyhow!("block 'x' has no query source child");
+        assert!(missing_table_verdict(&attribution, &unrelated).is_none());
+    }
+
+    /// The regression the chained-source fix introduced: plain `Display` on an
+    /// anyhow chain prints only the outermost context, dropping the missing
+    /// table names that are the whole point of the message.
+    #[test]
+    fn the_alternate_format_is_required_to_keep_the_cause() {
+        let error = missing_tables(&["cc_session"]);
+        assert!(
+            !format!("{error}").contains("cc_session"),
+            "plain Display drops the chained cause — the log MUST use {{:#}}"
+        );
+        assert!(format!("{error:#}").contains("cc_session"));
     }
 }

@@ -49,16 +49,63 @@ fn normalize_var_name(s: &str) -> String {
 /// never take down a boot that otherwise succeeded. The row itself is written
 /// by `IntegrationStateProjector`, so a miss leaves `Pending` — visibly
 /// unresolved rather than a wrong claim.
+/// The same call also stamps the verdict onto `name`'s declared tables, so the
+/// sidebar row and the render path can never disagree about whether an
+/// integration is running.
 async fn record_status(
     db: &holon::storage::DbHandle,
+    attribution: &holon_core::integration_attribution::IntegrationAttribution,
     name: &str,
     status: crate::integration_projection::IntegrationStatus,
+    cause: &str,
 ) {
+    attribution.set_status(name, status, cause);
     if let Err(e) = crate::integration_projection::set_integration_status(db, name, status).await {
         warn!(
             "[McpIntegrationsModule] Could not record boot status for '{name}' — the \
              Integrations section will show it as Pending: {e:#}"
         );
+    }
+}
+
+/// Declare the tables `provider` owns BEFORE the connect attempt.
+///
+/// A sidecar names its entities whether or not the remote ever answers, so
+/// declaring here is what makes a FAILED connect attributable: without it the
+/// matview over `cc_session` fails hours later owned by nobody.
+fn declare_entity_tables(
+    attribution: &holon_core::integration_attribution::IntegrationAttribution,
+    provider: &str,
+    display_name: &str,
+    config: &holon_mcp_client::IntegrationFileConfig,
+) {
+    for key in config.entities.keys() {
+        let table = holon_mcp_client::mcp_sidecar::canonical_entity_name(
+            config.entity_prefix.as_deref(),
+            key,
+        )
+        .table_name();
+        attribution.declare(
+            table,
+            holon_core::integration_attribution::TableOwner {
+                integration: provider.to_string(),
+                display_name: display_name.to_string(),
+                status: crate::integration_projection::IntegrationStatus::Pending,
+                cause: String::new(),
+            },
+        );
+    }
+}
+
+/// The boot cause worth showing a user.
+///
+/// A sidecar whose `command` could not be resolved carries the classification
+/// (not installed vs. not on this process's PATH) — the two need different
+/// remedies, and the raw `ENOENT` tells them apart for nobody.
+fn boot_cause(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<holon_mcp_client::command_resolution::SidecarCommandUnavailable>() {
+        Some(unavailable) => unavailable.to_string(),
+        None => format!("{error:#}"),
     }
 }
 
@@ -462,7 +509,31 @@ impl Module for McpIntegrationsModule {
                 let mut names = Vec::new();
                 let mut integrations = Vec::new();
 
+                let attribution = (*resolver
+                    .resolve::<holon_core::integration_attribution::IntegrationAttribution>(
+                ))
+                .clone();
+                let display_names: HashMap<String, String> = settings_vm
+                    .rows()
+                    .into_iter()
+                    .map(|row| (row.provider.to_string(), row.display_name))
+                    .collect();
+
                 for (name, config) in configs_for_registry.as_ref() {
+                    // A provider the enablement store has no row for (an
+                    // installed sidecar this build does not bundle) still needs
+                    // a name in the banner. The raw provider name is worse
+                    // reading than the store's, and never wrong.
+                    let display_name = display_names.get(name).cloned().unwrap_or_else(|| {
+                        warn!(
+                            "[McpIntegrationsModule] provider '{name}' has no row in the \
+                             enablement store — a degraded banner for it will use the raw \
+                             provider name"
+                        );
+                        name.clone()
+                    });
+                    declare_entity_tables(&attribution, name, &display_name, config);
+
                     let mcp_config = match config
                         .clone()
                         .into_mcp_config_with(name.clone(), &var_lookup)
@@ -483,8 +554,10 @@ impl Module for McpIntegrationsModule {
                             disclose_connect_failure(name, &e, &degraded_bus);
                             record_status(
                                 &db_handle,
+                                &attribution,
                                 name,
                                 crate::integration_projection::IntegrationStatus::Unavailable,
+                                &format!("{e}"),
                             )
                             .await;
                             continue;
@@ -546,8 +619,10 @@ impl Module for McpIntegrationsModule {
 
                             record_status(
                                 &db_handle,
+                                &attribution,
                                 name,
                                 crate::integration_projection::IntegrationStatus::Connected,
+                                "",
                             )
                             .await;
 
@@ -562,11 +637,24 @@ impl Module for McpIntegrationsModule {
                                 "[McpIntegrationsModule] Provider '{}' needs OAuth — auth_url: {}",
                                 provider_name, auth_url
                             );
+                            // `declare_entity_tables` keyed this integration's
+                            // tables on `name`. A `provider_name` that differs
+                            // would stamp nothing, leaving them Pending
+                            // forever and every later failure unexplained — so
+                            // the divergence must be loud, not silent.
+                            assert_eq!(
+                                &provider_name, name,
+                                "the connect result named provider '{provider_name}' for the \
+                                 config keyed '{name}' — the attribution and status keys have \
+                                 diverged and this integration's tables would never be marked"
+                            );
                             disclose_needs_auth(&provider_name, &auth_url, &degraded_bus);
                             record_status(
                                 &db_handle,
-                                &provider_name,
+                                &attribution,
+                                name,
                                 crate::integration_projection::IntegrationStatus::NeedsAuth,
+                                &format!("sign in at {auth_url}"),
                             )
                             .await;
                         }
@@ -578,8 +666,10 @@ impl Module for McpIntegrationsModule {
                             disclose_connect_failure(name, &e, &degraded_bus);
                             record_status(
                                 &db_handle,
+                                &attribution,
                                 name,
                                 crate::integration_projection::IntegrationStatus::Unavailable,
+                                &boot_cause(&e),
                             )
                             .await;
                         }
@@ -679,8 +769,40 @@ mod tests {
         };
         assert_eq!(integration, "todoist");
         assert!(
-            error.contains("No such file") || error.contains("os error 2"),
-            "error must carry the spawn failure: {error}"
+            error.contains("/nonexistent/holon-test-sidecar"),
+            "error must name the binary it could not run: {error}"
+        );
+        assert_eq!(
+            boot_cause(&err),
+            "binary not found at /nonexistent/holon-test-sidecar",
+            "a configured path that does not exist is a MISSING binary — distinct from a bare \
+             name this process cannot see, which needs the opposite remedy"
+        );
+    }
+
+    /// The Finder-launch failure: a bare `command` the user has installed, but
+    /// not anywhere launchd's minimal `PATH` reaches. The recorded cause must
+    /// say so, and say where it looked.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_sidecar_command_missing_from_path_is_recorded_as_a_path_failure() {
+        let Err(err) = holon_mcp_client::connect_mcp_child(
+            "holon-definitely-not-installed-sidecar",
+            &[],
+            &HashMap::new(),
+        )
+        .await
+        else {
+            panic!("spawning an unresolvable sidecar command must fail");
+        };
+
+        let cause = boot_cause(&err);
+        assert!(
+            cause.starts_with("binary 'holon-definitely-not-installed-sidecar' not found on PATH"),
+            "the cause must distinguish PATH from a missing file: {cause}"
+        );
+        assert!(
+            cause.contains("searched"),
+            "the cause must say where it looked, or a packaging failure is undiagnosable: {cause}"
         );
     }
 

@@ -165,6 +165,7 @@ async fn create_initialized_engine(
     graph_schema_registry: GraphSchemaRegistry,
     type_registry: &TypeRegistry,
     clock: Arc<dyn holon_api::Clock>,
+    attribution: holon_core::integration_attribution::IntegrationAttribution,
 ) -> Result<BackendEngine> {
     let backend_guard = backend.read().await;
     let db_handle = backend_guard.handle().clone();
@@ -193,6 +194,7 @@ async fn create_initialized_engine(
         graph_schema_registry,
     )
     .context("Failed to create BackendEngine")?;
+    engine.install_integration_attribution(attribution);
 
     // Undo substrate: back the per-session undo stack with the replica DB
     // (`undo_log` snapshot + live-state precondition reader) so history survives
@@ -277,6 +279,14 @@ fn register_shared_services(injector: &Injector) -> Result<()> {
     injector.provide::<holon_api::link_parser::LinkTargetClassifier>(Provider::root(move |_| {
         Shared::new(link_classifier.clone())
     }));
+
+    // Empty until the integration registry declares into it — a wiring with no
+    // integrations at all still resolves it, so the render path never has to
+    // ask whether attribution exists.
+    let attribution = holon_core::integration_attribution::IntegrationAttribution::new();
+    injector.provide::<holon_core::integration_attribution::IntegrationAttribution>(
+        Provider::root(move |_| Shared::new(attribution.clone())),
+    );
 
     injector.provide_into_set::<dyn OperationObserver>(Provider::root_async(
         move |inj| async move {
@@ -632,6 +642,10 @@ pub fn register_core_services_with_backend(
                         graph_schema_registry,
                         &type_registry,
                         clock,
+                        (*inj
+                            .resolve::<holon_core::integration_attribution::IntegrationAttribution>(
+                            ))
+                        .clone(),
                     )
                     .await
                     // fluxdi async providers return `T`, not `Result<T>`, and

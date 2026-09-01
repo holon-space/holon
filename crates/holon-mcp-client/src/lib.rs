@@ -11,6 +11,7 @@
 //! `OperationProvider`s.
 
 pub mod bundled_sidecars;
+pub mod command_resolution;
 pub mod credential_store;
 pub mod entity_mirror;
 pub mod integration_config;

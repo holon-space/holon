@@ -48,41 +48,9 @@ pub const TABLE_COLUMNS: &[&str] = &[
     "_change_origin",
 ];
 
-/// How far an enabled integration got at boot — the axis the integration
-/// REGISTRY owns, distinct from the store's `enabled`/`config_status`.
-///
-/// The design defers this (§8 R9) and notes the table takes the extra column
-/// without disturbing anything else. The discovery surface wants it: keeping
-/// "switched on" and "actually working" apart is what lets a broken
-/// integration stay visible AND read as broken, instead of vanishing from the
-/// list or rendering like a healthy one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IntegrationStatus {
-    /// Enabled; the registry has not resolved it yet. Every freshly projected
-    /// row starts here.
-    Pending,
-    /// Connected, operations registered.
-    Connected,
-    /// Reachable, but waiting on an OAuth grant.
-    NeedsAuth,
-    /// Enabled but not running: connect failed, or a `${VAR}` it needs is set
-    /// neither in the environment nor in settings.
-    Unavailable,
-}
-
-impl IntegrationStatus {
-    /// The word the discovery section prints. Stored rather than derived at
-    /// render time, because the section is a `live_query` and SQL is the only
-    /// language between the mirror and the row.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Pending => "Pending",
-            Self::Connected => "Connected",
-            Self::NeedsAuth => "Needs auth",
-            Self::Unavailable => "Unavailable",
-        }
-    }
-}
+/// The mirror's status column and the render path's table attribution must
+/// agree on the words, so both read the one enum in `holon-core`.
+pub use holon_core::integration_attribution::IntegrationStatus;
 
 /// The row id for `provider` — the `integration:` entity scheme.
 pub fn integration_row_id(provider: &str) -> String {
