@@ -418,7 +418,7 @@ async fn test_sync_with_empty_peer() -> Result<()> {
     let _ = accept_handle.await?;
 
     let text2 = doc2.get_text("editor")?;
-    assert_eq!(text2, "");
+    assert_eq!(text2, "Non-empty");
 
     Ok(())
 }

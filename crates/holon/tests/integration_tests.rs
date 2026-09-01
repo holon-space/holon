@@ -320,43 +320,97 @@ async fn test_sync_timeout_protection() -> Result<()> {
 #[cfg(feature = "iroh-sync")]
 #[tokio::test]
 #[serial]
+/// Both legs matter: an acceptor advertising `doc-alpha` must REFUSE a peer
+/// dialling `doc-beta` and ACCEPT one dialling `doc-alpha`. Asserting only the
+/// refusal passes just as well when no ALPN is registered at all, which is how
+/// this test stayed green while every peer was being rejected.
 async fn test_alpn_mismatch_detection() -> Result<()> {
-    let doc1 = LoroDocument::new("doc-alpha".to_string())?;
-    let doc2 = LoroDocument::new("doc-beta".to_string())?;
+    // Leg 1 — a peer dialling the wrong doc id is refused at the handshake.
+    {
+        let served = Arc::new(LoroDocument::new("doc-alpha".to_string())?);
+        served.insert_text("editor", 0, "Alpha")?;
+        let dialled = LoroDocument::new("doc-beta".to_string())?;
+        dialled.insert_text("editor", 0, "Beta")?;
 
-    doc1.insert_text("editor", 0, "Alpha")?;
-    doc2.insert_text("editor", 0, "Beta")?;
+        let acceptor = IrohSyncAdapter::new("loro-sync").await?;
+        let dialer = IrohSyncAdapter::new("loro-sync").await?;
+        let addr = acceptor.addr();
 
-    let adapter1 = IrohSyncAdapter::new("loro-sync").await?;
-    let adapter2 = IrohSyncAdapter::new("loro-sync").await?;
+        let served_clone = served.clone();
+        let accept_handle = tokio::spawn(async move { acceptor.accept_sync(&served_clone).await });
+        sleep(Duration::from_millis(500)).await;
 
-    let doc1 = Arc::new(doc1);
-    let doc1_clone = doc1.clone();
-    let peer1_addr = adapter1.addr();
-
-    let accept_handle = tokio::spawn(async move { adapter1.accept_sync(&doc1_clone).await });
-
-    sleep(Duration::from_millis(500)).await;
-
-    let _connect_result = adapter2.sync_with_peer(&doc2, peer1_addr).await;
-    let accept_result = accept_handle.await?;
-
-    assert!(
-        accept_result.is_err(),
-        "Should reject mismatched document IDs"
-    );
-
-    if let Err(e) = accept_result {
-        let err_str = format!("{:?}", e);
+        let err = dialer
+            .sync_with_peer(&dialled, addr)
+            .await
+            .expect_err("a peer dialling doc-beta must not reach a doc-alpha acceptor");
+        let err_str = format!("{err:?}");
         assert!(
-            err_str.contains("Wrong document")
-                || err_str.contains("ALPN")
-                || err_str.contains("protocol"),
-            "Error should mention document/ALPN/protocol mismatch: {}",
-            err_str
+            err_str.contains("protocol") || err_str.contains("alpn") || err_str.contains("ALPN"),
+            "refusal should name the protocol/ALPN mismatch: {err_str}"
         );
+        accept_handle.abort();
     }
 
+    // Leg 2 — a peer dialling the SAME doc id gets through and syncs.
+    {
+        let served = Arc::new(LoroDocument::new("doc-gamma".to_string())?);
+        served.insert_text("editor", 0, "Gamma")?;
+        let dialled = LoroDocument::new("doc-gamma".to_string())?;
+
+        let acceptor = IrohSyncAdapter::new("loro-sync").await?;
+        let dialer = IrohSyncAdapter::new("loro-sync").await?;
+        let addr = acceptor.addr();
+
+        let served_clone = served.clone();
+        let accept_handle = tokio::spawn(async move { acceptor.accept_sync(&served_clone).await });
+        sleep(Duration::from_millis(500)).await;
+
+        dialer.sync_with_peer(&dialled, addr).await?;
+        accept_handle.await??;
+        assert_eq!(dialled.get_text("editor")?, "Gamma");
+    }
+
+    Ok(())
+}
+
+/// `Endpoint::set_alpns` REPLACES the endpoint's protocol set, so an adapter
+/// accepting for a second document must not un-register the first one's ALPN.
+#[cfg(feature = "iroh-sync")]
+#[tokio::test]
+#[serial]
+async fn accepting_a_second_doc_keeps_the_first_docs_alpn_registered() -> Result<()> {
+    let doc_a = Arc::new(LoroDocument::new("cumulative-a".to_string())?);
+    let doc_b = Arc::new(LoroDocument::new("cumulative-b".to_string())?);
+    doc_a.insert_text("editor", 0, "A")?;
+    doc_b.insert_text("editor", 0, "B")?;
+
+    let acceptor = Arc::new(IrohSyncAdapter::new("loro-sync").await?);
+    let addr = acceptor.addr();
+
+    // Both accepts are live at once, so only a cumulative registration leaves
+    // both ALPNs advertised.
+    let (acc_a, acc_b) = (acceptor.clone(), acceptor.clone());
+    let (a_clone, b_clone) = (doc_a.clone(), doc_b.clone());
+    let handle_a = tokio::spawn(async move { acc_a.accept_sync(&a_clone).await });
+    let handle_b = tokio::spawn(async move { acc_b.accept_sync(&b_clone).await });
+    sleep(Duration::from_millis(500)).await;
+
+    // Which accept picks up which connection is racy; the handshake is not.
+    for doc_id in ["cumulative-a", "cumulative-b"] {
+        let client_doc = LoroDocument::new(doc_id.to_string())?;
+        let client = IrohSyncAdapter::new("loro-sync").await?;
+        if let Err(e) = client.sync_with_peer(&client_doc, addr.clone()).await {
+            let err_str = format!("{e:?}");
+            assert!(
+                !err_str.contains("doesn't support any known protocol"),
+                "{doc_id} was refused at the handshake — its ALPN was un-registered: {err_str}"
+            );
+        }
+    }
+
+    handle_a.abort();
+    handle_b.abort();
     Ok(())
 }
 

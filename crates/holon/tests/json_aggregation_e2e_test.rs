@@ -86,7 +86,10 @@ async fn setup_test_schema(engine: &Arc<BackendEngine>) -> Result<()> {
             parent_id TEXT,
             color TEXT,
             is_favorite INTEGER DEFAULT 0,
-            is_archived INTEGER DEFAULT 0
+            is_archived INTEGER DEFAULT 0,
+            -- sql_parser::TABLES_WITH_CHANGE_ORIGIN names this table, so the
+            -- compiler projects the column into every branch of a UNION.
+            _change_origin TEXT
         )
         "#,
             vec![],
@@ -105,7 +108,8 @@ async fn setup_test_schema(engine: &Arc<BackendEngine>) -> Result<()> {
             project_id TEXT,
             priority INTEGER DEFAULT 1,
             completed INTEGER DEFAULT 0,
-            is_deleted INTEGER DEFAULT 0
+            is_deleted INTEGER DEFAULT 0,
+            _change_origin TEXT
         )
         "#,
             vec![],
@@ -464,25 +468,13 @@ append (
     let sql = engine.compile_to_sql(prql, QueryLanguage::HolonPrql)?;
     println!("Generated SQL:\n{}\n", sql);
 
-    // Check if json_object includes derived columns
-    let sql_lower = sql.to_lowercase();
-
-    let has_json_object = sql_lower.contains("json_object");
-    let has_entity_name = sql_lower.contains("'entity_name'");
-    let has_display_name = sql_lower.contains("'display_name'");
-
-    println!("json_object present: {}", has_json_object);
-    println!("entity_name in json_object: {}", has_entity_name);
-    println!("display_name in json_object: {}", has_display_name);
-
-    assert!(has_json_object, "Should inject json_object");
+    // The transformer emits `json_object(*)` over each branch CTE rather than an
+    // enumerated key list, so the derived columns are only observable in the
+    // RESULT rows below — asserting them in the SQL text would pin the shape of
+    // the emitted call instead of the behaviour it must deliver.
     assert!(
-        has_entity_name,
-        "Should include derived column 'entity_name' in json_object"
-    );
-    assert!(
-        has_display_name,
-        "Should include derived column 'display_name' in json_object"
+        sql.to_lowercase().contains("json_object"),
+        "Should inject json_object"
     );
 
     // Execute the query
@@ -491,12 +483,20 @@ append (
         .await?;
     println!("Query executed with {} results", results.len());
 
+    // One projects row and one tasks row; without this an empty result set would
+    // pass the loop below with zero assertions executed.
+    assert_eq!(results.len(), 2, "one row per appended branch");
+
     for (i, row) in results.iter().enumerate() {
         println!("Row {}: keys={:?}", i, row.keys().collect::<Vec<_>>());
-        // Check that entity_name is present (from flattened data)
+        // Both derived columns must survive `json_object(*)` and the flattening.
         assert!(
             row.get("entity_name").is_some(),
             "Row should have entity_name from flattened data"
+        );
+        assert!(
+            row.get("display_name").is_some(),
+            "Row should have display_name from flattened data"
         );
     }
 
@@ -720,7 +720,8 @@ select { id, title, data }
     Ok(())
 }
 
-/// Test to isolate the printf issue - this is the root cause
+/// Pins that `printf` zero-padding survives the BackendEngine query path, in
+/// the bare call and in the CAST and concat shapes.
 #[tokio::test]
 async fn test_printf_sql_issue() -> Result<()> {
     let engine = create_test_engine().await?;
@@ -742,31 +743,20 @@ async fn test_printf_sql_issue() -> Result<()> {
         )
         .await?;
 
-    // Test 1: Via BackendEngine execute_sql (fails with "Invalid formatter")
+    // Test 1: the bare printf call via BackendEngine execute_sql
     {
         let sql = "SELECT id, printf('%012d', num) as sort_key FROM test_table";
         println!("\nTesting via BackendEngine.execute_sql: {}", sql);
 
-        match engine
+        let results = engine
             .execute_query(sql.to_string(), std::collections::HashMap::new(), None)
-            .await
-        {
-            Ok(results) => {
-                for row in &results {
-                    println!("BackendEngine result: {:?}", row);
-                }
-                panic!("Expected error but got results");
-            }
-            Err(e) => {
-                let err_msg = e.to_string();
-                println!("BackendEngine error (expected): {}", err_msg);
-                assert!(
-                    err_msg.contains("Invalid formatter"),
-                    "Expected 'Invalid formatter' error, got: {}",
-                    err_msg
-                );
-            }
-        }
+            .await?;
+        assert_eq!(results.len(), 1, "one fixture row");
+        assert_eq!(
+            results[0].get("sort_key"),
+            Some(&holon_api::Value::String("000000000100".to_string())),
+            "printf must zero-pad to width 12"
+        );
     }
 
     // Test 2: Workaround - use CAST to explicitly convert result

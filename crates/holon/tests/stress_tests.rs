@@ -192,15 +192,16 @@ async fn test_parallel_sync_operations() -> Result<()> {
 
     let hub_adapter = IrohSyncAdapter::new("loro-sync").await?;
     let peer_addr = hub_adapter.addr();
-    let mut join_handles = Vec::new();
 
-    for _ in 0..5 {
-        let hub_clone = hub.clone();
-        let hub_adapter_new = IrohSyncAdapter::new("loro-sync").await?;
-        let accept_handle =
-            tokio::spawn(async move { hub_adapter_new.accept_sync(&hub_clone).await });
-        join_handles.push(accept_handle);
-    }
+    // The clients all dial `peer_addr`, so the accepts must run on that same
+    // adapter — one at a time, since `accept_sync` takes a single connection.
+    let hub_clone = hub.clone();
+    let accept_handle = tokio::spawn(async move {
+        for _ in 0..5 {
+            hub_adapter.accept_sync(&hub_clone).await?;
+        }
+        anyhow::Ok(())
+    });
 
     sleep(Duration::from_millis(500)).await;
 
@@ -225,9 +226,7 @@ async fn test_parallel_sync_operations() -> Result<()> {
         let _ = handle.await;
     }
 
-    for handle in join_handles {
-        let _ = handle.await;
-    }
+    accept_handle.await??;
 
     let hub_text = hub.get_text("editor")?;
     assert!(!hub_text.is_empty());

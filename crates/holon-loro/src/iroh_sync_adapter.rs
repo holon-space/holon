@@ -32,8 +32,10 @@
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod adapter {
+    use std::collections::BTreeSet;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::RwLock;
     use std::time::Duration;
 
@@ -455,6 +457,10 @@ mod adapter {
     pub struct IrohSyncAdapter {
         endpoint: Arc<Endpoint>,
         alpn_prefix: String,
+        /// Every ALPN this adapter has accepted for. `Endpoint::set_alpns`
+        /// REPLACES the endpoint's protocol set, so accepting for a second
+        /// document would otherwise un-register the first one's.
+        registered_alpns: Mutex<BTreeSet<Vec<u8>>>,
     }
 
     impl IrohSyncAdapter {
@@ -463,19 +469,36 @@ mod adapter {
             Ok(Self {
                 endpoint: Arc::new(endpoint),
                 alpn_prefix: alpn_prefix.to_string(),
+                registered_alpns: Mutex::new(BTreeSet::new()),
             })
         }
 
         pub async fn new_with_alpns(alpn_prefix: &str, accepted_ids: &[&str]) -> Result<Self> {
-            let alpns: Vec<Vec<u8>> = accepted_ids
+            let alpns: BTreeSet<Vec<u8>> = accepted_ids
                 .iter()
                 .map(|id| format!("{}/{}", alpn_prefix, id).into_bytes())
                 .collect();
-            let endpoint = Endpoint::builder().alpns(alpns).bind().await?;
+            let endpoint = Endpoint::builder()
+                .alpns(alpns.iter().cloned().collect())
+                .bind()
+                .await?;
             Ok(Self {
                 endpoint: Arc::new(endpoint),
                 alpn_prefix: alpn_prefix.to_string(),
+                registered_alpns: Mutex::new(alpns),
             })
+        }
+
+        /// Advertise `doc_id`'s ALPN in addition to every one already accepted
+        /// for.
+        fn register_alpn(&self, doc_id: &str) {
+            let mut registered = self
+                .registered_alpns
+                .lock()
+                .expect("IrohSyncAdapter ALPN set poisoned");
+            registered.insert(self.alpn(doc_id));
+            self.endpoint
+                .set_alpns(registered.iter().cloned().collect());
         }
 
         fn alpn(&self, doc_id: &str) -> Vec<u8> {
@@ -525,6 +548,10 @@ mod adapter {
         /// Legacy full-snapshot accept for LoroDocument.
         pub async fn accept_sync(&self, doc: &LoroDocument) -> Result<()> {
             let doc_id = doc.doc_id();
+            // The doc to accept for is only known here, so `new()` cannot have
+            // registered its ALPN: without this the endpoint advertises none and
+            // every peer is rejected at the handshake.
+            self.register_alpn(doc_id);
             let incoming = self
                 .endpoint
                 .accept()
