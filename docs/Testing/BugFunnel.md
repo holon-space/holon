@@ -8,10 +8,10 @@ over verbatim by `scripts/bugfunnel-migrate.py`.
 | Want | Do |
 |---|---|
 | record a new escape | the `bug-gap-triage` skill — one new file under `docs/Testing/bugfunnel/entries/` |
-| the gap distribution | `python3 scripts/bugfunnel.py counts` |
-| scan the funnel | `python3 scripts/bugfunnel.py index` then read `docs/Testing/bugfunnel/INDEX.md` |
-| find specific escapes | `python3 scripts/bugfunnel.py list --gap ORACLE --status OPEN --since 2026-08-01` |
-| validate before landing | `python3 scripts/bugfunnel.py check` |
+| the gap distribution | `/usr/bin/python3 scripts/bugfunnel.py counts` |
+| scan the funnel | `/usr/bin/python3 scripts/bugfunnel.py index` then read `docs/Testing/bugfunnel/INDEX.md` |
+| find specific escapes | `/usr/bin/python3 scripts/bugfunnel.py list --gap ORACLE --status OPEN --since 2026-08-01` |
+| validate before landing | `/usr/bin/python3 scripts/bugfunnel.py check` |
 
 The rationale, the options that were rejected, and the measurements behind the
 change are in [BugFunnelFormat.md](BugFunnelFormat.md). The short version: one

@@ -445,9 +445,11 @@ Run `bug-gap-triage` per finding; it owns the entry format. One finding = one ne
 
 Litmus: COVERAGE = keystone can't generate the interaction · ORACLE = generatable but no invariant
 flags it · ENVIRONMENT = failing path/wiring/timing/platform absent from the test env ·
-PERCEPTION = visual/UX, no formal invariant possible. Latency-over-budget is ORACLE or
-ENVIRONMENT, never PERCEPTION. Then attempt keystone repro (CLAUDE.md rule) or name the parity
-work, and run `python3 scripts/bugfunnel.py check`. There is no distribution line to update —
+PERCEPTION = visual/UX, no formal invariant possible · FALSE-ALARM = the test failed with no
+product defect behind it (NOT for a flake whose cause you have not found — that stays OPEN in
+its escape class until root-caused; FALSE-ALARM is excluded from the escape distribution).
+Latency-over-budget is ORACLE or ENVIRONMENT, never PERCEPTION. Then attempt keystone repro
+(CLAUDE.md rule) or name the parity work, and run `/usr/bin/python3 scripts/bugfunnel.py check`. There is no distribution line to update —
 the totals are derived from the entries.
 
 **Report deliverables:** what you tried (seed + call sequence), what you observed (rendered vs

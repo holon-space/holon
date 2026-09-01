@@ -46,3 +46,10 @@ wiring/timing/platform differs from test · **PERCEPTION** = visual/UX, no
 formal invariant in current harness. Latency-over-budget (SLO: p95
 interaction→projection-visible < 200ms) is ORACLE or ENVIRONMENT, never
 PERCEPTION.
+
+A fifth class, **`FALSE-ALARM`**, records a test that failed with no product
+defect behind it — the test asserted something the product never promised. It
+is NOT an escape: `bugfunnel.py counts` prints it on its own line and leaves it
+out of the four-class distribution above, so it never skews where QA spend
+goes. A flake with an unknown cause is not a false alarm; it stays OPEN in its
+escape class until root-caused. See the `bug-gap-triage` skill.

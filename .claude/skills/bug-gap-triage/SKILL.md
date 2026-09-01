@@ -1,6 +1,6 @@
 ---
 name: bug-gap-triage
-description: Classify every manually- or exploratorily-discovered bug into one of four escape gaps (coverage/oracle/environment/perception) and record it in the bug-funnel ledger, so QA investment is steered by data. Use whenever a bug is found OUTSIDE an automated test — by Martin dogfooding, by an agent driving the app, or reported by a user.
+description: Classify every manually- or exploratorily-discovered bug into one of four escape gaps (coverage/oracle/environment/perception), or as a FALSE-ALARM test failure, and record it in the bug-funnel ledger, so QA investment is steered by data. Use whenever a bug is found OUTSIDE an automated test — by Martin dogfooding, by an agent driving the app, or reported by a user.
 ---
 
 # Bug-Gap Triage
@@ -21,6 +21,19 @@ dual):
 | **ORACLE** | The PBT can generate the interaction, but no invariant would have flagged the defect | "If a case had hit this state, would any invariant have gone red?" | Add/strengthen an invariant in `crates/holon-integration-tests/src/pbt/composed/invariants/` |
 | **ENVIRONMENT** | Prod wiring/timing/platform differs from the test's (platform-only code paths, embedder wiring divergence, boot/DDL ordering, real-vault scale, async races the settle masks) | "Does the failing code path even run in the keystone's wiring?" | Make test and prod more similar (CLAUDE.md rule): draw the wiring, add the platform rung (McpUserDriver), fail-loud boot guards |
 | **PERCEPTION** | The defect is visual/UX with no formal invariant possible in the current harness (layout overflow, touch ergonomics, theme) | "Could any headless assertion express this?" | Windowed T3 PBTs, layout snapshots, agent exploratory dogfooding |
+
+## The fifth class: `FALSE-ALARM` (not an escape)
+
+A test that failed with **no product defect behind it** is not an escape and
+gets `gap: FALSE-ALARM`. Use it when the test asserted something the product
+never promised — event ordering the platform does not guarantee, a timing
+model tighter than the real seam, an oracle stronger than the property under
+test. Do NOT use it for a flake whose cause you have not found: an unexplained
+failure stays OPEN in its escape class until it is root-caused, because
+"probably just noise" is exactly how real defects get filed away. False alarms
+are counted on their own line and excluded from the four-class escape
+distribution, so mislabelling one hides an escape from the numbers that steer
+QA investment.
 
 **Latency is NOT a perception gap.** Interaction→visible latency above budget
 is a formalizable bug: the SLO is **p95 interaction→projection-visible
@@ -44,7 +57,7 @@ not vault scale).
    ---
    id: 2026-08-16-page-switch-rendered-accordion-must-direct   # = the filename stem
    date: 2026-08-16
-   gap: PERCEPTION              # ENVIRONMENT | COVERAGE | PERCEPTION | ORACLE
+   gap: PERCEPTION              # ENVIRONMENT | COVERAGE | PERCEPTION | ORACLE | FALSE-ALARM
    secondary: ENVIRONMENT       # null when the bug is not genuinely dual
    status: FIXED                # FIXED | PARTIAL | MITIGATED | OPEN | NOTED
    summary: >-
@@ -82,10 +95,10 @@ not vault scale).
    cannot drift or merge wrongly:
 
    ```
-   python3 scripts/bugfunnel.py check     # schema: gap, status, id vs filename
-   python3 scripts/bugfunnel.py counts    # the distribution
-   python3 scripts/bugfunnel.py list --gap ORACLE --status OPEN --since 2026-08-01
-   python3 scripts/bugfunnel.py index     # regenerate INDEX.md (gitignored)
+   /usr/bin/python3 scripts/bugfunnel.py check     # schema: gap, status, id vs filename
+   /usr/bin/python3 scripts/bugfunnel.py counts    # the distribution
+   /usr/bin/python3 scripts/bugfunnel.py list --gap ORACLE --status OPEN --since 2026-08-01
+   /usr/bin/python3 scripts/bugfunnel.py index     # regenerate INDEX.md (gitignored)
    ```
 
    `check` must pass before you land. Read `INDEX.md` or a filtered `list` to

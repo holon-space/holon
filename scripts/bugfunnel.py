@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Query and index the bug funnel.
 
-The funnel is one file per escape under `docs/Testing/bugfunnel/entries/`.
-Totals are derived here and never stored, so two lanes adding an escape can
+The funnel is one file per entry under `docs/Testing/bugfunnel/entries/`.
+Totals are derived here and never stored, so two lanes adding an entry can
 never disagree about a counter.
 
+Run with `/usr/bin/python3` — the yaml module is present there and absent from
+the default `python3` on this machine.
+
   bugfunnel.py counts                 gap distribution (the old header line)
-  bugfunnel.py list --status OPEN     one line per matching escape
+  bugfunnel.py list --status OPEN     one line per matching entry
   bugfunnel.py index                  regenerate INDEX.md
   bugfunnel.py check                  validate every entry against the schema
 """
@@ -19,6 +22,10 @@ from pathlib import Path
 import yaml
 
 GAPS = ("ENVIRONMENT", "COVERAGE", "PERCEPTION", "ORACLE")
+# Not an escape: a test that failed with no product defect behind it. Counted
+# on its own line and kept out of the escape distribution that steers QA spend.
+FALSE_ALARM = "FALSE-ALARM"
+CLASSES = GAPS + (FALSE_ALARM,)
 STATUSES = ("FIXED", "PARTIAL", "MITIGATED", "OPEN", "NOTED", "UNCLASSIFIED")
 FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 REQUIRED = ("id", "date", "gap", "status", "summary")
@@ -37,8 +44,8 @@ def load(entries_dir):
         for key in REQUIRED:
             if meta.get(key) in (None, ""):
                 problems.append(f"{path.name}: missing `{key}`")
-        if meta.get("gap") not in GAPS:
-            problems.append(f"{path.name}: gap {meta.get('gap')!r} is not one of {GAPS}")
+        if meta.get("gap") not in CLASSES:
+            problems.append(f"{path.name}: gap {meta.get('gap')!r} is not one of {CLASSES}")
         if meta.get("status") not in STATUSES:
             problems.append(f"{path.name}: status {meta.get('status')!r} is not one of {STATUSES}")
         if meta.get("id") != path.stem:
@@ -71,7 +78,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("counts", "list", "index", "check"))
     parser.add_argument("--dir", default="docs/Testing/bugfunnel")
-    parser.add_argument("--gap", choices=GAPS)
+    parser.add_argument("--gap", choices=CLASSES)
     parser.add_argument("--status", choices=STATUSES)
     parser.add_argument("--since")
     args = parser.parse_args()
@@ -90,10 +97,16 @@ def main():
               "run `bugfunnel.py check`", file=sys.stderr)
         return 1
 
+    escapes = [e for e in entries if e["gap"] in GAPS]
+    false_alarms = [e for e in entries if e["gap"] == FALSE_ALARM]
+
     if args.command == "counts":
         for gap in GAPS:
-            print(f"{gap}: {sum(1 for e in entries if e['gap'] == gap)}")
-        print(f"TOTAL: {len(entries)}")
+            count = sum(1 for e in escapes if e["gap"] == gap)
+            share = 100 * count / len(escapes) if escapes else 0
+            print(f"{gap}: {count} ({share:.1f}%)")
+        print(f"TOTAL ESCAPES: {len(escapes)}")
+        print(f"{FALSE_ALARM}: {len(false_alarms)} (excluded from the distribution above)")
         for status in STATUSES:
             count = sum(1 for e in entries if e["status"] == status)
             if count:
@@ -110,10 +123,12 @@ def main():
              "One escape per file under `entries/`; this is the scan sheet.", "",
              "| Gap | Total | Open |", "|---|---|---|"]
     for gap in GAPS:
-        in_gap = [e for e in entries if e["gap"] == gap]
+        in_gap = [e for e in escapes if e["gap"] == gap]
         open_count = sum(1 for e in in_gap if e["status"] in ("OPEN", "PARTIAL"))
         lines.append(f"| {gap} | {len(in_gap)} | {open_count} |")
-    lines += ["", f"Total escapes: {len(entries)}", "", "## Entries (newest first)", ""]
+    lines += ["", f"Total escapes: {len(escapes)}",
+              f"Not escapes — {FALSE_ALARM}: {len(false_alarms)}",
+              "", "## Entries (newest first)", ""]
     for entry in sorted(entries, key=lambda e: (str(e["date"]), e["id"]), reverse=True):
         lines.append(f"- {one_line(entry, limit=110)}")
     (root / "INDEX.md").write_text("\n".join(lines) + "\n")
