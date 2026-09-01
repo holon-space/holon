@@ -95,21 +95,34 @@ New crate `holon-kitchen` ships type yamls + profile yamls (P7) plus the cooklan
 
 ### 3.4 What the aggregate subset must grow (Inc D)
 
-Minimal growth — two new `Computation` variants, one grammar rule, both seats:
+Minimal growth — one new `Computation` variant, one grammar rule, both seats:
 
 ```
 Agg { kind: AggKind, rel: RelName, inner: Box<Computation>, filter: Option<Box<Computation>> }
 AggKind = Sum | Count
 ```
 
+**Everything below is MEASURED, not assumed.** The D.0 spike
+(`crates/holon-turso/tests/agg_subquery_matview_spike.rs`, 8 probes green;
+lane report `lane-report-kitchen-d0.md`) **refuted this section's original
+correlated-subquery lowering**. What follows is the proven replacement — do not
+re-derive the old one.
+
 * **Grammar** (`expr_parser.rs`, extends the single `is_def_var` call form at P14 into a *small closed* call table — still no open registry): `sum(<rel>, <expr>)`, `count(<rel>)`, `count(<rel>, <pred>)`. `<rel>` is a bare identifier naming a declared child relation of the enclosing type.
-* **Eval seat** (P13 is the breaking change): `Context = HashMap<String,Value>` becomes a two-part scope — the outer row map plus a relation resolver yielding the child rows' own `Context`s. `inner` evaluates in the CHILD context. Every other variant keeps evaluating against the outer map unchanged, so this is additive.
-* **SQL seat** (P15 makes this cheap): lower to a scalar correlated subquery
-  `(SELECT COALESCE(SUM(<inner_sql>),0) FROM <child_table> c WHERE c.<fk> = <outer>.id [AND <filter_sql>])`.
-  Parameter-free and inlinable ⇒ it plants into the matview SELECT with **no change to `schema_modules.rs:477-502`**. That is the single largest reason to prefer this shape over chained matviews (K3 already rules chained matviews out).
-* **Relation declaration**: `rel` must resolve to `(child_table, fk_column)`. This is exactly the gap in P8 — closing R2 is a hard prerequisite of Inc D, not an optional cleanup.
+* **SQL seat — the correlated subquery is REJECTED by the fork.** A scalar correlated subquery in a matview SELECT list fails at DDL: *"Correlated scalar subqueries in materialized view SELECT lists are not yet supported by the IVM compiler. Rewrite as a LEFT OUTER JOIN with GROUP BY…"* (`SUM` and `COUNT` alike, so the verdict is about the shape). The original claim of "**no change to `schema_modules.rs:477-502`**" therefore does not hold; see the plant-site cost below.
+* **SQL seat — the proven lowering** is the fork's own prescription, and it is the shape `block` already ships for its edge fields (`schema_modules.rs:528-532` generalized from junctions to declared relations): one GROUP BY **side matview** per relation, `LEFT OUTER JOIN`ed into the type's matview, with the outer column `COALESCE`d. Verified IVM-maintained across child insert / update / delete / FK re-parent / emptied relation, and through the three-level chain §3.3 needs (`child_raw → child mv → relation agg mv → parent mv`) — which matters because `recipe.kcal_total` sums `ingredient_use.grams`, itself a computed column. **The `COALESCE` is load-bearing, not cosmetic**: without it a parent with no children drops out of its own matview.
+* **`N` aggregates over ONE relation share ONE side view and ONE join.** §3.3's four recipe rollups plus `unmatched_count` are a single extra join on `recipe`, not five.
+* **Filtered count lowers to `SUM(iif(<pred>, 1, 0))`, never `COUNT(*) FILTER (WHERE …)`.** The `FILTER` clause the fork's own error message suggests is itself unsupported (*"FILTER not supported with Count in incremental views (v1 limitation)"*) — taking that message at face value produces a second dead end. `iif` is already the lowering `Computation::Case` uses, for the same class of reason.
+* **The inner expression is compiled with the child alias applied at compile time**, not left to SQL name resolution. Under the rejected subquery lowering, an inner column the child does not own bound silently to the OUTER row — a plausible, wrong number. Under the JOIN lowering the same mistake is a hard DDL error (*"SUM column 'servings' not found in input"*), so the lowering removes a bug class rather than guarding against it.
+* **Plant-site cost — this is where the work moved.** `PlantedColumn` is a `{name, sql}` pair rendered as `(<sql>) AS "<name>"` and `TursoAdapter::matview_select` emits a flat `SELECT … FROM "<raw>"`; neither can express a join. Three bounded changes: `DerivedFieldPlan` gains a third bucket for relation aggregates; `matview_select` emits the joins and `COALESCE`d outer columns; `TursoAdapter::schema_modules` emits one side-matview module per relation, ordered before the type's own matview so the existing `requires` DDL gate is satisfied.
+* **Eval seat — P13 is NOT a breaking change** (measured: 4 exhaustive matches over `Computation`, all in `computation.rs`; 3 production `eval` callers, of which only `derived_reconciler.rs` must migrate). `eval(&Context)` stays; add `eval_scoped(&EvalScope)` where `EvalScope` pairs the outer row with a relation resolver yielding each child row's own `Context`. `eval` delegates with a resolver that **fails loud** on `Agg` (`NoRelationResolver { rel }`) — never zero, never an empty set. `inner` evaluates in the CHILD context; every other variant is untouched.
+* **The PARSER scope changes too, not only the two seats**: `parse_typed` resolves `+` as concat-vs-add from declared column types, and inside `sum(<rel>, …)` those are the CHILD's `FieldTypes`. Forgetting this mis-types an operator silently instead of failing.
+* **`result_kind`**: both `Sum` and `Count` yield `FieldKind::Numeric`, independent of the inner. Declare-time checks, all fail-loud: `Sum` requires a `Numeric` inner, `filter`/`<pred>` requires `Boolean`, and a nested `Agg` is refused (there is no second scope level).
+* **`Sum` yields REAL on BOTH seats** (`CAST(… AS REAL)` in SQL, `Value::Float` in eval) — ruled 2026-09-01. One rule with no type-dependence beats type-faithful summation here, because the dual-seat design's purpose is minimizing desync points and nutrition sums are real anyway. Revisit if a future integer-domain aggregate makes it awkward. Pin it with an integer-column case in the differential; the D.0 probe used a REAL column throughout and did not cover it.
+* **Relation declaration**: `rel` must resolve to `(child_table, fk_column)` — see R2 below, a hard prerequisite of Inc D, not an optional cleanup.
 * **Fail-loud, no zero-substitution**: `COALESCE(...,0)` is legitimate only over rows that are all convertible. The incompleteness signal is carried by `unmatched_count`, and the UI must refuse to present a total as authoritative when it is non-zero (D2).
-* **Rhai burn-down alignment** (K3): aggregates in the subset must NOT be reachable via `Script` fallback, or the two seats silently diverge. `Agg` inside a `Script` is a loud refusal.
+* **Rhai burn-down alignment** (K3): aggregates in the subset must NOT be reachable via `Script` fallback, or the two seats silently diverge — the Rhai seat has no relation resolver. `Agg` inside a `Script` is a loud refusal.
+* **The standing oracle**: extend `derived_field_eval_vs_sql.rs` with generated parent/child sets and assert the seats agree **after every mutation of the child set**, not only at the end. A retraction the IVM gets wrong is invisible to a final-state-only assertion.
 
 ## 4. K4 — shopping app peer sync
 
@@ -176,8 +189,12 @@ Per P2/P3 neither half is a new transport kind.
 * **Red-first.** Mock-HTTP PBT: both peers mutate the same item across a poll; assert §4's rules incl. the rename limitation as an EXPECTED, asserted outcome. Expected red: `rest` refuses a non-GET method loudly.
 
 ### Inc D — product/nutrition + AGGREGATE GROWTH (riskiest increment)
-* **D.0 — LANGUAGE-DESIGN SPIKE FIRST, before any nutrition code.** Deliverable: the `Agg` variant, the grammar rule, the two seats, and the relation-declaration answer (R2) prototyped end-to-end on ONE throwaway field, with the SQL seat proven to plant into a real matview. If the eval-seat scope change (P13) proves invasive, that is the moment to escalate — not after the nutrition tables exist.
-* **Then.** `product` type + bundled nutrition table + `product_alias`; the §3.3 computed_persisted fields; the D2 unmatched banner.
+* **D.0 — LANGUAGE-DESIGN SPIKE — DONE 2026-09-01.** It paid for itself: §3.4's correlated-subquery SQL seat was **refuted** and the replacement proven, before any nutrition code existed. The eval-seat scope change (P13) — the escalation trigger this spike was built around — did **not** fire; it is additive and touches one production caller. What the spike did NOT do: no `Agg` variant in `holon-api`, no plant-site change, no nutrition tables. Record: `crates/holon-turso/tests/agg_subquery_matview_spike.rs` (8 probes green) + `lane-report-kitchen-d0.md`. Probes A (correlated subquery rejected, `SUM` and `COUNT`) and the `COUNT(*) FILTER` probe are **retained as fork-capability guards** — a future fork bump flips them red and the lowering gets revisited deliberately rather than by accident; probe B's childless-parent `0.0` assertion is a permanent guard on the `COALESCE`.
+* **Then, in this order** (splitting the plant-site risk from the language risk, so a plant-site bug and a language bug can never be diagnosed as each other):
+  1. **R2 alone** — `fields[].references` + the relation registry. Prerequisite of both the aggregates and `ingredient_use.grams`, closes the D6 seam, carries no language change.
+  2. **The plant-site generalization** (§3.4), exercised by a **stored** child column — no new `Computation` variant yet. This is where the risk moved after D.0, and it can be de-risked without touching the language.
+  3. **`Agg` + grammar + `eval_scoped`**, with the extended differential.
+  4. **Then** `product` type + bundled nutrition table + `product_alias`; the §3.3 computed_persisted fields; the D2 unmatched banner.
 * **Inc A left a stated seam Inc D must close (D6).** `IngredientUse` is a parse-time value, NOT yet a row: its `name` field maps to the schema's `raw_name` column, and it carries no `id` or `recipe_id` at all. Inc A never persists ingredient uses, so the gap is inert there; Inc D is what writes them and must supply the id minting, the `recipe_id` foreign key (per R2's `fields[].references`), and the `name`→`raw_name` rename at the boundary. Anchors: `crates/holon-kitchen/src/cook.rs` (`IngredientUse`) vs `crates/holon-kitchen/assets/types/ingredient_use.yaml`.
 * **Riskiest thing.** The eval-seat scope change (P13) — it touches every `Computation` consumer, and getting it wrong desynchronizes the two seats, which is precisely the class of bug the dual-compile design exists to prevent.
 * **Red-first.** A differential PBT asserting eval and SQL agree on `sum(...)` over generated recipes — the standing dual-seat oracle.
@@ -212,7 +229,19 @@ C1 is on NO critical path — it is startable today and independent of A/B/D.
 ## 7. Open risks / rulings needed
 
 * **R1 — GRANTED.** Inc A claims PARTIAL Inc-5 de-risking (extension claiming, identity, read authority), explicitly not C7. Wording lands in the BG doc.
-* **R2 — APPROVED in direction**: `fields[].references` typed FK; detail belongs to Inc D's spike.
+* **R2 — CLOSED 2026-09-01 by the D.0 spike.** The FK is declared on the **CHILD**, and the parent's relation set is **derived** from it — two authorable declarations that can disagree is how the two seats come to disagree.
+
+  ```yaml
+  # ingredient_use.yaml
+  fields:
+    - name: recipe_id
+      sql_type: TEXT
+      references:
+        type: recipe          # target type; the target column is ALWAYS its pk
+        as: ingredient_uses   # OPTIONAL — the name the aggregate uses
+  ```
+
+  `references.type` names the parent type; a general column-to-column FK buys nothing Kitchen needs and doubles the resolution surface. `as` defaults to the **child type's name verbatim** (`ingredient_use`) — **no pluralization**, ruled 2026-09-01: guesses in identifier position are how declarations silently stop resolving. Two FKs from the same child type to the same parent without distinct `as` names is a **construction error**, refused when the registry is built rather than at first use (same discipline as `FormatRegistry`'s contested-extension rule). Resolution seat: a `RelationRegistry` mapping `(parent_type, rel_name) → { child_table, fk_column, child_types: FieldTypes }`, read by the parser as well as by both seats (§3.4). Closing R2 also closes the D6 seam — `references` is exactly what turns `recipe_id` from a plain TEXT column into the relation an aggregate can name.
 * **R6 — DISCHARGED 2026-09-01 by Inc A2.** The registry is landed and `.cook` files in a real vault ingest; Inc B's "cookable now over MY recipes" is no longer fixture-bound. Obsidian and logseq are NOT unlocked by it: both claim `md`, so they additionally need the vault-flavor discriminator before they can be registered.
 * **R7 (NEW, from Inc A2) — `VaultPath::page_file_from_name_chain` hardcodes `.org`.** A page homed in another format derives an ORG path as "its own file". Inc A2 makes this safe for READ-ONLY formats by refusing the write, but the refusal is not available to a writable non-org format. *Recommendation:* the derivation must ask the owning adapter for its extension before any SECOND WRITABLE format is registered. Not on the kitchen critical path (cook is read-only); it blocks markdown write-back and any future writable adapter.
 
@@ -242,3 +271,5 @@ Cookidoo (NG1) · site importers (NG5/K5) · OpenFoodFacts network (NG4) · shar
 | R7 page-file derivation still org-only | `grep -n 'push(format!("{segment}.org"))' crates/holon-filesystem/src/vault_path.rs` — a hit means R7 is still open |
 | P32 markdown precedent unwired | `grep -rn "ObsidianMarkdownAdapter" crates/ \| grep -v holon-markdown` — hits outside its own crate/tests mean it went live |
 | P29 brace guard | `cargo nextest run -p holon-kitchen -E 'test(unclosed_quantity_brace)'` |
+| §3.4 correlated subquery still rejected by the fork | `cargo nextest run -p holon-turso --test agg_subquery_matview_spike` — probes A / `COUNT(*) FILTER` are the fork-capability guards. A RED there means a fork bump changed what plants, and §3.4's lowering must be revisited (it does NOT mean the tests are broken) |
+| P13 eval-seat blast radius still 4 matches / 1 migrating caller | `grep -c "Computation::Lit" crates/holon-api/src/computation.rs` · `grep -rn "computation.eval(\|comp.eval(" crates --include='*.rs' \| grep -v /tests/` |
