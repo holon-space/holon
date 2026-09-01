@@ -95,12 +95,15 @@ impl Redactor {
     /// Register a secret for the life of the integration. Idempotent; values
     /// below [`MIN_SECRET_LEN`] are ignored.
     pub fn register(&self, value: &str) {
-        let Some(canon) = registrable(value) else {
-            return;
-        };
         let mut reg = self.registry.write().expect("redactor lock poisoned");
-        if !reg.permanent.contains(&canon) {
-            reg.permanent.push(canon);
+        for canon in registrable(value).into_iter().chain(
+            url_secret_parts(value)
+                .iter()
+                .filter_map(|p| registrable(p)),
+        ) {
+            if !reg.permanent.contains(&canon) {
+                reg.permanent.push(canon);
+            }
         }
     }
 
@@ -122,8 +125,19 @@ impl Redactor {
     }
 
     /// Replace every registered secret occurrence in `text`, matching on the
-    /// canonicalized form and replacing the corresponding span of the original.
+    /// canonicalized form and replacing the corresponding span of the original,
+    /// then blank any `!`-marked path segment.
+    ///
+    /// The second layer covers what the first structurally cannot: a credential
+    /// that rotates per request was never the value anyone registered. It
+    /// applies to every string that leaves the transport, not only to URLs — an
+    /// upstream that echoes the path back inside its error body leaks exactly
+    /// as badly as a printed URL.
     pub fn redact(&self, text: &str) -> String {
+        redact_marked_segments(&self.redact_registered(text))
+    }
+
+    fn redact_registered(&self, text: &str) -> String {
         let reg = self.registry.read().expect("redactor lock poisoned");
         if reg.permanent.is_empty() && reg.minted.is_empty() {
             return text.to_string();
@@ -143,8 +157,8 @@ impl Redactor {
         splice(text, spans)
     }
 
-    /// [`Self::redact`] plus a generic layer: the whole query string goes,
-    /// since a parameter can be sensitive without having come from a
+    /// [`Self::redact`] plus one more generic layer: the whole query string
+    /// goes, since a parameter can be sensitive without having come from a
     /// `${VAR}`.
     pub fn redact_url(&self, url: &str) -> String {
         let redacted = self.redact(url);
@@ -167,6 +181,85 @@ impl std::fmt::Debug for Redactor {
             Err(_) => write!(f, "Redactor(poisoned)"),
         }
     }
+}
+
+/// Blank every `!`-marked path segment, wherever it appears — a bare URL, or a
+/// URL quoted inside an error message or an echoed response body.
+///
+/// Registration cannot reach a credential that ROTATES per request: by the time
+/// it is printed it was never the value anyone registered, so matching on the
+/// value finds nothing. Such a token is stripped structurally instead, on the
+/// marker rather than on the value, so redaction does not depend on having been
+/// told the secret first.
+///
+/// Only the credential run is replaced, not the rest of the segment, so
+/// punctuation around a quoted URL survives and the message stays readable.
+fn redact_marked_segments(text: &str) -> String {
+    if !text.contains('!') {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while let Some(offset) = text[i..].find('!') {
+        let bang = i + offset;
+        let run_end = bytes[bang + 1..]
+            .iter()
+            .position(|b| !(b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-'))
+            .map_or(text.len(), |n| bang + 1 + n);
+        out.push_str(&text[i..bang]);
+        // A `!` in ordinary prose is followed by a space or nothing. Requiring
+        // a credential-length run is what keeps "Error!" readable while still
+        // blanking a marked token wherever it is quoted — a bare path, a query
+        // value, or an echoed body that never carried the leading slash.
+        if run_end - (bang + 1) >= MIN_SECRET_LEN {
+            out.push_str(REDACTED);
+        } else {
+            out.push_str(&text[bang..run_end]);
+        }
+        i = run_end;
+    }
+    out.push_str(&text[i..]);
+    out
+}
+
+/// The individually-secret pieces of a URL-shaped value: everything past the
+/// authority, split on the delimiters a path and query are built from.
+///
+/// A capability URL is secret as a whole, but an upstream error rarely echoes
+/// it whole — it quotes the path it was asked for, and matching only the full
+/// string then finds nothing while the token stands in plain sight. Registering
+/// the pieces makes the token strippable wherever it surfaces, in a URL or in
+/// an echoed body. Non-URL values are left alone: splitting an opaque API key
+/// would register fragments of it as secrets in their own right.
+fn url_secret_parts(value: &str) -> Vec<&str> {
+    let Some((_, after_scheme)) = value.split_once("://") else {
+        return Vec::new();
+    };
+    let (authority, rest) = after_scheme.split_once('/').unwrap_or((after_scheme, ""));
+    // The leading host label too: a capability URL can carry its credential as
+    // a subdomain (`https://<token>.host/`) rather than as a path segment.
+    let host_label = authority.split(['.', ':']).next().unwrap_or_default();
+    std::iter::once(host_label)
+        .chain(rest.split(['/', '?', '&', '=', '#']))
+        // Both with and without a leading marker: an upstream may echo a marked
+        // segment's token bare, and the marked and unmarked forms are different
+        // byte strings to the matcher.
+        .flat_map(|part| [part, part.strip_prefix('!').unwrap_or(part)])
+        .filter(|part| looks_like_a_credential(part))
+        .collect()
+}
+
+/// Whether a URL piece is worth registering in its own right.
+///
+/// A piece that reads as an ordinary lowercase word (`subscriptions`,
+/// `calendars`, `gmail`) is structure, and registering it would blank that word
+/// out of every unrelated diagnostic — the URL as a whole is still registered,
+/// so nothing is lost by leaving it. A credential essentially always breaks the
+/// pattern with a digit, a capital, or a separator.
+fn looks_like_a_credential(part: &str) -> bool {
+    part.bytes()
+        .any(|b| b.is_ascii_digit() || b.is_ascii_uppercase() || b == b'-' || b == b'_')
 }
 
 /// The canonical bytes of a value worth registering, or `None` when it is too
@@ -349,6 +442,111 @@ mod tests {
             r.redact_url("https://api.example.com/token?client_secret=abc"),
             "https://api.example.com/token?<redacted>"
         );
+    }
+
+    #[test]
+    fn a_marked_path_segment_goes_without_having_been_registered() {
+        // A per-request token was never registered and never could be, so the
+        // marker is all there is to go on.
+        // Synthetic, of the shape the real one has. A captured credential does
+        // not belong in a fixture even after it has rotated.
+        let out =
+            Redactor::new().redact_url("https://host.example/!sYnTh3t1c_t0k3n-Xy9Q/api/list/7");
+        assert_eq!(out, format!("https://host.example/{REDACTED}/api/list/7"));
+    }
+
+    #[test]
+    fn a_marked_segment_echoed_inside_a_body_goes_too() {
+        // An upstream quoting the path back in its error body leaks exactly as
+        // badly as a printed URL, and registration reaches neither.
+        let out =
+            Redactor::new().redact(r#"{"error":"no route for /!sYnTh3t1c_t0k3n-Xy9Q/api/list/7"}"#);
+        assert!(!out.contains("sYnTh3t1c"), "{out}");
+        // The punctuation around the URL survives, so the message still reads.
+        assert!(out.ends_with(r#"/api/list/7"}"#), "{out}");
+    }
+
+    #[test]
+    fn a_marked_token_quoted_without_a_leading_slash_still_goes() {
+        let out = Redactor::new().redact("retrying with token=!sYnTh3t1c_t0k3n-Xy9Q now");
+        assert!(!out.contains("sYnTh3t1c"), "{out}");
+    }
+
+    #[test]
+    fn an_exclamation_in_prose_survives() {
+        // The credential-length floor is what separates a token from emphasis.
+        let text = "boom! the request failed";
+        assert_eq!(Redactor::new().redact(text), text);
+    }
+
+    #[test]
+    fn a_static_marked_token_echoed_without_its_marker_is_still_stripped() {
+        // Registration keeps both forms, so an upstream that quotes the token
+        // bare does not slip past the value matcher.
+        let r = redactor(&["https://host.example/!st4t1c_t0k3n_value/api"]);
+        let out = r.redact("upstream said st4t1c_t0k3n_value was rejected");
+        assert!(!out.contains("st4t1c_t0k3n_value"), "{out}");
+    }
+
+    #[test]
+    fn an_unmarked_path_segment_stays_readable() {
+        let out = Redactor::new().redact_url("https://host.example/api/list/7");
+        assert_eq!(out, "https://host.example/api/list/7");
+    }
+
+    #[test]
+    fn a_path_segment_of_a_whole_url_secret_is_stripped_on_its_own() {
+        // The capability-URL shape where the WHOLE url is the `${VAR}`: an
+        // upstream that echoes only the path it was asked for never repeats the
+        // registered string, so the token has to be strippable by itself.
+        let r = redactor(&["https://host.example/c/cap-7f3a9d2e4b8c1056/list"]);
+        let out = r.redact("upstream failed for /c/cap-7f3a9d2e4b8c1056/list/42");
+        assert!(!out.contains("cap-7f3a9d2e4b8c1056"), "{out}");
+        assert!(out.contains(REDACTED), "{out}");
+    }
+
+    #[test]
+    fn a_query_value_of_a_whole_url_secret_is_stripped_on_its_own() {
+        let r = redactor(&["https://host.example/api?key=tok-19f4c8b27ae5"]);
+        let out = r.redact("upstream echoed key=tok-19f4c8b27ae5");
+        assert!(!out.contains("tok-19f4c8b27ae5"), "{out}");
+    }
+
+    #[test]
+    fn a_credential_in_a_subdomain_is_stripped_on_its_own() {
+        let r = redactor(&["https://cap-7f3a9d2e4b8c1056.host.example/api"]);
+        let out = r.redact("upstream rejected cap-7f3a9d2e4b8c1056");
+        assert!(!out.contains("cap-7f3a9d2e4b8c1056"), "{out}");
+    }
+
+    #[test]
+    fn a_benign_path_word_does_not_become_a_global_redaction_trigger() {
+        // Registering ordinary structure would blank the word out of every
+        // unrelated message while protecting nothing.
+        let r = redactor(&["https://host.example/subscriptions/calendars"]);
+        assert_eq!(
+            r.redact("listing subscriptions and calendars failed"),
+            "listing subscriptions and calendars failed"
+        );
+    }
+
+    #[test]
+    fn the_host_of_a_url_secret_stays_readable_in_its_own_right() {
+        // Only what follows the authority is registered piecewise, so a
+        // diagnostic that names the host without the credential still reads.
+        let r = redactor(&["https://host.example/c/cap-7f3a9d2e4b8c1056"]);
+        assert_eq!(
+            r.redact("could not resolve host.example"),
+            "could not resolve host.example"
+        );
+    }
+
+    #[test]
+    fn an_opaque_secret_is_not_split_into_pieces() {
+        // No `://`, so nothing is split: registering fragments of an API key
+        // would rewrite ordinary text that happens to share one.
+        let r = redactor(&["abcdefgh=ijklmnop"]);
+        assert_eq!(r.redact("value abcdefgh stands"), "value abcdefgh stands");
     }
 
     #[test]

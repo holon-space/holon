@@ -5580,12 +5580,17 @@ name = "holon-kitchen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "cooklang",
  "holon-api",
  "holon-core",
+ "holon-mcp-client",
  "holon-profiles",
+ "rmcp",
+ "serde_json",
  "serde_yaml",
  "tempfile",
+ "tokio",
  "workspace-hack 0.1.0",
 ]
 

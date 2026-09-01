@@ -205,6 +205,7 @@ const BUNDLED: &[&str] = &[
     "gcal",
     "gmail",
     "jsonplaceholder",
+    "shopping",
     "todoist",
 ];
 

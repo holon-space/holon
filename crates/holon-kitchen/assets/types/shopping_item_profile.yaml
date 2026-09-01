@@ -1,0 +1,7 @@
+entity_name: shopping_item
+
+variants:
+  # One shopping row, read-only: the peer is the only writer Holon has, and
+  # nothing here can send an edit back to it yet.
+  - name: default
+    render: 'row(text(col("count")), text(col("name")), text(col("cat")))'

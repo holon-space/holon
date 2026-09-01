@@ -189,7 +189,20 @@ Two limits worth knowing when you choose what to put in a variable:
 - **Redaction is deliberately greedy.** A `base_url` that is *entirely* a
   `${VAR}` means errors say `<redacted>/things` instead of naming the host. If
   you want the host to stay readable in diagnostics, put only the secret part
-  in the variable (`https://host/c/${CAP_TOKEN}`), not the whole URL.
+  in the variable (`https://host/c/${CAP_TOKEN}`), not the whole URL. A
+  URL-shaped value is additionally registered piece by piece — each path
+  segment, query value, and the leading host label — because an upstream that
+  quotes only the path it was asked for never repeats the whole URL, and
+  matching only the whole string would find nothing while the token stood in
+  plain sight. Pieces that read as ordinary lowercase words (`subscriptions`,
+  `gmail`) are skipped, so structure stays readable in diagnostics; a
+  credential breaks that pattern with a digit, a capital, or a separator.
+- **A `!`-marked path segment is stripped WITHOUT being registered.** Some APIs
+  carry a bearer credential as the first path segment and rotate it every
+  request (`https://host/!<token>/api/…`), which no `${VAR}` can hold and no
+  value match can reach. Such a segment is blanked structurally, on the marker,
+  in every string the connector emits — including an upstream error body that
+  echoes the path back.
 
 ---
 

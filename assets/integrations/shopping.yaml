@@ -1,0 +1,44 @@
+# Sidecar-format generation. The app runs its own bundled copy of this file
+# unless an INSTALLED copy declares the generation the running build understands
+# (crates/holon-mcp-client/src/bundled_sidecars.rs).
+schema_version: 1
+
+display_name: "Shopping list"
+icon: list
+default_view: shopping-view
+
+# Shopping-list peer — the READ leg of a bidirectional sync (Holon is a peer,
+# never the master; docs/Plans/Kitchen.md §4).
+#
+# `GET /list/{listId}` answers `{ "data": { "items": [ ... ] } }` where an item
+# is `{ name, cat, count? }`. There is no item id, no timestamp and no etag, so
+# the ingest is keyed on `(name, cat)` and runs through
+# `holon_kitchen::shopping::ShoppingReconciler` rather than the generic entity
+# mirror, which requires a server-issued id. That is why this file declares no
+# `entities`: the sidecar supplies the transport manual, and the kitchen crate
+# owns identity and reconciliation.
+#
+# NOT WIRED TO A LIVE POLL. The production target is the phone API in
+# docs/Plans/ThatShoppingList-API-2026-09-01.md; that swap, its rotating-token
+# auth, the live wiring and the `/commit` write leg are the next lane, pending a
+# token-refresh handshake capture.
+#
+# THE BASE URL IS THE CREDENTIAL for this endpoint: no auth header, an opaque
+# token in a PATH segment. Referencing it as `${VAR}` is what marks it secret,
+# which is what strips it from every error, log line and toast the connector
+# emits (assets/integrations/README.md §2). Never write a resolved URL here.
+
+transport:
+  rest:
+    base_url: ${SHOPPING_LIST_URL}
+    # The peer serves one unpaginated full snapshot per poll; 60s is the
+    # cadence worth having while a shopping list is open.
+    poll_interval: 60s
+    calls:
+      list-items:
+        method: GET
+        path: /list/{listId}
+
+entities: {}
+
+tools: {}

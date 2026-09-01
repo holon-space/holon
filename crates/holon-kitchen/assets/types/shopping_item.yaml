@@ -1,0 +1,44 @@
+name: shopping_item
+default_lifetime: persistent
+primary_key: id
+graph_label: ShoppingItem
+source: pre_configured
+fields:
+  # Derived from `(name, cat)` rather than minted: the peer issues no id, so
+  # that pair IS the identity and a re-add after a deletion must land on the
+  # same row. See `ItemKey::row_id`.
+  - name: id
+    sql_type: TEXT
+    primary_key: true
+    indexed: true
+  - name: name
+    sql_type: TEXT
+    indexed: true
+  # The peer's category code, verbatim, including any `_<qualifier>` suffix.
+  # Parsed into `ShoppingCategory` at the boundary; stored in wire form so it
+  # round-trips to the peer unchanged.
+  - name: cat
+    sql_type: TEXT
+    indexed: true
+  - name: count
+    sql_type: REAL
+    nullable: true
+  # Local-only. The peer's observed schema has neither field, and checking an
+  # item there may simply BE removal from the list, so nothing here is ever
+  # pushed until the write leg is specified (docs/Plans/Kitchen.md P28).
+  - name: checked
+    sql_type: INTEGER
+  - name: product_id
+    sql_type: TEXT
+    nullable: true
+    indexed: true
+  # Local tombstone: set on a local delete so the next pull cannot resurrect
+  # the item before the deletion has been pushed.
+  - name: deleted_at
+    sql_type: TEXT
+    nullable: true
+  # The last COMPLETE fetch that carried this item. NULL marks a row the peer
+  # has never sent, whose absence therefore says nothing about it.
+  - name: last_seen_remote
+    sql_type: TEXT
+    nullable: true

@@ -244,6 +244,19 @@ fn the_sidebar_row_opens_the_integrations_default_view() {
 ///
 /// Swept from `BUNDLED_SIDECARS` rather than a hardcoded list, so a provider
 /// added to the bundle joins the claim instead of slipping past it.
+/// Datatype tables an integration writes without declaring an entity for them.
+///
+/// The entity mirror keys rows on a server-issued id and refuses to run without
+/// one, so a peer that issues none is reconciled by a datatype-owning crate and
+/// its rows live in that datatype's table. Naming them here keeps the rule that
+/// something in the tree, not the page itself, says which data a page may show.
+fn datatype_backed_tables(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "shopping" => &["shopping_item"],
+        _ => &[],
+    }
+}
+
 #[test]
 fn every_bundled_integration_has_a_seeded_default_view() {
     let rt = runtime();
@@ -330,12 +343,26 @@ fn every_bundled_integration_has_a_seeded_default_view() {
             // `{entity_prefix}{entity key}`, so the sidecar itself says which
             // names count — a page pointed at another provider's data reads as
             // plausible in review and is wrong in the window.
-            let prefix = config.entity_prefix.unwrap_or_default();
-            let tables: Vec<String> = config
+            let prefix = config.entity_prefix.clone().unwrap_or_default();
+            let mut tables: Vec<String> = config
                 .entities
                 .keys()
                 .map(|name| format!("{prefix}{name}"))
                 .collect();
+            // A peer that issues no row id cannot drive the entity mirror,
+            // which keys on one and fails loud without it. Such an integration
+            // declares no entity and lands its rows in a datatype table
+            // instead, so that table is what its page reads.
+            tables.extend(
+                datatype_backed_tables(provider)
+                    .iter()
+                    .map(|t| (*t).to_string()),
+            );
+            assert!(
+                !tables.is_empty(),
+                "'{provider}' declares no entity and no datatype table, so nothing says which \
+                 data its page is allowed to show"
+            );
             if !tables.iter().any(|t| content.contains(t.as_str())) {
                 problems.push(format!(
                     "the '{provider}' view must query one of its own tables {tables:?}: {content}"

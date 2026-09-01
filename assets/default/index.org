@@ -86,6 +86,13 @@ column(text("Unread threads, newest first", #{muted: true}), live_query(#{sql: "
 #+BEGIN_SRC render :id jsonplaceholder-view::render::0
 column(text("Posts, newest first", #{muted: true}), live_query(#{sql: "SELECT id, userId, title, body FROM jp_posts ORDER BY id DESC LIMIT 25", item_template: list(#{item_template: render_entity()})}))
 #+END_SRC
+* Shopping list
+:PROPERTIES:
+:ID: shopping-view
+:END:
+#+BEGIN_SRC render :id shopping-view::render::0
+column(text("To buy, by aisle", #{muted: true}), live_query(#{sql: "SELECT id, name, cat, count FROM shopping_item WHERE deleted_at IS NULL AND checked = 0 ORDER BY cat, name", item_template: list(#{item_template: render_entity()})}))
+#+END_SRC
 * Todoist
 :PROPERTIES:
 :ID: todoist-view

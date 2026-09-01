@@ -42,6 +42,7 @@ pub static BUNDLED_SIDECARS: &[BundledSidecar] = &[
     bundled!("gcal"),
     bundled!("gmail"),
     bundled!("jsonplaceholder"),
+    bundled!("shopping"),
     bundled!("todoist"),
 ];
 

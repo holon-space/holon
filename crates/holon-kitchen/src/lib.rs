@@ -1,9 +1,11 @@
-//! Kitchen domain: recipes, and (later) pantry, shopping and nutrition.
+//! Kitchen domain: recipes and the shopping list, and (later) pantry and
+//! nutrition.
 //!
-//! Inc A scope — the cooklang READ adapter, the `recipe` / `ingredient_use`
-//! datatypes, and the recipe page as the `recipe` type's default render
-//! variant. `.cook` files in the vault are authoritative and are never written
-//! back here.
+//! Two read legs today. The cooklang adapter projects `.cook` files, which are
+//! authoritative and are never written back here. [`shopping`] pulls the
+//! shopping-list peer, which owns its own list and issues no item ids, so this
+//! crate carries the identity and reconciliation the generic entity mirror
+//! cannot supply.
 //!
 //! Per-format de-risking: this crate exercises the existing Block-shaped
 //! `FileFormatAdapter` on a second, non-org format — extension claiming,
@@ -15,6 +17,7 @@ pub mod cook;
 pub mod cookable;
 pub mod file_format;
 pub mod params;
+pub mod shopping;
 
 use anyhow::Context as _;
 use anyhow::Result;
@@ -34,6 +37,9 @@ pub const RECIPE_TYPE_YAML: &str = include_str!("../assets/types/recipe.yaml");
 pub const INGREDIENT_USE_TYPE_YAML: &str = include_str!("../assets/types/ingredient_use.yaml");
 pub const PANTRY_ITEM_TYPE_YAML: &str = include_str!("../assets/types/pantry_item.yaml");
 pub const RECIPE_PROFILE_YAML: &str = include_str!("../assets/types/recipe_profile.yaml");
+pub const SHOPPING_ITEM_TYPE_YAML: &str = include_str!("../assets/types/shopping_item.yaml");
+pub const SHOPPING_ITEM_PROFILE_YAML: &str =
+    include_str!("../assets/types/shopping_item_profile.yaml");
 
 /// Register the kitchen datatypes and the recipe page's render profile.
 ///
@@ -44,6 +50,7 @@ pub fn register_kitchen_types(registry: &TypeRegistry) -> Result<()> {
         ("recipe", RECIPE_TYPE_YAML),
         ("ingredient_use", INGREDIENT_USE_TYPE_YAML),
         ("pantry_item", PANTRY_ITEM_TYPE_YAML),
+        ("shopping_item", SHOPPING_ITEM_TYPE_YAML),
     ] {
         let type_def: TypeDefinition = serde_yaml::from_str(yaml)
             .with_context(|| format!("Failed to parse kitchen type '{name}'"))?;
@@ -52,16 +59,22 @@ pub fn register_kitchen_types(registry: &TypeRegistry) -> Result<()> {
             .with_context(|| format!("Failed to register kitchen type '{name}'"))?;
     }
 
-    let profile = parse_profile_yaml(RECIPE_PROFILE_YAML)
-        .context("Failed to parse the recipe profile YAML")?;
-    // Fail LOUD here if a render calls a lookup the engine never registers —
-    // otherwise it errors at eval and degrades to () at WARN, inverting every
-    // condition it feeds.
-    holon_profiles::validate_lookups_registered(&profile)
-        .context("recipe profile references an unregistered lookup function")?;
-    registry
-        .apply_parsed_profile(profile)
-        .context("Failed to apply the recipe profile")?;
+    for (name, yaml) in [
+        ("recipe", RECIPE_PROFILE_YAML),
+        ("shopping_item", SHOPPING_ITEM_PROFILE_YAML),
+    ] {
+        let profile = parse_profile_yaml(yaml)
+            .with_context(|| format!("Failed to parse the {name} profile YAML"))?;
+        // Fail LOUD here if a render calls a lookup the engine never registers —
+        // otherwise it errors at eval and degrades to () at WARN, inverting every
+        // condition it feeds.
+        holon_profiles::validate_lookups_registered(&profile).with_context(|| {
+            format!("{name} profile references an unregistered lookup function")
+        })?;
+        registry
+            .apply_parsed_profile(profile)
+            .with_context(|| format!("Failed to apply the {name} profile"))?;
+    }
 
     Ok(())
 }

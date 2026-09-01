@@ -51,6 +51,12 @@ const CAP_TOKEN_BACKSLASH: &str = r"cap\4Qk3vR7mNp2xW5tLb9dHs4gJc6yFa0e";
 
 const CAP_TOKEN_BACKSLASH_VAR: &str = "HOLON_TEST_CAPABILITY_TOKEN_BACKSLASH";
 
+/// A per-request bearer token of the phone shopping API's shape: it lives in
+/// the FIRST path segment behind a `!` marker and ROTATES every request, so it
+/// is NEVER registered as a secret. Only the structural marker can reach it —
+/// which is the whole point of the rung that uses it.
+const ROTATING_TOKEN: &str = "sYnTh3t1c_r0t4t1ng-Tok3nXy9QrLm2vB";
+
 /// What the mock's token endpoint mints. Never configured anywhere — it exists
 /// only at runtime, which is the point of the rung that uses it.
 const MINTED_TOKEN: &str = "access-tok-7Hn4pQ2sVb9eLxTm";
@@ -245,6 +251,25 @@ transport:
       get-things:
         method: GET
         path: /things
+entities: {{}}
+tools: {{}}
+"#
+    )
+}
+
+/// A sidecar whose call path carries an unregistered, `!`-marked bearer segment
+/// — the shape of a credential that rotates per request, which no `${VAR}` can
+/// hold and no value-based redaction can match.
+fn rotating_token_yaml(base: &str) -> String {
+    format!(
+        r#"
+transport:
+  rest:
+    base_url: {base}
+    calls:
+      get-things:
+        method: GET
+        path: /!{ROTATING_TOKEN}/api/things
 entities: {{}}
 tools: {{}}
 "#
@@ -465,4 +490,30 @@ async fn a_percent_encoded_capability_token_is_hidden_in_an_echoed_body() {
     assert_secret_absent("the echoed body", &err, CAP_TOKEN_ODD);
     assert_secret_absent("the echoed body", &err, &CAP_TOKEN_ODD.replace(' ', "%20"));
     assert_redacted_marker("the echoed body", &err);
+}
+
+#[tokio::test]
+async fn a_rotating_unregistered_bearer_segment_is_stripped_from_the_error_and_the_body() {
+    // `Mode::EchoUrlIn500` makes the upstream quote the request path back
+    // inside its error body — the path that leaked the whole token when the
+    // structural scrub ran in `redact_url` alone, since a response body reaches
+    // the reader through `redact`, not `redact_url`.
+    let base = start_mock(Mode::EchoUrlIn500).await;
+    let surface = surface_from(&rotating_token_yaml(&base), &no_credential_root());
+
+    let err = call_err(&surface).await;
+    assert!(err.contains("500"), "status missing from error: {err}");
+    // Nothing registered this token, and nothing could have.
+    assert_secret_absent("the HTTP error", &err, ROTATING_TOKEN);
+    assert_redacted_marker("the HTTP error", &err);
+}
+
+#[tokio::test]
+async fn a_rotating_unregistered_bearer_segment_is_stripped_from_a_non_json_body_error() {
+    let base = start_mock(Mode::EchoUrlInNonJson).await;
+    let surface = surface_from(&rotating_token_yaml(&base), &no_credential_root());
+
+    let err = call_err(&surface).await;
+    assert_secret_absent("the non-JSON body error", &err, ROTATING_TOKEN);
+    assert_redacted_marker("the non-JSON body error", &err);
 }
