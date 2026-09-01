@@ -1275,6 +1275,43 @@ impl HeadlessFrontendComponent {
             .expect("headless create_block");
     }
 
+    /// Create a `Page`-tagged block. A plain page renders its descendants as an
+    /// outline, which is what a graft root has to do: `block:journals` — the
+    /// boot Main focus root — renders `SELECT * FROM journal_feed`
+    /// (`holon_frontend::journals_page_blocks`), whose rows are only its
+    /// `Page`-tagged children, so plain rows grafted there never reach the
+    /// ViewModel. Same root the windowed slice's `focused_graft_root` creates.
+    pub async fn create_page_block(&self, id: &str, parent_id: &str, content: &str) {
+        use holon_api::EntityName;
+        use holon_api::StorageEntity;
+        use holon_api::Value;
+        use holon_api::types::ContentType;
+        let mut params: StorageEntity = std::collections::HashMap::new();
+        params.insert(
+            "id".into(),
+            Value::String(EntityUri::from_raw(id).to_string()),
+        );
+        params.insert(
+            "parent_id".into(),
+            Value::String(EntityUri::from_raw(parent_id).to_string()),
+        );
+        params.insert("content".into(), Value::String(content.to_string()));
+        params.insert("content_type".into(), ContentType::Text.into());
+        params.insert(
+            "tags".into(),
+            Value::Array(vec![Value::String(holon_api::PAGE_TAG.to_string())]),
+        );
+        self.engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "create",
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .expect("headless create_page_block");
+    }
+
     async fn all_blocks(&self) -> Vec<Block> {
         let rows = self
             .engine

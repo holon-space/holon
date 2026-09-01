@@ -119,16 +119,42 @@ async fn frontend_slice_watch_rows_deliver_over_production_reactive_surface() {
     );
 }
 
+/// The plain page the headless graft below hangs under, and its title.
+const GRAFT_PAGE_ID: &str = "fslice-graft-page";
+const GRAFT_PAGE_CONTENT: &str = "Frontend Slice Graft Page";
+
+/// Every node of a widget tree as `kind[entity]`, in walk order.
+fn widget_kinds(tree: &holon_pbt_core::capabilities::WidgetSnapshot) -> Vec<String> {
+    tree.walk()
+        .map(|n| match &n.entity_id {
+            Some(id) => format!("{}[{id}]", n.kind),
+            None => n.kind.clone(),
+        })
+        .collect()
+}
+
 /// The deep `/viewmodel` content oracle, headless edition: graft the fixed
-/// `parent`/`c1`/`c2` tree under the Main focus root (`block:journals`), seed
-/// the ref with the same ids+content, and prove `inv-displayed-text/viewmodel`
-/// *compares the nested Main-panel content* (not just panel chrome) — reaching
-/// `Ok` clean and `Fail` on a planted `c1` divergence. This works because the
-/// component resolves the FULL tree via the engine's recursive `snapshot`
-/// warmed to a fixed point (rich ViewModel: no window needed). `/widget` is
-/// deselected (no `SutLayout` geometry headless), so `/viewmodel` carries it.
+/// `parent`/`c1`/`c2` tree under a focused plain page, seed the ref with the
+/// same ids+content, and prove `inv-displayed-text/viewmodel` *compares the
+/// nested Main-panel content* (not just panel chrome) — reaching `Ok` clean and
+/// `Fail` on a planted `c1` divergence. The component resolves the FULL tree
+/// via the engine's recursive `snapshot` warmed to a fixed point (rich
+/// ViewModel: no window needed). `/widget` is deselected (no `SutLayout`
+/// geometry headless), so `/viewmodel` carries it.
+///
+/// The graft hangs under [`GRAFT_PAGE_ID`], not the boot Main focus root
+/// `block:journals`, whose feed renders only `Page`-tagged children
+/// (`HeadlessFrontendComponent::create_page_block`; the windowed twin of the
+/// same fixture assumption is the funnel entry
+/// `2026-08-14-windowed-fixture-grafted-under-main-focus`). Navigating onto it
+/// through the production sidebar path is also what starts the root layout's
+/// region `live_block`s; unstarted, they stay `loading` and the tree carries no
+/// text widgets at all.
 #[tokio::test(flavor = "multi_thread")]
 async fn frontend_slice_displayed_text_viewmodel_bites_on_nested_content() {
+    use holon_pbt_core::capabilities::CapRegion;
+    use holon_pbt_core::capabilities::SutFocusWrite;
+    use holon_pbt_core::capabilities::SutRenderer;
     use holon_pbt_core::invariant::InvariantResult;
 
     use crate::pbt::composed::seed_primitives::C1;
@@ -143,12 +169,21 @@ async fn frontend_slice_displayed_text_viewmodel_bites_on_nested_content() {
 
     let comp = new_component().await;
     let ids = fixed_ids();
-    comp.create_block(ids.parent.as_str(), "block:journals", PARENT)
+    let page = EntityUri::block(GRAFT_PAGE_ID);
+    comp.create_page_block(
+        page.as_str(),
+        EntityUri::no_parent().as_str(),
+        GRAFT_PAGE_CONTENT,
+    )
+    .await;
+    comp.apply_navigate_focus(CapRegion::Main, &page).await;
+    comp.create_block(ids.parent.as_str(), page.as_str(), PARENT)
         .await;
     comp.create_block(ids.c1.as_str(), ids.parent.as_str(), C1)
         .await;
     comp.create_block(ids.c2.as_str(), ids.parent.as_str(), C2)
         .await;
+    let probe = comp.clone();
     let sut = frontend_wide(comp);
 
     let seeded = {
@@ -180,8 +215,9 @@ async fn frontend_slice_displayed_text_viewmodel_bites_on_nested_content() {
         matches!(vm_result, Some(InvariantResult::Ok)),
         "headless /viewmodel must reach Ok over the grafted nested content (NOT Skipped — that \
          would mean the recursive snapshot didn't resolve the Main-panel content), got \
-         {vm_result:?}; ran={:?}",
+         {vm_result:?}; ran={:?}; vm tree={:?}",
         report.ran_ids(),
+        widget_kinds(&probe.widget_tree_snapshot().await),
     );
 
     let planted = {

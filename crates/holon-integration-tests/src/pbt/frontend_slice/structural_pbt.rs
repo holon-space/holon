@@ -600,6 +600,19 @@ fn editor_ref() -> ReferenceState {
         .block_documents
         .insert(page.clone(), EntityUri::no_parent());
 
+    // Both pages own an org file, so every block under them is org-homed —
+    // the draw `inv-home-profile-matches-derived` reads. `boot_and_seed_editor`
+    // writes `WIDE_TREE_ORG` to `structural-page.org`, and the journals page,
+    // fileless at boot, gets its own file from the fileless-page sweep.
+    state
+        .files
+        .documents
+        .insert(page.clone(), "structural-page.org".to_string());
+    state.files.documents.insert(
+        EntityUri::parse(holon_frontend::JOURNALS_PAGE_ID).expect("journals id"),
+        "Journals.org".to_string(),
+    );
+
     // Re-root parent/c1/c2 flat under the page (was `parent→{c1,c2}`).
     for (i, id) in [&ids.parent, &ids.c1, &ids.c2].into_iter().enumerate() {
         let b = state
