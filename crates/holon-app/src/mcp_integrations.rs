@@ -33,13 +33,6 @@ use tracing::warn;
 
 use crate::integrations_settings::IntegrationsSettingsVm;
 
-/// Normalize a variable/setting name for fuzzy matching: lowercase, with `.`
-/// and `_` treated as the same separator. So the env var `TODOIST_API_KEY` and
-/// the setting key `todoist.api_key` both normalize to `todoist_api_key`.
-fn normalize_var_name(s: &str) -> String {
-    s.to_ascii_lowercase().replace('.', "_")
-}
-
 /// Disclose that `name` could not be connected at boot. Without this the
 /// failure is log-only and every page backed by the integration's `cc_*`
 /// tables renders blank as if the remote had no data.
@@ -554,26 +547,12 @@ impl Module for McpIntegrationsModule {
                 // `add_frontend`, opened by the `post_ready` scan barrier.
                 let sync_gate: SyncGate = (*resolver.resolve::<SyncGate>()).clone();
 
-                // Layered `${VAR}` resolver: environment variable wins, then a
-                // settings value whose key matches case-insensitively with `.`/`_`
-                // treated as the same separator (so `${TODOIST_API_KEY}` resolves
-                // from the `todoist.api_key` setting). Keeps secrets out of the
-                // committed YAML while letting the Settings UI supply them.
-                let pref_by_norm: HashMap<String, String> = resolver
-                    .resolve::<holon_frontend::config::HolonConfig>()
-                    .preferences
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        let s = v.as_str()?;
-                        (!s.is_empty()).then(|| (normalize_var_name(k.as_str()), s.to_string()))
-                    })
-                    .collect();
-                let var_lookup = move |name: &str| -> Option<String> {
-                    std::env::var(name)
-                        .ok()
-                        .filter(|v| !v.is_empty())
-                        .or_else(|| pref_by_norm.get(&normalize_var_name(name)).cloned())
-                };
+                let var_lookup = holon_frontend::integration_vars::preference_var_lookup(
+                    &resolver
+                        .resolve::<holon_frontend::config::HolonConfig>()
+                        .preferences,
+                    |name| std::env::var(name).ok(),
+                );
 
                 let mut names = Vec::new();
                 let mut integrations = Vec::new();

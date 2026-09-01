@@ -5297,6 +5297,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "toml 0.8.23",
  "tracing",
  "uuid",
 ]
@@ -5497,6 +5498,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "toml 0.8.23",
  "tracing",
  "tracing-oslog",
  "tracing-subscriber",

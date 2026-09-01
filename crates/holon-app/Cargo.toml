@@ -51,4 +51,5 @@ tempfile.workspace = true
 # `io-util`/`net`: the shopping tests drive the real `rest` transport against a
 # hand-rolled local mock HTTP server, so no HTTP-server dependency is pulled in.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net"] }
+toml.workspace = true
 uuid.workspace = true

@@ -14,18 +14,31 @@ use crate::theme::ThemeRegistry;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PrefKey(String);
 
+/// The opening words of the two complaints `deserialize_preferences` raises.
+/// A caller distinguishing them from a plain shape error matches on these, so
+/// the wording and the match can never drift apart.
+pub const INVALID_PREFERENCE_KEY: &str = "Invalid preference key";
+pub const DUPLICATE_PREFERENCE_KEY: &str = "is set twice in holon.toml";
+
 impl PrefKey {
     pub fn new(raw: &str) -> Self {
-        assert!(
-            !raw.is_empty()
-                && raw
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '.' || c == '_')
-                && !raw.starts_with('.')
-                && !raw.ends_with('.'),
-            "Invalid preference key: {raw:?}"
-        );
-        Self(raw.to_string())
+        Self::parse(raw).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The fallible form, for input that arrives from a config file rather than
+    /// from a call site the author controls.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let ok = !raw.is_empty()
+            && raw
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '.' || c == '_')
+            && !raw.starts_with('.')
+            && !raw.ends_with('.');
+        if ok {
+            Ok(Self(raw.to_string()))
+        } else {
+            Err(format!("{INVALID_PREFERENCE_KEY}: {raw:?}"))
+        }
     }
 
     pub fn as_str(&self) -> &str {
@@ -48,8 +61,66 @@ impl Serialize for PrefKey {
 impl<'de> Deserialize<'de> for PrefKey {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        Ok(Self::new(&s))
+        Self::parse(&s).map_err(serde::de::Error::custom)
     }
+}
+
+/// Read the preference map, accepting a key either as one dotted string or as
+/// the nested tables a dotted path turns into.
+///
+/// The map is flat and its keys contain dots, but the layered config pipeline
+/// addresses values by dotted PATH — so `holon.toml`'s `"shopping.list_url"`
+/// comes back through that pipeline as `shopping = { list_url = ... }` while a
+/// direct parse of the same file yields the flat key. A preference value is
+/// always a scalar, so a table can only be a split key: recursing to the scalar
+/// and rejoining the segments recovers the authored key from both shapes.
+///
+/// A key written in BOTH shapes is refused rather than resolved: which value
+/// won would depend on map iteration order.
+pub fn deserialize_preferences<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<PrefKey, toml::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    fn collapse<E: serde::de::Error>(
+        prefix: &str,
+        value: toml::Value,
+        out: &mut HashMap<PrefKey, toml::Value>,
+    ) -> Result<(), E> {
+        match value {
+            toml::Value::Table(table) => {
+                for (segment, nested) in table {
+                    let path = if prefix.is_empty() {
+                        segment
+                    } else {
+                        format!("{prefix}.{segment}")
+                    };
+                    collapse(&path, nested, out)?;
+                }
+                Ok(())
+            }
+            scalar => {
+                let key = PrefKey::parse(prefix).map_err(serde::de::Error::custom)?;
+                // Both shapes can name one key, and nothing downstream could
+                // tell which value it got — a credential silently decided by
+                // map iteration order. Refuse the load instead.
+                if let Some(existing) = out.insert(key, scalar) {
+                    return Err(serde::de::Error::custom(format!(
+                        "preference {prefix:?} {DUPLICATE_PREFERENCE_KEY} — once as a dotted key \
+                         and once as a nested table (the earlier value was {existing}). Keep one \
+                         of the two."
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    let raw = toml::value::Table::deserialize(deserializer)?;
+    let mut out = HashMap::new();
+    collapse("", toml::Value::Table(raw), &mut out)?;
+    Ok(out)
 }
 
 /// A named section that groups preferences in the UI. Validated at
@@ -112,6 +183,35 @@ pub struct PreferenceDef {
     pub pref_type: PrefType,
     pub default: toml::Value,
     pub requires_restart: bool,
+    /// The environment variable that wins over this preference, when the
+    /// integration `${VAR}` resolver consults one for this key.
+    ///
+    /// Declared rather than derived from the key's spelling: the resolver
+    /// matches case-insensitively with `.` and `_` as one separator, so a
+    /// derived name would claim that a stray `UI_THEME` shadows the theme,
+    /// which nothing reads.
+    pub env_override: Option<&'static str>,
+}
+
+/// The keys whose declared [`PreferenceDef::env_override`] is set in `env`, so
+/// the value the user sees in Settings is NOT the one the integration uses.
+///
+/// The settings UI marks these read-only. An editable field whose value is
+/// silently ignored is the silent-degradation failure the error-handling
+/// policy forbids — and for a credential it is worse than cosmetic, because
+/// the user cannot tell which of two secrets is in force.
+pub fn env_shadowed_keys(
+    defs: &[PreferenceDef],
+    env: &dyn Fn(&str) -> Option<String>,
+) -> HashSet<PrefKey> {
+    defs.iter()
+        .filter(|def| {
+            def.env_override
+                .and_then(env)
+                .is_some_and(|v| !v.trim().is_empty())
+        })
+        .map(|def| def.key.clone())
+        .collect()
 }
 
 /// Build the complete preference schema.
@@ -143,6 +243,7 @@ pub fn define_preferences(theme_registry: &ThemeRegistry) -> Vec<PreferenceDef> 
             pref_type: PrefType::Choice(theme_options),
             default: toml::Value::String("holonLight".into()),
             requires_restart: false,
+            env_override: None,
         },
         PreferenceDef {
             key: PrefKey::new("ui.glass_background"),
@@ -152,6 +253,7 @@ pub fn define_preferences(theme_registry: &ThemeRegistry) -> Vec<PreferenceDef> 
             pref_type: PrefType::Toggle,
             default: toml::Value::Boolean(false),
             requires_restart: true,
+            env_override: None,
         },
         PreferenceDef {
             key: PrefKey::new("todoist.api_key"),
@@ -160,10 +262,25 @@ pub fn define_preferences(theme_registry: &ThemeRegistry) -> Vec<PreferenceDef> 
                           Integrations). The TODOIST_API_KEY environment variable overrides this \
                           if set."
                 .into(),
+            section: integrations.clone(),
+            pref_type: PrefType::Secret,
+            default: toml::Value::String(String::new()),
+            requires_restart: true,
+            env_override: Some("TODOIST_API_KEY"),
+        },
+        PreferenceDef {
+            key: PrefKey::new("shopping.list_url"),
+            label: "Shopping List URL".into(),
+            description: "Paste the shopping peer's list URL. It contains the list's capability \
+                          token, so treat it as a password — anyone holding it can read and \
+                          change the list. The SHOPPING_LIST_URL environment variable overrides \
+                          this if set."
+                .into(),
             section: integrations,
             pref_type: PrefType::Secret,
             default: toml::Value::String(String::new()),
             requires_restart: true,
+            env_override: Some("SHOPPING_LIST_URL"),
         },
         PreferenceDef {
             key: PrefKey::new("vault.root"),
@@ -175,6 +292,7 @@ pub fn define_preferences(theme_registry: &ThemeRegistry) -> Vec<PreferenceDef> 
             pref_type: PrefType::DirectoryPath,
             default: toml::Value::String(String::new()),
             requires_restart: true,
+            env_override: None,
         },
     ]
 }
@@ -450,6 +568,61 @@ mod tests {
         assert!(sections.contains(&"Appearance"));
         assert!(sections.contains(&"Integrations"));
         assert!(sections.contains(&"Data"));
+    }
+
+    #[test]
+    fn shopping_list_url_is_a_masked_preference_the_settings_menu_can_set() {
+        let defs = define_preferences(&ThemeRegistry::load(None));
+        let def = defs
+            .iter()
+            .find(|d| d.key.as_str() == "shopping.list_url")
+            .expect("the shopping peer's base URL must be settable from the settings menu");
+        assert!(
+            matches!(def.pref_type, PrefType::Secret),
+            "the base URL carries the list's capability token, so the field must be masked"
+        );
+    }
+
+    #[test]
+    fn an_env_shadowed_secret_reaches_the_ui_as_a_locked_row() {
+        let defs = define_preferences(&ThemeRegistry::load(None));
+        let key = PrefKey::new("shopping.list_url");
+        let stale = HashMap::from([(
+            key.clone(),
+            toml::Value::String("https://shop.example/!abc123SYNTHETICstale/api".into()),
+        )]);
+
+        let shadowed = env_shadowed_keys(&defs, &|name| {
+            (name == "SHOPPING_LIST_URL")
+                .then(|| "https://shop.example/!abc123SYNTHETIClive/api".to_string())
+        });
+        let rows = preferences_to_rows(&defs, &stale, &shadowed);
+        let row = rows
+            .iter()
+            .find(|r| matches!(r.get("key"), Some(holon_api::Value::String(k)) if *k == *key.as_str()))
+            .expect("the shopping list URL has a settings row");
+
+        assert_eq!(
+            row.get("locked"),
+            Some(&holon_api::Value::Boolean(true)),
+            "the row the export shadows must render read-only"
+        );
+        assert_eq!(
+            row.get("pref_type"),
+            Some(&holon_api::Value::String("secret".into())),
+            "the masked rendering is what keeps the token off the screen"
+        );
+    }
+
+    #[test]
+    fn only_a_declared_override_shadows_a_field() {
+        // The theme is not resolved through the integration variable lookup, so
+        // a stray `UI_THEME` in the environment must not make it read-only.
+        let defs = define_preferences(&ThemeRegistry::load(None));
+        let shadowed = env_shadowed_keys(&defs, &|_| Some("anything".to_string()));
+        assert!(!shadowed.contains(&PrefKey::new("ui.theme")));
+        assert!(shadowed.contains(&PrefKey::new("todoist.api_key")));
+        assert!(shadowed.contains(&PrefKey::new("shopping.list_url")));
     }
 
     #[test]

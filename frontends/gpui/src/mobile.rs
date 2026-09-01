@@ -147,12 +147,16 @@ fn open_holon_window(
         // first-class sharing target and without it `LoroModule` is never
         // configured → `Arc<LoroShareBackend>` unregistered → share/accept ops
         // fail with "No provider registered for entity: tree".
+        // A malformed holon.toml stops the boot with the parse error. Booting
+        // on defaults would silently run against the wrong vault and drop every
+        // stored credential — the outcome mobile already shipped once.
         let holon_config = HolonConfig::load_runtime_with_platform_overrides(
             &config_dir,
             db_path,
             orgmode_root,
             true,
-        );
+        )
+        .unwrap_or_else(|e| panic!("Cannot boot: {e:#}"));
         let session_config = SessionConfig::new(ui_info);
 
         // Bootstrap through `GpuiModule` (same path as desktop `main.rs`)

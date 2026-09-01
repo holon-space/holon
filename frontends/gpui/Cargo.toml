@@ -175,6 +175,8 @@ tracing-oslog = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+# The settings window rung stores a preference before the modal renders.
+toml.workspace = true
 # Installs the capturing tracing subscriber before `main`/the libtest harness in
 # every windowed test binary (tests/test_init/mod.rs). A per-test call site
 # cannot give that guarantee — the SUT emits during construction and on

@@ -206,6 +206,7 @@ pub mod editor_caret;
 pub mod headless_editor_mirror;
 pub mod input;
 pub mod input_trigger;
+pub mod integration_vars;
 pub(crate) mod link_provider;
 pub mod link_segments;
 pub mod live_block_ancestors;
@@ -711,8 +712,13 @@ impl<T> FrontendSession<T> {
     ) {
         let current = self.holon_config.lock().unwrap().preferences.clone();
         let expr = preferences::preferences_render_expr(&self.preference_defs);
-        let rows =
-            preferences::preferences_to_rows(&self.preference_defs, &current, &self.locked_keys);
+        // A field the environment shadows is read-only for the same reason a
+        // CLI-sourced one is: what the user would type there is not what the
+        // integration reads.
+        let mut locked =
+            preferences::env_shadowed_keys(&self.preference_defs, &|name| std::env::var(name).ok());
+        locked.extend(self.locked_keys.iter().cloned());
+        let rows = preferences::preferences_to_rows(&self.preference_defs, &current, &locked);
         (expr, rows.into_iter().map(Arc::new).collect())
     }
 

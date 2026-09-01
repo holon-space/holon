@@ -31,6 +31,7 @@ use gpui::MouseButton;
 use gpui::Pixels;
 use gpui::Point;
 use holon_frontend::geometry::GeometryProvider;
+use holon_frontend::preferences::PrefKey;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
@@ -48,6 +49,45 @@ const SETTINGS_GEAR: &str = "settings-gear";
 /// static token and must offer no way to start one.
 const GCAL_CONFIGURE: &str = "op-button-begin_oauth-integration:gcal";
 const TODOIST_CONFIGURE: &str = "op-button-begin_oauth-integration:todoist";
+
+/// The shopping peer's list URL is a credential — the list's capability token
+/// sits in a path segment — so the settings row for it must paint a mask, never
+/// the value. Only a real window can answer that.
+const SHOPPING_PREF_KEY: &str = "shopping.list_url";
+
+/// Synthetic. A real list URL is a live credential and never belongs in a
+/// fixture. Nothing else in this file contains this literal, so finding it in
+/// painted text is a leak.
+const LIST_URL_TOKEN: &str = "abc123SYNTHETICwindowedTOKENq7Wv";
+
+/// What a user pastes into Settings. The token sits in an UNMARKED segment:
+/// this rung is about masking on the way to the screen, not about the
+/// redactor's separate `!`-marker rule.
+const STORED_LIST_URL: &str = "https://shop.example/c/abc123SYNTHETICwindowedTOKENq7Wv/api";
+
+/// The glyphs a masked secret paints.
+const SECRET_MASK: &str = "••••••••";
+
+/// Exported so the shopping row renders its LOCKED state: the environment
+/// outranks the stored value, which is the other of the two paths that can put
+/// a secret on screen (`build_locked_display` rather than `build_text_field`).
+const EXPORTED_LIST_URL: &str = "https://shop.example/c/abc123SYNTHETICexportedTOKENz4Kd/api";
+const EXPORTED_LIST_TOKEN: &str = "abc123SYNTHETICexportedTOKENz4Kd";
+
+/// A second stored secret whose override is NOT exported, so one masked row is
+/// locked and one is editable. Without both, reverting either mask stays green.
+const TODOIST_PREF_KEY: &str = "todoist.api_key";
+const TODOIST_TOKEN: &str = "abc123SYNTHETICtodoistTOKENm5Rt";
+
+/// Every text the window painted, so a failure names what the user would have
+/// seen instead of only that an assertion tripped.
+fn painted_texts(bounds: &BoundsRegistry) -> Vec<String> {
+    bounds
+        .all_elements()
+        .into_iter()
+        .filter_map(|(_, info)| info.displayed_text.as_deref().map(str::to_string))
+        .collect()
+}
 
 /// Dispatch a real left click at `center`.
 fn click_at(
@@ -152,6 +192,13 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
     // SAFETY: single-threaded test binary (`--test-threads=1`), set before the
     // app boots and before any thread reads the environment.
     unsafe { std::env::set_var("HOME", home.path()) };
+    // One override exported and one removed, so the modal paints a LOCKED
+    // secret row and an EDITABLE one in the same window.
+    // SAFETY: as above — single-threaded, before the app boots.
+    unsafe {
+        std::env::set_var("SHOPPING_LIST_URL", EXPORTED_LIST_URL);
+        std::env::remove_var("TODOIST_API_KEY");
+    }
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
@@ -167,6 +214,17 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
         .reactive
         .clone()
         .expect("full_headless -> booted ReactiveEngine");
+
+    // Stored before the first render, so the rows the modal paints hold
+    // credentials rather than empty fields.
+    for (key, value) in [
+        (SHOPPING_PREF_KEY, STORED_LIST_URL),
+        (TODOIST_PREF_KEY, TODOIST_TOKEN),
+    ] {
+        session
+            .set_preference(&PrefKey::new(key), toml::Value::String(value.into()))
+            .unwrap_or_else(|e| panic!("{key} must persist into the test profile: {e:#}"));
+    }
 
     let bounds = BoundsRegistry::new();
     let nav = NavigationState::new();
@@ -227,6 +285,28 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
         prefs > 0,
         "the modal's preferences half must still render alongside the integrations section: \
          {census}"
+    );
+
+    // What the user's eyes get. The stored list URL is a credential, so the row
+    // must paint the mask and nothing that contains the token.
+    let texts = painted_texts(&bounds);
+    for token in [LIST_URL_TOKEN, EXPORTED_LIST_TOKEN, TODOIST_TOKEN] {
+        if let Some(leak) = texts.iter().find(|t| t.contains(token)) {
+            panic!(
+                "the settings window painted a credential: {leak:?} — neither a stored secret nor \
+                 an exported one may reach the screen"
+            );
+        }
+    }
+    // Two masked rows: the shopping row is locked (its override is exported, so
+    // it renders through `build_locked_display`) and the todoist row is
+    // editable (`build_text_field`). Requiring both is what gives each mask its
+    // own teeth — with one row, reverting the other mask stays green.
+    let masked = texts.iter().filter(|t| *t == SECRET_MASK).count();
+    assert!(
+        masked >= 2,
+        "expected a masked LOCKED row and a masked EDITABLE row, saw {masked} mask(s). Without \
+         both, the leak check above can pass by finding no text at all. painted: {texts:?}"
     );
     let gcal = gcal.unwrap_or_else(|| {
         panic!("gcal has an unrun consent flow, so its row must paint {GCAL_CONFIGURE}: {census}")

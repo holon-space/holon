@@ -7,6 +7,11 @@ use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
 
 use super::prelude::*;
+use crate::geometry::TransparentTracker;
+
+/// What a secret preference shows instead of its value. The only place the
+/// settings row is allowed to say a secret is present.
+const SECRET_MASK: &str = "••••••••";
 
 fn dispatch_set_preference(services: &Arc<dyn BuilderServices>, key: &str, value: Value) {
     services.dispatch_intent(OperationIntent {
@@ -70,8 +75,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         ref other => format!("{other:?}"),
     };
 
-    let input_el = if locked {
-        build_locked_display(ctx, &value_str)
+    let (input_el, painted) = if locked {
+        build_locked_display(ctx, &pref_type, &value_str)
     } else {
         build_input(ctx, &pref_type, &value, &value_str, &key, &options)
     };
@@ -111,17 +116,52 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         .rounded(px(6.0))
         .hover(|s| s.bg(gpui::rgba(0xffffff08)))
         .child(label_col)
-        .child(div().flex_shrink_0().child(input_el))
+        .child(tracked_value(ctx, &key, input_el, painted))
 }
 
-fn build_locked_display(ctx: &GpuiRenderContext, value_str: &str) -> Div {
-    let display = if value_str.is_empty() {
-        "Not set".to_string()
-    } else {
-        value_str.to_string()
+/// Wrap the value control so a windowed test can read the text this row
+/// actually paints.
+///
+/// Without it the registry records no text for a preference row, and an
+/// assertion that a secret never reaches the screen would pass by finding
+/// nothing rather than by finding a mask.
+fn tracked_value(
+    ctx: &GpuiRenderContext,
+    key: &str,
+    input_el: Div,
+    painted: Option<String>,
+) -> TransparentTracker {
+    let tracker = TransparentTracker::new(
+        format!("pref-value-{key}"),
+        "pref_field_value",
+        ctx.bounds_registry.clone(),
+        div().flex_shrink_0().child(input_el).into_any_element(),
+    );
+    match painted {
+        Some(text) => tracker.with_displayed_text(text),
+        None => tracker,
+    }
+}
+
+/// The read-only stand-in for a field whose value comes from the CLI or the
+/// environment.
+///
+/// A secret stays masked here as it is in the editable field: locking a field
+/// says where its value comes from, never that the value may now be shown.
+/// What is in force for a locked secret is the external value, not the one this
+/// row carries, so the mask reads "set elsewhere" rather than claiming a value.
+fn build_locked_display(
+    ctx: &GpuiRenderContext,
+    pref_type: &str,
+    value_str: &str,
+) -> (Div, Option<String>) {
+    let display = match (pref_type, value_str.is_empty()) {
+        ("secret", _) => SECRET_MASK.to_string(),
+        (_, true) => "Not set".to_string(),
+        (_, false) => value_str.to_string(),
     };
 
-    div().child(
+    let el = div().child(
         div()
             .text_sm()
             .px_3()
@@ -133,8 +173,9 @@ fn build_locked_display(ctx: &GpuiRenderContext, value_str: &str) -> Div {
             .border_color(tc(ctx, |t| t.border))
             .text_color(tc(ctx, |t| t.muted_foreground))
             .opacity(0.6)
-            .child(display),
-    )
+            .child(display.clone()),
+    );
+    (el, Some(display))
 }
 
 fn build_input(
@@ -144,10 +185,10 @@ fn build_input(
     value_str: &str,
     key: &str,
     options: &[Value],
-) -> Div {
+) -> (Div, Option<String>) {
     match pref_type {
-        "toggle" => build_toggle(ctx, value, key),
-        "choice" => build_choice(ctx, value_str, key, options),
+        "toggle" => (build_toggle(ctx, value, key), None),
+        "choice" => (build_choice(ctx, value_str, key, options), None),
         "secret" => build_text_field(ctx, key, value_str, true),
         _ => build_text_field(ctx, key, value_str, false),
     }
@@ -223,12 +264,17 @@ fn build_choice(
     )
 }
 
-fn build_text_field(ctx: &GpuiRenderContext, key: &str, current: &str, is_secret: bool) -> Div {
+fn build_text_field(
+    ctx: &GpuiRenderContext,
+    key: &str,
+    current: &str,
+    is_secret: bool,
+) -> (Div, Option<String>) {
     let display = if is_secret {
         if current.is_empty() {
             "Not set".to_string()
         } else {
-            "••••••••".to_string()
+            SECRET_MASK.to_string()
         }
     } else {
         if current.is_empty() {
@@ -250,7 +296,7 @@ fn build_text_field(ctx: &GpuiRenderContext, key: &str, current: &str, is_secret
     let el_id = format!("pref-text-{key}");
     let hidden = is_secret;
 
-    div().child(
+    let el = div().child(
         div()
             .id(hashed_id(&el_id))
             .text_sm()
@@ -264,7 +310,7 @@ fn build_text_field(ctx: &GpuiRenderContext, key: &str, current: &str, is_secret
             .text_color(text_color)
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgba(0xffffff15)))
-            .child(display)
+            .child(display.clone())
             .on_mouse_down(gpui::MouseButton::Left, move |_, window, _| {
                 let services = services.clone();
                 let key = key_owned.clone();
@@ -277,7 +323,8 @@ fn build_text_field(ctx: &GpuiRenderContext, key: &str, current: &str, is_secret
                 });
                 window.refresh();
             }),
-    )
+    );
+    (el, Some(display))
 }
 
 /// Show a native macOS text input dialog via osascript.

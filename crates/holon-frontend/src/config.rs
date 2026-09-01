@@ -101,7 +101,11 @@ pub struct HolonConfig {
     /// ("ui.theme"). This is the canonical store that the settings UI
     /// reads/writes.
     #[cfg_attr(not(target_arch = "wasm32"), arg(skip))]
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        deserialize_with = "crate::preferences::deserialize_preferences"
+    )]
     pub preferences: HashMap<PrefKey, toml::Value>,
 }
 
@@ -408,6 +412,13 @@ pub fn load_config(
         );
     }
 
+    // The layered pipeline addresses values by dotted PATH, so a key written
+    // both flat and nested collapses to one path and premortem keeps whichever
+    // it saw last — a silent winner this crate never gets to see. Re-read the
+    // raw file through the same guard the direct parse uses, so both boot paths
+    // refuse the ambiguity identically.
+    PreferencesProbe::check(&toml_path)?;
+
     let traced = Config::<HolonConfig>::builder()
         .source(premortem::sources::Defaults::from(HolonConfig::default()))
         .source(premortem::sources::Toml::file(&toml_path))
@@ -418,6 +429,49 @@ pub fn load_config(
     let locked = extract_locked_keys(&traced);
 
     Ok((traced, locked))
+}
+
+/// Reads nothing but `[preferences]`, so `load_config` can apply the same
+/// duplicate-key refusal the direct parse gets for free.
+#[derive(Deserialize)]
+struct PreferencesProbe {
+    #[serde(
+        default,
+        deserialize_with = "crate::preferences::deserialize_preferences"
+    )]
+    #[allow(dead_code)]
+    preferences: HashMap<PrefKey, toml::Value>,
+}
+
+/// Whether a deserializer error is one `deserialize_preferences` raised itself,
+/// as opposed to a plain shape error (a wrong type, a broken table).
+fn is_preference_complaint(message: &str) -> bool {
+    message.starts_with(crate::preferences::INVALID_PREFERENCE_KEY)
+        || message.contains(crate::preferences::DUPLICATE_PREFERENCE_KEY)
+}
+
+impl PreferencesProbe {
+    fn check(toml_path: &Path) -> Result<()> {
+        use anyhow::Context;
+
+        let raw = std::fs::read_to_string(toml_path)
+            .with_context(|| format!("Failed to read {}", toml_path.display()))?;
+        // Only a preference-key complaint is this probe's to report; anything
+        // else wrong with the file is premortem's to describe, in its own
+        // vocabulary, with the source tracing this probe does not have.
+        //
+        // Matched on the error's MESSAGE, never on `to_string()`: that renders
+        // the echoed source line too, so `preferences = 5` would carry the word
+        // "preferences" into the match and lose premortem's tracing.
+        match toml::from_str::<Self>(&raw) {
+            Ok(_) => Ok(()),
+            Err(e) if is_preference_complaint(e.message()) => Err(anyhow::anyhow!(
+                "Failed to parse {}: {e}",
+                toml_path.display()
+            )),
+            Err(_) => Ok(()),
+        }
+    }
 }
 
 /// Extract preference keys whose final value came from the "cli" source
@@ -525,9 +579,13 @@ impl HolonConfig {
 
 impl HolonConfig {
     /// Load config from `{config_dir}/holon.toml`.
-    /// Returns `Default` if the file doesn't exist. On wasm32, always returns
-    /// Default.
-    pub fn load_runtime(config_dir: &Path) -> Self {
+    ///
+    /// A missing file is the first run, not an error, and yields the built-in
+    /// defaults. A file that is present but unreadable or malformed — including
+    /// an invalid preference key — is an `Err`, never a silent default: booting
+    /// on defaults would run against the wrong vault and drop every stored
+    /// credential. On wasm32 there is no file to read.
+    pub fn load_runtime(config_dir: &Path) -> Result<Self> {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = config_dir;
@@ -535,27 +593,32 @@ impl HolonConfig {
                 "[HolonConfig] config file loading not supported on wasm32 — using built-in \
                  defaults"
             );
-            return Self::default();
+            return Ok(Self::default());
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
+            use anyhow::Context;
+
             let path = config_dir.join("holon.toml");
-            match std::fs::read_to_string(&path) {
-                Ok(content) => toml::from_str(&content).unwrap_or_else(|e| {
-                    let hint = if content.contains("[orgmode]")
-                        || content.contains("[loro]")
-                        || content.contains("root_directory")
-                    {
-                        "\n\nConfig keys were renamed: `[orgmode]` → `[vault]` (root_directory → \
-                         root), `[loro]` → `[crdt]`. Update holon.toml to the new section names."
-                    } else {
-                        ""
-                    };
-                    panic!("Failed to parse {}: {}{}", path.display(), e, hint)
-                }),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
-                Err(e) => panic!("Failed to read {}: {}", path.display(), e),
-            }
+            let content = match std::fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+                Err(e) => {
+                    return Err(e).with_context(|| format!("Failed to read {}", path.display()));
+                }
+            };
+            toml::from_str(&content).with_context(|| {
+                let hint = if content.contains("[orgmode]")
+                    || content.contains("[loro]")
+                    || content.contains("root_directory")
+                {
+                    "\n\nConfig keys were renamed: `[orgmode]` → `[vault]` (root_directory → \
+                     root), `[loro]` → `[crdt]`. Update holon.toml to the new section names."
+                } else {
+                    ""
+                };
+                format!("Failed to parse {}{}", path.display(), hint)
+            })
         }
     }
 
@@ -582,8 +645,8 @@ impl HolonConfig {
         db_path: Option<PathBuf>,
         vault_root: Option<PathBuf>,
         crdt_enabled: bool,
-    ) -> Self {
-        let mut config = Self::load_runtime(config_dir);
+    ) -> Result<Self> {
+        let mut config = Self::load_runtime(config_dir)?;
         if db_path.is_some() {
             config.db_path = db_path;
         }
@@ -591,7 +654,7 @@ impl HolonConfig {
             config.vault.root = vault_root;
         }
         config.crdt.enabled = Some(crdt_enabled);
-        config
+        Ok(config)
     }
 
     /// Save config to `{config_dir}/holon.toml`, preserving any keys not owned
@@ -856,6 +919,104 @@ mod tests {
         );
     }
 
+    /// DESKTOP boot path: a preference persisted in `holon.toml` must survive
+    /// the load. The settings UI writes every preference into the
+    /// `[preferences]` map, and integrations resolve `${VAR}` from that map, so
+    /// a map that arrives empty means every credential typed into Settings is
+    /// silently forgotten on restart.
+    #[test]
+    fn load_config_applies_persisted_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("holon.toml"),
+            "[preferences]\n\"shopping.list_url\" = \"https://shop.example/c/tok-SYNTHETIC/api\"\n\"ui.theme\" = \"dracula\"\n",
+        )
+        .unwrap();
+
+        let (traced, _) = load_config(dir.path(), HolonConfig::default())
+            .expect("load_config must succeed for a valid config");
+        let prefs = traced.into_inner().preferences;
+
+        assert_eq!(
+            prefs
+                .get(&PrefKey::new("shopping.list_url"))
+                .and_then(|v| v.as_str()),
+            Some("https://shop.example/c/tok-SYNTHETIC/api"),
+            "the persisted preference must survive the desktop boot load. whole map: {prefs:?}"
+        );
+        assert_eq!(
+            prefs
+                .get(&PrefKey::new("ui.theme"))
+                .and_then(|v| v.as_str()),
+            Some("dracula"),
+            "a dotted key must not be split into nested tables. whole map: {prefs:?}"
+        );
+    }
+
+    /// A key written in both shapes has no defensible winner — which value the
+    /// app ran on would depend on map iteration order, and for a credential
+    /// that is two different secrets.
+    #[test]
+    fn a_preference_set_in_both_shapes_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("holon.toml"),
+            "[preferences]\n\"shopping.list_url\" = \"https://a.example/1\"\n\n[preferences.shopping]\nlist_url = \"https://b.example/2\"\n",
+        )
+        .unwrap();
+
+        let err = load_config(dir.path(), HolonConfig::default())
+            .expect_err("a key set twice must not load")
+            .to_string();
+        // The whole rendered sentence: a wrapped literal that keeps its source
+        // indentation reads as a run of spaces in the terminal.
+        assert!(
+            err.contains(
+                "preference \"shopping.list_url\" is set twice in holon.toml — once as a dotted \
+                 key and once as a nested table (the earlier value was \"https://b.example/2\"). \
+                 Keep one of the two."
+            ),
+            "the error must name the offending key and read as prose: {err}"
+        );
+    }
+
+    /// A `[preferences]` that is not a table is a shape error, not a key
+    /// complaint. The probe must not claim it: premortem describes it with the
+    /// file/line tracing the probe does not have.
+    #[test]
+    fn a_malformed_preferences_table_is_left_to_premortem() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("holon.toml"), "preferences = 5\n").unwrap();
+
+        let err = load_config(dir.path(), HolonConfig::default())
+            .expect_err("a non-table preferences value must not load")
+            .to_string();
+        assert!(
+            err.contains("Config errors"),
+            "premortem must be the one to report it, not the probe: {err}"
+        );
+    }
+
+    /// MOBILE boot path: a malformed preference key must come back as an error
+    /// the caller can report, not abort the process from inside a deserializer.
+    #[test]
+    fn load_runtime_returns_err_for_an_invalid_preference_key() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("holon.toml"),
+            "[preferences]\n\"not a key\" = \"x\"\n",
+        )
+        .unwrap();
+
+        let err = HolonConfig::load_runtime(dir.path())
+            .expect_err("an invalid preference key must not load")
+            .to_string();
+        assert!(
+            err.contains("Failed to parse"),
+            "the error must name the file it could not parse: {err}"
+        );
+    }
+
     /// MOBILE boot path regression (dogfood 2026-07-19): mobile built its
     /// `HolonConfig` from `::default()`, so a `ui.theme` persisted by the
     /// settings UI was ignored on restart (booted `holonLight`). The boot
@@ -871,7 +1032,8 @@ mod tests {
             Some(PathBuf::from("/data/holon.db")),
             None,
             true,
-        );
+        )
+        .expect("valid config");
 
         assert_eq!(
             config.ui.theme.as_deref(),
@@ -903,7 +1065,8 @@ mod tests {
             None,
             Some(PathBuf::from("/vault")),
             true,
-        );
+        )
+        .expect("first run is not an error");
 
         assert_eq!(
             config.ui.theme, None,
@@ -1010,6 +1173,6 @@ mod tests {
             "[orgmode]\nroot_directory = \"/org\"\n",
         )
         .unwrap();
-        HolonConfig::load_runtime(dir.path());
+        HolonConfig::load_runtime(dir.path()).expect("valid config");
     }
 }
