@@ -7,6 +7,8 @@ use anyhow::Result;
 use holon_api::Block;
 use holon_api::EntityUri;
 use holon_core::FileFormatAdapter;
+use holon_core::FormatRegistry;
+use holon_core::WriteTier;
 
 use crate::sync_ports::BlockReader;
 use crate::sync_ports::DocumentManager;
@@ -26,20 +28,41 @@ use crate::sync_ports::DocumentManager;
 pub struct WritebackRenderer {
     block_reader: Arc<dyn BlockReader>,
     doc_manager: Arc<dyn DocumentManager>,
-    format: Arc<dyn FileFormatAdapter>,
+    formats: Arc<FormatRegistry>,
 }
 
 impl WritebackRenderer {
     pub fn new(
         block_reader: Arc<dyn BlockReader>,
         doc_manager: Arc<dyn DocumentManager>,
-        format: Arc<dyn FileFormatAdapter>,
+        formats: Arc<FormatRegistry>,
     ) -> Self {
         Self {
             block_reader,
             doc_manager,
-            format,
+            formats,
         }
+    }
+
+    /// The adapter for `path`, refused unless its format can be written back.
+    ///
+    /// The controller gates on [`WriteTier`] before it ever renders, so a
+    /// read-only format reaching here means a write path bypassed that gate.
+    /// It is an `Err` and not the adapter's own `panic!` because a render
+    /// task that aborts discloses nothing to the user whose file it was about
+    /// to overwrite.
+    fn writable_adapter(&self, path: &Path) -> Result<Arc<dyn FileFormatAdapter>> {
+        let adapter = self.formats.require(path)?;
+        if adapter.write_tier() == WriteTier::ReadOnly {
+            anyhow::bail!(
+                "write-back render REFUSED for {}: its format is read-only (authoritative input \
+                 only) and ships no renderer, so writing a reconstructed file over it would be \
+                 loss. Reaching this render means a write path skipped the controller's \
+                 write-tier gate.",
+                path.display()
+            );
+        }
+        Ok(adapter)
     }
 
     /// `doc_id`'s blocks from the write authority, in document order.
@@ -59,8 +82,8 @@ impl WritebackRenderer {
         blocks: &[Block],
     ) -> Result<String> {
         let rendered = match self.doc_manager.get_by_id(doc_id).await? {
-            Some(doc) => self.render_with_document_block(&doc, blocks, path),
-            None => self.render_body_raw(doc_id, path, blocks),
+            Some(doc) => self.render_with_document_block(&doc, blocks, path)?,
+            None => self.render_body_raw(doc_id, path, blocks)?,
         };
         assert_rendered(doc_id, blocks, &rendered);
         Ok(rendered)
@@ -74,7 +97,7 @@ impl WritebackRenderer {
         blocks: &[Block],
         path: &Path,
     ) -> Result<String> {
-        Ok(self.render_with_document_block(document, blocks, path))
+        self.render_with_document_block(document, blocks, path)
     }
 
     /// The authoritative full render: read `doc_id`'s blocks from the write
@@ -95,9 +118,10 @@ impl WritebackRenderer {
         document: &Block,
         blocks: &[Block],
         path: &Path,
-    ) -> String {
-        self.format
-            .render_document(document, blocks, path, &document.id)
+    ) -> Result<String> {
+        Ok(self
+            .writable_adapter(path)?
+            .render_document(document, blocks, path, &document.id))
     }
 
     /// Render the body alone — no document header.
@@ -107,11 +131,13 @@ impl WritebackRenderer {
         path: &Path,
         blocks: &[Block],
     ) -> Result<String> {
-        Ok(self.render_body_raw(doc_id, path, blocks))
+        self.render_body_raw(doc_id, path, blocks)
     }
 
-    fn render_body_raw(&self, doc_id: &EntityUri, path: &Path, blocks: &[Block]) -> String {
-        self.format.render_blocks(blocks, path, doc_id)
+    fn render_body_raw(&self, doc_id: &EntityUri, path: &Path, blocks: &[Block]) -> Result<String> {
+        Ok(self
+            .writable_adapter(path)?
+            .render_blocks(blocks, path, doc_id))
     }
 }
 

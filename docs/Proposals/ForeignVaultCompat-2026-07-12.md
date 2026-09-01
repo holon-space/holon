@@ -90,10 +90,30 @@ first-class and visible.
 `build_block_params()`, `content_differs()`, `sync_document_metadata()`,
 `check_writeback_lossless()`. `OrgFormatAdapter` implements it today.
 
-**Gap:** `FileSyncController::with_format` binds *one* `Arc<dyn FileFormatAdapter>` for the
-whole vault, and `OrgFileWatcher` hardcodes the `.org` extension filter
-(`holon-orgmode/src/file_watcher.rs:87`, `:25-31`). Foreign vaults are heterogeneous (LogSeq
-markdown vault can contain both `.md` and `.org`; an Obsidian vault is `.md` + attachments).
+**Gap — CLOSED 2026-09-01 by Kitchen Inc A2 (D55.a).** The registry described below is
+landed. `FileSyncController` holds `formats: Arc<FormatRegistry>` and resolves the adapter
+per file at every parse / identity / render / write-back site; the watcher, the directory
+scan, `poll_new_files` and the notify adapter's rename-pairing buffer all filter on the
+registry's extension union. Production registers **org + cook**; the markdown adapters stay
+unregistered because both claim `md` and the registry refuses a contested extension at
+construction (see the flavor discriminator below) — registering them is one line plus that
+discriminator. Pinned by `crates/holon-core/tests/format_registry.rs` and
+`crates/holon-integration-tests/tests/cook_vault_ingest.rs`.
+
+*Historic statement of the gap:* `FileSyncController::with_format` bound *one*
+`Arc<dyn FileFormatAdapter>` for the whole vault, and `OrgFileWatcher` hardcoded the `.org`
+extension filter. Foreign vaults are heterogeneous (a LogSeq markdown vault can contain both
+`.md` and `.org`; an Obsidian vault is `.md` + attachments).
+
+**Follow-up the registry exposed — writable non-org formats need a per-adapter page-file
+naming seam.** `VaultPath::page_file_from_name_chain`
+(`crates/holon-filesystem/src/vault_path.rs`) appends `.org` unconditionally, so a page homed
+in another format derives an ORG path as "its own file". For a read-only format A2 closes
+this by refusing the write outright (`WriteTier::ReadOnly` gates write-back AND page-file
+materialization), and without that gate a `.cook` recipe was observed being deleted and
+replaced by a `Pancakes.org` projection of itself. The moment a SECOND WRITABLE format is
+registered, the refusal stops being available and the derivation must ask the owning adapter
+for the extension instead.
 
 **Design:** introduce a `FormatRegistry` — an ordered `Vec<Arc<dyn FileFormatAdapter>>` — and a
 resolver `fn adapter_for(path) -> Option<&dyn FileFormatAdapter>` that routes by lowercased

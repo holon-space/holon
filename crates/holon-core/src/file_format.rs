@@ -10,10 +10,13 @@
 //! lives here (in `holon-core`) so future format crates can implement it
 //! without taking a dependency on `holon-orgmode`.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
+use anyhow::bail;
 use holon_api::EntityUri;
 use holon_api::StorageEntity;
 use holon_api::block::Block;
@@ -62,6 +65,21 @@ pub trait FileFormatAdapter: Send + Sync {
     /// (e.g. `&["org"]`, `&["md", "markdown"]`). The vault watcher uses this
     /// to route each on-disk path to the right adapter.
     fn extensions(&self) -> &'static [&'static str];
+
+    /// Whether this format's files may be written back, or are authoritative
+    /// input only.
+    ///
+    /// The sync controller consults this BEFORE rendering: a read-only
+    /// format's `render_*` must never be reached, so the refusal is a
+    /// disclosed ERROR rather than a panic in the write-back task. It also
+    /// keeps a document homed in a read-only file out of page-file
+    /// materialization, which would otherwise mint a SECOND home for it in the
+    /// write-capable format's own extension.
+    ///
+    /// Deliberately without a default: a new adapter that says nothing about
+    /// its write half would inherit "writable" by silence, and be discovered
+    /// to be otherwise only by overwriting a user's file.
+    fn write_tier(&self) -> WriteTier;
 
     /// Parse a file's contents into a document + blocks.
     ///
@@ -168,4 +186,116 @@ pub trait FileFormatAdapter: Send + Sync {
         sanctioned_removals: &HashSet<String>,
         root: &Path,
     ) -> Result<WritebackDropVerdict>;
+}
+
+/// Whether a format's files may be written back by the sync controller.
+///
+/// An enum rather than a `bool` so a call site reads as the question it
+/// answers, and so a third tier (write-with-restrictions) grows here instead
+/// of as a second flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteTier {
+    /// Parse and render both; the controller round-trips these files.
+    ReadWrite,
+    /// Authoritative input only. The controller refuses write-back and
+    /// page-file materialization for documents homed in this format, loudly.
+    ReadOnly,
+}
+
+/// The vault's registered file formats, routed per file by extension.
+///
+/// One vault is heterogeneous — an org vault holding `.cook` recipes, a LogSeq
+/// vault holding both `.md` and `.org` — so the sync controller resolves the
+/// adapter for each path instead of binding one for the whole tree.
+///
+/// Two adapters claiming one extension is refused at CONSTRUCTION rather than
+/// resolved by list order: the two markdown flavors both claim `md` and are
+/// separated by a vault-flavor discriminator (`logseq/config.edn` vs
+/// `.obsidian/`) that does not exist yet, and an ordered list would let a
+/// wiring pick one of them by accident.
+pub struct FormatRegistry {
+    adapters: Vec<Arc<dyn FileFormatAdapter>>,
+    /// Lowercased extension → index into `adapters`.
+    by_ext: HashMap<String, usize>,
+}
+
+impl FormatRegistry {
+    /// Refuses when two adapters claim one extension, naming the extension and
+    /// both claimants' full extension sets — the fix is to choose between
+    /// them, which a message naming only the extension does not support.
+    pub fn new(adapters: Vec<Arc<dyn FileFormatAdapter>>) -> Result<Self> {
+        let mut by_ext: HashMap<String, usize> = HashMap::new();
+        for (index, adapter) in adapters.iter().enumerate() {
+            for ext in adapter.extensions() {
+                let ext = ext.to_ascii_lowercase();
+                if let Some(&claimed_by) = by_ext.get(&ext) {
+                    bail!(
+                        "two file-format adapters both claim the '{ext}' extension: one claiming \
+                         {:?} and one claiming {:?}. A vault path routes by extension alone, so \
+                         the registry cannot choose between them — register only one, or \
+                         discriminate them by vault flavor first.",
+                        adapters[claimed_by].extensions(),
+                        adapter.extensions(),
+                    );
+                }
+                by_ext.insert(ext, index);
+            }
+        }
+        Ok(Self { adapters, by_ext })
+    }
+
+    /// The adapter claiming `path`'s extension, or `None` when no adapter
+    /// does — that path is simply not a vault document (an attachment, a
+    /// `.gitignore`, an editor lock file), which is a typed absence and not a
+    /// failure.
+    /// Returns an owned handle rather than a borrow: the sync controller
+    /// resolves the adapter inside `&mut self` methods that go on to mutate
+    /// their own state, and a borrow of `self` would outlive that.
+    pub fn adapter_for(&self, path: &Path) -> Option<Arc<dyn FileFormatAdapter>> {
+        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        self.by_ext.get(&ext).map(|&i| self.adapters[i].clone())
+    }
+
+    /// The adapter for a path the scan or watcher has ALREADY admitted as a
+    /// vault document. An unclaimed extension here is a routing bug — the
+    /// admission filter and this lookup disagreed — so it is loud.
+    pub fn require(&self, path: &Path) -> Result<Arc<dyn FileFormatAdapter>> {
+        match self.adapter_for(path) {
+            Some(adapter) => Ok(adapter),
+            None => bail!(
+                "no registered file-format adapter claims {}, yet it reached a routing site that \
+                 only tracked vault documents reach. Registered extensions: {:?}",
+                path.display(),
+                self.sorted_extensions(),
+            ),
+        }
+    }
+
+    /// Whether `path` is a vault document of some registered format — the
+    /// admission filter the directory scan and the watcher share.
+    pub fn handles(&self, path: &Path) -> bool {
+        self.adapter_for(path).is_some()
+    }
+
+    /// The union of every registered adapter's claimed extensions, lowercase
+    /// and without leading dots, in no particular order.
+    pub fn extensions(&self) -> impl Iterator<Item = &str> {
+        self.by_ext.keys().map(String::as_str)
+    }
+
+    /// Every registered extension, lowercase, sorted — a stable order for
+    /// error messages and for extension-driven candidate probes.
+    pub fn sorted_extensions(&self) -> Vec<&str> {
+        let mut exts: Vec<&str> = self.extensions().collect();
+        exts.sort_unstable();
+        exts
+    }
+}
+
+impl std::fmt::Debug for FormatRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FormatRegistry")
+            .field("extensions", &self.sorted_extensions())
+            .finish()
+    }
 }

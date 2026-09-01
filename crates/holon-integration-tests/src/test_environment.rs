@@ -321,17 +321,24 @@ impl TestEnvironmentBuilder {
         self
     }
 
-    /// Add an org file to be created BEFORE engine initialization
+    /// Add a vault file of ANY registered format, created BEFORE engine
+    /// initialization.
     ///
-    /// The file will exist when OrgModeSyncProvider starts scanning,
-    /// which triggers the sync/DDL race condition.
-    pub fn with_org_file(
+    /// The file exists when the sync provider starts scanning, which is what
+    /// triggers the sync/DDL race condition — and, for a non-org format, what
+    /// exercises the `FormatRegistry`'s per-file routing on the real boot path.
+    pub fn with_vault_file(
         mut self,
         filename: impl Into<String>,
         content: impl Into<String>,
     ) -> Self {
         self.org_files.push((filename.into(), content.into()));
         self
+    }
+
+    /// [`with_vault_file`](Self::with_vault_file) for an org file.
+    pub fn with_org_file(self, filename: impl Into<String>, content: impl Into<String>) -> Self {
+        self.with_vault_file(filename, content)
     }
 
     /// Set whether to wait for file watcher to be ready before returning

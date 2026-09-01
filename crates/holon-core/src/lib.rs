@@ -48,6 +48,8 @@ pub use entity_cache::CacheFactory;
 pub use entity_cache::EntityCache;
 pub use file_format::FileFormatAdapter;
 pub use file_format::FileFormatParseResult;
+pub use file_format::FormatRegistry;
+pub use file_format::WriteTier;
 pub use publish_errors::PublishErrorTracker;
 pub use sink_reader::SinkReader;
 pub use sql_cell_registry::SqlOnlyCellRegistry;

@@ -157,9 +157,15 @@ impl OrgModeSyncProvider {
         // Track what we've seen to detect deletions
         let mut seen_files: HashMap<String, bool> = HashMap::new();
 
-        let scanned = crate::file_watcher::scan_directory(self.fs.as_ref(), &self.root_directory)
-            .await
-            .map_err(|e| format!("Failed to scan {}: {e}", self.root_directory.display()))?;
+        // Org-only by design: this provider emits `File` changes for the org
+        // sync framework, and A2 widens the FileSyncController leg alone.
+        let scanned = crate::file_watcher::scan_directory(
+            self.fs.as_ref(),
+            &self.root_directory,
+            &crate::file_sync_controller::org_only_format_registry(),
+        )
+        .await
+        .map_err(|e| format!("Failed to scan {}: {e}", self.root_directory.display()))?;
 
         let canonical_root = self
             .fs

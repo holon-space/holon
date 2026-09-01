@@ -1,16 +1,21 @@
-//! File watcher for Org files
+//! File watcher for vault files
 //!
-//! Bridges the injected [`FileChangeSource`] port (ADR 0011) to the org sync
-//! loop: subscribes to raw file-change events, filters to `.org` files that
-//! are not gitignored (including always skipping `.git/` and `.jj/`), and
-//! forwards the paths on an unbounded mpsc channel.
+//! Bridges the injected [`FileChangeSource`] port (ADR 0011) to the vault sync
+//! loop: subscribes to raw file-change events, filters to files of a
+//! REGISTERED format that are not gitignored (including always skipping
+//! `.git/` and `.jj/`), and forwards the paths on an unbounded mpsc channel.
+//!
+//! The admitted extension set is the union of the [`FormatRegistry`]'s
+//! adapters, so a vault holding `.org` pages and `.cook` recipes watches both.
 //!
 //! Echo suppression lives in `FileSyncController::last_projection`, not here.
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use holon_core::CanonicalPath;
+use holon_core::FormatRegistry;
 use holon_filesystem::FileChange;
 use holon_filesystem::FileChangeKind;
 use holon_filesystem::FileChangeSource;
@@ -21,16 +26,18 @@ use tokio::sync::mpsc;
 use tracing::debug;
 use tracing::warn;
 
-/// Scan a directory for `.org` files through the `FileSystem` port (ADR 0011).
+/// Scan a directory for vault files through the `FileSystem` port (ADR 0011).
 ///
 /// The gitignore-aware recursive walk lives in the port
 /// (`holon_filesystem::fs_port::walk_directory` for the real adapter); this
-/// wrapper applies the org-format extension filter.
-pub async fn scan_directory(fs: &dyn FileSystem, root: &Path) -> std::io::Result<ScannedEntries> {
+/// wrapper keeps only the files a registered format claims.
+pub async fn scan_directory(
+    fs: &dyn FileSystem,
+    root: &Path,
+    formats: &FormatRegistry,
+) -> std::io::Result<ScannedEntries> {
     let mut scanned = fs.scan_directory(root).await?;
-    scanned
-        .files
-        .retain(|p| p.extension().is_some_and(|e| e == "org"));
+    scanned.files.retain(|p| formats.handles(p));
     Ok(scanned)
 }
 
@@ -74,10 +81,10 @@ pub enum FileEvent {
     Renamed { from: PathBuf, to: PathBuf },
 }
 
-/// Whether `path` is an org file the sync loop should track (`.org` extension,
-/// not gitignored / VCS-internal).
-fn is_org_relevant(path: &Path, gitignore: &Gitignore) -> bool {
-    path.extension().map(|e| e == "org").unwrap_or(false) && !is_ignored(path, gitignore)
+/// Whether `path` is a vault file the sync loop should track (an extension a
+/// registered format claims, not gitignored / VCS-internal).
+fn is_vault_relevant(path: &Path, formats: &FormatRegistry, gitignore: &Gitignore) -> bool {
+    formats.handles(path) && !is_ignored(path, gitignore)
 }
 
 /// Map one raw [`FileChange`] to the org-relevant [`FileEvent`] the sync loop
@@ -87,9 +94,9 @@ fn is_org_relevant(path: &Path, gitignore: &Gitignore) -> bool {
 /// production bridge uses (the ENVIRONMENT-parity rung for the pairing
 /// fallback, see docs/Testing/BugFunnel.md 2026-07-27).
 ///
-/// `is_relevant` decides whether a path is one the org side tracks; the bridge
-/// passes a gitignore-aware predicate, a focused test may pass an extension
-/// check.
+/// `is_relevant` decides whether a path is one the vault side tracks; the
+/// bridge passes a gitignore-aware, registry-backed predicate, a focused test
+/// may pass an extension check.
 pub fn classify_change_to_event(
     change: FileChange,
     is_relevant: &dyn Fn(&Path) -> bool,
@@ -105,7 +112,7 @@ pub fn classify_change_to_event(
                 );
                 Some(FileEvent::Renamed { from, to })
             } else if is_relevant(&from) {
-                // Renamed OUT of org-space (`.org` -> `.txt`): the org side sees
+                // Renamed OUT of vault-space (`.org` -> `.txt`): the org side sees
                 // only the departure, so treat it as a change to the vanished
                 // `from` (stats NotFound -> delete).
                 debug!(
@@ -138,18 +145,22 @@ pub fn classify_change_to_event(
 /// channel so the consumer can advance its processed-seq watermark strictly in
 /// delivery order — advancing for a filtered event from the bridge directly
 /// could overtake an unprocessed earlier forwarded event.
-pub struct OrgFileWatcher {
+pub struct VaultFileWatcher {
     change_rx: mpsc::UnboundedReceiver<(Option<FileEvent>, u64)>,
 }
 
-impl OrgFileWatcher {
+impl VaultFileWatcher {
     /// Subscribe to `source` and spawn the filter bridge. Subscribing happens
     /// here — before the caller arms the source — so no event is missed.
     ///
     /// The gitignore root is canonicalized so it matches the canonical paths
     /// fs event backends report (macOS: `/var` → `/private/var`).
-    pub fn new(source: &dyn FileChangeSource, watch_dir: &Path) -> Self {
-        let gitignore = tracing::info_span!("OrgFileWatcher.build_gitignore")
+    pub fn new(
+        source: &dyn FileChangeSource,
+        watch_dir: &Path,
+        formats: Arc<FormatRegistry>,
+    ) -> Self {
+        let gitignore = tracing::info_span!("VaultFileWatcher.build_gitignore")
             .in_scope(|| build_gitignore(&CanonicalPath::new(watch_dir).into_path_buf()));
         let (change_tx, change_rx) = mpsc::unbounded_channel();
         let mut source_rx = source.subscribe();
@@ -159,8 +170,9 @@ impl OrgFileWatcher {
                 match source_rx.recv().await {
                     Ok(change) => {
                         let seq = change.seq;
-                        let msg =
-                            classify_change_to_event(change, &|p| is_org_relevant(p, &gitignore));
+                        let msg = classify_change_to_event(change, &|p| {
+                            is_vault_relevant(p, &formats, &gitignore)
+                        });
                         if change_tx.send((msg, seq)).is_err() {
                             // Receiver dropped — sync loop is gone.
                             return;
@@ -169,7 +181,7 @@ impl OrgFileWatcher {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         // Dropped raw events are repaired by the controller's
                         // poll backstops (poll_tracked_files / poll_new_files).
-                        warn!("[OrgFileWatcher] lagged behind change source by {n} events");
+                        warn!("[VaultFileWatcher] lagged behind change source by {n} events");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 }
@@ -202,11 +214,16 @@ mod tests {
     use super::*;
 
     /// These tests drive the REAL `NotifyWatcher` (fsevents on macOS) end to
-    /// end through the org filter bridge — the dedicated real-watcher coverage
-    /// ADR 0011 requires once the PBT harness runs on the in-memory adapter.
-    fn armed_watcher(dir: &Path) -> OrgFileWatcher {
+    /// end through the vault filter bridge — the dedicated real-watcher
+    /// coverage ADR 0011 requires once the PBT harness runs on the in-memory
+    /// adapter.
+    fn armed_watcher(dir: &Path) -> VaultFileWatcher {
         let source = Arc::new(NotifyWatcher::new_unarmed().unwrap());
-        let watcher = OrgFileWatcher::new(source.as_ref(), dir);
+        let watcher = VaultFileWatcher::new(
+            source.as_ref(),
+            dir,
+            crate::file_sync_controller::org_only_format_registry(),
+        );
         source.arm(dir).unwrap();
         // Leak the source so the notify watcher outlives this helper —
         // dropping it stops event delivery. Test-scoped only.

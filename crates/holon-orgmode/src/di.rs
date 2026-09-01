@@ -25,7 +25,7 @@ use holon_filesystem::DocumentManager;
 use holon_filesystem::FileSyncController;
 
 use crate::file_watcher::FileEvent;
-use crate::file_watcher::OrgFileWatcher;
+use crate::file_watcher::VaultFileWatcher;
 use crate::home_authority::DocHome;
 use crate::org_renderer::OrgRenderer;
 
@@ -248,15 +248,18 @@ impl OrgSyncIdleSignal {
     }
 }
 
-/// Scan a directory recursively for .org files.
+/// Scan a directory recursively for vault files of any registered format.
 ///
 /// Delegates to `file_watcher::scan_directory` — the gitignore-aware walk
-/// behind the `FileSystem` port (ADR 0011), filtered to `.org`.
-async fn scan_org_files(
+/// behind the `FileSystem` port (ADR 0011), filtered to the registry's union.
+async fn scan_vault_files(
     fs: &dyn holon_filesystem::FileSystem,
     dir: &std::path::Path,
+    formats: &holon_core::FormatRegistry,
 ) -> std::io::Result<Vec<PathBuf>> {
-    Ok(crate::file_watcher::scan_directory(fs, dir).await?.files)
+    Ok(crate::file_watcher::scan_directory(fs, dir, formats)
+        .await?
+        .files)
 }
 
 /// Configuration for OrgMode integration
@@ -299,9 +302,16 @@ pub async fn seed_default_org_assets(
         return;
     }
     let root = &config.root_directory;
-    let scanned = crate::file_watcher::scan_directory(fs, root)
-        .await
-        .unwrap_or_else(|e| panic!("Failed to scan org root {}: {e}", root.display()));
+    // Seeding is an ORG concern — it ships org assets — so emptiness is judged
+    // over org files alone. A vault holding only foreign-format documents has
+    // no org page yet and still wants the shipped layout.
+    let scanned = crate::file_watcher::scan_directory(
+        fs,
+        root,
+        &crate::file_sync_controller::org_only_format_registry(),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("Failed to scan org root {}: {e}", root.display()));
     if !scanned.files.is_empty() {
         return;
     }
@@ -315,13 +325,24 @@ pub async fn seed_default_org_assets(
     }
 }
 
-/// The container's file-format adapter, defaulting to org when none is bound.
-async fn resolve_file_format(resolver: &Injector) -> Arc<dyn holon_core::FileFormatAdapter> {
+/// The container's registered file formats.
+///
+/// A container that binds a [`FormatRegistry`] (the app wiring does, with org
+/// + cook) gets it verbatim. Otherwise the vault is single-format: a container
+/// may still override the ONE adapter, and failing that it is org.
+async fn resolve_format_registry(resolver: &Injector) -> Arc<holon_core::FormatRegistry> {
+    if let Some(registry) = resolver
+        .optional_resolve_async::<holon_core::FormatRegistry>()
+        .await
+    {
+        return registry;
+    }
+
     let classifier = resolver
         .optional_resolve_async::<holon_api::link_parser::LinkTargetClassifier>()
         .await
         .map(|c| (*c).clone());
-    resolver
+    let adapter = resolver
         .optional_resolve_async::<dyn holon_core::FileFormatAdapter>()
         .await
         .unwrap_or_else(|| {
@@ -331,7 +352,11 @@ async fn resolve_file_format(resolver: &Injector) -> Arc<dyn holon_core::FileFor
             Arc::new(crate::file_format::OrgFormatAdapter::with_classifier(
                 classifier,
             )) as Arc<dyn holon_core::FileFormatAdapter>
-        })
+        });
+    Arc::new(
+        holon_core::FormatRegistry::new(vec![adapter])
+            .expect("one adapter cannot contest its own extensions"),
+    )
 }
 
 /// Register the backend-blind file-sync core: FileSystem/FileChangeSource
@@ -363,12 +388,27 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
 
     // FileChangeSource port (ADR 0011): default-bind the notify adapter.
     // Same first-binding-wins override contract as dyn FileSystem above.
-    match injector.try_provide::<dyn holon_filesystem::FileChangeSource>(Provider::root(|_| {
-        Arc::new(
-            holon_filesystem::NotifyWatcher::new_unarmed()
-                .expect("notify watcher construction failed"),
-        ) as Arc<dyn holon_filesystem::FileChangeSource>
-    })) {
+    // The rename-pairing buffer inside the adapter gates on the vault's
+    // extensions, so it is built from the registry rather than from `.org`:
+    // otherwise a `.cook` rename reads as a foreign interposer.
+    match injector.try_provide::<dyn holon_filesystem::FileChangeSource>(Provider::root(
+        |resolver| {
+            // SYNC resolve, deliberately: this port is also resolved from sync
+            // contexts, and an async provider makes every one of those fail
+            // with `AsyncFactoryRequiresAsyncResolve`. The composition root
+            // binds the registry with a sync provider; a container binding
+            // none watches org alone.
+            let extensions: Vec<String> = match resolver.try_resolve::<holon_core::FormatRegistry>()
+            {
+                Ok(formats) => formats.extensions().map(|e| e.to_string()).collect(),
+                Err(_) => vec!["org".to_string()],
+            };
+            Arc::new(
+                holon_filesystem::NotifyWatcher::new_unarmed_for_extensions(extensions)
+                    .expect("notify watcher construction failed"),
+            ) as Arc<dyn holon_filesystem::FileChangeSource>
+        },
+    )) {
         Ok(()) => {}
         Err(e) if matches!(e.kind, fluxdi::ErrorKind::ProviderAlreadyRegistered) => {
             info!(
@@ -415,7 +455,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
             Shared::new(holon_filesystem::WritebackRenderer::new(
                 resolver.resolve_async::<dyn BlockReader>().await,
                 resolver.resolve_async::<dyn DocumentManager>().await,
-                resolve_file_format(&resolver).await,
+                resolve_format_registry(&resolver).await,
             ))
         },
     ));
@@ -446,7 +486,8 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     .optional_resolve_async::<holon_api::live_data::BlockFeed>()
                     .await
                     .map(|bf| bf.0.clone());
-                let format = resolve_file_format(&resolver).await;
+                let formats = resolve_format_registry(&resolver).await;
+                let formats_for_loop = formats.clone();
                 // The alias registrar (doc_id ↔ path) is a Loro-backed seam
                 // registered at the composition root — `dyn AliasRegistrar` in
                 // both the Turso container (app `wiring.rs`, off `LoroBlockOperations`)
@@ -498,11 +539,11 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 // order can never come from two different stores.
                 let home_ordering = ordering.clone();
 
-                let mut controller = FileSyncController::with_format(
+                let mut controller = FileSyncController::with_formats(
                     block_reader,
                     doc_manager,
                     config.root_directory.clone(),
-                    format,
+                    formats,
                     ordering,
                     fs.clone(),
                 );
@@ -707,6 +748,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     ready_sender,
                     fs,
                     change_source,
+                    formats_for_loop,
                 ));
 
                 Shared::new(FileSyncStarted)
@@ -904,6 +946,7 @@ pub async fn run_file_sync_controller(
     ready_sender: std::sync::Arc<std::sync::Mutex<Option<FileWatcherReadySender>>>,
     fs: Arc<dyn holon_filesystem::FileSystem>,
     change_source: Arc<dyn holon_filesystem::FileChangeSource>,
+    formats: Arc<holon_core::FormatRegistry>,
 ) {
     use tracing::Instrument;
     use tracing::error;
@@ -925,8 +968,10 @@ pub async fn run_file_sync_controller(
     // it yet — the slow recursive watch registration (9+s on macOS for the
     // notify adapter) is deferred until after signal_ready so the factory can
     // return immediately. The bridge subscribes here, so no event is missed.
-    let mut file_rx = tracing::info_span!("org.startup.file_watcher_new_unarmed")
-        .in_scope(|| OrgFileWatcher::new(change_source.as_ref(), &root_directory))
+    let mut file_rx = tracing::info_span!("vault.startup.file_watcher_new_unarmed")
+        .in_scope(|| {
+            VaultFileWatcher::new(change_source.as_ref(), &root_directory, formats.clone())
+        })
         .into_receiver();
     info!(
         "[OrgMode] File watcher built (unarmed) for: {}",
@@ -943,7 +988,7 @@ pub async fn run_file_sync_controller(
     // (LiveData mirrors, matview cursors) wedged
     // because partial-state writes never reconciled.
     let scan_failures: Vec<(std::path::PathBuf, anyhow::Error)> = async {
-        let org_files = match scan_org_files(fs.as_ref(), &root_directory).await {
+        let org_files = match scan_vault_files(fs.as_ref(), &root_directory, &formats).await {
             Ok(files) => files,
             Err(e) => {
                 return vec![(

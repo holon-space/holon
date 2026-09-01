@@ -272,6 +272,8 @@ async fn create_initialized_engine(
 fn register_shared_services(injector: &Injector) -> Result<()> {
     let type_registry =
         create_default_registry().context("Failed to create default TypeRegistry")?;
+    holon_kitchen::register_kitchen_types(&type_registry)
+        .context("Failed to register the kitchen datatypes")?;
     // The classifier holds the registry, so it tracks entities registered later
     // (an MCP sidecar connecting) without re-wiring.
     let link_classifier = type_registry.link_target_classifier();
@@ -332,6 +334,8 @@ pub fn register_core_services_no_turso(injector: &Injector, db_path: PathBuf) ->
 
     let type_registry =
         create_default_registry().context("Failed to create default TypeRegistry")?;
+    holon_kitchen::register_kitchen_types(&type_registry)
+        .context("Failed to register the kitchen datatypes")?;
     // The classifier holds the registry, so it tracks entities registered later
     // (an MCP sidecar connecting) without re-wiring.
     let link_classifier = type_registry.link_target_classifier();

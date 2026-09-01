@@ -321,6 +321,20 @@ impl FrontendInjectorExt for Injector {
                 .collect();
             self.provide::<OrgModeConfig>(Provider::root(move |_| Shared::new(org_config.clone())));
 
+            // The vault's file formats. Org pages are read AND written; `.cook`
+            // recipes are authoritative input, so the controller refuses to
+            // write them back. The markdown adapters are deliberately NOT here:
+            // both claim `md`, which the registry refuses at construction until
+            // a vault-flavor discriminator picks between them (D56.a).
+            let formats = std::sync::Arc::new(
+                holon_core::FormatRegistry::new(vec![
+                    std::sync::Arc::new(holon_orgmode::file_format::OrgFormatAdapter::new()),
+                    std::sync::Arc::new(holon_kitchen::CookFormatAdapter::new()),
+                ])
+                .map_err(|e| anyhow::anyhow!("vault format registry: {e}"))?,
+            );
+            self.provide::<holon_core::FormatRegistry>(Provider::root(move |_| formats.clone()));
+
             // 3-way text merger for the no-store conflict path (spec 0008 §3.1).
             // Registered unconditionally here — NOT inside the `loro_enabled`
             // block — because the conflict path it serves is SqlOnly/`Direct`

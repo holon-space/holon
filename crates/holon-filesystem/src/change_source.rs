@@ -1,6 +1,6 @@
 //! `FileChangeSource` port (ADR 0011): "how I learn a file changed".
 //!
-//! Sits *below* the org-side `OrgFileWatcher`: this port emits raw change
+//! Sits *below* the org-side `VaultFileWatcher`: this port emits raw change
 //! events; content-hash gating / extension / gitignore filtering stay with the
 //! consumer so prod and tests share the same dedupe and echo-suppression path.
 
@@ -197,8 +197,8 @@ fn notify_event_to_signals(
 /// ## Refutation fix (2026-07-27): a pending `From` is DURABLE
 ///
 /// The pairing runs UPSTREAM of org-relevance filtering (that lives in the
-/// `OrgFileWatcher` bridge), so ANY interposing event — an editor lock file, a
-/// Dropbox/iCloud/Syncthing daemon write — can land between the two rename
+/// `VaultFileWatcher` bridge), so ANY interposing event — an editor lock file,
+/// a Dropbox/iCloud/Syncthing daemon write — can land between the two rename
 /// halves. Such an interposer must NEVER flush the pending `From`: a flushed
 /// `Remove` routes to `on_file_deleted`, whose title-based D3 guard cannot fire
 /// before the title has followed, so a LIVE document gets cascade-deleted.
@@ -361,13 +361,15 @@ impl RenamePairing {
     }
 }
 
-/// Cheap org-relevance predicate for the pairing buffer: a `.org` extension.
-/// The full gitignore / VCS-internal filter lives downstream in the
-/// `OrgFileWatcher` bridge; here we only need to keep NON-`.org` interposers
-/// (editor lock files, byte-syncer temp files) from disturbing a pending
-/// rename `From`.
-fn is_org_ext(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e == "org")
+/// Cheap vault-relevance predicate for the pairing buffer: an extension a
+/// registered format claims. The full gitignore / VCS-internal filter lives
+/// downstream in the `VaultFileWatcher` bridge; here we only need to keep
+/// foreign interposers (editor lock files, byte-syncer temp files) from
+/// disturbing a pending rename `From`.
+fn has_vault_ext(path: &Path, exts: &[String]) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
 }
 
 /// Production adapter: wraps `notify::RecommendedWatcher` (fsevents on macOS).
@@ -381,7 +383,18 @@ static NOTIFY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 impl NotifyWatcher {
     /// Build the watcher (channels + callback) without registering the
     /// recursive watch — see [`FileChangeSource::arm`].
+    /// Watch an org-only vault. The production wiring uses
+    /// [`new_unarmed_for_extensions`](Self::new_unarmed_for_extensions) with
+    /// the registry's union; this is the single-format convenience the
+    /// focused watcher tests drive.
     pub fn new_unarmed() -> std::io::Result<Self> {
+        Self::new_unarmed_for_extensions(vec!["org".to_string()])
+    }
+
+    /// Watch a vault whose documents carry `extensions` (lowercase, no leading
+    /// dot) — the union of the registered format adapters' claims. Only those
+    /// paths may disturb a pending rename half.
+    pub fn new_unarmed_for_extensions(extensions: Vec<String>) -> std::io::Result<Self> {
         let (tx, _) = broadcast::channel(4096);
         let event_tx = tx.clone();
         let pairing = Mutex::new(RenamePairing::default());
@@ -394,12 +407,13 @@ impl NotifyWatcher {
                         .lock()
                         .expect("NotifyWatcher rename-pairing mutex poisoned");
                     for signal in &signals {
-                        // Cheap `.org`-extension relevance here; the full
-                        // gitignore/VCS filter stays in the `OrgFileWatcher`
-                        // bridge. This is enough to keep a non-`.org` interposer
+                        // Cheap extension relevance here; the full
+                        // gitignore/VCS filter stays in the `VaultFileWatcher`
+                        // bridge. This is enough to keep a foreign interposer
                         // (lock file, byte-syncer temp) from disturbing a pending
                         // rename `From`.
-                        let emissions = pairing.classify(signal, now, &is_org_ext);
+                        let emissions = pairing
+                            .classify(signal, now, &|p: &Path| has_vault_ext(p, &extensions));
                         for (path, kind) in emissions {
                             let seq =
                                 NOTIFY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;

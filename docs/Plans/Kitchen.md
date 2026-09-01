@@ -146,6 +146,13 @@ Risk-eliminating order. Each is independently landable with a red-first surface 
 * **Red-first (captured).** `lane-logs/red1-adapter-missing.log`: every rung fails as `unresolved import holon_kitchen::{CookFormatAdapter, IngredientUse, ingredient_uses, RECIPE_TYPE_YAML, …}`. Green: 15/15.
 * **Out of scope, held.** Ingredient→product binding stays NULL and visibly unmatched (Inc D).
 
+### Inc A2 — the `FormatRegistry` — **LANDED 2026-09-01 (D55.a, discharges R6)**
+* **Scope.** `FormatRegistry` in `holon-core` (ordered adapters + lowercased-extension index; a contested extension is a CONSTRUCTION error, per parse-don't-validate). `FileSyncController` holds `formats: Arc<FormatRegistry>` instead of one adapter and routes per file at every parse / identity / render / write-back site; the watcher, the directory scan, `poll_new_files` and the notify adapter's rename-pairing buffer filter on the registry's extension union. `OrgFileWatcher` → `VaultFileWatcher`. Production registers **org + cook** (D56.a); `register_kitchen_types` is now called from the bundled-type declaration site, so the `recipe` table exists.
+* **`WriteTier` — the increment's real design change.** `FileFormatAdapter` gained `fn write_tier(&self) -> WriteTier { ReadWrite | ReadOnly }`, no default impl. Routing a read-only format INTO the controller also exposes it to the controller's write half, and the adapter's own `unreachable!()` guards would have turned that into a PANIC in a spawned task — an abort that discloses nothing. The gate sits at `write_back_or_skip_readonly`, the ONE chokepoint every projection write passes, and refuses at ERROR through `WritebackDisclosure`.
+* **What the red test caught (would have been a P0 in a real vault).** With routing live but before the gate, a `.cook` recipe was DELETED and replaced by a `Pancakes.org` projection of itself: cooklang embeds no id, so the page is name-chain-identified, `page_file_from_name_chain` appends `.org`, the twin was materialized and the original retired as a stale home. Two fixes: the write-tier gate, and recording `doc_home` at ingest for read-only formats (it was otherwise written only where the controller WRITES a file, so the document read as homeless and every gate read that as "its file is ours to mint").
+* **Red-first.** `lane-logs/red3-registry-missing.*.log` (unresolved `FormatRegistry` / `WriteTier`, before implementation); `lane-logs/red1-red2-no-cook-registration.*.log` (cook adapter unregistered → no page minted for `Pancakes.cook`; wiring restored byte-for-byte, sha verified).
+* **Out of scope, held.** Markdown registration (both flavors claim `md`; needs the vault-flavor discriminator) · a cooklang renderer / any `.cook` write leg · C7 type-genericity · populating `recipe` ROWS (Inc B/D — the adapter emits blocks, nothing writes that table yet) · carrying the cooklang `title:` metadata onto the persisted page (pages are titled from the filename; `sync_document_metadata` is the seam) · the `.org`-hardcoded page-file derivation (see R7).
+
 ### Inc B — pantry + ops + cookable-now live query
 * **Scope.** `pantry_item` type; add/consume/adjust ops; the "what can I cook now" live query (a recipe is cookable iff every `ingredient_use` has a `pantry_item` with sufficient converted quantity).
 * **Riskiest thing.** The cookable-now predicate is an aggregate in disguise ("ALL children satisfy…"). **It must be written as a query, not as a computed field**, or it silently front-runs Inc D and forces the language growth early. Ruling for the executor: query.
@@ -184,7 +191,7 @@ Per P2/P3 neither half is a new transport kind.
 ## 6. Dependencies
 
 ```
-   Inc A (LANDED) ──> A2 FormatRegistry (R6, NEW) ──> Inc B
+   Inc A (LANDED) ──> A2 FormatRegistry (LANDED, R6 discharged) ──> Inc B
                                                              │
    redact_url path fix (P26) ──> C1 (READY NOW) ──> C2       ├──> Inc E
                                         [Martin: write spec]─┘     ▲
@@ -206,7 +213,9 @@ C1 is on NO critical path — it is startable today and independent of A/B/D.
 
 * **R1 — GRANTED.** Inc A claims PARTIAL Inc-5 de-risking (extension claiming, identity, read authority), explicitly not C7. Wording lands in the BG doc.
 * **R2 — APPROVED in direction**: `fields[].references` typed FK; detail belongs to Inc D's spike.
-* **R6 (NEW, from P31) — the `FormatRegistry` is now on the kitchen critical path.** Nothing in the vault can reach `CookFormatAdapter` until `FileSyncController` takes a registry and the watcher filter becomes the union of adapters' `extensions()`. It is a prerequisite of Inc B's "cookable now over MY recipes" being real rather than fixture-driven. *Recommendation:* size it as its own increment (A2) before Inc B, since it is shared infrastructure — obsidian and logseq are waiting on the identical unlock, so three adapters convert from dead code to live on one change.
+* **R6 — DISCHARGED 2026-09-01 by Inc A2.** The registry is landed and `.cook` files in a real vault ingest; Inc B's "cookable now over MY recipes" is no longer fixture-bound. Obsidian and logseq are NOT unlocked by it: both claim `md`, so they additionally need the vault-flavor discriminator before they can be registered.
+* **R7 (NEW, from Inc A2) — `VaultPath::page_file_from_name_chain` hardcodes `.org`.** A page homed in another format derives an ORG path as "its own file". Inc A2 makes this safe for READ-ONLY formats by refusing the write, but the refusal is not available to a writable non-org format. *Recommendation:* the derivation must ask the owning adapter for its extension before any SECOND WRITABLE format is registered. Not on the kitchen critical path (cook is read-only); it blocks markdown write-back and any future writable adapter.
+
 * **R3 — the check-off-wins rule (§4) is asserted, not measured**, and may be moot: the observed schema has no `checked` field at all (P23). It is a product judgment; if Martin disagrees, only the reconciler PBT changes.
 * **R4 — name-keying loses local state on a peer-side rename (§4).** No fix exists without a server-issued item id. *Recommendation:* accept it as a disclosed limitation for C1/C2 and, in parallel, ask the shopping app's author whether an `id` field can be added — that single field would delete this entire risk class. Needs Martin's call on whether the rename hole is acceptable before C2 is designed around it.
 * **R5 — `redact_url` is a live credential-leak hazard the moment a path-token URL is configured (P26)**, and it is not kitchen-specific: any future sidecar using a capability URL inherits it. Fixing it in C1 is correct, but it may deserve landing on its own ahead of C1.
@@ -229,6 +238,7 @@ Cookidoo (NG1) · site importers (NG5/K5) · OpenFoodFacts network (NG4) · shar
 | P19 cooklang absent | `grep -in cooklang Cargo.lock` |
 | P25 base_url ${VAR} | `grep -n "base_url" crates/holon-mcp-client/src/integration_config.rs` |
 | P26 redact_url query-only | `grep -n "fn redact_url" -A 8 crates/holon-mcp-client/src/rest_oauth2.rs` — if it still only splits on `'?'`, the leak stands |
-| P31 no adapter routing | `grep -n "format: Arc<dyn FileFormatAdapter>" crates/holon-filesystem/src/file_sync_controller.rs` · `grep -rn "FormatRegistry\|adapter_for" crates/` — a hit means R6 has landed |
+| P31 adapter routing — LANDED | `grep -n "formats: Arc<FormatRegistry>" crates/holon-filesystem/src/file_sync_controller.rs` · `grep -n "fn write_tier" crates/holon-core/src/file_format.rs` — absence means A2 was reverted |
+| R7 page-file derivation still org-only | `grep -n 'push(format!("{segment}.org"))' crates/holon-filesystem/src/vault_path.rs` — a hit means R7 is still open |
 | P32 markdown precedent unwired | `grep -rn "ObsidianMarkdownAdapter" crates/ \| grep -v holon-markdown` — hits outside its own crate/tests mean it went live |
 | P29 brace guard | `cargo nextest run -p holon-kitchen -E 'test(unclosed_quantity_brace)'` |

@@ -34,6 +34,8 @@ use holon_core::CanonicalPath;
 use holon_core::DownstreamProjection;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::file_format::FileFormatAdapter;
+use holon_core::file_format::FormatRegistry;
+use holon_core::file_format::WriteTier;
 use holon_core::file_format::WritebackDropVerdict;
 use holon_core::fractional_index::default_sort_key;
 use tracing::debug;
@@ -640,11 +642,10 @@ pub struct FileSyncController {
     /// files to disk on render and ingest them from disk on parse.
     image_data: Option<Arc<dyn ImageDataProvider>>,
 
-    /// File format adapter — delegates parse/render so the controller works
-    /// across formats. Defaults to `OrgFormatAdapter`; future markdown /
-    /// notion / logseq adapters plug in here without changing the
-    /// controller's logic.
-    format: Arc<dyn FileFormatAdapter>,
+    /// The vault's registered file formats. Every parse / render / identity
+    /// question is routed to the adapter claiming THAT file's extension, so
+    /// one vault can hold `.org` pages and `.cook` recipes at once.
+    formats: Arc<FormatRegistry>,
 
     /// Positional-intent writer. Used during disk-order replay to move
     /// misaligned blocks into the position recorded in the org file.
@@ -842,15 +843,15 @@ pub struct FileSyncController {
 }
 
 impl FileSyncController {
-    /// Construct a controller with an explicit `FileFormatAdapter`. The
+    /// Construct a controller over an explicit [`FormatRegistry`]. The
     /// format-default convenience ctors live with their format crates (e.g.
     /// `holon_orgmode::new_org_sync_controller`); the engine itself is
     /// format-agnostic.
-    pub fn with_format(
+    pub fn with_formats(
         block_reader: Arc<dyn BlockReader>,
         doc_manager: Arc<dyn DocumentManager>,
         root_dir: PathBuf,
-        format: Arc<dyn FileFormatAdapter>,
+        formats: Arc<FormatRegistry>,
         ordering: Arc<dyn BlockOrdering>,
         fs: Arc<dyn FileSystem>,
     ) -> Self {
@@ -860,7 +861,7 @@ impl FileSyncController {
         let renderer = Arc::new(crate::writeback_render::WritebackRenderer::new(
             block_reader.clone(),
             doc_manager.clone(),
-            format.clone(),
+            formats.clone(),
         ));
         Self {
             last_projection: HashMap::new(),
@@ -876,7 +877,7 @@ impl FileSyncController {
             doc_home: HashMap::new(),
             post_write_hook: None,
             image_data: None,
-            format,
+            formats,
             ordering,
             downstream: None,
             fs,
@@ -1352,7 +1353,7 @@ impl FileSyncController {
         let mut healed = 0usize;
         let mut mounts_skipped = 0usize;
         for file in scanned.files {
-            if file.extension().and_then(|e| e.to_str()) != Some("org") {
+            if !self.formats.handles(&file) {
                 continue;
             }
             let Some(disk_content) = self.read_if_present(&file).await? else {
@@ -1411,8 +1412,55 @@ impl FileSyncController {
     /// ([`heal_title_less_doc_roots`]) and the runtime file-watch reingest —
     /// never from the ingest fast-path, which certifies byte-identity only.
     /// Returns whether a heal was written.
+    /// The format adapter for a vault file the scan or watcher already
+    /// admitted. Loud when nothing claims the extension: that means the
+    /// admission filter and this lookup disagree, which is a wiring bug and
+    /// not a file to skip.
+    fn adapter(&self, path: &Path) -> Result<Arc<dyn FileFormatAdapter>> {
+        self.formats.require(path)
+    }
+
+    /// Whether `doc_id`'s file may be written back at all.
+    ///
+    /// A document homed in a read-only format (an authoritative `.cook`
+    /// recipe) is excluded from BOTH write-back and page-file
+    /// materialization. Materialization matters as much as write-back here:
+    /// the page-file path is derived from the name chain and always carries
+    /// the org extension, so materializing a `.cook`-homed page would mint a
+    /// SECOND, org-format home for the same recipe rather than overwrite the
+    /// original.
+    fn home_is_writable(&self, doc_id: &EntityUri) -> bool {
+        match self.doc_home.get(doc_id) {
+            Some(home) => match self.formats.adapter_for(home.as_path_buf()) {
+                Some(adapter) => adapter.write_tier() == WriteTier::ReadWrite,
+                // Not a file of any registered format: nothing routed it in,
+                // so nothing may route a write out to it.
+                None => false,
+            },
+            // No recorded home yet — a page that has never been ingested from
+            // disk. Its file is ours to mint, in a writable format.
+            None => true,
+        }
+    }
+
+    /// Disclose a refused write to a read-only-format file, at ERROR, once the
+    /// caller has decided not to write. Named separately from the general
+    /// write-back failure disclosure because the remedy differs: nothing is
+    /// broken, the file is simply authoritative input.
+    fn disclose_readonly_refusal(&self, doc_id: &EntityUri, path: &Path, site: &str) {
+        tracing::error!(
+            doc = %doc_id,
+            path = %path.display(),
+            site,
+            "WRITE-BACK REFUSED: {} is a read-only format (authoritative input only). The store \
+             holds changes for {doc_id} that will NOT reach this file, and no other file is \
+             written in its place. Edit the file on disk to change it.",
+            path.display(),
+        );
+    }
+
     async fn heal_title_less_doc_root(&mut self, path: &Path, disk_content: &str) -> Result<bool> {
-        let Some(bare) = self.format.doc_id_from_content(disk_content) else {
+        let Some(bare) = self.adapter(path)?.doc_id_from_content(disk_content) else {
             return Ok(false);
         };
         let id = EntityUri::block(&bare);
@@ -1531,9 +1579,10 @@ impl FileSyncController {
         // projected the file, fall back to name-chain lookup (get-only — a
         // deletion must never mint page blocks).
         let last = self.last_projection.get(canonical).cloned();
+        let deleted_adapter = self.adapter(path)?;
         let rooted_here = last
             .as_deref()
-            .and_then(|l| self.format.doc_id_from_content(l));
+            .and_then(|l| deleted_adapter.doc_id_from_content(l));
         let document = match &rooted_here {
             Some(bare) => self.doc_manager.get_by_id(&EntityUri::block(bare)).await?,
             None => {
@@ -1585,7 +1634,13 @@ impl FileSyncController {
                 if p == canonical {
                     return None;
                 }
-                match self.format.doc_id_from_content(content) {
+                // Routed by `p`, not by the deleted file: a reunion
+                // destination may be a different format from the departure.
+                match self
+                    .formats
+                    .adapter_for(p.as_path_buf())
+                    .and_then(|a| a.doc_id_from_content(content))
+                {
                     Some(bare) if EntityUri::block(&bare) == document_uri => {
                         Some(p.as_path_buf().clone())
                     }
@@ -1983,9 +2038,10 @@ impl FileSyncController {
         // never projected `from` this session, fall back to a get-only
         // name-chain lookup off `from`'s path (a rename must never MINT a doc).
         let last = self.last_projection.get(&from_canon).cloned();
+        let from_adapter = self.adapter(from)?;
         let document = match last
             .as_deref()
-            .and_then(|l| self.format.doc_id_from_content(l))
+            .and_then(|l| from_adapter.doc_id_from_content(l))
         {
             Some(bare) => self.doc_manager.get_by_id(&EntityUri::block(&bare)).await?,
             None => match from.strip_prefix(&self.root_dir) {
@@ -2317,7 +2373,7 @@ impl FileSyncController {
     /// etc.). Returns `Ok(None)` when there is no companion, or the companion
     /// carries no explicit id (a name-chain-only page).
     async fn companion_doc_id(&self, rel_dir: &str) -> Result<Option<String>> {
-        for ext in self.format.extensions() {
+        for ext in self.formats.sorted_extensions() {
             // `rel_dir` is a join of page TITLES, so it carries author-supplied
             // text. An escaping chain must not reach outside the vault for a
             // file whose `#+ID` would then be ADOPTED as a page identity.
@@ -2338,7 +2394,13 @@ impl FileSyncController {
                     .read_to_string(candidate)
                     .await
                     .with_context(|| format!("read companion {}", candidate.display()))?;
-                if let Some(bare) = self.format.doc_id_from_content(&content) {
+                // By the CANDIDATE's own extension: the union above may span
+                // formats, and each answers document identity its own way.
+                if let Some(bare) = self
+                    .formats
+                    .adapter_for(candidate)
+                    .and_then(|a| a.doc_id_from_content(&content))
+                {
                     return Ok(Some(bare));
                 }
             }
@@ -2492,9 +2554,12 @@ impl FileSyncController {
         if !lc.contains("share-role") && !lc.contains("shared-tree-id") {
             return Ok(ShareProbe::Ordinary);
         }
-        let parsed =
-            self.format
-                .parse(path, disk_content, &EntityUri::no_parent(), &self.root_dir)?;
+        let parsed = self.adapter(path)?.parse(
+            path,
+            disk_content,
+            &EntityUri::no_parent(),
+            &self.root_dir,
+        )?;
         if !is_shared_subtree_projection(&parsed.document, &parsed.blocks) {
             return Ok(ShareProbe::Ordinary);
         }
@@ -2628,7 +2693,7 @@ impl FileSyncController {
         // `#+ID:`; one that somehow does not takes the full ingest, which
         // resolves identity properly.
         let disk_root = self
-            .format
+            .adapter(path)?
             .doc_id_from_content(&disk_content)
             .map(|bare| EntityUri::block(&bare));
 
@@ -2716,7 +2781,8 @@ impl FileSyncController {
         // authoritative identity — it survives renames. When absent we fall
         // back to name-chain resolution and emit `#+ID:` on the next render
         // so subsequent loads pick up the stable identity from the file.
-        let bare_id_in_file = self.format.doc_id_from_content(&disk_content);
+        let ingest_adapter = self.adapter(path)?;
+        let bare_id_in_file = ingest_adapter.doc_id_from_content(&disk_content);
         let segments = path_to_name_chain(rel_path);
         let segment_refs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
         // Filename-derived page title: the last path segment with the extension
@@ -2869,68 +2935,65 @@ impl FileSyncController {
             .map(String::as_str)
             .unwrap_or("");
         let base_fresh = self.base_source.get(&canonical).map(String::as_str) == Some(last);
-        let old_blocks: HashMap<EntityUri, Block> =
-            if base_fresh && self.base_store.is_base_seeded(&base_key) {
-                self.base_store
-                    .get_base(&base_key)
-                    .values()
-                    .map(|s| (s.block.id.clone(), s.block.clone()))
+        let old_blocks: HashMap<EntityUri, Block> = if base_fresh
+            && self.base_store.is_base_seeded(&base_key)
+        {
+            self.base_store
+                .get_base(&base_key)
+                .values()
+                .map(|s| (s.block.id.clone(), s.block.clone()))
+                .collect()
+        } else {
+            // (Re)seed the base. On first run (no `last_projection`) the
+            // consolidated store may already hold blocks (e.g. from
+            // seed_default_layout); querying it ensures they are treated as
+            // updates. Otherwise parse the last projected content.
+            let seed: HashMap<EntityUri, Block> = if last.is_empty() {
+                self.block_reader
+                    .get_blocks(&document_uri)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "seed the diff base from the store (doc {document_uri}, file {})",
+                            path.display()
+                        )
+                    })?
+                    .into_iter()
+                    .map(|b| (b.id.clone(), b))
                     .collect()
             } else {
-                // (Re)seed the base. On first run (no `last_projection`) the
-                // consolidated store may already hold blocks (e.g. from
-                // seed_default_layout); querying it ensures they are treated as
-                // updates. Otherwise parse the last projected content.
-                let seed: HashMap<EntityUri, Block> = if last.is_empty() {
-                    self.block_reader
-                        .get_blocks(&document_uri)
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "seed the diff base from the store (doc {document_uri}, file {})",
-                                path.display()
-                            )
-                        })?
+                match ingest_adapter.parse(path, last, &EntityUri::no_parent(), &self.root_dir) {
+                    Ok(result) => result
+                        .blocks
                         .into_iter()
                         .map(|b| (b.id.clone(), b))
-                        .collect()
-                } else {
-                    match self
-                        .format
-                        .parse(path, last, &EntityUri::no_parent(), &self.root_dir)
-                    {
-                        Ok(result) => result
-                            .blocks
-                            .into_iter()
-                            .map(|b| (b.id.clone(), b))
-                            .collect(),
-                        Err(_) => HashMap::new(),
-                    }
-                };
-                // Org has no fractional index — order is document position — so
-                // the base's `sort_key` slot is inert here (default key). The
-                // org reconciler diffs Block content; ordering is applied
-                // separately via `place_all` from document order (ADR 0005).
-                let snapshot: HashMap<String, SnapshotBlock> = seed
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.to_string(),
-                            SnapshotBlock {
-                                block: v.clone(),
-                                sort_key: default_sort_key(),
-                            },
-                        )
-                    })
-                    .collect();
-                self.base_store.put_base(&base_key, snapshot);
-                self.base_source.insert(canonical.clone(), last.to_string());
-                seed
+                        .collect(),
+                    Err(_) => HashMap::new(),
+                }
             };
+            // Org has no fractional index — order is document position — so
+            // the base's `sort_key` slot is inert here (default key). The
+            // org reconciler diffs Block content; ordering is applied
+            // separately via `place_all` from document order (ADR 0005).
+            let snapshot: HashMap<String, SnapshotBlock> = seed
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.to_string(),
+                        SnapshotBlock {
+                            block: v.clone(),
+                            sort_key: default_sort_key(),
+                        },
+                    )
+                })
+                .collect();
+            self.base_store.put_base(&base_key, snapshot);
+            self.base_source.insert(canonical.clone(), last.to_string());
+            seed
+        };
 
         let new_parse =
-            self.format
-                .parse(path, &disk_content, &EntityUri::no_parent(), &self.root_dir)?;
+            ingest_adapter.parse(path, &disk_content, &EntityUri::no_parent(), &self.root_dir)?;
 
         // Sync format-specific document-header metadata (org `#+TODO:` keywords)
         // from the parsed file onto the document block. The parser extracts these
@@ -2938,10 +3001,7 @@ impl FileSyncController {
         // DocumentManager) doesn't carry them. Without this, re-renders via
         // render_document() omit the header.
         let mut doc = document;
-        if self
-            .format
-            .sync_document_metadata(&new_parse.document, &mut doc)
-        {
+        if ingest_adapter.sync_document_metadata(&new_parse.document, &mut doc) {
             self.doc_manager.update_metadata(&doc).await?;
         }
 
@@ -3490,8 +3550,7 @@ impl FileSyncController {
                 // diff base), so nothing can have gone stale — the write names
                 // no authority over peer property keys.
                 let mut params =
-                    self.format
-                        .build_block_params(block, parent_id, &document_uri, None);
+                    ingest_adapter.build_block_params(block, parent_id, &document_uri, None);
                 if let Some(Some(prev)) = predecessors.get(&block.id) {
                     params.insert(
                         POSITION_AFTER_BLOCK_ID_PARAM.into(),
@@ -3607,13 +3666,13 @@ impl FileSyncController {
                     }
                 }
                 let effective = merged_block.as_ref().unwrap_or(new_block);
-                if self.format.content_differs(old_block, effective) {
+                if ingest_adapter.content_differs(old_block, effective) {
                     let parent_id = if effective.parent_id == new_parse.document.id {
                         &document_uri
                     } else {
                         &effective.parent_id
                     };
-                    let mut params = self.format.build_block_params(
+                    let mut params = ingest_adapter.build_block_params(
                         effective,
                         parent_id,
                         &document_uri,
@@ -4125,6 +4184,21 @@ impl FileSyncController {
             return Ok(IngestOutcome::Ingested);
         }
 
+        // A read-only format never re-projects: the file is authoritative, so
+        // there is no merge for a write-back to carry and no renderer to carry
+        // it. Disk already reflects every block this ingest processed — the ops
+        // came FROM this parse — so recording the disk bytes as the projection
+        // is exact. This return also DOMINATES the
+        // ingest-normalization write below, which reaches `self.fs` without
+        // passing the write-tier gate in `write_back_or_skip_readonly`.
+        if ingest_adapter.write_tier() == WriteTier::ReadOnly {
+            self.last_projection
+                .insert(canonical.clone(), disk_content.to_string());
+            self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
+                .await;
+            return Ok(IngestOutcome::Ingested);
+        }
+
         // Structural changes occurred — re-project from cache so the file reflects
         // any merges (e.g. conflict re-parenting, seed layout integration).
         let rendered = self.render_file_by_doc_id(&document_uri, path).await?;
@@ -4509,6 +4583,19 @@ impl FileSyncController {
         self.apply_block_delta(doc_id, delta);
 
         self.page_identity_preflight(doc_id, delta, rows).await;
+
+        // Write-tier gate. A document ingested from a read-only format is
+        // authoritative on disk: the store holds its blocks, but nothing may
+        // render over it, and the name-chain path derived below would name a
+        // DIFFERENT file (the org extension), so proceeding would mint a
+        // second home rather than refuse. Disclosed at ERROR, never silent.
+        if !self.home_is_writable(doc_id) {
+            if let Some(home) = self.doc_home.get(doc_id) {
+                let home = home.as_path_buf().clone();
+                self.disclose_readonly_refusal(doc_id, &home, "on_block_changed");
+            }
+            return Ok(false);
+        }
 
         let vault_path = match self.doc_id_to_path(doc_id, PathIntent::WriteOwnFile).await {
             Ok(Some(p)) => p,
@@ -5088,12 +5175,7 @@ impl FileSyncController {
             })?;
         // Keep only files this controller's format adapter handles, so a vault
         // hosting more than one format doesn't ingest foreign extensions.
-        let exts = self.format.extensions();
-        scanned.files.retain(|p| {
-            p.extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| exts.contains(&e))
-        });
+        scanned.files.retain(|p| self.formats.handles(p));
         for path in scanned.files {
             let canonical = CanonicalPath::new(&path);
             if self.last_projection.contains_key(&canonical) {
@@ -5280,7 +5362,7 @@ impl FileSyncController {
             // wrong page and re-mint the file's `#+ID` on write-back (data loss).
             // The disk bytes carry the id, so prefer it whenever present.
             let doc = match self
-                .format
+                .adapter(&path)?
                 .doc_id_from_content(&disk_content)
                 .map(|bare| EntityUri::block(&bare))
             {
@@ -5678,7 +5760,7 @@ impl FileSyncController {
         // render at the new home — the invariant (one page, one file) wins
         // over that window, the same store-wins call reconciliation makes
         // elsewhere in this controller.
-        match self.format.doc_id_from_content(&disk) {
+        match self.adapter(prior)?.doc_id_from_content(&disk) {
             Some(bare) if EntityUri::block(&bare) == *page_id => {
                 Ok(StaleHomeOwner::StillRootsThisPage)
             }
@@ -5782,6 +5864,21 @@ impl FileSyncController {
         let docs = self.block_reader.iter_documents_with_blocks().await?;
         for (doc_id, blocks) in docs {
             if blocks.is_empty() {
+                continue;
+            }
+            // A document already homed in a read-only-format file is NOT
+            // fileless — it owns an authoritative one. Its name-chain path
+            // carries the org extension, so materializing here would give the
+            // same page a second, divergent home.
+            if !self.home_is_writable(&doc_id) {
+                if let Some(home) = self.doc_home.get(&doc_id) {
+                    let home = home.as_path_buf().clone();
+                    self.disclose_readonly_refusal(
+                        &doc_id,
+                        &home,
+                        "materialize_missing_page_files",
+                    );
+                }
                 continue;
             }
             let vault_path = match self.doc_id_to_path(&doc_id, PathIntent::WriteOwnFile).await {
@@ -6086,7 +6183,8 @@ impl FileSyncController {
             .union(&grounding.moved)
             .cloned()
             .collect();
-        let mut verdict = self.format.writeback_drops(
+        let drops_adapter = self.adapter(path)?;
+        let mut verdict = drops_adapter.writeback_drops(
             path,
             source,
             rendered,
@@ -6103,7 +6201,7 @@ impl FileSyncController {
         // under a new id (the id-rebind an ingest performs) survives whatever
         // the authority says about the old id.
         if !grounding.authority_lost.is_empty() {
-            let own = self.format.writeback_drops(
+            let own = drops_adapter.writeback_drops(
                 path,
                 source,
                 rendered,
@@ -6196,8 +6294,9 @@ impl FileSyncController {
         sanctioned_removals: &HashSet<String>,
     ) -> Result<SiblingGrounding> {
         let parent = EntityUri::no_parent();
-        let source_parsed = self.format.parse(path, source, &parent, &self.root_dir)?;
-        let rendered_parsed = self.format.parse(path, rendered, &parent, &self.root_dir)?;
+        let grounding_adapter = self.adapter(path)?;
+        let source_parsed = grounding_adapter.parse(path, source, &parent, &self.root_dir)?;
+        let rendered_parsed = grounding_adapter.parse(path, rendered, &parent, &self.root_dir)?;
         let rendered_ids: HashSet<&str> = rendered_parsed
             .blocks
             .iter()
@@ -6511,6 +6610,36 @@ impl FileSyncController {
     ) -> Result<bool> {
         let path = vault_path.as_path();
         let canonical = CanonicalPath::new(path);
+
+        // Write-tier gate. FOUR of the five projection write sites funnel here;
+        // the fifth is the ingest-normalization write, which writes through
+        // `self.fs` directly and is covered instead by the read-only
+        // early-return that dominates it inside the same ingest (see
+        // `write_tier() == WriteTier::ReadOnly` above). A sixth caller added
+        // here is gated; one added to the ingest path is NOT.
+        // Two ways a write is refused: the document is homed in a read-only
+        // format (its file is authoritative input), or the TARGET is one. The
+        // second is what stops an org twin: a `.cook`-homed page derives
+        // `<title>.org` from its name chain, and that path is a writable
+        // format, so only the home test catches it.
+        if !self.home_is_writable(doc_id) {
+            let home = self
+                .doc_home
+                .get(doc_id)
+                .map(|h| h.as_path_buf().clone())
+                .unwrap_or_else(|| path.to_path_buf());
+            self.disclose_readonly_refusal(doc_id, &home, "write_back");
+            return Ok(false);
+        }
+        if self
+            .formats
+            .adapter_for(path)
+            .is_some_and(|a| a.write_tier() == WriteTier::ReadOnly)
+        {
+            self.disclose_readonly_refusal(doc_id, path, "write_back_target");
+            return Ok(false);
+        }
+
         if self.writeback_readonly.contains(&canonical) {
             tracing::debug!(
                 doc_id = %doc_id,
@@ -6596,10 +6725,21 @@ impl FileSyncController {
                 }
             }
         }
-        let parsed = match self
-            .format
-            .parse(path, text, &EntityUri::no_parent(), &self.root_dir)
-        {
+        // This disclosure helper returns `()`, so an unroutable path is warned
+        // about and dropped rather than propagated — the write it describes has
+        // already happened.
+        let adapter = match self.adapter(path) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "[FileSyncController] no format adapter for our own render while checking a \
+                     shared-subtree write-back: {e:#}",
+                );
+                return;
+            }
+        };
+        let parsed = match adapter.parse(path, text, &EntityUri::no_parent(), &self.root_dir) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(

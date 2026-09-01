@@ -15,6 +15,7 @@ use holon_api::StorageEntity;
 use holon_api::block::Block;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
+use holon_core::file_format::WriteTier;
 
 use crate::build::opaque_block;
 use crate::build::text_block;
@@ -120,6 +121,10 @@ fn split_block_anchor(line: &str) -> (String, Option<String>) {
 impl FileFormatAdapter for ObsidianMarkdownAdapter {
     fn extensions(&self) -> &'static [&'static str] {
         &["md", "markdown"]
+    }
+
+    fn write_tier(&self) -> WriteTier {
+        WriteTier::ReadOnly
     }
 
     fn parse(

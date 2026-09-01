@@ -14,6 +14,7 @@ use holon_api::StorageEntity;
 use holon_api::block::Block;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
+use holon_core::file_format::WriteTier;
 use holon_core::file_format::WritebackDropVerdict;
 
 use crate::cook::STEP_NUMBER_KEY;
@@ -33,6 +34,10 @@ impl CookFormatAdapter {
 impl FileFormatAdapter for CookFormatAdapter {
     fn extensions(&self) -> &'static [&'static str] {
         &["cook"]
+    }
+
+    fn write_tier(&self) -> WriteTier {
+        WriteTier::ReadOnly
     }
 
     fn parse(

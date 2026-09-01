@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use holon_core::block_ordering::BlockOrdering;
+use holon_core::file_format::FormatRegistry;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
 use holon_filesystem::FileSyncController;
@@ -16,7 +17,15 @@ use holon_filesystem::FileSystem;
 
 use crate::file_format::OrgFormatAdapter;
 
-/// Construct a `FileSyncController` wired with the org-mode format adapter.
+/// A registry holding org alone — the single-format vault.
+pub fn org_only_format_registry() -> Arc<FormatRegistry> {
+    Arc::new(
+        FormatRegistry::new(vec![Arc::new(OrgFormatAdapter::new())])
+            .expect("one adapter cannot contest its own extensions"),
+    )
+}
+
+/// Construct a `FileSyncController` over an org-only format registry.
 pub fn new_org_sync_controller(
     block_reader: Arc<dyn BlockReader>,
     doc_manager: Arc<dyn DocumentManager>,
@@ -24,11 +33,11 @@ pub fn new_org_sync_controller(
     ordering: Arc<dyn BlockOrdering>,
     fs: Arc<dyn FileSystem>,
 ) -> FileSyncController {
-    FileSyncController::with_format(
+    FileSyncController::with_formats(
         block_reader,
         doc_manager,
         root_dir,
-        Arc::new(OrgFormatAdapter::new()),
+        org_only_format_registry(),
         ordering,
         fs,
     )

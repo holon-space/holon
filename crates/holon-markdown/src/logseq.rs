@@ -15,6 +15,7 @@ use holon_api::StorageEntity;
 use holon_api::block::Block;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
+use holon_core::file_format::WriteTier;
 
 use crate::build::apply_planning;
 use crate::build::opaque_block;
@@ -80,6 +81,10 @@ fn is_journal(path: &Path, root: &Path) -> bool {
 impl FileFormatAdapter for LogseqMarkdownAdapter {
     fn extensions(&self) -> &'static [&'static str] {
         &["md", "markdown"]
+    }
+
+    fn write_tier(&self) -> WriteTier {
+        WriteTier::ReadOnly
     }
 
     fn parse(

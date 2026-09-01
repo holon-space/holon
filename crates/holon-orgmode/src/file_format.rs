@@ -13,6 +13,7 @@ use holon_api::block::Block;
 use holon_api::link_parser::LinkTargetClassifier;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
+use holon_core::file_format::WriteTier;
 
 use crate::block_params::build_block_params;
 use crate::models::OrgBlockExt;
@@ -43,6 +44,10 @@ impl OrgFormatAdapter {
 impl FileFormatAdapter for OrgFormatAdapter {
     fn extensions(&self) -> &'static [&'static str] {
         &["org"]
+    }
+
+    fn write_tier(&self) -> WriteTier {
+        WriteTier::ReadWrite
     }
 
     fn parse(

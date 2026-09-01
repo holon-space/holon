@@ -260,6 +260,7 @@ holon-app = { path = "crates/holon-app" }
 holon-macros = { path = "crates/holon-macros" }
 holon-mcp-client = { path = "crates/holon-mcp-client" }
 holon-org-format = { path = "crates/holon-org-format" }
+holon-kitchen = { path = "crates/holon-kitchen" }
 holon-orgmode = { path = "crates/holon-orgmode", features = ["di"] }
 holon-markdown = { path = "crates/holon-markdown" }
 holon-filesystem = { path = "crates/holon-filesystem" }
