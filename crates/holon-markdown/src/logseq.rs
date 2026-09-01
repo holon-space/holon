@@ -277,6 +277,7 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
             document,
             blocks,
             blocks_needing_ids: Vec::new(),
+            typed_rows: Vec::new(),
         })
     }
 

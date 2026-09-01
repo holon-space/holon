@@ -17,6 +17,7 @@ pub mod cook;
 pub mod cookable;
 pub mod file_format;
 pub mod params;
+mod rows;
 pub mod shopping;
 pub mod shopping_sync;
 

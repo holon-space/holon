@@ -16,6 +16,7 @@ use fluxdi::Module;
 use fluxdi::Provider;
 use fluxdi::Shared;
 use holon_api::EntityName;
+use holon_api::OpOrigin;
 use holon_api::Operation;
 use holon_api::OperationDescriptor;
 use holon_api::schema::BuiltinSchemas;
@@ -547,6 +548,28 @@ impl OperationDispatcher {
         op_name: &str,
         params: StorageEntity,
         input: AuthoredInput,
+    ) -> Result<OperationResult> {
+        self.execute_operation_with_provenance(entity_name, op_name, params, input, OpOrigin::User)
+            .await
+    }
+
+    /// [`Self::execute_operation_with_input`] for a caller that knows the
+    /// operation's provenance.
+    ///
+    /// `origin` decides whether the write earns an undo/redo entry:
+    /// [`OpOrigin::User`] is the only origin that does, which is the rule
+    /// `OpOrigin` itself states. A derived write — a rule firing, a peer
+    /// merging, a vault file re-deriving its rows — must not enter the log:
+    /// undoing one is meaningless (the deriving source writes it straight back)
+    /// and a vault of files would bury the user's own edits under machine
+    /// entries on every boot.
+    pub async fn execute_operation_with_provenance(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: StorageEntity,
+        input: AuthoredInput,
+        origin: OpOrigin,
     ) -> Result<OperationResult> {
         use tracing::Instrument;
         use tracing::debug;
@@ -1147,12 +1170,14 @@ impl OperationDispatcher {
                         .map(|(k, v)| (k.to_string(), v))
                         .collect(),
                 );
-                self.notify_observers(
-                    resolved_entity_name,
-                    &executed_operation,
-                    &operation_result.undo,
-                )
-                .await;
+                if origin.is_user() {
+                    self.notify_observers(
+                        resolved_entity_name,
+                        &executed_operation,
+                        &operation_result.undo,
+                    )
+                    .await;
+                }
 
                 // Execute follow-up operations (e.g., editor_focus after split_block).
                 for follow_up in std::mem::take(&mut operation_result.follow_ups) {
@@ -1556,6 +1581,16 @@ impl Module for OperationModule {
 
             Shared::new(dispatcher)
         }));
+
+        // The door vault ingest uses for the declared-type rows a file format
+        // derives beside its blocks. It routes through the dispatcher above, so
+        // those tables keep exactly one writer.
+        injector.provide::<dyn holon_core::file_format::TypedRowSink>(Provider::root_async(
+            |r| async move {
+                Arc::new(crate::core::typed_row_sink::DispatchingTypedRowSink::new(r))
+                    as Arc<dyn holon_core::file_format::TypedRowSink>
+            },
+        ));
         Ok(())
     }
 }

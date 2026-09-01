@@ -35,6 +35,52 @@ pub struct FileFormatParseResult {
     /// the next write — the controller uses this hint to decide whether
     /// re-rendering after parse is required to persist freshly assigned IDs.
     pub blocks_needing_ids: Vec<String>,
+    /// Declared-type rows this file owns, beyond its blocks — a `.cook`
+    /// recipe's `recipe` + `ingredient_use` rows. A format that projects only
+    /// blocks emits none.
+    pub typed_rows: Vec<TypedRowSet>,
+}
+
+/// Every row of ONE declared type that ONE file owns.
+///
+/// Re-ingest REPLACES the set: the sink retires each row of `type_name` that
+/// `owner_column` scopes to this file and that this parse no longer produces,
+/// then writes `rows`. Ownership is declared rather than inferred because a
+/// row carries no file-provenance column of its own — the adapter names a
+/// column the type already declares and fills it from the file's identity
+/// (`recipe.source_path`, `ingredient_use.recipe_id`).
+pub struct TypedRowSet {
+    /// A type the registry declares, e.g. `recipe`.
+    pub type_name: String,
+    /// A field of `type_name` whose value ties a row to one source file.
+    pub owner_column: String,
+    /// The value `owner_column` holds for this file. Every `rows` entry must
+    /// carry it, or the row would be written outside the scope its own
+    /// replacement sweeps.
+    pub owner_value: String,
+    /// `create` params per row. `id` is REQUIRED and must be derived from the
+    /// file's CONTENT, not from row position: the replacement above keys on it,
+    /// and anything holding a row's id must still mean the same row after the
+    /// user edits the file somewhere above it.
+    pub rows: Vec<StorageEntity>,
+}
+
+/// Writes an adapter's [`TypedRowSet`]s through the generic entity-operation
+/// path.
+///
+/// Declared elsewhere than the file-sync controller because that controller
+/// sits below the operation dispatcher: the implementation resolves the ONE
+/// shared dispatcher and routes `create`/`delete` through it, so vault ingest
+/// never becomes a second writer of these tables.
+#[async_trait::async_trait]
+pub trait TypedRowSink: Send + Sync {
+    /// Make each set's owned rows be exactly its `rows`.
+    ///
+    /// NOT atomic: retire and write are separate operations, so a failure part
+    /// way leaves the set partly emptied. It is disclosed — the error names the
+    /// type and the caller names the file — and the next ingest of that file
+    /// restores the set.
+    async fn replace_typed_rows(&self, sets: &[TypedRowSet]) -> Result<()>;
 }
 
 /// The ungrounded-drop verdict a write-back guard produces — DATA, distinct

@@ -62,6 +62,7 @@ impl FileFormatAdapter for OrgFormatAdapter {
             document: result.document,
             blocks: result.blocks,
             blocks_needing_ids: result.headlines_needing_ids,
+            typed_rows: Vec::new(),
         })
     }
 

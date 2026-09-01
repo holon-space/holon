@@ -119,12 +119,20 @@ impl FileFormatAdapter for CookFormatAdapter {
             }
         }
 
+        let typed_rows = crate::rows::recipe_row_sets(
+            &recipe,
+            &rel.to_string_lossy(),
+            &document.content,
+            document.get_property_str("course"),
+        )?;
+
         Ok(FileFormatParseResult {
             document,
             blocks,
             // Nothing is written back, so no block needs an id minted for
             // re-rendering.
             blocks_needing_ids: Vec::new(),
+            typed_rows,
         })
     }
 

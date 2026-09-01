@@ -5531,6 +5531,7 @@ dependencies = [
  "holon-engine",
  "holon-filesystem",
  "holon-frontend",
+ "holon-kitchen",
  "holon-layout-testing",
  "holon-logseq-db",
  "holon-loro",

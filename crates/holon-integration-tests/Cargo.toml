@@ -29,6 +29,7 @@ test-infra = [
     "dep:holon-profiles",
     "dep:holon-turso",
     "dep:holon-filesystem",
+    "dep:holon-kitchen",
     "dep:holon-loro",
     "dep:holon-sharing",
     "dep:holon-api",
@@ -113,6 +114,7 @@ holon-core = { workspace = true, optional = true }
 holon-profiles = { workspace = true, optional = true }
 holon-turso = { workspace = true, optional = true }
 holon-filesystem = { workspace = true, optional = true }
+holon-kitchen = { workspace = true, optional = true }
 holon-loro = { workspace = true, optional = true }
 # True sharing: the sans-IO acceptor + `sync_once` the two-instance slice drives.
 holon-sharing = { workspace = true, optional = true }

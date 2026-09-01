@@ -2702,7 +2702,7 @@ impl OperationEngine for DispatchingOperationEngine {
 
         let mut result = self
             .dispatcher
-            .execute_operation_with_input(entity_name, op_name, params, input)
+            .execute_operation_with_provenance(entity_name, op_name, params, input, origin.clone())
             .await
             .map_err(|e| {
                 anyhow::anyhow!("Operation '{op_name}' on entity '{entity_name}' failed: {e}")

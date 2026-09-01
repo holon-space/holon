@@ -527,6 +527,14 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     .optional_resolve_async::<dyn holon_filesystem::MountRegistry>()
                     .await;
 
+                // Writer for the declared-type rows a format derives from a
+                // file. Absent in the no-Turso / org-standalone containers,
+                // where no registered format emits any — a format that does
+                // then refuses to ingest rather than dropping them.
+                let typed_row_sink = resolver
+                    .optional_resolve_async::<dyn holon_core::file_format::TypedRowSink>()
+                    .await;
+
                 let idle_signal_weak = std::sync::Arc::downgrade(&idle_signal);
 
                 // Keep an authoritative-read handle for the feed resolver BEFORE
@@ -561,6 +569,9 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 }
                 if let Some(registry) = mount_registry {
                     controller = controller.with_mount_registry(registry);
+                }
+                if let Some(sink) = typed_row_sink {
+                    controller = controller.with_typed_row_sink(sink);
                 }
                 // Shared-subtree materialization gaps are disclosed from the
                 // WRITE-BACK path inside the controller — it is the only layer

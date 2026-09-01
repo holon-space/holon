@@ -49,6 +49,8 @@ pub use entity_cache::EntityCache;
 pub use file_format::FileFormatAdapter;
 pub use file_format::FileFormatParseResult;
 pub use file_format::FormatRegistry;
+pub use file_format::TypedRowSet;
+pub use file_format::TypedRowSink;
 pub use file_format::WriteTier;
 pub use publish_errors::PublishErrorTracker;
 pub use sink_reader::SinkReader;

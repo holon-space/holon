@@ -10,6 +10,7 @@ pub mod task_keyword_cycle;
 pub mod task_keyword_promotion;
 pub mod traits;
 pub mod type_declaration;
+pub mod typed_row_sink;
 
 // Re-export DynamicEntity from holon_api (single source of truth)
 pub use holon_api::DynamicEntity;

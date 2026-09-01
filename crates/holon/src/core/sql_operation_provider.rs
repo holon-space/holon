@@ -1687,6 +1687,11 @@ impl SqlOperationProvider {
         // is corrupt state, not a recoverable condition.
         let mut visited: HashSet<String> = HashSet::new();
         visited.insert(id.to_string());
+        // A type that declares no `parent_id` has no descendants to cascade to;
+        // walking for them would query a column its table does not have.
+        if !self.write_schema.is_column("parent_id") {
+            queue.clear();
+        }
         while let Some(parent) = queue.pop() {
             let children_sql = format!(
                 "SELECT id FROM {} WHERE parent_id = '{}'",
@@ -2626,6 +2631,13 @@ impl SqlOperationProvider {
     /// cascade). A leaf (no children) delete is identity-invertible; a subtree
     /// delete is declared irreversible for now (see the `delete` arm).
     async fn has_children(&self, id: &str) -> Result<bool> {
+        // A type that declares no `parent_id` has no child relation at all, so
+        // no delete of it can cascade. Asking anyway is a SQL parse error on
+        // the missing column, which surfaces as a failed delete of a perfectly
+        // ordinary free-standing row.
+        if !self.write_schema.is_column("parent_id") {
+            return Ok(false);
+        }
         let sql = format!(
             "SELECT 1 FROM {table} WHERE parent_id = '{id}' LIMIT 1",
             table = self.table_name,

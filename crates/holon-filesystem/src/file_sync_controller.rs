@@ -35,6 +35,7 @@ use holon_core::DownstreamProjection;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FormatRegistry;
+use holon_core::file_format::TypedRowSink;
 use holon_core::file_format::WriteTier;
 use holon_core::file_format::WritebackDropVerdict;
 use holon_core::fractional_index::default_sort_key;
@@ -651,6 +652,12 @@ pub struct FileSyncController {
     /// misaligned blocks into the position recorded in the org file.
     ordering: Arc<dyn BlockOrdering>,
 
+    /// Writer for the declared-type rows an adapter derives from a file
+    /// (`recipe`, `ingredient_use`). Absent in wirings below the operation
+    /// dispatcher; a parse that emits rows with no sink is then a loud refusal,
+    /// never a silent drop.
+    typed_row_sink: Option<Arc<dyn TypedRowSink>>,
+
     /// Downstream convergent feed (consolidator → SQL sink). Present when a
     /// separate consolidator owns block storage; `None` when the SQL store
     /// itself is the consolidator (degraded mode). After sending create /
@@ -879,6 +886,7 @@ impl FileSyncController {
             image_data: None,
             formats,
             ordering,
+            typed_row_sink: None,
             downstream: None,
             fs,
             holder: HashMap::new(),
@@ -1162,6 +1170,13 @@ impl FileSyncController {
     /// but raises no user-visible banner.
     pub fn with_writeback_disclosure(mut self, disclosure: Arc<dyn WritebackDisclosure>) -> Self {
         self.writeback_disclosure = Some(disclosure);
+        self
+    }
+
+    /// Wire the declared-type row writer. Without it a format that emits
+    /// typed rows cannot ingest at all — see `apply_typed_rows`.
+    pub fn with_typed_row_sink(mut self, sink: Arc<dyn TypedRowSink>) -> Self {
+        self.typed_row_sink = Some(sink);
         self
     }
 
@@ -3003,6 +3018,25 @@ impl FileSyncController {
         let mut doc = document;
         if ingest_adapter.sync_document_metadata(&new_parse.document, &mut doc) {
             self.doc_manager.update_metadata(&doc).await?;
+        }
+
+        // Declared-type rows this format derives from the file, beside its
+        // blocks (a `.cook` recipe's `recipe` + `ingredient_use` rows). The
+        // sink REPLACES each set, so a re-save lands the same rows and an
+        // ingredient the cook deleted does not survive as an orphan.
+        if !new_parse.typed_rows.is_empty() {
+            let sink = self.typed_row_sink.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} parses to {} declared-type row set(s), but this wiring registered no \
+                     TypedRowSink — the rows would vanish and every query over them would answer \
+                     as if the file were empty",
+                    path.display(),
+                    new_parse.typed_rows.len(),
+                )
+            })?;
+            sink.replace_typed_rows(&new_parse.typed_rows)
+                .await
+                .with_context(|| format!("write the declared-type rows of {}", path.display()))?;
         }
 
         let mut new_blocks_vec = new_parse.blocks;
