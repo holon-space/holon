@@ -459,7 +459,7 @@ pub(crate) async fn dependent_views_on_conn(
     conn: &turso::Connection,
     view_name: &str,
 ) -> Result<Vec<String>> {
-    let rows = crate::turso::TursoBackend::handle_query(
+    let rows = crate::turso::TursoBackend::query_rows(
         conn,
         "SELECT name, sql FROM sqlite_master WHERE type='view'",
         HashMap::new(),
@@ -492,8 +492,7 @@ pub(crate) async fn cleanup_orphaned_dbsp_state_on_conn(
         "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE \
          '__turso_internal_dbsp_state_v%_{view_name}'"
     );
-    let residual =
-        crate::turso::TursoBackend::handle_query(conn, &check_sql, HashMap::new()).await?;
+    let residual = crate::turso::TursoBackend::query_rows(conn, &check_sql, HashMap::new()).await?;
     for row in residual {
         if let Some(Value::String(table_name)) = row.get("name") {
             tracing::warn!(

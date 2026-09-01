@@ -12,8 +12,10 @@
 //! uniformly regardless of source language (PRQL, SQL, GQL).
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use holon_core::storage::Resource;
+use sqlparser::ast::AlterTableOperation;
 use sqlparser::ast::Cte;
 use sqlparser::ast::Expr;
 use sqlparser::ast::FunctionArg;
@@ -38,6 +40,8 @@ use sqlparser::dialect::SQLiteDialect;
 use sqlparser::parser::Parser;
 pub use sqlparser::parser::ParserError;
 
+use crate::schema_catalog::SchemaCatalog;
+
 // =============================================================================
 // Parse / render boundary
 // =============================================================================
@@ -53,6 +57,80 @@ pub fn sql_to_string(stmts: &[Statement]) -> String {
         .map(|s| s.to_string())
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+// =============================================================================
+// DDL recognition
+// =============================================================================
+
+/// Whether a statement is DDL — it can change what a relation's columns are.
+///
+/// A keyword scan rather than a parse: this runs on every statement the actor
+/// executes, and the statements that are NOT DDL are the hot ones.
+pub fn is_ddl_statement(sql: &str) -> bool {
+    let mut rest = sql.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("--") {
+            rest = after.split_once('\n').map(|(_, tail)| tail).unwrap_or("");
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = after.split_once("*/").map(|(_, tail)| tail).unwrap_or("");
+        } else {
+            break;
+        }
+        rest = rest.trim_start();
+    }
+    let keyword: String = rest
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    matches!(keyword.as_str(), "CREATE" | "DROP" | "ALTER")
+}
+
+/// The relations a DDL statement can have created, reshaped or removed.
+///
+/// `None` means the statement's footprint cannot be read — an unparseable
+/// statement, or a DDL form this function does not enumerate. The caller must
+/// then re-derive the whole schema rather than assume nothing changed.
+pub fn ddl_touched_relations(sql: &str) -> Option<Vec<String>> {
+    let stmts = match parse_sql(sql) {
+        Ok(stmts) => stmts,
+        Err(e) => {
+            let preview: String = sql.chars().take(120).collect();
+            tracing::debug!(
+                error = %e,
+                sql = %preview,
+                "[SchemaCatalog] DDL did not parse; its footprint is unknown, so the whole \
+                 schema is re-derived"
+            );
+            return None;
+        }
+    };
+    let mut names = Vec::new();
+    for stmt in &stmts {
+        match stmt {
+            Statement::CreateTable(ct) => names.push(normalize_table_name(&ct.name.to_string())),
+            Statement::CreateView(cv) => names.push(normalize_table_name(&cv.name.to_string())),
+            Statement::CreateVirtualTable { name, .. } => {
+                names.push(normalize_table_name(&name.to_string()))
+            }
+            Statement::AlterTable(alter) => {
+                names.push(normalize_table_name(&alter.name.to_string()));
+                for op in &alter.operations {
+                    if let AlterTableOperation::RenameTable { table_name } = op {
+                        names.push(normalize_table_name(&table_name.to_string()));
+                    }
+                }
+            }
+            Statement::Drop { names: dropped, .. } => {
+                names.extend(dropped.iter().map(|n| normalize_table_name(&n.to_string())));
+            }
+            // An index changes no relation's column set.
+            Statement::CreateIndex(_) => {}
+            _ => return None,
+        }
+    }
+    Some(names)
 }
 
 // =============================================================================
@@ -414,7 +492,7 @@ fn resolve_query_table_inner(
 // Internal helpers (unchanged)
 // =============================================================================
 
-fn normalize_table_name(name: &str) -> String {
+pub(crate) fn normalize_table_name(name: &str) -> String {
     name.trim()
         .trim_matches('"')
         .trim_matches('\'')
@@ -697,7 +775,18 @@ pub trait SqlTransformer: Send + Sync {
 /// For SELECTs with explicit column lists, adds `table._change_origin` as a
 /// qualified column reference. For `SELECT *`, skips (already included).
 /// Idempotent.
-pub struct ChangeOriginInjector;
+pub struct ChangeOriginInjector {
+    schema: Arc<SchemaCatalog>,
+}
+
+impl ChangeOriginInjector {
+    /// Takes the catalog of what the database's relations actually declare —
+    /// the only thing that can tell a table carrying `_change_origin` from one
+    /// that does not.
+    pub fn new(schema: Arc<SchemaCatalog>) -> Self {
+        Self { schema }
+    }
+}
 
 impl SqlTransformer for ChangeOriginInjector {
     fn name(&self) -> &'static str {
@@ -707,7 +796,7 @@ impl SqlTransformer for ChangeOriginInjector {
         20
     }
     fn transform(&self, stmts: &mut Vec<Statement>) {
-        inject_change_origin(stmts);
+        inject_change_origin(stmts, self.schema.as_ref());
     }
 }
 
@@ -750,29 +839,13 @@ pub fn apply_sql_transforms(sql: &str, transformers: &[Box<dyn SqlTransformer>])
 // _change_origin injection
 // =============================================================================
 
-/// Tables known to have the `_change_origin` column.
-/// Only base tables managed by Holon's Entity system have this column.
-/// Materialized views, CTEs, and other derived tables do not.
-const TABLES_WITH_CHANGE_ORIGIN: &[&str] = &[
-    "block",
-    "file",
-    "operation",
-    "todoist_task",
-    "todoist_project",
-];
-
-fn has_change_origin_column(table_name: &str) -> bool {
-    TABLES_WITH_CHANGE_ORIGIN
-        .iter()
-        .any(|t| t.eq_ignore_ascii_case(table_name))
-}
-
 /// Inject `table._change_origin` into every SELECT projection.
 ///
 /// For `SELECT *`, skips (already included). For explicit columns, adds
 /// `table._change_origin` as a qualified column reference. Idempotent.
-/// Only injects for base tables known to have the `_change_origin` column.
-fn inject_change_origin(stmts: &mut [Statement]) {
+/// Only injects where the schema says the resolved relation declares the
+/// column.
+fn inject_change_origin(stmts: &mut [Statement], schema: &SchemaCatalog) {
     for stmt in stmts.iter_mut() {
         if let Statement::Query(query) = stmt {
             let mut cte_names = HashSet::new();
@@ -786,15 +859,19 @@ fn inject_change_origin(stmts: &mut [Statement]) {
             // counts
             if !is_recursive && let Some(with) = &mut query.with {
                 for cte in &mut with.cte_tables {
-                    inject_change_origin_into_query(&mut cte.query, &cte_names);
+                    inject_change_origin_into_query(&mut cte.query, &cte_names, schema);
                 }
             }
-            inject_change_origin_into_set_expr(&mut query.body, &cte_names);
+            inject_change_origin_into_set_expr(&mut query.body, &cte_names, schema);
         }
     }
 }
 
-fn inject_change_origin_into_query(query: &mut Query, cte_names: &HashSet<String>) {
+fn inject_change_origin_into_query(
+    query: &mut Query,
+    cte_names: &HashSet<String>,
+    schema: &SchemaCatalog,
+) {
     let mut all_cte_names = cte_names.clone();
     if let Some(with) = &query.with {
         for cte in &with.cte_tables {
@@ -803,13 +880,17 @@ fn inject_change_origin_into_query(query: &mut Query, cte_names: &HashSet<String
     }
     if let Some(with) = &mut query.with {
         for cte in &mut with.cte_tables {
-            inject_change_origin_into_query(&mut cte.query, &all_cte_names);
+            inject_change_origin_into_query(&mut cte.query, &all_cte_names, schema);
         }
     }
-    inject_change_origin_into_set_expr(&mut query.body, &all_cte_names);
+    inject_change_origin_into_set_expr(&mut query.body, &all_cte_names, schema);
 }
 
-fn inject_change_origin_into_set_expr(set_expr: &mut SetExpr, cte_names: &HashSet<String>) {
+fn inject_change_origin_into_set_expr(
+    set_expr: &mut SetExpr,
+    cte_names: &HashSet<String>,
+    schema: &SchemaCatalog,
+) {
     match set_expr {
         SetExpr::Select(select) => {
             // Skip if already has _change_origin or if projection is SELECT *
@@ -822,7 +903,7 @@ fn inject_change_origin_into_set_expr(set_expr: &mut SetExpr, cte_names: &HashSe
             // use that table's alias, not the first FROM alias.
             let (real_name, table_ref) = get_change_origin_table_and_alias(select, cte_names);
             if let Some(ref name) = real_name
-                && !has_change_origin_column(name)
+                && !schema.declares_column(name, holon_api::CHANGE_ORIGIN_COLUMN)
             {
                 return;
             }
@@ -837,11 +918,11 @@ fn inject_change_origin_into_set_expr(set_expr: &mut SetExpr, cte_names: &HashSe
             }
         }
         SetExpr::SetOperation { left, right, .. } => {
-            inject_change_origin_into_set_expr(left, cte_names);
-            inject_change_origin_into_set_expr(right, cte_names);
+            inject_change_origin_into_set_expr(left, cte_names, schema);
+            inject_change_origin_into_set_expr(right, cte_names, schema);
         }
         SetExpr::Query(query) => {
-            inject_change_origin_into_query(query, cte_names);
+            inject_change_origin_into_query(query, cte_names, schema);
         }
         _ => {}
     }
@@ -1334,10 +1415,25 @@ mod tests {
     // _change_origin injection tests
     // =========================================================================
 
+    /// The relations these tests talk about, each holding the columns the
+    /// engine would report for it. `block_with_path` and `current_focus` are
+    /// the shapes that carry no origin column.
+    fn schema_fixture() -> SchemaCatalog {
+        let catalog = SchemaCatalog::new();
+        catalog.set_columns("block", BLOCK_COLUMNS.map(str::to_string));
+        catalog.set_columns("file", ["id", "path", "_change_origin"].map(str::to_string));
+        catalog.set_columns(
+            "block_with_path",
+            ["id", "content", "path"].map(str::to_string),
+        );
+        catalog.set_columns("current_focus", ["block_id"].map(str::to_string));
+        catalog
+    }
+
     #[test]
     fn test_change_origin_explicit_cols() {
         let mut stmts = parse("SELECT id, content FROM block");
-        inject_change_origin(&mut stmts);
+        inject_change_origin(&mut stmts, &schema_fixture());
         let sql = sql_to_string(&stmts);
         assert!(
             sql.contains("block._change_origin"),
@@ -1348,7 +1444,7 @@ mod tests {
     #[test]
     fn test_change_origin_skips_wildcard() {
         let mut stmts = parse("SELECT * FROM block");
-        inject_change_origin(&mut stmts);
+        inject_change_origin(&mut stmts, &schema_fixture());
         let sql = sql_to_string(&stmts);
         assert!(
             !sql.contains("block._change_origin"),
@@ -1359,7 +1455,7 @@ mod tests {
     #[test]
     fn test_change_origin_idempotent() {
         let mut stmts = parse("SELECT id, block._change_origin AS _change_origin FROM block");
-        inject_change_origin(&mut stmts);
+        inject_change_origin(&mut stmts, &schema_fixture());
         let sql = sql_to_string(&stmts);
         let count = sql.matches("_change_origin").count();
         assert_eq!(count, 2, "should not duplicate _change_origin: {sql}");
@@ -1368,7 +1464,7 @@ mod tests {
     #[test]
     fn test_change_origin_union() {
         let mut stmts = parse("SELECT id FROM block UNION ALL SELECT id FROM file");
-        inject_change_origin(&mut stmts);
+        inject_change_origin(&mut stmts, &schema_fixture());
         let sql = sql_to_string(&stmts);
         assert!(sql.contains("block._change_origin"), "block branch: {sql}");
         assert!(sql.contains("file._change_origin"), "file branch: {sql}");
@@ -1377,7 +1473,7 @@ mod tests {
     #[test]
     fn test_change_origin_skips_matview() {
         let mut stmts = parse("SELECT id, content FROM block_with_path WHERE path LIKE '/abc%'");
-        inject_change_origin(&mut stmts);
+        inject_change_origin(&mut stmts, &schema_fixture());
         let sql = sql_to_string(&stmts);
         assert!(
             !sql.contains("_change_origin"),
@@ -1395,7 +1491,7 @@ mod tests {
              _v0 JOIN block AS _v2 ON _v0.block_id = _v2.parent_id JOIN block AS _v4 ON _v4.id = \
              _v2.id",
         );
-        inject_change_origin(&mut stmts);
+        inject_change_origin(&mut stmts, &schema_fixture());
         let sql = sql_to_string(&stmts);
         assert!(
             sql.contains("_v4._change_origin"),
@@ -1411,7 +1507,7 @@ mod tests {
     fn test_change_origin_uses_alias() {
         let mut stmts =
             parse("SELECT _v0.id AS \"b.id\", _v0.content AS \"b.content\" FROM block AS _v0");
-        inject_change_origin(&mut stmts);
+        inject_change_origin(&mut stmts, &schema_fixture());
         let sql = sql_to_string(&stmts);
         assert!(
             sql.contains("_v0._change_origin"),
@@ -1494,13 +1590,27 @@ mod tests {
         assert!(lower.contains("_branch_0"), "should add branch CTEs: {sql}");
     }
 
+    /// A catalog holding just the relations one test talks about, each with
+    /// the columns the engine would report for it.
+    fn catalog_from(relations: &[(&str, &[&str])]) -> Arc<SchemaCatalog> {
+        let catalog = SchemaCatalog::new();
+        for (relation, columns) in relations {
+            catalog.set_columns(*relation, columns.iter().map(|c| c.to_string()));
+        }
+        Arc::new(catalog)
+    }
+
+    const BLOCK_COLUMNS: [&str; 4] = ["id", "content", "parent_id", "_change_origin"];
+
     // =========================================================================
     // apply_sql_transforms integration test
     // =========================================================================
 
     #[test]
     fn test_apply_sql_transforms_chains_all() {
-        let transformers: Vec<Box<dyn SqlTransformer>> = vec![Box::new(ChangeOriginInjector)];
+        let transformers: Vec<Box<dyn SqlTransformer>> = vec![Box::new(ChangeOriginInjector::new(
+            catalog_from(&[("block", &BLOCK_COLUMNS)]),
+        ))];
         let result = apply_sql_transforms("SELECT id FROM block", &transformers);
         assert!(
             result.contains("_change_origin"),
@@ -1513,7 +1623,11 @@ mod tests {
         // End-to-end: GQL-compiled SQL through both EntityNameInjector and
         // ChangeOriginInjector. Both should resolve to the block table (via
         // dominant qualifier), not the matview.
-        let transformers: Vec<Box<dyn SqlTransformer>> = vec![Box::new(ChangeOriginInjector)];
+        let transformers: Vec<Box<dyn SqlTransformer>> =
+            vec![Box::new(ChangeOriginInjector::new(catalog_from(&[
+                ("block", &BLOCK_COLUMNS),
+                ("current_focus", &["block_id"]),
+            ])))];
         let sql = "SELECT _v4.\"id\" AS \"id\", _v4.\"content\" AS \"content\" FROM current_focus \
                    AS _v0 JOIN block AS _v2 ON _v0.block_id = _v2.parent_id JOIN block AS _v4 ON \
                    _v4.id = _v2.id";
@@ -1538,5 +1652,42 @@ mod tests {
         let bad_sql = "NOT VALID SQL AT ALL";
         let result = apply_sql_transforms(bad_sql, &transformers);
         assert_eq!(result, bad_sql);
+    }
+
+    // =========================================================================
+    // D67.a: the column question is answered by the schema, not by a list
+    // =========================================================================
+
+    /// A table that declares `_change_origin` gets it injected even though no
+    /// list ever named it. Any type declared at runtime is such a table.
+    #[test]
+    fn a_declared_change_origin_column_is_injected_for_a_table_no_list_names() {
+        let transformers: Vec<Box<dyn SqlTransformer>> = vec![Box::new(ChangeOriginInjector::new(
+            catalog_from(&[("recipe", &["id", "title", "_change_origin"])]),
+        ))];
+
+        let result = apply_sql_transforms("SELECT id FROM recipe", &transformers);
+
+        assert!(
+            result.contains("recipe._change_origin"),
+            "a relation the engine reports with _change_origin must have it projected: {result}"
+        );
+    }
+
+    /// A table WITHOUT the column is never assumed to have it — the red that
+    /// row 18 of the holon-crate reds recorded, where a fixture stood up a
+    /// listed table with a narrower shape.
+    #[test]
+    fn a_table_without_the_column_is_not_assumed_to_have_it() {
+        let transformers: Vec<Box<dyn SqlTransformer>> = vec![Box::new(ChangeOriginInjector::new(
+            catalog_from(&[("todoist_task", &["id", "content"])]),
+        ))];
+
+        let result = apply_sql_transforms("SELECT id FROM todoist_task", &transformers);
+
+        assert!(
+            !result.contains("_change_origin"),
+            "a relation the engine reports without _change_origin must not have one projected: {result}"
+        );
     }
 }

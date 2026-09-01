@@ -75,6 +75,7 @@ use crate::matview_lease::LeaseGrant;
 use crate::matview_lease::MatviewStats;
 use crate::matview_lease::ViewState;
 use crate::matview_lease::ViewWaiter;
+use crate::schema_catalog::SchemaCatalog;
 use crate::sql_parser::extract_created_tables;
 use crate::sql_parser::extract_table_refs;
 use crate::sql_parser::parse_sql;
@@ -286,10 +287,13 @@ struct ActorState {
     generation: u64,
     next_lease_id: u64,
     matview_stats: Arc<MatviewStats>,
+    /// What every relation created through this actor declares. Recorded from
+    /// the DDL itself, so a column question never has to consult a list.
+    schema_catalog: Arc<SchemaCatalog>,
 }
 
 impl ActorState {
-    fn new(matview_stats: Arc<MatviewStats>) -> Self {
+    fn new(matview_stats: Arc<MatviewStats>, schema_catalog: Arc<SchemaCatalog>) -> Self {
         Self {
             phase: DatabasePhase::SchemaInit,
             pending_ddl: VecDeque::new(),
@@ -299,6 +303,7 @@ impl ActorState {
             generation: 0,
             next_lease_id: 1,
             matview_stats,
+            schema_catalog,
         }
     }
 
@@ -775,9 +780,18 @@ pub struct DbHandle {
     /// Matview lease counters, republished by the actor after every lease
     /// mutation so a reader never has to queue behind the command stream.
     matview_stats: Arc<MatviewStats>,
+    /// The column vocabulary of every relation this handle's actor created.
+    /// Shared with the actor, which records each executed DDL into it.
+    schema_catalog: Arc<SchemaCatalog>,
 }
 
 impl DbHandle {
+    /// What the relations in this database declare — the authority a SQL
+    /// rewriter asks instead of assuming a table's columns.
+    pub fn schema_catalog(&self) -> Arc<SchemaCatalog> {
+        self.schema_catalog.clone()
+    }
+
     /// Execute a query (SELECT) with named parameters and return results
     // 120 chars is NOT enough to tell Holon's block queries apart: the
     // full-table hydrating scan, the doc-scoped CTE and the single-block point
@@ -1869,6 +1883,9 @@ pub struct TursoBackend {
     cdc_seq: Arc<std::sync::atomic::AtomicU64>,
     /// Matview lease counters, written by the actor and read via `DbHandle`.
     matview_stats: Arc<MatviewStats>,
+    /// What every relation created through this backend declares, handed to
+    /// each `DbHandle` so a SQL rewriter can ask the schema.
+    schema_catalog: Arc<SchemaCatalog>,
 }
 
 impl std::fmt::Debug for TursoBackend {
@@ -2084,6 +2101,8 @@ impl TursoBackend {
         let actor_stats_for_actor = actor_stats.clone();
         let matview_stats = Arc::new(MatviewStats::default());
         let matview_stats_for_actor = matview_stats.clone();
+        let schema_catalog = Arc::new(SchemaCatalog::new());
+        let schema_catalog_for_actor = schema_catalog.clone();
         if let (Some(stats), Some(interval)) = (
             actor_stats.clone(),
             crate::turso_actor_stats::enabled_interval(),
@@ -2101,6 +2120,7 @@ impl TursoBackend {
             cdc_broadcast_for_actor,
             actor_stats_for_actor,
             matview_stats_for_actor,
+            schema_catalog_for_actor,
         ));
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         wasm_bindgen_futures::spawn_local(Self::run_actor(
@@ -2109,6 +2129,7 @@ impl TursoBackend {
             cdc_broadcast_for_actor,
             actor_stats_for_actor,
             matview_stats_for_actor,
+            schema_catalog_for_actor,
         ));
 
         tracing::info!(
@@ -2122,12 +2143,14 @@ impl TursoBackend {
             tx: tx.clone(),
             cdc_seq: cdc_seq.clone(),
             matview_stats: matview_stats.clone(),
+            schema_catalog: schema_catalog.clone(),
         };
         let handle = DbHandle {
             tx,
             cdc_broadcast,
             cdc_seq,
             matview_stats,
+            schema_catalog,
         };
 
         Ok((backend, handle))
@@ -2149,6 +2172,7 @@ impl TursoBackend {
             cdc_broadcast: self.cdc_broadcast.clone(),
             cdc_seq: self.cdc_seq.clone(),
             matview_stats: self.matview_stats.clone(),
+            schema_catalog: self.schema_catalog.clone(),
         }
     }
 
@@ -2531,10 +2555,17 @@ impl TursoBackend {
         cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
         actor_stats: Option<Arc<crate::turso_actor_stats::ActorStats>>,
         matview_stats: Arc<MatviewStats>,
+        schema_catalog: Arc<SchemaCatalog>,
     ) {
         tracing::info!("[TursoBackend::Actor] Starting actor loop");
 
-        let mut state = ActorState::new(matview_stats);
+        let mut state = ActorState::new(matview_stats, schema_catalog);
+
+        // A database that already holds its schema runs no CREATE on this boot
+        // — `CREATE TABLE IF NOT EXISTS` is a no-op and the view reconciler
+        // skips an unchanged matview outright — so the catalog starts from what
+        // the engine already reports. Every later DDL keeps it current.
+        Self::resync_whole_catalog(&conn, &state.schema_catalog).await;
 
         while let Some(cmd) = rx.recv().await {
             let stats_meta = actor_stats.as_ref().map(|_| {
@@ -2615,7 +2646,7 @@ impl TursoBackend {
             } => {
                 trace_sql_named("actor_query", &sql, &params);
                 let result = match Self::screen_replace_statement(conn, &sql, None).await {
-                    Ok(()) => Self::handle_query(conn, &sql, params).await,
+                    Ok(()) => Self::handle_query(conn, &state.schema_catalog, &sql, params).await,
                     Err(e) => Err(e),
                 };
                 let _ = response.send(result);
@@ -2628,7 +2659,10 @@ impl TursoBackend {
             } => {
                 trace_sql_positional("actor_query", &sql, &params);
                 let result = match Self::screen_replace_statement(conn, &sql, None).await {
-                    Ok(()) => Self::handle_query_positional(conn, &sql, params).await,
+                    Ok(()) => {
+                        Self::handle_query_positional(conn, &state.schema_catalog, &sql, params)
+                            .await
+                    }
                     Err(e) => Err(e),
                 };
                 let _ = response.send(result);
@@ -2641,7 +2675,7 @@ impl TursoBackend {
             } => {
                 trace_sql_positional("actor_exec", &sql, &params);
                 let result = match Self::screen_replace_statement(conn, &sql, None).await {
-                    Ok(()) => Self::handle_execute(conn, &sql, params).await,
+                    Ok(()) => Self::handle_execute(conn, &state.schema_catalog, &sql, params).await,
                     Err(e) => Err(e),
                 };
                 let _ = response.send(result);
@@ -2653,18 +2687,18 @@ impl TursoBackend {
                 response,
             } => {
                 trace_sql_positional("actor_exec_unscreened", &sql, &params);
-                let result = Self::handle_execute(conn, &sql, params).await;
+                let result = Self::handle_execute(conn, &state.schema_catalog, &sql, params).await;
                 let _ = response.send(result);
             }
 
             DbCommand::ExecuteDdlUnscreened { sql, response } => {
-                let result = Self::handle_ddl(conn, &sql).await;
+                let result = Self::handle_ddl(conn, &state.schema_catalog, &sql).await;
                 let _ = response.send(result);
             }
 
             DbCommand::ExecuteDdl { sql, response } => {
                 let result = match Self::screen_conflict_replace_ddl(&sql) {
-                    Ok(()) => Self::handle_ddl(conn, &sql).await,
+                    Ok(()) => Self::handle_ddl(conn, &state.schema_catalog, &sql).await,
                     Err(e) => Err(e),
                 };
                 if result.is_ok()
@@ -2746,7 +2780,9 @@ impl TursoBackend {
                     }
                 }
                 let result = match screened {
-                    Ok(()) => Self::handle_transaction(conn, statements).await,
+                    Ok(()) => {
+                        Self::handle_transaction(conn, &state.schema_catalog, statements).await
+                    }
                     Err(e) => Err(e),
                 };
                 let _ = response.send(result);
@@ -2857,7 +2893,22 @@ impl TursoBackend {
     }
 
     /// Handle a query command
+    /// Run one statement for a caller and note what it did to the schema
+    /// before that caller is answered.
     pub(crate) async fn handle_query(
+        conn: &turso::Connection,
+        catalog: &SchemaCatalog,
+        sql: &str,
+        params: HashMap<String, Value>,
+    ) -> Result<Vec<StorageEntity>> {
+        let rows = Self::query_rows(conn, sql, params).await?;
+        Self::note_statement(conn, catalog, sql).await;
+        Ok(rows)
+    }
+
+    /// Read rows without touching the catalog. The actor's own bookkeeping
+    /// reads go here, so noting a statement can never recurse into itself.
+    pub(crate) async fn query_rows(
         conn: &turso::Connection,
         sql: &str,
         params: HashMap<String, Value>,
@@ -2908,6 +2959,7 @@ impl TursoBackend {
     /// Handle a query command with positional parameters
     async fn handle_query_positional(
         conn: &turso::Connection,
+        catalog: &SchemaCatalog,
         sql: &str,
         params: Vec<turso::Value>,
     ) -> Result<Vec<StorageEntity>> {
@@ -2948,12 +3000,14 @@ impl TursoBackend {
             results.push(entity);
         }
 
+        Self::note_statement(conn, catalog, sql).await;
         Ok(results)
     }
 
     /// Handle an execute command
     async fn handle_execute(
         conn: &turso::Connection,
+        catalog: &SchemaCatalog,
         sql: &str,
         params: Vec<turso::Value>,
     ) -> Result<u64> {
@@ -2965,6 +3019,7 @@ impl TursoBackend {
             StorageError::DatabaseError(format!("Failed to execute statement: {}", e))
         })?;
 
+        Self::note_statement(conn, catalog, sql).await;
         Ok(rows_affected)
     }
 
@@ -3081,7 +3136,114 @@ impl TursoBackend {
     }
 
     /// Handle a DDL command
-    pub(crate) async fn handle_ddl(conn: &turso::Connection, sql: &str) -> Result<()> {
+    /// Note what one executed statement did to the schema.
+    ///
+    /// THE catalog funnel: every statement the actor runs passes through one of
+    /// its execution primitives, and each calls this before its caller is
+    /// answered — so a DDL's effect is in the catalog by the time the submitter
+    /// can read it. Keyed on statement kind, not on which `DbHandle` method
+    /// submitted it: the agent-facing `create_table` / `drop_table` helpers
+    /// send their DDL down the query path.
+    async fn note_statement(conn: &turso::Connection, catalog: &SchemaCatalog, sql: &str) {
+        if !crate::sql_parser::is_ddl_statement(sql) {
+            return;
+        }
+        match crate::sql_parser::ddl_touched_relations(sql) {
+            Some(names) => {
+                for name in &names {
+                    Self::refresh_relation(conn, catalog, name).await;
+                }
+            }
+            // The statement's footprint cannot be read, so nothing may be
+            // assumed to have survived it.
+            None => Self::resync_whole_catalog(conn, catalog).await,
+        }
+    }
+
+    /// Re-derive one relation's columns from the engine.
+    ///
+    /// `PRAGMA table_info` answers for tables, views and materialized views
+    /// alike on this fork, so there is one mechanism and no relation kind it
+    /// cannot see. No rows means the engine does not have the relation — which
+    /// a name RENAMEd by the statement just executed also reports, because this
+    /// build does not resolve the new name until the next statement. The
+    /// direction is safe (the relation stays unknown, so nothing is projected
+    /// for it) and no production DDL renames a relation.
+    async fn refresh_relation(conn: &turso::Connection, catalog: &SchemaCatalog, relation: &str) {
+        match Self::column_names_of(conn, relation).await {
+            Ok(columns) if columns.is_empty() => catalog.forget(relation),
+            Ok(columns) => catalog.set_columns(relation, columns),
+            Err(e) => {
+                catalog.forget(relation);
+                tracing::warn!(
+                    relation = %relation,
+                    "[SchemaCatalog] the engine would not describe this relation, so every \
+                     column question about it now answers `no`: {e}"
+                );
+            }
+        }
+    }
+
+    /// Re-derive every relation the engine holds, dropping the ones it no
+    /// longer has.
+    async fn resync_whole_catalog(conn: &turso::Connection, catalog: &SchemaCatalog) {
+        let names = match Self::query_rows(
+            conn,
+            "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+            HashMap::new(),
+        )
+        .await
+        {
+            Ok(rows) => rows
+                .iter()
+                .filter_map(|row| match row.get("name") {
+                    Some(Value::String(name)) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                tracing::error!(
+                    "[SchemaCatalog] cannot list sqlite_master; the catalog keeps the schema it \
+                     last derived and may now be stale: {e}"
+                );
+                return;
+            }
+        };
+
+        let mut fresh = Vec::with_capacity(names.len());
+        for name in &names {
+            match Self::column_names_of(conn, name).await {
+                Ok(columns) if columns.is_empty() => {}
+                Ok(columns) => fresh.push((name.clone(), columns)),
+                Err(e) => tracing::warn!(
+                    relation = %name,
+                    "[SchemaCatalog] the engine would not describe this relation during a full \
+                     resync; it is left out of the catalog: {e}"
+                ),
+            }
+        }
+        catalog.replace_all(fresh);
+    }
+
+    /// The column names the engine reports for one relation.
+    async fn column_names_of(conn: &turso::Connection, relation: &str) -> Result<Vec<String>> {
+        let bare = crate::sql_parser::normalize_table_name(relation);
+        let rows =
+            Self::query_rows(conn, &format!("PRAGMA table_info({bare})"), HashMap::new()).await?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| match row.get("name") {
+                Some(Value::String(name)) => Some(name.clone()),
+                _ => None,
+            })
+            .collect())
+    }
+
+    pub(crate) async fn handle_ddl(
+        conn: &turso::Connection,
+        catalog: &SchemaCatalog,
+        sql: &str,
+    ) -> Result<()> {
         trace_sql("actor_ddl", sql);
         // Latency stage (matview/read-path maintenance): a `CREATE MATERIALIZED
         // VIEW watch_view_*` cold-materializes here on page navigation and can
@@ -3139,6 +3301,8 @@ impl TursoBackend {
             "holon_latency",
         );
         tracing::debug!("[TursoBackend::Actor] DDL completed successfully");
+        Self::note_statement(conn, catalog, sql).await;
+
         Ok(())
     }
 
@@ -3163,6 +3327,7 @@ impl TursoBackend {
     /// Handle a transaction command
     async fn handle_transaction(
         conn: &turso::Connection,
+        catalog: &SchemaCatalog,
         statements: Vec<(String, Vec<turso::Value>)>,
     ) -> Result<()> {
         tracing::trace!(
@@ -3199,7 +3364,7 @@ impl TursoBackend {
         }
 
         // Execute each statement, rolling back on any error
-        let result = Self::execute_statements_in_transaction(conn, statements).await;
+        let result = Self::execute_statements_in_transaction(conn, catalog, statements).await;
 
         if result.is_err() {
             // Rollback on error
@@ -3235,6 +3400,7 @@ impl TursoBackend {
     /// handling)
     async fn execute_statements_in_transaction(
         conn: &turso::Connection,
+        catalog: &SchemaCatalog,
         statements: Vec<(String, Vec<turso::Value>)>,
     ) -> Result<()> {
         for (sql, params) in statements {
@@ -3246,6 +3412,8 @@ impl TursoBackend {
             stmt.execute(params).await.map_err(|e| {
                 StorageError::DatabaseError(format!("Failed to execute statement: {}", e))
             })?;
+
+            Self::note_statement(conn, catalog, &sql).await;
         }
         Ok(())
     }
@@ -3396,7 +3564,7 @@ impl TursoBackend {
             completion,
             ..
         } = op;
-        let result = Self::handle_ddl(conn, &sql).await;
+        let result = Self::handle_ddl(conn, &state.schema_catalog, &sql).await;
 
         if result.is_ok() {
             // Mark provided resources as available
@@ -3688,7 +3856,13 @@ impl TursoBackend {
         let mut doomed = dependents;
         doomed.push(view_name.to_string());
         for name in &doomed {
-            if let Err(e) = Self::handle_ddl(conn, &format!("DROP VIEW IF EXISTS {name}")).await {
+            if let Err(e) = Self::handle_ddl(
+                conn,
+                &state.schema_catalog,
+                &format!("DROP VIEW IF EXISTS {name}"),
+            )
+            .await
+            {
                 tracing::error!(
                     view = %name,
                     "[TursoBackend::Actor] failed to drop an unleased matview; it stays \
@@ -3723,6 +3897,7 @@ impl TursoBackend {
     ) -> Result<usize> {
         let rows = Self::handle_query(
             conn,
+            &state.schema_catalog,
             &format!(
                 "SELECT name FROM sqlite_master WHERE type='view' AND name LIKE '{}%'",
                 crate::matview_manager::WATCH_VIEW_PREFIX
@@ -3736,7 +3911,12 @@ impl TursoBackend {
             let Some(Value::String(name)) = row.get("name") else {
                 continue;
             };
-            Self::handle_ddl(conn, &format!("DROP VIEW IF EXISTS {name}")).await?;
+            Self::handle_ddl(
+                conn,
+                &state.schema_catalog,
+                &format!("DROP VIEW IF EXISTS {name}"),
+            )
+            .await?;
             crate::matview_manager::cleanup_orphaned_dbsp_state_on_conn(conn, name)
                 .await
                 .map_err(|e| {

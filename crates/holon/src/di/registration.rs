@@ -89,9 +89,11 @@ async fn assert_clock_seeded(db_handle: &DbHandle) -> Result<()> {
 }
 
 /// Build the default set of SQL-level transformers (applied after compilation).
-fn build_sql_transformers() -> Vec<Box<dyn SqlTransformer>> {
+fn build_sql_transformers(
+    schema_catalog: Arc<holon_turso::schema_catalog::SchemaCatalog>,
+) -> Vec<Box<dyn SqlTransformer>> {
     let mut transformers: Vec<Box<dyn SqlTransformer>> = vec![
-        Box::new(ChangeOriginInjector),
+        Box::new(ChangeOriginInjector::new(schema_catalog)),
         Box::new(JsonAggregationSqlTransformer),
     ];
     transformers.sort_by_key(|t| t.priority());
@@ -190,7 +192,7 @@ async fn create_initialized_engine(
         db_handle.clone(),
         dispatcher,
         profile_resolver.clone(),
-        build_sql_transformers(),
+        build_sql_transformers(db_handle.schema_catalog()),
         graph_schema_registry,
     )
     .context("Failed to create BackendEngine")?;

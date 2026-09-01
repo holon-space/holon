@@ -25,6 +25,7 @@ pub use backend::*;
 pub use block_table_names::BLOCK_READ_TABLE;
 pub use block_table_names::BLOCK_WRITE_TABLE;
 pub use holon_core::fractional_index::*;
+pub use holon_turso::schema_catalog::SchemaCatalog;
 pub use resource::Resource;
 pub use schema_module::EdgeFieldDescriptor;
 pub use schema_module::SchemaModule;
