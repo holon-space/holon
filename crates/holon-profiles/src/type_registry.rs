@@ -16,8 +16,10 @@ use std::sync::RwLock;
 use anyhow::Context;
 use anyhow::Result;
 use holon_api::ComputedSpec;
+use holon_api::ComputedTier;
 use holon_api::FieldLifetime;
 use holon_api::TypeDefinition;
+use holon_api::computation::FieldKind;
 /// A compiled computed field: name + pre-compiled Rhai AST.
 /// Stored in topological order (dependencies before dependents).
 pub use holon_api::entity_profile::CompiledComputedField;
@@ -174,9 +176,16 @@ impl TypeRegistry {
             if let Some(existing) = type_def.fields.iter_mut().find(|f| f.name == name) {
                 existing.lifetime = FieldLifetime::Computed { spec };
             } else {
+                // The column's SQL type comes from the computation's own result
+                // kind, never a fixed TEXT: the capability check asks what kind
+                // the field PRODUCES, and a column that always claimed TEXT
+                // would answer `string_only` with a "yes" it has not earned.
+                let sql_type = sql_type_for(&spec).map_err(|e| {
+                    anyhow::anyhow!("computed field '{name}' on entity '{entity_name}': {e}")
+                })?;
                 type_def.fields.push(holon_api::FieldSchema {
                     name,
-                    sql_type: "TEXT".to_string(),
+                    sql_type,
                     lifetime: FieldLifetime::Computed { spec },
                     ..Default::default()
                 });
@@ -330,6 +339,33 @@ fn check_computed_types_match_columns(type_def: &TypeDefinition) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The SQL type of the column a computed declaration introduces.
+///
+/// `computed_persisted` is PLANTED as a matview column, so an uninferable
+/// result kind is fatal — the alternative is a column whose declared type is a
+/// guess that the capability check then reads as fact. `computed_live` plants
+/// nothing; its declared type describes no engine artifact, so a Rhai-only
+/// expression (which has no inferable kind at all) keeps the neutral TEXT
+/// rather than failing a registry load over a value nothing reads.
+fn sql_type_for(spec: &ComputedSpec) -> Result<String> {
+    let kind = match spec.result_kind() {
+        Ok(kind) => kind,
+        Err(e) if spec.tier() == ComputedTier::ComputedPersisted => {
+            anyhow::bail!(
+                "declared computed_persisted, so it is planted as a matview column, but its \
+                 result type cannot be inferred: {e}"
+            );
+        }
+        Err(_) => return Ok("TEXT".to_string()),
+    };
+    Ok(match kind {
+        FieldKind::Text => "TEXT",
+        FieldKind::Numeric => "NUMERIC",
+        FieldKind::Boolean => "BOOLEAN",
+    }
+    .to_string())
 }
 
 /// Reorder computed fields in a TypeDefinition so dependencies come before

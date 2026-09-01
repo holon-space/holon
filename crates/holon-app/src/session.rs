@@ -65,7 +65,7 @@ where
     // callers that need a handle — re-resolving it elsewhere (especially
     // synchronously) risks a duplicate engine with its own CDC/matview state
     // and background tasks (see lifecycle.rs TOCTOU note).
-    let (engine, (session, extra)) = holon::di::create_backend_engine_with_extras(
+    let (engine, (session, extra, types)) = holon::di::create_backend_engine_with_extras(
         db_path,
         move |injector| {
             injector.add_frontend(holon_config, session_config, config_dir, locked_keys)?;
@@ -75,10 +75,29 @@ where
         |injector| async move {
             let session = injector.resolve_async::<FrontendSession>().await;
             let extra = extra_resolve(&injector);
-            (session, extra)
+            let types = injector
+                .resolve_async::<holon_profiles::TypeRegistry>()
+                .await;
+            (session, extra, types)
         },
     )
     .await?;
+
+    // CV-E admission over the WHOLE registry (ruling D54.a). The `declare_type`
+    // op is not how bundled types become real — registry seeding is — so
+    // guarding only the op would leave every seeded type unchecked.
+    //
+    // Ordering: this runs before the session and engine handles reach any
+    // caller, and those handles are the only route to dispatching a write, so
+    // no caller-served write can precede it. Write AUTHORITIES are already
+    // registered by this point (`FreeStandingTypeViews` derives them during
+    // engine construction), which is why a refusal here aborts startup rather
+    // than unwinding them — there is no undeclare.
+    let profiles = holon_capability::registry::shipped_profiles()
+        .map_err(|e| anyhow::anyhow!("the shipped capability profiles must parse: {e}"))?;
+    crate::type_admission::sweep_registry(&profiles, &types).map_err(|e| {
+        anyhow::anyhow!("refusing to start: the type registry fails capability admission: {e}")
+    })?;
 
     Ok((session, engine, extra))
 }

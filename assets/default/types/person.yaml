@@ -1,4 +1,8 @@
 name: person
+# The home this type declares against (ruling D54.a). `display_name` is a
+# computed_persisted field, and CV-E admission refuses one whose home nobody
+# stated — so this key is load-bearing, not decoration.
+home: holon-native
 default_lifetime: persistent
 primary_key: id
 graph_label: Person

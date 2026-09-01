@@ -143,7 +143,7 @@ enforced_by:
     - clause: computed_live
       site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type)"
     - clause: computed_persisted
-      site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type; CV-E lands in 2b.6)"
+      site: "crates/holon-app/src/type_admission.rs:33-51 (admits + declare_type_admitted; the admission seat sits in holon-app because a format may not read its own profile)"
     - clause: computed_expression_closure
       site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type)"
 

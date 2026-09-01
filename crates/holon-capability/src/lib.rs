@@ -35,6 +35,7 @@
 pub mod axes;
 pub mod certify;
 pub mod clause;
+pub mod declaration;
 pub mod diff;
 #[cfg(test)]
 pub(crate) mod fixture;
@@ -112,6 +113,11 @@ pub use clause::DeferredClause;
 pub use clause::EnforcementLayer;
 pub use clause::EnforcementMap;
 pub use clause::GapReason;
+pub use declaration::HomeRefusal;
+pub use declaration::HomeSeat;
+pub use declaration::UnknownHome;
+pub use declaration::check_computed_persisted;
+pub use declaration::check_declared_homes_exist;
 pub use diff::CapabilityLoss;
 pub use home::profile_for;
 pub use home::profile_of;

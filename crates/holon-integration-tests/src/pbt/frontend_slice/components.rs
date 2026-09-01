@@ -6393,6 +6393,12 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
                 .map(|c| holon_api::FieldSchema::new(c, "TEXT").nullable()),
         );
         let mut type_def = holon_api::TypeDefinition::new(type_name, fields);
+        // A drawn type is free-standing, so its home is Holon's own storage.
+        // Stated rather than left absent: the admission seat refuses a
+        // `computed_persisted` field whose home nobody named.
+        type_def.home = Some(
+            holon_api::HomeProfileId::parse("holon-native").expect("a well-formed profile id"),
+        );
 
         // The computed fields are parsed against the stored columns' declared
         // types, exactly as `TypeRegistry::add_computed_fields` parses a YAML
@@ -6421,7 +6427,13 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
             });
         }
         let registry = self.injector.resolve::<holon_profiles::TypeRegistry>();
-        holon::core::type_declaration::declare_type(
+        // Through the ADMISSION SEAT, not `declare_type` directly: production
+        // declares types here, and a keystone that reached around the seat
+        // would be a documented bypass of the CV-E check.
+        let profiles = holon_capability::registry::shipped_profiles()
+            .expect("the shipped capability profiles must parse");
+        holon_app::type_admission::declare_type_admitted(
+            &profiles,
             &type_def,
             self.engine.db_handle(),
             &registry,

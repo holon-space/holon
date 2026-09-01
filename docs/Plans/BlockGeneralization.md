@@ -109,15 +109,109 @@ Follow-on rulings that bind open work:
     `stage_evaluated` is empty. Spawning it would be a worker over an empty
     field set. It becomes production wiring when a declaration surface for
     block-scoped derived fields exists.
-- **Still open.** The capability check itself (below). `declare_type` takes no
-  home, so refusing a `computed_persisted` declaration against a
-  `string_only`/`none` home first needs a ruling on which home a type
-  declaration binds to.
-- **Red-first surface.** A test declaring such a type and expecting a named
-  refusal; expected red = `declare_type` accepts it.
+- **LANDED.** Ruling D54.a binds a declaration to a home: types carry a
+  type-level `home:` (`TypeDefinition::home`) with an optional per-field
+  `fields[].home` override, both parsed into `holon_api::HomeProfileId`.
+  - **The seat is `crates/holon-app/src/type_admission.rs`, NOT `declare_type`.**
+    `holon` is a `PROFILED_FORMAT_CRATE`
+    (`crates/holon-architecture-tests/tests/architecture_rules.rs:330`) and may
+    not link `holon-capability` in its production graph, because a format that
+    read its own profile would make its own certification circular. Profiles
+    DESCRIBE formats; the layer that COMPOSES formats and profiles decides
+    admission. So enforcement (holon-app) and certification (format vs profile)
+    stay two independent measurements, and admission against the default
+    `holon-native` home is not self-confirming. `declare_type` is unchanged in
+    signature and crate deps. Like `move_block` vs `MoveGuard`, the guarded call
+    is still reachable: the direct `declare_type` callers that remain are its
+    own unit tests.
+  - **The kind checked is the kind the COMPUTATION PRODUCES**, not the column's
+    declared SQL type. `Computation::result_kind` infers it over the
+    SQL-plantable AST, and `TypeRegistry` now derives a fresh computed column's
+    `sql_type` from that same answer — the old hard-coded `"TEXT"` made every
+    computed field look String-kinded and would have answered `string_only`
+    with a "yes" it had not earned. An uninferable kind is a loud error for
+    `computed_persisted`; `computed_live` keeps neutral TEXT, since it plants no
+    column and every Rhai-only field is uninferable by construction.
+  - A `computed_persisted` field whose home nobody named is REFUSED — a silent
+    default would make the check vacuous. An unknown `home:` is refused for any
+    type, computed fields or not, so a typo fails the day it is authored.
+  - **BOTH doors are guarded, and the second one is the important one.** A type
+    becomes real two ways: the `declare_type` op, and REGISTRY SEEDING at boot
+    (`create_default_registry`, `holon_kitchen::register_kitchen_types`, an MCP
+    sidecar), which reaches the same end state — registry entry, Turso
+    artifacts, write authority — without touching the op. Guarding only the op
+    left every bundled type unchecked, and `person.display_name` (the tree's one
+    `computed_persisted` field) shipped with no home at all.
+    `type_admission::sweep_registry` runs `admits()` over the WHOLE registry and
+    `holon_app::new_from_config_with_di` calls it, refusing startup loudly on any
+    offender. Sweeping the REGISTRY rather than a list of seeding call sites is
+    deliberate: a future door is covered by construction, because every seeder
+    shares the one registry. `assets/default/types/person.yaml` now declares
+    `home: holon-native`.
+    **Ordering:** the sweep runs before the session and engine handles reach any
+    caller, and those handles are the only route to dispatching a write, so no
+    caller-served write can precede it. Write AUTHORITIES are already registered
+    at that point (`FreeStandingTypeViews` derives them during engine
+    construction), which is why a refusal aborts startup rather than unwinding
+    them — there is no undeclare.
+- **The rehome-time re-check (D54.a's second half) is implemented at LIBRARY
+  LEVEL ONLY and has NO production driver.**
+  `check_computed_persisted(.., HomeSeat::Destination(id))` applies the
+  destination to every field and deliberately ignores field/type homes, so a
+  `fields[].home` can never exempt a field from a move's check. Nothing calls it
+  in production, and that is measured, not assumed: `RehomeTarget` accepts only
+  `holon-native` (`crates/holon-app/src/rehome_entity.rs:53`), which is
+  `full_algebra`; `MoveGuard` returns `Confirm` for anything that is not
+  `block` + `move_block` (`crates/holon-app/src/move_guard.rs:208`); and `block`
+  declares no `computed_persisted` field — repo-wide, `tier: computed_persisted`
+  appears only in `assets/default/types/person_profile.yaml:5`. So no op today
+  can move a `computed_persisted`-bearing entity into a lossy home. **Wiring it
+  belongs to whichever increment introduces an entity-level home-changing op**;
+  wiring it now would add a branch that short-circuits on every reachable input.
+- **Coverage.** `crates/holon-app/tests/type_admission_cve.rs` drives the seat.
+  The discriminating shape is a COMPARISON (`a == b` → Boolean), which
+  `string_only` refuses; a concatenation — the only shape the keystone's
+  datatype axis draws — infers to Text and is offered by every home, so it
+  cannot tell an enforced check from an absent one. A keystone rung is feasible
+  on the existing `datatype` axis but needs a Boolean draw, a drawn home, and an
+  outcome return on `SutTypedEntity::declare_typed_schema` (which panics on a
+  declare error today); that is a follow-up increment, not this item.
+- **Type onboarding is a PN action (ADR 0024, ruling D57) — THIN version
+  landed.** The seat is a guard/body pair (`admits` / `declare_type_admitted`)
+  and registers a `declare_type` `OperationDescriptor` under entity `type`,
+  `TargetScope::Global`, no `id_column` — reachable through the existing
+  generic surface (`list_operations` / `execute_operation`, MCP included) with
+  no bespoke tool. It declares itself `UndoAction::DeclaredIrreversible`:
+  declaration is one-way, so there is no inverse to offer. Entity `type` is a
+  name no table backs, which the dispatcher already supports — `navigation` and
+  `identity` are existing precedents. NOT the wildcard `*`: that arm broadcasts
+  to every provider and its ADR 0031 guard argument holds only for ops taking
+  no parameters. Bundled types do NOT come through this op — see the boot
+  sweep above.
+- **Deferred follow-ups.**
+  - Boot-path unification: bundled types declared through the PN rather than by
+    direct call (bootstrap staging of a self-registering PN).
+  - An inverse/undo design for `declare_type` (today: declared irreversible).
+  - An entity-level home-changing op — the production driver
+    `HomeSeat::Destination` currently lacks.
+  - DDL-transaction hardening for runtime declarations: `declare_type` mutates
+    the registry after the SQL artifacts exist, so a step-3 failure is
+    unrecoverable for that name.
+  - A keystone rung for CV-E: needs a Boolean-producing draw, a drawn home, and
+    an outcome return on `SutTypedEntity::declare_typed_schema`.
+  - **BootLadder debt:** the no-Turso boot path
+    (`holon-app/src/no_turso.rs:79` → `loro_ui_watcher.rs:68`) builds its OWN
+    `create_default_registry()` and is not swept. Out of scope for CV-E today —
+    it derives render profiles for a session with no Turso, so there is no
+    planted column for a `computed_persisted` field to be lost from, and it
+    parses the same bundled yaml that every Turso boot sweeps. It joins the
+    other steps that path owes (`docs/Plans/BootLadder-2026-07-18.md`) rather
+    than getting one shared-wiring step while missing the rest.
 - **Blocked by.** Nothing — I3-1 has landed (`8d07c182`) and supplies the
   tier answer via `DerivedFieldPlan`.
-- **Done when.** All four `CV-E lands in 2b.6` citations are gone.
+- **Done when.** All four deferral citations in the profile yamls (and the
+  fixture) are gone — the marker they carried is now absent from the tree. ✅
+  They cite `crates/holon-app/src/type_admission.rs`.
 
 ### 2b.5 — refuse content at the write boundary on profile clauses
 - **Scope.** Turn certified profile clauses into write-boundary refusals.

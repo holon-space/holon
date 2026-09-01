@@ -800,7 +800,124 @@ impl Computation {
             }),
         }
     }
+
+    /// The [`FieldKind`] this computation produces, inferred from the shape and
+    /// the declared types of the columns it reads.
+    ///
+    /// Every seat that must know a computed field's storage class reads it from
+    /// HERE: the planted column's declared SQL type and the capability question
+    /// "can this home persist a computed field of that kind" are two views of
+    /// one answer, and deriving them separately is how they come to disagree.
+    ///
+    /// [`Computation::Script`] has no inferable kind — it is an opaque Rhai
+    /// AST. A `computed_persisted` declaration can never carry one
+    /// ([`crate::ComputedSpec::parse`] refuses it), so the error is reachable
+    /// only from a `computed_live` caller, which is told so by name.
+    pub fn result_kind(&self, types: &FieldTypes) -> Result<FieldKind, ResultKindUnknown> {
+        Ok(match self {
+            Computation::Lit(v) => match kind_of_literal(v) {
+                Some(kind) => kind,
+                // A bare `Null` names no storage class. Inside a `Case` arm it
+                // is absorbed below; standing alone it is a field whose type
+                // nothing can state.
+                None => return Err(ResultKindUnknown::NullLiteral),
+            },
+            Computation::Field(name) => types
+                .kind(name)
+                .ok_or_else(|| ResultKindUnknown::UndeclaredField(name.clone()))?,
+            Computation::Arith { .. } => FieldKind::Numeric,
+            Computation::Concat { .. } => FieldKind::Text,
+            Computation::Compare { .. }
+            | Computation::And { .. }
+            | Computation::IsDefined(_)
+            | Computation::Predicate(_) => FieldKind::Boolean,
+            Computation::Case {
+                branches, else_, ..
+            } => {
+                // The scrutinee is compared, never returned, so it does not
+                // contribute. `Null` arms are absorbed: `if c { name } else { ()
+                // }` is a nullable text column, not a type disagreement.
+                let mut kind = None;
+                for arm in branches.iter().map(|(_, result)| result).chain([&**else_]) {
+                    let arm_kind = match arm.result_kind(types) {
+                        Ok(k) => k,
+                        Err(ResultKindUnknown::NullLiteral) => continue,
+                        Err(e) => return Err(e),
+                    };
+                    match kind {
+                        None => kind = Some(arm_kind),
+                        Some(seen) if seen == arm_kind => {}
+                        Some(seen) => {
+                            return Err(ResultKindUnknown::MixedCaseArms {
+                                first: seen,
+                                second: arm_kind,
+                            });
+                        }
+                    }
+                }
+                kind.ok_or(ResultKindUnknown::NullLiteral)?
+            }
+            Computation::Script(expr) => {
+                return Err(ResultKindUnknown::Script {
+                    source: expr.source.clone(),
+                });
+            }
+        })
+    }
 }
+
+/// The storage class of a literal. `None` for [`Value::Null`], which names
+/// none, and for the shapes no planted column carries.
+fn kind_of_literal(value: &Value) -> Option<FieldKind> {
+    match value {
+        // DateTime and Json are carried as TEXT by the SQL leg, which is what
+        // the storage class asks about.
+        Value::String(_) | Value::DateTime(_) | Value::Json(_) => Some(FieldKind::Text),
+        Value::Integer(_) | Value::Float(_) => Some(FieldKind::Numeric),
+        Value::Boolean(_) => Some(FieldKind::Boolean),
+        Value::Null | Value::Array(_) | Value::Object(_) | Value::Removed(_) => None,
+    }
+}
+
+/// Why [`Computation::result_kind`] could not name a storage class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResultKindUnknown {
+    /// The expression is a bare `()` / `null`, or a `Case` all of whose arms
+    /// are.
+    NullLiteral,
+    /// A column the declaration reads is absent from [`FieldTypes`].
+    UndeclaredField(String),
+    /// Two `Case` arms produce different storage classes, so the column has no
+    /// single one.
+    MixedCaseArms { first: FieldKind, second: FieldKind },
+    /// An opaque Rhai expression.
+    Script { source: String },
+}
+
+impl fmt::Display for ResultKindUnknown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NullLiteral => write!(
+                f,
+                "the expression yields only `()`, which names no storage class"
+            ),
+            Self::UndeclaredField(name) => write!(
+                f,
+                "`{name}` is not among the declared columns, so its storage class is unknown"
+            ),
+            Self::MixedCaseArms { first, second } => write!(
+                f,
+                "the branches disagree on the storage class: {first:?} and {second:?}"
+            ),
+            Self::Script { source } => write!(
+                f,
+                "`{source}` is an opaque Rhai expression, which has no inferable storage class"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResultKindUnknown {}
 
 /// Lower a [`Computation::Case`] to a nested `iif(...)` chain. Each branch
 /// becomes `iif(<scrutinee> = <match_value>, <result>, <rest>)`; the innermost

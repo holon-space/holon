@@ -44,6 +44,7 @@ pub mod rehome_entity;
 pub mod seed;
 pub mod session;
 pub mod turso_seams;
+pub mod type_admission;
 pub mod wiring;
 
 pub use boot_error::BootComponent;

@@ -207,6 +207,11 @@ pub fn derive_entity_impl(input: DeriveInput) -> TokenStream {
                     source: #api_path::TypeSource::BuiltIn,
                     profile_variants: Vec::new(),
                     write_authority: #api_path::WriteAuthority::Local,
+                    // An in-tree entity states no home: it declares no
+                    // `computed_persisted` field of its own (those arrive from
+                    // profile yaml, which carries the home), so there is
+                    // nothing here for a home to be checked against.
+                    home: None,
                 }
             }
 

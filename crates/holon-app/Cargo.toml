@@ -26,6 +26,7 @@ holon-loro.workspace = true
 holon-loro-wiring.workspace = true
 holon-turso.workspace = true
 holon-mcp-client.workspace = true
+serde_json.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 fluxdi.workspace = true

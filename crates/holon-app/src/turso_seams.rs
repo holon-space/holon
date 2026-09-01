@@ -1013,6 +1013,24 @@ impl Module for OrgModeModule {
             },
         ));
 
+        // Type onboarding as a PN action (ADR 0024, ruling D57). Contributed
+        // here for the same reason as the two above: admission needs the
+        // capability profiles, which `holon` may not link. Registering the
+        // descriptor is what makes type declaration reachable through the
+        // generic op surface; boot-seeded types are guarded by
+        // `type_admission::sweep_registry` at session construction.
+        injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
+            |resolver| async move {
+                let registry = Arc::new(
+                    holon_capability::registry::shipped_profiles()
+                        .expect("the shipped capability profiles must parse"),
+                );
+                Arc::new(crate::type_admission::TypeAdmissionProvider::new(
+                    resolver, registry,
+                )) as Arc<dyn OperationProvider>
+            },
+        ));
+
         // ADR 0032 §3 — the net gate's placement policy, contributed here for
         // the same reason: deciding a destination's capability needs both
         // homes' profiles.

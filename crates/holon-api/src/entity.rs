@@ -7,6 +7,7 @@
 //! - `IntoEntity`, `TryFromEntity`: Traits for entity conversion
 
 use std::collections::HashMap;
+use std::fmt;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -249,6 +250,18 @@ impl ComputedSpec {
     pub fn types(&self) -> &FieldTypes {
         &self.types
     }
+
+    /// The storage class the computation produces, resolved against the very
+    /// [`FieldTypes`] the declaration was parsed with.
+    ///
+    /// The ONE answer both the planted column's SQL type and the home's
+    /// "can you persist a computed field of that kind" question are read from.
+    pub fn result_kind(
+        &self,
+    ) -> std::result::Result<crate::computation::FieldKind, crate::computation::ResultKindUnknown>
+    {
+        self.computation.result_kind(&self.types)
+    }
 }
 
 /// The serialized form of a [`ComputedSpec`]: the declaration as authored,
@@ -298,6 +311,70 @@ impl<'de> Deserialize<'de> for ComputedSpec {
 }
 
 // =============================================================================
+// HomeProfileId — the capability profile a declaration binds to
+// =============================================================================
+
+/// The id of the capability profile a declaration binds to — its DEFAULT home
+/// (ruling D54.a).
+///
+/// A bare id, deliberately: only a `ProfileRegistry` knows which profiles a
+/// build ships, and it lives in `holon-capability`, which depends on this
+/// crate. Holding the resolved profile here would either invert that edge or
+/// mint a second answer for the shipped set. So the SHAPE is parsed at this
+/// boundary and the EXISTENCE at the check site, which is the only place that
+/// can answer it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct HomeProfileId(String);
+
+impl HomeProfileId {
+    /// Parse an authored id. Empty or whitespace-bearing is refused: the id
+    /// reaches a registry lookup and an error message, and a blank one would
+    /// report as a missing profile rather than as the typo it is.
+    pub fn parse(id: impl Into<String>) -> std::result::Result<Self, InvalidHomeProfileId> {
+        let id = id.into();
+        if id.is_empty() || id.chars().any(char::is_whitespace) {
+            return Err(InvalidHomeProfileId { id });
+        }
+        Ok(Self(id))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for HomeProfileId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for HomeProfileId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Self::parse(String::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// An authored `home:` that is not a usable profile id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidHomeProfileId {
+    pub id: String,
+}
+
+impl fmt::Display for InvalidHomeProfileId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "`{}` is not a capability profile id (it is empty or contains whitespace)",
+            self.id
+        )
+    }
+}
+
+impl std::error::Error for InvalidHomeProfileId {}
+
+// =============================================================================
 // FieldSchema — single field definition
 // =============================================================================
 
@@ -326,6 +403,12 @@ pub struct FieldSchema {
     /// Set by `#[reference(entity = "...")]` on Entity structs.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reference_target: Option<String>,
+    /// Overrides [`TypeDefinition::home`] for THIS field's declaration.
+    ///
+    /// A declaration-time default only. Re-homing an entity re-checks every
+    /// field against the destination, where a field-level home has no say.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub home: Option<HomeProfileId>,
 }
 
 impl Default for FieldSchema {
@@ -341,6 +424,7 @@ impl Default for FieldSchema {
             lifetime: FieldLifetime::default(),
             edge_name: None,
             reference_target: None,
+            home: None,
         }
     }
 }
@@ -474,6 +558,15 @@ pub struct TypeDefinition {
     /// machinery derived from its columns.
     #[serde(default)]
     pub write_authority: WriteAuthority,
+    /// The DEFAULT home this type's declaration binds to (ruling D54.a), which
+    /// a per-field [`FieldSchema::home`] may override.
+    ///
+    /// Absent is legal only for a type with no `computed_persisted` field: the
+    /// capability check runs on those alone, so a default cannot hide anything
+    /// there. A type that HAS one and names no home is refused at declaration
+    /// — a silent `holon-native` default would make the check vacuous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<HomeProfileId>,
 }
 
 /// Who serves writes to a type.
@@ -519,6 +612,7 @@ impl TypeDefinition {
             source: TypeSource::default(),
             profile_variants: Vec::new(),
             write_authority: WriteAuthority::Local,
+            home: None,
         }
     }
 
@@ -632,6 +726,7 @@ impl TypeDefinition {
             profile_variants: Vec::new(),
             source: TypeSource::default(),
             write_authority: WriteAuthority::Local,
+            home: None,
         }
     }
 
@@ -965,6 +1060,7 @@ mod create_table_sql_tests {
             id_references: None,
             profile_variants: vec![],
             write_authority: WriteAuthority::Local,
+            home: None,
             default_lifetime: FieldLifetime::default(),
             source: TypeSource::default(),
         };
@@ -995,6 +1091,7 @@ mod create_table_sql_tests {
             id_references: None,
             profile_variants: vec![],
             write_authority: WriteAuthority::Local,
+            home: None,
             default_lifetime: FieldLifetime::default(),
             source: TypeSource::default(),
         };
