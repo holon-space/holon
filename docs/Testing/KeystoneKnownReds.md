@@ -298,6 +298,33 @@ changed `sql_reads` to lead with the dedup count, which killed
 passed. The only real guard is to re-read the pattern against the CURRENT
 format string whenever you touch a quoted message.
 
+## `holon` integration-test binaries known reds
+
+The `holon` crate's own `--test` binaries (`sync_suite`, `api_pbt`) run under
+`cargo nextest run -p holon --features test-helpers`.
+
+**Adding a row here ARMS the nightly classifier.**
+`scripts/keystone-known-reds.sh:50-55` parses this file with a section-blind
+`awk -F'|' '/^\| *`/'` and takes EVERY row whose Status is `known-red`,
+whatever section it sits in. A row therefore auto-demotes its signature to a
+WARN pass-with-note in composed-nightly logs — it is not a passive
+manually-maintained baseline. Register a signature here only when
+pass-with-note is what you want for it; a suspected real defect belongs in the
+bug funnel as an OPEN entry instead, where it stays visible.
+
+**Baseline established 2026-09-01** at base `ed38a4dae833`, 10 isolated runs
+per test (each run its own `cargo nextest run … -E 'test(<name>)'` invocation,
+serialized through the `holon-build` semaphore; logs `lane-logs/flakes/`).
+
+| Key | Status | Match pattern | Signature | Evidence | Task | Owner |
+| --- | --- | --- | --- | --- | --- | --- |
+| `loro-backend-change-count` | known-red | `Reference and SUT should receive same number of change` | `loro_backend_pbt.rs:534` `test_loro_backend_state_machine`: `assertion \`left == right\` failed: Reference and SUT should receive same number of change notifications.` / `Reference: N changes` / `SUT: M changes` — the watcher notification counts diverge between the reference model and `LoroBackend`. | FLAKES ONLY UNDER SUITE LOAD. 2026-09-01, 10 isolated runs: **10 passed, 0 failed** — `lane-logs/flakes/loro-1.log` .. `loro-10.log`, each `1 test run: 1 passed (1 slow), 5 skipped`, wall time 43s–66s. The signature above is therefore quoted from the assertion's own format string, NOT decoded from a captured payload: correct the Signature column on the first firing that is actually logged. Registered so that first firing inside a loaded suite run is a WARN pass-with-note rather than an aborted run. | — | **UNOWNED** |
+
+`subtree_share_round_trip_pbt`'s `P-NO-TMP-LEFTOVER/B` failure is deliberately
+NOT registered here: it is a suspected real atomic-publish race, so demoting it
+to pass-with-note would hide it. It is tracked as an OPEN bug-funnel entry,
+`2026-09-01-subtree-share-tmp-leftover-race`.
+
 ## Where it runs — local, not GitHub Actions
 
 The tier is a LOCAL nightly (Martin's machine or an orchestrator session). No

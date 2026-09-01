@@ -36,13 +36,10 @@ impl PantryOperations {
     }
 
     async fn read_stock(&self, id: &str) -> DatasourceResult<(f64, Option<String>)> {
-        let sql = format!(
-            "SELECT quantity, unit FROM {TABLE} WHERE id = '{}'",
-            id.replace('\'', "''")
-        );
+        let sql = format!("SELECT quantity, unit FROM {TABLE} WHERE id = ?");
         let rows = self
             .db_handle
-            .query(&sql, HashMap::new())
+            .query_positional(&sql, vec![turso::Value::Text(id.to_string())])
             .await
             .map_err(|e| format!("consume: reading pantry item '{id}': {e}"))?;
         let row = rows
@@ -172,12 +169,15 @@ impl OperationProvider for PantryOperations {
         }
 
         let remaining = on_hand - asked;
-        let sql = format!(
-            "UPDATE {TABLE} SET quantity = {remaining} WHERE id = '{}'",
-            id.replace('\'', "''")
-        );
+        let sql = format!("UPDATE {TABLE} SET quantity = ? WHERE id = ?");
         self.db_handle
-            .execute(&sql, vec![])
+            .execute(
+                &sql,
+                vec![
+                    turso::Value::Real(remaining),
+                    turso::Value::Text(id.clone()),
+                ],
+            )
             .await
             .map_err(|e| format!("consume: updating pantry item '{id}': {e}"))?;
 

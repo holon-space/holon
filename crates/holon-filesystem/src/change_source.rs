@@ -873,10 +873,25 @@ mod tests {
             .await
             .unwrap();
 
-        let change = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("timed out waiting for fs event")
-            .expect("channel closed");
-        assert!(change.path.ends_with("a.org"));
+        // Arming a watch on a fresh directory also delivers events for the
+        // directory itself, and fsevents does not order them against the write,
+        // so the arrival to assert on is the first one FOR `a.org` — not the
+        // first one at all.
+        let mut seen = Vec::new();
+        let arrived = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let change = rx.recv().await.expect("channel closed");
+                let is_target = change.path.ends_with("a.org");
+                seen.push(change.path);
+                if is_target {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(
+            arrived.is_ok(),
+            "no fs event for a.org within the budget; seen: {seen:?}"
+        );
     }
 }

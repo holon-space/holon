@@ -5,6 +5,24 @@
 //! when the upstream response body echoes the request URL back at us.
 //!
 //! Every token here is synthetic and generated for this file.
+//!
+//! # Deliberately not covered
+//!
+//! `redact_marked_segments` blanks the alphanumeric run after a literal `!`,
+//! so these shapes are outside what it can or should reach:
+//!
+//! - **A `%21`-percent-encoded `!` marker.** The scan matches the byte `!`, so
+//!   a marker an upstream re-encoded is not recognised. Decoding first would
+//!   mean redacting against a string that is not the one being printed.
+//! - **An all-lowercase-alpha piece.** Such a piece is indistinguishable from
+//!   an ordinary path word, and registering it would blank the word wherever it
+//!   appears in prose.
+//! - **A token in host position.** The marker convention places the credential
+//!   in the path; blanking the authority instead would erase which endpoint an
+//!   error came from, which is most of the diagnostic value.
+//! - **Benign path words of `MIN_SECRET_LEN` (8) bytes or more are
+//!   over-redacted** when they follow a `!`. The length floor is what keeps
+//!   `Error!` readable, and it cannot tell a long word from a long token.
 
 use std::io::Write;
 use std::sync::Arc;

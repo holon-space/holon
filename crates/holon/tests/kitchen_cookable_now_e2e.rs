@@ -397,3 +397,47 @@ async fn the_cookable_list_updates_live_and_discloses_its_degraded_mode() -> Res
 
     Ok(())
 }
+
+/// A pantry id carries the user-typed item name, so SQL metacharacters reach
+/// `consume`'s read-modify-write verbatim. Bound parameters carry them as data:
+/// the row is consumed and no statement is split at the `;`.
+#[tokio::test(flavor = "multi_thread")]
+async fn consume_carries_sql_metacharacters_in_the_item_id() -> Result<()> {
+    let ctx = E2ETestContext::new().await?;
+
+    // Spaces are out of reach: an id is an RFC 3986 URI path. `'`, `;` and `--`
+    // are all inside that alphabet, so they are what a hostile item name can
+    // actually deliver to the statement.
+    let id = "p-o'brien';drop--table";
+    stock(&ctx, id, "O'Brien's rye; -- aged", 500.0, Some("g")).await?;
+    consume(&ctx, id, 200.0, Some("g")).await?;
+
+    assert_eq!(
+        stocked_quantity(&ctx, id).await?,
+        Some(300.0),
+        "consume must subtract from the row whose id holds the metacharacters"
+    );
+
+    Ok(())
+}
+
+/// The `quantity` still on hand for `local_id`, read back through the query
+/// seat. `None` means no such row survived.
+async fn stocked_quantity(ctx: &E2ETestContext, local_id: &str) -> Result<Option<f64>> {
+    let rows = ctx
+        .query(
+            "SELECT id, quantity FROM pantry_item_raw".to_string(),
+            QueryLanguage::HolonSql,
+            HashMap::new(),
+        )
+        .await?;
+    let wanted = minted("pantry_item", local_id);
+    Ok(rows
+        .iter()
+        .find(|r| r.get("id").and_then(|v| v.as_string()) == Some(wanted.as_str()))
+        .and_then(|r| match r.get("quantity") {
+            Some(Value::Float(f)) => Some(*f),
+            Some(Value::Integer(i)) => Some(*i as f64),
+            _ => None,
+        }))
+}
