@@ -1550,6 +1550,38 @@ impl HeadlessFrontendComponent {
         )
     }
 
+    /// Hold until the Main panel binds a shift-click intent for `id` — the
+    /// precondition [`SutNavHistoryDrive::pin_block`] needs and deliberately
+    /// does not pay for itself (its resolved-tree reads are budgeted).
+    ///
+    /// The panel's nested `live_block` watch streams a newly-focused root's
+    /// bullets in asynchronously, so a shift+click issued straight after the
+    /// focus finds no `shift_action`, degrades to a bare focus, and pins
+    /// nothing. Callers that navigate before pinning wait here.
+    pub(crate) async fn await_main_pin_intent(&self, id: &EntityUri) {
+        let root_uri = holon_api::root_layout_block_uri();
+        let modifiers = holon_api::ClickModifiers::shift();
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(10));
+        loop {
+            let resolved = self.reactive.snapshot_resolved(&root_uri);
+            if holon_frontend::focus_path::find_click_intent_in_region(
+                &resolved, id, "main", modifiers,
+            )
+            .is_some()
+            {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[await_main_pin_intent] the Main panel never bound a shift-click intent for \
+                 {id}; a pin from here would silently degrade to a bare focus.\n  MISS REASON: \
+                 {}",
+                self.main_click_miss_reason(id, modifiers),
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// Modifier-parameterised form of [`Self::await_sidebar_nav_intent`]. The
     /// primary click resolves `navigation.focus`, cmd/ctrl resolve
     /// `navigation.open_tab`; both stream in on the same nested `live_block`
@@ -1674,7 +1706,7 @@ impl HeadlessFrontendComponent {
     /// matviews. `block_id`/`history_id` are passed only for the ops that
     /// take them (`focus_pin` / `close`); `close` ignores the
     /// region. Drives `SutNavHistoryDrive`.
-    async fn dispatch_navigation(
+    pub(crate) async fn dispatch_navigation(
         &self,
         op: &str,
         region: holon_api::Region,
@@ -5608,6 +5640,7 @@ mod tests {
             None,
         )
         .await;
+        comp.await_main_pin_intent(&target).await;
 
         // `focus_pin` (shift+click in production) — reachable headlessly with an
         // observable matview effect. The bullet's `shift_action` pins into the
@@ -5722,6 +5755,7 @@ mod tests {
             None,
         )
         .await;
+        comp.await_main_pin_intent(&pin_uri).await;
 
         // Dispatch focus_pin into the RIGHT sidebar (PinBlock's region) and assert it
         // populates `focus_roots(right_sidebar)` headlessly — the make-or-break:
@@ -5842,6 +5876,18 @@ mod tests {
         let comp =
             HeadlessFrontendComponent::new(&[("doc0.org", doc0)], Duration::from_millis(300)).await;
         let pin_uri = EntityUri::parse("block:ref-block-0").expect("pin id");
+
+        // Main renders only the descendants of `focus_roots(main)`, and the pin is
+        // the production shift+click on the bullet — so focus the containing doc
+        // and let its bullets stream in before clicking one.
+        comp.dispatch_navigation(
+            "focus",
+            holon_api::Region::Main,
+            Some("block:ref-doc-0".to_string()),
+            None,
+        )
+        .await;
+        comp.await_main_pin_intent(&pin_uri).await;
 
         SutNavHistoryDrive::pin_block(&comp, holon_api::Region::RightSidebar, &pin_uri).await;
 

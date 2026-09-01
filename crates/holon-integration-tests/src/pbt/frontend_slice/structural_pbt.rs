@@ -4955,8 +4955,20 @@ entities:
         let zebra = EntityUri::parse("block:rsort-zebra").expect("zebra id");
         let apple = EntityUri::parse("block:rsort-apple").expect("apple id");
 
+        // Both pins are production shift+clicks on the bullets, so Main must be
+        // focused on the container and its bullets streamed in before either
+        // click — Main boots on journals, which holds neither heading.
+        comp.dispatch_navigation(
+            "focus",
+            Region::Main,
+            Some("block:rsort-container".to_string()),
+            None,
+        )
+        .await;
+        comp.await_main_pin_intent(&zebra).await;
         SutNavHistoryDrive::pin_block(comp.as_ref(), Region::RightSidebar, &zebra).await;
         tokio::time::sleep(SETTLE).await;
+        comp.await_main_pin_intent(&apple).await;
         SutNavHistoryDrive::pin_block(comp.as_ref(), Region::RightSidebar, &apple).await;
         tokio::time::sleep(SETTLE).await;
 

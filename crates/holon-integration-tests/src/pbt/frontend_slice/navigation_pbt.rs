@@ -239,15 +239,7 @@ const REQUIRED_INVARIANTS: &[&str] = &["inv-navigation-focus", "inv-focus-roots"
 /// The navigation alphabet — a **heterogeneous mixed alphabet** over a single
 /// composed `CapMap`: `NavigateFocus` (drawn from the two pinned page-doc ids —
 /// a state-derived candidate set, so no nonexistent-id SUT/oracle divergence),
-/// `NavigateHome`, and `PinBlock` (always the stable [`PINNABLE_ID`] Text block
-/// into the right sidebar). `PinBlock` is emitted directly rather than through
-/// its `weighted_generator`: this `RefFocus`-only slice intentionally does not
-/// seed `block_state`, so the factory's `main_editable_descendants` candidate
-/// set is empty — but `apply_to_ref` is total (it only pushes `open_pins`) and
-/// `inv-focus-roots` is a pure id-set compare, and the block *is* a real
-/// pinnable Text block on the SUT (the `:ID:` seed), so the lockstep stays
-/// faithful. Verified make-or-break: `headless_pin_block_right_sidebar_probe`;
-/// teeth: `pin_block_lockstep_stays_green`.
+/// and `NavigateHome`.
 ///
 /// `NavigateBack`/`NavigateForward` are gated by [`NavMachine::preconditions`]
 /// via each transition's own `can_go_back`/`can_go_forward`. They dispatch the
@@ -264,23 +256,44 @@ const REQUIRED_INVARIANTS: &[&str] = &["inv-navigation-focus", "inv-focus-roots"
 /// go_home×3 → 1 NULL row). Both fixed; this alphabet is robust at
 /// `PROPTEST_CASES=40`.
 ///
-/// `UnpinBlock` is layered on in [`NavMachine::transitions`] (not here) because
-/// it is **state-dependent** — its `history_id` is drawn from the pins the ref
-/// currently holds (see [`unpin_candidates`]), so the id always matches one the
-/// SUT assigned (the risk-C history-id alignment, kept exact by
-/// [`navigation_ref`]'s `next_history_id` reset).
+/// `PinBlock` and `UnpinBlock` are layered on in [`NavMachine::transitions`]
+/// (not here) because both are **state-dependent**: the pin needs its bullet
+/// rendered ([`pinnable_is_rendered`]), and the unpin's `history_id` is drawn
+/// from the pins the ref currently holds (see [`unpin_candidates`]), so the id
+/// always matches one the SUT assigned (the risk-C history-id alignment, kept
+/// exact by [`navigation_ref`]'s `next_history_id` reset).
+///
+/// `PinBlock` is emitted directly rather than through its `weighted_generator`:
+/// this `RefFocus`-only slice intentionally does not seed `block_state`, so the
+/// factory's `main_editable_descendants` candidate set is empty — but
+/// `apply_to_ref` is total (it only pushes `open_pins`), `inv-focus-roots` is a
+/// pure id-set compare, and the block *is* a real pinnable Text block on the
+/// SUT (the `:ID:` seed), so the lockstep stays faithful. Verified
+/// make-or-break: `headless_pin_block_right_sidebar_probe`; teeth:
+/// `pin_block_lockstep_stays_green`.
 fn aggregate() -> BoxedStrategy<NavTransition> {
     prop_oneof![
         proptest::sample::select(nav_doc_ids())
             .prop_map(|block_id| NavTransition::NavigateFocus(navigate(block_id))),
         Just(NavTransition::NavigateHome(navigate_home())),
-        Just(NavTransition::PinBlock(pin(
-            EntityUri::parse(PINNABLE_ID).expect("pinnable id")
-        ))),
         Just(NavTransition::NavigateBack(nav_back())),
         Just(NavTransition::NavigateForward(nav_forward())),
     ]
     .boxed()
+}
+
+/// The block `current_focus(Main)` points at, i.e. the root the Main panel
+/// renders (`None` while home).
+fn main_focus(state: &ReferenceState) -> Option<&EntityUri> {
+    let history = state.ui.tab.navigation_history.get(&Region::Main)?;
+    history.entries.get(history.cursor)?.as_ref()
+}
+
+/// [`PINNABLE_ID`]'s bullet is on screen — the precondition the production
+/// shift+click carries: Main renders only the descendants of its focus root,
+/// and doc0 is the only root [`PINNABLE_ID`] descends from.
+fn pinnable_is_rendered(state: &ReferenceState) -> bool {
+    main_focus(state).map(EntityUri::as_str) == Some(DOC0_ID)
 }
 
 #[derive(Clone, Debug)]
@@ -321,12 +334,25 @@ impl ReferenceStateMachine for NavMachine {
         // `UnpinBlock` is state-dependent: its `history_id` is drawn from the pins the
         // ref currently holds (so the id is always one the SUT also assigned — the
         // risk-C alignment). When no sidebar pin is open it is simply not offered.
+        // `PinBlock` is likewise state-dependent: it shift+clicks a bullet, so it
+        // is offered only while Main renders one (see `pinnable_is_rendered`).
+        let base = if pinnable_is_rendered(state) {
+            prop_oneof![
+                3 => aggregate(),
+                1 => Just(NavTransition::PinBlock(pin(
+                    EntityUri::parse(PINNABLE_ID).expect("pinnable id")
+                ))),
+            ]
+            .boxed()
+        } else {
+            aggregate()
+        };
         let candidates = unpin_candidates(state);
         if candidates.is_empty() {
-            aggregate()
+            base
         } else {
             prop_oneof![
-                4 => aggregate(),
+                4 => base,
                 1 => proptest::sample::select(candidates)
                     .prop_map(|history_id| NavTransition::UnpinBlock(UnpinBlock { history_id })),
             ]
@@ -335,18 +361,19 @@ impl ReferenceStateMachine for NavMachine {
     }
 
     fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
-        // `NavigateFocus`/`NavigateHome`/`PinBlock` are always applicable (total
-        // `apply_to_ref`; PinBlock's own `block_state` precondition is intentionally
-        // not gated here — see `aggregate`). `NavigateBack`/`NavigateForward` are gated
+        // `NavigateFocus`/`NavigateHome` are always applicable (total
+        // `apply_to_ref`). `PinBlock` needs its bullet on screen
+        // (`pinnable_is_rendered`) — its own `block_state` precondition is
+        // intentionally not gated here, see `aggregate`.
+        // `NavigateBack`/`NavigateForward` are gated
         // by their own `can_go_back`/`can_go_forward` — the ref's trimmed back-stack +
         // idempotent `go_home` (see `navigation_ref` and `navigate_home`) match the
         // SUT. `UnpinBlock` is shrink-gated: the `history_id` must STILL be an
         // open pin (a shrink that drops the creating `PinBlock` invalidates
         // it).
         match transition {
-            NavTransition::NavigateFocus(_)
-            | NavTransition::NavigateHome(_)
-            | NavTransition::PinBlock(_) => true,
+            NavTransition::NavigateFocus(_) | NavTransition::NavigateHome(_) => true,
+            NavTransition::PinBlock(_) => pinnable_is_rendered(state),
             NavTransition::NavigateBack(t) => t.preconditions(state).is_good(),
             NavTransition::NavigateForward(t) => t.preconditions(state).is_good(),
             NavTransition::UnpinBlock(u) => state
@@ -492,6 +519,24 @@ mod teeth {
             .unwrap()
     }
 
+    /// Navigate Main onto [`PINNABLE_ID`]'s containing doc in lockstep and wait
+    /// for its bullet to bind a shift-click intent.
+    ///
+    /// `PinBlock` drives the production shift+click, so the bullet must be on
+    /// screen; Main boots on journals and renders only the descendants of
+    /// `focus_roots(main)`.
+    fn reveal_pinnable(
+        rt: &tokio::runtime::Runtime,
+        caps: &mut CapMap,
+        component: &HeadlessFrontendComponent,
+        ref_state: &mut ReferenceState,
+    ) {
+        let t = navigate(EntityUri::parse(DOC0_ID).unwrap());
+        t.apply_to_ref(ref_state);
+        rt.block_on(t.apply_to_sut(ref_state, caps));
+        rt.block_on(component.await_main_pin_intent(&EntityUri::parse(PINNABLE_ID).unwrap()));
+    }
+
     /// Positive: navigating focus to `ref-doc-1` on BOTH the SUT and the oracle
     /// in lockstep keeps the focus invariants green — the faithful
     /// navigation write path (and non-vacuous: both focus invariants must
@@ -630,14 +675,16 @@ mod teeth {
     /// dispatched through the windowless session
     /// by `SutNavHistoryDrive::pin_block`, populates
     /// `focus_roots(right_sidebar)` with the pinned block — matching the
-    /// ref's `open_pins` — while `current_focus(main)` stays journals (pins
-    /// don't move the cursor). Non-vacuous (both focus invariants must have
+    /// ref's `open_pins` — while `current_focus(main)` stays on the doc the
+    /// pin was clicked from (pins don't move the cursor). Non-vacuous (both
+    /// focus invariants must have
     /// run). Verified make-or-break: `headless_pin_block_right_sidebar_probe`.
     #[test]
     fn pin_block_lockstep_stays_green() {
         let rt = rt();
-        let (mut caps, _component) = build_nav_sut(&rt);
+        let (mut caps, component) = build_nav_sut(&rt);
         let mut ref_state = navigation_ref();
+        reveal_pinnable(&rt, &mut caps, &component, &mut ref_state);
         let t = pin(EntityUri::parse(PINNABLE_ID).unwrap());
         t.apply_to_ref(&mut ref_state);
         rt.block_on(t.apply_to_sut(&ref_state, &mut caps));
@@ -671,8 +718,9 @@ mod teeth {
     #[test]
     fn sut_only_pin_block_is_caught_by_focus_roots() {
         let rt = rt();
-        let (mut caps, _component) = build_nav_sut(&rt);
-        let ref_state = navigation_ref(); // oracle has NO pin
+        let (mut caps, component) = build_nav_sut(&rt);
+        let mut ref_state = navigation_ref(); // oracle has NO pin
+        reveal_pinnable(&rt, &mut caps, &component, &mut ref_state);
         let t = pin(EntityUri::parse(PINNABLE_ID).unwrap());
         rt.block_on(t.apply_to_sut(&ref_state, &mut caps));
 
@@ -784,8 +832,8 @@ mod teeth {
     /// Positive (C1 UnpinBlock — the pin→unpin cycle): pin `ref-block-0` into
     /// the right sidebar lockstep, then `UnpinBlock` it by the
     /// ref-predicted `history_id` — which MUST equal the SUT's
-    /// `navigation_history.id` AUTOINCREMENT (2: journals is 1, the pin is
-    /// 2). That id alignment is the "risk C" the C1 research flagged; it is
+    /// `navigation_history.id` AUTOINCREMENT. That id alignment is the
+    /// "risk C" the C1 research flagged; it is
     /// asserted here and only holds because [`navigation_ref`] resets
     /// `next_history_id` to mirror the boot. Both sides clear;
     /// `inv-focus-roots` stays green (and non-vacuous). Make-or-break:
@@ -793,17 +841,19 @@ mod teeth {
     #[test]
     fn unpin_block_lockstep_stays_green() {
         let rt = rt();
-        let (mut caps, _component) = build_nav_sut(&rt);
+        let (mut caps, component) = build_nav_sut(&rt);
         let mut ref_state = navigation_ref();
+        reveal_pinnable(&rt, &mut caps, &component, &mut ref_state);
         let p = pin(EntityUri::parse(PINNABLE_ID).unwrap());
         p.apply_to_ref(&mut ref_state);
         rt.block_on(p.apply_to_sut(&ref_state, &mut caps));
 
         let hid = ref_pin_history_id(&ref_state);
         assert_eq!(
-            hid, 2,
-            "ref must assign the pin history_id=2, matching the SUT AUTOINCREMENT (journals=1, \
-             pin=2) — else UnpinBlock's close(history_id) targets the wrong row"
+            hid, 3,
+            "ref must assign the pin history_id=3, matching the SUT AUTOINCREMENT (journals=1, \
+             the reveal navigation=2, pin=3) — else UnpinBlock's close(history_id) targets the \
+             wrong row"
         );
 
         let u = UnpinBlock { history_id: hid };
@@ -835,8 +885,9 @@ mod teeth {
     #[test]
     fn sut_only_unpin_block_is_caught_by_focus_roots() {
         let rt = rt();
-        let (mut caps, _component) = build_nav_sut(&rt);
+        let (mut caps, component) = build_nav_sut(&rt);
         let mut ref_state = navigation_ref();
+        reveal_pinnable(&rt, &mut caps, &component, &mut ref_state);
         let p = pin(EntityUri::parse(PINNABLE_ID).unwrap());
         p.apply_to_ref(&mut ref_state);
         rt.block_on(p.apply_to_sut(&ref_state, &mut caps));
