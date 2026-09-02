@@ -1206,7 +1206,7 @@ pub mod block_wire_vec {
 /// Loro tree's `fractional_index`, hex-formatted). The domain `Block` no
 /// longer carries `sort_key` (ADR 0005); the file-sync diff base and the SQL
 /// projector read the ordering from here and `block` for everything else.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(into = "SnapshotBlockWire", from = "SnapshotBlockWire")]
 pub struct SnapshotBlock {
     pub block: Block,

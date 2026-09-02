@@ -329,3 +329,541 @@ fn post_boot_create_reaches_the_receiver_on_the_next_round() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// Inc 0 — two-writer convergence under concurrent structure + text.
+// ---------------------------------------------------------------------------
+//
+// ## The model
+// Two peers over ONE replicated container (`holon_tree`). Each peer applies a
+// script of production write ops to its own instance; sync rounds are
+// interleaved at generated points, so some ops are authored while the peers are
+// divergent. After the script the pair is driven to a sync fixed point.
+//
+// **Oracle (convergence law):** at the fixed point both peers' live Loro block
+// trees are EQUAL — same ids, same parents, same sibling order, same text
+// — and neither session panicked or poisoned. That is the only oracle available
+// here: with two concurrent writers there is no single-writer reference state
+// to reconcile against, and inventing one would mean re-implementing RGA
+// tiebreaks in the model.
+//
+// **What is subtracted:** `receiver_boot_ids`. Both instances mint
+// `block:root-layout`, `block:__default__` and the journals roots under the
+// SAME fixed ids at boot, so they collide by construction on merge. That defect
+// is Inc 1's; leaving it in would red every case for a reason this increment
+// does not own.
+//
+// **Why this is not the composed slice's alphabet.** `TwoInstanceMachine`
+// judges the OWNER against a `ReferenceState` that models one writer, and the
+// composed harness treats EVERY invariant failure as hard. A receiver-authored
+// block flowing back into the owner would red the owner-vs-oracle invariants
+// for a reason unrelated to sharing. So the two-writer question gets its own
+// oracle here, over the SAME production caps the keystone transitions drive.
+
+use holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_receiver_caps;
+use holon_pbt_core::capabilities::SutBlockCreate;
+use holon_pbt_core::capabilities::SutBlockTreeWrite;
+use holon_pbt_core::capabilities::SutEditorMirrorWrite;
+use holon_pbt_core::capabilities::SutFocusWrite;
+use holon_pbt_core::composition::CapMap;
+use proptest::prelude::*;
+
+/// One production write, applied to whichever peer the step names. The
+/// structural arms are exactly the ops D70 reports as fatal on a shallow share
+/// when merged against a concurrent op; `Type` is the text op they must be
+/// interleaved with.
+#[derive(Debug, Clone)]
+enum PairOp {
+    Create,
+    Type(String),
+    Indent,
+    Outdent,
+    Join,
+}
+
+// `move_up` / `move_down` are deliberately ABSENT. Their driver asserts the
+// Alt+Up / Alt+Down chord actually dispatched, which it does not when the
+// target has no sibling in that direction — a driver precondition the keystone
+// enforces in its reference model. This slice picks targets by observation, not
+// by model, so a reorder arm would red on driver preconditions instead of on
+// convergence. `Indent` already reparents, which is the tree-move shape D70
+// reports as fatal.
+
+#[derive(Debug, Clone)]
+enum PairStep {
+    /// `on_owner` picks the peer; `pick` selects a target block from that
+    /// peer's own live id set (modulo). A step whose op has no applicable
+    /// target is skipped rather than forced.
+    Write {
+        on_owner: bool,
+        pick: usize,
+        op: PairOp,
+    },
+    /// A sync round in one direction. Interleaved so writes land while the
+    /// peers are divergent.
+    Sync { owner_to_receiver: bool },
+}
+
+fn pair_op() -> impl Strategy<Value = PairOp> {
+    prop_oneof![
+        3 => Just(PairOp::Create),
+        3 => "[a-z]{1,6}".prop_map(PairOp::Type),
+        3 => Just(PairOp::Indent),
+        2 => Just(PairOp::Outdent),
+        1 => Just(PairOp::Join),
+    ]
+}
+
+fn pair_step() -> impl Strategy<Value = PairStep> {
+    prop_oneof![
+        4 => (any::<bool>(), 0usize..64, pair_op())
+            .prop_map(|(on_owner, pick, op)| PairStep::Write { on_owner, pick, op }),
+        1 => any::<bool>().prop_map(|owner_to_receiver| PairStep::Sync { owner_to_receiver }),
+    ]
+}
+
+/// Blocks a write op may target on one peer: everything the peer's live Loro
+/// tree holds MINUS the ids the oracle subtracts. Writing to a subtracted block
+/// would produce a write the oracle cannot see, so the non-vacuity count would
+/// over-claim.
+///
+/// The candidate set is narrowed per op to the targets whose PRECONDITION
+/// holds. `indent` and `join_block` both fold a block into its previous
+/// sibling and the production op refuses when there is none; the keystone
+/// enforces that in its reference model, and this slice — which picks by
+/// observation, not by model — has to enforce it here or it reds on driver
+/// preconditions instead of on convergence.
+fn candidates(state: &TreeState, op: &PairOp) -> Vec<holon_api::EntityUri> {
+    // A page ROOT has no parent block: `outdent` refuses it outright, and
+    // `indent`/`join_block` refuse it even when other page roots sit beside it
+    // under the tree sentinel.
+    let needs_parent_block = matches!(op, PairOp::Indent | PairOp::Outdent | PairOp::Join);
+    let needs_previous_sibling = matches!(op, PairOp::Indent | PairOp::Join);
+    state
+        .values()
+        .filter(|b| {
+            if needs_parent_block && !state.contains_key(b.block.parent_id.as_str()) {
+                return false;
+            }
+            if !needs_previous_sibling {
+                return true;
+            }
+            state.values().any(|other| {
+                other.block.parent_id == b.block.parent_id
+                    && other.block.id != b.block.id
+                    && other.sort_key < b.sort_key
+            })
+        })
+        .map(|b| b.block.id.clone())
+        .collect()
+}
+
+/// Apply one production write to one peer through its OWN cap map.
+///
+/// Returns `false` when no target satisfies the op's precondition, so the
+/// caller does not count a write that never happened.
+async fn apply_pair_op(caps: &CapMap, state: &TreeState, op: &PairOp, pick: usize) -> bool {
+    let mut targets = candidates(state, op);
+    targets.sort();
+    if targets.is_empty() {
+        return false;
+    }
+    let target = targets[pick % targets.len()].clone();
+    match op {
+        PairOp::Create => {
+            caps.expect::<dyn SutBlockCreate>()
+                .apply_create_under_focus(&target, "pair", None)
+                .await;
+        }
+        PairOp::Type(text) => {
+            caps.expect::<dyn SutFocusWrite>()
+                .apply_focus_editable_text(&target)
+                .await;
+            caps.expect::<dyn SutEditorMirrorWrite>()
+                .apply_type_chars(text)
+                .await;
+        }
+        PairOp::Indent => {
+            caps.expect::<dyn SutBlockTreeWrite>()
+                .apply_indent(&target)
+                .await
+        }
+        PairOp::Outdent => {
+            caps.expect::<dyn SutBlockTreeWrite>()
+                .apply_outdent(&target)
+                .await
+        }
+        PairOp::Join => {
+            caps.expect::<dyn SutBlockTreeWrite>()
+                .apply_join_block(&target)
+                .await
+        }
+    }
+    true
+}
+
+const PAIR_SETTLE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Drive rounds until neither side imports anything new — the sync fixed point
+/// the oracle is stated at. Bounded: a pair that will not quiesce is a defect,
+/// not a reason to loop forever.
+async fn drive_to_sync_fixpoint(
+    two: &std::sync::Arc<dyn SutTwoInstance>,
+    handle: &std::sync::Arc<
+        holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    >,
+) {
+    for _ in 0..6 {
+        let a = two.sync_now(true).await;
+        holon_integration_tests::pbt::composed::wide_e2e::converge_handle(
+            handle.receiver(),
+            PAIR_SETTLE,
+        )
+        .await;
+        let b = two.sync_now(false).await;
+        holon_integration_tests::pbt::composed::wide_e2e::converge_handle(
+            handle.owner(),
+            PAIR_SETTLE,
+        )
+        .await;
+        if a.imported == 0 && b.imported == 0 && a.pushed == 0 && b.pushed == 0 {
+            return;
+        }
+    }
+}
+
+/// Run one generated script and return the two peers' final tree states.
+///
+/// `ref_state` is built by the CALLER, outside any runtime: `wide_e2e_ref`
+/// boots its own runtime to extract the cap set, and a nested one panics.
+type TreeState = std::collections::BTreeMap<String, holon_loro::loro_backend::SnapshotBlock>;
+
+async fn run_pair_script(
+    ref_state: &holon_integration_tests::pbt::reference_state::ReferenceState,
+    script: &[PairStep],
+) -> (TreeState, TreeState, usize) {
+    let resolver = IdResolver::default();
+    let (owner_caps, receiver_caps, handle, _) =
+        boot_two_instances_with_receiver_caps(&resolver, ref_state).await;
+    let two = caps_two(&owner_caps);
+    let recv = owner_caps.expect::<dyn SutReceiverBackend>();
+
+    // One pairing gesture, read-write, then a first round so the receiver holds
+    // the owner's tree — every later concurrent op is authored against a SHARED
+    // ancestor, which is the merge shape the design turns on.
+    two.share_container("holon_tree", "receiver").await;
+    two.sync_now(true).await;
+    holon_integration_tests::pbt::composed::wide_e2e::converge_handle(
+        handle.receiver(),
+        PAIR_SETTLE,
+    )
+    .await;
+
+    // The oracle's subtraction, resolved BEFORE the script so writes and the
+    // comparison agree on what is observable.
+    let exclude = recv.receiver_boot_block_ids().await;
+
+    let mut writes = 0usize;
+    for step in script {
+        match step {
+            PairStep::Write { on_owner, pick, op } => {
+                let caps = if *on_owner {
+                    &owner_caps
+                } else {
+                    &receiver_caps
+                };
+                let state = handle.loro_tree_state(*on_owner, &exclude).await;
+                if !apply_pair_op(caps, &state, op, *pick).await {
+                    continue;
+                }
+                let side = if *on_owner {
+                    handle.owner()
+                } else {
+                    handle.receiver()
+                };
+                holon_integration_tests::pbt::composed::wide_e2e::converge_handle(
+                    side,
+                    PAIR_SETTLE,
+                )
+                .await;
+                writes += 1;
+            }
+            PairStep::Sync { owner_to_receiver } => {
+                two.sync_now(*owner_to_receiver).await;
+                let side = if *owner_to_receiver {
+                    handle.receiver()
+                } else {
+                    handle.owner()
+                };
+                holon_integration_tests::pbt::composed::wide_e2e::converge_handle(
+                    side,
+                    PAIR_SETTLE,
+                )
+                .await;
+            }
+        }
+    }
+
+    drive_to_sync_fixpoint(&two, &handle).await;
+
+    (
+        handle.loro_tree_state(true, &exclude).await,
+        handle.loro_tree_state(false, &exclude).await,
+        writes,
+    )
+}
+
+fn caps_two(caps: &holon_pbt_core::composition::CapMap) -> std::sync::Arc<dyn SutTwoInstance> {
+    caps.expect::<dyn SutTwoInstance>()
+}
+
+fn assert_converged(owner: &TreeState, receiver: &TreeState, writes: usize, label: &str) {
+    if writes == 0 {
+        // Every generated step's precondition was unsatisfiable. Nothing was
+        // exercised, so there is nothing to judge — and calling it green would
+        // be a vacuous pass.
+        return;
+    }
+    if owner == receiver {
+        return;
+    }
+    let ids: BTreeSet<&String> = owner.keys().chain(receiver.keys()).collect();
+    let divergent: Vec<String> = ids
+        .into_iter()
+        .filter(|id| owner.get(*id) != receiver.get(*id))
+        .map(|id| {
+            format!(
+                "{id}\n  owner:    {:?}\n  receiver: {:?}",
+                owner.get(id),
+                receiver.get(id)
+            )
+        })
+        .collect();
+    panic!(
+        "{label}: the two peers did NOT converge after {writes} write(s) and a sync fixed point. \
+         {} block(s) differ:\n{}",
+        divergent.len(),
+        divergent.join("\n")
+    );
+}
+
+proptest! {
+    #![proptest_config(proptest::test_runner::Config {
+        cases: std::env::var("PAIR_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(24),
+        max_shrink_iters: 20,
+        failure_persistence: None,
+        .. proptest::test_runner::Config::default()
+    })]
+
+    /// **Inc 0 keystone.** Both peers author concurrently — structure and text
+    /// — over a read-write pairing, and the pair converges.
+    ///
+    /// `#[ignore]`d while
+    /// `cross_peer_indent_then_join_stalls_the_receiver_projection` is
+    /// OPEN: roughly one run in five draws that shape and reds on it, which
+    /// would make every landing gate flaky on a defect this increment does not
+    /// own. Measured 2026-09-02: 4 of 5 runs at 24 cases green, the fifth red
+    /// on case 20. Run it with
+    /// `PAIR_CASES=24 cargo nextest run --run-ignored all -E 'test(concurrent_two_writer_pair_converges)'`.
+    #[test]
+    #[ignore = "reds ~1 run in 5 on the OPEN receiver-projection stall; see cross_peer_indent_then_join_stalls_the_receiver_projection"]
+    fn concurrent_two_writer_pair_converges(
+        script in proptest::collection::vec(pair_step(), 1..7)
+    ) {
+        let rt = rt();
+        let ref_state = wide_e2e_ref();
+        let (owner, receiver, writes) = rt.block_on(run_pair_script(&ref_state, &script));
+        assert_converged(&owner, &receiver, writes, &format!("script {script:?}"));
+    }
+}
+
+/// The worst shape, pinned deterministically: a text edit on the RECEIVER
+/// concurrent with a structural create on the OWNER, then sync both ways. This
+/// is the exact merge D70 reports as fatal on a shallow share
+/// (`tree_state.rs:1198`); the replicate-all path exports full op lineage
+/// (`ExportMode::updates_owned`), and this test is what says whether that
+/// difference matters.
+#[test]
+fn edit_on_receiver_concurrent_with_create_on_owner_converges() {
+    let script = vec![
+        PairStep::Write {
+            on_owner: false,
+            pick: 1,
+            op: PairOp::Type("phone".to_string()),
+        },
+        PairStep::Write {
+            on_owner: true,
+            pick: 1,
+            op: PairOp::Create,
+        },
+        PairStep::Sync {
+            owner_to_receiver: true,
+        },
+        PairStep::Sync {
+            owner_to_receiver: false,
+        },
+    ];
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    let (owner, receiver, writes) = rt.block_on(run_pair_script(&ref_state, &script));
+    assert!(writes == 2, "worst shape: expected 2 writes, got {writes}");
+    assert_converged(&owner, &receiver, writes, "worst shape");
+
+    // Teeth: convergence on two peers that both lost the receiver's edit would
+    // also be "equal". Require the phone-side text to be present on BOTH.
+    for (side, state) in [("owner", &owner), ("receiver", &receiver)] {
+        assert!(
+            state.values().any(|b| b.block.content.contains("phone")),
+            "{side} converged WITHOUT the receiver-authored text — the reverse leg carried \
+             nothing, so this case proves only that two identical trees are identical"
+        );
+    }
+
+    // Teeth: and the owner's concurrent create must have survived the merge.
+    for (side, state) in [("owner", &owner), ("receiver", &receiver)] {
+        assert!(
+            state.values().any(|b| b.block.content == "pair"),
+            "{side} converged WITHOUT the owner's concurrent create"
+        );
+    }
+}
+
+/// The structural half of the same shape: concurrent tree MOVES on both peers.
+/// A move-move merge is the arm that reparents a node on both sides at once —
+/// the loro tree state's hardest case.
+#[test]
+fn concurrent_structural_moves_on_both_peers_converge() {
+    let script = vec![
+        PairStep::Write {
+            on_owner: true,
+            pick: 2,
+            op: PairOp::Create,
+        },
+        PairStep::Write {
+            on_owner: false,
+            pick: 2,
+            op: PairOp::Create,
+        },
+        PairStep::Write {
+            on_owner: true,
+            pick: 3,
+            op: PairOp::Indent,
+        },
+        PairStep::Write {
+            on_owner: false,
+            pick: 3,
+            op: PairOp::Outdent,
+        },
+        PairStep::Sync {
+            owner_to_receiver: true,
+        },
+        PairStep::Sync {
+            owner_to_receiver: false,
+        },
+    ];
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    let (owner, receiver, writes) = rt.block_on(run_pair_script(&ref_state, &script));
+    assert!(
+        writes == 4,
+        "concurrent moves: expected 4 writes, got {writes}"
+    );
+    assert_converged(&owner, &receiver, writes, "concurrent moves");
+}
+
+/// **OPEN DEFECT, pinned — the cross-peer indent+join CLASS.**
+///
+/// An `indent` and a `join_block` applied across the two peers stall the
+/// RECEIVER's Loro→SQL projection. The CRDT layer is fine — the trees merge and
+/// the peers agree — but the receiver's outbound reconcile fails with
+///
+/// ```text
+/// [TursoBackend::Actor] Commit failed, rolling back: deferred foreign key constraint failed on commit
+/// [LoroSyncController] Outbound reconcile failed: BlockConsolidator sink write failed: ...
+///   (ops[N]: create:block:receiver-root<-sentinel:no_parent,
+///            create:block:<uuid><-block:receiver-root,
+///            update:block:fe-target<-block:fe-blocked, ...)
+/// ```
+///
+/// and is never retried. `LoroSyncController::run_loop`
+/// (`crates/holon-loro/src/loro_sync_controller.rs:438-451`) is wake-driven: a
+/// failed reconcile bumps `error_count`, logs, and waits for the NEXT doc
+/// change. Nothing re-drives the failed batch, so ONE failure is permanent and
+/// `converge_projections` never reaches its fixed point. A STALL, not a
+/// livelock — the single-case log carries exactly one reconcile failure.
+///
+/// The loro fork emits `WARN loro_internal::state: Missing in parent's
+/// children` on the same tick, which is the D70 neighbourhood surfacing as a
+/// warning rather than the `tree_state.rs` panic — worth a look from the
+/// fork-rebase lane.
+///
+/// Two shapes are pinned because the defect is a CLASS, not one interleaving:
+/// this one puts the `indent` on the receiver, its sibling below puts four of
+/// five writes on the owner. Both stall the same way.
+///
+/// `#[ignore]`d because the defect is OPEN and belongs to the Loro→SQL
+/// projection, not to this increment: Inc 0 answers whether the replicate-all
+/// path converges in the CRDT, and it does. Un-ignore when the projection both
+/// surfaces the failure and re-drives it.
+#[test]
+#[ignore = "OPEN: a failed reconcile after a cross-peer indent+join is never re-driven, so the receiver projection stalls"]
+fn cross_peer_indent_then_join_stalls_the_receiver_projection() {
+    let script = vec![
+        PairStep::Write {
+            on_owner: false,
+            pick: 3,
+            op: PairOp::Indent,
+        },
+        PairStep::Write {
+            on_owner: true,
+            pick: 2,
+            op: PairOp::Join,
+        },
+    ];
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    let (owner, receiver, writes) = rt.block_on(run_pair_script(&ref_state, &script));
+    assert_eq!(writes, 2);
+    assert_converged(&owner, &receiver, writes, "indent+join");
+}
+
+/// The same class, owner-heavy: the shrunk counterexample the lane's verifier
+/// reached independently, with four of its five writes on the OWNER. Pinned
+/// beside its sibling so a fix that only handles a receiver-side `indent`
+/// cannot look complete.
+#[test]
+#[ignore = "OPEN: same class — a failed reconcile after a cross-peer indent+join is never re-driven"]
+fn owner_heavy_indent_then_join_stalls_the_receiver_projection() {
+    let script = vec![
+        PairStep::Write {
+            on_owner: true,
+            pick: 1,
+            op: PairOp::Indent,
+        },
+        PairStep::Write {
+            on_owner: false,
+            pick: 1,
+            op: PairOp::Indent,
+        },
+        PairStep::Write {
+            on_owner: true,
+            pick: 2,
+            op: PairOp::Indent,
+        },
+        PairStep::Write {
+            on_owner: true,
+            pick: 3,
+            op: PairOp::Indent,
+        },
+        PairStep::Write {
+            on_owner: true,
+            pick: 2,
+            op: PairOp::Join,
+        },
+    ];
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    let (owner, receiver, writes) = rt.block_on(run_pair_script(&ref_state, &script));
+    assert_eq!(writes, 5);
+    assert_converged(&owner, &receiver, writes, "owner-heavy indent+join");
+}

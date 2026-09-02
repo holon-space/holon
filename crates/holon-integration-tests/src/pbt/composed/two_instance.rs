@@ -30,6 +30,7 @@
 //! increment's job. Widening the alphabet before then would produce
 //! refusal-driven REDs that say nothing about sharing.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -174,6 +175,37 @@ impl TwoInstanceHandle {
             .collect()
     }
 
+    /// The full block tree one side's LIVE Loro doc holds — id → block, not
+    /// just the id set. The two-writer convergence oracle compares these
+    /// directly: two peers that agree on ids but disagree on a block's parent,
+    /// order or text have NOT converged, and an id-set oracle would call that
+    /// green.
+    ///
+    /// Reads the live document (no fork), so it answers "have they converged",
+    /// not `crdt_converged`'s "would they converge if synced once more".
+    /// `exclude` drops the fixed-id boot roots both instances mint
+    /// independently (`block:root-layout`, `block:__default__`, the journals
+    /// roots). They collide by construction, which is Inc 1's defect, not this
+    /// oracle's.
+    pub async fn loro_tree_state(
+        &self,
+        owner: bool,
+        exclude: &BTreeSet<EntityUri>,
+    ) -> BTreeMap<String, holon_loro::loro_backend::SnapshotBlock> {
+        let side = if owner { "owner" } else { "receiver" };
+        let handle = if owner { &self.owner } else { &self.receiver };
+        let doc = Self::registry(handle, side)
+            .store()
+            .get_global_doc()
+            .await
+            .unwrap_or_else(|e| panic!("the {side} instance has no global Loro doc: {e:#}"));
+        let skip: BTreeSet<&str> = exclude.iter().map(EntityUri::as_str).collect();
+        holon_loro::loro_backend::snapshot_blocks_from_doc(&doc.doc())
+            .into_iter()
+            .filter(|(id, _)| !skip.contains(id.as_str()))
+            .collect()
+    }
+
     fn with_transport_counters(&self, mut witness: SyncRoundWitness) -> SyncRoundWitness {
         witness.transport_consultations = self.relay.witness().total();
         witness.transport_envelopes = self.relay.stored_envelopes();
@@ -226,7 +258,12 @@ impl SutTwoInstance for TwoInstanceHandle {
             BlockId(selector.to_string()),
             Principal(principal.to_string()),
             Issuer::Owner,
-            Capabilities::read_only(),
+            // Own-device pairing (D68.b) makes the peer a full WRITER, so the
+            // cert the slice issues is the one production will issue. `admit`
+            // gates on `Read` alone today; `Write` is what the reverse leg's
+            // authorization will read once it stops reusing the receiver's
+            // audience for both directions (see `sync_now`).
+            Capabilities::read_write(),
             false,
             Lease::starting_at(holon_api::Clock::now_millis(&*self.clock), LEASE_TTL_MILLIS),
             &UnverifiedAuthority,
@@ -412,10 +449,33 @@ impl SutReceiverBackend for TwoInstanceHandle {
 }
 
 /// Boot both instances and assemble the two-instance cap map.
+///
+/// The receiver's own `CapMap` is dropped here: the composed slice's oracle is
+/// the OWNER's `ReferenceState`, which models a single writer. Tests that need
+/// the receiver to author (own-device pairing, D68.b) call
+/// [`boot_two_instances_with_receiver_caps`] and judge by convergence instead.
 pub async fn boot_two_instances(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
 ) -> (CapMap, Arc<TwoInstanceHandle>, BTreeSet<EntityUri>) {
+    let (owner_caps, _receiver_caps, handle, scaffold) =
+        boot_two_instances_with_receiver_caps(resolver, ref_state).await;
+    (owner_caps, handle, scaffold)
+}
+
+/// Boot both instances and hand back BOTH cap maps, so a caller can drive
+/// production writes on either peer.
+///
+/// This is the two-writer seam. The receiver's map is the SAME
+/// `compose_sut(full_headless)` surface as the owner's — same transitions, same
+/// drivers — so a peer-side write goes through production code, not a test
+/// shortcut. It is returned separately rather than merged into the owner's map
+/// because `CapMap` is keyed by cap TYPE: one map cannot hold two realizations
+/// of `SutBlockCreate`.
+pub async fn boot_two_instances_with_receiver_caps(
+    resolver: &IdResolver,
+    ref_state: &ReferenceState,
+) -> (CapMap, CapMap, Arc<TwoInstanceHandle>, BTreeSet<EntityUri>) {
     let (mut owner_caps, owner, scaffold) =
         boot_and_seed_wide_with_peer_id(resolver, ref_state, Some(OWNER_PEER_ID)).await;
 
@@ -464,7 +524,7 @@ pub async fn boot_two_instances(
             cap.name(),
         );
     }
-    (owner_caps, handle, scaffold)
+    (owner_caps, receiver_caps, handle, scaffold)
 }
 
 /// The caps this slice adds ON TOP of the wide owner map it boots through the

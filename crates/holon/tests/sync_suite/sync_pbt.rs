@@ -1753,6 +1753,685 @@ mod tests {
             });
         }
 
+        // -------------------------------------------------------------
+        // Inc 0b — the REPLICATE-ALL whole-vault path, shallow variant.
+        // -------------------------------------------------------------
+        //
+        // The Inc 0 experiment (`two_instance_composed_pbt.rs`) proved the
+        // replicate-all path converges under concurrent structure + text when
+        // both peers' docs carry full history. But `save_all` writes a SHALLOW
+        // snapshot on the FIRST save of every session and every 64th after
+        // (`loro_document_store.rs:204-220`, `COMPACT_EVERY = 64`, kill-switch
+        // `HOLON_LORO_COMPACT=off`), so after a restart the vault doc loads
+        // shallow. "Replicate-all is the full-lineage path" therefore holds
+        // only until the next session start.
+        //
+        // These tests re-run the same question with the OWNER's doc genuinely
+        // shallow — saved compact, then reloaded through the production
+        // `LoroDocumentStore` load path via `backend_at`. That restart seam is
+        // why the variant lives HERE and not in the two-instance slice: the
+        // composed session caches `Arc<LoroDocument>` inside `LoroBackend`
+        // (`loro_backend.rs:1983`), so swapping the store's doc slot would
+        // desync the session rather than restart it.
+        //
+        // The ops are raw `LoroTree` / `LoroText` calls, exactly as the D70
+        // pin above argues: the question is about the ENGINE's merge, so
+        // bypassing every Holon write path is what isolates it.
+
+        /// A peer's whole tree as a peer-independent, sorted shape: stable id,
+        /// stable parent id, and text. Comparing `TreeID`s directly would
+        /// compare peer ids, which legitimately differ.
+        fn tree_shape(doc: &LoroDoc) -> Vec<String> {
+            let tree = doc.get_tree(TREE_NAME);
+            let stable = |tid: TreeID| -> String {
+                match tree.get_meta(tid) {
+                    Ok(meta) => match meta.get("id") {
+                        Some(loro::ValueOrContainer::Value(v)) => v
+                            .as_string()
+                            .map(|s| s.as_str().to_string())
+                            .unwrap_or_else(|| "<unnamed>".to_string()),
+                        _ => "<unnamed>".to_string(),
+                    },
+                    Err(_) => "<gone>".to_string(),
+                }
+            };
+            let mut out: Vec<String> = get_alive_nodes(doc)
+                .into_iter()
+                .map(|(id, parent, content)| {
+                    let p = parent.map(stable).unwrap_or_else(|| "<root>".to_string());
+                    format!("{} parent={p} text={content:?}", stable(id))
+                })
+                .collect();
+            out.sort();
+            out
+        }
+
+        fn raw_create_under(doc: &LoroDoc, parent_stable: &str, label: &str) {
+            let tree = doc.get_tree(TREE_NAME);
+            let parent = find(doc, parent_stable)
+                .unwrap_or_else(|| panic!("no node with stable id {parent_stable}"));
+            let node = tree.create(Some(parent)).unwrap();
+            let meta = tree.get_meta(node).unwrap();
+            meta.insert("id", loro::LoroValue::from(label)).unwrap();
+            let t: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
+            t.insert(0, label).unwrap();
+            doc.commit();
+        }
+
+        /// Reparent `child_stable` under `new_parent_stable` — the tree-MOVE
+        /// arm, which is the shape `tree_state.rs` resolves and the one D70
+        /// panics on.
+        fn raw_move(doc: &LoroDoc, child_stable: &str, new_parent_stable: &str) {
+            let tree = doc.get_tree(TREE_NAME);
+            let child = find(doc, child_stable).unwrap();
+            let parent = find(doc, new_parent_stable).unwrap();
+            tree.mov(child, Some(parent)).unwrap();
+            doc.commit();
+        }
+
+        fn raw_append_text(doc: &LoroDoc, stable_id: &str, extra: &str) {
+            let tree = doc.get_tree(TREE_NAME);
+            let node = find(doc, stable_id).unwrap();
+            let meta = tree.get_meta(node).unwrap();
+            let t: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
+            let len = t.len_unicode();
+            t.insert(len, extra).unwrap();
+            doc.commit();
+        }
+
+        /// One direction of a replicate-all round, over the SAME production
+        /// functions the two-instance slice drives: `push_once` exports
+        /// `ExportMode::updates_owned(from)` and `pull_once` admits and
+        /// imports. Returns `(pushed, imported, refusals)`.
+        #[allow(clippy::too_many_arguments)]
+        async fn replicate_round(
+            from: &holon_loro::ContainerRegistry,
+            to: &holon_loro::ContainerRegistry,
+            relay: &holon_loro::sync_transport::InMemoryRelay,
+            from_session: &mut holon_sharing::sync::SyncSession,
+            to_session: &mut holon_sharing::sync::SyncSession,
+            sender: u64,
+            chain: &holon_sharing::lease::MembershipChain,
+            clock: &holon_api::TestClock,
+        ) -> (usize, usize, Vec<String>) {
+            use holon_sharing::acceptor::AcceptorContext;
+            use holon_sharing::policy::Principal;
+            use holon_sharing::policy::UnverifiedVerifier;
+            use holon_sharing::sync::OutboundAuth;
+
+            let audience = Principal("peer".to_string());
+            let auth = OutboundAuth {
+                sender: holon_loro::sync_transport::StablePeerId(sender),
+                audience: audience.clone(),
+                epoch: 0,
+                chain: chain.clone(),
+            };
+            let push = holon_sharing::sync::push_once(from, relay, from_session, &auth)
+                .await
+                .expect(
+                    "push_once must surface an export failure as Err; a shallow doc that cannot \
+                     export its un-pushed delta is a FINDING, not something to swallow",
+                );
+            let ctx = AcceptorContext {
+                receiver: &audience,
+                clock,
+                verifier: &UnverifiedVerifier,
+            };
+            let pull = holon_sharing::sync::pull_once(to, relay, to_session, &ctx)
+                .await
+                .expect("pull_once must surface a transport or import failure as Err");
+            (
+                push.pushed.len(),
+                pull.imported.len(),
+                pull.refusals
+                    .iter()
+                    .map(|(c, d)| format!("{c}: {d:?}"))
+                    .collect(),
+            )
+        }
+
+        /// The exchange the PRODUCTION iroh leg performs, mirrored here
+        /// clause for clause from
+        /// `iroh_sync_adapter::export_delta_or_full_snapshot`
+        /// (`iroh_sync_adapter.rs:77-105`), which is private to that module:
+        /// a peer that does not include our shallow base gets a self-contained
+        /// SNAPSHOT; everyone else gets `ExportMode::updates(peer_vv)`; an
+        /// `Err` from `updates` also falls back to a snapshot.
+        ///
+        /// The relay leg (`push_once`) has NO such guard — that difference is
+        /// exactly what the two shallow variants below measure.
+        fn export_like_iroh(doc: &LoroDoc, peer_vv: &loro::VersionVector) -> Vec<u8> {
+            if doc.is_shallow() {
+                let base = doc.shallow_since_vv().to_vv();
+                if !peer_vv.includes_vv(&base) {
+                    return doc.export(loro::ExportMode::Snapshot).unwrap();
+                }
+            }
+            match doc.export(loro::ExportMode::updates(peer_vv)) {
+                Ok(delta) => delta,
+                Err(_) => doc.export(loro::ExportMode::Snapshot).unwrap(),
+            }
+        }
+
+        fn sync_pair_like_iroh(a: &LoroDoc, b: &LoroDoc) {
+            let import = |dst: &LoroDoc, payload: &[u8], side: &str, other: &LoroDoc| {
+                if payload.is_empty() {
+                    return;
+                }
+                if let Err(e) = dst.import(payload) {
+                    panic!(
+                        "[{side}] importing {} bytes FAILED: {e:?}\n  destination shallow={} \
+                         since={:?}\n  source shallow={} since={:?}",
+                        payload.len(),
+                        dst.is_shallow(),
+                        dst.shallow_since_vv().to_vv(),
+                        other.is_shallow(),
+                        other.shallow_since_vv().to_vv(),
+                    );
+                }
+            };
+            let to_b = export_like_iroh(a, &b.oplog_vv());
+            import(b, &to_b, "owner->receiver", a);
+            let to_a = export_like_iroh(b, &a.oplog_vv());
+            import(a, &to_a, "receiver->owner", b);
+        }
+
+        /// Run the Inc 0b experiment. `shallow` decides whether the owner
+        /// restarts over a compacted snapshot first; `iroh_like` picks the
+        /// PRODUCTION exchange (snapshot fallback) over the relay leg.
+        ///
+        /// Returns `(owner_shape, receiver_shape, owner_doc_was_shallow)`.
+        /// The axes of the Inc 0b experiment. A struct rather than five bools
+        /// so a call site reads as the variant it is.
+        #[derive(Clone, Copy)]
+        struct PairVariant {
+            /// Compact the owner's snapshot before restarting it.
+            compact_owner: bool,
+            /// Use the production iroh exchange (snapshot fallback) instead of
+            /// the `push_once` relay leg.
+            iroh_like: bool,
+            /// Give the receiver a seed of its own before pairing.
+            receiver_has_own_history: bool,
+            /// Let the receiver type into content that predates the compaction.
+            receiver_edits_pretrim_text: bool,
+            /// Set `HOLON_LORO_COMPACT=off` before the owner's save — the crude
+            /// stopgap. With it, the save is full and the restart is not
+            /// shallow.
+            compaction_disabled: bool,
+        }
+
+        impl PairVariant {
+            fn shallow() -> Self {
+                Self {
+                    compact_owner: true,
+                    iroh_like: true,
+                    receiver_has_own_history: true,
+                    receiver_edits_pretrim_text: true,
+                    compaction_disabled: false,
+                }
+            }
+        }
+
+        async fn run_replicate_all_pair(v: PairVariant) -> (Vec<String>, Vec<String>, bool) {
+            use holon_sharing::lease::Issuer;
+            use holon_sharing::lease::Lease;
+            use holon_sharing::lease::MembershipCert;
+            use holon_sharing::lease::MembershipChain;
+            use holon_sharing::policy::Capabilities;
+            use holon_sharing::policy::Principal;
+            use holon_sharing::types::BlockId;
+            use holon_sharing::types::UnverifiedAuthority;
+
+            let dir_a = TempDir::new().unwrap();
+            let bus_a = Arc::new(DegradedSignalBus::new());
+            let a = backend_fresh(dir_a.path(), bus_a.clone()).await;
+            seed(&a, "root-a", None, "root-a").await;
+            seed(&a, "p1", Some("root-a"), "Parent one").await;
+            seed(&a, "c1", Some("p1"), "Child one").await;
+            seed(&a, "c2", Some("p1"), "Child two").await;
+
+            let PairVariant {
+                compact_owner,
+                iroh_like,
+                receiver_has_own_history,
+                receiver_edits_pretrim_text,
+                compaction_disabled,
+            } = v;
+
+            if compaction_disabled {
+                // SAFETY: nextest runs every test in its own process, so this
+                // never races another test's environment.
+                unsafe { std::env::set_var("HOLON_LORO_COMPACT", "off") };
+            }
+
+            let a = if compact_owner {
+                // The FIRST `save_all` of a store compacts (counter starts at
+                // 0, and 0 is a multiple of 64), so this writes the shallow
+                // snapshot a restart then loads.
+                a.store.read().await.save_all().await.unwrap();
+                drop(a);
+                backend_at(dir_a.path(), bus_a.clone()).await
+            } else {
+                a
+            };
+
+            let a_doc = a.be.test_global_doc().await;
+            let a_is_shallow = a_doc.doc().is_shallow();
+            let expected_shallow = compact_owner && !compaction_disabled;
+            assert_eq!(
+                a_is_shallow, expected_shallow,
+                "the owner's doc shallowness is the whole independent variable; this variant \
+                 implies shallow={expected_shallow} and the reloaded doc reports \
+                 {a_is_shallow}, so the case would measure nothing"
+            );
+
+            // A peer with its OWN pre-pairing history is the real own-device
+            // shape (a phone boots its own layout and journals before it ever
+            // pairs), and it is what the two-instance slice models. The
+            // no-history case isolates whether that independent lineage is
+            // what a compacted owner cannot merge with.
+            let (b, _bus_b, _dir_b) = backend().await;
+            if receiver_has_own_history {
+                seed(&b, "root-b", None, "root-b").await;
+            }
+
+            let reg_a = holon_loro::ContainerRegistry::new(a.store.read().await.clone());
+            let reg_b = holon_loro::ContainerRegistry::new(b.store.read().await.clone());
+            let relay = holon_loro::sync_transport::InMemoryRelay::new();
+            let clock = holon_api::TestClock::new(0);
+            let chain = MembershipChain::direct(MembershipCert::issue(
+                BlockId(holon_loro::container_registry::ROOT_CONTAINER_ID.to_string()),
+                Principal("peer".to_string()),
+                Issuer::Owner,
+                Capabilities::read_write(),
+                false,
+                Lease::starting_at(holon_api::Clock::now_millis(&clock), 60 * 60 * 1000),
+                &UnverifiedAuthority,
+            ));
+            let mut sess_a = holon_sharing::sync::SyncSession::new();
+            let mut sess_b = holon_sharing::sync::SyncSession::new();
+
+            let da = a.be.test_global_doc().await;
+            let db = b.be.test_global_doc().await;
+            let doc_a = da.doc();
+            let doc_b = db.doc();
+
+            // Pair: one round each way so the receiver holds the owner's tree
+            // and every later op merges against a SHARED ancestor.
+            if iroh_like {
+                sync_pair_like_iroh(&doc_a, &doc_b);
+            } else {
+                replicate_round(
+                    &reg_a,
+                    &reg_b,
+                    &relay,
+                    &mut sess_a,
+                    &mut sess_b,
+                    1,
+                    &chain,
+                    &clock,
+                )
+                .await;
+                replicate_round(
+                    &reg_b,
+                    &reg_a,
+                    &relay,
+                    &mut sess_b,
+                    &mut sess_a,
+                    2,
+                    &chain,
+                    &clock,
+                )
+                .await;
+            }
+            assert!(
+                find(&doc_b, "c1").is_some(),
+                "the receiver never got the owner's tree, so every concurrent op below would \
+                 merge against nothing"
+            );
+
+            // Concurrent, unsynced, on BOTH peers: structure on one side and
+            // text on the other is the exact D70 shape, plus a tree MOVE.
+            raw_create_under(&doc_a, "p1", "a-new");
+            if receiver_edits_pretrim_text {
+                // Typing into content that existed BEFORE the owner compacted
+                // — the ordinary own-device gesture (edit an existing note on
+                // the phone).
+                raw_append_text(&doc_b, "c1", " [B typed]");
+            }
+            raw_move(&doc_a, "c2", "c1");
+            let b_create_parent = if receiver_has_own_history {
+                "root-b"
+            } else {
+                "p1"
+            };
+            raw_create_under(&doc_b, b_create_parent, "b-new");
+
+            // Sync to a fixed point.
+            for _ in 0..4 {
+                if iroh_like {
+                    sync_pair_like_iroh(&doc_a, &doc_b);
+                    continue;
+                }
+                let (pa, ia, ra) = replicate_round(
+                    &reg_a,
+                    &reg_b,
+                    &relay,
+                    &mut sess_a,
+                    &mut sess_b,
+                    1,
+                    &chain,
+                    &clock,
+                )
+                .await;
+                let (pb, ib, rb) = replicate_round(
+                    &reg_b,
+                    &reg_a,
+                    &relay,
+                    &mut sess_b,
+                    &mut sess_a,
+                    2,
+                    &chain,
+                    &clock,
+                )
+                .await;
+                assert!(
+                    ra.is_empty() && rb.is_empty(),
+                    "acceptor refused: {ra:?} {rb:?}"
+                );
+                if pa == 0 && ia == 0 && pb == 0 && ib == 0 {
+                    break;
+                }
+            }
+
+            let shape_a = tree_shape(&doc_a);
+            let shape_b = tree_shape(&doc_b);
+            drop(doc_a);
+            drop(doc_b);
+            a.advertiser_for_test().close_all().await;
+            b.advertiser_for_test().close_all().await;
+            (shape_a, shape_b, a_is_shallow)
+        }
+
+        fn pair_rt() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+                .unwrap()
+        }
+
+        fn assert_pair_converged(a: &[String], b: &[String], label: &str) {
+            if a == b {
+                return;
+            }
+            let sa: std::collections::BTreeSet<&String> = a.iter().collect();
+            let sb: std::collections::BTreeSet<&String> = b.iter().collect();
+            panic!(
+                "{label}: the two peers did NOT converge.\nonly on the owner:\n{:#?}\nonly on \
+                 the receiver:\n{:#?}",
+                sa.difference(&sb).collect::<Vec<_>>(),
+                sb.difference(&sa).collect::<Vec<_>>()
+            );
+        }
+
+        /// **Inc 0b, variant NON-SHALLOW.** The control: the same replicate-all
+        /// round at the engine layer with a full-history owner doc. Green here
+        /// and red in the shallow twin isolates shallowness as the cause.
+        #[test]
+        fn replicate_all_converges_under_concurrent_structure_and_text() {
+            let rt = pair_rt();
+            let (a, b, was_shallow) = rt.block_on(run_replicate_all_pair(PairVariant {
+                compact_owner: false,
+                iroh_like: false,
+                ..PairVariant::shallow()
+            }));
+            assert!(!was_shallow);
+            assert!(
+                a.iter().any(|n| n.contains("a-new"))
+                    && a.iter().any(|n| n.contains("[B typed]"))
+                    && a.iter().any(|n| n.contains("b-new")),
+                "the owner is missing one of the concurrent writes, so equality proves nothing: \
+                 {a:#?}"
+            );
+            assert_pair_converged(&a, &b, "non-shallow");
+        }
+
+        /// **Inc 0b, variant SHALLOW over the RELAY leg — a real defect,
+        /// pinned.**
+        ///
+        /// The owner restarts over a compacted snapshot first, which is what
+        /// EVERY session start does (`save_all` compacts on its first save).
+        /// The pair then cannot even bootstrap: `pull_once` returns
+        ///
+        /// ```text
+        /// importing an ADMITTED 226-byte blob (seq Some(2)) into container `holon_tree`
+        ///   Caused by: Import Failed: The dependencies of the importing updates are not
+        ///   included in the shallow history of the doc.
+        /// ```
+        ///
+        /// This is NOT the D70 panic — the engine refuses loudly and the doc
+        /// is not poisoned. The defect is in the relay leg: `push_once`
+        /// exports `ExportMode::updates_owned(from)` with NO shallow guard
+        /// (`crates/holon-sharing/src/sync.rs:167`), while the production iroh
+        /// leg falls back to a self-contained snapshot for a peer below the
+        /// shallow base (`iroh_sync_adapter.rs:77-105`). The twin below shows
+        /// that with production's fallback the same merge converges, so the
+        /// fix is to give `push_once` the same guard.
+        ///
+        /// `#[ignore]`d because the fix belongs to the sharing lane, not to
+        /// this increment. Un-ignore it when `push_once` grows the guard.
+        #[test]
+        #[ignore = "OPEN: push_once has no shallow-base guard, so a compacted owner doc cannot bootstrap a peer over the relay leg"]
+        fn replicate_all_over_the_relay_leg_fails_when_the_owner_doc_is_shallow() {
+            let rt = pair_rt();
+            let (a, b, was_shallow) = rt.block_on(run_replicate_all_pair(PairVariant {
+                iroh_like: false,
+                ..PairVariant::shallow()
+            }));
+            assert!(was_shallow);
+            assert_pair_converged(&a, &b, "shallow / relay leg");
+        }
+
+        /// **Inc 0b, variant SHALLOW over the PRODUCTION exchange.** The owner
+        /// is shallow exactly as above, but the exchange is the one production
+        /// performs — `export_delta_or_full_snapshot`'s snapshot fallback for
+        /// a peer below the shallow base.
+        ///
+        /// It does NOT converge, and not with the D70 panic either. The
+        /// reverse leg fails:
+        ///
+        /// ```text
+        /// [receiver->owner] importing 227 bytes FAILED: ImportUpdatesThatDependsOnOutdatedVersion
+        ///   destination shallow=true  since=VersionVector({<owner peer>: 46})
+        ///   source      shallow=false since=VersionVector({})
+        /// ```
+        ///
+        /// Read the two `shallow=` lines: the receiver imported the owner's
+        /// shallow SNAPSHOT and did NOT inherit the shallow base — its own
+        /// `shallow_since` is empty, so it believes it holds history from 0.
+        /// Its later ops causally depend on containers the owner trimmed, and
+        /// the owner's shallow doc cannot accept an op that depends on
+        /// history it no longer holds. The protocol has no way to express
+        /// "my base is at 46" to the peer, so nothing the receiver authors on
+        /// top of the snapshot can ever come back.
+        ///
+        /// `#[ignore]`d: OPEN, and it belongs to the sharing/loro-pin lanes.
+        #[test]
+        #[ignore = "OPEN: a compacted owner cannot import anything a peer authored on top of the snapshot it sent (receiver does not inherit the shallow base)"]
+        fn replicate_all_converges_when_the_owner_doc_is_shallow() {
+            let rt = pair_rt();
+            let (a, b, was_shallow) = rt.block_on(run_replicate_all_pair(PairVariant::shallow()));
+            assert!(was_shallow);
+            assert!(
+                a.iter().any(|n| n.contains("a-new"))
+                    && a.iter().any(|n| n.contains("[B typed]"))
+                    && a.iter().any(|n| n.contains("b-new")),
+                "the owner is missing one of the concurrent writes, so equality proves nothing: \
+                 {a:#?}"
+            );
+            assert_pair_converged(&a, &b, "shallow / production exchange");
+        }
+
+        /// **Inc 0b, the isolating case.** Shallow owner, production exchange,
+        /// and a receiver that authored NOTHING before pairing. If this
+        /// converges while the twin above does not, the trigger is not
+        /// compaction alone — it is a compacted owner meeting a peer that
+        /// already has an independent lineage, which is exactly what an
+        /// own-device pair is.
+        ///
+        /// It does NOT converge either — same
+        /// `ImportUpdatesThatDependsOnOutdatedVersion` on the reverse leg. So
+        /// the receiver's independent lineage is NOT the trigger.
+        ///
+        /// `#[ignore]`d: OPEN, same defect as the twin above.
+        #[test]
+        #[ignore = "OPEN: same shallow-base defect; the receiver's own history is not the trigger"]
+        fn shallow_owner_converges_with_a_receiver_that_has_no_own_history() {
+            let rt = pair_rt();
+            let (a, b, was_shallow) = rt.block_on(run_replicate_all_pair(PairVariant {
+                receiver_has_own_history: false,
+                ..PairVariant::shallow()
+            }));
+            assert!(was_shallow);
+            assert!(
+                a.iter().any(|n| n.contains("a-new"))
+                    && a.iter().any(|n| n.contains("[B typed]"))
+                    && a.iter().any(|n| n.contains("b-new")),
+                "the owner is missing one of the concurrent writes: {a:#?}"
+            );
+            assert_pair_converged(&a, &b, "shallow / no receiver history");
+        }
+
+        /// **Inc 0b, the mechanism probe.** Shallow owner, production
+        /// exchange, and a receiver that only CREATES — it never types into
+        /// content that existed before the owner compacted. Green here would
+        /// mean the constraint is specifically "the peer may not edit
+        /// pre-compaction content", which is the ordinary own-device gesture
+        /// and therefore the whole point of D68.b.
+        ///
+        /// It does NOT converge. A create under a pre-compaction parent
+        /// depends on that parent's creation op, which was trimmed, so even a
+        /// pure create cannot come back. The constraint is not "do not edit
+        /// old text" — it is that essentially NOTHING the peer authors on top
+        /// of a compacted snapshot is mergeable by the owner.
+        ///
+        /// `#[ignore]`d: OPEN, same defect.
+        #[test]
+        #[ignore = "OPEN: same shallow-base defect; even a pure create under a pre-compaction parent cannot merge back"]
+        fn shallow_owner_and_a_receiver_that_only_creates() {
+            let rt = pair_rt();
+            let (a, b, was_shallow) = rt.block_on(run_replicate_all_pair(PairVariant {
+                receiver_edits_pretrim_text: false,
+                ..PairVariant::shallow()
+            }));
+            assert!(was_shallow);
+            assert!(
+                a.iter().any(|n| n.contains("a-new")) && a.iter().any(|n| n.contains("b-new")),
+                "the owner is missing one of the concurrent creates: {a:#?}"
+            );
+            assert_pair_converged(&a, &b, "shallow / receiver creates only");
+        }
+
+        /// **Inc 0b, the crude stopgap.** `HOLON_LORO_COMPACT=off` on the owner
+        /// before it saves, so the restart reloads a FULL-history doc. If this
+        /// converges, turning compaction off for a paired vault buys working
+        /// pairing at the cost of an unbounded oplog.
+        #[test]
+        fn compaction_disabled_on_the_owner_lets_the_pair_converge() {
+            let rt = pair_rt();
+            let (a, b, was_shallow) = rt.block_on(run_replicate_all_pair(PairVariant {
+                compaction_disabled: true,
+                ..PairVariant::shallow()
+            }));
+            assert!(
+                !was_shallow,
+                "HOLON_LORO_COMPACT=off did not prevent the compacting save"
+            );
+            assert!(
+                a.iter().any(|n| n.contains("a-new"))
+                    && a.iter().any(|n| n.contains("[B typed]"))
+                    && a.iter().any(|n| n.contains("b-new")),
+                "the owner is missing one of the concurrent writes: {a:#?}"
+            );
+            assert_pair_converged(&a, &b, "compaction disabled");
+        }
+
+        /// **Inc 0b, P2 — the pairing-replaces-the-phone's-doc shape.**
+        ///
+        /// The earlier shallow variants had the receiver import the owner's
+        /// snapshot into a doc that ALREADY existed (its schema init, and in
+        /// most variants a seed too). The diagnostic showed the consequence:
+        /// the receiver came out `shallow=false since={}`, i.e. it did not
+        /// inherit the owner's base.
+        ///
+        /// Here the receiver's document IS the import: a bare `LoroDoc` with
+        /// no prior history, exactly what "pairing replaces the fresh phone's
+        /// document" would do. Returns whether the receiver ended up shallow
+        /// and what base it carries, so the answer is measured, not inferred.
+        async fn run_empty_receiver_bootstrap() -> (Vec<String>, Vec<String>, bool, String) {
+            let dir_a = TempDir::new().unwrap();
+            let bus_a = Arc::new(DegradedSignalBus::new());
+            let a = backend_fresh(dir_a.path(), bus_a.clone()).await;
+            seed(&a, "root-a", None, "root-a").await;
+            seed(&a, "p1", Some("root-a"), "Parent one").await;
+            seed(&a, "c1", Some("p1"), "Child one").await;
+            seed(&a, "c2", Some("p1"), "Child two").await;
+            a.store.read().await.save_all().await.unwrap();
+            drop(a);
+            let a = backend_at(dir_a.path(), bus_a.clone()).await;
+
+            let da = a.be.test_global_doc().await;
+            let doc_a = da.doc();
+            assert!(
+                doc_a.is_shallow(),
+                "the owner must be shallow for this probe"
+            );
+
+            // The receiver's document is CREATED by the pairing payload.
+            let doc_b = LoroDoc::new();
+            doc_b.set_peer_id(2).unwrap();
+            let bootstrap = export_like_iroh(&doc_a, &doc_b.oplog_vv());
+            doc_b.import(&bootstrap).unwrap();
+            let b_is_shallow = doc_b.is_shallow();
+            let b_since = format!("{:?}", doc_b.shallow_since_vv().to_vv());
+
+            assert!(
+                find(&doc_b, "c1").is_some(),
+                "the bootstrap payload did not carry the owner's tree"
+            );
+
+            // The same concurrent structure + text as every other variant.
+            raw_create_under(&doc_a, "p1", "a-new");
+            raw_append_text(&doc_b, "c1", " [B typed]");
+            raw_move(&doc_a, "c2", "c1");
+            raw_create_under(&doc_b, "p1", "b-new");
+
+            for _ in 0..4 {
+                sync_pair_like_iroh(&doc_a, &doc_b);
+            }
+
+            let shape_a = tree_shape(&doc_a);
+            let shape_b = tree_shape(&doc_b);
+            drop(doc_a);
+            a.advertiser_for_test().close_all().await;
+            (shape_a, shape_b, b_is_shallow, b_since)
+        }
+
+        #[test]
+        fn shallow_owner_converges_with_a_receiver_bootstrapped_into_an_empty_doc() {
+            let rt = pair_rt();
+            let (a, b, b_is_shallow, b_since) = rt.block_on(run_empty_receiver_bootstrap());
+            eprintln!("[P2] receiver after bootstrap: shallow={b_is_shallow} since={b_since}");
+            assert!(
+                a.iter().any(|n| n.contains("a-new"))
+                    && a.iter().any(|n| n.contains("[B typed]"))
+                    && a.iter().any(|n| n.contains("b-new")),
+                "the owner is missing one of the concurrent writes: {a:#?}"
+            );
+            assert_pair_converged(&a, &b, "empty-doc receiver bootstrap");
+        }
+
         /// The accepter side of the same routing question: a block created
         /// under the mount B got from `accept_shared_subtree` must land in the
         /// shared doc and reach the sharer.

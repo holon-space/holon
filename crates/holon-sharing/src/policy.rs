@@ -75,6 +75,13 @@ impl Capabilities {
         Self::of([Capability::Read])
     }
 
+    /// What an own-device peer holds: it both reads the vault and authors into
+    /// it. Distinct from [`Self::read_only`] because a third-party share must
+    /// never confer `Write` by default.
+    pub fn read_write() -> Self {
+        Self::of([Capability::Read, Capability::Write])
+    }
+
     pub fn contains(&self, cap: Capability) -> bool {
         self.0.contains(&cap)
     }
