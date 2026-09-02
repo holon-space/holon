@@ -85,6 +85,7 @@ pub mod sql_budget;
 pub mod task_state_matches_ref;
 pub mod task_state_storage_coherence;
 pub mod two_instance_convergence;
+pub mod two_writer_peer_writes_land;
 pub mod undo_redo_reference_heal;
 pub mod value_fn_provider_arg_variance_13;
 pub mod value_fn_provider_identity;

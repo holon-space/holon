@@ -39,18 +39,33 @@ impl<R: RefSharedView + RefSharedViewMut> TransitionFactory<R> for SyncNow {
 
     type Reason = Reason;
 
-    fn weighted_generator(_: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        // ONE-WAY only. A receiver→owner round imports receiver-local state into
-        // the owner, which the owner-side oracle does not model — it would
-        // surface as an unreconcilable id rather than as a sharing finding. The
-        // reverse direction lands with the concurrent-edit increment that gives
-        // the model a second side.
+    fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
+        // BOTH directions, with the reverse leg gated on a shared vault and
+        // weighted up once a peer write is outstanding: the reverse round
+        // imports receiver-authored state, which is a sharing finding only when
+        // there is a share and something to carry.
+        let reverse_weight = match (
+            state.is_shared() && crate::pbt::sharing_state::two_writer_alphabet_enabled(),
+            state.peer_writes_pending().is_empty(),
+        ) {
+            (false, _) => 0,
+            (true, true) => 1,
+            (true, false) => 4,
+        };
         Good((
             25,
-            Just(SyncNow {
-                owner_to_receiver: true,
-            })
-            .boxed(),
+            if reverse_weight == 0 {
+                Just(SyncNow {
+                    owner_to_receiver: true,
+                })
+                .boxed()
+            } else {
+                prop_oneof![
+                    3 => Just(SyncNow { owner_to_receiver: true }),
+                    reverse_weight => Just(SyncNow { owner_to_receiver: false }),
+                ]
+                .boxed()
+            },
         ))
     }
 }
@@ -66,8 +81,17 @@ impl<R: RefSharedView + RefSharedViewMut> TransitionRef<R> for SyncNow {
         // A round only counts as a delivery when there is something to deliver:
         // unshared, the acceptor refuses everything, so the receiver's state is
         // unchanged and the model must NOT start expecting convergence.
-        if self.owner_to_receiver && state.is_shared() {
+        if !state.is_shared() {
+            return;
+        }
+        if self.owner_to_receiver {
             state.note_owner_to_receiver_round();
+        } else {
+            // The receiver→owner leg is what the model requires before it
+            // expects a peer write on the owner. A bidirectional wire may
+            // deliver earlier — the model states a LOWER bound, so an early
+            // delivery is not a violation.
+            state.note_receiver_to_owner_round();
         }
     }
 }

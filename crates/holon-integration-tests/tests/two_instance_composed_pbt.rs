@@ -40,6 +40,7 @@ use holon_pbt_core::capabilities::SutReceiverBackend;
 use holon_pbt_core::capabilities::SutTwoInstance;
 use holon_pbt_core::capabilities::SyncRoundWitness;
 use holon_pbt_core::capabilities::SyncTransportKind;
+use proptest_state_machine::StateMachineTest;
 use proptest_state_machine::prop_state_machine;
 
 prop_state_machine! {
@@ -1012,4 +1013,200 @@ fn the_reverse_leg_reaches_the_owner_under_the_owners_own_audience() {
             after.len()
         );
     });
+}
+
+// ---------------------------------------------------------------------------
+// The two-writer reference model, driven deterministically (D76.b).
+// ---------------------------------------------------------------------------
+
+use holon_integration_tests::pbt::composed::harness::ComposedSlice;
+use holon_integration_tests::pbt::reference_state::ReferenceState;
+use holon_integration_tests::pbt::sharing_state::RECEIVER_PRINCIPAL;
+use holon_integration_tests::pbt::transitions::E2ETransition;
+use holon_integration_tests::pbt::transitions::ReceiverCreateBlock;
+use holon_integration_tests::pbt::transitions::ShareContainer;
+use holon_integration_tests::pbt::transitions::SyncNow;
+use holon_integration_tests::pbt::transitions::share_container::ROOT_SELECTOR;
+use holon_pbt_core::capabilities::RefSharedView;
+use holon_pbt_core::composition::RunReport;
+use holon_pbt_core::invariant::InvariantResult;
+use proptest_state_machine::ReferenceStateMachine;
+
+type Sut = ComposedSut<TwoInstanceE2E>;
+type Machine = <TwoInstanceE2E as ComposedSlice>::Machine;
+
+/// The two-writer chain: share, one forward round, a block authored on the
+/// RECEIVER under an owner-authored parent, one reverse round.
+///
+/// Driven through `StateMachineTest::apply`, so the harness's per-tick
+/// synthetic↔real reconcile judges every step exactly as it does inside the
+/// property — that reconcile is the seam the authorship scoping exists for, and
+/// without it step 4 panics on the 1:1 `synthetic`/`real_new` guard.
+fn drive_two_writer_chain() -> (Sut, ReferenceState) {
+    let mut ref_state = wide_e2e_ref();
+    let mut sut = <Sut as StateMachineTest>::init_test(&ref_state);
+
+    let mut step = |sut: Sut, ref_state: &mut ReferenceState, t: E2ETransition| -> Sut {
+        assert!(
+            Machine::preconditions(ref_state, &t),
+            "two-writer chain: {t:?} violates its precondition against the booted oracle — the \
+             chain is malformed, which is a finding about the model, not a reason to skip a step"
+        );
+        *ref_state = Machine::apply(ref_state.clone(), &t);
+        let sut = <Sut as StateMachineTest>::apply(sut, ref_state, t);
+        // A second settle window. The receiver's org write-back can outlast one
+        // `CONVERGE_BUDGET` on a loaded host — the load-sensitive red `pair-inc0`
+        // recorded on pristine `main` — and this chain would then red on that
+        // instead of on the two-writer question. Same production settle, one
+        // more budget; a write-back that is stalled rather than slow still reds.
+        sut.settle_projections();
+        sut
+    };
+
+    sut = step(
+        sut,
+        &mut ref_state,
+        E2ETransition::ShareContainer(ShareContainer {
+            selector: ROOT_SELECTOR.to_string(),
+            principal: RECEIVER_PRINCIPAL.to_string(),
+        }),
+    );
+    sut = step(
+        sut,
+        &mut ref_state,
+        E2ETransition::SyncNow(SyncNow {
+            owner_to_receiver: true,
+        }),
+    );
+
+    // The parent the receiver writes under: an owner-authored block the model
+    // knows the forward round carried. Picked from the MODEL, not by observing
+    // the receiver — a parent chosen by observation would make the oracle's
+    // parent claim a restatement of what it read.
+    let parent = ref_state
+        .blocks_delivered_to_receiver()
+        .into_iter()
+        .next()
+        .expect(
+            "one owner→receiver round must leave the model holding at least one delivered block; \
+             with none, a peer write has nothing to parent under and this chain proves nothing",
+        );
+    sut = step(
+        sut,
+        &mut ref_state,
+        E2ETransition::ReceiverCreateBlock(ReceiverCreateBlock {
+            parent,
+            content: "phone".to_string(),
+            id: holon_api::EntityUri::block("pair-0"),
+        }),
+    );
+    sut = step(
+        sut,
+        &mut ref_state,
+        E2ETransition::SyncNow(SyncNow {
+            owner_to_receiver: false,
+        }),
+    );
+    (sut, ref_state)
+}
+
+/// The two-writer oracle's verdict, demanded rather than read.
+///
+/// Fails on absence (the peer-authored partition would be scoped out of the
+/// owner's comparison and judged NOWHERE) and on `Skipped` (the oracle declined
+/// to look at the only thing the chain exists to check). This is the assertion
+/// the first version of these tests could never reach: it sat after a full
+/// `check_invariants`, which panics on the fixed-id boot collision — a defect
+/// this model does not own — so the guard was unreachable code.
+fn assert_two_writer_oracle_engaged(report: &RunReport, ref_state: &ReferenceState) {
+    assert!(
+        !ref_state.peer_writes_delivered().is_empty(),
+        "the model records no delivered peer write, so this assertion would judge nothing — the \
+         chain did not reach the state it exists to create"
+    );
+    let verdict = report
+        .ran
+        .iter()
+        .find(|(id, _)| id.0 == "inv-two-writer-peer-writes-land")
+        .map(|(_, r)| r.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "`inv-two-writer-peer-writes-land` did not run against a two-instance CapMap — \
+                 the peer-authored partition of the owner's store is scoped out of the \
+                 owner-vs-oracle comparison and judged NOWHERE. Ran: {:?}, deselected: {:?}",
+                report.ran_ids(),
+                report.deselected
+            )
+        });
+    match verdict {
+        InvariantResult::Ok => {}
+        InvariantResult::Skipped(reason) => panic!(
+            "the two-writer oracle SKIPPED after a receiver-authored block and a reverse round \
+             ({reason}) — it declined to look at the only thing this chain exists to check"
+        ),
+        other => panic!("the two-writer oracle failed: {other:?}"),
+    }
+}
+
+/// **The two-writer model, asserted.** Runs the chain and demands the
+/// two-writer oracle ENGAGE and pass — nothing else.
+///
+/// Not `#[ignore]`d, and deliberately narrower than its sibling below: it runs
+/// the harness reconcile over a second writer and judges the peer-authored
+/// partition, without also demanding the whole catalog be green over a merged
+/// pair of independently-seeded vaults (which the fixed-id boot collision makes
+/// impossible until the layout-container increment lands). Without this test
+/// the two-writer oracle engages in NO runnable test and could sit at `Skipped`
+/// forever.
+#[test]
+fn a_receiver_authored_block_reaches_the_owner_and_the_two_writer_oracle_engages() {
+    let (sut, ref_state) = drive_two_writer_chain();
+    // Authorship of every id in the owner's tree: a red is then triaged against
+    // provenance rather than presence — an id listing BOTH peers is one both
+    // instances minted, not one that crossed.
+    for line in sut.runtime().block_on(sut.handle().authorship_dump(true)) {
+        eprintln!("[authorship owner] {line}");
+    }
+    assert_two_writer_oracle_engaged(&sut.run_report_now(&ref_state), &ref_state);
+}
+
+/// The SAME chain, judged by the WHOLE catalog — the state the property will be
+/// in once the two-writer alphabet is drawable by default.
+///
+/// ## OPEN, and why it is `#[ignore]`d
+/// It reds on the FIXED-ID BOOT COLLISION, not on the two-writer model. Once a
+/// receiver→owner round runs, the owner's tree holds two nodes for every id
+/// both instances seed independently:
+///
+/// ```text
+/// [inv-blocks-match-ref/loro] actual holds DUPLICATE ids
+///   ["block:368857d2-…", "block:journals", "block:journals::action::0",
+///    "block:journals::auto-create"]
+/// [inv-birth-contract-satisfied] 4 of 42 visible block(s) hold no minted
+///   position … block:structural-page … block:receiver-root
+/// [inv-viewmodel-entity-ids-subset-of-data] phantom entity … block:receiver-root
+/// ```
+///
+/// The `[authorship owner]` dump names the cause of the first: those ids list
+/// `peers {1, 2}` while `block:pair-0` and `block:receiver-root` list
+/// `peers {2}` and `block:parent` lists `peers {1}`. Both instances minted
+/// them; nothing crossed that should not have. That is the layout-container
+/// increment's defect, and subtracting the receiver's boot ids to make it pass
+/// is exactly the subtraction that increment exists to remove.
+///
+/// The other two are a SECOND, separate gap: `inv-birth-contract-satisfied` and
+/// `inv-viewmodel-entity-ids-subset-of-data` read the store directly and never
+/// consult the seed / unmodeled set, so they judge `block:receiver-root` — a
+/// pure `peers {2}` foreign block — as if the owner's model should account for
+/// it. The scoping hook cannot reach them. Over-strict, never a false green,
+/// and it needs those two bodies to respect the partition.
+///
+/// The two-writer oracle is asserted FIRST here too, so this test can only ever
+/// fail for a reason its sibling above has already cleared.
+#[test]
+#[ignore = "OPEN: reds on the fixed-id boot collision (duplicate block:journals* nodes after a reverse round), which the layout-container increment owns"]
+fn the_two_writer_chain_is_green_across_the_whole_catalog() {
+    let (sut, ref_state) = drive_two_writer_chain();
+    assert_two_writer_oracle_engaged(&sut.run_report_now(&ref_state), &ref_state);
+    <Sut as StateMachineTest>::check_invariants(&sut, &ref_state);
 }

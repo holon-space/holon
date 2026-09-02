@@ -30,6 +30,7 @@ pub mod mark_bounds_within_content;
 pub mod matview_recompute_matches;
 pub mod paint_text_styling;
 pub mod two_instance_convergence;
+pub mod two_writer_peer_writes_land;
 pub mod typed_matview_matches_ref;
 // `navigation_focus` moved to `capability_pair!`'s `compare_navigation_focus`
 // in holon-pbt-core (auto-derived `inv-navigation-focus`); body file deleted.

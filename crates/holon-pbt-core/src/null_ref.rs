@@ -308,6 +308,19 @@ impl RefSharedView for NullRef {
     fn shared_audience(&self) -> Audience {
         panic!("class-2: invariant read RefSharedView::shared_audience")
     }
+    fn blocks_delivered_to_receiver(&self) -> std::collections::BTreeSet<EntityUri> {
+        panic!("class-2: invariant read RefSharedView::blocks_delivered_to_receiver")
+    }
+    fn peer_writes_delivered(
+        &self,
+    ) -> std::collections::BTreeMap<EntityUri, crate::capabilities::PeerWrite> {
+        panic!("class-2: invariant read RefSharedView::peer_writes_delivered")
+    }
+    fn peer_writes_pending(
+        &self,
+    ) -> std::collections::BTreeMap<EntityUri, crate::capabilities::PeerWrite> {
+        panic!("class-2: invariant read RefSharedView::peer_writes_pending")
+    }
 }
 
 #[allow(unused_variables)]

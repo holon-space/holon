@@ -30,6 +30,7 @@
 //! cap set the wide catalog needs; each trait's own doc explains what it
 //! observes and which invariants bind it.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -3507,6 +3508,25 @@ pub trait SutTwoInstance {
     /// The round witness WITHOUT driving a round — for an invariant that must
     /// read counters it did not produce.
     async fn sync_witness(&self) -> SyncRoundWitness;
+
+    /// Ids one side's live CRDT holds that THAT side's own peer authored —
+    /// authorship read off the document (which peer created the node), never
+    /// inferred from a block being present on one side and not the other.
+    ///
+    /// This is what makes a two-writer oracle possible. Co-presence proves
+    /// nothing about provenance: both instances mint the fixed boot ids, and a
+    /// deterministic rule (the journal day block) can mint the SAME id on both
+    /// sides independently. Only the document knows who wrote what.
+    async fn locally_authored_ids(&self, owner: bool) -> BTreeSet<EntityUri>;
+
+    /// Create a block on the RECEIVER instance, through the receiver's own
+    /// production create path, under `parent` (an id in the owner/oracle space
+    /// the slice resolves) with the born-equal id `id`.
+    ///
+    /// Born-equal on purpose: the receiver's mints never enter the owner-side
+    /// synthetic→real reconcile, so the model needs to name the block it
+    /// predicts without a second reconcile map.
+    async fn peer_create_block(&self, parent: &EntityUri, content: &str, id: &EntityUri);
 }
 
 /// SUT-side observation of the RECEIVER instance's projections. Separate from
@@ -3552,6 +3572,15 @@ pub trait SutReceiverBackend {
     async fn crdt_converged(&self) -> Option<bool>;
 }
 
+/// One block the RECEIVER authored, as the two-writer model predicts it: where
+/// it lives and what it says. Both are order-independent, which is exactly why
+/// a model with two concurrent writers can predict them at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerWrite {
+    pub parent: EntityUri,
+    pub content: String,
+}
+
 /// Reference-side view of what the receiver is ENTITLED to hold, and how many
 /// sync rounds the model believes have run. Ref-only; the SUT twin is
 /// [`SutReceiverBackend`].
@@ -3569,6 +3598,27 @@ pub trait RefSharedView {
 
     /// The audience the container is shared with. Empty ⇒ local-only.
     fn shared_audience(&self) -> Audience;
+
+    /// Blocks the model knows the receiver holds: everything the owner had when
+    /// the last owner→receiver round ran. A peer write may only be parented
+    /// under one of these — the receiver cannot create under a block it has
+    /// never seen.
+    fn blocks_delivered_to_receiver(&self) -> BTreeSet<EntityUri>;
+
+    /// Peer-authored blocks the model expects to have reached the OWNER. A
+    /// write moves in here once a receiver→owner round has run since it was
+    /// authored.
+    ///
+    /// Membership, parent identity and content only: with two concurrent
+    /// writers the model deliberately predicts nothing order-dependent, and
+    /// leaves sibling order to the convergence law.
+    fn peer_writes_delivered(&self) -> BTreeMap<EntityUri, PeerWrite>;
+
+    /// Peer-authored blocks not yet carried to the owner. They may legitimately
+    /// be present on the owner already (a bidirectional wire delivers earlier
+    /// than the model's lower bound), so the oracle never asserts their
+    /// ABSENCE — only that the delivered ones are present.
+    fn peer_writes_pending(&self) -> BTreeMap<EntityUri, PeerWrite>;
 }
 
 /// Write side of [`RefSharedView`] — the two model mutations the sharing
@@ -3584,6 +3634,13 @@ pub trait RefSharedViewMut: RefSharedView {
 
     /// Record one applied owner→receiver sync round.
     fn note_owner_to_receiver_round(&mut self);
+
+    /// Record one applied receiver→owner sync round: every pending peer write
+    /// becomes a delivered one.
+    fn note_receiver_to_owner_round(&mut self);
+
+    /// Record a block the RECEIVER authored, pending delivery.
+    fn note_peer_write(&mut self, id: EntityUri, write: PeerWrite);
 }
 
 #[cfg(test)]

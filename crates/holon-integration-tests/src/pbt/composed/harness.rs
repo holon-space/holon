@@ -340,6 +340,34 @@ pub trait ComposedSlice {
     /// next_id` into its split-id hint.
     fn align_ids(_: &Self::Handle, _: &ReferenceState) {}
 
+    /// Ids currently in the SUT store that a writer OTHER than the one the
+    /// reference model models authored. Default: none — a single-writer slice
+    /// has no second author by construction.
+    ///
+    /// The harness uses them to SCOPE the owner-vs-oracle comparison to the
+    /// modeled writer's partition of the store, in two places: they never enter
+    /// the per-tick synthetic→real reconcile (they were minted by nobody the
+    /// oracle drove), and they join `scaffold_ids`, which both sides of the
+    /// `inv-blocks-match-ref/*` family already subtract. Nothing is softened —
+    /// every invariant keeps full strength over the modeled writer's blocks.
+    ///
+    /// A slice that returns ids here owes a side-scoped oracle that judges
+    /// them; excusing a block from the owner's oracle without judging it
+    /// anywhere would be a hole, not a scope.
+    async fn foreign_ids(_: &Self::Handle) -> BTreeSet<EntityUri> {
+        BTreeSet::new()
+    }
+
+    /// Invariants for which "selected every tick, `Skipped` every tick" is a
+    /// bug rather than legitimate not-applicable. Default: the shared
+    /// [`ENGAGEMENT_FLOOR`]. A slice adds an id here when its OWN alphabet is
+    /// what makes that invariant reachable — the selection floor only proves
+    /// the invariant is wired, and an invariant that is wired but never looks
+    /// at anything proves nothing.
+    fn engagement_floor() -> Vec<&'static str> {
+        ENGAGEMENT_FLOOR.to_vec()
+    }
+
     /// Produce the catalog run report for a check. Default: resolve the
     /// oracle's doc-uris through the reconcile map, seed-inject the booted
     /// scaffold, and run the full catalog via `run_with_seeded_ref`. A
@@ -597,6 +625,11 @@ pub struct ComposedSut<S: ComposedSlice> {
     /// inferred from a set difference.
     redo_burned: BTreeSet<EntityUri>,
     scaffold_ids: BTreeSet<EntityUri>,
+    /// Ids in the SUT store authored by a writer the reference model does not
+    /// model — see [`ComposedSlice::foreign_ids`]. Accumulated (never
+    /// retracted): a foreign block the peer later deletes stays excused, which
+    /// is correct because the oracle never held it in the first place.
+    foreign_ids: BTreeSet<EntityUri>,
     rt: tokio::runtime::Runtime,
     /// Pumps an attached gpui window to a fixed point before each
     /// `check_invariants` read; a no-op for the headless path. See
@@ -669,6 +702,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             burned: BurnedPairs::new(),
             redo_burned: BTreeSet::new(),
             scaffold_ids,
+            foreign_ids: BTreeSet::new(),
             rt,
             settle,
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
@@ -701,6 +735,17 @@ impl<S: ComposedSlice> ComposedSut<S> {
         self.rt.block_on(S::settle_after_apply(handle, caps));
     }
 
+    /// The ids the oracle must not be compared against: the booted scaffold
+    /// plus everything a second writer authored. Both are seed-injected the
+    /// same way, because the reason is the same — the oracle never modeled
+    /// them.
+    fn unmodeled_ids(&self) -> BTreeSet<EntityUri> {
+        self.scaffold_ids
+            .union(&self.foreign_ids)
+            .cloned()
+            .collect()
+    }
+
     /// Produce the catalog run report over the current SUT/oracle state — the
     /// SAME report [`StateMachineTest::check_invariants`] asserts over. Lets a
     /// deterministic test prove an invariant actually RAN (present in
@@ -708,12 +753,13 @@ impl<S: ComposedSlice> ComposedSut<S> {
     /// invariant must fail such a test, not pass it vacuously.
     pub fn run_report_now(&self, ref_state: &ReferenceState) -> RunReport {
         (self.settle)();
+        let unmodeled = self.unmodeled_ids();
         self.rt.block_on(S::run_report(
             &self.caps,
             &self.resolver,
             &self.burned,
             &self.redo_burned,
-            &self.scaffold_ids,
+            &unmodeled,
             ref_state,
         ))
     }
@@ -760,6 +806,11 @@ impl<S: ComposedSlice> ComposedSut<S> {
 /// as a strict improvement.
 const ENGAGEMENT_FLOOR: &[&str] = &["inv-viewmodel-entity-ids-subset-of-data"];
 
+/// The shared floor, for a slice that ADDS to it rather than replacing it.
+pub fn default_engagement_floor() -> Vec<&'static str> {
+    ENGAGEMENT_FLOOR.to_vec()
+}
+
 /// The engagement floor's pure decision (extracted so it is unit-testable
 /// without booting a full slice — the `teardown` hook that calls it never runs
 /// under the shipped keystone gate, which short-circuits on the journals RED in
@@ -767,10 +818,11 @@ const ENGAGEMENT_FLOOR: &[&str] = &["inv-viewmodel-entity-ids-subset-of-data"];
 /// [`ENGAGEMENT_FLOOR`] ids that this draw SELECTED (`required`) but that never
 /// produced a non-`Skipped` verdict (`engaged`) — i.e. selected-but-vacuous.
 fn engagement_floor_violations(
+    floor: &[&'static str],
     engaged: &std::collections::BTreeSet<&str>,
     required: &std::collections::BTreeSet<&str>,
 ) -> Vec<&'static str> {
-    ENGAGEMENT_FLOOR
+    floor
         .iter()
         .copied()
         .filter(|id| required.contains(id))
@@ -814,6 +866,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             burned: BurnedPairs::new(),
             redo_burned: BTreeSet::new(),
             scaffold_ids,
+            foreign_ids: BTreeSet::new(),
             rt,
             settle: Box::new(|| {}),
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
@@ -929,6 +982,14 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 (before, after, action_us)
             })
         };
+        // Authorship scoping, read AFTER the settle so a block a peer authored
+        // and this tick's sync round carried is already classified when the
+        // reconcile below runs. Accumulated, never retracted.
+        {
+            let handle = &sut.handle;
+            let foreign = sut.rt.block_on(S::foreign_ids(handle));
+            sut.foreign_ids.extend(foreign);
+        }
         // Weights-spike telemetry: record this transition's kind + wall micros
         // (flag-off => `record_label` is `None`, so no accumulation happens).
         if let Some(label) = record_label {
@@ -1009,6 +1070,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         for id in after.difference(&before) {
             if ref_state.domain.block_state.blocks.contains_key(id)
                 && !is_peer_scheme_id(id)
+                && !sut.foreign_ids.contains(id)
                 && !is_composed_minted_synthetic_id(id)
                 && !map.contains_key(id)
             {
@@ -1028,9 +1090,15 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         // (which only counts synthetic-scheme oracle ids) and panic.
         // `resolve_id` passes unmapped ids through as identity, so dropping
         // them here is correct.
+        // Blocks a SECOND writer authored (`ComposedSlice::foreign_ids`) are
+        // excluded for the same reason as peer-scheme ids: the oracle never
+        // minted a synthetic for them, so counting them here would make
+        // `real_new` outrun `synthetic` and panic on a block the model is not
+        // responsible for. Their own side-scoped oracle judges them.
         let real_new: Vec<EntityUri> = after
             .difference(&before)
             .filter(|id| !is_peer_scheme_id(id))
+            .filter(|id| !sut.foreign_ids.contains(*id))
             .filter(|id| !ref_state.domain.block_state.blocks.contains_key(*id))
             .cloned()
             .collect();
@@ -1066,12 +1134,13 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         // read the post-transition frame (no-op headlessly — see `SettleHook`). Mirrors
         // the sim windowed per-tick hook's `settle_to_fixed_point` before its check.
         (sut.settle)();
+        let unmodeled = sut.unmodeled_ids();
         let report = sut.rt.block_on(S::run_report(
             &sut.caps,
             &sut.resolver,
             &sut.burned,
             &sut.redo_burned,
-            &sut.scaffold_ids,
+            &unmodeled,
             ref_state,
         ));
         // `HOLON_PBT_INVARIANTS` disclosed softening: a matched `warn`/`skip` failure
@@ -1262,7 +1331,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             .into_iter()
             .map(|id| id.0)
             .collect();
-        let unengaged = engagement_floor_violations(&engaged, &required);
+        let unengaged = engagement_floor_violations(&S::engagement_floor(), &engaged, &required);
         assert!(
             unengaged.is_empty(),
             "non-vacuity (engagement): invariant(s) were selected but never produced a \
@@ -1407,7 +1476,10 @@ mod engagement_floor_tests {
         let id = ENGAGEMENT_FLOOR[0];
         let required: BTreeSet<&str> = [id].into_iter().collect();
         let engaged: BTreeSet<&str> = BTreeSet::new();
-        assert_eq!(engagement_floor_violations(&engaged, &required), vec![id]);
+        assert_eq!(
+            engagement_floor_violations(ENGAGEMENT_FLOOR, &engaged, &required),
+            vec![id]
+        );
     }
 
     /// A single non-`Skipped` verdict somewhere in the sequence satisfies it.
@@ -1416,7 +1488,7 @@ mod engagement_floor_tests {
         let id = ENGAGEMENT_FLOOR[0];
         let required: BTreeSet<&str> = [id].into_iter().collect();
         let engaged: BTreeSet<&str> = [id].into_iter().collect();
-        assert!(engagement_floor_violations(&engaged, &required).is_empty());
+        assert!(engagement_floor_violations(ENGAGEMENT_FLOOR, &engaged, &required).is_empty());
     }
 
     /// A draw that never SELECTED the invariant (a Loro-only draw with no
@@ -1425,6 +1497,23 @@ mod engagement_floor_tests {
     fn floor_ignores_unselected_invariants() {
         let required: BTreeSet<&str> = BTreeSet::new();
         let engaged: BTreeSet<&str> = BTreeSet::new();
-        assert!(engagement_floor_violations(&engaged, &required).is_empty());
+        assert!(engagement_floor_violations(ENGAGEMENT_FLOOR, &engaged, &required).is_empty());
+    }
+
+    /// A slice-contributed floor id behaves like a shared one. The two-instance
+    /// slice adds `inv-two-writer-peer-writes-land` when its two-writer
+    /// alphabet is drawable: that invariant sits in the SELECTION floor
+    /// permanently, so without an engagement entry a whole run could select it
+    /// on every tick, `Skipped` it on every tick, and still pass.
+    #[test]
+    fn a_slice_contributed_floor_id_is_enforced_like_a_shared_one() {
+        let id = "inv-two-writer-peer-writes-land";
+        let floor: Vec<&'static str> = [ENGAGEMENT_FLOOR, &[id]].concat();
+        let required: BTreeSet<&str> = [id].into_iter().collect();
+        let engaged: BTreeSet<&str> = BTreeSet::new();
+        assert_eq!(
+            engagement_floor_violations(&floor, &engaged, &required),
+            vec![id]
+        );
     }
 }

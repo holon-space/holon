@@ -17,9 +17,11 @@
 //!   effective audience + sharing epoch (ADR 0028 directional alignment).
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::Audience;
+use holon_pbt_core::capabilities::PeerWrite;
 
 /// Reference-model sharing overlay: audiences + epoch. Default = nothing
 /// shared.
@@ -56,6 +58,23 @@ pub struct SharingRefState {
     /// convergence oracle only expects the receiver to hold owner state after
     /// at least one.
     pub owner_to_receiver_rounds: u64,
+
+    /// The owner's non-seed block ids as of the last owner→receiver round —
+    /// exactly what the model knows the receiver holds. A peer write must be
+    /// parented under one of these, because the receiver cannot create a child
+    /// of a block it has never received.
+    pub blocks_delivered_to_receiver: BTreeSet<EntityUri>,
+
+    /// Receiver-authored blocks not yet carried to the owner by a modeled
+    /// receiver→owner round.
+    pub peer_writes_pending: BTreeMap<EntityUri, PeerWrite>,
+
+    /// Receiver-authored blocks the model expects on BOTH peers. The two-writer
+    /// oracle asserts membership + parent identity over this map and nothing
+    /// else: with two concurrent writers everything order-dependent belongs to
+    /// the convergence law, not to a reference model that would have to
+    /// re-implement RGA tiebreaks to predict it.
+    pub peer_writes_delivered: BTreeMap<EntityUri, PeerWrite>,
 }
 
 /// The principal the two-instance slice's receiver acts as. Fixed: the model
@@ -69,6 +88,28 @@ pub const RECEIVER_PRINCIPAL: &str = "receiver";
 /// for both was how the owner came to admit envelopes addressed to somebody
 /// else.
 pub const OWNER_PRINCIPAL: &str = "owner";
+
+/// Environment switch for the TWO-WRITER alphabet — receiver-authored blocks
+/// and the receiver→owner round that carries them.
+pub const TWO_WRITER_ENV: &str = "HOLON_PBT_TWO_WRITER";
+
+/// Is the two-writer alphabet drawable? Default **off**, and the reason is a
+/// defect this switch does not own: once a receiver→owner round runs, the
+/// owner's tree holds TWO nodes for every fixed id both instances seed
+/// independently (`block:journals`, `block:root-layout`, the fixed-clock
+/// journal day block), which reds `inv-blocks-match-ref/loro` on duplicate ids
+/// and `inv-birth-contract-satisfied` on re-keyed page roots. That is the
+/// fixed-id boot collision the layout-container increment owns; leaving these
+/// arms drawable would make every landing gate flaky on it.
+///
+/// The model itself is NOT gated — it is built, wired, and exercised by
+/// `a_receiver_authored_block_reaches_the_owner_and_the_two_writer_oracle_engages`,
+/// and the authorship scoping it introduces runs unconditionally on the
+/// production wire (whose version-vector exchange is bidirectional, so
+/// peer-authored blocks reach the owner with no reverse round at all).
+pub fn two_writer_alphabet_enabled() -> bool {
+    std::env::var_os(TWO_WRITER_ENV).is_some_and(|v| v == "1")
+}
 
 impl SharingRefState {
     /// The owner-intended audience for a block. Falls back to the whole-vault
@@ -105,6 +146,10 @@ impl SharingRefState {
     /// `ReferenceState::with_resolved_doc_uris`). A no-op on the empty default.
     pub fn remapped(&self, map: &BTreeMap<EntityUri, EntityUri>) -> Self {
         let resolve = |u: &EntityUri| map.get(u).cloned().unwrap_or_else(|| u.clone());
+        let resolve_write = |w: &PeerWrite| PeerWrite {
+            parent: resolve(&w.parent),
+            content: w.content.clone(),
+        };
         Self {
             epoch: self.epoch,
             vault_share: self.vault_share.clone(),
@@ -119,6 +164,32 @@ impl SharingRefState {
                 .iter()
                 .map(|(k, v)| (resolve(k), v.clone()))
                 .collect(),
+            blocks_delivered_to_receiver: self
+                .blocks_delivered_to_receiver
+                .iter()
+                .map(resolve)
+                .collect(),
+            peer_writes_pending: self
+                .peer_writes_pending
+                .iter()
+                .map(|(k, v)| (resolve(k), resolve_write(v)))
+                .collect(),
+            peer_writes_delivered: self
+                .peer_writes_delivered
+                .iter()
+                .map(|(k, v)| (resolve(k), resolve_write(v)))
+                .collect(),
         }
+    }
+
+    /// Record a receiver-authored block, pending delivery to the owner.
+    pub fn note_peer_write(&mut self, id: EntityUri, write: PeerWrite) {
+        self.peer_writes_pending.insert(id, write);
+    }
+
+    /// A receiver→owner round carries every pending peer write to the owner.
+    pub fn deliver_peer_writes(&mut self) {
+        self.peer_writes_delivered
+            .extend(std::mem::take(&mut self.peer_writes_pending));
     }
 }

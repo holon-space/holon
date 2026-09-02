@@ -11,7 +11,12 @@
 //! branch — which is also vacuously true there, because no receiver cap is
 //! wired for them to select against.
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+
 use holon_pbt_core::capabilities::Audience;
+use holon_pbt_core::capabilities::EntityUri;
+use holon_pbt_core::capabilities::PeerWrite;
 use holon_pbt_core::capabilities::RefSharedView;
 use holon_pbt_core::capabilities::RefSharedViewMut;
 
@@ -37,6 +42,18 @@ impl RefSharedView for ReferenceState {
     fn shared_audience(&self) -> Audience {
         self.sharing.vault_share.clone().unwrap_or_default()
     }
+
+    fn blocks_delivered_to_receiver(&self) -> BTreeSet<EntityUri> {
+        self.sharing.blocks_delivered_to_receiver.clone()
+    }
+
+    fn peer_writes_delivered(&self) -> BTreeMap<EntityUri, PeerWrite> {
+        self.sharing.peer_writes_delivered.clone()
+    }
+
+    fn peer_writes_pending(&self) -> BTreeMap<EntityUri, PeerWrite> {
+        self.sharing.peer_writes_pending.clone()
+    }
 }
 
 impl RefSharedViewMut for ReferenceState {
@@ -46,5 +63,17 @@ impl RefSharedViewMut for ReferenceState {
 
     fn note_owner_to_receiver_round(&mut self) {
         self.sharing.owner_to_receiver_rounds += 1;
+        // What the round could carry is what the owner holds now, so this is
+        // also the set a later peer write may parent under.
+        self.sharing.blocks_delivered_to_receiver =
+            holon_pbt_core::capabilities::RefBlockTree::all_non_seed_block_ids(self);
+    }
+
+    fn note_receiver_to_owner_round(&mut self) {
+        self.sharing.deliver_peer_writes();
+    }
+
+    fn note_peer_write(&mut self, id: EntityUri, write: PeerWrite) {
+        self.sharing.note_peer_write(id, write);
     }
 }

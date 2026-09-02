@@ -48,6 +48,7 @@ use holon_api::TestClock;
 use holon_loro::sync_transport::StablePeerId;
 use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::capabilities::SutBackend;
+use holon_pbt_core::capabilities::SutBlockCreate;
 use holon_pbt_core::capabilities::SutOrgRead;
 use holon_pbt_core::capabilities::SutReceiverBackend;
 use holon_pbt_core::capabilities::SutTwoInstance;
@@ -85,6 +86,7 @@ use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transitions::CreateBlockUnderFocus;
 use crate::pbt::transitions::E2ETransition;
 use crate::pbt::transitions::Nothing;
+use crate::pbt::transitions::ReceiverCreateBlock;
 use crate::pbt::transitions::ShareContainer;
 use crate::pbt::transitions::SyncNow;
 use crate::pbt::transitions::TypeChars;
@@ -145,6 +147,17 @@ pub struct TwoInstanceHandle {
     /// programmatic default layout both instances mint under the same fixed
     /// ids.
     receiver_boot_ids: BTreeSet<EntityUri>,
+    /// The receiver's production create path — the second writer's write
+    /// surface. Captured as the cap itself rather than the receiver's whole
+    /// `CapMap`, which the caller still owns (and which cannot merge into the
+    /// owner's: `CapMap` is keyed by cap TYPE, so one map cannot hold two
+    /// realizations of `SutBlockCreate`).
+    receiver_create: Arc<dyn SutBlockCreate>,
+    /// The OWNER-side reconcile map. A peer write names its parent in oracle id
+    /// space; the receiver holds that block under the owner's REAL id, so the
+    /// parent has to be resolved through the owner's resolver before the
+    /// receiver's create can reach it.
+    owner_resolver: IdResolver,
     state: Mutex<SharingRuntime>,
 }
 
@@ -209,6 +222,84 @@ impl TwoInstanceHandle {
             .unwrap_or_else(|e| panic!("reading the {side} instance's Loro doc failed: {e:#}"))
             .into_iter()
             .filter(|(id, _)| !skip.contains(id.as_str()))
+            .collect()
+    }
+
+    /// Which peers authored each stable id in one side's LIVE Loro tree.
+    ///
+    /// Authorship is the CREATING peer of the tree node (`loro::TreeID` is
+    /// allocated by the peer that created it and travels with the op), so this
+    /// is provenance off the CRDT rather than an inference from a block being
+    /// present here and absent there. An id can carry MORE than one peer: the
+    /// fixed boot ids are minted independently on both instances, and after a
+    /// merge the tree holds one node per minting peer under the same
+    /// `STABLE_ID`. Reporting the set (not a winner) is what keeps those ids
+    /// classified as owner-authored instead of flipping with snapshot order.
+    async fn authoring_peers(&self, owner: bool) -> BTreeMap<EntityUri, BTreeSet<u64>> {
+        let side = if owner { "owner" } else { "receiver" };
+        let handle = if owner { &self.owner } else { &self.receiver };
+        let doc = Self::registry(handle, side)
+            .store()
+            .get_global_doc()
+            .await
+            .unwrap_or_else(|e| panic!("the {side} instance has no global Loro doc: {e:#}"));
+        doc.with_read(|d| {
+            let tree = d.get_tree(holon_loro::loro_backend::TREE_NAME);
+            let mut authors: BTreeMap<EntityUri, BTreeSet<u64>> = BTreeMap::new();
+            for node in tree.get_nodes(false) {
+                if matches!(
+                    node.parent,
+                    loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+                ) {
+                    continue;
+                }
+                // A live node whose meta has not landed yet is transiently
+                // incomplete, not absent: skip it. The next tick's read
+                // classifies it, and the accumulated foreign set never
+                // un-classifies an id.
+                let Ok(meta) = tree.get_meta(node.id) else {
+                    continue;
+                };
+                let Some(loro::LoroValue::String(raw)) =
+                    meta.get(holon_loro::loro_backend::STABLE_ID).map(|v| {
+                        v.into_value()
+                            .expect("STABLE_ID is a plain value, never a container")
+                    })
+                else {
+                    continue;
+                };
+                authors
+                    .entry(EntityUri::block(raw.as_str()))
+                    .or_default()
+                    .insert(node.id.peer);
+            }
+            Ok(authors)
+        })
+        .unwrap_or_else(|e| panic!("reading the {side} instance's Loro doc failed: {e:#}"))
+    }
+
+    /// Every stable id in one side's tree with the set of peers that authored a
+    /// node for it. The triage read for a fixed-id collision: an id listing
+    /// BOTH peers is one both instances minted independently, which is a
+    /// different defect from one that failed to cross.
+    pub async fn authorship_dump(&self, owner: bool) -> Vec<String> {
+        self.authoring_peers(owner)
+            .await
+            .into_iter()
+            .map(|(id, peers)| format!("{id} <- peers {peers:?}"))
+            .collect()
+    }
+
+    /// Ids in the OWNER's store that the owner's own peer never authored — the
+    /// second writer's partition. This is what
+    /// [`ComposedSlice::foreign_ids`](crate::pbt::composed::harness::ComposedSlice::foreign_ids)
+    /// scopes the owner-vs-oracle comparison by.
+    pub async fn peer_authored_on_owner(&self) -> BTreeSet<EntityUri> {
+        self.authoring_peers(true)
+            .await
+            .into_iter()
+            .filter(|(_, peers)| !peers.contains(&OWNER_PEER_ID))
+            .map(|(id, _)| id)
             .collect()
     }
 
@@ -355,6 +446,35 @@ impl SutTwoInstance for TwoInstanceHandle {
         }
         drop(guard);
         self.with_transport_counters(out)
+    }
+
+    async fn locally_authored_ids(&self, owner: bool) -> BTreeSet<EntityUri> {
+        let own_peer = if owner {
+            OWNER_PEER_ID
+        } else {
+            RECEIVER_PEER_ID
+        };
+        self.authoring_peers(owner)
+            .await
+            .into_iter()
+            .filter(|(_, peers)| peers.contains(&own_peer))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    async fn peer_create_block(&self, parent: &EntityUri, content: &str, id: &EntityUri) {
+        // Oracle id space → the owner's real id, which is the id the receiver
+        // holds too (the block crossed as itself).
+        let resolved = self
+            .owner_resolver
+            .lock()
+            .expect("resolver lock")
+            .get(parent)
+            .cloned()
+            .unwrap_or_else(|| parent.clone());
+        self.receiver_create
+            .apply_create_under_focus(&resolved, content, Some(id))
+            .await;
     }
 
     async fn sync_witness(&self) -> SyncRoundWitness {
@@ -525,6 +645,8 @@ async fn boot_two_instances_with_receiver_caps_on(
         transport: transport.build(),
         clock: crate::pbt::frontend_slice::components::keystone_boot_clock(),
         receiver_boot_ids,
+        receiver_create: receiver_caps.expect::<dyn SutBlockCreate>(),
+        owner_resolver: Arc::clone(resolver),
         state: Mutex::new(SharingRuntime::default()),
     });
 
@@ -589,6 +711,9 @@ impl ReferenceStateMachine for TwoInstanceMachine {
         offer!(SyncNow);
         offer!(CreateBlockUnderFocus);
         offer!(TypeChars);
+        // The SECOND writer. Gated in its own generator on a delivered parent,
+        // so it can only draw once the receiver provably holds something.
+        offer!(ReceiverCreateBlock);
         // `Nothing` has no preconditions, so `arms` is never empty and the
         // Union below cannot panic on a state where everything else is gated.
         offer!(Nothing);
@@ -619,8 +744,11 @@ impl ComposedSlice for TwoInstanceE2E {
     /// The two invariants this slice EXISTS to run. Unlike the keystone's
     /// derive-from-cap_set floor, this list is explicit: if either deselects,
     /// the slice proves nothing and must RED rather than pass.
-    const REQUIRED_INVARIANTS: &'static [&'static str] =
-        &["inv-two-instance-convergence", "inv-boundary-respected"];
+    const REQUIRED_INVARIANTS: &'static [&'static str] = &[
+        "inv-two-instance-convergence",
+        "inv-boundary-respected",
+        "inv-two-writer-peer-writes-land",
+    ];
     const SETTLE: Duration = SETTLE;
     const MULTI_THREAD: bool = true;
 
@@ -640,6 +768,31 @@ impl ComposedSlice for TwoInstanceE2E {
         ref_state: &ReferenceState,
     ) -> (CapMap, Arc<TwoInstanceHandle>, BTreeSet<EntityUri>) {
         boot_two_instances(resolver, ref_state).await
+    }
+
+    /// The owner's store partitioned by AUTHORSHIP: everything the owner's own
+    /// peer never wrote. Two sources feed it — the receiver's disjoint seed,
+    /// which a bidirectional round carries into the owner whether or not the
+    /// receiver ever writes, and every `ReceiverCreateBlock`.
+    ///
+    /// The `inv-two-writer-peer-writes-land` oracle judges these blocks, so
+    /// scoping them out of the owner-vs-oracle comparison narrows that
+    /// comparison rather than putting a hole in it.
+    /// The shared floor PLUS this slice's own two-writer oracle, once the
+    /// two-writer alphabet is drawable. `REQUIRED_INVARIANTS` only proves the
+    /// oracle is WIRED; with a second writer in the alphabet, a whole run that
+    /// selects it on every tick and `Skipped`s it on every tick has checked
+    /// nothing and must not read green.
+    fn engagement_floor() -> Vec<&'static str> {
+        let mut floor = crate::pbt::composed::harness::default_engagement_floor();
+        if crate::pbt::sharing_state::two_writer_alphabet_enabled() {
+            floor.push("inv-two-writer-peer-writes-land");
+        }
+        floor
+    }
+
+    async fn foreign_ids(handle: &Arc<TwoInstanceHandle>) -> BTreeSet<EntityUri> {
+        handle.peer_authored_on_owner().await
     }
 
     /// Settle BOTH instances: a receiver whose CDC / org has not drained looks

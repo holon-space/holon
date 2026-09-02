@@ -78,7 +78,18 @@ where
             );
         }
 
-        let leaked: Vec<_> = exclusive.intersection(&receiver).take(10).collect();
+        // PROVENANCE, not co-presence. An id can be on both sides because both
+        // sides minted it: the fixed boot ids do, and so does any deterministic
+        // rule (the journal day block under the fixed clock) whose async firing
+        // can land after the receiver's boot snapshot was taken — which is
+        // exactly how a correct system used to read as a leak here. Only a
+        // block the receiver's own peer never authored can have crossed.
+        let receiver_authored = sut.locally_authored_ids(false).await;
+        let leaked: Vec<_> = exclusive
+            .intersection(&receiver)
+            .filter(|id| !receiver_authored.contains(*id))
+            .take(10)
+            .collect();
 
         if !expects_convergence {
             // NEGATIVE branch. Vacuous unless the sync path actually ran.
@@ -100,9 +111,9 @@ where
             if !leaked.is_empty() {
                 return InvariantResult::Fail(format!(
                     "[inv-two-instance-convergence] the receiver holds owner-exclusive blocks \
-                     {leaked:?} although the model says shared={} rounds={} — state crossed \
-                     without an authorized, model-acknowledged share (unauthorized: {:?}, \
-                     refusals: {:?})",
+                     {leaked:?} — which its OWN peer never authored — although the model says \
+                     shared={} rounds={}: state crossed without an authorized, \
+                     model-acknowledged share (unauthorized: {:?}, refusals: {:?})",
                     ref_.is_shared(),
                     ref_.owner_to_receiver_rounds(),
                     witness.unauthorized,

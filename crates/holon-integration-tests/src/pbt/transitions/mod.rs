@@ -133,6 +133,7 @@ mod open_tab_via_modifier_click;
 pub mod outdent;
 mod pin_block;
 mod press_key;
+pub mod receiver_create_block;
 mod redo;
 pub mod register_entity_scheme;
 mod rehome_entity;
@@ -215,6 +216,7 @@ pub use open_tab_via_modifier_click::OpenTabViaModifierClick;
 pub use outdent::Outdent;
 pub use pin_block::PinBlock;
 pub use press_key::PressKey;
+pub use receiver_create_block::ReceiverCreateBlock;
 pub use redo::Redo;
 pub use register_entity_scheme::RegisterEntityScheme;
 pub use rehome_entity::RehomeEntity;
@@ -321,6 +323,7 @@ crate::declare_e2e_transitions! {
         // which no single-instance slice provides).
         ShareContainer(ShareContainer),
         SyncNow(SyncNow),
+        ReceiverCreateBlock(ReceiverCreateBlock),
     }
 }
 
