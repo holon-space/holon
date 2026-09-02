@@ -32,6 +32,28 @@ use tokio::sync::RwLock;
 use tracing::error;
 use tracing::info;
 
+/// The SQL write authority for the `block` entity. Every Loro-side writer of
+/// blocks resolves its provider here, so all of them write through one
+/// configuration.
+///
+/// That configuration is load-bearing in two places. Writes target `block_raw`
+/// because `block` is a matview and Turso rejects DML against it. And the
+/// edge-typed fields (`tags`, `requires`, …) need their `BlockSchemaModule`
+/// descriptors to reach their junction tables:
+/// `SqlOperationProvider::partition_params` routes an edge param it has no
+/// descriptor for into the `properties` JSON column instead, silently.
+pub fn block_sql_write_provider(
+    db_handle: holon::storage::DbHandle,
+) -> Arc<dyn OriginTaggedWrites> {
+    Arc::new(SqlOperationProvider::with_edge_fields(
+        db_handle,
+        BLOCK_WRITE_TABLE.to_string(),
+        "block".to_string(),
+        "block".to_string(),
+        BlockSchemaModule.edge_fields(),
+    ))
+}
+
 /// Configuration for standalone Loro CRDT support
 #[derive(Clone, Debug)]
 pub struct LoroConfig {
@@ -161,14 +183,7 @@ impl Module for LoroModule {
                 let doc_store = resolver.resolve::<LoroDocumentStore>();
                 let db_handle_provider = resolver.resolve::<dyn holon::di::DbHandleProvider>();
                 let db_handle = db_handle_provider.handle();
-                let sql_ops = Arc::new(SqlOperationProvider::with_edge_fields(
-                    db_handle.clone(),
-                    BLOCK_WRITE_TABLE.to_string(),
-                    "block".to_string(),
-                    "block".to_string(),
-                    BlockSchemaModule.edge_fields(),
-                ));
-                let command_bus: Arc<dyn OriginTaggedWrites> = sql_ops;
+                let command_bus = block_sql_write_provider(db_handle.clone());
                 let sink_reader: Arc<dyn holon_loro::SinkReader> =
                     Arc::new(holon::storage::TursoSinkReader::new(db_handle));
                 let doc_store_arc = Arc::new(RwLock::new((*doc_store).clone()));
@@ -398,17 +413,10 @@ fn register_subtree_share(injector: &Injector) {
         let store_arc = Arc::new(RwLock::new((*doc_store).clone()));
 
         // Wire up the `block` SQL provider so mount-node projection into
-        // the SQL `block` table works. Mirrors the construction in
-        // `LoroModule::configure` — separate instance, but points at the
-        // same `DbHandle`. Writes go to `block_raw`; `block` is a matview
-        // and Turso rejects DML against it.
+        // the SQL `block` table works. Same factory as the global
+        // projection's — a separate instance over the same `DbHandle`.
         let db_handle_provider = resolver.resolve::<dyn holon::di::DbHandleProvider>();
-        let sql_ops = Arc::new(SqlOperationProvider::new(
-            db_handle_provider.handle(),
-            BLOCK_WRITE_TABLE.to_string(),
-            "block".to_string(),
-            "block".to_string(),
-        ));
+        let sql_ops = block_sql_write_provider(db_handle_provider.handle());
 
         // The global Loro→SQL projection (same instance `LoroSyncController`
         // drives). `share_subtree` flushes it after pruning so the global

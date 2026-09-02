@@ -712,7 +712,7 @@ impl LoroShareBackend {
         mount_block_uri: &str,
         parent_block_uri: &str,
         shared_tree_id: &str,
-        fallback_title: &str,
+        identity: &MountIdentity,
     ) -> Result<()> {
         let Some(sql_ops) = self.sql_ops.as_ref() else {
             return Ok(());
@@ -723,18 +723,25 @@ impl LoroShareBackend {
             "parent_id".into(),
             Value::String(parent_block_uri.to_string()),
         );
-        params.insert("content".into(), Value::String(fallback_title.to_string()));
+        params.insert("content".into(), Value::String(identity.title.clone()));
         params.insert("content_type".into(), Value::String("text".to_string()));
         // The mount is a Page (Inc 2) — it owns a dedicated on-disk org file so
         // the shared subtree's write-back resolves a path (`name_chain`
         // terminates at the mount) instead of inlining shared content into a
-        // global-truth file. `tags: ["Page"]` writes the `block_tags` junction
+        // global-truth file. The rest of the set is the shared root's own tags
+        // (see `MountIdentity`). This param writes the `block_tags` junction
         // the create op consumes. The caller has already parented the mount
         // under a page ancestor (Amendment A), so this never lands a page under
         // a non-page.
         params.insert(
             "tags".into(),
-            Value::Array(vec![Value::String(holon_api::block::PAGE_TAG.to_string())]),
+            Value::Array(
+                identity
+                    .tags
+                    .iter()
+                    .map(|t| Value::String(t.clone()))
+                    .collect(),
+            ),
         );
         // Custom properties — `SqlOperationProvider::prepare_create` packs
         // any key not in the schema-derived block columns into the `properties` JSON.
@@ -1332,15 +1339,57 @@ fn ensure_shared_with_me_root_node(doc: &LoroDoc) -> Result<TreeID> {
     Ok(node)
 }
 
+/// The identity a mount adopts from its shared root (D3).
+///
+/// Title and tags follow the SAME branch, because they answer one question:
+/// whether the mount IS the shared root or merely contains it.
+struct MountIdentity {
+    title: String,
+    /// Always contains `PAGE_TAG`: the mount owns an on-disk org file, so it
+    /// is a page whether or not the shared root was one.
+    tags: Vec<String>,
+}
+
+/// Shape a mount's identity from the shared doc's root.
+///
+/// Page share — adopt-and-collapse: the mount page IS that page, so it takes
+/// the root's title AND its tags. `project_descendants_to_sql` drops the root's
+/// own row on this path, so a tag left behind is a tag lost and the shared page
+/// stops being reachable by every tag-driven query, the sidebar's `block_tags`
+/// join first.
+///
+/// Block share — synthetic container: the mount only wraps the shared block,
+/// whose row SURVIVES with its own tags. Copying them onto the container would
+/// make each tag two rows in `block_tags` and put a "Shared tree (…)" container
+/// in tag feeds it has nothing to do with.
+fn mount_identity(shared_doc: &LoroDoc, shared_tree_id: &str) -> Result<MountIdentity> {
+    let (root_is_page, root_title, root_tags) = shared_root_summary(shared_doc)?;
+    let page_tag = holon_api::block::PAGE_TAG.to_string();
+    if !root_is_page {
+        return Ok(MountIdentity {
+            title: format!("Shared tree ({shared_tree_id})"),
+            tags: vec![page_tag],
+        });
+    }
+    let mut tags = root_tags;
+    if !tags.contains(&page_tag) {
+        tags.push(page_tag);
+    }
+    Ok(MountIdentity {
+        title: root_title,
+        tags,
+    })
+}
+
 /// Summary of a shared doc's root node used to shape materialization (D3):
 /// `is_page` decides adopt-and-collapse (page share — the mount adopts P's
 /// identity, P's node folds) vs synthetic-container (block share — the mount is
-/// a synthetic page wrapping the shared block). `title` is the root's content,
-/// adopted as the mount page's title in the page case.
+/// a synthetic page wrapping the shared block). `title` is the root's content
+/// and `tags` its tag set, both adopted by the mount in the page case.
 ///
 /// The shared subtree has exactly one root (extract_for_share reparents the
 /// subtree root to the tree root); zero or many roots is a corrupt share.
-fn shared_root_summary(shared_doc: &LoroDoc) -> Result<(bool, String)> {
+fn shared_root_summary(shared_doc: &LoroDoc) -> Result<(bool, String, Vec<String>)> {
     let blocks = crate::loro_backend::snapshot_blocks_from_doc(shared_doc);
     let mut roots = blocks
         .values()
@@ -1354,7 +1403,11 @@ fn shared_root_summary(shared_doc: &LoroDoc) -> Result<(bool, String)> {
                 .to_string(),
         ));
     }
-    Ok((root.block.is_page(), root.block.content.clone()))
+    Ok((
+        root.block.is_page(),
+        root.block.content.clone(),
+        root.block.tags.to_vec(),
+    ))
 }
 
 fn set_stable_id(doc: &LoroDoc, tid: TreeID, stable_id: &str) -> anyhow::Result<()> {
@@ -1528,19 +1581,15 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // Without the DI-wired projection (tests) there is no global loop to
         // race, so the flush is simply skipped.
         //
-        // D3: when the shared root is a PAGE the mount adopts its title (the
-        // mount page IS that page); otherwise it is a synthetic container page.
-        let (root_is_page, root_title) = shared_root_summary(&shared_arc)?;
-        let mount_title = if root_is_page {
-            root_title
-        } else {
-            format!("Shared tree ({shared_tree_id})")
-        };
+        // D3: when the shared root is a PAGE the mount adopts its identity —
+        // title AND tags (the mount page IS that page); otherwise it is a
+        // synthetic container page.
+        let identity = mount_identity(&shared_arc, &shared_tree_id)?;
         self.project_mount_to_sql(
             &mount_stable_id,
             &mount_parent_uri,
             &shared_tree_id,
-            &mount_title,
+            &identity,
         )
         .await?;
         if let Some(projection) = self.downstream_projection.as_ref() {
@@ -1798,20 +1847,15 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
 
         // Project the mount node as a Page Block row so the UI (SQL matviews)
         // and the org write-back (name_chain terminates at the mount page) both
-        // resolve the shared content. D3: adopt the shared root's title when it
-        // is a page (the mount page IS that page); otherwise synthetic
-        // container. Identifiable via the `share-role=mount` property.
-        let (root_is_page, root_title) = shared_root_summary(&shared_arc)?;
-        let mount_title = if root_is_page {
-            root_title
-        } else {
-            format!("Shared tree ({shared_tree_id})")
-        };
+        // resolve the shared content. D3: adopt the shared root's title and
+        // tags when it is a page (the mount page IS that page); otherwise
+        // synthetic container. Identifiable via the `share-role=mount` property.
+        let identity = mount_identity(&shared_arc, &shared_tree_id)?;
         self.project_mount_to_sql(
             &mount_stable_id,
             &mount_parent_uri,
             &shared_tree_id,
-            &mount_title,
+            &identity,
         )
         .await?;
 
@@ -2292,13 +2336,12 @@ pub async fn rehydrate_shared_trees(
             (Some(mount_bare), Some(parent_bare)) => {
                 let mount_uri = block_uri_from_bare(mount_bare);
                 let parent_uri = block_uri_from_bare(parent_bare);
-                // D3: re-adopt the shared root's title on rehydrate so the
-                // mount page keeps its identity across restarts. The mount's
-                // parent was page-resolved when it was first created, so it is
-                // reprojected as-is.
-                let title = match shared_root_summary(&arc) {
-                    Ok((true, root_title)) => root_title,
-                    Ok((false, _)) => format!("Shared tree ({shared_tree_id})"),
+                // D3: re-adopt the shared root's identity on rehydrate so the
+                // mount page keeps its title and tags across restarts. The
+                // mount's parent was page-resolved when it was first created,
+                // so it is reprojected as-is.
+                let identity = match mount_identity(&arc, &shared_tree_id) {
+                    Ok(identity) => identity,
                     Err(e) => {
                         // Disclosed degraded mode (mirrors the projection-error
                         // warns below — one unreadable share must not abort
@@ -2310,11 +2353,14 @@ pub async fn rehydrate_shared_trees(
                             "[share] shared_root_summary during rehydrate failed; \
                              projecting mount with synthetic placeholder title"
                         );
-                        format!("Shared tree ({shared_tree_id})")
+                        MountIdentity {
+                            title: format!("Shared tree ({shared_tree_id})"),
+                            tags: vec![holon_api::block::PAGE_TAG.to_string()],
+                        }
                     }
                 };
                 if let Err(e) = backend
-                    .project_mount_to_sql(&mount_uri, &parent_uri, &shared_tree_id, &title)
+                    .project_mount_to_sql(&mount_uri, &parent_uri, &shared_tree_id, &identity)
                     .await
                 {
                     warn!(

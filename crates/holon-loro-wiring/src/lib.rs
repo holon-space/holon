@@ -25,4 +25,5 @@ pub mod pbt_infrastructure;
 pub use event_infra_module::EventInfraModule;
 pub use loro_module::LoroConfig;
 pub use loro_module::LoroModule;
+pub use loro_module::block_sql_write_provider;
 pub use memory_backend::MemoryBackend;
