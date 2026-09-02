@@ -217,6 +217,35 @@ pub enum HomedDiff<K, T> {
     Remove { doc: K, key: String },
 }
 
+/// Whether a `home_by` stream currently owes its consumer output.
+///
+/// The fold between a source diff arriving and the last item it produces being
+/// yielded is `await`-heavy — every home is an authority read — and while it
+/// runs NOTHING downstream has moved yet. A settle watching only the source
+/// (the feed) and the sink (the write-back loop) reads that window as
+/// quiescence and concludes too early, which is exactly what left a receiver's
+/// org files empty in the two-instance slice (BugFunnel
+/// `2026-09-02-two-instance-binary-is-red-on-main-and-in-no-gate`).
+///
+/// Shared with a stream via [`LiveData::home_by_with_progress`].
+#[derive(Debug, Default)]
+pub struct HomeByProgress {
+    folding: std::sync::atomic::AtomicBool,
+}
+
+impl HomeByProgress {
+    /// `true` between a source burst being taken and the last diff it produced
+    /// being handed to the consumer.
+    pub fn is_folding(&self) -> bool {
+        self.folding.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn set(&self, folding: bool) {
+        self.folding
+            .store(folding, std::sync::atomic::Ordering::Release);
+    }
+}
+
 impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     /// Re-home this feed's keyed changelog by an authoritative
     /// `(document, previous-sibling)` derivation.
@@ -230,9 +259,23 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
         K: Clone + Ord + Send + 'static,
         A: HomeAuthority<K> + 'static,
     {
+        self.home_by_with_progress(authority, Arc::new(HomeByProgress::default()))
+    }
+
+    /// [`home_by`](Self::home_by), reporting mid-fold state into `progress` so
+    /// a settle can tell "no output yet" apart from "nothing to output".
+    pub fn home_by_with_progress<K, A>(
+        &self,
+        authority: Arc<A>,
+        progress: Arc<HomeByProgress>,
+    ) -> impl Stream<Item = Result<HomedDiff<K, T>>>
+    where
+        K: Clone + Ord + Send + 'static,
+        A: HomeAuthority<K> + 'static,
+    {
         let mut source = self.signal_map();
         let diffs = futures::stream::poll_fn(move |cx| source.poll_map_change_unpin(cx));
-        home_diffs(diffs, authority)
+        home_diffs_with_progress(diffs, authority, progress)
     }
 }
 
@@ -268,14 +311,40 @@ struct HomeState<S, K, T, A> {
     /// Set once the source has reported end-of-stream mid-burst; the burst
     /// still gets processed, then we end.
     source_done: bool,
+    progress: Arc<HomeByProgress>,
+}
+
+/// A stream that stops being polled — dropped mid-fold, or abandoned by a
+/// supervisor that has given up — must not leave its handle claiming work is in
+/// flight. Nothing would ever lower it again.
+impl<S, K, T, A> Drop for HomeState<S, K, T, A> {
+    fn drop(&mut self) {
+        self.progress.set(false);
+    }
 }
 
 /// Core combinator: fold a stream of `MapDiff<String, Arc<T>>` into a stream
 /// of `Result<HomedDiff<K, T>>`. Split out from [`LiveData::home_by`] so it can
 /// be driven at the `MapDiff` boundary directly.
+/// [`home_diffs_with_progress`] for a caller that observes only the stream.
+#[cfg(test)]
 fn home_diffs<S, K, T, A>(
     source: S,
     authority: Arc<A>,
+) -> impl Stream<Item = Result<HomedDiff<K, T>>>
+where
+    S: Stream<Item = MapDiff<String, Arc<T>>>,
+    K: Clone + Ord + Send + 'static,
+    T: Send + Sync + 'static,
+    A: HomeAuthority<K> + 'static,
+{
+    home_diffs_with_progress(source, authority, Arc::new(HomeByProgress::default()))
+}
+
+fn home_diffs_with_progress<S, K, T, A>(
+    source: S,
+    authority: Arc<A>,
+    progress: Arc<HomeByProgress>,
 ) -> impl Stream<Item = Result<HomedDiff<K, T>>>
 where
     S: Stream<Item = MapDiff<String, Arc<T>>>,
@@ -290,6 +359,7 @@ where
         authority,
         errored: false,
         source_done: false,
+        progress,
     };
     futures::stream::unfold(state, |mut st| async move {
         use futures::stream::StreamExt as _;
@@ -298,8 +368,13 @@ where
                 return Some((item, st));
             }
             if st.errored || st.source_done {
+                st.progress.set(false);
                 return None;
             }
+            // Every item of the last burst has been handed over and nothing is
+            // queued — about to park on the source. This is the only point at
+            // which the fold owes its consumer nothing.
+            st.progress.set(false);
 
             // The burst: everything the source already holds when it wakes us.
             // A single op fans one diff per affected member, so the whole fan
@@ -310,6 +385,10 @@ where
             // document. A write that lands mid-burst is echoed by its own diff
             // in the NEXT burst, with a fresh memo: convergence at quiescence.
             let mut burst = vec![st.source.next().await?];
+            // A diff is in hand. The authority reads below are the window this
+            // flag exists for, so it must be raised BEFORE them: everything
+            // downstream is idle for their whole duration.
+            st.progress.set(true);
             loop {
                 match futures::poll!(st.source.next()) {
                     std::task::Poll::Ready(Some(d)) => burst.push(d),
@@ -332,6 +411,13 @@ where
                 )
                 .await
                 {
+                    // Lower BEFORE queueing the Err. A consumer under
+                    // supervision may never poll this stream again — on the
+                    // give-up path `run_supervised` breaks on the error it
+                    // just took — so the `errored` branch at the top of the
+                    // loop is not reachable, and a flag left raised there is
+                    // raised for the life of the process.
+                    st.progress.set(false);
                     st.errored = true;
                     st.pending.push_back(Err(e));
                     break;
@@ -2548,6 +2634,50 @@ mod tests {
                 .filter(|e| matches!(e, Supervised::Reset))
                 .count();
             assert_eq!(resets as u32, MAX_RESTARTS_IN_WINDOW + 1);
+        }
+
+        /// The give-up path must leave `HomeByProgress` DOWN.
+        ///
+        /// A restart hides a stuck flag — the fresh incarnation lowers the
+        /// shared handle before it parks — so the only way to observe it is to
+        /// spend the budget and have no next incarnation. A flag left raised
+        /// there is permanent for the process: every later settle sees activity
+        /// forever and reports "projections did not reach a combined fixed
+        /// point" instead of the write-back degradation that actually happened.
+        #[test]
+        fn the_give_up_path_lowers_the_fold_flag() {
+            let tree = Arc::new(Mutex::new(Tree::new()));
+            let authority = Arc::new(FlakyAuthority::new(tree.clone()));
+            let feed = test_feed();
+            seed_root(&tree, &feed);
+
+            let progress = Arc::new(HomeByProgress::default());
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Emission>();
+            let stream_feed = feed.clone();
+            let stream_authority = authority.clone();
+            let stream_progress = progress.clone();
+            let mut supervisor = Box::pin(run_supervised(
+                "test-home-by",
+                move || {
+                    stream_feed
+                        .home_by_with_progress(stream_authority.clone(), stream_progress.clone())
+                },
+                tx,
+                |_, _, _| {},
+            ));
+
+            authority.arm(0, i64::MAX);
+            assert!(
+                pump(&mut supervisor),
+                "a permanently failing authority must exhaust the budget and finish"
+            );
+
+            assert!(
+                !progress.is_folding(),
+                "the fold reported itself in flight after the supervisor gave up — nothing will \
+                 ever lower it again, so every later settle would burn its whole budget and \
+                 blame convergence for a write-back that is simply dead"
+            );
         }
 
         // ---- (f) recovery at EVERY fault position -------------------------

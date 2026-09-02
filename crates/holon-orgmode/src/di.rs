@@ -132,6 +132,13 @@ impl FileWatcherReadySender {
 /// [`wait_quiescent`]: OrgSyncIdleSignal::wait_quiescent
 #[derive(Debug)]
 pub struct OrgSyncIdleSignal {
+    /// Mid-fold state of the `home_by` stream that feeds the write-back loop.
+    ///
+    /// The loop's own [`tick`](Self::tick) says nothing while that fold is
+    /// running: the work exists but has not been handed over, so a settle
+    /// polling only the tick sees quiescence and reads disk too early. Set once
+    /// at wiring; `None` in a container with no block feed.
+    writeback_fold: std::sync::OnceLock<Arc<holon_api::live_data::home_by::HomeByProgress>>,
     /// Monotonic count of completed loop iterations. Bumped after every
     /// processed event (file or block change).
     tick: std::sync::atomic::AtomicU64,
@@ -143,6 +150,16 @@ pub struct OrgSyncIdleSignal {
     /// delivery order, so `seq <= watermark` means "that change (and every
     /// earlier one) has been processed".
     change_seq: std::sync::atomic::AtomicU64,
+    /// Passes the loop has entered and not yet finished.
+    ///
+    /// [`tick`](Self::tick) advances only when a pass COMPLETES, so a pass that
+    /// runs longer than a settle's quiet floor — a write-back render is several
+    /// authority reads plus disk — is indistinguishable from an idle loop. A
+    /// settle that only samples the tick therefore concludes mid-pass and reads
+    /// a half-written vault.
+    in_pass: std::sync::atomic::AtomicUsize,
+    /// A debounced bulk re-render is armed and its 50ms tick has not fired.
+    bulk_pending: std::sync::atomic::AtomicBool,
 }
 
 impl OrgSyncIdleSignal {
@@ -151,7 +168,29 @@ impl OrgSyncIdleSignal {
             tick: std::sync::atomic::AtomicU64::new(0),
             notify: tokio::sync::Notify::new(),
             change_seq: std::sync::atomic::AtomicU64::new(0),
+            in_pass: std::sync::atomic::AtomicUsize::new(0),
+            bulk_pending: std::sync::atomic::AtomicBool::new(false),
+            writeback_fold: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Publish the write-back `home_by` stream's fold state. Called once, at
+    /// wiring, by whoever builds that stream.
+    pub fn attach_writeback_fold(
+        &self,
+        progress: Arc<holon_api::live_data::home_by::HomeByProgress>,
+    ) {
+        self.writeback_fold
+            .set(progress)
+            .map_err(|_| "writeback fold progress already attached")
+            .expect("attach_writeback_fold is called once per container");
+    }
+
+    /// `true` while the write-back's `home_by` fold owes its consumer output —
+    /// i.e. work is in flight that the tick cannot yet show. `false` when no
+    /// fold is wired: a container without one has no such window.
+    pub fn writeback_fold_in_flight(&self) -> bool {
+        self.writeback_fold.get().is_some_and(|p| p.is_folding())
     }
 
     /// Current tick value. Increases monotonically.
@@ -191,6 +230,28 @@ impl OrgSyncIdleSignal {
             }
             let _ = tokio::time::timeout(remaining, notified).await;
         }
+    }
+
+    /// Bracket one loop pass. The guard decrements on drop, so a pass that
+    /// returns early or panics cannot leave the loop looking busy forever.
+    pub fn enter_pass(self: &Arc<Self>) -> PassGuard {
+        self.in_pass
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        PassGuard(self.clone())
+    }
+
+    /// `true` while the loop is inside a pass it has not finished, or owes the
+    /// debounced bulk re-render its 50ms tick has not yet delivered.
+    pub fn pass_in_flight(&self) -> bool {
+        self.in_pass.load(std::sync::atomic::Ordering::Acquire) > 0
+            || self.bulk_pending.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Record whether a debounced bulk re-render is owed. Armed work the loop
+    /// has not started is as invisible to the tick as work it is doing.
+    pub fn set_bulk_pending(&self, pending: bool) {
+        self.bulk_pending
+            .store(pending, std::sync::atomic::Ordering::Release);
     }
 
     /// Called by the controller loop after each processed event.
@@ -245,6 +306,17 @@ impl OrgSyncIdleSignal {
                 }
             }
         }
+    }
+}
+
+/// Holds [`OrgSyncIdleSignal::pass_in_flight`] true for one loop pass.
+pub struct PassGuard(Arc<OrgSyncIdleSignal>);
+
+impl Drop for PassGuard {
+    fn drop(&mut self) {
+        self.0
+            .in_pass
+            .fetch_sub(1, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -634,6 +706,12 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     );
                     let degraded = writeback_disclosure.clone();
                     let feed_for_stream = feed.clone();
+                    // One progress handle across every supervised incarnation:
+                    // a restart replaces the stream, not the question a settle
+                    // asks of it.
+                    let fold_progress =
+                        Arc::new(holon_api::live_data::home_by::HomeByProgress::default());
+                    idle_signal.attach_writeback_fold(fold_progress.clone());
 
                     // The write-back document mirror IS the `home_by`
                     // combinator's output, under let-it-die supervision: the
@@ -644,7 +722,10 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     // precedes every incarnation, including the first.
                     let mut supervised = holon_api::live_data::supervision::spawn_supervised(
                         "org-writeback",
-                        move || feed_for_stream.home_by(authority.clone()),
+                        move || {
+                            feed_for_stream
+                                .home_by_with_progress(authority.clone(), fold_progress.clone())
+                        },
                         move |component, restarts, err| {
                             // A spent restart budget means edits stop reaching
                             // disk for the rest of the process — exactly the
@@ -1219,6 +1300,7 @@ pub async fn run_file_sync_controller(
         };
         tokio::select! {
             Some((maybe_evt, change_seq)) = file_rx.recv() => {
+                let _pass = idle_signal_for_task.enter_pass();
                 match maybe_evt {
                     Some(FileEvent::Changed(file_path)) => {
                         tracing::debug!("[ORGSYNC_TRACE] file_rx -> on_file_changed({})", file_path.display());
@@ -1295,6 +1377,10 @@ pub async fn run_file_sync_controller(
                 // first lets `on_block_changed_coalesced` spend one render per
                 // DOCUMENT. Pure latency win — nothing waits for a timer, and a
                 // lone message drains to a batch of one.
+                // Held for the whole pass, not just bumped at the end: the
+                // renders below are several authority reads plus disk, which
+                // outlasts a settle's quiet floor.
+                let _pass = idle_signal_for_task.enter_pass();
                 let mut drained = vec![first];
                 while let Ok(next) = rerender_rx.try_recv() {
                     drained.push(next);
@@ -1318,7 +1404,10 @@ pub async fn run_file_sync_controller(
                                 pending_blocks.clear();
                                 controller.reset_holder();
                             }
-                            OrgRerender::All => { pending_full_rerender = true; }
+                            OrgRerender::All => {
+                                pending_full_rerender = true;
+                                idle_signal_for_task.set_bulk_pending(true);
+                            }
                         }
                     }
 
@@ -1329,7 +1418,10 @@ pub async fn run_file_sync_controller(
                             match verdict {
                                 Ok(true) => { note_doc_written_from_holder(); }
                                 // ALLOW(fallback): doc resolved to no tracked file → full re-render
-                                Ok(false) => { pending_full_rerender = true; }
+                                Ok(false) => {
+                                    pending_full_rerender = true;
+                                    idle_signal_for_task.set_bulk_pending(true);
+                                }
                                 Err(e) => {
                                     error!(
                                         "[OrgMode] Block change error for {}: {}",
@@ -1343,7 +1435,13 @@ pub async fn run_file_sync_controller(
                 idle_signal_for_task.mark_progress();
             }
             _ = rerender_flush_tick.tick(), if pending_full_rerender => {
+                // The heaviest pass in the loop — a re-render of EVERY tracked
+                // file — and the one every supervised Reset routes through, so
+                // boot and every restart pay it. Unguarded it was the largest
+                // window in which a settle read quiet.
+                let _pass = idle_signal_for_task.enter_pass();
                 pending_full_rerender = false;
+                idle_signal_for_task.set_bulk_pending(false);
                 // Recovery reseeds carry no per-block Remove intent — departures and
                 // deletions route as `OrgRerender::Block { Remove }` and ground per
                 // file via `on_block_changed`, so the bulk pass never needs a
@@ -1354,6 +1452,7 @@ pub async fn run_file_sync_controller(
                 {
                     error!("[OrgMode] re_render_all_tracked (debounced) error: {}", e);
                 }
+                idle_signal_for_task.mark_progress();
             }
         }
     }

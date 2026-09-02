@@ -25,7 +25,10 @@ use crate::test_environment::pbt_quiet_floor;
 /// 2. **Loro** — the sync controller's `last_synced_frontiers()` catches up to
 ///    the authority doc's `oplog_frontiers()` (a peer/merge write projects
 ///    asynchronously).
-/// 3. **org** — the file-sync controller's `OrgSyncIdleSignal` goes quiescent
+/// 3. **block-matview mirror** — the `BlockFeed`'s `consumed_seq` stops
+///    advancing (the org write-back reads that mirror, so its ARRIVAL, not
+///    CDC's emission, is when the write-back's work becomes reachable).
+/// 4. **org** — the file-sync controller's `OrgSyncIdleSignal` goes quiescent
 ///    (the org re-render `inv-blocks-match-ref/org` reads has drained).
 ///
 /// A CDC-only signal (the reverted lever 2) under-settled — Loro/org lagged
@@ -47,6 +50,7 @@ pub(crate) async fn converge_signals(
     sync: Option<Arc<LoroSyncControllerHandle>>,
     store: Option<LoroDocumentStore>,
     org_idle: Option<Arc<OrgSyncIdleSignal>>,
+    block_feed: Option<Arc<holon_api::live_data::LiveData<holon_api::Block>>>,
     reactive: Option<&Arc<ReactiveEngine>>,
     budget: Duration,
 ) -> bool {
@@ -58,6 +62,7 @@ pub(crate) async fn converge_signals(
     // reactive consumer apply-epoch).
     let mut last_cdc = engine.map(|e| e.db_handle().cdc_emitted_watermark());
     let mut last_tick = org_idle.as_ref().map(|s| s.current_tick());
+    let mut last_feed_seq = block_feed.as_ref().map(|f| f.consumed_seq());
     let mut last_epoch = reactive.map(|r| r.apply_epoch());
     // The last instant ANY signal showed activity OR Loro was not yet caught up.
     // Convergence = all three quiet AND Loro caught up, held for one `quiet` floor.
@@ -97,11 +102,47 @@ pub(crate) async fn converge_signals(
             }
         }
 
+        // Block-matview mirror delivery. The org write-back is driven off this
+        // mirror, and CDC EMISSION (above) is not its arrival: the broadcast hop
+        // between the commit that bumped the watermark and the mirror applying
+        // the batch is a window every other signal reads as quiet. Counting the
+        // mirror's own `consumed_seq` advance as activity restarts the quiet
+        // window at ARRIVAL, so the org stage below is judged from there.
+        //
+        // Change-detected, deliberately NOT `consumed_seq < emitted_watermark`:
+        // the emitted watermark counts every commit, including ones whose CDC
+        // touched no `block` row, and this mirror is delivered only its own
+        // matview's batches — so it trails the global counter permanently and a
+        // catch-up test would never converge.
+        if let Some(feed) = &block_feed {
+            let now_seq = feed.consumed_seq();
+            if last_feed_seq != Some(now_seq) {
+                last_feed_seq = Some(now_seq);
+                active = true;
+            }
+        }
+
         // org re-render loop: `current_tick` bumps after every processed change.
+        //
+        // The tick alone is not enough. Between the mirror above delivering a
+        // batch and this loop being handed anything sits the write-back's
+        // `home_by` fold, which is one authority read per block: tens of
+        // milliseconds during which the mirror is quiet and the tick has not
+        // moved, so a quiet floor expires INSIDE the fold. `home_by`'s own
+        // in-flight flag is the only signal that names that window, so it
+        // counts as activity exactly like a not-caught-up Loro does.
         if let Some(idle) = &org_idle {
             let now_tick = idle.current_tick();
             if last_tick != Some(now_tick) {
                 last_tick = Some(now_tick);
+                active = true;
+            }
+            // Two windows the tick cannot show, because it moves only when a
+            // pass COMPLETES: the `home_by` fold that has not handed the loop
+            // anything yet, and a pass already running whose renders outlast a
+            // quiet floor. Both count as activity, exactly as a not-caught-up
+            // Loro does.
+            if idle.writeback_fold_in_flight() || idle.pass_in_flight() {
                 active = true;
             }
         }

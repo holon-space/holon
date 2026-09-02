@@ -858,6 +858,10 @@ impl HeadlessFrontendComponent {
                 sync,
                 store,
                 org_idle,
+                injector
+                    .try_resolve::<holon_api::live_data::BlockFeed>()
+                    .ok() // ALLOW(ok): optional DI service — absent without a block matview
+                    .map(|bf| bf.0.clone()),
                 // Boot registers only the sidebar page-list watch; the reactive
                 // consumer-drain stage matters for per-transition settles, not
                 // this tolerant boot settle.
@@ -1083,6 +1087,22 @@ impl HeadlessFrontendComponent {
         self.injector
             .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
             .ok() // ALLOW(ok): optional DI service — absent when org file-sync is disabled
+    }
+
+    /// The shared `block` matview mirror the org write-back feed reads.
+    ///
+    /// Its `consumed_seq` pairs with `DbHandle::cdc_emitted_watermark` to say
+    /// whether the mirror has caught the CDC a write already emitted — the one
+    /// hop between "SQL landed" and "the write-back loop has work queued",
+    /// which no other settle signal can observe. `None` when no block feed is
+    /// wired (a Loro-only / no-Turso draw).
+    pub(crate) fn block_feed(
+        &self,
+    ) -> Option<Arc<holon_api::live_data::LiveData<holon_api::Block>>> {
+        self.injector
+            .try_resolve::<holon_api::live_data::BlockFeed>()
+            .ok() // ALLOW(ok): optional DI service — absent without a block matview
+            .map(|bf| bf.0.clone())
     }
 
     /// Share the composed runner's [`IdResolver`] so the id-taking nav/focus

@@ -508,6 +508,7 @@ into hooks with `scripts/install-git-hooks.sh` (bypass a run with `--no-verify`)
 | 2 | `just prepush` | every push | `just gate-arch` · `just check-frontend-wasm` · the full keystone (`PROPTEST_CASES=16`, incl. persisted regression seeds) |
 | L | `just landing-gate` | before reporting a lane done, and before weaving | fmt · `gate-compile` · `check-frontend-wasm` · `gate-arch` · `keystone-smoke` · `loro-suite` · `hand-authored` |
 | L | `cargo nextest run --no-fail-fast -p holon -p holon-app` | per land, in parallel with `landing-gate` (D43.a form) | the `holon` and `holon-app` integration suites, classified against the known reds (D64.a) |
+| L | `cargo nextest run -p holon-integration-tests --features holon-integration-tests/pbt --test two_instance_composed_pbt --no-fail-fast` | per weave | the two-instance sharing slice — the only thing that runs the sharing transport end to end |
 
 Notes:
 
@@ -523,6 +524,17 @@ Notes:
   111–179s; its single red coincided with a load average above 200 and was a
   QUIC transport timeout). Any other failure blocks the land. The signatures
   live in `docs/Testing/HolonCrateReds-2026-09-01.md`.
+- **The two-instance binary is in the weave list because it was in nothing
+  else** (2026-09-02). It is not in `gate-compile` (which only typechecks), not
+  in `keystone-smoke`, not in `loro-suite`, not in the land battery — so it
+  compiled on every workspace check, ran on none, and sat red on `main` with
+  nothing reporting it (BugFunnel
+  `2026-09-02-two-instance-binary-is-red-on-main-and-in-no-gate`, the same shape
+  as the 25 un-gated `-p holon` reds). Two timing facts before wiring it into a
+  recipe: it already carries a 20-minute `slow-timeout` override in
+  `.config/nextest.toml`, and it boots TWO full sessions per case, so running it
+  beside the rest of the suite wants a concurrency pin or a test-group rather
+  than a bare parallel invocation.
 - **The vault-scale latency guard runs in the nextest test-group
   `vault-scale-latency`** (`max-threads = 1`) because it is load-sensitive:
   853ms isolated against a 5s budget, 7.5s contended.
