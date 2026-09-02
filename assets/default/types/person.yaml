@@ -25,3 +25,16 @@ fields:
   - name: phone
     sql_type: TEXT
     nullable: true
+  # Overflow bag for properties with no column of their own; the engine's
+  # `_provenance` stamp lands here.
+  - name: properties
+    sql_type: TEXT
+    nullable: true
+    jsonb: true
+    value_kind: overflow_properties
+  # `properties`' companion: it records each key's value KIND so a stored NULL
+  # stays distinguishable from an absent key on read-back.
+  - name: property_kinds
+    sql_type: TEXT
+    nullable: true
+    value_kind: overflow_property_kinds

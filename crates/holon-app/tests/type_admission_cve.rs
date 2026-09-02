@@ -90,11 +90,15 @@ async fn boot_fresh_db(
 /// infer to Text and be offered by every home, so it could not tell an enforced
 /// check from an absent one.
 fn boolean_computed_type(name: &str, home: &str) -> TypeDefinition {
-    let fields = vec![
+    let mut fields = vec![
         FieldSchema::new("id", "TEXT").primary_key(),
         FieldSchema::new("a", "TEXT").nullable(),
         FieldSchema::new("b", "TEXT").nullable(),
     ];
+    // The overflow pair every declarable type carries: without it the engine
+    // has nowhere to stamp `_provenance`, and the declaration is refused before
+    // any home is consulted.
+    fields.extend(FieldSchema::overflow_pair());
     let mut type_def = TypeDefinition::new(name, fields);
     type_def.home = Some(HomeProfileId::parse(home).expect("a well-formed profile id"));
 

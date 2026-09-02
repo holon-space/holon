@@ -295,12 +295,16 @@ pub fn local_intent_operation(intent: &LocalIntent) -> Operation {
         LocalIntent::Check { id } => {
             set_field(id, "checked", Value::Integer(1), "Check off shopping item")
         }
+        // `purge`, not `delete`: the type declares soft deletion, so `delete`
+        // WRITES a tombstone for the peer to be told about. Both of these
+        // intents are the other direction — the peer has already spoken, and
+        // the row must actually go.
         LocalIntent::Delete { id } | LocalIntent::ReapTombstone { id } => {
             let mut params = std::collections::HashMap::new();
             params.insert("id".to_string(), Value::String(id.clone()));
             Operation::new(
                 SHOPPING_ITEM_ENTITY,
-                "delete",
+                "purge",
                 "Remove shopping item",
                 params,
             )

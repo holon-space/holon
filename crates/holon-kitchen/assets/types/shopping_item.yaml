@@ -33,7 +33,8 @@ fields:
     nullable: true
     indexed: true
   # Local tombstone: set on a local delete so the next pull cannot resurrect
-  # the item before the deletion has been pushed.
+  # the item before the deletion has been pushed. Written by the generic
+  # `delete` because of the `soft_delete` declaration below, never by hand.
   - name: deleted_at
     sql_type: TEXT
     nullable: true
@@ -42,3 +43,21 @@ fields:
   - name: last_seen_remote
     sql_type: TEXT
     nullable: true
+  # Overflow bag for properties with no column of their own; the engine's
+  # `_provenance` stamp lands here.
+  - name: properties
+    sql_type: TEXT
+    nullable: true
+    jsonb: true
+    value_kind: overflow_properties
+  # `properties`' companion: it records each key's value KIND so a stored NULL
+  # stays distinguishable from an absent key on read-back.
+  - name: property_kinds
+    sql_type: TEXT
+    nullable: true
+    value_kind: overflow_property_kinds
+# The peer owns the list, so a deletion must survive until it has been pushed.
+# The retention is the window a pull may not resurrect the item in.
+soft_delete:
+  tombstone_field: deleted_at
+  retention_days: 7

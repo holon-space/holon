@@ -238,6 +238,20 @@ fn blocks_known_columns() -> Vec<&'static str> {
 #[derive(Clone, Debug)]
 pub(crate) struct WriteSchema {
     columns: HashSet<String>,
+    /// The tombstone column of a type that declared soft-delete semantics
+    /// ([`holon_api::entity::SoftDelete`]). `Some` turns `delete` into a
+    /// tombstone write and adds `purge` as the op that removes the row.
+    soft_delete: Option<String>,
+}
+
+/// What a `delete` or `purge` does to the target row.
+#[derive(Clone, Debug)]
+enum DeletePlan {
+    /// The row stays and `column` is stamped with `at`, so a peer that has not
+    /// been told about the deletion cannot resurrect it.
+    Tombstone { column: String, at: String },
+    /// The row goes, and its descendants with it.
+    Purge,
 }
 
 impl WriteSchema {
@@ -252,6 +266,7 @@ impl WriteSchema {
     fn new(columns: impl IntoIterator<Item = String>) -> Self {
         Self {
             columns: columns.into_iter().collect(),
+            soft_delete: None,
         }
     }
 
@@ -264,12 +279,18 @@ impl WriteSchema {
     /// The vocabulary a runtime-declared type's raw table exposes: its
     /// PERSISTED fields. Computed and transient fields are not written.
     fn from_type_def(type_def: &TypeDefinition) -> Self {
-        Self::new(
-            type_def
-                .persistent_fields()
-                .into_iter()
-                .map(|f| f.name.clone()),
-        )
+        Self {
+            soft_delete: type_def
+                .soft_delete
+                .as_ref()
+                .map(|s| s.tombstone_field.clone()),
+            ..Self::new(
+                type_def
+                    .persistent_fields()
+                    .into_iter()
+                    .map(|f| f.name.clone()),
+            )
+        }
     }
 
     fn is_column(&self, name: &str) -> bool {
@@ -278,6 +299,12 @@ impl WriteSchema {
 
     fn has_overflow(&self) -> bool {
         self.columns.contains(Self::OVERFLOW_COLUMN)
+    }
+
+    /// The tombstone column `delete` stamps instead of removing the row, for a
+    /// type that declared soft-delete semantics.
+    fn tombstone_column(&self) -> Option<&str> {
+        self.soft_delete.as_deref()
     }
 
     /// Whether a create stamps write-time timestamps: only when the table
@@ -1147,7 +1174,7 @@ impl SqlOperationProvider {
     ///
     /// # Cycle contract
     ///
-    /// A stored parent cycle is refused, matching [`Self::prepare_delete`]'s
+    /// A stored parent cycle is refused, matching [`Self::prepare_purge`]'s
     /// cascade. A block has exactly ONE parent, so any cycle among `root`'s
     /// descendants must pass through `root` itself — `root` returning as its
     /// own descendant is therefore the complete test, not a heuristic.
@@ -1670,9 +1697,71 @@ impl SqlOperationProvider {
         }))
     }
 
-    /// Build SQL for a delete operation (with cascade) without executing.
-    /// Requires async because cascade discovery queries the DB.
+    /// What a `delete` does to the row, from the type's own declaration. Every
+    /// route asks this and nothing else decides it, so the single-op and the
+    /// batch write leg cannot disagree about whether a row survives.
+    fn delete_plan(&self, op_name: &str) -> Result<DeletePlan> {
+        match self.write_schema.tombstone_column() {
+            // `purge` is the removal even for a soft-delete type — it is the
+            // reap of a tombstone the peer has already been told about.
+            Some(column) if op_name == "delete" => Ok(DeletePlan::Tombstone {
+                column: column.to_string(),
+                at: self.tombstone_now()?,
+            }),
+            _ => Ok(DeletePlan::Purge),
+        }
+    }
+
+    /// The SQL a plan lowers to. Async because cascade discovery queries the
+    /// DB.
+    async fn delete_statements(
+        &self,
+        plan: &DeletePlan,
+        params: &StorageEntity,
+    ) -> Result<PreparedOp> {
+        match plan {
+            DeletePlan::Tombstone { column, at } => {
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .ok_or_else(|| "Missing 'id' parameter".to_string())?;
+                Ok(self.tombstone_statements(id, column, at))
+            }
+            DeletePlan::Purge => self.prepare_purge(params).await,
+        }
+    }
+
+    /// The batch write leg's delete: the same plan and the same SQL the
+    /// single-op route runs, without the inverse an undoable op needs.
     async fn prepare_delete(&self, params: &StorageEntity) -> Result<PreparedOp> {
+        self.delete_statements(&self.delete_plan("delete")?, params)
+            .await
+    }
+
+    /// Tombstone timestamps are RFC 3339.
+    fn tombstone_now(&self) -> Result<String> {
+        let millis = self.clock.now_millis();
+        Ok(chrono::DateTime::from_timestamp_millis(millis)
+            .ok_or_else(|| format!("the clock returned {millis}ms, which is not a valid instant"))?
+            .to_rfc3339())
+    }
+
+    /// Stamp one row's tombstone column. No cascade: a soft delete states a
+    /// fact about the named row alone.
+    fn tombstone_statements(&self, id: &str, column: &str, at: &str) -> PreparedOp {
+        PreparedOp {
+            row_statements: vec![format!(
+                "UPDATE {table} SET {column} = '{at}' WHERE id = '{id}'",
+                table = self.table_name,
+                column = Self::quote_identifier(column),
+                at = at.replace('\'', "''"),
+                id = id.replace('\'', "''"),
+            )],
+            edge_statements: Vec::new(),
+        }
+    }
+
+    async fn prepare_purge(&self, params: &StorageEntity) -> Result<PreparedOp> {
         let id = params
             .get("id")
             .and_then(|v| v.as_string())
@@ -1713,7 +1802,7 @@ impl SqlOperationProvider {
             for child in children {
                 if !visited.insert(child.clone()) {
                     return Err(format!(
-                        "prepare_delete: parent cycle detected while cascading delete of '{id}' — \
+                        "prepare_purge: parent cycle detected while cascading delete of '{id}' — \
                          block '{child}' is its own ancestor (corrupt block tree)"
                     )
                     .into());
@@ -2900,6 +2989,34 @@ impl OperationProvider for SqlOperationProvider {
             },
         ];
 
+        if self.write_schema.tombstone_column().is_some() {
+            ops.push(OperationDescriptor {
+                entity_name: self.entity_name.clone().into(),
+                entity_short_name: self.entity_short_name.clone(),
+                name: "purge".to_string(),
+                display_name: "Purge".to_string(),
+                description: format!("Remove a tombstoned {} for good", self.entity_short_name),
+                required_params: vec![OperationParam {
+                    name: "id".to_string(),
+                    type_hint: TypeHint::String,
+                    description: "Entity ID".to_string(),
+                }],
+                id_column: "id".to_string(),
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: self.target_scope(),
+                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::Internal,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                marking_delta: holon_api::marking::MarkingDelta::Undeclared,
+                guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
+            });
+        }
+
         // The compounds below READ block's content/hierarchy vocabulary
         // (`content`, `parent_id`, marks, task properties), so an entity whose
         // write table declares none of it cannot answer them. Advertising them
@@ -3564,21 +3681,27 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 }
                 Ok(OperationResult::irreversible(Vec::new()))
             }
-            "delete" => {
+            "delete" | "purge" => {
                 let id = params
                     .get("id")
                     .and_then(|v| v.as_string())
                     .ok_or_else(|| "Missing 'id' parameter".to_string())?
                     .to_string();
+                let plan = self.delete_plan(&op_name)?;
 
-                // Capture the FULL row + edges BEFORE deleting so a LEAF delete
+                // Capture the FULL row + edges BEFORE writing so a LEAF delete
                 // is identity-invertible (inverse = `create` with the same id,
                 // parent_id, sort_key, content, properties, edges — ADR 0024:
                 // never delete+create where identity can be preserved). A delete
                 // that CASCADES to descendants is declared irreversible for now:
                 // faithfully resurrecting an ordered subtree is a Wave-2 concern.
                 let captured = self.capture_row(&id).await?;
-                let cascades = self.has_children(&id).await?;
+                let cascades = match plan {
+                    // A tombstone states a fact about the named row alone, so
+                    // it never reaches a descendant and stays invertible.
+                    DeletePlan::Tombstone { .. } => false,
+                    DeletePlan::Purge => self.has_children(&id).await?,
+                };
                 let inverse = match (&captured, cascades) {
                     (Some(row), false) => {
                         let mut create_params = row.clone();
@@ -3595,14 +3718,34 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     _ => None,
                 };
 
-                let prepared = self.prepare_delete(&params).await?;
+                let prepared = self.delete_statements(&plan, &params).await?;
                 self.execute_prepared(prepared).await?;
 
-                // Forward fingerprint: the `id` column is absent post-delete
-                // (present → its own value pre-delete), so an undo (`create`)
-                // drops loudly if the row was resurrected under it.
-                match inverse {
-                    Some(create_op) => Ok(OperationResult::new(
+                match (plan, inverse) {
+                    // The tombstone column's own before/after is the delta; the
+                    // inverse `create` restores every captured field, that
+                    // column among them.
+                    (DeletePlan::Tombstone { column, at }, Some(create_op)) => {
+                        let before = captured
+                            .as_ref()
+                            .and_then(|row| row.get(column.as_str()))
+                            .cloned()
+                            .unwrap_or(Value::Null);
+                        Ok(OperationResult::new(
+                            vec![FieldDelta::new(id, &column, before, Value::String(at))],
+                            create_op,
+                        ))
+                    }
+                    (DeletePlan::Tombstone { .. }, None) => {
+                        Ok(OperationResult::declared_irreversible(
+                            Vec::new(),
+                            "delete: target row absent (nothing to tombstone)",
+                        ))
+                    }
+                    // Forward fingerprint: the `id` column is absent post-delete
+                    // (present → its own value pre-delete), so an undo (`create`)
+                    // drops loudly if the row was resurrected under it.
+                    (DeletePlan::Purge, Some(create_op)) => Ok(OperationResult::new(
                         vec![FieldDelta::new(
                             id.clone(),
                             "id",
@@ -3611,11 +3754,13 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         )],
                         create_op,
                     )),
-                    None if captured.is_none() => Ok(OperationResult::declared_irreversible(
-                        Vec::new(),
-                        "delete: target row absent (nothing to resurrect)",
-                    )),
-                    None => Ok(OperationResult::declared_irreversible(
+                    (DeletePlan::Purge, None) if captured.is_none() => {
+                        Ok(OperationResult::declared_irreversible(
+                            Vec::new(),
+                            "delete: target row absent (nothing to resurrect)",
+                        ))
+                    }
+                    (DeletePlan::Purge, None) => Ok(OperationResult::declared_irreversible(
                         Vec::new(),
                         "delete: subtree capture not yet implemented",
                     )),
@@ -5495,6 +5640,155 @@ mod tag_op_tests {
         assert!(
             err.to_string().contains("page under a non-page"),
             "got: {err}"
+        );
+    }
+}
+
+/// A soft-delete type's `delete` must land the SAME tombstone on BOTH write
+/// legs: the single-op route the UI drives and the batch route the Loro→SQL
+/// projection sink drives. The batch leg is the one a peer's deletions travel
+/// on, so a leg that hard-deleted instead would drop the row before it had been
+/// pushed.
+#[cfg(test)]
+mod soft_delete_route_tests {
+    use holon_api::FieldSchema;
+    use holon_api::TypeDefinition;
+    use holon_api::entity::SoftDelete;
+    use holon_core::traits::BatchOp;
+
+    use super::*;
+
+    const TOMBSTONE: &str = "deleted_at";
+
+    fn soft_delete_type() -> TypeDefinition {
+        let mut fields = vec![
+            FieldSchema::new("id", "TEXT").primary_key(),
+            FieldSchema::new("name", "TEXT").nullable(),
+            FieldSchema::new(TOMBSTONE, "TEXT").nullable(),
+        ];
+        fields.extend(FieldSchema::overflow_pair());
+        let mut type_def = TypeDefinition::new("gen_perishable", fields);
+        type_def.soft_delete = Some(SoftDelete {
+            tombstone_field: TOMBSTONE.to_string(),
+            retention_days: 7,
+        });
+        type_def
+    }
+
+    async fn seeded() -> (crate::storage::turso::DbHandle, SqlOperationProvider) {
+        let (_backend, db) = crate::storage::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory turso");
+        db.execute(
+            "CREATE TABLE gen_perishable_raw (id TEXT PRIMARY KEY, name TEXT, deleted_at TEXT, \
+             properties TEXT, property_kinds TEXT)",
+            vec![],
+        )
+        .await
+        .expect("gen_perishable_raw");
+        db.execute(
+            "INSERT INTO gen_perishable_raw (id, name) VALUES ('gen-perishable:milk', 'Milch')",
+            vec![],
+        )
+        .await
+        .expect("seed row");
+        let provider = SqlOperationProvider::for_type(db.clone(), &soft_delete_type());
+        std::mem::forget(_backend);
+        (db, provider)
+    }
+
+    /// `(name, deleted_at)` for every row still on the write table.
+    async fn rows(db: &crate::storage::turso::DbHandle) -> Vec<(String, Option<String>)> {
+        db.query(
+            "SELECT name, deleted_at FROM gen_perishable_raw ORDER BY name",
+            HashMap::new(),
+        )
+        .await
+        .expect("query rows")
+        .iter()
+        .map(|r| {
+            (
+                r.get("name")
+                    .and_then(|v| v.as_string())
+                    .expect("name")
+                    .to_string(),
+                r.get(TOMBSTONE)
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string),
+            )
+        })
+        .collect()
+    }
+
+    fn delete_params() -> StorageEntity {
+        let mut params = StorageEntity::new();
+        params.insert(
+            "id".into(),
+            Value::String("gen-perishable:milk".to_string()),
+        );
+        params
+    }
+
+    fn assert_tombstoned(rows: &[(String, Option<String>)], route: &str) {
+        assert_eq!(
+            rows.len(),
+            1,
+            "{route}: the row must survive a soft delete until the peer has been told; rows: \
+             {rows:?}"
+        );
+        assert!(
+            rows[0].1.is_some(),
+            "{route}: the delete must WRITE the tombstone the sync leg pushes from; rows: {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_single_op_route_tombstones_instead_of_removing_the_row() {
+        let (db, provider) = seeded().await;
+        provider
+            .execute_operation_with_origin(
+                &EntityName::new("gen_perishable"),
+                "delete",
+                delete_params(),
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+            .expect("delete");
+        assert_tombstoned(&rows(&db).await, "single-op");
+    }
+
+    #[tokio::test]
+    async fn the_batch_route_tombstones_instead_of_removing_the_row() {
+        let (db, provider) = seeded().await;
+        provider
+            .execute_batch_with_origin(
+                &EntityName::new("gen_perishable"),
+                vec![BatchOp::data("delete", delete_params())],
+                EventOrigin::Loro,
+            )
+            .await
+            .expect("batch delete");
+        assert_tombstoned(&rows(&db).await, "batch");
+    }
+
+    /// `purge` is the reap, and it is the removal on BOTH the op name and the
+    /// declaration — a soft-delete type that could never lose a row would grow
+    /// tombstones forever.
+    #[tokio::test]
+    async fn purge_removes_the_row_of_a_soft_delete_type() {
+        let (db, provider) = seeded().await;
+        provider
+            .execute_operation_with_origin(
+                &EntityName::new("gen_perishable"),
+                "purge",
+                delete_params(),
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+            .expect("purge");
+        assert!(
+            rows(&db).await.is_empty(),
+            "purge must remove the row it reaps"
         );
     }
 }

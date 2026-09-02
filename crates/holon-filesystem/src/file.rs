@@ -38,6 +38,18 @@ pub struct File {
     /// FK to Document.id (UUID), None until adapter creates the Document
     #[indexed]
     pub document_id: Option<String>,
+
+    /// Overflow bag for properties with no column of their own; the engine's
+    /// `_provenance` stamp lands here.
+    #[jsonb]
+    #[value_kind(overflow_properties)]
+    pub properties: Option<String>,
+
+    /// Per-key kind map for `properties`, holding an entry only where the JSON
+    /// form is ambiguous. NULL means every key reads back at its JSON-evident
+    /// kind.
+    #[value_kind(overflow_property_kinds)]
+    pub property_kinds: Option<String>,
 }
 
 impl File {
@@ -54,6 +66,8 @@ impl File {
             parent_id,
             content_hash,
             document_id,
+            properties: None,
+            property_kinds: None,
         }
     }
 }

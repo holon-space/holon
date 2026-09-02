@@ -378,12 +378,40 @@ impl std::error::Error for InvalidHomeProfileId {}
 // FieldSchema — single field definition
 // =============================================================================
 
+/// What a persisted column's cell holds. The SQL type says how wide the cell
+/// is; this says what has to parse out of it and who writes it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnValueKind {
+    /// A value of the field's declared SQL type, written by whoever creates or
+    /// updates the row.
+    #[default]
+    Declared,
+    /// The overflow bag: a JSON object holding the properties with no column of
+    /// their own, plus the engine's own stamps (`_provenance`,
+    /// `_change_origin`). The engine owns every cell of it.
+    OverflowProperties,
+    /// The overflow bag's companion: a JSON object of key → value kind, for the
+    /// keys whose JSON form does not name their kind. Written with the bag.
+    OverflowPropertyKinds,
+}
+
+impl ColumnValueKind {
+    /// Whether the engine, rather than the row's author, decides this cell.
+    pub fn is_engine_owned(self) -> bool {
+        matches!(self, Self::OverflowProperties | Self::OverflowPropertyKinds)
+    }
+}
+
 /// Schema for a single field in a table.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct FieldSchema {
     pub name: String,
     pub sql_type: String,
+    /// What has to parse out of this column's cells. Defaults to
+    /// [`ColumnValueKind::Declared`].
+    pub value_kind: ColumnValueKind,
     pub nullable: bool,
     pub primary_key: bool,
     pub indexed: bool,
@@ -416,6 +444,7 @@ impl Default for FieldSchema {
         Self {
             name: String::new(),
             sql_type: "TEXT".to_string(),
+            value_kind: ColumnValueKind::default(),
             nullable: false,
             primary_key: false,
             indexed: false,
@@ -475,6 +504,27 @@ impl FieldSchema {
 
     pub fn reference_target(mut self, target: impl Into<String>) -> Self {
         self.reference_target = Some(target.into());
+        self
+    }
+
+    /// The overflow pair, as ONE unit: the bag the engine's `_provenance` stamp
+    /// lands in and the companion kind map that keeps the bag's values readable
+    /// at their stored kind. Neither column means anything without the other,
+    /// so nothing declares one of them.
+    pub fn overflow_pair() -> [Self; 2] {
+        [
+            Self::new("properties", "TEXT")
+                .nullable()
+                .jsonb()
+                .value_kind(ColumnValueKind::OverflowProperties),
+            Self::new("property_kinds", "TEXT")
+                .nullable()
+                .value_kind(ColumnValueKind::OverflowPropertyKinds),
+        ]
+    }
+
+    pub fn value_kind(mut self, kind: ColumnValueKind) -> Self {
+        self.value_kind = kind;
         self
     }
 }
@@ -567,6 +617,30 @@ pub struct TypeDefinition {
     /// — a silent `holon-native` default would make the check vacuous.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<HomeProfileId>,
+    /// Declares that a deletion of this type is recorded, not removed. See
+    /// [`SoftDelete`]. Absent = `delete` removes the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soft_delete: Option<SoftDelete>,
+}
+
+/// Soft-delete semantics for a type whose deletions must outlive the row — a
+/// type synced with a peer that learns of a deletion from a tombstone.
+///
+/// `delete` writes [`Self::tombstone_field`]; `purge` is the separate op that
+/// removes the row once the deletion has been delivered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SoftDelete {
+    /// The nullable TEXT field `delete` stamps with an RFC 3339 timestamp.
+    pub tombstone_field: String,
+    /// How long a tombstone stays authoritative against an incoming snapshot.
+    /// Past it, an incoming row wins.
+    pub retention_days: i64,
+}
+
+impl SoftDelete {
+    pub fn retention(&self) -> chrono::Duration {
+        chrono::Duration::days(self.retention_days)
+    }
 }
 
 /// Who serves writes to a type.
@@ -613,6 +687,7 @@ impl TypeDefinition {
             profile_variants: Vec::new(),
             write_authority: WriteAuthority::Local,
             home: None,
+            soft_delete: None,
         }
     }
 
@@ -727,6 +802,7 @@ impl TypeDefinition {
             source: TypeSource::default(),
             write_authority: WriteAuthority::Local,
             home: None,
+            soft_delete: None,
         }
     }
 
@@ -1061,6 +1137,7 @@ mod create_table_sql_tests {
             profile_variants: vec![],
             write_authority: WriteAuthority::Local,
             home: None,
+            soft_delete: None,
             default_lifetime: FieldLifetime::default(),
             source: TypeSource::default(),
         };
@@ -1092,6 +1169,7 @@ mod create_table_sql_tests {
             profile_variants: vec![],
             write_authority: WriteAuthority::Local,
             home: None,
+            soft_delete: None,
             default_lifetime: FieldLifetime::default(),
             source: TypeSource::default(),
         };

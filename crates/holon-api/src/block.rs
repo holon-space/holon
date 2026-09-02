@@ -352,6 +352,7 @@ pub struct Block {
     /// Stored as JSON object for native JSON support in Turso.
     /// Tier 2: works fully in Org + Loro
     #[jsonb]
+    #[value_kind(overflow_properties)]
     pub properties: HashMap<String, Value>,
 
     /// Inline rich-text marks (Bold, Italic, Link, etc.) over `content`.

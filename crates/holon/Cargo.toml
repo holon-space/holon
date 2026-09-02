@@ -129,6 +129,10 @@ name = "kitchen_cookable_now_e2e"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "shopping_authoring_door_e2e"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "json_aggregation_e2e_test"
 required-features = ["test-helpers"]
 

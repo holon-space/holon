@@ -43,6 +43,15 @@ pub const SHOPPING_ITEM_TYPE_YAML: &str = include_str!("../assets/types/shopping
 pub const SHOPPING_ITEM_PROFILE_YAML: &str =
     include_str!("../assets/types/shopping_item_profile.yaml");
 
+/// The `shopping_item` declaration, parsed. The sync leg reads its
+/// `soft_delete` retention from here rather than carrying a constant of its
+/// own: the tombstone window is a property of the declared type, and two
+/// spellings of it would let a yaml edit silently disagree with the reconciler.
+pub fn shopping_item_type() -> Result<TypeDefinition> {
+    serde_yaml::from_str(SHOPPING_ITEM_TYPE_YAML)
+        .context("Failed to parse the shopping_item type declaration")
+}
+
 /// Register the kitchen datatypes and the recipe page's render profile.
 ///
 /// Mirrors `create_default_registry`'s bundled-type loop: types first, then the

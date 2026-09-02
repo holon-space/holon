@@ -48,14 +48,16 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
 /// A type whose `computed_persisted` field produces a Boolean — refused by any
 /// `string_only` home, admitted by `holon-native`.
 fn boolean_computed_type(name: &str, home: &str) -> TypeDefinition {
-    let mut type_def = TypeDefinition::new(
-        name,
-        vec![
-            FieldSchema::new("id", "TEXT").primary_key(),
-            FieldSchema::new("a", "TEXT").nullable(),
-            FieldSchema::new("b", "TEXT").nullable(),
-        ],
-    );
+    let mut fields = vec![
+        FieldSchema::new("id", "TEXT").primary_key(),
+        FieldSchema::new("a", "TEXT").nullable(),
+        FieldSchema::new("b", "TEXT").nullable(),
+    ];
+    // The overflow pair every declarable type carries: without it the engine
+    // has nowhere to stamp `_provenance`, and the declaration is refused before
+    // any home is consulted.
+    fields.extend(FieldSchema::overflow_pair());
+    let mut type_def = TypeDefinition::new(name, fields);
     type_def.home = Some(HomeProfileId::parse(home).expect("a well-formed profile id"));
     let declared = type_def.field_types();
     let spec = ComputedSpec::parse(

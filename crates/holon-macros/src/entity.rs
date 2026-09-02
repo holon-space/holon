@@ -58,6 +58,26 @@ pub fn derive_entity_impl(input: DeriveInput) -> TokenStream {
 
         let is_jsonb = field.attrs.iter().any(|attr| attr.path().is_ident("jsonb"));
 
+        // `#[value_kind(overflow_properties)]` — the variant is spelled as the
+        // enum's own serde name, so a struct field and a type YAML declare a
+        // column's kind with the same word.
+        let value_kind: Option<syn::Ident> = field.attrs.iter().find_map(|attr| {
+            if !attr.path().is_ident("value_kind") {
+                return None;
+            }
+            let Meta::List(meta_list) = &attr.meta else {
+                panic!("#[value_kind(...)] takes one kind, e.g. #[value_kind(declared)]");
+            };
+            let spelled = meta_list.tokens.to_string();
+            let variant = match spelled.as_str() {
+                "declared" => "Declared",
+                "overflow_properties" => "OverflowProperties",
+                "overflow_property_kinds" => "OverflowPropertyKinds",
+                other => panic!("#[value_kind({other})] is not a ColumnValueKind"),
+            };
+            Some(syn::Ident::new(variant, proc_macro2::Span::call_site()))
+        });
+
         let default_value: Option<String> = field.attrs.iter().find_map(|attr| {
             if attr.path().is_ident("default_value")
                 && let syn::Meta::NameValue(nv) = &attr.meta
@@ -129,6 +149,12 @@ pub fn derive_entity_impl(input: DeriveInput) -> TokenStream {
 
             if is_jsonb {
                 field_schema_builder = quote! { #field_schema_builder.jsonb() };
+            }
+
+            if let Some(ref kind) = value_kind {
+                field_schema_builder = quote! {
+                    #field_schema_builder.value_kind(#api_path::ColumnValueKind::#kind)
+                };
             }
 
             if let Some(ref dv) = default_value {
@@ -212,6 +238,10 @@ pub fn derive_entity_impl(input: DeriveInput) -> TokenStream {
                     // profile yaml, which carries the home), so there is
                     // nothing here for a home to be checked against.
                     home: None,
+                    // Soft deletion is declared by a type that must keep a
+                    // deletion around to tell someone about it (a sync peer);
+                    // an in-tree entity has no such obligation.
+                    soft_delete: None,
                 }
             }
 

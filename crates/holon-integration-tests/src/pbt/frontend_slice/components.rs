@@ -6408,6 +6408,10 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
         computed: Vec<(String, String)>,
     ) {
         let mut fields = vec![holon_api::FieldSchema::new("id", "TEXT").primary_key()];
+        // The overflow pair, on every drawn type: the engine stamps
+        // `_provenance` onto each create, so a type without it cannot be
+        // declared at all. Production yaml carries it for the same reason.
+        fields.extend(holon_api::FieldSchema::overflow_pair());
         fields.extend(
             value_columns
                 .iter()

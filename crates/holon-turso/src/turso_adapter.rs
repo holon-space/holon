@@ -279,7 +279,16 @@ impl TursoAdapter {
         );
         columns.extend(plan.sql_planted.iter().map(|c| c.select_expr()));
 
-        format!("SELECT {} FROM \"{raw}\"", columns.join(", "))
+        // A tombstoned row is deleted as far as every reader is concerned; it
+        // stays on the RAW table only so whoever must still be told (a sync
+        // peer) can read the deletion. Filtering here is what makes the split
+        // honest: `from <name>` shows the live list, `<name>_raw` shows the
+        // deletion that has not been delivered yet.
+        let live = match &type_def.soft_delete {
+            Some(soft_delete) => format!(" WHERE \"{}\" IS NULL", soft_delete.tombstone_field),
+            None => String::new(),
+        };
+        format!("SELECT {} FROM \"{raw}\"{live}", columns.join(", "))
     }
 
     /// The generated PRQL stdlib fragment: a type's DERIVED relations

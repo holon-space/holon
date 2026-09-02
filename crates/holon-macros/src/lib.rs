@@ -41,7 +41,16 @@ pub fn derive_step_vocabulary(input: TokenStream) -> TokenStream {
 
 #[proc_macro_derive(
     Entity,
-    attributes(entity, primary_key, indexed, reference, lens, jsonb, edge_field)
+    attributes(
+        entity,
+        primary_key,
+        indexed,
+        reference,
+        lens,
+        jsonb,
+        edge_field,
+        value_kind
+    )
 )]
 pub fn derive_entity(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

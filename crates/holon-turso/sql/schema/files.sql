@@ -4,6 +4,8 @@ CREATE TABLE IF NOT EXISTS file (
     parent_id TEXT NOT NULL,
     content_hash TEXT NOT NULL DEFAULT '',
     document_id TEXT,
+    properties TEXT,
+    property_kinds TEXT,
     _change_origin TEXT
 );
 

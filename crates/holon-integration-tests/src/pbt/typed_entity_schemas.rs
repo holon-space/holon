@@ -26,8 +26,14 @@ pub struct TypedEntitySchema {
     pub type_name: String,
     /// The primary-key column (`id` for every type today).
     pub id_column: String,
-    /// The remaining persisted columns, in a stable order. A create fills every
+    /// The persisted columns whose cells the ROW'S AUTHOR writes
+    /// ([`ColumnValueKind::Declared`]), in a stable order. A create fills every
     /// one of them, so no column compares NULL-vs-empty-string.
+    ///
+    /// An engine-owned column — the overflow bag and its kind map — is
+    /// deliberately absent: the engine stamps `_provenance` into the bag on
+    /// every create, so its stored value is not the value any author wrote and
+    /// the oracle cannot predict it from the transition alone.
     pub value_columns: Vec<String>,
     /// The type's `computed_persisted` fields, each with the `Computation` the
     /// registry compiled it into. The SUT reads these off the matview as
@@ -72,7 +78,7 @@ pub fn free_standing_schemas() -> &'static [TypedEntitySchema] {
                     });
                 let value_columns = persisted
                     .iter()
-                    .filter(|f| !f.primary_key)
+                    .filter(|f| !f.primary_key && !f.value_kind.is_engine_owned())
                     .map(|f| f.name.clone())
                     .collect();
                 let computed_columns = type_def

@@ -190,10 +190,18 @@ impl OperationProvider for ShoppingOperations {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("shopping_sync: the system clock is before the epoch: {e}"))?
             .as_millis() as i64;
+        let declaration = holon_kitchen::shopping_item_type()
+            .map_err(|e| format!("shopping_sync: {e:#}"))?
+            .soft_delete
+            .ok_or_else(|| {
+                "shopping_sync: `shopping_item` declares no soft deletion, so a local delete \
+                 leaves no tombstone for this round to push"
+                    .to_string()
+            })?;
         let outcome = sync_once(
             &peer,
             &rows,
-            &ShoppingReconciler::default(),
+            &ShoppingReconciler::with_tombstone_window(declaration.retention()),
             &self.device_id,
             now_ms,
         )
