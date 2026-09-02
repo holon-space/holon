@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Minimal streamable-HTTP MCP client for driving a running Holon frontend.
 
-Stdlib + `requests` only. Full initialize handshake per invocation, then ONE
-tools/call, result printed to stdout.
+Stdlib ONLY — the helper a skill mandates must not need a pip install. Full
+initialize handshake per invocation, then ONE tools/call, result printed to
+stdout.
 
 Usage:
     python3 holon_mcp_cli.py <port> <tool_name> ['<json_args>'] [--out file.png]
@@ -11,23 +12,38 @@ Usage:
 
 SAFETY: talks ONLY to 127.0.0.1:<port>. Never use 8520 (Martin's live app).
 """
-import base64, json, sys, requests
+import base64, json, sys, urllib.error, urllib.request
 PROTO = "2025-03-26"
+
+
+def _http(url, method, headers, body=None, timeout=60):
+    """One request. Returns (status, headers, text), the body decoded as UTF-8.
+
+    `headers` comes back CASE-INSENSITIVE. HTTP header names are, and the MCP
+    session id arrives spelled differently than it is asked for; a plain dict
+    loses the session and the next call is refused as an unexpected message.
+
+    The decode is explicit, not sniffed from the Content-Type: the server
+    answers UTF-8 whether or not it says so, and the sniffing fallback is
+    Latin-1, which mojibakes every multibyte character in a response.
+    """
+    req = urllib.request.Request(url, method=method, data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            headers = {k.lower(): v for k, v in r.headers.items()}
+            return r.status, headers, r.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            "HTTP %s from %s: %s" % (e.code, url, e.read().decode("utf-8", "replace"))
+        ) from e
 
 def _post(url, sid, payload):
     h = {"Content-Type": "application/json",
          "Accept": "application/json, text/event-stream"}
     if sid: h["Mcp-Session-Id"] = sid
-    r = requests.post(url, headers=h, data=json.dumps(payload), timeout=60)
-    r.raise_for_status()
-    # Defense against charset-less servers: `requests` falls back to Latin-1
-    # for a bare `text/event-stream`/`application/json` Content-Type (no
-    # `charset` param), mojibaking every multibyte character in the body.
-    # The MCP server response is always UTF-8; force it explicitly rather
-    # than trusting the (possibly charset-less) header.
-    r.encoding = "utf-8"
-    sid = r.headers.get("Mcp-Session-Id", sid)
-    body, result = r.text, None
+    _, resp_headers, text = _http(url, "POST", h, json.dumps(payload).encode("utf-8"))
+    sid = resp_headers.get("mcp-session-id", sid)
+    body, result = text, None
     if body.strip().startswith("{"):
         result = json.loads(body)
     else:
@@ -62,8 +78,8 @@ def main():
         print(__doc__); sys.exit(2)
     port = sys.argv[1]
     if sys.argv[2] == "--health":
-        r = requests.get(f"http://127.0.0.1:{port}/health", timeout=5)
-        print(f"HTTP {r.status_code}: {r.text}"); return
+        status, _, text = _http(f"http://127.0.0.1:{port}/health", "GET", {}, timeout=5)
+        print(f"HTTP {status}: {text}"); return
     if sys.argv[2] == "--list":
         resp = list_tools(port)
         print("\n".join(sorted(t["name"] for t in resp.get("result",{}).get("tools",[])))); return
