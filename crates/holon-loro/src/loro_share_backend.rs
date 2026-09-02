@@ -144,7 +144,7 @@ where
 /// persists — `flush_all` needs the `doc` handle to force a final save
 /// before shutdown without waiting for the debounce window.
 struct SaveWorker {
-    _handle: DebouncedCommitWorkerHandle,
+    handle: DebouncedCommitWorkerHandle,
     doc: Arc<LoroDoc>,
 }
 
@@ -198,10 +198,7 @@ fn spawn_save_worker(
         },
     );
 
-    SaveWorker {
-        _handle: handle,
-        doc,
-    }
+    SaveWorker { handle, doc }
 }
 
 /// Backing state for subtree share operations. Kept separate from
@@ -255,12 +252,27 @@ pub struct LoroShareBackend {
     self_weak: std::sync::Weak<LoroShareBackend>,
 }
 
+/// Which per-share writers a settle waits for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SettleScope {
+    /// Save and projection workers. Excludes the sync worker, whose
+    /// `sync_with_peers` dials every known peer under `CONNECT_TIMEOUT`
+    /// each — waiting on it prices the settle in peer reachability
+    /// rather than in pending local work.
+    LocalWrites,
+    /// Also the sync worker. Costs a network round trip, and is what a
+    /// caller needs when nothing may rewrite the snapshot afterwards:
+    /// `sync_with_peers` republishes it as a save-before-push barrier
+    /// before it dials.
+    IncludingSync,
+}
+
 /// Holder for a per-share auto-resync worker. Wraps the generic
 /// [`DebouncedCommitWorkerHandle`] — no per-worker state beyond the
 /// handle itself (unlike `SaveWorker`, which keeps the `doc` handle
 /// alive for `flush_all`).
 struct SyncWorker {
-    _handle: DebouncedCommitWorkerHandle,
+    handle: DebouncedCommitWorkerHandle,
 }
 
 /// Debounce for the auto-resync worker. Larger than `SAVE_DEBOUNCE`
@@ -315,14 +327,14 @@ fn spawn_sync_worker(
             }
         });
 
-    SyncWorker { _handle: handle }
+    SyncWorker { handle }
 }
 
 /// Per-share SQL projection worker. On every change to the shared doc
 /// (debounced), diffs the current state against a frontiers watermark
 /// and projects creates/updates/deletes into the SQL block table.
 struct ProjectionWorker {
-    _handle: DebouncedCommitWorkerHandle,
+    handle: DebouncedCommitWorkerHandle,
 }
 
 /// Debounce for the SQL projection worker. Same cadence as save —
@@ -479,7 +491,7 @@ fn spawn_projection_worker(
             }
         },
     );
-    ProjectionWorker { _handle: handle }
+    ProjectionWorker { handle }
 }
 
 /// One share-projection diff step: snapshot `after` settled-aware, apply the
@@ -670,6 +682,39 @@ impl LoroShareBackend {
                     shared_tree_id: id,
                     reason: ShareDegradedReason::SnapshotSaveFailed(format!("{e:#}")),
                 });
+            }
+        }
+    }
+
+    /// Resolve once the per-share workers in `scope` have no pending
+    /// debounce window and no work call in flight. Iterates to a fixed
+    /// point because a commit re-arms them all. Never times out; bound
+    /// it at the call site.
+    ///
+    /// Rehydration's kick-sync is a detached task and is outside every
+    /// scope, so a caller inspecting `shares/` must re-settle and
+    /// re-check rather than treat one pass as final.
+    pub async fn wait_for_workers_idle(&self, scope: SettleScope) {
+        loop {
+            let quiesces = {
+                let save = self.save_workers.read().await;
+                let projection = self.projection_workers.read().await;
+                let sync = self.sync_workers.read().await;
+                save.values()
+                    .map(|w| w.handle.quiesce())
+                    .chain(projection.values().map(|w| w.handle.quiesce()))
+                    .chain(
+                        sync.values()
+                            .filter(|_| scope == SettleScope::IncludingSync)
+                            .map(|w| w.handle.quiesce()),
+                    )
+                    .collect::<Vec<_>>()
+            };
+            if quiesces.iter().all(|q| q.is_idle()) {
+                return;
+            }
+            for q in &quiesces {
+                q.wait_idle().await;
             }
         }
     }
@@ -3558,6 +3603,210 @@ mod tests {
             "expected ≤3 file writes after 200-commit burst, got {writes}"
         );
         assert!(writes >= 1, "expected at least one save, got {writes}");
+    }
+
+    /// Set up a save worker over a store whose publish window is held
+    /// open, commit once, and hand back everything the caller needs to
+    /// observe the window. `doc` and `store` are returned so they stay
+    /// alive for the duration of the test.
+    async fn armed_save_worker(
+        dir: &TempDir,
+        stall: Duration,
+    ) -> (Arc<SharedSnapshotStore>, Arc<LoroDoc>, SaveWorker) {
+        let bus = Arc::new(DegradedSignalBus::new());
+        let store = Arc::new(SharedSnapshotStore::new(
+            dir.path().to_path_buf(),
+            bus.clone(),
+        ));
+        store.set_publish_stall(stall);
+        let doc = Arc::new(LoroDoc::new());
+        let worker = spawn_save_worker(store.clone(), bus, "stalled".to_string(), doc.clone());
+        let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+        let node = tree.create(None::<TreeID>).unwrap();
+        tree.get_meta(node).unwrap().insert("n", 1i64).unwrap();
+        doc.commit();
+        (store, doc, worker)
+    }
+
+    fn tmp_files(shares: &std::path::Path) -> Vec<std::path::PathBuf> {
+        if !shares.exists() {
+            return vec![];
+        }
+        std::fs::read_dir(shares)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".loro.tmp"))
+            })
+            .collect()
+    }
+
+    /// The publish is `write tmp → fsync → rename`, so a `.loro.tmp`
+    /// under `shares/` is a legal transient for as long as that call
+    /// runs. A sweep that is only separated from the commit by a fixed
+    /// sleep can therefore land inside the window and see the tmp —
+    /// which is what `subtree_share_round_trip_pbt`'s `SettleSaves`
+    /// used to do. Pins the mechanism, not a defect.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_fixed_sleep_can_land_inside_the_publish_window() {
+        let dir = TempDir::new().unwrap();
+        let (_store, _doc, worker) =
+            armed_save_worker(&dir, SAVE_DEBOUNCE + Duration::from_millis(600)).await;
+
+        // The settle policy `SettleSaves` used: sleep past
+        // `SAVE_DEBOUNCE`, then sweep. Observed off the runtime because
+        // the publish is a blocking call and holds tokio's timers with
+        // it — one more reason a timer is the wrong settle point here.
+        let shares = dir.path().join("shares");
+        let observed = tokio::task::spawn_blocking(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            tmp_files(&shares)
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            !observed.is_empty(),
+            "expected the stalled publish to be observable as a .loro.tmp"
+        );
+        // The worker is correspondingly NOT idle — the settle point the
+        // sweep should have used says so.
+        assert!(!worker.handle.quiesce().is_idle());
+    }
+
+    /// Worker quiescence IS a settle point: once it resolves, the
+    /// rename has completed, the snapshot is on disk, and nothing of
+    /// ours is left under a `.tmp` name.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn worker_quiesce_is_a_publish_settle_point() {
+        let dir = TempDir::new().unwrap();
+        let (_store, _doc, worker) =
+            armed_save_worker(&dir, SAVE_DEBOUNCE + Duration::from_millis(600)).await;
+
+        tokio::time::timeout(Duration::from_secs(30), worker.handle.quiesce().wait_idle())
+            .await
+            .expect("save worker did not quiesce");
+
+        assert_eq!(
+            tmp_files(&dir.path().join("shares")),
+            Vec::<std::path::PathBuf>::new(),
+            "quiesced save worker left a .tmp behind"
+        );
+        assert!(dir.path().join("shares/stalled.loro").is_file());
+    }
+
+    /// A harness that corrupts a snapshot on disk needs the guarantee
+    /// that nothing will rewrite it afterwards. The sync worker is one
+    /// such writer: `sync_with_peers` republishes the snapshot as its
+    /// save-before-push barrier BEFORE it dials, so a barrier save armed
+    /// by an earlier commit lands on top of the corrupt bytes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn settling_including_sync_keeps_a_corrupt_snapshot_corrupt() {
+        const CORRUPT: &[u8] = b"\x00\x01not-loro";
+
+        let (backend, _dir) = make_backend();
+        let id = "corrupt".to_string();
+        backend.manager.register(id.clone(), LoroDoc::new());
+        let doc = backend.manager.get_doc(&id).unwrap();
+        backend.snapshot_store().save(&id, &doc).unwrap();
+        backend.attach_sync_worker(id.clone(), doc.clone()).await;
+
+        // A local commit arms the sync worker. No peers are registered,
+        // so its work call is the barrier save and nothing else.
+        let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+        let node = tree.create(None::<TreeID>).unwrap();
+        tree.get_meta(node).unwrap().insert("n", 1i64).unwrap();
+        doc.commit();
+
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            backend.wait_for_workers_idle(SettleScope::IncludingSync),
+        )
+        .await
+        .expect("settle never returned");
+
+        let path = backend.snapshot_store().snapshot_path(&id);
+        std::fs::write(&path, CORRUPT).unwrap();
+        tokio::time::sleep(SYNC_DEBOUNCE * 3).await;
+
+        let on_disk = std::fs::read(&path).unwrap();
+        assert!(
+            on_disk == CORRUPT,
+            "a barrier save republished over the corruption after the settle returned: \
+             {} bytes on disk, expected the {}-byte corrupt payload",
+            on_disk.len(),
+            CORRUPT.len()
+        );
+    }
+
+    /// Settling for a disk sweep must not cost what a network round
+    /// trip costs. The sync worker's work call is `sync_with_peers`,
+    /// which persists a barrier snapshot and then dials every known
+    /// peer under a 30 s `CONNECT_TIMEOUT` each, so including it in
+    /// quiescence would make the settle's duration a function of peer
+    /// reachability rather than of pending local work.
+    ///
+    /// Both halves of that cost are present here: an unreachable peer
+    /// address, and a publish stall that holds the barrier save open
+    /// regardless of what the network does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn settle_stays_bounded_while_the_sync_worker_dials_an_unreachable_peer() {
+        let (backend, _dir) = make_backend();
+        backend
+            .snapshot_store()
+            .set_publish_stall(Duration::from_secs(5));
+
+        let id = "unreachable".to_string();
+        backend.manager.register(id.clone(), LoroDoc::new());
+        let doc = backend.manager.get_doc(&id).unwrap();
+
+        // TEST-NET-1 (RFC 5737). Never routed, so the dial either sits
+        // until CONNECT_TIMEOUT or fails fast depending on the network;
+        // the publish stall keeps the work call slow either way.
+        let peer_key = iroh::SecretKey::generate(&mut rand::rng());
+        let unreachable = EndpointAddr::from_parts(
+            peer_key.public(),
+            [iroh::TransportAddr::Ip("192.0.2.1:9".parse().unwrap())],
+        );
+        backend.remember_peer(&id, unreachable).await;
+
+        backend.attach_sync_worker(id.clone(), doc.clone()).await;
+        let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+        let node = tree.create(None::<TreeID>).unwrap();
+        tree.get_meta(node).unwrap().insert("n", 1i64).unwrap();
+        doc.commit();
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            backend.wait_for_workers_idle(SettleScope::LocalWrites),
+        )
+        .await
+        .expect("settle never returned");
+        let elapsed = started.elapsed();
+
+        // Non-vacuity: read before asserting, so a settle that returned
+        // fast only because the worker was already done cannot pass.
+        let still_busy = {
+            let guard = backend.sync_workers.read().await;
+            !guard
+                .get(&id)
+                .expect("sync worker registered")
+                .handle
+                .quiesce()
+                .is_idle()
+        };
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "settle took {elapsed:?}; it waited on the sync worker's barrier save \
+             and its dial to an unreachable peer"
+        );
+        assert!(
+            still_busy,
+            "sync worker had already finished — the bound above proves nothing"
+        );
     }
 
     /// Focused debug test for the known_peers+auto-resync feature

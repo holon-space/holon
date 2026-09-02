@@ -310,8 +310,7 @@ the existing landing battery — `just landing-gate` alongside
 `cargo nextest run -p holon-app` (D43.a). Its failures are CLASSIFIED, never
 judged by exit code: the five registered `e2e_backend_engine_test` matview reds
 are pass-with-note, and today's sanctioned load-sensitive flakes are
-`subtree_share_round_trip_pbt` (OPEN bug-funnel entry, tmp-leftover race),
-`concurrent_keystrokes_keep_every_undo_step` (OPEN ORACLE entry), and
+`concurrent_keystrokes_keep_every_undo_step` (OPEN ORACLE entry) and
 `test_multi_peer_sync_iroh` (measured 2026-09-02: 5/5 PASS isolated at
 111–179s; its single red coincided with a load average above 200 and was a QUIC
 transport timeout). Anything else blocks the land. The full signature list is
@@ -343,10 +342,12 @@ serialized through the `holon-build` semaphore; logs `lane-logs/flakes/`).
 | --- | --- | --- | --- | --- | --- | --- |
 | `loro-backend-change-count` | known-red | `Reference and SUT should receive same number of change` | `loro_backend_pbt.rs:534` `test_loro_backend_state_machine`: `assertion \`left == right\` failed: Reference and SUT should receive same number of change notifications.` / `Reference: N changes` / `SUT: M changes` — the watcher notification counts diverge between the reference model and `LoroBackend`. | FLAKES ONLY UNDER SUITE LOAD. 2026-09-01, 10 isolated runs: **10 passed, 0 failed** — `lane-logs/flakes/loro-1.log` .. `loro-10.log`, each `1 test run: 1 passed (1 slow), 5 skipped`, wall time 43s–66s. The signature above is therefore quoted from the assertion's own format string, NOT decoded from a captured payload: correct the Signature column on the first firing that is actually logged. Registered so that first firing inside a loaded suite run is a WARN pass-with-note rather than an aborted run. | — | **UNOWNED** |
 
-`subtree_share_round_trip_pbt`'s `P-NO-TMP-LEFTOVER/B` failure is deliberately
-NOT registered here: it is a suspected real atomic-publish race, so demoting it
-to pass-with-note would hide it. It is tracked as an OPEN bug-funnel entry,
-`2026-09-01-subtree-share-tmp-leftover-race`.
+`subtree_share_round_trip_pbt`'s `P-NO-TMP-LEFTOVER` failure is deliberately
+NOT registered here, and no longer needs to be: it was root-caused on 2026-09-02
+to the harness sweeping `shares/` while a publish armed by rehydration's
+detached kick-sync was still running, and the test now waits for a real settle
+point instead of a fixed sleep. Bug-funnel entry
+`2026-09-01-subtree-share-tmp-leftover-race`, status FIXED.
 
 ## Where it runs — local, not GitHub Actions
 

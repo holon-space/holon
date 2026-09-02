@@ -30,6 +30,8 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use futures::FutureExt;
 use loro::LoroDoc;
@@ -58,12 +60,74 @@ pub fn local_only() -> EventFilter {
     Arc::new(|event| event.triggered_by == loro::EventTriggerKind::Local)
 }
 
+/// Work-tracking counters shared between the Loro callback and the
+/// worker loop. `enqueued` counts accepted commit events; `completed`
+/// is raised to the `enqueued` value a work call covered, once that
+/// call returns. The worker is idle exactly when the two are equal.
+struct Quiesce {
+    enqueued: AtomicU64,
+    completed: AtomicU64,
+    idle: Notify,
+}
+
+impl Quiesce {
+    fn is_idle(&self) -> bool {
+        self.completed.load(Ordering::SeqCst) >= self.enqueued.load(Ordering::SeqCst)
+    }
+}
+
 /// Handle for a running debounced commit worker. Dropping the handle
 /// aborts the background task AND unregisters the Loro callback (via
 /// the held `Subscription`'s `Drop` impl).
 pub struct DebouncedCommitWorkerHandle {
     _subscription: loro::Subscription,
     abort: AbortHandle,
+    quiesce: Arc<Quiesce>,
+}
+
+impl DebouncedCommitWorkerHandle {
+    /// A detachable view of this worker's idleness. Cloneable and
+    /// independent of the handle's lifetime, so a caller can await
+    /// quiescence without holding the lock that guards the handle.
+    pub fn quiesce(&self) -> WorkerQuiesce {
+        WorkerQuiesce(self.quiesce.clone())
+    }
+}
+
+/// Observer of one worker's idleness, obtained from
+/// [`DebouncedCommitWorkerHandle::quiesce`].
+#[derive(Clone)]
+pub struct WorkerQuiesce(Arc<Quiesce>);
+
+impl WorkerQuiesce {
+    /// True when every commit event accepted so far has been covered by
+    /// a completed work call — no debounce window pending, no work call
+    /// in flight.
+    pub fn is_idle(&self) -> bool {
+        self.0.is_idle()
+    }
+
+    /// Resolve once the worker is idle. A commit that arrives while
+    /// waiting keeps the wait alive, so on return every side effect of
+    /// every commit made before the call has hit its destination — for
+    /// the save worker, that means the snapshot rename has completed
+    /// and no `.tmp` of ours is on disk.
+    ///
+    /// Never times out, and never resolves if the worker task was
+    /// aborted mid-work; a caller that needs a bound must impose one.
+    pub async fn wait_idle(&self) {
+        loop {
+            let notified = self.0.idle.notified();
+            tokio::pin!(notified);
+            // Arm before the check so a completion racing the check
+            // still wakes us.
+            notified.as_mut().enable();
+            if self.0.is_idle() {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 impl Drop for DebouncedCommitWorkerHandle {
@@ -98,12 +162,20 @@ where
     let notify = Arc::new(Notify::new());
     let notify_cb = notify.clone();
     let filter_cb = filter;
+    let quiesce = Arc::new(Quiesce {
+        enqueued: AtomicU64::new(0),
+        completed: AtomicU64::new(0),
+        idle: Notify::new(),
+    });
+    let quiesce_cb = quiesce.clone();
     let subscription = doc.subscribe_root(Arc::new(move |event| {
         if filter_cb(&event) {
+            quiesce_cb.enqueued.fetch_add(1, Ordering::SeqCst);
             notify_cb.notify_one();
         }
     }));
 
+    let quiesce_task = quiesce.clone();
     let handle = tokio::spawn(async move {
         loop {
             notify.notified().await;
@@ -111,7 +183,14 @@ where
             // Drain any notifications that fired during the sleep so
             // one work call covers the whole burst.
             while notify.notified().now_or_never().is_some() {}
-            if let Err(e) = work().await {
+            // Read the enqueue counter BEFORE the work call: anything
+            // arriving during the call is deliberately not covered by
+            // it, and leaves the worker non-idle for another round.
+            let covered = quiesce_task.enqueued.load(Ordering::SeqCst);
+            let outcome = work().await;
+            quiesce_task.completed.fetch_max(covered, Ordering::SeqCst);
+            quiesce_task.idle.notify_waiters();
+            if let Err(e) = outcome {
                 tracing::error!(
                     worker = worker_name,
                     error = %format!("{e:#}"),
@@ -125,6 +204,7 @@ where
     DebouncedCommitWorkerHandle {
         _subscription: subscription,
         abort: handle.abort_handle(),
+        quiesce,
     }
 }
 

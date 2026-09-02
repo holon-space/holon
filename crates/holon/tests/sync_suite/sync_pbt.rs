@@ -203,6 +203,7 @@ mod tests {
         use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
         use holon_loro::loro_document_store::LoroDocumentStore;
         use holon_loro::loro_share_backend::LoroShareBackend;
+        use holon_loro::loro_share_backend::SettleScope;
         use holon_loro::loro_share_backend::SubtreeShareOperations;
         use holon_loro::loro_share_backend::rehydrate_shared_trees;
         use holon_loro::multi_peer::TREE_NAME;
@@ -1106,6 +1107,9 @@ mod tests {
                             let d = a.manager_for_test().get_doc(&shared_tree_id).unwrap();
                             append_text_on_root(&d, &s);
                             ref_a.alive_suffixes.push(s);
+                            // Republishes A's snapshot, repairing a
+                            // pending corruption. See `CorruptSharedOnA`.
+                            ref_a.corrupt_pending = false;
                         }
                     }
                     Action::EditOnB(s) => {
@@ -1116,17 +1120,46 @@ mod tests {
                         }
                     }
                     Action::SettleSaves => {
-                        // Wait longer than the save debounce so all
-                        // pending worker writes finish.
-                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                        // P-NO-TMP-LEFTOVER: no `.tmp` should remain.
-                        for (label, dir) in [("A", dir_a.path()), ("B", dir_b.path())] {
-                            let (_zero, tmps) = scan_for_corruption(dir);
-                            assert!(
-                                tmps.is_empty(),
-                                "P-NO-TMP-LEFTOVER/{label}: stale tmp files: {tmps:?}"
-                            );
+                        // P-NO-TMP-LEFTOVER: no `.tmp` should REMAIN. The
+                        // temp half of an atomic publish is legal while
+                        // that publish runs, so settle, sweep, and retry:
+                        // a writer the settle does not cover can start one
+                        // after it, but a real orphan never clears. The
+                        // budget starts after the FIRST settle so the
+                        // settle cannot consume it.
+                        let mut deadline: Option<std::time::Instant> = None;
+                        let mut stale: Vec<(&str, Vec<std::path::PathBuf>)> = Vec::new();
+                        loop {
+                            for (label, peer) in [("A", &a), ("B", &b)] {
+                                tokio::time::timeout(
+                                    std::time::Duration::from_secs(60),
+                                    peer.wait_for_workers_idle(SettleScope::LocalWrites),
+                                )
+                                .await
+                                .unwrap_or_else(|_| {
+                                    panic!("SettleSaves/{label}: share workers never went idle")
+                                });
+                            }
+                            let deadline = *deadline.get_or_insert_with(|| {
+                                std::time::Instant::now() + std::time::Duration::from_secs(30)
+                            });
+                            stale.clear();
+                            for (label, dir) in [("A", dir_a.path()), ("B", dir_b.path())] {
+                                let (_zero, tmps) = scan_for_corruption(dir);
+                                if !tmps.is_empty() {
+                                    stale.push((label, tmps));
+                                }
+                            }
+                            if stale.is_empty() || std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         }
+                        assert!(
+                            stale.is_empty(),
+                            "P-NO-TMP-LEFTOVER: tmp files still present 30s after the first \
+                             settle: {stale:?}"
+                        );
                     }
                     Action::PullBtoA => {
                         if ref_a.share_usable && ref_b.share_usable {
@@ -1148,6 +1181,8 @@ mod tests {
                             }
                             ref_a.alive_suffixes = merged.clone();
                             ref_b.alive_suffixes = merged;
+                            // Merging commits on A. See `CorruptSharedOnA`.
+                            ref_a.corrupt_pending = false;
 
                             // Marks merge similarly — but suffixes have
                             // shifted positions on the *receiver's* side
@@ -1222,6 +1257,20 @@ mod tests {
                         // random bytes. In-memory state is unchanged
                         // until the next RestartA, when rehydration
                         // will fail to import and quarantine the file.
+                        // Corruption survives only until A's next
+                        // commit: a commit republishes the snapshot, and
+                        // `RestartA` then flushes, so `corrupt_pending`
+                        // is cleared by every action that commits on A.
+                        // Settle first for the same reason — an armed
+                        // save would republish over these bytes. The
+                        // scope includes the sync worker here because
+                        // its barrier save is one such writer.
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(60),
+                            a.wait_for_workers_idle(SettleScope::IncludingSync),
+                        )
+                        .await
+                        .expect("CorruptSharedOnA: A's share workers never went idle");
                         let path = dir_a
                             .path()
                             .join("shares")
@@ -1302,6 +1351,9 @@ mod tests {
                                     key: kind.loro_key(),
                                 });
                             }
+                            // Republishes A's snapshot, repairing a
+                            // pending corruption. See `CorruptSharedOnA`.
+                            ref_a.corrupt_pending = false;
                         }
                     }
                     Action::MarkOnB(kind) => {

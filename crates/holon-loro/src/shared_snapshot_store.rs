@@ -44,6 +44,11 @@ pub struct SharedSnapshotStore {
     /// observe how many times the file was actually written.
     #[cfg(test)]
     write_counter: std::sync::atomic::AtomicUsize,
+    /// Test-only stall inserted between the tmp write and the rename, so
+    /// a test can hold the publish window open and observe what an
+    /// in-flight save looks like from outside.
+    #[cfg(test)]
+    publish_stall: std::sync::Mutex<std::time::Duration>,
 }
 
 impl SharedSnapshotStore {
@@ -56,7 +61,16 @@ impl SharedSnapshotStore {
             bus,
             #[cfg(test)]
             write_counter: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            publish_stall: std::sync::Mutex::new(std::time::Duration::ZERO),
         }
+    }
+
+    /// Hold every subsequent publish open for `d` between the tmp write
+    /// and the rename.
+    #[cfg(test)]
+    pub(crate) fn set_publish_stall(&self, d: std::time::Duration) {
+        *self.publish_stall.lock().unwrap() = d;
     }
 
     pub fn shares_dir(&self) -> &Path {
@@ -103,6 +117,13 @@ impl SharedSnapshotStore {
                 .with_context(|| format!("write tmp {}", tmp_path.display()))?;
             f.sync_all()
                 .with_context(|| format!("fsync tmp {}", tmp_path.display()))?;
+        }
+        #[cfg(test)]
+        {
+            let stall = *self.publish_stall.lock().unwrap();
+            if !stall.is_zero() {
+                std::thread::sleep(stall);
+            }
         }
         std::fs::rename(&tmp_path, &final_path)
             .with_context(|| format!("rename {} → {}", tmp_path.display(), final_path.display()))?;

@@ -518,8 +518,7 @@ Notes:
 - **Classify its failures against the known-red list; never judge it by exit
   code.** The five registered `e2e_backend_engine_test` matview reds are
   pass-with-note. Sanctioned load-sensitive flakes today:
-  `subtree_share_round_trip_pbt` (OPEN BugFunnel entry, tmp-leftover race),
-  `concurrent_keystrokes_keep_every_undo_step` (OPEN ORACLE entry), and
+  `concurrent_keystrokes_keep_every_undo_step` (OPEN ORACLE entry) and
   `test_multi_peer_sync_iroh` (measured 2026-09-02 at 5/5 PASS isolated,
   111–179s; its single red coincided with a load average above 200 and was a
   QUIC transport timeout). Any other failure blocks the land. The signatures
