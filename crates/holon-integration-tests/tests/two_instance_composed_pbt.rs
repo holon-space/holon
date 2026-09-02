@@ -1210,3 +1210,138 @@ fn the_two_writer_chain_is_green_across_the_whole_catalog() {
     assert_two_writer_oracle_engaged(&sut.run_report_now(&ref_state), &ref_state);
     <Sut as StateMachineTest>::check_invariants(&sut, &ref_state);
 }
+
+// ─── The fixed-id boot collision (plan v3 Inc 3) ───────────────────────
+
+/// Boot a pair, pair it read-write, and drive both directions to a sync fixed
+/// point. NO writes: the collision is a property of booting and syncing alone.
+///
+/// Returns each side's live-node counts plus the owner's tree, which is what
+/// names the `block:__default__` subtree.
+async fn pair_and_settle(
+    ref_state: &holon_integration_tests::pbt::reference_state::ReferenceState,
+) -> (
+    std::collections::BTreeMap<String, usize>,
+    std::collections::BTreeMap<String, usize>,
+    TreeState,
+) {
+    let resolver = IdResolver::default();
+    let (owner_caps, _receiver_caps, handle, _) =
+        boot_two_instances_with_receiver_caps(&resolver, ref_state).await;
+    let two = caps_two(&owner_caps);
+    two.share_container("holon_tree", "receiver").await;
+    drive_to_sync_fixpoint(&two, &handle).await;
+    (
+        handle.live_node_counts(true).await,
+        handle.live_node_counts(false).await,
+        handle.loro_tree_state(true, &BTreeSet::new()).await,
+    )
+}
+
+/// The `block:__default__` subtree — every block the bundled `index.org` layout
+/// contributes, closed over `parent_id`. This is the set D68.b rules
+/// DEVICE-LOCAL, so it is the set the layout container has to carry.
+fn layout_subtree(owner_tree: &TreeState) -> BTreeSet<String> {
+    let mut closure: BTreeSet<String> = BTreeSet::new();
+    closure.insert(holon_api::DEFAULT_DOC_BLOCK_ID.to_string());
+    // The tree map is in id order, not parent order, so grow to a fixed point
+    // rather than assuming a single pass reaches the leaves.
+    loop {
+        let before = closure.len();
+        for (id, snap) in owner_tree {
+            if closure.contains(snap.block.parent_id.as_str()) {
+                closure.insert(id.clone());
+            }
+        }
+        if closure.len() == before {
+            return closure;
+        }
+    }
+}
+
+/// Ids carried by MORE than one live tree node, optionally restricted to a set.
+fn duplicate_ids(
+    counts: &std::collections::BTreeMap<String, usize>,
+    restrict: Option<&BTreeSet<String>>,
+) -> Vec<String> {
+    counts
+        .iter()
+        .filter(|(id, n)| **n > 1 && restrict.is_none_or(|r| r.contains(*id)))
+        .map(|(id, n)| format!("{id} ×{n}"))
+        .collect()
+}
+
+/// **The layout half of the fixed-id boot collision.**
+///
+/// Both devices seed the bundled `index.org` layout under the SAME fixed ids
+/// (`block:root-layout`, `block:__default__`, the sidebars), so once a round
+/// carries the receiver's state to the owner every one of those ids names TWO
+/// live tree nodes. Every other oracle in this file keys by stable id and so
+/// cannot see it — `live_node_counts` counts nodes.
+///
+/// D68.b rules the layout DEVICE-LOCAL, so the fix is structural: the layout
+/// lives in its own `LoroDoc` that never enters the replication set, and this
+/// assertion is that increment's green criterion. Deterministic in ~10 s; 25
+/// duplicated ids at the time of writing.
+#[test]
+#[ignore = "OPEN: the bundled layout is seeded into the REPLICATED global doc on both devices; \
+            un-ignore as the green criterion for the device-local layout container (D68.b)"]
+fn the_device_local_layout_ids_resolve_to_one_live_node_after_a_round() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    let (owner, receiver, owner_tree) = rt.block_on(pair_and_settle(&ref_state));
+
+    let layout = layout_subtree(&owner_tree);
+    assert!(
+        layout.len() > 1,
+        "the owner's tree holds no `{}` subtree, so this test asserts nothing — the layout seed \
+         did not run",
+        holon_api::DEFAULT_DOC_BLOCK_ID
+    );
+
+    for (side, counts) in [("owner", &owner), ("receiver", &receiver)] {
+        let dups = duplicate_ids(counts, Some(&layout));
+        assert!(
+            dups.is_empty(),
+            "{side}: {} device-local layout id(s) resolve to MORE than one live Loro node after a \
+             round — both devices minted the bundled layout independently and replication carried \
+             both mintings:\n  {}",
+            dups.len(),
+            dups.join("\n  ")
+        );
+    }
+}
+
+/// **The whole fixed-id boot collision, layout and replicated alike.**
+///
+/// The strict statement of the same law over EVERY id: after a whole-vault
+/// round, no block id may name two live tree nodes on either side. It is
+/// strictly stronger than the layout test above, and it stays red on the
+/// families a device-local layout container cannot reach — `block:journals`
+/// and its machinery, and the rule-minted journal day block, all of which are
+/// replicated content that both devices mint independently at boot.
+///
+/// Those families need a boot-ORDER answer, not a container answer: the seed
+/// is already idempotent against a node the tree holds
+/// (`BlockCellRegistry::create_entity` skips the create when
+/// `resolve_to_tree_id` resolves), so a receiver that bootstrapped from the
+/// owner's snapshot BEFORE its first seed would never mint the second node.
+/// Un-ignore once that order is ruled and wired.
+#[test]
+#[ignore = "OPEN: replicated fixed-id roots (block:journals + its machinery, the rule-minted \
+            journal day block) are minted independently on both devices before the first sync"]
+fn every_fixed_boot_id_resolves_to_one_live_node_after_a_round() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    let (owner, receiver, _) = rt.block_on(pair_and_settle(&ref_state));
+
+    for (side, counts) in [("owner", &owner), ("receiver", &receiver)] {
+        let dups = duplicate_ids(counts, None);
+        assert!(
+            dups.is_empty(),
+            "{side}: {} block id(s) resolve to MORE than one live Loro node after a round:\n  {}",
+            dups.len(),
+            dups.join("\n  ")
+        );
+    }
+}

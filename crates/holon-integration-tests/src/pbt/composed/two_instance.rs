@@ -303,6 +303,35 @@ impl TwoInstanceHandle {
             .collect()
     }
 
+    /// How many LIVE Loro tree NODES carry each block id on one side.
+    ///
+    /// Every other reader in this file keys by stable id, so two tree nodes
+    /// minted under one id collapse into a single entry and a merge that left a
+    /// duplicate reads as converged. This one counts nodes, which is the only
+    /// layer at which the fixed-id boot collision is observable at all: both
+    /// devices seed `block:root-layout`, `block:__default__` and the journals
+    /// roots independently, and a round carries both mintings across.
+    ///
+    /// A count above one is the defect. The layout family is fixed by the
+    /// device-local layout container; the replicated families are not.
+    pub async fn live_node_counts(&self, owner: bool) -> BTreeMap<String, usize> {
+        let side = if owner { "owner" } else { "receiver" };
+        let handle = if owner { &self.owner } else { &self.receiver };
+        let doc = Self::registry(handle, side)
+            .store()
+            .get_global_doc()
+            .await
+            .unwrap_or_else(|e| panic!("the {side} instance has no global Loro doc: {e:#}"));
+        let index = doc
+            .with_read(|d| Ok(holon_loro::loro_backend::build_tid_index(d)))
+            .unwrap_or_else(|e| panic!("reading the {side} instance's Loro doc failed: {e:#}"));
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for id in index.into_values() {
+            *counts.entry(id).or_default() += 1;
+        }
+        counts
+    }
+
     fn with_transport_counters(&self, mut witness: SyncRoundWitness) -> SyncRoundWitness {
         let wire = self.transport.wire();
         witness.transport = if witness.rounds_run == 0 {
