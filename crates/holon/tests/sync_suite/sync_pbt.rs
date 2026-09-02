@@ -1936,6 +1936,22 @@ mod tests {
             import(a, &to_a, "receiver->owner", b);
         }
 
+        /// `sync_pair_like_iroh` at the doc-boundary layer: both sides import,
+        /// so both need the write guard. The two docs are distinct `Arc`s and
+        /// therefore distinct locks, so the nesting cannot self-deadlock.
+        fn pair_like_iroh(
+            a: &holon_loro::loro_document::LoroDocument,
+            b: &holon_loro::loro_document::LoroDocument,
+        ) {
+            a.with_write_origin("pair_probe", |doc_a| {
+                b.with_write_origin("pair_probe", |doc_b| {
+                    sync_pair_like_iroh(doc_a, doc_b);
+                    Ok(())
+                })
+            })
+            .unwrap();
+        }
+
         /// Run the Inc 0b experiment. `shallow` decides whether the owner
         /// restarts over a compacted snapshot first; `iroh_like` picks the
         /// PRODUCTION exchange (snapshot fallback) over the relay leg.
@@ -2016,7 +2032,7 @@ mod tests {
             };
 
             let a_doc = a.be.test_global_doc().await;
-            let a_is_shallow = a_doc.doc().is_shallow();
+            let a_is_shallow = a_doc.with_read(|d| Ok(d.is_shallow())).unwrap();
             let expected_shallow = compact_owner && !compaction_disabled;
             assert_eq!(
                 a_is_shallow, expected_shallow,
@@ -2053,13 +2069,11 @@ mod tests {
 
             let da = a.be.test_global_doc().await;
             let db = b.be.test_global_doc().await;
-            let doc_a = da.doc();
-            let doc_b = db.doc();
 
             // Pair: one round each way so the receiver holds the owner's tree
             // and every later op merges against a SHARED ancestor.
             if iroh_like {
-                sync_pair_like_iroh(&doc_a, &doc_b);
+                pair_like_iroh(&da, &db);
             } else {
                 replicate_round(
                     &reg_a,
@@ -2085,32 +2099,42 @@ mod tests {
                 .await;
             }
             assert!(
-                find(&doc_b, "c1").is_some(),
+                db.with_read(|d| Ok(find(d, "c1").is_some())).unwrap(),
                 "the receiver never got the owner's tree, so every concurrent op below would \
                  merge against nothing"
             );
 
             // Concurrent, unsynced, on BOTH peers: structure on one side and
-            // text on the other is the exact D70 shape, plus a tree MOVE.
-            raw_create_under(&doc_a, "p1", "a-new");
-            if receiver_edits_pretrim_text {
-                // Typing into content that existed BEFORE the owner compacted
-                // — the ordinary own-device gesture (edit an existing note on
-                // the phone).
-                raw_append_text(&doc_b, "c1", " [B typed]");
-            }
-            raw_move(&doc_a, "c2", "c1");
+            // text on the other is the exact D70 shape, plus a tree MOVE. The
+            // two sides do not sync in between, so grouping each peer's ops
+            // into one batch leaves the concurrency the case is about intact.
+            da.with_write_origin("pair_probe", |doc_a| {
+                raw_create_under(doc_a, "p1", "a-new");
+                raw_move(doc_a, "c2", "c1");
+                Ok(())
+            })
+            .unwrap();
             let b_create_parent = if receiver_has_own_history {
                 "root-b"
             } else {
                 "p1"
             };
-            raw_create_under(&doc_b, b_create_parent, "b-new");
+            db.with_write_origin("pair_probe", |doc_b| {
+                if receiver_edits_pretrim_text {
+                    // Typing into content that existed BEFORE the owner
+                    // compacted — the ordinary own-device gesture (edit an
+                    // existing note on the phone).
+                    raw_append_text(doc_b, "c1", " [B typed]");
+                }
+                raw_create_under(doc_b, b_create_parent, "b-new");
+                Ok(())
+            })
+            .unwrap();
 
             // Sync to a fixed point.
             for _ in 0..4 {
                 if iroh_like {
-                    sync_pair_like_iroh(&doc_a, &doc_b);
+                    pair_like_iroh(&da, &db);
                     continue;
                 }
                 let (pa, ia, ra) = replicate_round(
@@ -2144,10 +2168,10 @@ mod tests {
                 }
             }
 
-            let shape_a = tree_shape(&doc_a);
-            let shape_b = tree_shape(&doc_b);
-            drop(doc_a);
-            drop(doc_b);
+            let shape_a = da.with_read(|d| Ok(tree_shape(d))).unwrap();
+            let shape_b = db.with_read(|d| Ok(tree_shape(d))).unwrap();
+            drop(da);
+            drop(db);
             a.advertiser_for_test().close_all().await;
             b.advertiser_for_test().close_all().await;
             (shape_a, shape_b, a_is_shallow)
@@ -2382,38 +2406,44 @@ mod tests {
             let a = backend_at(dir_a.path(), bus_a.clone()).await;
 
             let da = a.be.test_global_doc().await;
-            let doc_a = da.doc();
-            assert!(
-                doc_a.is_shallow(),
-                "the owner must be shallow for this probe"
-            );
 
-            // The receiver's document is CREATED by the pairing payload.
-            let doc_b = LoroDoc::new();
-            doc_b.set_peer_id(2).unwrap();
-            let bootstrap = export_like_iroh(&doc_a, &doc_b.oplog_vv());
-            doc_b.import(&bootstrap).unwrap();
-            let b_is_shallow = doc_b.is_shallow();
-            let b_since = format!("{:?}", doc_b.shallow_since_vv().to_vv());
+            // The owner imports on every round, so the whole probe runs under
+            // its write guard. The receiver is a bare `LoroDoc` this function
+            // owns outright — no doc boundary to cross.
+            let (shape_a, shape_b, b_is_shallow, b_since) = da
+                .with_write_origin("empty_receiver_bootstrap", |doc_a| {
+                    assert!(
+                        doc_a.is_shallow(),
+                        "the owner must be shallow for this probe"
+                    );
 
-            assert!(
-                find(&doc_b, "c1").is_some(),
-                "the bootstrap payload did not carry the owner's tree"
-            );
+                    // The receiver's document is CREATED by the pairing payload.
+                    let doc_b = LoroDoc::new();
+                    doc_b.set_peer_id(2).unwrap();
+                    let bootstrap = export_like_iroh(doc_a, &doc_b.oplog_vv());
+                    doc_b.import(&bootstrap).unwrap();
+                    let b_is_shallow = doc_b.is_shallow();
+                    let b_since = format!("{:?}", doc_b.shallow_since_vv().to_vv());
 
-            // The same concurrent structure + text as every other variant.
-            raw_create_under(&doc_a, "p1", "a-new");
-            raw_append_text(&doc_b, "c1", " [B typed]");
-            raw_move(&doc_a, "c2", "c1");
-            raw_create_under(&doc_b, "p1", "b-new");
+                    assert!(
+                        find(&doc_b, "c1").is_some(),
+                        "the bootstrap payload did not carry the owner's tree"
+                    );
 
-            for _ in 0..4 {
-                sync_pair_like_iroh(&doc_a, &doc_b);
-            }
+                    // The same concurrent structure + text as every other variant.
+                    raw_create_under(doc_a, "p1", "a-new");
+                    raw_append_text(&doc_b, "c1", " [B typed]");
+                    raw_move(doc_a, "c2", "c1");
+                    raw_create_under(&doc_b, "p1", "b-new");
 
-            let shape_a = tree_shape(&doc_a);
-            let shape_b = tree_shape(&doc_b);
-            drop(doc_a);
+                    for _ in 0..4 {
+                        sync_pair_like_iroh(doc_a, &doc_b);
+                    }
+
+                    Ok((tree_shape(doc_a), tree_shape(&doc_b), b_is_shallow, b_since))
+                })
+                .unwrap();
+            drop(da);
             a.advertiser_for_test().close_all().await;
             (shape_a, shape_b, b_is_shallow, b_since)
         }

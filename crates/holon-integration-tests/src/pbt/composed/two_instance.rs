@@ -200,7 +200,8 @@ impl TwoInstanceHandle {
             .await
             .unwrap_or_else(|e| panic!("the {side} instance has no global Loro doc: {e:#}"));
         let skip: BTreeSet<&str> = exclude.iter().map(EntityUri::as_str).collect();
-        holon_loro::loro_backend::snapshot_blocks_from_doc(&doc.doc())
+        doc.with_read(|d| Ok(holon_loro::loro_backend::snapshot_blocks_from_doc(d)))
+            .unwrap_or_else(|e| panic!("reading the {side} instance's Loro doc failed: {e:#}"))
             .into_iter()
             .filter(|(id, _)| !skip.contains(id.as_str()))
             .collect()
