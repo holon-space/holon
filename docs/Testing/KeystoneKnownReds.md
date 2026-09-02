@@ -301,7 +301,30 @@ format string whenever you touch a quoted message.
 ## `holon` integration-test binaries known reds
 
 The `holon` crate's own `--test` binaries (`sync_suite`, `api_pbt`) run under
-`cargo nextest run -p holon --features test-helpers`.
+`cargo nextest run --no-fail-fast -p holon -p holon-app`. `-p holon` ALONE does
+not compile its tests: its `test-helpers` feature is unified only when
+`holon-app` is in the same invocation, so always run both packages together.
+
+**This command is a PER-LAND gate** (D64.a, 2026-09-02), run in parallel with
+the existing landing battery — `just landing-gate` alongside
+`cargo nextest run -p holon-app` (D43.a). Its failures are CLASSIFIED, never
+judged by exit code: the five registered `e2e_backend_engine_test` matview reds
+are pass-with-note, and today's sanctioned load-sensitive flakes are
+`subtree_share_round_trip_pbt` (OPEN bug-funnel entry, tmp-leftover race),
+`concurrent_keystrokes_keep_every_undo_step` (OPEN ORACLE entry), and
+`test_multi_peer_sync_iroh` (measured 2026-09-02: 5/5 PASS isolated at
+111–179s; its single red coincided with a load average above 200 and was a QUIC
+transport timeout). Anything else blocks the land. The full signature list is
+`docs/Testing/HolonCrateReds-2026-09-01.md`.
+chain.
+
+The vault-scale latency guard runs in the nextest test-group
+`vault-scale-latency` with `max-threads = 1`, because it is load-sensitive:
+853ms isolated against a 5s budget, 7.5s contended.
+
+**A/B baseline for a lane**: run the identical command on a main-base tree and
+on the lane tip, then compare the two failure-name sets with `comm -23`. Only a
+name that appears on the lane tip alone is the lane's own regression.
 
 **Adding a row here ARMS the nightly classifier.**
 `scripts/keystone-known-reds.sh:50-55` parses this file with a section-blind

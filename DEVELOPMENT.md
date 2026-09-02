@@ -507,8 +507,29 @@ into hooks with `scripts/install-git-hooks.sh` (bypass a run with `--no-verify`)
 | 1 | `just precommit` | every commit | justfile pipefail guard · defensive-code ratchet · `just gate-compile` · `check-frontend-wasm` · out-of-workspace worker |
 | 2 | `just prepush` | every push | `just gate-arch` · `just check-frontend-wasm` · the full keystone (`PROPTEST_CASES=16`, incl. persisted regression seeds) |
 | L | `just landing-gate` | before reporting a lane done, and before weaving | fmt · `gate-compile` · `check-frontend-wasm` · `gate-arch` · `keystone-smoke` · `loro-suite` · `hand-authored` |
+| L | `cargo nextest run --no-fail-fast -p holon -p holon-app` | per land, in parallel with `landing-gate` (D43.a form) | the `holon` and `holon-app` integration suites, classified against the known reds (D64.a) |
 
 Notes:
+
+- **The per-land nextest leg runs both crates in ONE invocation** (D64.a,
+  2026-09-02). `-p holon` alone does not compile its tests: its `test-helpers`
+  feature is unified only when `holon-app` is in the same invocation. Always
+  run the two together.
+- **Classify its failures against the known-red list; never judge it by exit
+  code.** The five registered `e2e_backend_engine_test` matview reds are
+  pass-with-note. Sanctioned load-sensitive flakes today:
+  `subtree_share_round_trip_pbt` (OPEN BugFunnel entry, tmp-leftover race),
+  `concurrent_keystrokes_keep_every_undo_step` (OPEN ORACLE entry), and
+  `test_multi_peer_sync_iroh` (measured 2026-09-02 at 5/5 PASS isolated,
+  111–179s; its single red coincided with a load average above 200 and was a
+  QUIC transport timeout). Any other failure blocks the land. The signatures
+  live in `docs/Testing/HolonCrateReds-2026-09-01.md`.
+- **The vault-scale latency guard runs in the nextest test-group
+  `vault-scale-latency`** (`max-threads = 1`) because it is load-sensitive:
+  853ms isolated against a 5s budget, 7.5s contended.
+- **A/B baseline**: run the identical command on a main-base tree and on the
+  lane tip, then compare the two failure-name sets with `comm -23`. A name that
+  appears only on the lane tip is the lane's regression.
 
 - **Why `gate-compile` and not `cargo check --workspace`**: the bare form builds
   only lib and bin targets, so a test binary that no longer compiles is
