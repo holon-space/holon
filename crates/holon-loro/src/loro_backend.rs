@@ -4842,6 +4842,23 @@ mod h3_property_convergence_tests {
 
     use super::*;
 
+    /// serde_json's default float parser is a fast approximation that lands up
+    /// to 1 ULP from the float that was written; the workspace turns on
+    /// `float_roundtrip` so a stored number is not silently changed on the way
+    /// back out.
+    #[test]
+    fn a_stored_float_property_comes_back_to_the_last_bit() {
+        let drifter = -57093562.380749084_f64;
+        let encoded = encode_property_value("quantity", &Value::Float(drifter)).unwrap();
+        let json = encoded
+            .as_string()
+            .expect("a property is stored as a JSON string");
+        let Value::Float(back) = decode_property_json("quantity", json.as_str()) else {
+            panic!("quantity must decode as a float: {json:?}");
+        };
+        assert_eq!(back.to_bits(), drifter.to_bits(), "got {back:?}");
+    }
+
     /// Bidirectional delta exchange — the deterministic equivalent of two peers
     /// reaching the same merged state.
     fn sync_pair(a: &LoroDoc, b: &LoroDoc) {

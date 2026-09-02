@@ -49,6 +49,7 @@ pub struct FileFormatParseResult {
 /// row carries no file-provenance column of its own — the adapter names a
 /// column the type already declares and fills it from the file's identity
 /// (`recipe.source_path`, `ingredient_use.recipe_id`).
+#[derive(Debug, Clone, PartialEq)]
 pub struct TypedRowSet {
     /// A type the registry declares, e.g. `recipe`.
     pub type_name: String,

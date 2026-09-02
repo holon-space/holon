@@ -5591,6 +5591,7 @@ dependencies = [
  "holon-api",
  "holon-core",
  "holon-profiles",
+ "holon-rows",
  "proptest 1.11.0",
  "serde_json",
  "serde_yaml",
@@ -6001,6 +6002,20 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
+name = "holon-rows"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "holon-api",
+ "holon-core",
+ "proptest 1.11.0",
+ "serde",
+ "serde_json",
  "workspace-hack 0.1.0",
 ]
 

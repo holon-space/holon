@@ -18,6 +18,7 @@ members = [
   "crates/holon-orgmode",
   "crates/holon-markdown",
   "crates/holon-kitchen",
+  "crates/holon-rows",
   "crates/holon-filesystem",
   "crates/holon-frontend",
   "crates/holon-app",
@@ -65,7 +66,11 @@ resolver = "2"
 [workspace.dependencies]
 # === Serialization ===
 serde = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
+# `float_roundtrip`: serde_json's default float parser is a fast approximation
+# that lands up to 1 ULP from the float that was written, so a number read back
+# through JSON would be silently changed. Parse-side only, and every leg that
+# reads JSON wants it.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_yaml = "0.9"
 toml = "0.8"
 
@@ -262,6 +267,7 @@ holon-macros = { path = "crates/holon-macros" }
 holon-mcp-client = { path = "crates/holon-mcp-client" }
 holon-org-format = { path = "crates/holon-org-format" }
 holon-kitchen = { path = "crates/holon-kitchen" }
+holon-rows = { path = "crates/holon-rows" }
 holon-orgmode = { path = "crates/holon-orgmode", features = ["di"] }
 holon-markdown = { path = "crates/holon-markdown" }
 holon-filesystem = { path = "crates/holon-filesystem" }

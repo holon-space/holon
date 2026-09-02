@@ -24,6 +24,9 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
+# Inc 1 differential only: the adapter's rows go over the neutral contract in
+# tests, so nothing in the kitchen's own build depends on it.
+holon-rows.workspace = true
 # The sync round is async over the `ShoppingPeer` trait; the tests drive it with
 # a mock peer, so no HTTP stack is needed here.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
