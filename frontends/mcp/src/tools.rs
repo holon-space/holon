@@ -14,6 +14,7 @@ use holon_api::POSITION_AFTER_BLOCK_ID_PARAM;
 use holon_api::QueryLanguage;
 use holon_api::Value;
 use holon_core::storage::types::StorageEntity;
+use holon_loro::DocScope;
 use holon_loro::LoroBackend;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -2281,7 +2282,7 @@ impl HolonMcpServer {
             if let (Some(sync), Some(store)) = (&loro_sync, &loro_store) {
                 let collab = {
                     let guard = store.read().await;
-                    guard.get_global_doc().await.map_err(|e| {
+                    guard.get_doc(DocScope::Global).await.map_err(|e| {
                         rmcp::ErrorData::internal_error(
                             format!("await_quiescence: live Loro global doc unreachable: {e}"),
                             None,
@@ -4427,7 +4428,7 @@ impl HolonMcpServer {
             Some(store) => {
                 let doc = {
                     let guard = store.read().await;
-                    guard.get_global_doc().await.map_err(|e| {
+                    guard.get_doc(DocScope::Global).await.map_err(|e| {
                         rmcp::ErrorData::internal_error(
                             format!("live Loro global doc unreachable: {e}"),
                             None,

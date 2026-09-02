@@ -37,6 +37,7 @@ use holon::api::BackendEngine;
 use holon_api::EntityUri;
 use holon_api::repository::CoreOperations;
 use holon_api::repository::NewBlock;
+use holon_loro::DocScope;
 use holon_loro::LoroBackend;
 use holon_loro::LoroDocumentStore;
 use holon_loro_testing::LoroBackendComponent;
@@ -646,7 +647,7 @@ async fn compose_sut_seeded_impl(
         // Build a `LoroDocumentStore` and hand the read component a backend over its
         // global doc, so the read caps AND the peer-mesh `LoroSut` observe ONE shared
         // doc (a merged peer block must show up in the store invariants read). The
-        // loro-only fast config never persists (no `save_all`), so `get_global_doc`
+        // loro-only fast config never persists (no `save_all`), so `get_doc(Global)`
         // caches the doc in memory and the tempdir is needed only to construct the
         // store — it can drop immediately.
         // Read-doc unification (task #4): when the frontend booted with Loro on, build
@@ -665,10 +666,19 @@ async fn compose_sut_seeded_impl(
         let global_doc = doc_store
             .read()
             .await
-            .get_global_doc()
+            .get_doc(DocScope::Global)
             .await
             .expect("init loro global doc");
-        let backend = Arc::new(LoroBackend::from_document(global_doc));
+        let layout_doc = doc_store
+            .read()
+            .await
+            .get_doc(DocScope::Layout)
+            .await
+            .expect("init loro layout doc");
+        // The slice's Loro cap reads the DEVICE's whole store, not the
+        // replicated half: layout blocks are as real to a block invariant as
+        // any other, and a cap blind to them would report them missing.
+        let backend = Arc::new(LoroBackend::from_document(global_doc).with_layout_doc(layout_doc));
         loro_backend = Some(backend.clone());
 
         let mut loro_caps = CapMap::new();

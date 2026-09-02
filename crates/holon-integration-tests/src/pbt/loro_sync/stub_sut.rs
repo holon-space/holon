@@ -18,6 +18,7 @@ use holon_core::OperationResult;
 use holon_core::OriginTaggedWrites;
 use holon_core::Result as DatasourceResult;
 use holon_core::storage::types::StorageEntity;
+use holon_loro::DocScope;
 use holon_loro::LoroDocumentStore;
 use holon_loro::LoroSyncController;
 use holon_loro::LoroSyncControllerHandle;
@@ -68,7 +69,7 @@ impl StubSut {
         // into.
         {
             let store = doc_store.read().await;
-            let _ = store.get_global_doc().await?;
+            let _ = store.get_doc(DocScope::Global).await?;
         }
 
         let stub_ops = Arc::new(StubOperationProvider::new());
@@ -135,9 +136,9 @@ impl StubSut {
         let ref_doc = &state.peers[0].doc;
         let store = self.doc_store.read().await;
         let collab = store
-            .get_global_doc()
+            .get_doc(DocScope::Global)
             .await
-            .map_err(|e| anyhow::anyhow!("get_global_doc: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("get_doc(Global): {}", e))?;
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         sync_docs_direct(doc, ref_doc);
@@ -172,7 +173,7 @@ impl LoroSyncSut for StubSut {
                 )));
                 {
                     let store = self.doc_store.read().await;
-                    let _ = store.get_global_doc().await?;
+                    let _ = store.get_doc(DocScope::Global).await?;
                 }
                 self.start_controller().await?;
             }
@@ -185,9 +186,9 @@ impl LoroSyncSut for StubSut {
                 {
                     let store = self.doc_store.read().await;
                     let collab = store
-                        .get_global_doc()
+                        .get_doc(DocScope::Global)
                         .await
-                        .map_err(|e| anyhow::anyhow!("get_global_doc: {}", e))?;
+                        .map_err(|e| anyhow::anyhow!("get_doc(Global): {}", e))?;
                     let doc_arc = collab.doc();
                     let doc = &*doc_arc;
                     sync_docs_direct(doc, &state.peers[*peer_idx].doc);
@@ -205,7 +206,7 @@ impl LoroSyncSut for StubSut {
                 )));
                 {
                     let store = self.doc_store.read().await;
-                    let _ = store.get_global_doc().await?;
+                    let _ = store.get_doc(DocScope::Global).await?;
                 }
                 self.start_controller().await?;
             }
@@ -254,7 +255,7 @@ impl LoroSyncSut for StubSut {
 
     async fn primary_oplog_frontiers(&self) -> Frontiers {
         let store = self.doc_store.read().await;
-        let Ok(collab) = store.get_global_doc().await else {
+        let Ok(collab) = store.get_doc(DocScope::Global).await else {
             return Frontiers::default();
         };
         let doc_arc = collab.doc();
@@ -264,7 +265,7 @@ impl LoroSyncSut for StubSut {
 
     async fn primary_loro_snapshot(&self) -> BTreeMap<String, BlockSnapshot> {
         let store = self.doc_store.read().await;
-        let Ok(collab) = store.get_global_doc().await else {
+        let Ok(collab) = store.get_doc(DocScope::Global).await else {
             return BTreeMap::new();
         };
         let doc_arc = collab.doc();

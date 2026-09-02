@@ -49,6 +49,10 @@ use crate::loro_text_cell_backing::LoroTextCellBacking;
 pub struct BlockCellRegistry {
     cache: CellCache,
     doc: Arc<LoroDoc>,
+    /// The device-local layout doc. Cell resolution probes it alongside the
+    /// global doc: a layout block's `content` container lives there, and a
+    /// registry that only knew the global doc would report it missing.
+    layout_doc: Option<Arc<LoroDoc>>,
     backend: Arc<LoroBackend>,
 }
 
@@ -57,15 +61,18 @@ impl BlockCellRegistry {
     /// registry walks the tree on demand to resolve `(block_id, "content")`
     /// to a `LoroText` container, and dispatches non-content writes through
     /// the wrapped [`LoroBackend`] (Phase 2 authority flip).
-    pub fn with_loro(loro_doc: Arc<LoroDocument>) -> Self {
+    pub fn with_loro(loro_doc: Arc<LoroDocument>, layout: Arc<LoroDocument>) -> Self {
         // ALLOW(loro_doc_escape): the cell backings' retained container handles
         // read single containers of already-born blocks; the scoped-capability
         // ruling keeps them outside the doc-boundary lock.
         let doc = loro_doc.doc();
-        let backend = Arc::new(LoroBackend::from_document(loro_doc));
+        // ALLOW(loro_doc_escape): same scoped-capability ruling, layout doc.
+        let layout_doc = layout.doc();
+        let backend = Arc::new(LoroBackend::from_document(loro_doc).with_layout_doc(layout));
         Self {
             cache: CellCache::new(),
             doc,
+            layout_doc: Some(layout_doc),
             backend,
         }
     }
@@ -81,12 +88,14 @@ impl BlockCellRegistry {
         Self {
             cache: CellCache::new(),
             doc,
+            layout_doc: None,
             backend,
         }
     }
 
-    fn loro_doc(&self) -> Result<Arc<LoroDoc>> {
-        Ok(self.doc.clone())
+    /// The docs cell resolution walks, in probe order.
+    fn docs(&self) -> impl Iterator<Item = &Arc<LoroDoc>> {
+        std::iter::once(&self.doc).chain(self.layout_doc.iter())
     }
 
     /// Walk the Loro tree for the node whose stable id matches `block_id` and
@@ -94,22 +103,23 @@ impl BlockCellRegistry {
     /// container and every scalar property. Errors loudly if the block isn't
     /// in the tree (inbound consumer hasn't applied the create yet, or it was
     /// never imported), never silently falling to SQL.
-    fn resolve_node_meta(&self, block_id: &str) -> Result<loro::LoroMap> {
-        let doc = self.loro_doc()?;
+    fn resolve_node_meta(&self, block_id: &str) -> Result<(Arc<LoroDoc>, loro::LoroMap)> {
         let bare_id = block_id.strip_prefix("block:").unwrap_or(block_id);
-        let tree = doc.get_tree(TREE_NAME);
-        for node in tree.get_nodes(false) {
-            if matches!(
-                node.parent,
-                loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
-            ) {
-                continue;
-            }
-            let meta = tree
-                .get_meta(node.id)
-                .map_err(|e| anyhow!("tree.get_meta({:?}) failed: {e:#}", node.id))?;
-            if crate::settled_read::read_stable_id(&meta).is_some_and(|sid| sid == bare_id) {
-                return Ok(meta);
+        for doc in self.docs() {
+            let tree = doc.get_tree(TREE_NAME);
+            for node in tree.get_nodes(false) {
+                if matches!(
+                    node.parent,
+                    loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+                ) {
+                    continue;
+                }
+                let meta = tree
+                    .get_meta(node.id)
+                    .map_err(|e| anyhow!("tree.get_meta({:?}) failed: {e:#}", node.id))?;
+                if crate::settled_read::read_stable_id(&meta).is_some_and(|sid| sid == bare_id) {
+                    return Ok((doc.clone(), meta));
+                }
             }
         }
         Err(anyhow!(
@@ -119,8 +129,7 @@ impl BlockCellRegistry {
     }
 
     fn resolve_loro_text_container(&self, block_id: &str) -> Result<(Arc<LoroDoc>, LoroText)> {
-        let doc = self.loro_doc()?;
-        let meta = self.resolve_node_meta(block_id)?;
+        let (doc, meta) = self.resolve_node_meta(block_id)?;
         // Source blocks keep their content in the SOURCE_CODE container
         // (`write_content_to_meta`), text blocks in CONTENT_RAW. Binding
         // CONTENT_RAW unconditionally silently forked source-block content:
@@ -177,7 +186,7 @@ async fn resolve_parent_or_placeholder(
 ) -> Result<EntityUri> {
     if parent_id.is_no_parent()
         || parent_id.is_sentinel()
-        || backend.resolve_to_tree_id(parent_id.id()).await.is_some()
+        || backend.is_live_anywhere(parent_id.id()).await
     {
         return Ok(parent_id.clone());
     }
@@ -221,8 +230,8 @@ impl EntityCellRegistry for BlockCellRegistry {
         }
 
         // Every other field is a scalar, resolved on the node meta map.
-        let (doc, backend) = (self.doc.clone(), self.backend.clone());
-        let meta = self.resolve_node_meta(&block_id_owned)?;
+        let backend = self.backend.clone();
+        let (doc, meta) = self.resolve_node_meta(&block_id_owned)?;
         let schemed_id = uri.to_string();
         let make = |m: loro::LoroMap| (doc.clone(), backend.clone(), m, schemed_id.clone());
 
@@ -303,7 +312,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         // *before* the place loop ran — scrambling sibling order
         // (`inv-live-children-match-ref`). Mirrors the resolve-first guard in
         // `create_entity`.
-        if backend.resolve_to_tree_id(uri.id()).await.is_none() {
+        if !backend.is_live_anywhere(uri.id()).await {
             return Ok(false);
         }
         backend
@@ -341,7 +350,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         // `write_position`. ALLOW(fallback): disclosed degraded mode — the
         // new block stays in the same (SQL-only) store as its anchor.
         if let Some(after) = after_id
-            && backend.resolve_to_tree_id(after.id()).await.is_none()
+            && !backend.is_live_anywhere(after.id()).await
         {
             tracing::warn!(
                 "create_entity({new_id}): after-block {after} has no Loro tree node — falling \
@@ -354,7 +363,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         // initial scan calls this for a block a prior scan/seed already
         // placed), skip the create — `create_block` would mint a duplicate
         // node for the same stable id. Still apply the requested position.
-        if backend.resolve_to_tree_id(new_id.id()).await.is_some() {
+        if backend.is_live_anywhere(new_id.id()).await {
             if let Some(after) = after_id {
                 backend
                     .update_block_position(new_id.id(), parent_id.as_str(), Some(after.id()))
@@ -480,7 +489,7 @@ impl EntityCellRegistry for BlockCellRegistry {
     /// the TOCTOU between the resolve_ check and the call is harmless.
     async fn delete_entity(&self, uri: &EntityUri) -> Result<bool> {
         let backend = self.backend.clone();
-        let in_tree = backend.resolve_to_tree_id(uri.id()).await.is_some();
+        let in_tree = backend.is_live_anywhere(uri.id()).await;
         if in_tree {
             backend
                 .delete_block(uri.id())
@@ -495,7 +504,7 @@ impl EntityCellRegistry for BlockCellRegistry {
     /// of creates, in ONE Loro commit — the cold-boot ingest's dominant cost.
     ///
     /// Per-block `create_entity` pays an existence probe
-    /// (`resolve_to_tree_id`) that MISSES for every genuinely-new block and
+    /// (`is_live_anywhere`) that MISSES for every genuinely-new block and
     /// therefore walks all live nodes: O(nodes) per create, i.e. quadratic in
     /// one file's block count. Here the id cache is warmed ONCE per chunk, so
     /// the same existence question is answered from the cache and only the
@@ -585,7 +594,7 @@ impl EntityCellRegistry for BlockCellRegistry {
     /// pre-Loro-vault upgrade signal consumed by `BlockOrdering::in_tree`.
     async fn live_in_tree(&self, id: &str) -> Result<Option<bool>> {
         let backend = self.backend.clone();
-        Ok(Some(backend.resolve_to_tree_id(id).await.is_some()))
+        Ok(Some(backend.is_live_anywhere(id).await))
     }
 
     async fn live_children(&self, parent_id: &str) -> Result<Option<Vec<String>>> {
@@ -604,7 +613,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         let parent_uri = EntityUri::from_raw(parent_id);
         if !parent_uri.is_no_parent()
             && !parent_uri.is_sentinel()
-            && backend.resolve_to_tree_id(parent_id).await.is_none()
+            && !backend.is_live_anywhere(parent_id).await
         {
             tracing::warn!(
                 parent_id,
@@ -653,7 +662,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         let backend = self.backend.clone();
         let mut refreshed = 0usize;
         for (id, content) in blocks {
-            if backend.resolve_to_tree_id(id.id()).await.is_none() {
+            if !backend.is_live_anywhere(id.id()).await {
                 continue;
             }
             let current = backend
@@ -716,7 +725,7 @@ impl EntityCellRegistry for BlockCellRegistry {
                 // the block eventually exists there. ALLOW(fallback):
                 // disclosed degraded mode, same rationale as `create_entity`'s
                 // anchor guard.
-                if backend.resolve_to_tree_id(uri.id()).await.is_none() {
+                if !backend.is_live_anywhere(uri.id()).await {
                     tracing::warn!(
                         "write_field(content) for {uri}: no Loro tree node — writing through the \
                          SQL path (Loro authority missing or unseeded for this block)"

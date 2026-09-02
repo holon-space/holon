@@ -1204,7 +1204,7 @@ fn a_receiver_authored_block_reaches_the_owner_and_the_two_writer_oracle_engages
 /// The two-writer oracle is asserted FIRST here too, so this test can only ever
 /// fail for a reason its sibling above has already cleared.
 #[test]
-#[ignore = "OPEN: reds on the fixed-id boot collision (duplicate block:journals* nodes after a reverse round), which the layout-container increment owns"]
+#[ignore = "OPEN (D78): reds on the journals half of the fixed-id boot collision (duplicate block:journals* nodes after a reverse round); the layout half is closed by the device-local layout doc"]
 fn the_two_writer_chain_is_green_across_the_whole_catalog() {
     let (sut, ref_state) = drive_two_writer_chain();
     assert_two_writer_oracle_engaged(&sut.run_report_now(&ref_state), &ref_state);
@@ -1284,8 +1284,6 @@ fn duplicate_ids(
 /// assertion is that increment's green criterion. Deterministic in ~10 s; 25
 /// duplicated ids at the time of writing.
 #[test]
-#[ignore = "OPEN: the bundled layout is seeded into the REPLICATED global doc on both devices; \
-            un-ignore as the green criterion for the device-local layout container (D68.b)"]
 fn the_device_local_layout_ids_resolve_to_one_live_node_after_a_round() {
     let rt = rt();
     let ref_state = wide_e2e_ref();
@@ -1328,8 +1326,9 @@ fn the_device_local_layout_ids_resolve_to_one_live_node_after_a_round() {
 /// owner's snapshot BEFORE its first seed would never mint the second node.
 /// Un-ignore once that order is ruled and wired.
 #[test]
-#[ignore = "OPEN: replicated fixed-id roots (block:journals + its machinery, the rule-minted \
-            journal day block) are minted independently on both devices before the first sync"]
+#[ignore = "OPEN (D78): the replicated fixed-id roots — block:journals + its machinery and the \
+            rule-minted journal day block — are minted independently on both devices before the \
+            first sync; they need a boot-ORDER answer, not a container answer"]
 fn every_fixed_boot_id_resolves_to_one_live_node_after_a_round() {
     let rt = rt();
     let ref_state = wide_e2e_ref();

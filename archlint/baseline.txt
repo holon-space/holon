@@ -38,7 +38,6 @@ fallback	crates/holon-frontend/src/user_driver.rs	/// This is NOT a fallback —
 fallback	crates/holon-frontend/src/user_driver.rs	/// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable. //
 fallback	crates/holon-frontend/src/user_driver.rs	/// `send_key_chord` uses for its router fallback. If the entity is //
 fallback	crates/holon-loro-wiring/src/loro_module.rs	/// env/random fallback. Injected by `SessionConfig::loro_peer_id` so two
-fallback	crates/holon-loro/src/loro_document_store.rs	/// Peer id to mint the global doc under. `None` = the env/random fallback
 fallback	crates/holon-orgmode/src/file_watcher.rs	/// fallback, see docs/Testing/BugFunnel.md 2026-07-27).
 fallback	frontends/dioxus-web/src/render/builders/mod.rs	// per file. Variants not covered by a file hit the fallback (empty element //
 fallback	frontends/dioxus-web/src/render/builders/mod.rs	/// Fallback arm emitted by `builder_registry!` when a `ViewKind` variant //

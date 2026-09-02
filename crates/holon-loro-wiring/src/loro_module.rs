@@ -22,6 +22,7 @@ use holon::core::SqlOperationProvider;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
 use holon_core::OriginTaggedWrites;
+use holon_loro::DocScope;
 use holon_loro::LoroBlockOperations;
 use holon_loro::LoroBlocksDataSource;
 use holon_loro::LoroDocumentStore;
@@ -143,10 +144,16 @@ impl Module for LoroModule {
             Provider::root_async(|resolver| async move {
                 let doc_store = resolver.resolve::<LoroDocumentStore>();
                 let collab = doc_store
-                    .get_global_doc()
+                    .get_doc(DocScope::Global)
                     .await
-                    .expect("LoroDocumentStore::get_global_doc failed for BlockCellRegistry");
-                Shared::new(holon_loro::block_cell_registry::BlockCellRegistry::with_loro(collab))
+                    .expect("LoroDocumentStore::get_doc(Global) failed for BlockCellRegistry");
+                let layout = doc_store
+                    .get_doc(DocScope::Layout)
+                    .await
+                    .expect("LoroDocumentStore::get_doc(Layout) failed for BlockCellRegistry");
+                Shared::new(
+                    holon_loro::block_cell_registry::BlockCellRegistry::with_loro(collab, layout),
+                )
             }),
         );
 
@@ -246,15 +253,32 @@ impl Module for LoroModule {
             // SQL (`block_raw`) is a pure projection of Loro. There is no
             // SQL→Loro direction (the Turso-seed + runtime mirror are removed).
 
+            // Move a pre-split vault's layout subtree out of the replicated
+            // global doc and into the device-local layout doc. Runs before the
+            // watermark advance so the projection's first pass already sees the
+            // final placement.
+            {
+                let store = doc_store_arc.read().await;
+                let moved = holon_loro::layout_migration::migrate_layout_out_of_global(&store)
+                    .await
+                    .expect("[LoroModule] layout migration");
+                if moved > 0 {
+                    info!(
+                        "[LoroModule] moved {moved} layout block(s) out of the replicated global \
+                         doc into the device-local layout doc"
+                    );
+                }
+            }
+
             // Advance the shared projection watermark to the current frontiers so
             // the controller's first reconcile starts from the loaded doc state.
             {
                 let frontiers = {
                     let store = doc_store_arc.read().await;
                     let collab = store
-                        .get_global_doc()
+                        .get_doc(DocScope::Global)
                         .await
-                        .expect("[LoroModule] get_global_doc for watermark advance");
+                        .expect("[LoroModule] get_doc(Global) for watermark advance");
                     collab
                         .with_read(|doc| Ok(doc.oplog_frontiers()))
                         .expect("[LoroModule] read global doc for watermark advance")
@@ -289,9 +313,9 @@ impl Module for LoroModule {
                 let backend = resolver.resolve::<Arc<LoroShareBackend>>();
                 let store = doc_store_arc.read().await;
                 let collab = store
-                    .get_global_doc()
+                    .get_doc(DocScope::Global)
                     .await
-                    .expect("[LoroModule] get_global_doc for share rehydration");
+                    .expect("[LoroModule] get_doc(Global) for share rehydration");
                 // Lock-exempt for now: `rehydrate_shared_trees` is async, so it
                 // cannot run inside the doc's synchronous read guard. It runs
                 // once at boot before the sync controller starts, with no

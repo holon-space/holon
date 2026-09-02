@@ -41,6 +41,7 @@ use holon_frontend::UserDriver;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::reactive::ReactiveRenderedRows;
+use holon_loro::DocScope;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::SutAdviceMatview;
 use holon_pbt_core::capabilities::SutAppLifecycle;
@@ -4564,21 +4565,21 @@ mod tests {
 
         // The Loro authority store the controller watches must be the cached/shared
         // global doc (so a peer import into it wakes the controller). Two reads of
-        // `get_global_doc()` must return the SAME doc (not a fresh one each call).
+        // `get_doc(Global)()` must return the SAME doc (not a fresh one each call).
         let store = comp
             .loro_doc_store()
             .expect("[A0-probe] loro_doc_store present when Loro on");
         let doc_a = store
-            .get_global_doc()
+            .get_doc(DocScope::Global)
             .await
             .expect("[A0-probe] global doc #1");
         let doc_b = store
-            .get_global_doc()
+            .get_doc(DocScope::Global)
             .await
             .expect("[A0-probe] global doc #2");
         assert!(
             Arc::ptr_eq(&doc_a, &doc_b),
-            "[A0-probe] get_global_doc() must return the cached doc (same Arc), else a peer \
+            "[A0-probe] get_doc(Global)() must return the cached doc (same Arc), else a peer \
              import would not wake the controller"
         );
         eprintln!("[A0-probe] global doc is cached/shared ✓");

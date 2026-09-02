@@ -194,14 +194,21 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     ),
     ("crates/holon-loro-testing/src/quiescence.rs", 1),
     ("crates/holon-loro-testing/src/sut_loro.rs", 3),
-    ("crates/holon-loro/src/block_cell_registry.rs", 1),
+    // +1: the layout doc's retained container handle, same cell-backing rationale
+    // as the global one.
+    ("crates/holon-loro/src/block_cell_registry.rs", 2),
     ("crates/holon-loro/src/container_registry.rs", 2),
     ("crates/holon-loro/src/deleted_container_purge.rs", 2),
     ("crates/holon-loro/src/import_atomicity_probe.rs", 7),
-    ("crates/holon-loro/src/loro_backend.rs", 8),
+    // +2: `layout_writer` and `block_sort_key`'s global arm, both re-wrapping an
+    // existing `Arc<LoroDoc>` via `from_existing` so the wrapper keeps the same
+    // boundary lock.
+    ("crates/holon-loro/src/loro_backend.rs", 10),
     ("crates/holon-loro/src/loro_document.rs", 3),
     ("crates/holon-loro/src/loro_share_backend.rs", 14),
-    ("crates/holon-loro/src/loro_sync_controller.rs", 1),
+    // +1: the layout doc's `subscribe_root` registration, same rationale as the
+    // global doc's.
+    ("crates/holon-loro/src/loro_sync_controller.rs", 2),
     ("crates/holon-sharing/src/sync.rs", 1),
     ("crates/holon-loro-wiring/src/loro_module.rs", 1),
     ("crates/holon/tests/api_pbt/loro_backend_pbt.rs", 4),

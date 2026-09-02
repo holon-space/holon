@@ -17,7 +17,7 @@
 //! handoff (search for `[PHANTOM-LORO-TRACE]`) fires:
 //!
 //!   - `LoroBlockOperations::create` — should NEVER fire in production.
-//!   - `LoroDocumentStore::get_global_doc` snapshot exists check — should
+//!   - `LoroDocumentStore::get_doc(Global)` snapshot exists check — should
 //!     report `exists=false` for a fresh temp dir.
 //!   - `find_tree_id_by_stable_id` matched node — fires for every
 //!     `resolve_to_tree_id` slow-path hit; the matched TreeID's peer and

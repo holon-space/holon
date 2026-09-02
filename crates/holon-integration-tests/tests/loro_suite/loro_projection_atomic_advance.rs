@@ -42,6 +42,7 @@ use holon_core::OriginTaggedWrites;
 use holon_core::Result as DatasourceResult;
 use holon_loro::CONTENT_RAW;
 use holon_loro::CONTENT_TYPE;
+use holon_loro::DocScope;
 use holon_loro::LoroDocumentStore;
 use holon_loro::LoroProjection;
 use holon_loro::PendingChange;
@@ -203,7 +204,7 @@ async fn insert_root_block(
     stable_id: &str,
     content: &str,
 ) -> Result<TreeID> {
-    let collab = doc_store.read().await.get_global_doc().await?;
+    let collab = doc_store.read().await.get_doc(DocScope::Global).await?;
     let doc = collab.doc();
     let tree = doc.get_tree(TREE_NAME);
     let node = tree.create(None)?; // root-level; fi auto-assigned by schema
@@ -224,7 +225,7 @@ async fn failed_sink_write_neither_advances_base_nor_drops_change() -> Result<()
     )));
     // Force global doc init (schema: fractional index enabled) so the tree
     // accepts nodes and the projection has something to read.
-    doc_store.read().await.get_global_doc().await?;
+    doc_store.read().await.get_doc(DocScope::Global).await?;
 
     let sink = Arc::new(ToggleFailSink::new());
     let projection = LoroProjection::new(

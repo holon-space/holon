@@ -48,6 +48,7 @@ use tokio::sync::RwLock;
 
 use crate::LoroDocument;
 use crate::loro_backend::snapshot_blocks_from_doc;
+use crate::loro_document_store::DocScope;
 use crate::loro_document_store::LoroDocumentStore;
 
 /// Stable share id of the root container — the whole vault's global LoroTree
@@ -125,7 +126,7 @@ impl ContainerRegistry {
     /// registered extra container. **No filter parameter** — this is the whole
     /// negative space Inc 3 types away. Iterating this is replicate-all.
     pub async fn replication_set(&self) -> Result<Vec<RegisteredContainer>> {
-        let root = self.store.get_global_doc().await?;
+        let root = self.store.get_doc(DocScope::Global).await?;
         let mut set = vec![RegisteredContainer {
             id: ROOT_CONTAINER_ID.to_string(),
             doc: root,
@@ -153,7 +154,7 @@ impl ContainerRegistry {
     /// returned [`SubtreeIndex`] answers containment synchronously, which is
     /// what a policy-commit-time `SubtreeContainment` impl requires.
     pub async fn subtree_index(&self) -> Result<SubtreeIndex> {
-        let doc = self.store.get_global_doc().await?;
+        let doc = self.store.get_doc(DocScope::Global).await?;
         let blocks = doc.with_read(|d| Ok(snapshot_blocks_from_doc(d)))?;
         // child_uri -> parent_uri, both in EntityUri string form for a
         // scheme-consistent walk.
@@ -325,7 +326,7 @@ mod tests {
     async fn subtree_contains_walks_the_real_tree() -> Result<()> {
         // Build root -> child -> grandchild in the store's global doc.
         let store = tmp_store();
-        let doc = store.get_global_doc().await?;
+        let doc = store.get_doc(DocScope::Global).await?;
         let raw: Arc<LoroDoc> = doc.doc();
         let (root_uri, child_uri, gc_uri, sibling_uri);
         {

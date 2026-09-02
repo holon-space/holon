@@ -45,6 +45,7 @@ use std::time::Duration;
 
 use holon_api::EntityUri;
 use holon_api::TestClock;
+use holon_loro::DocScope;
 use holon_loro::sync_transport::StablePeerId;
 use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::capabilities::SutBackend;
@@ -185,7 +186,7 @@ impl TwoInstanceHandle {
         let handle = if owner { &self.owner } else { &self.receiver };
         let doc = Self::registry(handle, side)
             .store()
-            .get_global_doc()
+            .get_doc(DocScope::Global)
             .await
             .unwrap_or_else(|e| panic!("the {side} instance has no global Loro doc: {e:#}"));
         holon_loro::loro_backend::snapshot_blocks_from_doc(&doc.doc())
@@ -212,17 +213,27 @@ impl TwoInstanceHandle {
     ) -> BTreeMap<String, holon_loro::loro_backend::SnapshotBlock> {
         let side = if owner { "owner" } else { "receiver" };
         let handle = if owner { &self.owner } else { &self.receiver };
-        let doc = Self::registry(handle, side)
-            .store()
-            .get_global_doc()
-            .await
-            .unwrap_or_else(|e| panic!("the {side} instance has no global Loro doc: {e:#}"));
+        let registry = Self::registry(handle, side);
+        let store = registry.store();
         let skip: BTreeSet<&str> = exclude.iter().map(EntityUri::as_str).collect();
-        doc.with_read(|d| Ok(holon_loro::loro_backend::snapshot_blocks_from_doc(d)))
-            .unwrap_or_else(|e| panic!("reading the {side} instance's Loro doc failed: {e:#}"))
-            .into_iter()
-            .filter(|(id, _)| !skip.contains(id.as_str()))
-            .collect()
+        let mut state = BTreeMap::new();
+        // Both docs — the device's whole block set, not just the replicated
+        // half (see `live_node_counts`).
+        for scope in [DocScope::Global, DocScope::Layout] {
+            let doc = store
+                .get_doc(scope)
+                .await
+                .unwrap_or_else(|e| panic!("the {side} instance has no {scope:?} Loro doc: {e:#}"));
+            state.extend(
+                doc.with_read(|d| Ok(holon_loro::loro_backend::snapshot_blocks_from_doc(d)))
+                    .unwrap_or_else(|e| {
+                        panic!("reading the {side} instance's {scope:?} Loro doc failed: {e:#}")
+                    })
+                    .into_iter()
+                    .filter(|(id, _)| !skip.contains(id.as_str())),
+            );
+        }
+        state
     }
 
     /// Which peers authored each stable id in one side's LIVE Loro tree.
@@ -240,7 +251,7 @@ impl TwoInstanceHandle {
         let handle = if owner { &self.owner } else { &self.receiver };
         let doc = Self::registry(handle, side)
             .store()
-            .get_global_doc()
+            .get_doc(DocScope::Global)
             .await
             .unwrap_or_else(|e| panic!("the {side} instance has no global Loro doc: {e:#}"));
         doc.with_read(|d| {
@@ -317,17 +328,26 @@ impl TwoInstanceHandle {
     pub async fn live_node_counts(&self, owner: bool) -> BTreeMap<String, usize> {
         let side = if owner { "owner" } else { "receiver" };
         let handle = if owner { &self.owner } else { &self.receiver };
-        let doc = Self::registry(handle, side)
-            .store()
-            .get_global_doc()
-            .await
-            .unwrap_or_else(|e| panic!("the {side} instance has no global Loro doc: {e:#}"));
-        let index = doc
-            .with_read(|d| Ok(holon_loro::loro_backend::build_tid_index(d)))
-            .unwrap_or_else(|e| panic!("reading the {side} instance's Loro doc failed: {e:#}"));
+        let registry = Self::registry(handle, side);
+        let store = registry.store();
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-        for id in index.into_values() {
-            *counts.entry(id).or_default() += 1;
+        // BOTH docs: the law is about this DEVICE's live nodes, and the layout
+        // doc holds device-local blocks that are just as real as the global
+        // tree's. Counting only the global doc would let a duplicate hide by
+        // living in the other one.
+        for scope in [DocScope::Global, DocScope::Layout] {
+            let doc = store
+                .get_doc(scope)
+                .await
+                .unwrap_or_else(|e| panic!("the {side} instance has no {scope:?} Loro doc: {e:#}"));
+            let index = doc
+                .with_read(|d| Ok(holon_loro::loro_backend::build_tid_index(d)))
+                .unwrap_or_else(|e| {
+                    panic!("reading the {side} instance's {scope:?} Loro doc failed: {e:#}")
+                });
+            for id in index.into_values() {
+                *counts.entry(id).or_default() += 1;
+            }
         }
         counts
     }
@@ -376,7 +396,7 @@ impl SutTwoInstance for TwoInstanceHandle {
         async fn live(handle: &WideHandle, side: &str) -> u64 {
             TwoInstanceHandle::registry(handle, side)
                 .store()
-                .get_global_doc()
+                .get_doc(DocScope::Global)
                 .await
                 .unwrap_or_else(|e| panic!("the {side} instance has no global Loro doc: {e:#}"))
                 .peer_id()
@@ -571,8 +591,8 @@ impl SutReceiverBackend for TwoInstanceHandle {
     async fn crdt_converged(&self) -> Option<bool> {
         let owner = self.owner.frontend()?.loro_doc_store()?;
         let receiver = self.receiver.frontend()?.loro_doc_store()?;
-        let a = owner.get_global_doc().await.ok()?.doc();
-        let b = receiver.get_global_doc().await.ok()?.doc();
+        let a = owner.get_doc(DocScope::Global).await.ok()?.doc();
+        let b = receiver.get_doc(DocScope::Global).await.ok()?.doc();
         // Pairwise fixed point over THROWAWAY forks: import each side's delta
         // into a fork of the other and compare. Forks, so the live documents the
         // rest of the case reads stay untouched.

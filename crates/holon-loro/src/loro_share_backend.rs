@@ -50,6 +50,7 @@ use crate::iroh_sync_adapter::SharedTreeSyncManager;
 use crate::iroh_sync_adapter::create_endpoint;
 use crate::iroh_sync_adapter::make_alpn;
 use crate::iroh_sync_adapter::sync_doc_initiate;
+use crate::loro_document_store::DocScope;
 use crate::loro_document_store::LoroDocumentStore;
 use crate::loro_sync_controller::project_shared_doc_to_ops;
 use crate::share_peer_id::stable_peer_id;
@@ -969,9 +970,9 @@ impl LoroShareBackend {
     async fn global_doc(&self) -> Result<Arc<crate::loro_document::LoroDocument>> {
         let store = self.store.read().await;
         store
-            .get_global_doc()
+            .get_doc(DocScope::Global)
             .await
-            .map_err(|e| err(format!("get_global_doc failed: {e:#}")))
+            .map_err(|e| err(format!("get_doc(Global) failed: {e:#}")))
     }
 
     async fn remember_peer(&self, shared_tree_id: &str, addr: EndpointAddr) {
@@ -2771,7 +2772,7 @@ mod tests {
             .unwrap_err();
         let msg = format!("{err}");
         assert!(
-            msg.contains("not found") || msg.contains("get_global_doc"),
+            msg.contains("not found") || msg.contains("get_doc(Global)"),
             "expected a lookup error, got: {msg}"
         );
     }

@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use holon_loro::DocScope;
 use holon_loro::LoroDocumentStore;
 use holon_loro::LoroSyncControllerHandle;
 use tokio::sync::RwLock;
@@ -38,9 +39,9 @@ pub async fn wait_for_loro_quiescence_on(
         let current = {
             let store = doc_store.read().await;
             store
-                .get_global_doc()
+                .get_doc(DocScope::Global)
                 .await
-                .expect("wait_for_loro_quiescence: get_global_doc failed")
+                .expect("wait_for_loro_quiescence: get_doc(Global) failed")
                 .doc()
                 .oplog_frontiers()
         };

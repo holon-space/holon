@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use holon::api::BackendEngine;
 use holon_frontend::reactive::ReactiveEngine;
+use holon_loro::DocScope;
 use holon_loro::LoroDocumentStore;
 use holon_loro::LoroSyncControllerHandle;
 use holon_orgmode::OrgSyncIdleSignal;
@@ -76,9 +77,9 @@ pub(crate) async fn converge_signals(
         // sync/store = a Loro-off draw = nothing to wait for.)
         if let (Some(sync), Some(store)) = (&sync, &store) {
             let current = store
-                .get_global_doc()
+                .get_doc(DocScope::Global)
                 .await
-                .expect("converge_signals: get_global_doc failed")
+                .expect("converge_signals: get_doc(Global) failed")
                 .doc()
                 .oplog_frontiers();
             if sync.last_synced_frontiers() != current {

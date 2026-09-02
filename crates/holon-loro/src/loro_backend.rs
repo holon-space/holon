@@ -1904,17 +1904,60 @@ fn collect_shared_tree_blocks(
     }
 }
 
+/// Project the live members of `tree_ids` out of `tree`. Tombstoned ids are
+/// skipped: a caller naming a deleted block asked for what is no longer there.
+fn read_live_nodes(tree: &loro::LoroTree, tree_ids: &[loro::TreeID]) -> Vec<Block> {
+    tree_ids
+        .iter()
+        .filter(|tid| is_node_alive(tree, **tid))
+        .map(|tid| read_block_from_tree(tree, *tid, get_node_parent(tree, *tid)))
+        .collect()
+}
+
+/// One sibling level of a tree: the settled children's block uris. A half-born
+/// child is withheld rather than erred; unreadable meta on a live child is
+/// corruption and fails loud.
+fn children_of_node(
+    tree: &loro::LoroTree,
+    parent: loro::TreeID,
+    parent_id: &str,
+) -> Result<Vec<String>, ApiError> {
+    let mut result = Vec::new();
+    for tid in tree.children(parent).unwrap_or_default() {
+        match classify(tree, tid) {
+            LiveNode::Settled(sid) => result.push(EntityUri::block(&sid).to_string()),
+            LiveNode::HalfBorn => warn_half_born("list_children", tid, parent_id),
+            LiveNode::MetaUnreadable => {
+                return Err(ApiError::InternalError {
+                    message: format!("child {tid:?} of {parent_id} has no readable meta"),
+                });
+            }
+        }
+    }
+    Ok(result)
+}
+
 // ============================================================
 // LoroBackend
 // ============================================================
 
-/// Where a resolved write must land. A block that was pruned into a shared
-/// subtree doc no longer lives in the global tree, so writing to it through
-/// the global doc silently no-ops (or fails `BlockNotFound`).
-/// `resolve_write_target` routes each write to the doc that actually holds the
-/// live node.
+/// Doc identity, for comparing two resolved targets. Two writes land in the
+/// same doc iff their keys are equal.
+#[derive(PartialEq, Eq, Debug)]
+enum DocKey<'a> {
+    Global,
+    Layout,
+    Shared(&'a str),
+}
+
+/// Where a resolved write must land. A block's live node lives in exactly one
+/// doc: the global tree, the device-local layout tree, or — once pruned at
+/// share time — a shared subtree doc. Writing through the wrong doc silently
+/// no-ops (or fails `BlockNotFound`), so `resolve_write_target` routes each
+/// write to the doc that actually holds the node.
 enum WriteTarget {
     Global(loro::TreeID),
+    Layout(loro::TreeID),
     Shared {
         shared_tree_id: String,
         doc: Arc<loro::LoroDoc>,
@@ -1923,13 +1966,11 @@ enum WriteTarget {
 }
 
 impl WriteTarget {
-    /// Doc-identity key: `None` = the global doc, `Some(shared_tree_id)` = a
-    /// shared subtree doc. Two writes land in the same doc iff their keys
-    /// match.
-    fn doc_key(&self) -> Option<&str> {
+    fn doc_key(&self) -> DocKey<'_> {
         match self {
-            WriteTarget::Global(_) => None,
-            WriteTarget::Shared { shared_tree_id, .. } => Some(shared_tree_id),
+            WriteTarget::Global(_) => DocKey::Global,
+            WriteTarget::Layout(_) => DocKey::Layout,
+            WriteTarget::Shared { shared_tree_id, .. } => DocKey::Shared(shared_tree_id),
         }
     }
 }
@@ -1940,6 +1981,7 @@ impl WriteTarget {
 /// inside the target doc's tree at write time (via `resolve_parent_tree_id`).
 enum ParentWriteTarget {
     Global,
+    Layout,
     Shared {
         shared_tree_id: String,
         doc: Arc<loro::LoroDoc>,
@@ -1947,10 +1989,11 @@ enum ParentWriteTarget {
 }
 
 impl ParentWriteTarget {
-    fn doc_key(&self) -> Option<&str> {
+    fn doc_key(&self) -> DocKey<'_> {
         match self {
-            ParentWriteTarget::Global => None,
-            ParentWriteTarget::Shared { shared_tree_id, .. } => Some(shared_tree_id),
+            ParentWriteTarget::Global => DocKey::Global,
+            ParentWriteTarget::Layout => DocKey::Layout,
+            ParentWriteTarget::Shared { shared_tree_id, .. } => DocKey::Shared(shared_tree_id),
         }
     }
 }
@@ -1974,13 +2017,17 @@ impl ParentRoute {
         }
     }
 
-    fn doc_key(&self) -> Option<&str> {
+    fn doc_key(&self) -> DocKey<'_> {
         self.target.doc_key()
     }
 }
 
 pub struct LoroBackend {
     collab_doc: Arc<LoroDocument>,
+    /// The device-local layout doc (`block:__default__` and its descendants).
+    /// `None` in the raw-doc constructors used by unit tests and by callers
+    /// that address one doc directly; production always attaches it.
+    layout_doc: Option<Arc<LoroDocument>>,
     subscribers: ChangeSubscribers<Block>,
     event_log: Arc<Mutex<EventRing<Change<Block>>>>,
     shared_trees: Option<Arc<dyn SharedTreeStore>>,
@@ -1994,6 +2041,7 @@ impl Clone for LoroBackend {
     fn clone(&self) -> Self {
         Self {
             collab_doc: self.collab_doc.clone(),
+            layout_doc: self.layout_doc.clone(),
             subscribers: self.subscribers.clone(),
             event_log: self.event_log.clone(),
             shared_trees: self.shared_trees.clone(),
@@ -2007,12 +2055,22 @@ impl LoroBackend {
     pub fn from_document(collab_doc: Arc<LoroDocument>) -> Self {
         Self {
             collab_doc,
+            layout_doc: None,
             subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             event_log: Arc::new(Mutex::new(EventRing::new(DEFAULT_EVENT_RING_CAPACITY))),
             shared_trees: None,
             id_cache: Arc::new(Mutex::new(HashMap::new())),
             clock: std::sync::Arc::new(holon_api::SystemClock),
         }
+    }
+
+    /// Attach the device-local layout doc. Reads probe it before the global
+    /// tree and creates route into it by parent (see
+    /// [`Self::resolve_write_target`] /
+    /// [`Self::resolve_write_target_for_parent`]).
+    pub fn with_layout_doc(mut self, layout_doc: Arc<LoroDocument>) -> Self {
+        self.layout_doc = Some(layout_doc);
+        self
     }
 
     pub fn with_clock(mut self, clock: std::sync::Arc<dyn holon_api::Clock>) -> Self {
@@ -2123,15 +2181,78 @@ impl LoroBackend {
             })
     }
 
+    /// The attached layout doc. Every caller reaches it through a
+    /// `WriteTarget::Layout` / `ParentWriteTarget::Layout` this backend itself
+    /// minted, and only an attached layout doc can mint one — so a `None` here
+    /// is a routing bug, not a configuration a caller can hit.
+    fn layout_doc(&self) -> &Arc<LoroDocument> {
+        self.layout_doc
+            .as_ref()
+            .expect("a Layout write target was resolved without an attached layout doc")
+    }
+
+    /// A writable wrapper over the layout doc. `from_existing` re-wraps the
+    /// SAME inner `Arc<LoroDoc>`, so the wrapper shares the layout doc's
+    /// boundary lock — the rationale `target_doc` gives for its global arm.
+    fn layout_writer(&self) -> LoroDocument {
+        let layout = self.layout_doc();
+        // ALLOW(loro_doc_escape): re-wrapped under the same boundary lock.
+        LoroDocument::from_existing(layout.doc(), layout.doc_id())
+    }
+
+    /// The layout doc's live node for `id`, if the layout doc holds one.
+    ///
+    /// A direct tree walk rather than a cache lookup: the layout is the bundled
+    /// UI shell, tens of nodes, and `id_cache` keys the global tree alone —
+    /// caching both under one map would make the cache's aliveness check
+    /// ambiguous about which doc it consulted.
+    fn resolve_layout(&self, id: &str) -> Option<WriteTarget> {
+        let layout = self.layout_doc.as_ref()?;
+        // ALLOW(entity_uri_from_raw): backend string-id resolve surface (accepts both
+        // id formats)
+        let needle = EntityUri::from_raw(id).id().to_string();
+        layout
+            .with_read(|doc| {
+                let Some(tree_id) = find_stable_id_in_doc(doc, &needle) else {
+                    return Ok(None);
+                };
+                Ok(is_node_alive(&doc.get_tree(TREE_NAME), tree_id).then_some(tree_id))
+            })
+            // ALLOW(ok): `Option<WriteTarget>` is this probe's contract — the
+            // `with_read` error is a lock diagnostic the callers already treat
+            // as "not in the layout doc" and then resolve elsewhere.
+            .ok()
+            .flatten()
+            .map(WriteTarget::Layout)
+    }
+
+    /// Does `id` name a live node in ANY doc this backend routes over — the
+    /// global tree, the layout doc, or a shared subtree?
+    ///
+    /// The authority predicate for "is this block under Loro's control", as
+    /// distinct from `resolve_to_tree_id`, which answers only for the global
+    /// tree. A create-idempotence guard asking the global-only question would
+    /// mint a second node for a block the layout doc already holds.
+    pub async fn is_live_anywhere(&self, id: &str) -> bool {
+        !matches!(
+            self.resolve_write_target(id).await,
+            Err(ApiError::BlockNotFound { .. })
+        )
+    }
+
     /// Route a write for block `id` to the doc that holds its live node.
     ///
-    /// Global tree first (the common case), then — on a global miss or a stale
-    /// tombstoned candidate — the shared subtree docs. A shared block's stable
-    /// id is absent from the global tree (its subtree was pruned at share
-    /// time), so the global resolver returns `None`; TreeIDs are globally
-    /// unique (peer+counter), so a stale global TreeID is still a valid key
-    /// to probe the shared docs with.
+    /// Layout doc first (a bounded walk that settles the device-local ids),
+    /// then the global tree, then — on a global miss or a stale tombstoned
+    /// candidate — the shared subtree docs. A shared block's stable id is
+    /// absent from the global tree (its subtree was pruned at share time), so
+    /// the global resolver returns `None`; TreeIDs are globally unique
+    /// (peer+counter), so a stale global TreeID is still a valid key to probe
+    /// the shared docs with.
     async fn resolve_write_target(&self, id: &str) -> Result<WriteTarget, ApiError> {
+        if let Some(target) = self.resolve_layout(id) {
+            return Ok(target);
+        }
         if let Some(tree_id) = self.resolve_to_tree_id(id).await {
             let alive_global = self
                 .collab_doc
@@ -2154,30 +2275,68 @@ impl LoroBackend {
         Err(ApiError::BlockNotFound { id: id.to_string() })
     }
 
-    /// One sibling level inside a shared doc. A half-born child is withheld
-    /// rather than erred, exactly as the global path does.
-    fn children_in_shared_doc(
+    /// One sibling level inside a non-global doc (a shared subtree, or the
+    /// layout). A half-born child is withheld rather than erred, exactly as the
+    /// global path does.
+    fn children_in_doc(
         &self,
         doc: &Arc<loro::LoroDoc>,
         parent: loro::TreeID,
         parent_id: &str,
     ) -> Result<Vec<String>, ApiError> {
-        let tree = doc.get_tree(TREE_NAME);
-        let mut result = Vec::new();
-        for tid in tree.children(parent).unwrap_or_default() {
-            match classify(&tree, tid) {
-                LiveNode::Settled(sid) => result.push(EntityUri::block(&sid).to_string()),
-                LiveNode::HalfBorn => warn_half_born("list_children", tid, parent_id),
-                LiveNode::MetaUnreadable => {
-                    return Err(ApiError::InternalError {
-                        message: format!(
-                            "shared child {tid:?} of {parent_id} has no readable meta"
-                        ),
-                    });
+        children_of_node(&doc.get_tree(TREE_NAME), parent, parent_id)
+    }
+
+    /// Every live block in the layout doc, at the depths `traversal` admits.
+    /// Empty when no layout doc is attached.
+    fn layout_blocks(
+        &self,
+        traversal: &holon_api::repository::Traversal,
+    ) -> Result<Vec<Block>, ApiError> {
+        let Some(layout) = self.layout_doc.as_ref() else {
+            return Ok(Vec::new());
+        };
+        layout
+            .with_read(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                let mut blocks = Vec::new();
+                for tree_node in tree.get_nodes(false) {
+                    if matches!(
+                        tree_node.parent,
+                        loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+                    ) {
+                        continue;
+                    }
+                    if !traversal.includes_level(compute_depth(&tree, tree_node.parent)) {
+                        continue;
+                    }
+                    let parent_tid = match tree_node.parent {
+                        loro::TreeParentId::Node(pid) => Some(pid),
+                        _ => None,
+                    };
+                    blocks.push(read_block_from_tree(&tree, tree_node.id, parent_tid));
                 }
-            }
-        }
-        Ok(result)
+                Ok(blocks)
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("Failed to read the layout doc's blocks: {e:#}"),
+            })
+    }
+
+    /// The layout doc's children of `parent`, read under its boundary lock.
+    fn children_in_layout(
+        &self,
+        parent: loro::TreeID,
+        parent_id: &str,
+    ) -> Result<Vec<String>, ApiError> {
+        self.layout_doc()
+            .with_read(|doc| {
+                children_of_node(&doc.get_tree(TREE_NAME), parent, parent_id)
+                    .map_err(|e| anyhow::anyhow!("{e:?}"))
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("list_children({parent_id}) in the layout doc: {e:#}"),
+            })
     }
 
     /// The shared doc holding `id`, or `None` when the global tree does (or
@@ -2194,7 +2353,7 @@ impl LoroBackend {
             Err(e) => return Err(e),
         };
         Ok(match target {
-            WriteTarget::Global(_) => None,
+            WriteTarget::Global(_) | WriteTarget::Layout(_) => None,
             WriteTarget::Shared { doc, tree_id, .. } => Some((doc, tree_id)),
         })
     }
@@ -2251,6 +2410,7 @@ impl LoroBackend {
                 LoroDocument::from_existing(self.collab_doc.doc(), self.collab_doc.doc_id()),
                 *tree_id,
             ),
+            WriteTarget::Layout(tree_id) => (self.layout_writer(), *tree_id),
             WriteTarget::Shared {
                 shared_tree_id,
                 doc,
@@ -2271,6 +2431,7 @@ impl LoroBackend {
             ParentWriteTarget::Global => {
                 LoroDocument::from_existing(self.collab_doc.doc(), self.collab_doc.doc_id())
             }
+            ParentWriteTarget::Layout => self.layout_writer(),
             ParentWriteTarget::Shared {
                 shared_tree_id,
                 doc,
@@ -2289,6 +2450,10 @@ impl LoroBackend {
                 .map_err(|e| ApiError::InternalError {
                     message: format!("mount-node check (global) failed: {e}"),
                 }),
+            // The layout doc holds the bundled UI shell alone; a mount there
+            // would be a shared subtree grafted into device-local state, which
+            // nothing can create.
+            WriteTarget::Layout(_) => Ok(false),
             WriteTarget::Shared { doc, tree_id, .. } => {
                 Ok(is_mount_node(&doc.get_tree(TREE_NAME), *tree_id))
             }
@@ -2312,21 +2477,41 @@ impl LoroBackend {
         Ok(target)
     }
 
-    /// Resolve the doc a to-be-created child must land in, by its parent.
+    /// Resolve the doc a to-be-created child must land in, by its parent —
+    /// except for the layout ROOT, which is the one block no parent can place:
+    /// `block:__default__` is parented at the tree root, so `child` is what
+    /// says it belongs in the layout doc. Its descendants then follow their
+    /// parent there like any other child.
+    ///
     /// `no_parent`/sentinel → the global doc (roots live globally). A mount
     /// node → the shared doc it stands for, with the shared root as the
     /// effective parent (see [`Self::route_through_mount`]). Otherwise probe
     /// the parent's owning doc exactly as [`Self::resolve_write_target`] does
-    /// (global-first, then shared by stale TreeID, then shared by stable id). A
-    /// parent found nowhere falls back to Global: it may be seeded later in the
-    /// same batch, and `resolve_parent_tree_id`'s tree-walk covers that (or
-    /// errors loudly there).
+    /// (layout, then global, then shared by stale TreeID, then shared by stable
+    /// id). A parent found nowhere falls back to Global: it may be seeded later
+    /// in the same batch, and `resolve_parent_tree_id`'s tree-walk covers that
+    /// (or errors loudly there).
     async fn resolve_write_target_for_parent(
         &self,
         parent: &EntityUri,
+        child: Option<&EntityUri>,
     ) -> Result<ParentRoute, ApiError> {
+        let child_is_layout_root =
+            child.is_some_and(|c| c.as_str() == holon_api::DEFAULT_DOC_BLOCK_ID);
+        if self.layout_doc.is_some() && child_is_layout_root {
+            return Ok(ParentRoute {
+                target: ParentWriteTarget::Layout,
+                parent: parent.clone(),
+            });
+        }
         if parent.is_no_parent() || parent.is_sentinel() {
             return Ok(ParentRoute::global(parent.clone()));
+        }
+        if self.resolve_layout(parent.as_str()).is_some() {
+            return Ok(ParentRoute {
+                target: ParentWriteTarget::Layout,
+                parent: parent.clone(),
+            });
         }
         if let Some(tree_id) = self.resolve_to_tree_id(parent.as_str()).await {
             let alive_global = self
@@ -2883,7 +3068,9 @@ impl LoroBackend {
         // shared doc. The global `id_cache` must never receive a shared TreeID
         // (its keys index the global tree only), so the shared arm resolves the
         // parent against a throwaway cache and skips `cache_stable_id` below.
-        let parent_route = self.resolve_write_target_for_parent(&parent_id).await?;
+        let parent_route = self
+            .resolve_write_target_for_parent(&parent_id, id.as_ref())
+            .await?;
         let write_doc = self.parent_doc(&parent_route.target);
         let is_global = matches!(parent_route.target, ParentWriteTarget::Global);
         let id_cache = if is_global {
@@ -2961,7 +3148,7 @@ impl LoroBackend {
                 continue;
             }
             let route = self
-                .resolve_write_target_for_parent(&request.parent_id)
+                .resolve_write_target_for_parent(&request.parent_id, Some(&request.id))
                 .await?;
             // A mount parent is rewritten to the shared root it stands for, so
             // the node resolves inside the doc it now lands in.
@@ -3153,8 +3340,11 @@ impl LoroBackend {
         // Reject a cross-doc re-parent (into/out of a shared subtree) before any
         // mutation; same-doc re-parents route to the owning doc.
         let source_target = self.resolve_write_target_checked(id).await?;
+        // ALLOW(entity_uri_from_raw): id &str backend API param (accepts both id
+        // formats)
+        let moved = EntityUri::from_raw(id);
         let parent_route = self
-            .resolve_write_target_for_parent(&requested_parent_uri)
+            .resolve_write_target_for_parent(&requested_parent_uri, Some(&moved))
             .await?;
         // A mount destination means "under the shared root it stands for".
         let new_parent_uri = parent_route.parent.clone();
@@ -3169,7 +3359,7 @@ impl LoroBackend {
             });
         }
         let (write_doc, tree_id) = self.target_doc(&source_target);
-        let id_cache = if source_target.doc_key().is_none() {
+        let id_cache = if source_target.doc_key() == DocKey::Global {
             self.id_cache.clone()
         } else {
             Arc::new(Mutex::new(HashMap::new()))
@@ -3225,8 +3415,11 @@ impl LoroBackend {
         // Reject a cross-doc positioned move before any mutation; same-doc moves
         // route to the owning doc.
         let source_target = self.resolve_write_target_checked(target_id).await?;
+        // ALLOW(entity_uri_from_raw): target_id &str backend API param (accepts both id
+        // formats)
+        let moved = EntityUri::from_raw(target_id);
         let parent_route = self
-            .resolve_write_target_for_parent(&requested_parent_uri)
+            .resolve_write_target_for_parent(&requested_parent_uri, Some(&moved))
             .await?;
         // A mount destination means "under the shared root it stands for".
         let new_parent_uri = parent_route.parent.clone();
@@ -3248,7 +3441,7 @@ impl LoroBackend {
             Some(p) => Some(self.target_doc(&self.resolve_write_target(p).await?).1),
             None => None,
         };
-        let id_cache = if source_target.doc_key().is_none() {
+        let id_cache = if source_target.doc_key() == DocKey::Global {
             self.id_cache.clone()
         } else {
             Arc::new(Mutex::new(HashMap::new()))
@@ -3580,8 +3773,15 @@ impl LoroBackend {
     /// org-scan order writeback can never overwrite a disambiguated key with
     /// the raw tied fi.
     pub async fn block_sort_key(&self, id: &str) -> Result<Option<String>, ApiError> {
-        let tree_id = self.require_tree_id(id).await?;
-        self.collab_doc
+        let (read_doc, tree_id) = match self.resolve_layout(id) {
+            Some(target) => self.target_doc(&target),
+            None => (
+                // ALLOW(loro_doc_escape): re-wrapped under the same boundary lock.
+                LoroDocument::from_existing(self.collab_doc.doc(), self.collab_doc.doc_id()),
+                self.require_tree_id(id).await?,
+            ),
+        };
+        read_doc
             .with_read(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 if tree.fractional_index(tree_id).is_none() {
@@ -3856,6 +4056,7 @@ impl Lifecycle for LoroBackend {
         Self::initialize_schema(&collab_doc).await?;
         Ok(Self {
             collab_doc,
+            layout_doc: None,
             subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             event_log: Arc::new(Mutex::new(EventRing::new(DEFAULT_EVENT_RING_CAPACITY))),
             shared_trees: None,
@@ -3930,6 +4131,13 @@ impl ChangeNotifications<Block> for LoroBackend {
                 })
                 .map_err(|e| ApiError::InternalError {
                     message: format!("Failed to get current blocks: {}", e),
+                })
+                .and_then(|mut blocks| {
+                    // The replay is this device's whole block set, so the
+                    // device-local layout doc belongs in it alongside the
+                    // replicated tree.
+                    blocks.extend(self.layout_blocks(&holon_api::repository::Traversal::ALL)?);
+                    Ok(blocks)
                 }) {
                 Ok(current_blocks) => {
                     for block in current_blocks {
@@ -4062,6 +4270,10 @@ impl CoreOperations for LoroBackend {
                 message: format!("Failed to get all blocks: {}", e),
             })?;
 
+        // The device-local layout lives in its own doc; it is part of THIS
+        // device's block set even though it is outside the replication set.
+        result.extend(self.layout_blocks(&traversal)?);
+
         // Follow mount nodes into shared trees
         if let Some(store) = &shared_trees {
             for (mount_info, mount_parent, mount_depth) in &mounts {
@@ -4103,7 +4315,7 @@ impl CoreOperations for LoroBackend {
             };
             let shared_root =
                 uri_to_tree_id(&route.parent).expect("mount info carries the shared root's TreeID");
-            return self.children_in_shared_doc(&doc, shared_root, parent_id);
+            return self.children_in_doc(&doc, shared_root, parent_id);
         }
 
         // A parent inside a shared subtree lives in that share's doc, not in
@@ -4111,8 +4323,12 @@ impl CoreOperations for LoroBackend {
         // global tree finds nothing — and `delete_subtree` / `move_block` walk
         // children, so an unrouted read makes every structural op on shared
         // content fail.
+        if let Some(WriteTarget::Layout(tree_id)) = self.resolve_layout(parent_id) {
+            return self.children_in_layout(tree_id, parent_id);
+        }
+
         if let Some((doc, tree_id)) = self.shared_read_target(parent_id).await? {
-            return self.children_in_shared_doc(&doc, tree_id, parent_id);
+            return self.children_in_doc(&doc, tree_id, parent_id);
         }
 
         self.collab_doc
@@ -4305,7 +4521,9 @@ impl CoreOperations for LoroBackend {
                 ),
             });
         }
-        let parent_route = self.resolve_write_target_for_parent(&new_parent).await?;
+        let parent_route = self
+            .resolve_write_target_for_parent(&new_parent, Some(&id))
+            .await?;
         if source_target.doc_key() != parent_route.doc_key() {
             return Err(ApiError::InvalidOperation {
                 message: format!(
@@ -4323,7 +4541,7 @@ impl CoreOperations for LoroBackend {
         let (write_doc, tree_id) = self.target_doc(&source_target);
         // Shared arm gets a throwaway cache (the global `id_cache` must not hold
         // shared TreeIDs); global arm uses the real cache.
-        let id_cache = if source_target.doc_key().is_none() {
+        let id_cache = if source_target.doc_key() == DocKey::Global {
             self.id_cache.clone()
         } else {
             Arc::new(Mutex::new(HashMap::new()))
@@ -4384,26 +4602,40 @@ impl CoreOperations for LoroBackend {
 
     async fn get_blocks(&self, ids: Vec<String>) -> Result<Vec<Block>, ApiError> {
         let mut tree_ids = Vec::with_capacity(ids.len());
+        let mut layout_tree_ids = Vec::new();
         for id in &ids {
-            if let Some(tid) = self.resolve_to_tree_id(id).await {
-                tree_ids.push(tid);
-            }
-        }
-        self.collab_doc
-            .with_read(|doc| {
-                let tree = doc.get_tree(TREE_NAME);
-                let mut blocks = Vec::new();
-                for tid in tree_ids {
-                    if is_node_alive(&tree, tid) {
-                        let parent_tid = get_node_parent(&tree, tid);
-                        blocks.push(read_block_from_tree(&tree, tid, parent_tid));
+            match self.resolve_layout(id) {
+                Some(WriteTarget::Layout(tid)) => layout_tree_ids.push(tid),
+                _ => {
+                    if let Some(tid) = self.resolve_to_tree_id(id).await {
+                        tree_ids.push(tid);
                     }
                 }
-                Ok(blocks)
+            }
+        }
+        let mut layout_blocks = if layout_tree_ids.is_empty() {
+            Vec::new()
+        } else {
+            self.layout_doc()
+                .with_read(|doc| {
+                    let tree = doc.get_tree(TREE_NAME);
+                    Ok(read_live_nodes(&tree, &layout_tree_ids))
+                })
+                .map_err(|e| ApiError::InternalError {
+                    message: format!("Failed to get layout blocks: {e:#}"),
+                })?
+        };
+        let mut global_blocks = self
+            .collab_doc
+            .with_read(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                Ok(read_live_nodes(&tree, &tree_ids))
             })
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to get blocks: {}", e),
-            })
+            })?;
+        global_blocks.append(&mut layout_blocks);
+        Ok(global_blocks)
     }
 
     async fn create_blocks(&self, blocks: Vec<NewBlock>) -> Result<Vec<Block>, ApiError> {
@@ -4422,7 +4654,9 @@ impl CoreOperations for LoroBackend {
         let mut blocks = blocks;
         let mut owning: Option<ParentWriteTarget> = None;
         for nb in &mut blocks {
-            let route = self.resolve_write_target_for_parent(&nb.parent_id).await?;
+            let route = self
+                .resolve_write_target_for_parent(&nb.parent_id, nb.id.as_ref())
+                .await?;
             // A mount parent is rewritten to the shared root it stands for, so
             // the node resolves inside the doc it now lands in.
             nb.parent_id = route.parent;

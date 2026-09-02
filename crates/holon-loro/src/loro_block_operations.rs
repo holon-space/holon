@@ -50,6 +50,7 @@ use tokio::sync::RwLock;
 
 use crate::LoroDocumentStore;
 use crate::loro_backend::LoroBackend;
+use crate::loro_document_store::DocScope;
 use crate::shared_tree::SharedTreeStore;
 
 /// Generic operations on Loro blocks.
@@ -88,14 +89,19 @@ impl LoroBlockOperations {
         self.doc_store.clone()
     }
 
-    /// Get the global backend (single LoroDoc for all blocks).
+    /// Get the block backend: the global doc plus the device-local layout doc,
+    /// which the backend routes between by block id.
     async fn get_backend(&self, _: &str) -> Result<LoroBackend> {
         let store = self.doc_store.read().await;
         let collab_doc = store
-            .get_global_doc()
+            .get_doc(DocScope::Global)
             .await
             .map_err(|e| format!("Failed to get global doc: {}", e))?;
-        let mut backend = LoroBackend::from_document(collab_doc);
+        let layout_doc = store
+            .get_doc(DocScope::Layout)
+            .await
+            .map_err(|e| format!("Failed to get layout doc: {}", e))?;
+        let mut backend = LoroBackend::from_document(collab_doc).with_layout_doc(layout_doc);
         if let Some(store) = &self.shared_trees {
             backend = backend.with_shared_trees(store.clone());
         }

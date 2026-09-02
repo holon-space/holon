@@ -62,6 +62,7 @@ use crate::LoroDocumentStore;
 use crate::loro_backend::SnapshotBlock;
 use crate::loro_backend::snapshot_blocks_from_doc;
 use crate::loro_backend::snapshot_blocks_from_doc_settled;
+use crate::loro_document_store::DocScope;
 
 /// Filename of the sidecar file that persists the sync watermark next to the
 /// `.loro` snapshot. One file per `LoroDocumentStore`.
@@ -263,6 +264,8 @@ pub struct LoroSyncController {
 pub struct LoroSyncControllerHandle {
     /// Kept alive so the Loro callback keeps firing.
     _subscription: loro::Subscription,
+    /// The same, for the device-local layout doc.
+    _layout_subscription: loro::Subscription,
     /// Kept alive so the loop keeps running. The inner task takes ownership
     /// of the controller; dropping the JoinHandle does not cancel the task,
     /// so we rely on `wake.notify_one()` being the only input signal — when
@@ -370,15 +373,19 @@ impl LoroSyncController {
         // while that thread holds the doc write guard, so it must stay a pure
         // function of the event — it extracts facts from the event's own diff
         // and queues them. Touching the doc from it would re-enter the guard.
-        let doc_arc = {
+        let (doc_arc, layout_doc_arc) = {
             let store = self.doc_store.read().await;
             let collab = store
-                .get_global_doc()
+                .get_doc(DocScope::Global)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to get global doc: {}", e))?;
+            let layout = store
+                .get_doc(DocScope::Layout)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to get layout doc: {}", e))?;
             // ALLOW(loro_doc_escape): subscription registration; the handle
             // never reads doc state.
-            collab.doc()
+            (collab.doc(), layout.doc())
         };
         // Event-driven incremental input: extract each commit's dirty facts on
         // the committing thread (a pure function of the event — no `doc` access,
@@ -394,6 +401,24 @@ impl LoroSyncController {
                     pending_for_callback.lock().unwrap().append(&mut facts);
                 }
                 wake_for_callback.notify_one();
+            }))
+        };
+        // The same input leg for the device-local layout doc, into its own
+        // queue: the projection reads each fact's nodes out of the doc it came
+        // from, so the two must not be interleaved.
+        let layout_pending_for_callback = self.projection.layout_pending();
+        let wake_for_layout_callback = self.wake.clone();
+        let layout_subscription = {
+            let doc = &*layout_doc_arc;
+            doc.subscribe_root(Arc::new(move |event| {
+                let mut facts = crate::loro_backend::extract_pending_changes(&event);
+                if !facts.is_empty() {
+                    layout_pending_for_callback
+                        .lock()
+                        .unwrap()
+                        .append(&mut facts);
+                }
+                wake_for_layout_callback.notify_one();
             }))
         };
 
@@ -427,6 +452,7 @@ impl LoroSyncController {
 
         Ok(LoroSyncControllerHandle {
             _subscription: subscription,
+            _layout_subscription: layout_subscription,
             _task: task,
             _block_live: block_live,
             last_synced,
@@ -527,6 +553,15 @@ pub struct LoroProjection {
     /// `Arc` so `LoroSyncController::start` can hand the same queue to the
     /// callback. Only the incremental fast path consumes it.
     pending: Arc<StdMutex<Vec<crate::loro_backend::PendingChange>>>,
+    /// The same queue for the DEVICE-LOCAL layout doc, fed by its own
+    /// `subscribe_root` callback. Separate because `incremental_block_changes`
+    /// reads the named nodes out of ONE doc — a fact and the doc it came from
+    /// have to travel together.
+    layout_pending: Arc<StdMutex<Vec<crate::loro_backend::PendingChange>>>,
+    /// The layout doc's counterpart to `last_synced`. In memory only: it gates
+    /// the idle short-circuit within a session, and a cold boot takes the full
+    /// walk regardless (`seeded` is false), which reads both docs.
+    layout_last_synced: StdMutex<Frontiers>,
     /// Set when a pass clears `seeded` and RETURNS (the incremental sink-write
     /// failure at `emit_ops` Err) so the *next* pass's full walk — which sees
     /// only `seeded == false` at entry, indistinguishable from cold boot — can
@@ -562,6 +597,8 @@ impl LoroProjection {
             live: StdMutex::new(HashMap::new()),
             seeded: AtomicBool::new(false),
             tid_index: StdMutex::new(HashMap::new()),
+            layout_pending: Arc::new(StdMutex::new(Vec::new())),
+            layout_last_synced: StdMutex::new(Frontiers::default()),
             pending: Arc::new(StdMutex::new(Vec::new())),
             pending_reseed_reason: StdMutex::new(None),
         }
@@ -573,6 +610,12 @@ impl LoroProjection {
     /// fast path drains it.
     pub fn pending(&self) -> Arc<StdMutex<Vec<crate::loro_backend::PendingChange>>> {
         self.pending.clone()
+    }
+
+    /// The layout doc's pending-facts queue — the layout `subscribe_root`
+    /// callback's sink. See [`Self::pending`].
+    pub fn layout_pending(&self) -> Arc<StdMutex<Vec<crate::loro_backend::PendingChange>>> {
+        self.layout_pending.clone()
     }
 
     /// Whether the pending-facts queue is currently empty. Exposed so a settle
@@ -662,9 +705,11 @@ impl LoroProjection {
         let _guard = self.project_lock.lock().await;
         let t0 = std::time::Instant::now();
 
-        let collab = self.global_doc().await?;
+        let (collab, layout) = self.docs().await?;
         let current = collab.with_read(|doc| Ok(doc.oplog_frontiers()))?;
+        let layout_current = layout.with_read(|doc| Ok(doc.oplog_frontiers()))?;
         let last = self.last_synced.lock().unwrap().clone();
+        let layout_last = self.layout_last_synced.lock().unwrap().clone();
         let seeded = self.seeded.load(Ordering::SeqCst);
         let armed = self.armed.load(Ordering::SeqCst);
 
@@ -699,9 +744,15 @@ impl LoroProjection {
             // pending (that would silently drop a committed change).
             let pending: Vec<crate::loro_backend::PendingChange> =
                 std::mem::take(&mut *self.pending.lock().unwrap());
+            let layout_pending: Vec<crate::loro_backend::PendingChange> =
+                std::mem::take(&mut *self.layout_pending.lock().unwrap());
 
-            // Idle wake: no facts and the oplog hasn't moved → nothing to do.
-            if pending.is_empty() && last == current {
+            // Idle wake: no facts and NEITHER oplog has moved → nothing to do.
+            if pending.is_empty()
+                && layout_pending.is_empty()
+                && last == current
+                && layout_last == layout_current
+            {
                 return Ok(());
             }
 
@@ -712,13 +763,23 @@ impl LoroProjection {
             // of facts + re-reading each node) routes to the full reseed below.
             // Both routes are checkout-free, so neither can reintroduce the race.
             let live_len = self.live.lock().unwrap().len();
-            let take_incremental =
-                !pending.is_empty() && pending.len() <= INCREMENTAL_BATCH_MAX.max(live_len);
+            let facts = pending.len() + layout_pending.len();
+            let take_incremental = facts > 0 && facts <= INCREMENTAL_BATCH_MAX.max(live_len);
             if take_incremental {
-                let (changed, settled) = collab.with_read(|doc| {
+                let (mut changed, mut settled) = collab.with_read(|doc| {
                     let mut tid_index = self.tid_index.lock().unwrap();
                     crate::loro_backend::incremental_block_changes(doc, &pending, &mut tid_index)
                 })?;
+                let (layout_changed, layout_settled) = layout.with_read(|doc| {
+                    let mut tid_index = self.tid_index.lock().unwrap();
+                    crate::loro_backend::incremental_block_changes(
+                        doc,
+                        &layout_pending,
+                        &mut tid_index,
+                    )
+                })?;
+                changed.extend(layout_changed);
+                settled &= layout_settled;
                 if settled {
                     // Build ops + a STAGING plan WITHOUT mutating `live`. `live`
                     // (the diff base) and `last_synced` advance only AFTER the sink
@@ -833,6 +894,7 @@ impl LoroProjection {
                         {
                             Ok(()) => {
                                 // Sink write committed — now advance the diff base.
+                                *self.layout_last_synced.lock().unwrap() = layout_current;
                                 let mut live = self.live.lock().unwrap();
                                 for (id, v) in staging {
                                     match v {
@@ -896,8 +958,25 @@ impl LoroProjection {
         // `block_raw` → Loro and re-establishes `live == block_raw` on success.
         // This path is not steady-state (cold boot / unsettled / orphan / oversized
         // bootstrap), so the extra sink read is not on the hot path.
-        let (after, after_settled): (HashMap<String, SnapshotBlock>, bool) =
+        let (mut after, mut after_settled): (HashMap<String, SnapshotBlock>, bool) =
             collab.with_read(|doc| Ok(snapshot_blocks_from_doc_settled(doc)))?;
+        let (layout_after, layout_settled) =
+            layout.with_read(|doc| Ok(snapshot_blocks_from_doc_settled(doc)))?;
+        after_settled &= layout_settled;
+        for (id, snap) in layout_after {
+            // The two docs partition the block set. An id in both is an
+            // ambiguity no projection rule can resolve — it would make the SQL
+            // row's content depend on map iteration order.
+            if let Some(existing) = after.insert(id.clone(), snap) {
+                return Err(anyhow::anyhow!(
+                    "block {id} is live in BOTH the global and the layout Loro doc (global parent \
+                     {}); the two documents must partition the block set — refusing to project an \
+                     ambiguous row",
+                    existing.block.parent_id
+                ));
+            }
+        }
+        let after = after;
         let before: Arc<HashMap<String, SnapshotBlock>> = Arc::new(self.read_sql_snapshot().await?);
         let snapshot_ms = t0.elapsed().as_millis();
 
@@ -981,15 +1060,18 @@ impl LoroProjection {
         // the next pass can take the fast path (and so a later reseed diffs against
         // `live`).
         if after_settled {
-            let idx = collab.with_read(|doc| Ok(crate::loro_backend::build_tid_index(doc)))?;
+            let mut idx = collab.with_read(|doc| Ok(crate::loro_backend::build_tid_index(doc)))?;
+            idx.extend(layout.with_read(|doc| Ok(crate::loro_backend::build_tid_index(doc)))?);
             *self.tid_index.lock().unwrap() = idx;
             *self.live.lock().unwrap() = after;
+            *self.layout_last_synced.lock().unwrap() = layout_current;
             self.seeded.store(true, Ordering::SeqCst);
             // This full snapshot captured everything up to `current`, so any facts
             // accumulated before/during it are now stale — drop them so the next
             // incremental pass starts clean (bounds the queue during the pre-arm
             // boot window and after every reseed).
             self.pending.lock().unwrap().clear();
+            self.layout_pending.lock().unwrap().clear();
         }
 
         Ok(())
@@ -1098,12 +1180,19 @@ impl LoroProjection {
         Ok(())
     }
 
-    async fn global_doc(&self) -> Result<Arc<LoroDocument>> {
+    /// Both projected documents: the replicated global tree and the
+    /// device-local layout tree. Their union is what SQL mirrors.
+    async fn docs(&self) -> Result<(Arc<LoroDocument>, Arc<LoroDocument>)> {
         let store = self.doc_store.read().await;
-        store
-            .get_global_doc()
+        let global = store
+            .get_doc(DocScope::Global)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get global doc: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to get global doc: {}", e))?;
+        let layout = store
+            .get_doc(DocScope::Layout)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get layout doc: {}", e))?;
+        Ok((global, layout))
     }
 
     /// Read the sink's current block state (the diff "before") via the injected

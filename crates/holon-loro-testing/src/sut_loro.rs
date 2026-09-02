@@ -16,6 +16,7 @@ use std::time::Duration;
 use holon::api::CoreOperations;
 use holon_api::EntityUri;
 use holon_api::block::Block;
+use holon_loro::DocScope;
 use holon_loro::LoroBackend;
 use holon_loro::LoroDocumentStore;
 use holon_loro::LoroSyncControllerHandle;
@@ -103,7 +104,7 @@ impl LoroSut {
     pub async fn read_blocks(&self) -> anyhow::Result<Vec<Block>> {
         let store = self.doc_store.read().await;
         let collab_doc = store
-            .get_global_doc()
+            .get_doc(DocScope::Global)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get global doc: {}", e))?;
 
@@ -120,7 +121,7 @@ impl LoroSut {
     pub async fn read_block_snapshots(&self) -> anyhow::Result<Vec<holon::api::SnapshotBlock>> {
         let store = self.doc_store.read().await;
         let collab_doc = store
-            .get_global_doc()
+            .get_doc(DocScope::Global)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get global doc: {}", e))?;
         let doc_arc = collab_doc.doc();
@@ -225,7 +226,7 @@ impl SutLoro for LoroSut {
         tracing::trace!("[apply] AddPeer (peer_idx={})", self.peers.borrow().len());
         let store = self.doc_store.read().await;
         let global_doc = store
-            .get_global_doc()
+            .get_doc(DocScope::Global)
             .await
             .expect("Failed to get global doc for AddPeer");
         let snapshot = global_doc
@@ -393,7 +394,7 @@ impl SutLoro for LoroSut {
         {
             let store = self.doc_store.read().await;
             let global_doc = store
-                .get_global_doc()
+                .get_doc(DocScope::Global)
                 .await
                 .expect("Failed to get global doc for SyncWithPeer");
             let primary_doc = global_doc.doc();
@@ -412,7 +413,7 @@ impl SutLoro for LoroSut {
         {
             let store = self.doc_store.read().await;
             let global_doc = store
-                .get_global_doc()
+                .get_doc(DocScope::Global)
                 .await
                 .expect("Failed to get global doc for MergeFromPeer");
             // One-directional merge: export the peer's delta relative

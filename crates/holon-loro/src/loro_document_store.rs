@@ -1,14 +1,15 @@
-//! LoroDocumentStore - manages the single global LoroTree document.
+//! LoroDocumentStore - manages the vault's two LoroTree documents.
 //!
-//! All blocks live in one LoroDoc with a LoroTree. The store handles
-//! persistence (saving/loading the `.loro` snapshot) and provides access to the
-//! global doc.
+//! Blocks live in one of two LoroDocs, each with a LoroTree: the GLOBAL doc
+//! (notes — the replication set's root container) and the LAYOUT doc (the
+//! device-local UI layout). The store handles persistence (saving/loading each
+//! `.loro` snapshot) and hands out either doc by [`DocScope`].
 //!
 //! Legacy per-file methods are retained for backward compat during migration
 // ALLOW(compatibility): legacy per-file API shape predates the single-global-doc
 // model. Removing requires migrating every per-path caller (org sync, share
 // backend, tests); covered separately by the cell-authority cleanup roadmap.
-//! but all internally delegate to the single global document.
+//! but all internally delegate to the global document.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,17 +24,47 @@ use crate::CanonicalPath;
 use crate::LoroDocument;
 use crate::loro_backend::LoroBackend;
 
-/// Manages the single global LoroTree document.
+/// Which of the store's two LoroDocuments a caller means.
 ///
-/// All blocks are stored in one LoroDoc's LoroTree. The store handles
-/// persistence and provides access to the global document.
+/// The two are disjoint: a block id lives in exactly one of them. `Layout`
+/// holds `block:__default__` and its descendants — the device-local UI layout,
+/// which is never registered in `ContainerRegistry` and so is structurally
+/// outside `replicate_all`'s reach (D68.b).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DocScope {
+    Global,
+    Layout,
+}
+
+impl DocScope {
+    fn doc_id(self) -> &'static str {
+        match self {
+            DocScope::Global => GLOBAL_DOC_ID,
+            DocScope::Layout => LAYOUT_DOC_ID,
+        }
+    }
+
+    fn snapshot_name(self) -> &'static str {
+        match self {
+            DocScope::Global => GLOBAL_SNAPSHOT_NAME,
+            DocScope::Layout => LAYOUT_SNAPSHOT_NAME,
+        }
+    }
+}
+
+/// Manages the vault's two LoroTree documents.
+///
+/// Every block is stored in one LoroDoc's LoroTree, selected by [`DocScope`].
+/// The store handles persistence and provides access to both documents.
 ///
 /// Legacy per-file methods delegate to the global doc for backward compat.
 #[derive(Clone)]
 pub struct LoroDocumentStore {
-    /// The single global LoroDocument containing the LoroTree
+    /// The replicated LoroDocument containing the notes LoroTree
     global_doc: Arc<RwLock<Option<Arc<LoroDocument>>>>,
-    /// Directory where the .loro snapshot is stored
+    /// The device-local LoroDocument containing the layout LoroTree
+    layout_doc: Arc<RwLock<Option<Arc<LoroDocument>>>>,
+    /// Directory where the .loro snapshots are stored
     storage_dir: PathBuf,
     /// Legacy: aliases mapping doc_ids to file paths (kept for org sync compat)
     doc_id_aliases: Arc<RwLock<HashMap<String, CanonicalPath>>>,
@@ -41,7 +72,7 @@ pub struct LoroDocumentStore {
     /// (see `save_all`). `Arc` so clones share one schedule (the struct is
     /// `Clone`; a per-clone counter would compact on every clone's first save).
     save_counter: Arc<std::sync::atomic::AtomicU64>,
-    /// Peer id to mint the global doc under. `None` = the env/random fallback
+    /// Peer id to mint both docs under. `None` = the env/random default
     /// in `LoroDocument::new`. Two instances in ONE process must each
     /// inject their own — the env var is process-global and would collide.
     peer_id: Option<u64>,
@@ -49,11 +80,14 @@ pub struct LoroDocumentStore {
 
 const GLOBAL_DOC_ID: &str = "holon_tree";
 const GLOBAL_SNAPSHOT_NAME: &str = "holon_tree.loro";
+const LAYOUT_DOC_ID: &str = "holon_layout";
+const LAYOUT_SNAPSHOT_NAME: &str = "holon_layout.loro";
 
 impl LoroDocumentStore {
     pub fn new(storage_dir: PathBuf) -> Self {
         Self {
             global_doc: Arc::new(RwLock::new(None)),
+            layout_doc: Arc::new(RwLock::new(None)),
             storage_dir,
             doc_id_aliases: Arc::new(RwLock::new(HashMap::new())),
             save_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -77,35 +111,44 @@ impl LoroDocumentStore {
         &self.storage_dir
     }
 
-    fn snapshot_path(&self) -> PathBuf {
-        self.storage_dir.join(GLOBAL_SNAPSHOT_NAME)
+    fn snapshot_path(&self, scope: DocScope) -> PathBuf {
+        self.storage_dir.join(scope.snapshot_name())
     }
 
-    /// Get the global LoroDocument, loading from disk or creating fresh.
-    pub async fn get_global_doc(&self) -> Result<Arc<LoroDocument>> {
+    fn doc_slot(&self, scope: DocScope) -> &Arc<RwLock<Option<Arc<LoroDocument>>>> {
+        match scope {
+            DocScope::Global => &self.global_doc,
+            DocScope::Layout => &self.layout_doc,
+        }
+    }
+
+    /// Get one of the two LoroDocuments, loading from disk or creating fresh.
+    pub async fn get_doc(&self, scope: DocScope) -> Result<Arc<LoroDocument>> {
+        let slot = self.doc_slot(scope);
         // Fast path: already loaded
         {
-            let doc = self.global_doc.read().await;
+            let doc = slot.read().await;
             if let Some(d) = doc.as_ref() {
                 return Ok(d.clone());
             }
         }
 
         // Slow path: load or create
-        let mut doc_slot = self.global_doc.write().await;
+        let mut doc_slot = slot.write().await;
         // Double-check after acquiring write lock
         if let Some(d) = doc_slot.as_ref() {
             return Ok(d.clone());
         }
+        let doc_id = scope.doc_id();
 
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let doc = {
-            let snapshot_path = self.snapshot_path();
+            let snapshot_path = self.snapshot_path(scope);
             if snapshot_path.exists() {
-                info!("Loading global LoroTree from {}", snapshot_path.display());
+                info!("Loading {doc_id} LoroTree from {}", snapshot_path.display());
                 match LoroDocument::load_from_file_with_peer_id(
                     &snapshot_path,
-                    GLOBAL_DOC_ID.to_string(),
+                    doc_id.to_string(),
                     self.peer_id,
                 ) {
                     Ok(loaded) => Arc::new(loaded),
@@ -121,7 +164,7 @@ impl LoroDocumentStore {
                             );
                             let _ = std::fs::remove_file(&snapshot_path);
                             let fresh = Arc::new(LoroDocument::new_with_peer_id(
-                                GLOBAL_DOC_ID.to_string(),
+                                doc_id.to_string(),
                                 self.peer_id,
                             )?);
                             LoroBackend::initialize_schema(&fresh)
@@ -134,9 +177,9 @@ impl LoroDocumentStore {
                     }
                 }
             } else {
-                info!("Creating new global LoroTree document");
+                info!("Creating new {doc_id} LoroTree document");
                 let fresh = Arc::new(LoroDocument::new_with_peer_id(
-                    GLOBAL_DOC_ID.to_string(),
+                    doc_id.to_string(),
                     self.peer_id,
                 )?);
                 LoroBackend::initialize_schema(&fresh)
@@ -148,9 +191,9 @@ impl LoroDocumentStore {
 
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let doc = {
-            info!("Creating in-memory global LoroTree (wasm32 demo, no persistence)");
+            info!("Creating in-memory {doc_id} LoroTree (wasm32 demo, no persistence)");
             let fresh = Arc::new(LoroDocument::new_with_peer_id(
-                GLOBAL_DOC_ID.to_string(),
+                doc_id.to_string(),
                 self.peer_id,
             )?);
             LoroBackend::initialize_schema(&fresh)
@@ -177,7 +220,7 @@ impl LoroDocumentStore {
 
     /// Resolve a doc_id to the global LoroDocument.
     pub async fn resolve_by_doc_id(&self, _: &str) -> Option<Arc<LoroDocument>> {
-        self.get_global_doc().await.ok() // ALLOW(ok): doc may not be initialized
+        self.get_doc(DocScope::Global).await.ok() // ALLOW(ok): doc may not be initialized
     }
 
     /// Resolve an alias doc_id to its canonical file path.
@@ -189,31 +232,33 @@ impl LoroDocumentStore {
     /// Legacy: get or load a document for a file path.
     /// Now always returns the global doc.
     pub async fn get_or_load(&mut self, _: &Path) -> Result<Arc<LoroDocument>> {
-        self.get_global_doc().await
+        self.get_doc(DocScope::Global).await
     }
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub async fn save_all(&self) -> Result<()> {
         use std::sync::atomic::Ordering;
-        let doc = self.global_doc.read().await;
-        if let Some(d) = doc.as_ref() {
-            let path = self.snapshot_path();
+        // Periodic history compaction: every Nth save (incl. the first save of
+        // a session, which sheds history accumulated in prior sessions) write a
+        // shallow snapshot instead of a full one. Holon undo replays the
+        // inverse-command log, so trimmed Loro history is never needed locally;
+        // stale P2P peers get a full snapshot via the delta-export guard in
+        // `iroh_sync_adapter`. Kill-switch: HOLON_LORO_COMPACT=off.
+        const COMPACT_EVERY: u64 = 64;
+        let n = self.save_counter.fetch_add(1, Ordering::Relaxed);
+        let compact = std::env::var("HOLON_LORO_COMPACT")
+            .map(|v| v != "off")
+            .unwrap_or(true)
+            && n.is_multiple_of(COMPACT_EVERY);
+
+        for scope in [DocScope::Global, DocScope::Layout] {
+            let doc = self.doc_slot(scope).read().await;
+            let Some(d) = doc.as_ref() else { continue };
+            let path = self.snapshot_path(scope);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            // Periodic history compaction: every Nth save (incl. the first
-            // save of a session, which sheds history accumulated in prior
-            // sessions) write a shallow snapshot instead of a full one.
-            // Holon undo replays the inverse-command log, so trimmed Loro
-            // history is never needed locally; stale P2P peers get a full
-            // snapshot via the delta-export guard in `iroh_sync_adapter`.
-            // Kill-switch: HOLON_LORO_COMPACT=off.
-            const COMPACT_EVERY: u64 = 64;
-            let n = self.save_counter.fetch_add(1, Ordering::Relaxed);
-            let compaction_enabled = std::env::var("HOLON_LORO_COMPACT")
-                .map(|v| v != "off")
-                .unwrap_or(true);
-            if compaction_enabled && n.is_multiple_of(COMPACT_EVERY) {
+            if compact {
                 d.save_compact_to_file(&path)?;
             } else {
                 d.save_to_file(&path)?;
@@ -237,7 +282,7 @@ impl LoroDocumentStore {
     }
 
     pub async fn get(&self, _: &Path) -> Option<Arc<LoroDocument>> {
-        self.get_global_doc().await.ok() // ALLOW(ok): doc may not be initialized
+        self.get_doc(DocScope::Global).await.ok() // ALLOW(ok): doc may not be initialized
     }
 
     pub async fn get_loaded_paths(&self) -> Vec<CanonicalPath> {
@@ -246,7 +291,7 @@ impl LoroDocumentStore {
     }
 
     pub async fn iter(&self) -> Vec<(CanonicalPath, Arc<LoroDocument>)> {
-        if let Ok(doc) = self.get_global_doc().await {
+        if let Ok(doc) = self.get_doc(DocScope::Global).await {
             vec![(CanonicalPath::new(&self.storage_dir), doc)]
         } else {
             vec![]
@@ -266,8 +311,9 @@ impl LoroDocumentStore {
         &mut self,
         _: &Path,
     ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error + Send + Sync>> {
-        // Just ensure the global doc is loaded
-        self.get_global_doc().await?;
+        // Just ensure both docs are loaded
+        self.get_doc(DocScope::Global).await?;
+        self.get_doc(DocScope::Layout).await?;
         Ok(vec![])
     }
 }
@@ -282,7 +328,7 @@ mod tests {
     async fn test_global_doc_creates_new() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let store = LoroDocumentStore::new(temp_dir.path().to_path_buf());
-        let doc = store.get_global_doc().await?;
+        let doc = store.get_doc(DocScope::Global).await?;
         assert_eq!(doc.doc_id(), GLOBAL_DOC_ID);
         Ok(())
     }
@@ -291,8 +337,8 @@ mod tests {
     async fn test_global_doc_reuses() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let store = LoroDocumentStore::new(temp_dir.path().to_path_buf());
-        let doc1 = store.get_global_doc().await?;
-        let doc2 = store.get_global_doc().await?;
+        let doc1 = store.get_doc(DocScope::Global).await?;
+        let doc2 = store.get_doc(DocScope::Global).await?;
         assert!(Arc::ptr_eq(&doc1, &doc2));
         Ok(())
     }
@@ -302,14 +348,14 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let store_dir = temp_dir.path().to_path_buf();
         let store = LoroDocumentStore::new(store_dir.clone());
-        let doc1 = store.get_global_doc().await?;
+        let doc1 = store.get_doc(DocScope::Global).await?;
 
         doc1.insert_text("test", 0, "Hello")?;
         store.save_all().await?;
 
         // New store should load persisted data
         let store2 = LoroDocumentStore::new(store_dir);
-        let doc2 = store2.get_global_doc().await?;
+        let doc2 = store2.get_doc(DocScope::Global).await?;
         let text = doc2.get_text("test")?;
         assert_eq!(text, "Hello");
         Ok(())

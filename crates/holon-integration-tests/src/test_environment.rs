@@ -48,6 +48,7 @@ use holon_frontend::SessionConfig;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::BuilderServicesSlot;
 use holon_frontend::reactive::ReactiveEngine;
+use holon_loro::DocScope;
 use holon_loro::LoroBackend;
 use holon_loro::LoroDocumentStore;
 use holon_loro::event_bus::PublishErrorTracker;
@@ -1060,9 +1061,9 @@ impl TestEnvironment {
         let doc_store = LoroDocumentStore::new(storage_dir.clone());
         // Resolve (and cache) the global doc once so reads and writes share it.
         let doc = doc_store
-            .get_global_doc()
+            .get_doc(DocScope::Global)
             .await
-            .map_err(|e| anyhow::anyhow!("get_global_doc: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("get_doc(Global): {e}"))?;
         let backend = Arc::new(LoroBackend::from_document(doc));
         let shared_store = Arc::new(RwLock::new(doc_store));
 

@@ -34,6 +34,7 @@ use std::time::Duration;
 
 use holon_api::QueryLanguage;
 use holon_integration_tests::TestEnvironment;
+use holon_loro::DocScope;
 use holon_loro::LoroBackend;
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
@@ -85,7 +86,7 @@ async fn edge_backend(env: &TestEnvironment) -> LoroBackend {
     let global_doc = store
         .read()
         .await
-        .get_global_doc()
+        .get_doc(DocScope::Global)
         .await
         .expect("global Loro doc");
     LoroBackend::from_document(global_doc)

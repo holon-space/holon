@@ -58,6 +58,7 @@ pub mod iroh_advertiser;
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 pub mod iroh_sync_adapter;
+pub mod layout_migration;
 pub mod live_value;
 pub mod loro_backend;
 pub mod loro_block_operations;

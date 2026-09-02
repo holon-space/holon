@@ -32,6 +32,7 @@ use holon_core::OperationProvider;
 use holon_core::storage::BlockQuerySource;
 use holon_core::storage::BlockSnapshot;
 use holon_core::storage::block_query::Result;
+use holon_loro::DocScope;
 use holon_loro::LoroBackend;
 use holon_loro::loro_block_operations::LoroBlockOperations;
 use holon_loro::loro_document_store::LoroDocumentStore;
@@ -124,9 +125,9 @@ pub async fn register_loro_read_stack(
     let doc_store = LoroDocumentStore::new(storage_dir);
     // Load/create the persistent global doc once, up front.
     let doc = doc_store
-        .get_global_doc()
+        .get_doc(DocScope::Global)
         .await
-        .expect("register_loro_read_stack: get_global_doc failed");
+        .expect("register_loro_read_stack: get_doc(Global) failed");
     let backend = Arc::new(LoroBackend::from_document(doc));
 
     // A `LoroDocumentStore` clone shares the global-doc `Arc`, so the registered
@@ -370,7 +371,7 @@ mod tests {
         let store = register_loro_read_stack(&injector, dir).await;
 
         // Seed the SAME global doc the resolved source will read.
-        let doc = store.read().await.get_global_doc().await.unwrap();
+        let doc = store.read().await.get_doc(DocScope::Global).await.unwrap();
         let backend = LoroBackend::from_document(doc);
         let root = backend
             .create_block(EntityUri::no_parent(), BlockContent::text("root"), None)
@@ -408,7 +409,7 @@ mod tests {
         let child_id = {
             let doc_store = LoroDocumentStore::new(dir.clone());
             // `backend` and `ops` share this store's global doc (clone shares the Arc).
-            let doc = doc_store.get_global_doc().await.unwrap();
+            let doc = doc_store.get_doc(DocScope::Global).await.unwrap();
             let backend = LoroBackend::from_document(doc);
             let root = backend
                 .create_block(EntityUri::no_parent(), BlockContent::text("root"), None)
@@ -432,7 +433,7 @@ mod tests {
 
         // Reopen a brand-new store over the same dir.
         let store2 = LoroDocumentStore::new(dir);
-        let doc2 = store2.get_global_doc().await.unwrap();
+        let doc2 = store2.get_doc(DocScope::Global).await.unwrap();
         let backend2 = LoroBackend::from_document(doc2);
         let reloaded = backend2.get_block(&child_id).await.unwrap();
         assert_eq!(
