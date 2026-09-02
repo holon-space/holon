@@ -19,6 +19,7 @@ use holon_org_format::RenderFidelity;
 use holon_org_format::expected_reparse;
 use holon_org_format::extract_inline_marks;
 use holon_org_format::render_block_content_checked;
+use holon_org_format::render_lossless;
 use proptest::prelude::*;
 
 /// Render → parse → render → parse, through the PROD emit path
@@ -71,6 +72,10 @@ fn assert_fixed_point_against(
                  {fidelity:?}).\nemitted {emitted:?}\nhistory: {history:#?}"
             );
         }
+        assert_store_representable(
+            &next_marks,
+            &format!("cycle {cycle}: parsing {emitted:?}\nhistory: {history:#?}"),
+        );
         history.push((emitted, next_content.clone(), next_marks.clone()));
         state = (next_content, next_marks);
     }
@@ -93,6 +98,38 @@ fn assert_fixed_point_against(
         "stored marks never settled.\nhistory: {history:#?}"
     );
     (last.0.clone(), last.1.clone())
+}
+
+/// The mark set a parse mints must be one the store can hold.
+///
+/// Loro keys a mark by `(range, key, value)` and merges marks that share a key
+/// and value across an overlap, so two same-kind spans touching the same
+/// character come back as their union. An identical triple is only the
+/// degenerate case of that; comparing the NORMALISED set is what makes the
+/// overlapping-but-unequal pair visible too — `[Bold 0..3, Bold 1..2]` reads as
+/// duplicate-free while it is just as unstorable.
+fn assert_store_representable(marks: &[MarkSpan], context: &str) {
+    let mut normalised: Vec<(usize, usize, String)> = marks
+        .iter()
+        .map(|m| (m.start, m.end, format!("{:?}", m.mark)))
+        .collect();
+    normalised.sort();
+    let mut unique = normalised.clone();
+    unique.dedup();
+    assert_eq!(
+        normalised, unique,
+        "{context}\nminted a duplicate mark; the Peritext store holds marks as a (range, key, \
+         value) set and would give back only one"
+    );
+    for (i, (start, end, key)) in normalised.iter().enumerate() {
+        for (other_start, other_end, other_key) in &normalised[i + 1..] {
+            assert!(
+                key != other_key || end <= other_start,
+                "{context}\nminted the overlapping same-kind marks {start}..{end} and \
+                 {other_start}..{other_end} of {key}, which the store merges into one span"
+            );
+        }
+    }
 }
 
 fn span(start: usize, end: usize, mark: InlineMark) -> MarkSpan {
@@ -374,6 +411,59 @@ fn a_mark_outside_the_literal_keeps_full_fidelity() {
             "{content:?} + {mark:?} must render exactly; emitted {emitted:?}"
         );
         assert_fixed_point(content, &[mark], 3);
+    }
+}
+
+/// Emphasis nested 2–3 deep in AUTHORED org text, every level's delimiter
+/// drawn independently so same-delimiter and mixed-delimiter chains both come
+/// up: `**x**`, `*/*x*/*`, `_//x//_`.
+///
+/// The store-state generator above cannot reach this class — it mints marks,
+/// and the shapes here are made of DELIMITER BYTES a user typed, where which
+/// pair must survive as literal content depends on the whole chain above it.
+fn nested_emphasis_text_strategy() -> impl Strategy<Value = String> {
+    (
+        prop::collection::vec(
+            prop_oneof![Just('*'), Just('/'), Just('_'), Just('+')],
+            2..4,
+        ),
+        "[a-z][a-z0-9]{0,4}",
+    )
+        .prop_map(|(delims, core)| {
+            delims
+                .iter()
+                .rev()
+                .fold(core, |inner, delim| format!("{delim}{inner}{delim}"))
+        })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 512,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// Authored nesting is a byte contract, not just a settling one: the
+    /// delimiters the user typed must come back, all of them, in the order
+    /// they were typed. The mark set behind them must also be storable — a
+    /// chain that round-trips only because it minted two marks the store will
+    /// merge is corrupt one save later.
+    #[test]
+    fn nested_emphasis_text_round_trips_byte_identically(text in nested_emphasis_text_strategy()) {
+        let (content, marks) = extract_inline_marks(&text);
+        assert_store_representable(&marks, &format!("parsing {text:?}"));
+        let emitted = render_lossless(&content, &marks)
+            .unwrap_or_else(|e| panic!("render_lossless({text:?}) bailed: {e}"));
+        prop_assert_eq!(
+            &emitted,
+            &text,
+            "{:?} parsed to content {:?} + marks {:?}",
+            text,
+            content,
+            marks
+        );
+        assert_fixed_point(&content, &marks, 3);
     }
 }
 

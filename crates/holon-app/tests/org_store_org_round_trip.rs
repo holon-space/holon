@@ -30,6 +30,7 @@
 //!      is what rule 4 and the CLAUDE.md line quoting it should now be
 //!      corrected to say.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -44,6 +45,8 @@ use holon_api::block::Block;
 use holon_app::turso_seams::CacheBlockReader;
 use holon_core::OperationProvider;
 use holon_filesystem::BlockReader;
+use holon_loro::LoroBackend;
+use holon_loro::LoroDocument;
 use holon_loro::block_to_params;
 use holon_org_format::OrgRenderer;
 use holon_org_format::parse_org_file;
@@ -416,4 +419,75 @@ async fn compass_edges_survive_the_store_as_typed_edges() {
          string: {:?}",
         anchor.properties
     );
+}
+
+/// Doubled emphasis wrapping a markdown link, an org link, and plain words —
+/// the shapes bugfunnel
+/// `2026-09-02-org-write-back-halves-bold-markers-around-a-link` writes back
+/// with half their delimiters.
+const MARKED_INLINE: &str = "#+ID: marks-page\n* Inline marks\n:PROPERTIES:\n:ID: \
+                             marks-anchor\n:END:\nOpen: **[pr#128](https://example.test/128)** \
+                             (fixture) and **plain** and /italic/ and *[[https://example.test/1][org link]]* \
+                             tail.\n";
+
+/// The Loro seam, which the SQL legs of `render_both_ways` do not reach:
+/// `marks` travels to SQL as a JSON array, duplicates and all, while the CRDT
+/// keeps a Peritext attribute set that cannot hold them (see `MarkSpan`).
+#[tokio::test(flavor = "multi_thread")]
+async fn inline_marks_around_a_link_survive_the_loro_text_seam() {
+    let path = Path::new(FILE);
+    let parsed = parse_org_file(
+        path,
+        MARKED_INLINE,
+        &EntityUri::no_parent(),
+        Path::new(ROOT),
+    )
+    .expect("the fixture must parse");
+
+    let doc = Arc::new(LoroDocument::new("marks".to_string()).expect("loro doc"));
+    let backend = LoroBackend::from_document(doc);
+    for block in std::iter::once(&parsed.document).chain(parsed.blocks.iter()) {
+        backend
+            .create_block_with_properties(
+                block.parent_id.clone(),
+                block.to_block_content(),
+                Some(block.id.clone()),
+                &HashMap::new(),
+                &holon_api::BlockEdges::default(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("create {}: {e}", block.id));
+    }
+
+    let snapshot = backend.snapshot_blocks().await;
+    for block in parsed.blocks.iter() {
+        let back = snapshot
+            .get(&block.id.to_string())
+            .unwrap_or_else(|| panic!("{} must come back from the Loro doc", block.id));
+        assert_eq!(
+            back.block.to_block_content(),
+            block.to_block_content(),
+            "block {}: the Loro doc gave back a different mark set than the parser minted",
+            block.id
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inline_marks_around_a_link_survive_both_write_legs() {
+    for leg in [WriteLeg::OrgIngest, WriteLeg::Loro] {
+        let (from_parser, after_store) = render_both_ways(MARKED_INLINE, leg).await;
+        assert_eq!(
+            from_parser,
+            MARKED_INLINE,
+            "control (leg {}): the format-only leg must already reproduce the authored bytes",
+            leg.name()
+        );
+        assert_eq!(
+            after_store,
+            MARKED_INLINE,
+            "leg {}: write-back halved the authored `**…**` delimiters",
+            leg.name()
+        );
+    }
 }

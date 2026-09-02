@@ -231,9 +231,15 @@ impl InlineMark {
 /// One inline mark applied to a half-open `[start, end)` range of Unicode
 /// scalar offsets within a single block's `content`.
 ///
-/// Multiple `MarkSpan`s with overlapping ranges are allowed; the renderer
-/// is responsible for coalescing per output format (org cannot represent
-/// arbitrary overlap; markdown can via nesting).
+/// `MarkSpan`s of DIFFERENT marks may overlap; the renderer is responsible for
+/// coalescing per output format (org cannot represent arbitrary overlap;
+/// markdown can via nesting).
+///
+/// Two spans of the SAME mark may not. Loro keeps marks as a Peritext
+/// attribute set keyed by `(range, key, value)`, so it merges same-mark spans
+/// across an overlap and gives the pair back as their union — an identical
+/// triple twice being the degenerate case, where the renderer then emits one
+/// delimiter pair for what the author wrote as two.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MarkSpan {
     pub start: usize,

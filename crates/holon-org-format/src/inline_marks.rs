@@ -73,6 +73,28 @@ fn extract_state(text: &str, classifier: &LinkTargetClassifier, src_base: usize)
     let mut state = ExtractState {
         classifier: classifier.clone(),
         src_base,
+        whole_text_len: text.len(),
+        ..Default::default()
+    };
+    walk_node(&parse_inline(text), &mut state);
+    state
+}
+
+/// The emphasis arm's nested re-parse: same classifier and policy as `outer`,
+/// told where `text` sits in the outer source and which marks already cover it
+/// whole — see [`ExtractState::full_span_active`].
+fn extract_state_within(
+    text: &str,
+    outer: &ExtractState,
+    src_base: usize,
+    full_span_active: Vec<InlineMark>,
+) -> ExtractState {
+    let mut state = ExtractState {
+        classifier: outer.classifier.clone(),
+        keep_emphasis_raw: outer.keep_emphasis_raw,
+        src_base,
+        whole_text_len: text.len(),
+        full_span_active,
         ..Default::default()
     };
     walk_node(&parse_inline(text), &mut state);
@@ -494,6 +516,12 @@ fn quote_spans(
 /// - DATA-BEARING marks hold a link label, and org parses no emphasis inside a
 ///   link label. Quoting there adds `=` bytes to the LABEL, which then fails
 ///   the check and costs the block its URL on the degraded rung.
+///
+/// A third span is left alone for a reason of its own: one a styling mark of
+/// the SAME delimiter covers exactly. That is the stored form of the doubled
+/// emphasis `**x**` — content `*x*` under one Bold — and the mark's own
+/// delimiters wrap it back into the doubled form the parser reads as this very
+/// content. Quoting it would emit `*=*x*=*` instead, which does not.
 fn quotable_markup_spans(content: &str, marks: &[MarkSpan]) -> Vec<std::ops::Range<usize>> {
     let sealed = sealed_char_ranges(marks);
     markup_source_spans(content)
@@ -501,7 +529,16 @@ fn quotable_markup_spans(content: &str, marks: &[MarkSpan]) -> Vec<std::ops::Ran
         .filter(|span| {
             let start = content[..span.start].chars().count();
             let end = content[..span.end].chars().count();
-            !sealed.iter().any(|(s, e)| *s <= start && end <= *e)
+            if sealed.iter().any(|(s, e)| *s <= start && end <= *e) {
+                return false;
+            }
+            let doubled_by = |m: &&MarkSpan| {
+                m.mark.class() == MarkClass::Styling
+                    && m.start == start
+                    && m.end == end
+                    && open_delim(&m.mark) == content[span.clone()][..1]
+            };
+            !marks.iter().any(|m| doubled_by(&m))
         })
         .collect()
 }
@@ -547,6 +584,14 @@ struct ExtractState {
     /// Absolute source byte offset of the string being walked (non-zero only
     /// in the emphasis arm's nested re-parse).
     src_base: usize,
+    /// Byte length of the string being walked, so a node can tell whether it
+    /// spans the whole of it.
+    whole_text_len: usize,
+    /// Marks an ancestor already holds over exactly this whole string. A node
+    /// re-minting one of them would put the same `(start, end, mark)` triple
+    /// in the set twice, which the Peritext store cannot hold (see
+    /// [`MarkSpan`]); such a node emits its delimiters as content instead.
+    full_span_active: Vec<InlineMark>,
     /// Source→content provenance, in source order — see [`OffsetRun`].
     runs: Vec<OffsetRun>,
 }
@@ -828,16 +873,6 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
             // BOLD/ITALIC/UNDERLINE/STRIKE: 1-char delimiter each side.
             let inner = strip_prefix_suffix(&raw, 1, 1);
             let inner_src = stripped_byte_range(&raw, 1, 1);
-            // Recurse into the inner string for nested marks. orgize re-parses
-            // the substring fresh; nested mark offsets are scalar offsets
-            // within `inner`, ready to be shifted by the outer start. The
-            // re-parse is told where `inner` sits in the OUTER source, so the
-            // runs it reports need no rebasing here.
-            let nested = extract_state(&inner, &state.classifier, node_src.start + inner_src.start);
-            let (nested_text, nested_marks) = (nested.out, nested.marks);
-            // The text from recursion may differ from `inner` if it had nested
-            // marks (delimiters were stripped). Use nested_text as the actual
-            // emitted content.
             let outer_mark = match kind_hint {
                 MarkKindHint::Bold => InlineMark::Bold,
                 MarkKindHint::Italic => InlineMark::Italic,
@@ -845,15 +880,116 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
                 MarkKindHint::Strike => InlineMark::Strike,
                 _ => unreachable!(),
             };
+            // orgize reads `**x**` as bold nested in bold, so stripping both
+            // layers would yield TWO MarkSpans with the same range and the same
+            // mark. The store keeps marks as a Peritext attribute set, where a
+            // mark is (range, key, value) — a duplicate has no representation
+            // there, so it comes back as one and write-back halves the
+            // authored delimiters. When an ancestor already carries this mark
+            // over exactly this span, keep the delimiters as literal content
+            // instead: one representable mark, and the bytes survive.
+            if spans_whole_text(&raw, state) && state.full_span_active.contains(&outer_mark) {
+                emit_delimiters_as_content(&raw, node_src, state);
+                return;
+            }
+            // Recurse into the inner string for nested marks. orgize re-parses
+            // the substring fresh; nested mark offsets are scalar offsets
+            // within `inner`, ready to be shifted by the outer start. The
+            // re-parse is told where `inner` sits in the OUTER source, so the
+            // runs it reports need no rebasing here.
+            let nested = extract_state_within(
+                &inner,
+                state,
+                node_src.start + inner_src.start,
+                active_for_inner(&raw, outer_mark.clone(), state),
+            );
+            // The text from recursion may differ from `inner` if it had nested
+            // marks (delimiters were stripped). Use nested_text as the actual
+            // emitted content.
             push_with_inner_marks(
                 state,
-                &nested_text,
-                nested_marks,
+                &nested.out,
+                nested.marks,
                 outer_mark,
                 Provenance::Nested(nested.runs),
             );
         }
     }
+}
+
+/// Whether this node's source text IS the whole string being walked — the
+/// only geometry under which an ancestor's mark covers exactly this span, and
+/// therefore the only one where re-emitting that mark would duplicate it.
+fn spans_whole_text(raw: &str, state: &ExtractState) -> bool {
+    raw.len() == state.whole_text_len
+}
+
+/// The marks an ancestor holds over exactly the inner text this node is about
+/// to recurse into: this node's own mark, plus the ancestors' own set when
+/// this node spans everything they cover.
+fn active_for_inner(raw: &str, outer_mark: InlineMark, state: &ExtractState) -> Vec<InlineMark> {
+    let mut active = if spans_whole_text(raw, state) {
+        state.full_span_active.clone()
+    } else {
+        Vec::new()
+    };
+    active.push(outer_mark);
+    active
+}
+
+/// Emit an emphasis node's own delimiters as literal content, minting no mark:
+/// `*x*` under an already-active Bold becomes the three characters `*x*`.
+///
+/// The delimiters are content now, so they get verbatim runs of their own over
+/// the source bytes they came from and the run tiling stays total.
+fn emit_delimiters_as_content(
+    raw: &str,
+    node_src: std::ops::Range<usize>,
+    state: &mut ExtractState,
+) {
+    let delim_len = raw
+        .chars()
+        .next()
+        .expect("an emphasis node has delimiters")
+        .len_utf8();
+    let inner_src = stripped_byte_range(raw, 1, 1);
+    let inner = strip_prefix_suffix(raw, 1, 1);
+    let active = state.full_span_active.clone();
+    let nested = extract_state_within(&inner, state, node_src.start + inner_src.start, active);
+
+    push_text(
+        state,
+        &raw[..delim_len],
+        node_src.start..node_src.start + delim_len,
+        true,
+    );
+
+    let mark_base = state.char_pos;
+    let content_base = state.out.len();
+    state.out.push_str(&nested.out);
+    state.char_pos += nested.out.chars().count();
+    state
+        .runs
+        .extend(nested.runs.into_iter().map(|run| OffsetRun {
+            src: run.src,
+            content: content_base + run.content.start..content_base + run.content.end,
+            verbatim: run.verbatim,
+        }));
+    for span in nested.marks {
+        state.marks.push(MarkSpan::new(
+            mark_base + span.start,
+            mark_base + span.end,
+            span.mark,
+        ));
+    }
+
+    let trail_src = node_src.start + inner_src.end;
+    push_text(
+        state,
+        &raw[raw.len() - delim_len..],
+        trail_src..trail_src + delim_len,
+        true,
+    );
 }
 
 /// Append `text` to `state.out`, shifting any `inner_marks` by the current

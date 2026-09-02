@@ -159,3 +159,69 @@ fn link_shapes_adopt_and_keep_every_other_byte() {
         );
     }
 }
+
+/// Doubled emphasis, alone and around links. The store holds `**x**` as `*x*`
+/// under a single `Bold`, never `x` under two — a duplicate triple is a mark
+/// set `MarkSpan` forbids, and it is what halves the delimiters on write-back.
+const DOUBLED_EMPHASIS_SHAPES: &[&str] = &[
+    "**bold**",
+    "//italic//",
+    "__under__",
+    "++strike++",
+    "***triple***",
+    "**a** and **b**",
+    "**[pr#128](https://example.test/128)** and **plain**",
+    "**[[https://example.test/1][org link]]**",
+    "[[https://example.test/1][**label**]]",
+    "**x** [[https://example.test/1][l]] **y**",
+    "**/inner/ tail**",
+    // An unclosed doubled marker stays literal text and mints no mark.
+    "**unclosed",
+];
+
+/// Doubled emphasis with a DIFFERENT delimiter nested between the two same
+/// ones. Every one of these round-tripped before the doubled-emphasis fix and
+/// broke under its first form, which read the node as `DDxDD` off the first
+/// character alone and re-emitted the middle delimiter as the outer one —
+/// deleting the middle mark and rewriting the author's bytes (`*/*x*/*` →
+/// `***x***`). The delimiter that must become literal content is the one
+/// belonging to the INNERMOST node whose mark an ancestor already holds, not
+/// the second character of the node text.
+const NESTED_MIXED_DELIMITER_SHAPES: &[&str] =
+    &["*/*x*/*", "/*/x/*/", "_*_x_*_", "*_*x*_*", "*/**x**/*"];
+
+#[test]
+fn nested_mixed_delimiter_emphasis_round_trips_byte_identically() {
+    for shape in NESTED_MIXED_DELIMITER_SHAPES {
+        assert_round_trips_duplicate_free(shape);
+    }
+}
+
+/// Parse `shape`, assert the mark set is one the Peritext store can hold, and
+/// assert the render half puts the authored bytes back unchanged.
+fn assert_round_trips_duplicate_free(shape: &str) {
+    let (content, marks) = extract_inline_marks(shape);
+    for (i, m) in marks.iter().enumerate() {
+        assert!(
+            !marks[..i]
+                .iter()
+                .any(|o| o.start == m.start && o.end == m.end && o.mark == m.mark),
+            "{shape:?} minted the duplicate mark {m:?} — the Peritext store holds marks as a \
+             (range, key, value) set and would give back only one, halving the delimiters"
+        );
+    }
+    let emitted = render_lossless(&content, &marks)
+        .unwrap_or_else(|e| panic!("render_lossless({shape:?}) bailed: {e}"));
+    assert_eq!(
+        emitted, *shape,
+        "{shape:?} parsed to content {content:?} + marks {marks:?}, which rendered back as \
+         {emitted:?}"
+    );
+}
+
+#[test]
+fn doubled_emphasis_round_trips_byte_identically() {
+    for shape in DOUBLED_EMPHASIS_SHAPES {
+        assert_round_trips_duplicate_free(shape);
+    }
+}

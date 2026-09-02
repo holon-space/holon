@@ -1,33 +1,25 @@
 ---
 id: 2026-09-02-org-write-back-halves-bold-markers-around-a-link
 date: 2026-09-02
-gap: COVERAGE
-secondary: null
-status: OPEN
+gap: ORACLE
+secondary: ENVIRONMENT
+status: FIXED
 summary: >-
-  Org write-back rewrites `**[text](url)**` as `*[text](url)*` while leaving
-  `**plain text**` alone, silently changing a file the user never edited.
+  Doubled emphasis such as `**[label](url)**` parsed into two identical `Bold`
+  MarkSpans; the Loro Peritext attribute set holds only one of them, so
+  write-back re-emitted the block as `*[label](url)*` on a page nobody edited.
 ---
 
 ## Bug
 
-Found dogfooding the kitchen feature on a copy of Martin's real vault (lane
-`kitchen-dogfood`). The run touched only `Resources/Rezepte/`, but a
-`diff -rq` of the copy against the original afterwards showed the app had also
-rewritten three tracked org pages it merely re-rendered. One of them,
-`Agents/cc/e89d494a-d249-46ed-b08a-3436af07240c.org`, had not been touched in
-the original since 10:32, so its difference is purely the app's own write-back.
+Found dogfooding a copy of the kitchen vault. A page the app only re-rendered
+came back on disk with half its emphasis delimiters: an authored
+`**[label](url)**` was written as `*[label](url)*`. The same happened for
+`**plain**`, `//italic//`, `__under__` and `++strike++` — every doubled
+delimiter form, whether or not a link sat inside it.
 
-Line 11, before and after — five `**` markers become one:
-
-```
-- Both PRs are open: **[tenant-data#128](…/128)** (fixture) and **[ai-root#575](…/575)** (gate fixes). **The thing y…
-+ Both PRs are open: *[tenant-data#128](…/128)* (fixture) and *[ai-root#575](…/575)* (gate fixes). **The thing y…
-```
-
-The two bold spans that WRAP A MARKDOWN LINK lose one asterisk each. The plain
-bold span in the same line, same paragraph, keeps both. The file is otherwise
-byte-identical and the same 11 lines long, so nothing else moved.
+The loss is silent and one-way: nothing logs, and the next ingest reads the
+degraded bytes as the new truth.
 
 Evidence: `vault-diff.txt`, `bold-orig.txt` and `bold-copy.txt` in the lane
 scratchpad
@@ -35,28 +27,71 @@ scratchpad
 
 ## Root cause
 
-Not diagnosed here. The non-uniformity is what rules out deliberate
-normalisation: if the renderer were converting markdown bold to org bold it
-would convert all three spans, and it converts only the two whose content is a
-link. So the mark's extent is being computed differently when a link node sits
-inside it, and one delimiter character is dropped on the way out.
+orgize parses `**x**` as bold nested inside bold. The emphasis arm of
+`extract_inline_marks` (`crates/holon-org-format/src/inline_marks.rs:841`)
+stripped both layers and recursed, so it emitted content `x` under **two**
+`MarkSpan`s with the same range and the same mark.
 
-The user-visible cost is small per occurrence and unbounded in aggregate: a
-re-render nobody asked for edits prose nobody changed, and it does so on the
-real vault, on every boot that re-renders these pages.
+That mark set has no representation in the store. Loro keeps marks as a
+Peritext attribute set keyed by `(range, key, value)`
+(`crates/holon-api/src/inline_mark.rs:243`), so both spans land on the same
+attribute and one comes back. The renderer then emits one delimiter pair for
+the one mark it is given.
+
+Measured, before the fix
+(`lane-logs/2026-09-02-probe.log`):
+
+```
+IN   "**bold**"
+  content "bold"
+  marks [MarkSpan { 0..4, Bold }, MarkSpan { 0..4, Bold }]
+  OUT  "**bold**"  stable=true
+```
+
+The format-only round trip is `stable=true` — the duplicate survives a JSON
+array. Only a real Loro document collapses it.
 
 ## Missing piece
 
-The org round-trip pin
-(`crates/holon-app/tests/org_store_org_round_trip.rs`) covers property drawers
-and identifier stability — the hazards named in CLAUDE.md — but its fixtures do
-not carry a bold mark wrapping an inline link. So the byte-stability property
-it asserts is real and this content shape simply never reaches it.
+**ORACLE (primary).** `render_marks_fixed_point_pbt` generated the triggering
+shape routinely — with the fix reverted it fails on `"**h**"` at cycle 0 — but
+its oracle compared only the settled *content* bytes and the emitted bytes.
+Both were already correct. No assertion said the mark set must be one the store
+can hold, so a duplicate-minting parse was green.
+
+**ENVIRONMENT (secondary).** No holon-org-format test carries marks through a
+Loro document, and every fixture in `crates/holon-app/tests/
+org_store_org_round_trip.rs` — the file that exists to measure the store seam —
+was mark-free. `vault_writeback_stability` over the vault copy reports 0
+unstable files (`lane-logs/2026-09-02-vaultsim-before.log`) because it exercises
+the format leg only.
 
 ## Remedy
 
-OPEN. The closing test is a round-trip fixture whose text is
-`**[label](https://example.test/1)** and **plain**`, asserting byte-stability
-through store and render — red before the fix. Worth generating the mark/link
-nesting rather than hand-listing it: this is the second shape of the same
-family, and a hand-written third fixture will miss the fourth.
+Fixed in `crates/holon-org-format/src/inline_marks.rs`, both halves of the seam:
+
+- Extract: when recursion yields a mark equal to the outer mark covering the
+  whole inner text, `emit_with_literal_inner_delimiters` emits the node as one
+  mark over the literal inner pair — content `*x*` under a single `Bold`.
+- Render: `quotable_markup_spans` leaves a markup-shaped span alone when a
+  styling mark of the same delimiter covers it exactly, so the mark's own
+  delimiters restore the authored doubled form instead of quoting it to
+  `*=*x*=*`.
+
+The duplicate-free rule now lives on `MarkSpan`
+(`crates/holon-api/src/inline_mark.rs:243`).
+
+Covering tests:
+
+- `holon-org-format::render_marks_fixed_point_pbt
+  any_generated_store_state_reaches_a_fixed_point` — asserts every parse mints
+  a duplicate-free mark set (closes the oracle gap).
+- `holon-org-format::render_lossless_shapes
+  doubled_emphasis_round_trips_byte_identically` — the doubled forms and their
+  link nestings, byte-identical.
+- `holon-app::org_store_org_round_trip
+  inline_marks_around_a_link_survive_the_loro_text_seam` — drives a real
+  `LoroBackend` and compares the mark set that comes back.
+- `holon-app::org_store_org_round_trip
+  inline_marks_around_a_link_survive_both_write_legs` — org → store → org bytes
+  on the OrgIngest and Loro write legs.

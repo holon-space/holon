@@ -458,46 +458,59 @@ pub fn marked_content_strategy() -> impl Strategy<Value = MarkedContent> {
                 literals
             };
 
-            let marks: Vec<MarkSpan> = mark_specs
-                .into_iter()
-                .filter_map(|(geometry, kind, idx)| {
-                    let anchor_idx = idx.index(anchors.len());
-                    let (start, end) = anchors[anchor_idx];
-                    let (s, e) = match geometry {
-                        MarkGeometry::CoExtensive => (start, end),
-                        MarkGeometry::BoundaryBefore => (start.saturating_sub(3), start),
-                        MarkGeometry::BoundaryAfter => (end, (end + 3).min(total)),
-                        MarkGeometry::ContainingWithSlack => {
-                            (start.saturating_sub(2), (end + 2).min(total))
-                        }
-                        MarkGeometry::Inside => (start + 1, end.saturating_sub(1)),
-                        MarkGeometry::Crossing => (start, start + (end - start) / 2),
-                        MarkGeometry::Whole => (0, total),
-                    };
-                    if s >= e || e > total {
+            let candidates = mark_specs.into_iter().filter_map(|(geometry, kind, idx)| {
+                let anchor_idx = idx.index(anchors.len());
+                let (start, end) = anchors[anchor_idx];
+                let (s, e) = match geometry {
+                    MarkGeometry::CoExtensive => (start, end),
+                    MarkGeometry::BoundaryBefore => (start.saturating_sub(3), start),
+                    MarkGeometry::BoundaryAfter => (end, (end + 3).min(total)),
+                    MarkGeometry::ContainingWithSlack => {
+                        (start.saturating_sub(2), (end + 2).min(total))
+                    }
+                    MarkGeometry::Inside => (start + 1, end.saturating_sub(1)),
+                    MarkGeometry::Crossing => (start, start + (end - start) / 2),
+                    MarkGeometry::Whole => (0, total),
+                };
+                if s >= e || e > total {
+                    return None;
+                }
+                // A stored `Link` span IS a parsed label: plain text, already
+                // trimmed by org, and never overlapping raw link syntax —
+                // that syntax would have BECOME the mark, not sat inside it.
+                // Checked on the FINAL span: the geometry above, not the
+                // anchor, decides where the mark actually lands.
+                if matches!(kind, InlineMark::Link { .. }) {
+                    let label: String = content.chars().skip(s).take(e - s).collect();
+                    let overlaps_raw_link = ranges
+                        .iter()
+                        .any(|(rs, re, _, adopted)| adopted.is_some() && s < *re && *rs < e);
+                    if label.trim() != label || overlaps_raw_link {
                         return None;
                     }
-                    // A stored `Link` span IS a parsed label: plain text, already
-                    // trimmed by org, and never overlapping raw link syntax —
-                    // that syntax would have BECOME the mark, not sat inside it.
-                    // Checked on the FINAL span: the geometry above, not the
-                    // anchor, decides where the mark actually lands.
-                    if matches!(kind, InlineMark::Link { .. }) {
-                        let label: String = content.chars().skip(s).take(e - s).collect();
-                        let overlaps_raw_link = ranges
-                            .iter()
-                            .any(|(rs, re, _, adopted)| adopted.is_some() && s < *re && *rs < e);
-                        if label.trim() != label || overlaps_raw_link {
-                            return None;
-                        }
-                    }
-                    Some(MarkSpan {
-                        start: s,
-                        end: e,
-                        mark: kind,
-                    })
+                }
+                Some(MarkSpan {
+                    start: s,
+                    end: e,
+                    mark: kind,
                 })
-                .collect();
+            });
+            // Two marks that share a key AND a value are ONE mark in the store
+            // once their ranges touch: Loro merges them into the union, so a
+            // pair like `Italic 0..3` + `Italic 2..3` is a state no producer
+            // can hand a block. Generating it would make the round trip assert
+            // against an input the store cannot hold.
+            let mut marks: Vec<MarkSpan> = Vec::new();
+            for candidate in candidates {
+                let merges_into_a_kept_mark = marks.iter().any(|kept| {
+                    kept.mark == candidate.mark
+                        && kept.start < candidate.end
+                        && candidate.start < kept.end
+                });
+                if !merges_into_a_kept_mark {
+                    marks.push(candidate);
+                }
+            }
             // A raw-link segment adopts UNLESS a non-styling mark covers it:
             // protective says "this is literal", data-bearing says "this span
             // is already a link's label". Both are decided from the generated
