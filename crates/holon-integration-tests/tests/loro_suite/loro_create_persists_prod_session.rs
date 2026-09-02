@@ -17,8 +17,15 @@
 //!   * origin — dispatched through the SAME `HolonService` facade the MCP
 //!     server builds, with `OpOrigin::Agent` provenance (server.rs
 //!     `service()`), NOT the User-origin `FrontendSession::execute_operation`;
-//!   * timing — the row is present the instant `create` returns AND after
-//!     `wait_for_loro_quiescence`, so there is no async projection race.
+//!   * timing — the row is present once the projection quiesces within the
+//!     budget, so the write is not lost, only deferred.
+//!
+//! With CRDT enabled the Loro commit IS the persist; the `block_raw` row is a
+//! projection of it, produced by the spawned reconcile loop in
+//! `holon_loro::loro_sync_controller` and therefore NOT promised at the moment
+//! `create` returns. What this test locks is that the projection delivers the
+//! row within the quiescence budget — a wedged loop exhausts it and fails
+//! loudly, which is exactly the escape above.
 //!
 //! The live drop was therefore ENVIRONMENT-class: the co-landed backlinks
 //! matview-recreation storm (fixed in `main` e9bcb287) wedged the Loro→SQL
@@ -116,21 +123,15 @@ fn prod_session_create_block_persists_to_block_raw() {
                 .await
                 .unwrap_or_else(|e| panic!("{label}: block.create dispatch failed: {e:#}"));
 
-            // Present the instant create returns — locks that there is NO async
-            // projection race between success and the sink row being queryable.
-            assert_eq!(
-                block_rows(&engine, new_id).await,
-                1,
-                "{label}: block.create returned success but NO row was in block_raw \
-                 immediately after — success-before-persist (fail-loud violation)"
-            );
-
-            // …and still present after the projection fully quiesces.
+            // The row is a projection of the Loro commit, so it lands once the
+            // reconcile loop has run — a wedged loop exhausts this budget.
             env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
             assert_eq!(
                 block_rows(&engine, new_id).await,
                 1,
-                "{label}: block.create row must survive projection quiescence"
+                "{label}: block.create returned success but NO row reached block_raw \
+                 within the projection budget — success-before-persist (fail-loud \
+                 violation)"
             );
         }
     });
