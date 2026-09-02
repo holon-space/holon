@@ -99,6 +99,57 @@ pub struct WritebackDropVerdict {
     pub source_block_count: usize,
 }
 
+/// Property slot holding a document's own declared title — org's `#+TITLE:`,
+/// a recipe's `>> title:`, a markdown frontmatter `title:`. Distinct from the
+/// document block's NAME (the first line of its content), which stays
+/// path-derived; see [`apply_document_metadata`].
+pub const DOCUMENT_TITLE_KEY: &str = "title";
+
+/// The ingest contract for document metadata, in one place for every format.
+///
+/// The persisted document block's property bag becomes EXACTLY what the parse
+/// declares: `parsed.properties` verbatim, plus the declared title under
+/// [`DOCUMENT_TITLE_KEY`]. Returns whether `persisted` changed, so the caller
+/// writes only when there is something to write.
+///
+/// The file is the authority in both directions — a key the user deleted from
+/// it is removed here, or the block would keep serving metadata the file does
+/// not have, with nothing to disclose it.
+///
+/// The block's name is left alone: the sync controller re-resolves a document
+/// by its path-derived name chain on every later ingest, so a renamed block is
+/// unfindable there and the file gets a second page.
+pub fn apply_document_metadata(parsed: &Block, persisted: &mut Block) -> bool {
+    let mut declared: HashMap<&str, holon_api::Value> = parsed
+        .properties
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.clone()))
+        .collect();
+    let title = parsed.title();
+    if !title.is_empty() {
+        declared.insert(DOCUMENT_TITLE_KEY, title.into());
+    }
+
+    let mut changed = false;
+    let stale: Vec<String> = persisted
+        .properties
+        .keys()
+        .filter(|k| !declared.contains_key(k.as_str()))
+        .cloned()
+        .collect();
+    for key in stale {
+        persisted.properties.remove(&key);
+        changed = true;
+    }
+    for (key, value) in declared {
+        if persisted.properties.get(key) != Some(&value) {
+            persisted.properties.insert(key.to_string(), value);
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Pluggable parse + render adapter for a single vault file format.
 ///
 /// Implementors are stateless wrappers around the format crate's free
@@ -193,14 +244,23 @@ pub trait FileFormatAdapter: Send + Sync {
     /// excluded — it is derived from document position, not a per-block field.
     fn content_differs(&self, a: &Block, b: &Block) -> bool;
 
-    /// Reconcile format-specific document-header metadata from a freshly-parsed
-    /// document block onto the persisted document entity — e.g. org's `#+TODO:`
-    /// keyword config, which the parser reads from the file header but the
-    /// stored entity (created via `DocumentManager`) doesn't carry, so a
-    /// re-render would otherwise drop the header. Mutates `persisted` in place
-    /// and returns whether it changed; the controller persists via
+    /// Reconcile document-header metadata from a freshly-parsed document block
+    /// onto the persisted document entity. Mutates `persisted` in place and
+    /// returns whether it changed; the controller persists via
     /// `update_metadata` only when `true`.
-    fn sync_document_metadata(&self, parsed: &Block, persisted: &mut Block) -> bool;
+    ///
+    /// The default is the ingest contract — [`apply_document_metadata`]. An
+    /// override takes responsibility for that contract too, on top of whatever
+    /// format-specific header state it adds (org's `#+TODO:` keyword config,
+    /// its file-level drawer).
+    fn sync_document_metadata(&self, parsed: &Block, persisted: &mut Block) -> bool {
+        apply_document_metadata(parsed, persisted)
+    }
+
+    /// The format's name, as a reader of an error or a degraded banner would
+    /// recognise it — `"org"`, `"cooklang"`, `"Obsidian markdown"`. Every
+    /// message that names the format which refused a file takes it from here.
+    fn format_name(&self) -> &'static str;
 
     /// Which blocks a write-back would SILENTLY drop from disk (BugFunnel row
     /// 28, P0 data-loss class; ADR 0025 op-grounding) — as DATA, not an error.

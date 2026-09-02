@@ -3879,6 +3879,8 @@ mod intermediate_ancestor_writeback_hole {
             fn writeback_degraded(&self, detail: &str) {
                 self.0.lock().unwrap().push(detail.to_string());
             }
+            fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
+            fn ingest_recovered(&self, _: &std::path::Path) {}
         }
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3947,6 +3949,8 @@ mod intermediate_ancestor_writeback_hole {
             fn writeback_degraded(&self, detail: &str) {
                 self.0.lock().unwrap().push(detail.to_string());
             }
+            fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
+            fn ingest_recovered(&self, _: &std::path::Path) {}
         }
 
         let temp_dir = tempfile::tempdir().unwrap();

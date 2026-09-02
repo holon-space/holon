@@ -87,6 +87,10 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
         WriteTier::ReadOnly
     }
 
+    fn format_name(&self) -> &'static str {
+        "LogSeq markdown"
+    }
+
     fn parse(
         &self,
         path: &Path,
@@ -322,10 +326,6 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
 
     fn content_differs(&self, a: &Block, b: &Block) -> bool {
         a.content != b.content || a.marks != b.marks || a.tags != b.tags
-    }
-
-    fn sync_document_metadata(&self, _parsed: &Block, _persisted: &mut Block) -> bool {
-        false
     }
 
     fn writeback_drops(

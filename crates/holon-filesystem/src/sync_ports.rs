@@ -475,6 +475,20 @@ pub trait WritebackDisclosure: Send + Sync {
     /// successful respawn, which is accurate — the disk projection stays stale
     /// for exactly that long.
     fn writeback_degraded(&self, detail: &str);
+
+    /// Signal that one vault file was REFUSED by its format adapter, so
+    /// nothing of it is in the store. `format` is the refusing adapter's own
+    /// [`format_name`](holon_core::FileFormatAdapter::format_name).
+    ///
+    /// Sticky, keyed by `path`: the file really is still bad until it is fixed.
+    /// Lifted by [`ingest_recovered`](Self::ingest_recovered).
+    fn ingest_refused(&self, path: &Path, format: &str, reason: &str);
+
+    /// All-clear for [`ingest_refused`](Self::ingest_refused): this file's next
+    /// ingest fully succeeded, so the condition it raised no longer holds.
+    /// Called on every successful ingest, whether or not one was raised — a
+    /// clear for an unraised condition broadcasts nothing.
+    fn ingest_recovered(&self, path: &Path);
 }
 
 /// Authoritative "is this block id a registered shared-subtree mount?" seam.

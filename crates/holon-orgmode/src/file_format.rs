@@ -50,6 +50,10 @@ impl FileFormatAdapter for OrgFormatAdapter {
         WriteTier::ReadWrite
     }
 
+    fn format_name(&self) -> &'static str {
+        "org"
+    }
+
     fn parse(
         &self,
         path: &Path,
@@ -117,6 +121,12 @@ impl FileFormatAdapter for OrgFormatAdapter {
         // so it is not part of this content-equivalence check.
     }
 
+    /// Org carries the ingest contract itself, so it replaces the default: the
+    /// parsed doc-root's properties are the file-level `:PROPERTIES:` drawer,
+    /// round-tripped through `file_drawer` below, and the declared title lands
+    /// in the same `title` slot `apply_document_metadata` uses — via
+    /// `file_title`, whose value is `#+TITLE:`, not the doc-root's first
+    /// content line.
     fn sync_document_metadata(&self, parsed: &Block, persisted: &mut Block) -> bool {
         let mut changed = false;
         let parsed_kws = parsed.todo_keywords();

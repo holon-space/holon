@@ -195,6 +195,7 @@ impl InputBoxView {
                         shared_tree_id: "input_box".into(),
                         detail,
                         condition: None,
+                        format: None,
                     },
                     cx,
                 );

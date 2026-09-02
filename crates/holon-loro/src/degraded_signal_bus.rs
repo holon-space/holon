@@ -63,20 +63,20 @@ pub enum ShareDegradedReason {
     /// All-clear: the next successful projection of the same share — that is
     /// the moment an honest diff got through, so the refusal no longer holds.
     ForeignIdCollision(String),
-    /// OrgMode initial-scan ingest failed for one or more vault files. The
-    /// app stays up and the OTHER files keep syncing (the watch loop is
-    /// armed), but the failed file(s) are NOT ingested until fixed — this is
-    /// a visible degraded mode, not a silent sync death. String carries the
-    /// aggregated per-file failure summary. `shared_tree_id` is the sentinel
-    /// `"org-initial-scan"` (this is not tied to a shared doc).
+    /// One vault file was REFUSED by its format adapter, so nothing of it is
+    /// in the store. The app stays up and the OTHER files keep syncing (the
+    /// watch loop is armed), but this file is NOT ingested until it is fixed —
+    /// a visible degraded mode, not a silent sync death.
     ///
-    /// All-clear: the vault's write-back quarantine set going empty — the
-    /// `FileSyncController` already lifts a per-file quarantine on a clean
-    /// re-ingest, which is exactly the moment the aggregate summary stops being
-    /// true. That controller does not hold this bus yet, so the emitter of the
-    /// clear is still to be wired (task #22 follow-up); the condition is sticky
-    /// meanwhile, which is the honest state (the file really is still bad).
-    OrgIngestFailed(String),
+    /// `format` is the refusing adapter's own name (`org`, `cooklang`, …), so
+    /// the banner sends the reader to the defect the file can actually have;
+    /// `reason` carries the adapter's error. `shared_tree_id` is the file —
+    /// one condition per bad file, so a repaired file lifts its own banner and
+    /// leaves the others standing.
+    ///
+    /// All-clear: the next fully-successful ingest of that same file, emitted
+    /// by `FileSyncController` through its `WritebackDisclosure` seam.
+    VaultIngestFailed { format: String, reason: String },
     /// A block inside a shared subtree was edited, but its content could NOT be
     /// materialized to a dedicated on-disk org file (the mount is not yet a
     /// page-file, so the write-back layer cannot resolve a path). The edit is
@@ -177,12 +177,12 @@ impl ShareDegradedReason {
     pub const INTEGRATION_NOT_ENABLED: &'static str = "integration-not-enabled";
     pub const INTEGRATION_SIDECAR_NOT_BUNDLED: &'static str = "integration-sidecar-not-bundled";
     pub const INTEGRATION_SIDECAR_SUPERSEDED: &'static str = "integration-sidecar-superseded";
-    pub const ORG_INGEST_FAILED: &'static str = "org-ingest-failed";
     pub const REHYDRATION_FAILED: &'static str = "rehydration-failed";
     pub const SHARED_SUBTREE_NOT_MATERIALIZED: &'static str = "shared-subtree-not-materialized";
     pub const SNAPSHOT_LOAD_FAILED: &'static str = "snapshot-load-failed";
     pub const SNAPSHOT_SAVE_FAILED: &'static str = "snapshot-save-failed";
     pub const SQL_PROJECTION_FAILED: &'static str = "sql-projection-failed";
+    pub const VAULT_INGEST_FAILED: &'static str = "vault-ingest-failed";
     pub const WRITEBACK_DEGRADED: &'static str = "writeback-degraded";
 
     /// The condition's stable identity, paired with the subject to form a
@@ -202,7 +202,7 @@ impl ShareDegradedReason {
             Self::RehydrationFailed(_) => Self::REHYDRATION_FAILED,
             Self::SqlProjectionFailed(_) => Self::SQL_PROJECTION_FAILED,
             Self::ForeignIdCollision(_) => Self::FOREIGN_ID_COLLISION,
-            Self::OrgIngestFailed(_) => Self::ORG_INGEST_FAILED,
+            Self::VaultIngestFailed { .. } => Self::VAULT_INGEST_FAILED,
             Self::SharedSubtreeNotMaterialized { .. } => Self::SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::WritebackDegraded(_) => Self::WRITEBACK_DEGRADED,
         }
@@ -442,13 +442,16 @@ mod tests {
 
     /// The boot race the integration seam already fixed, for the OTHER
     /// emitters: `wiring.rs`'s detached `post_ready` task emits
-    /// `OrgIngestFailed` while the window is still launching. A fast-failing
+    /// `VaultIngestFailed` while the window is still launching. A fast-failing
     /// initial scan lands before the disclosure bridge subscribes; without
     /// replay the banner is dropped and the vault silently half-syncs.
     #[tokio::test(flavor = "current_thread")]
     async fn every_degradation_reaches_a_subscriber_that_arrives_after_it_was_raised() {
         let raised_before_anyone_listens = vec![
-            ShareDegradedReason::OrgIngestFailed("notes.org: unparseable".into()),
+            ShareDegradedReason::VaultIngestFailed {
+                format: "org".into(),
+                reason: "notes.org: unparseable".into(),
+            },
             ShareDegradedReason::SnapshotSaveFailed("disk full".into()),
             ShareDegradedReason::SnapshotLoadFailed("/v/s.loro.corrupt-1".into()),
             ShareDegradedReason::RehydrationFailed("advertiser: port in use".into()),

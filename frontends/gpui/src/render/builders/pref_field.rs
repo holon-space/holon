@@ -41,6 +41,7 @@ fn set_preference_or_toast(
                 shared_tree_id: format!("preference:{key}"),
                 detail: format!("Couldn't save '{key}': {e:#}"),
                 condition: None,
+                format: None,
             },
             cx,
         );

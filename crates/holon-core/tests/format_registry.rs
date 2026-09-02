@@ -42,6 +42,9 @@ impl FileFormatAdapter for StubAdapter {
     fn write_tier(&self) -> WriteTier {
         self.tier
     }
+    fn format_name(&self) -> &'static str {
+        "stub"
+    }
     fn parse(&self, _: &Path, _: &str, _: &EntityUri, _: &Path) -> Result<FileFormatParseResult> {
         unimplemented!("routing-only stub")
     }

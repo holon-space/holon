@@ -796,6 +796,11 @@ pub struct FileSyncController {
     /// Keyed by the same `CanonicalPath` as `last_projection`.
     quarantined: HashMap<CanonicalPath, QuarantineCause>,
 
+    /// Read-only-tier files already reported as non-candidates for the
+    /// debounced re-render. The skip is a healthy steady state, not an event,
+    /// so it is disclosed once per file instead of on every burst.
+    readonly_rerender_skipped: HashSet<CanonicalPath>,
+
     /// Per-document fold-completeness gate history. Present only while a
     /// document is mid-skip; the entry is dropped the moment its holder matches
     /// the authority, and the whole map is dropped on a supervisor `Reset`
@@ -933,6 +938,7 @@ impl FileSyncController {
             clock: Arc::new(holon_api::SystemClock),
             scan_feed_ids: None,
             quarantined: HashMap::new(),
+            readonly_rerender_skipped: HashSet::new(),
             gate_skips: HashMap::new(),
             writeback_disclosure: None,
             quarantine_skip_logged: std::sync::Mutex::new(HashSet::new()),
@@ -2248,6 +2254,14 @@ impl FileSyncController {
                 // than the grounded render that retires a veto entry. A REFUSED
                 // file proves nothing of the sort — nothing of it was read into
                 // the store — so its quarantine stands.
+                if outcome == IngestOutcome::Ingested {
+                    // All-clear for a prior refusal of this file. Unconditional:
+                    // clearing a condition that was never raised broadcasts
+                    // nothing.
+                    if let Some(disclosure) = &self.writeback_disclosure {
+                        disclosure.ingest_recovered(path);
+                    }
+                }
                 if outcome == IngestOutcome::Ingested
                     && self.quarantined.remove(&canonical).is_some()
                 {
@@ -2271,6 +2285,15 @@ impl FileSyncController {
                     .quarantined
                     .insert(canonical.clone(), QuarantineCause::Ingest)
                     == Some(QuarantineCause::Ingest);
+                // Raise the file's degraded condition, named by the format that
+                // refused it. Every episode re-raises: `emit` replaces by key,
+                // so the banner carries the current reason.
+                if let Some(disclosure) = &self.writeback_disclosure {
+                    let adapter = self.formats.require(path).expect(
+                        "the ingest that just refused this file resolved an adapter for it",
+                    );
+                    disclosure.ingest_refused(path, adapter.format_name(), &format!("{e:#}"));
+                }
                 if !already_ingest_caused {
                     // New quarantine episode: re-arm the once-per-episode
                     // skip-log so the first write-back skip is loud again.
@@ -2832,6 +2855,20 @@ impl FileSyncController {
         // back to name-chain resolution and emit `#+ID:` on the next render
         // so subsequent loads pick up the stable identity from the file.
         let ingest_adapter = self.adapter(path)?;
+        // Ingest of one file is atomic on its parse: the parse runs before the
+        // document entity is resolved or minted, so a refused file leaves no
+        // block behind at all. It depends on nothing the resolution below
+        // produces — the parse's parent is `no_parent()` and the controller
+        // reparents afterwards.
+        let new_parse = ingest_adapter
+            .parse(path, &disk_content, &EntityUri::no_parent(), &self.root_dir)
+            .with_context(|| {
+                format!(
+                    "{} was REFUSED by the {} adapter — nothing of it is ingested",
+                    path.display(),
+                    ingest_adapter.format_name(),
+                )
+            })?;
         let bare_id_in_file = ingest_adapter.doc_id_from_content(&disk_content);
         let segments = path_to_name_chain(rel_path);
         let segment_refs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
@@ -3042,14 +3079,12 @@ impl FileSyncController {
             seed
         };
 
-        let new_parse =
-            ingest_adapter.parse(path, &disk_content, &EntityUri::no_parent(), &self.root_dir)?;
-
-        // Sync format-specific document-header metadata (org `#+TODO:` keywords)
-        // from the parsed file onto the document block. The parser extracts these
-        // from the file header, but the document entity (created via
-        // DocumentManager) doesn't carry them. Without this, re-renders via
-        // render_document() omit the header.
+        // The ingest contract for document metadata: the adapter's parsed
+        // document title and property bag reach the persisted document block,
+        // on this ingest and every re-ingest. `sync_document_metadata`'s
+        // default IS that contract (`holon_core::apply_document_metadata`);
+        // org overrides it to route the same two things through its header and
+        // file-level drawer.
         let mut doc = document;
         if ingest_adapter.sync_document_metadata(&new_parse.document, &mut doc) {
             self.doc_manager.update_metadata(&doc).await?;
@@ -4907,6 +4942,10 @@ impl FileSyncController {
         // across the re-seed would escalate documents whose only crime is
         // being folded again from scratch.
         self.gate_skips.clear();
+        // The read-only skip is disclosed once per file per incarnation. The
+        // new incarnation re-derives its tracked set from scratch, so its
+        // first skip of each file is loud again.
+        self.readonly_rerender_skipped.clear();
     }
 
     /// Seed `doc`'s holder entry from the authoritative doc-scoped read.
@@ -5406,6 +5445,24 @@ impl FileSyncController {
                     path.display()
                 );
                 self.on_file_changed(&path).await?;
+            }
+
+            // A read-only-tier format is not a re-render candidate: its file is
+            // authoritative input. The tier question belongs to the caller, so
+            // the write-tier gate below is never asked about a healthy file.
+            // The pending external change above still ingests — that leg reads
+            // the file.
+            if self.adapter(&path)?.write_tier() == WriteTier::ReadOnly {
+                if self.readonly_rerender_skipped.insert(canonical.clone()) {
+                    tracing::info!(
+                        path = %path.display(),
+                        format = self.adapter(&path)?.format_name(),
+                        "[re_render_all_tracked] not a re-render candidate — its format is \
+                         read-only (authoritative input only). Edits reach the store and the UI, \
+                         never this file. (Logged once per file.)",
+                    );
+                }
+                continue;
             }
 
             // This tracked path is the write-back target below, and

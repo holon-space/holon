@@ -647,6 +647,32 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
             reason: holon_loro::ShareDegradedReason::WritebackDegraded(detail.to_string()),
         });
     }
+
+    fn ingest_refused(&self, path: &Path, format: &str, reason: &str) {
+        self.bus.emit(holon_loro::ShareDegraded {
+            shared_tree_id: ingest_subject(path),
+            reason: holon_loro::ShareDegradedReason::VaultIngestFailed {
+                format: format.to_string(),
+                reason: reason.to_string(),
+            },
+        });
+    }
+
+    fn ingest_recovered(&self, path: &Path) {
+        self.bus.clear(&holon_loro::DegradedConditionKey {
+            subject: ingest_subject(path),
+            kind: holon_loro::ShareDegradedReason::VAULT_INGEST_FAILED,
+        });
+    }
+}
+
+/// The subject an ingest condition is keyed by: the file, so a repaired file
+/// lifts its own banner and leaves the other refused files' standing.
+/// Canonicalized because the controller's own per-file state is keyed by
+/// `CanonicalPath` — two spellings of one file would otherwise raise a banner
+/// its own repair cannot clear.
+fn ingest_subject(path: &Path) -> String {
+    holon_core::CanonicalPath::new(path).display().to_string()
 }
 
 /// `MountRegistry` (Inc 3) backed by the global Loro tree's mount nodes — the

@@ -40,6 +40,10 @@ impl FileFormatAdapter for CookFormatAdapter {
         WriteTier::ReadOnly
     }
 
+    fn format_name(&self) -> &'static str {
+        "cooklang"
+    }
+
     fn parse(
         &self,
         path: &Path,
@@ -181,10 +185,6 @@ impl FileFormatAdapter for CookFormatAdapter {
 
     fn content_differs(&self, a: &Block, b: &Block) -> bool {
         a.content != b.content
-    }
-
-    fn sync_document_metadata(&self, _: &Block, _: &mut Block) -> bool {
-        false
     }
 
     fn writeback_drops(

@@ -206,6 +206,7 @@ impl EditorView {
                                         shared_tree_id: bare_for_copy.clone(),
                                         detail: format!("Copied block ID {bare_for_copy}"),
                                         condition: None,
+                                        format: None,
                                     },
                                     cx,
                                 );
@@ -1630,6 +1631,7 @@ impl Render for EditorView {
                                             shared_tree_id: "command".into(),
                                             detail,
                                             condition: None,
+                                            format: None,
                                         },
                                         cx,
                                     );
@@ -2037,6 +2039,7 @@ fn apply_popup_action(
                                 shared_tree_id: "command".into(),
                                 detail,
                                 condition: None,
+                                format: None,
                             },
                             cx,
                         );
@@ -2085,6 +2088,7 @@ fn apply_popup_action(
                     shared_tree_id: "command".into(),
                     detail: message,
                     condition: None,
+                    format: None,
                 },
                 cx,
             );

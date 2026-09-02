@@ -690,21 +690,15 @@ impl FrontendInjectorExt for Injector {
                                 // (dogfood 2026-07-10 ship-blocker). The org
                                 // watch loop is already armed (holon-orgmode
                                 // di.rs no longer early-returns on failure), so
-                                // the OTHER files keep syncing. Surface the
-                                // failure loudly + as a visible degraded banner.
+                                // the OTHER files keep syncing. The user-facing
+                                // banner is raised (and cleared) per refused
+                                // file by the controller's
+                                // `WritebackDisclosure`, naming the format that
+                                // refused it.
                                 tracing::error!(
                                     "OrgMode initial scan degraded — some vault files were not \
                                      ingested; other files continue syncing: {msg}"
                                 );
-                                resolver_bg
-                                    .resolve_async::<Arc<holon_loro::DegradedSignalBus>>()
-                                    .await
-                                    .emit(holon_loro::ShareDegraded {
-                                        shared_tree_id: "org-initial-scan".to_string(),
-                                        reason: holon_loro::ShareDegradedReason::OrgIngestFailed(
-                                            msg.clone(),
-                                        ),
-                                    });
                             }
                         }
                         // Org initial scan is done (success, degraded, or no

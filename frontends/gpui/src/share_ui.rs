@@ -106,6 +106,10 @@ pub struct DegradedToast {
     pub kind: DegradedKind,
     pub shared_tree_id: String,
     pub detail: String,
+    /// The vault format that refused a file, for the one kind whose headline is
+    /// not fixed ([`DegradedKind::VaultIngestFailed`]). `None` for every other
+    /// kind, whose headline is a constant.
+    pub format: Option<String>,
     /// Set for toasts sourced from the degraded bus, where every degradation is
     /// a sticky condition — upserted on re-raise, removed on clear. `None` for
     /// UI-local toasts (undo/command/preference failures, info) that have no
@@ -125,10 +129,11 @@ pub enum DegradedKind {
     /// Red — a shared doc tried to shadow a LOCAL block id; the projection was
     /// refused to protect the recipient's own content.
     ForeignIdCollision,
-    /// Red — OrgMode initial-scan failed to ingest one or more vault files.
-    /// Other files keep syncing; the failed file(s) need fixing. Surfaced so a
-    /// bad file is visible instead of silently killing file sync.
-    OrgIngestFailed,
+    /// Red — one vault file was refused by its format adapter. Other files
+    /// keep syncing; this one needs fixing. Surfaced so a bad file is visible
+    /// instead of silently killing file sync. The headline names the refusing
+    /// FORMAT, which only the toast's detail knows — see [`toast_message`].
+    VaultIngestFailed,
     /// Red — an undo/redo request reached the engine but failed (e.g. no
     /// operation engine wired, or the underlying apply errored). Fail-loud:
     /// undo/redo must never look like a silent no-op when it actually blew
@@ -261,6 +266,7 @@ impl ShareUiState {
                     shared_tree_id: event.shared_tree_id,
                     detail,
                     condition: Some(condition.clone()),
+                    format: None,
                 });
             }
             ShareDegradedReason::RehydrationFailed(detail) => {
@@ -269,6 +275,7 @@ impl ShareUiState {
                     shared_tree_id: event.shared_tree_id,
                     detail,
                     condition: Some(condition.clone()),
+                    format: None,
                 });
             }
             ShareDegradedReason::SqlProjectionFailed(detail) => {
@@ -277,6 +284,7 @@ impl ShareUiState {
                     shared_tree_id: event.shared_tree_id,
                     detail,
                     condition: Some(condition.clone()),
+                    format: None,
                 });
             }
             ShareDegradedReason::ForeignIdCollision(block_id) => {
@@ -285,6 +293,7 @@ impl ShareUiState {
                     shared_tree_id: event.shared_tree_id,
                     detail: block_id,
                     condition: Some(condition.clone()),
+                    format: None,
                 });
             }
             ShareDegradedReason::SnapshotLoadFailed(path) => {
@@ -305,12 +314,15 @@ impl ShareUiState {
                     None => self.quarantines.push(quarantine),
                 }
             }
-            ShareDegradedReason::OrgIngestFailed(summary) => {
+            ShareDegradedReason::VaultIngestFailed { format, reason } => {
                 self.push_toast(DegradedToast {
-                    kind: DegradedKind::OrgIngestFailed,
+                    kind: DegradedKind::VaultIngestFailed,
+                    // The file, so the headline can name it and the condition
+                    // clears per file rather than per scan.
+                    detail: format!("{}: {reason}", event.shared_tree_id),
                     shared_tree_id: event.shared_tree_id,
-                    detail: summary,
                     condition: Some(condition.clone()),
+                    format: Some(format),
                 });
             }
             ShareDegradedReason::WritebackDegraded(detail) => {
@@ -319,6 +331,7 @@ impl ShareUiState {
                     shared_tree_id: event.shared_tree_id,
                     detail,
                     condition: Some(condition.clone()),
+                    format: None,
                 });
             }
             ShareDegradedReason::SharedSubtreeNotMaterialized { file } => {
@@ -329,6 +342,7 @@ impl ShareUiState {
                     // user opens to see the stale projection.
                     detail: file,
                     condition: Some(condition.clone()),
+                    format: None,
                 });
             }
             // The toast body truncates `detail` at 80 chars, so both of these
@@ -339,6 +353,7 @@ impl ShareUiState {
                     shared_tree_id: event.shared_tree_id,
                     detail: format!("{integration}: {error}"),
                     condition: Some(condition.clone()),
+                    format: None,
                 });
             }
             ShareDegradedReason::IntegrationNeedsAuth {
@@ -350,6 +365,7 @@ impl ShareUiState {
                     shared_tree_id: event.shared_tree_id,
                     detail: format!("{integration}: authorize at {auth_url}"),
                     condition: Some(condition.clone()),
+                    format: None,
                 });
             }
             ShareDegradedReason::IntegrationSidecarSuperseded {
@@ -366,6 +382,7 @@ impl ShareUiState {
                          the bundled {bundled_source}"
                     ),
                     condition: Some(condition.clone()),
+                    format: None,
                 });
             }
             ShareDegradedReason::IntegrationNotEnabled {
@@ -384,6 +401,7 @@ impl ShareUiState {
                          {installed_path} runs nothing"
                     ),
                     condition: Some(condition.clone()),
+                    format: None,
                 });
             }
             ShareDegradedReason::IntegrationSidecarNotBundled {
@@ -398,6 +416,7 @@ impl ShareUiState {
                          ship — it runs nothing"
                     ),
                     condition: Some(condition.clone()),
+                    format: None,
                 });
             }
         }
@@ -595,6 +614,7 @@ pub fn spawn_op_failure_toast_bridge(
                             shared_tree_id: "command".into(),
                             detail,
                             condition: None,
+                            format: None,
                         });
                         cx.emit(NotifyShareUi);
                         cx.notify();
@@ -683,6 +703,7 @@ fn pending_event_toast(event: &PendingWriteEvent) -> DegradedToast {
                 event.display, event.tool
             ),
             condition: None,
+            format: None,
         },
         PendingWriteEventKind::OutcomeUnknown => DegradedToast {
             kind: DegradedKind::ConnectorWriteOutcomeUnknown,
@@ -692,6 +713,7 @@ fn pending_event_toast(event: &PendingWriteEvent) -> DegradedToast {
                 event.display, event.tool, event.detail
             ),
             condition: None,
+            format: None,
         },
     }
 }
@@ -752,6 +774,7 @@ pub fn dispatch_approve(
                             shared_tree_id: "connector-write".into(),
                             detail: format!("approve failed: {e}"),
                             condition: None,
+                            format: None,
                         });
                     }
                     // Success is silent here; the panel re-reads store state
@@ -984,6 +1007,7 @@ fn dispatch_undo_redo(
                             shared_tree_id: "undo".into(),
                             detail: d.detail,
                             condition: None,
+                            format: None,
                         });
                         cx.emit(NotifyShareUi);
                         cx.notify();
@@ -1392,6 +1416,7 @@ fn render_share_modal(
                                             shared_tree_id: "ui".into(),
                                             detail: "Ticket copied to clipboard".into(),
                                             condition: None,
+                                            format: None,
                                         });
                                         cx.emit(NotifyShareUi);
                                         cx.notify();
@@ -1672,6 +1697,12 @@ fn render_quarantine_modal(
 fn toast_message(toast: &DegradedToast) -> String {
     const MAX_DETAIL_CHARS: usize = 320;
     let (_, icon, label) = toast_style(toast.kind);
+    // The one kind whose headline is not a constant: it names the format that
+    // refused the file.
+    let label = match &toast.format {
+        Some(format) => format!("File sync degraded (bad {format} file)"),
+        None => label.to_string(),
+    };
     let detail = match toast.detail.char_indices().nth(MAX_DETAIL_CHARS) {
         Some((cut, _)) => format!("{}…", &toast.detail[..cut]),
         None => toast.detail.clone(),
@@ -1691,10 +1722,12 @@ fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
             crate::icon("⛔"),
             "Blocked shared write (id collision)",
         ),
-        DegradedKind::OrgIngestFailed => (
+        DegradedKind::VaultIngestFailed => (
             gpui::rgba(0xef4444ff),
             "⚠",
-            "File sync degraded (bad org file)",
+            // `toast_message` replaces this with a format-naming headline
+            // whenever the toast carries a `format`.
+            "File sync degraded (bad vault file)",
         ),
         DegradedKind::UndoFailed => (
             gpui::rgba(0xef4444ff),
@@ -1919,14 +1952,42 @@ mod tests {
         assert_eq!(s.quarantines.len(), 1);
     }
 
+    #[test]
+    fn the_ingest_headline_names_the_refusing_format() {
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "/vault/Resources/Rezepte/Linsensuppe.cook".into(),
+            reason: ShareDegradedReason::VaultIngestFailed {
+                format: "cooklang".into(),
+                reason: "unknown timer unit".into(),
+            },
+        });
+        let message = toast_message(&s.toasts[0]);
+        assert!(
+            message.contains("bad cooklang file"),
+            "the headline must name the refusing format; got: {message}",
+        );
+        assert!(
+            !message.contains("org"),
+            "the headline named a format the file is not; got: {message}",
+        );
+        assert!(
+            message.contains("Linsensuppe.cook"),
+            "the headline must name the file that needs fixing; got: {message}",
+        );
+    }
+
     /// A boot-race degradation that a late window learns about via replay must
     /// still render — and must be clearable by key like any other condition.
     #[test]
-    fn org_ingest_failed_is_a_clearable_condition() {
+    fn a_vault_ingest_failure_is_a_clearable_condition() {
         let mut s = ShareUiState::new();
         s.apply_degraded(ShareDegraded {
-            shared_tree_id: "org-initial-scan".into(),
-            reason: ShareDegradedReason::OrgIngestFailed("notes.org: unparseable".into()),
+            shared_tree_id: "/vault/notes.org".into(),
+            reason: ShareDegradedReason::VaultIngestFailed {
+                format: "org".into(),
+                reason: "unparseable".into(),
+            },
         });
         assert_eq!(s.toasts.len(), 1);
         let key = s.toasts[0]
@@ -1962,6 +2023,7 @@ mod tests {
                      this (no-Turso) session"
                 .into(),
             condition: None,
+            format: None,
         });
         assert_eq!(s.toasts.len(), 1);
         assert_eq!(s.toasts[0].kind, DegradedKind::UndoFailed);
@@ -2008,6 +2070,7 @@ mod tests {
             shared_tree_id: "undo".into(),
             detail: d.detail,
             condition: None,
+            format: None,
         });
         assert_eq!(s.toasts.len(), 1);
         assert_eq!(s.toasts[0].kind, DegradedKind::UndoStepDropped);
