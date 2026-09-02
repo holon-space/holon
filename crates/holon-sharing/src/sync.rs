@@ -46,10 +46,14 @@ use crate::policy::Principal;
 #[derive(Clone)]
 pub struct OutboundAuth {
     pub sender: StablePeerId,
-    /// The principal the pushed blobs authorize — the RECEIVER, not the sender.
-    /// See [`crate::acceptor`] for why the proof names the audience.
+    /// The principal on the OTHER end of this round — the peer that will admit
+    /// these blobs. It is a function of the round's direction, never a
+    /// constant: pushing to the owner means `audience` is the OWNER even
+    /// though `chain` still proves this device. See [`crate::acceptor`].
     pub audience: Principal,
     pub epoch: u64,
+    /// This device's own owner-signed chain. Its terminal grantee is the
+    /// subject the admitter checks capabilities against.
     pub chain: MembershipChain,
 }
 
@@ -178,7 +182,7 @@ pub async fn push_once(
             sender: auth.sender,
             payload,
             auth: MembershipProof {
-                principal: auth.audience.0.clone(),
+                audience: auth.audience.0.clone(),
                 selector: container.id.clone(),
                 epoch: auth.epoch,
                 chain: encode_chain(&auth.chain),

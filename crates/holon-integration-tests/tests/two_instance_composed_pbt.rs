@@ -867,3 +867,57 @@ fn owner_heavy_indent_then_join_stalls_the_receiver_projection() {
     assert_eq!(writes, 5);
     assert_converged(&owner, &receiver, writes, "owner-heavy indent+join");
 }
+
+/// The REVERSE leg, which the generator never draws (`SyncNow` always draws
+/// `owner_to_receiver: true`) and which therefore has no property coverage.
+///
+/// It pins the per-direction audience end to end: a receiver→owner round is
+/// addressed to the OWNER, and the owner admits it against its OWN identity. A
+/// harness that reuses one constant audience for both legs makes the owner
+/// refuse every envelope and import nothing.
+#[test]
+fn the_reverse_leg_reaches_the_owner_under_the_owners_own_audience() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (caps, handle, _) = boot_two_instances(&resolver, &ref_state).await;
+        let two = caps.expect::<dyn SutTwoInstance>();
+        let recv = caps.expect::<dyn SutReceiverBackend>();
+
+        two.share_container("holon_tree", "receiver").await;
+        two.sync_now(true).await;
+
+        let before = recv.owner_block_ids().await;
+        let witness = two.sync_now(false).await;
+        holon_integration_tests::pbt::composed::wide_e2e::converge_handle(
+            handle.owner(),
+            std::time::Duration::from_secs(15),
+        )
+        .await;
+
+        assert!(
+            witness.imported >= 1,
+            "the receiver→owner round imported nothing (pushed={} refusals={:?}) — with a \
+             read-write pairing cert the owner must admit the receiver's delta",
+            witness.pushed,
+            witness.refusals
+        );
+        assert!(
+            !witness
+                .refusals
+                .iter()
+                .any(|r| r.contains("RefuseCapability")),
+            "the pairing cert must confer Write, but the owner refused on capability: {:?}",
+            witness.refusals
+        );
+        let after = recv.owner_block_ids().await;
+        assert!(
+            after.len() > before.len(),
+            "the owner's store did not grow across the reverse round ({} -> {}) — the \
+             receiver-authored state never landed",
+            before.len(),
+            after.len()
+        );
+    });
+}

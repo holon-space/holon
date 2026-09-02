@@ -63,6 +63,13 @@ pub struct SharingRefState {
 /// dimension the oracle cannot observe on the SUT.
 pub const RECEIVER_PRINCIPAL: &str = "receiver";
 
+/// The principal the two-instance slice's owner acts as. Needed as its own name
+/// because the audience is a function of the round's direction: a
+/// receiver→owner round is addressed to the OWNER, and reusing one principal
+/// for both was how the owner came to admit envelopes addressed to somebody
+/// else.
+pub const OWNER_PRINCIPAL: &str = "owner";
+
 impl SharingRefState {
     /// The owner-intended audience for a block. Falls back to the whole-vault
     /// share, then local-only.

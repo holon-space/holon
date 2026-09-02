@@ -91,8 +91,11 @@ pub enum BlobKind {
 /// `holon_sharing::acceptor::admit`; the relay never reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MembershipProof {
-    /// The principal the sender claims to be acting as.
-    pub principal: String,
+    /// The principal this envelope is destined FOR. A peer refuses anything not
+    /// addressed to it, so a blob cannot be replayed at a second audience.
+    /// Distinct from the `chain`'s subject: on a receiver→owner round the
+    /// audience is the OWNER while the chain still proves the RECEIVER.
+    pub audience: String,
     /// The container selector the claim covers.
     pub selector: String,
     /// Sharing epoch the claim was minted under (ADR 0028 H2).
@@ -102,8 +105,17 @@ pub struct MembershipProof {
     pub chain: Vec<u8>,
 }
 
-/// Signature over the envelope's canonical bytes under the CONTAINER key — the
-/// reason a relay cannot inject content it did not receive from a member.
+/// Integrity tag over the envelope's canonical bytes
+/// (`holon_sharing::acceptor::blob_canonical_bytes`).
+///
+/// **Not a signature, despite the name.** It is an UNKEYED blake3 hash, so it
+/// detects a mangled or rebound blob and authenticates NOBODY: anyone who can
+/// place bytes in front of a peer can recompute it. Sender authenticity comes
+/// entirely from the transport below (the iroh QUIC node key pinned at
+/// enrollment). Making this a real Ed25519 signature by the chain's terminal
+/// grantee is required before any relay-backed or third-party share ships —
+/// bugfunnel `2026-09-02-blobsig-is-unkeyed-so-a-forged-sender-can-replay-a-chain`,
+/// ruling D75.a.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlobSig(pub Vec<u8>);
 
@@ -304,7 +316,7 @@ mod tests {
             sender: StablePeerId(7),
             payload: payload.to_vec(),
             auth: MembershipProof {
-                principal: "peer".into(),
+                audience: "peer".into(),
                 selector: container.into(),
                 epoch: 0,
                 chain: Vec::new(),

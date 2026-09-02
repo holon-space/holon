@@ -77,6 +77,7 @@ use crate::pbt::composed::wide_e2e::set_for_wiring;
 use crate::pbt::composed::wide_e2e::wide_e2e_ref;
 use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::reference_state::ReferenceState;
+use crate::pbt::sharing_state::OWNER_PRINCIPAL;
 use crate::pbt::sharing_state::RECEIVER_PRINCIPAL;
 use crate::pbt::transitions::CreateBlockUnderFocus;
 use crate::pbt::transitions::E2ETransition;
@@ -260,10 +261,10 @@ impl SutTwoInstance for TwoInstanceHandle {
             Principal(principal.to_string()),
             Issuer::Owner,
             // Own-device pairing (D68.b) makes the peer a full WRITER, so the
-            // cert the slice issues is the one production will issue. `admit`
-            // gates on `Read` alone today; `Write` is what the reverse leg's
-            // authorization will read once it stops reusing the receiver's
-            // audience for both directions (see `sync_now`).
+            // cert the slice issues is the one production will issue.
+            // D72.a: the acceptor now enforces `Capability::Write` on the
+            // reverse leg (previously it gated on `Read` alone), so an
+            // own-device pair's cert must carry `Write` too.
             Capabilities::read_write(),
             false,
             Lease::starting_at(holon_api::Clock::now_millis(&*self.clock), LEASE_TTL_MILLIS),
@@ -288,9 +289,21 @@ impl SutTwoInstance for TwoInstanceHandle {
             .expect("sharing runtime lock")
             .grant
             .clone();
+        // The admitting side of THIS round. Both the audience stamped on the
+        // push and the identity the pull verifies against must be that peer, or
+        // the owner ends up checking the receiver's authorization instead of its
+        // own.
+        let admitter = Principal(
+            if owner_to_receiver {
+                RECEIVER_PRINCIPAL
+            } else {
+                OWNER_PRINCIPAL
+            }
+            .to_string(),
+        );
         let auth = OutboundAuth {
             sender: StablePeerId(sender),
-            audience: Principal(RECEIVER_PRINCIPAL.to_string()),
+            audience: admitter.clone(),
             epoch: 0,
             // Unshared: an EMPTY chain. `push_once` then publishes NOTHING and
             // reports every container as `unauthorized` — state must not reach an
@@ -298,9 +311,8 @@ impl SutTwoInstance for TwoInstanceHandle {
             // paths are covered by its unit tests, not by leaking here.
             chain: grant.unwrap_or_else(|| MembershipChain::new(Vec::new())),
         };
-        let receiver_principal = Principal(RECEIVER_PRINCIPAL.to_string());
         let ctx = AcceptorContext {
-            receiver: &receiver_principal,
+            receiver: &admitter,
             clock: self.clock.as_ref(),
             verifier: &UnverifiedVerifier,
         };
