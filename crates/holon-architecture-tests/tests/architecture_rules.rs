@@ -160,7 +160,12 @@ fn latency_target_is_suppressed_by_every_filter_builder() {
 
 /// Calls of `WriteTxn::doc()`, which runs under the held write guard. Pinned
 /// per file, so a `txn.doc()` anywhere else still counts as an escape.
-const WRITE_TXN_DOC_SITES: &[(&str, usize)] = &[("crates/holon-loro/src/loro_share_backend.rs", 3)];
+const WRITE_TXN_DOC_SITES: &[(&str, usize)] = &[
+    ("crates/holon-loro/src/loro_share_backend.rs", 3),
+    // The pairing wipe and the adoption import reach the tree through the
+    // `WriteTxn` they are handed, i.e. inside the held guard — not an escape.
+    ("crates/holon-loro/src/device_pairing_op.rs", 2),
+];
 
 /// Calls of a `doc()` accessor belonging to another type, with that type's
 /// name. Pinned per file, so an escape added alongside them still counts.

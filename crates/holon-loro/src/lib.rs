@@ -85,6 +85,8 @@ pub mod multi_peer;
 /// authority objects (rosters, the crossing log) even without the iroh
 /// transport, so `holon-sharing` can back its `SigningAuthority` with it.
 pub mod owner_identity;
+/// The on-disk half of whole-store pairing: staging, archive, and the swap.
+pub mod pairing_swap;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
