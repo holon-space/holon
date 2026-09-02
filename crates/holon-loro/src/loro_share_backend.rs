@@ -1639,11 +1639,21 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         )
         .await?;
         if let Some(projection) = self.downstream_projection.as_ref() {
-            projection.flush().await.map_err(|e| {
+            let pass = projection.flush().await.map_err(|e| {
                 err(format!(
                     "flush global projection before re-projecting shared descendants: {e:#}"
                 ))
             })?;
+            // The prune-delete this flush publishes MUST land before the shared
+            // descendants are re-projected, or the delete races and re-removes
+            // the just-re-created rows. A withheld op means it did not land.
+            if pass.withheld() > 0 {
+                return Err(err(format!(
+                    "the global projection withheld {} FK-ungrounded op(s), so the prune-delete \
+                     did not reach SQL before re-projecting shared descendants",
+                    pass.withheld()
+                )));
+            }
         }
         self.project_descendants_to_sql(&shared_arc, &mount_stable_id, &shared_tree_id)
             .await?;
@@ -4324,11 +4334,28 @@ mod tests {
         }
     }
 
+    /// `DownstreamProjection` that reports a fixed outcome — the global
+    /// projection's answer to `share_subtree`'s prune-delete barrier.
+    struct FixedPassProjection(holon_core::ProjectionPass);
+
+    #[async_trait]
+    impl holon_core::DownstreamProjection for FixedPassProjection {
+        async fn flush(&self) -> holon_core::traits::Result<holon_core::ProjectionPass> {
+            Ok(self.0)
+        }
+    }
+
     /// Like `make_backend`, but wires a `RecordingSqlOps` so mount/descendant
     /// projection writes are observable. `downstream_projection` is `None` —
     /// there is no global `LoroSyncController` loop in these tests, so no
     /// prune-delete races the projection and the flush barrier is unnecessary.
     fn make_backend_with_sql() -> (Arc<LoroShareBackend>, Arc<RecordingSqlOps>, TempDir) {
+        make_backend_with_sql_and_projection(None)
+    }
+
+    fn make_backend_with_sql_and_projection(
+        projection: Option<Arc<dyn DownstreamProjection>>,
+    ) -> (Arc<LoroShareBackend>, Arc<RecordingSqlOps>, TempDir) {
         let dir = TempDir::new().unwrap();
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(
             dir.path().to_path_buf(),
@@ -4350,7 +4377,7 @@ mod tests {
             bus,
             key,
             Some(sql.clone() as Arc<dyn OriginTaggedWrites>),
-            None,
+            projection,
         );
         (backend, sql, dir)
     }
@@ -4561,6 +4588,39 @@ mod tests {
         assert_eq!(
             child_row.get("parent_id").and_then(|v| v.as_string()),
             Some("block:shared-parent")
+        );
+
+        backend.advertiser.close_all().await;
+    }
+
+    /// The prune-delete `share_subtree` publishes must reach SQL before the
+    /// shared descendants are re-projected, or the delete re-removes the rows
+    /// just re-created. The only evidence that it landed is the flush's
+    /// `ProjectionPass`, so an incomplete one must abort the share rather than
+    /// continue into the race.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn share_subtree_fails_when_the_prune_delete_did_not_reach_sql() {
+        let (backend, _sql, _dir) = make_backend_with_sql_and_projection(Some(Arc::new(
+            FixedPassProjection(holon_core::ProjectionPass::Incomplete { withheld: 2 }),
+        )));
+        seed_block(&backend, "shared-parent", None, "Shared heading").await;
+        seed_block(
+            &backend,
+            "shared-child",
+            Some("shared-parent"),
+            "Shared child",
+        )
+        .await;
+
+        let e = backend
+            .share_subtree("block:shared-parent", "none".into())
+            .await
+            .expect_err("an incomplete flush must abort the share");
+        let msg = format!("{e:#}");
+        assert!(
+            msg.contains("withheld 2") && msg.contains("prune-delete"),
+            "the error must name the owed op count and what did not land: {msg}"
         );
 
         backend.advertiser.close_all().await;

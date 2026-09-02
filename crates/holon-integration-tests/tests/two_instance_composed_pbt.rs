@@ -634,7 +634,7 @@ type TreeState = std::collections::BTreeMap<String, holon_loro::loro_backend::Sn
 async fn run_pair_script(
     ref_state: &holon_integration_tests::pbt::reference_state::ReferenceState,
     script: &[PairStep],
-) -> (TreeState, TreeState, usize) {
+) -> (TreeState, TreeState, usize, Vec<String>) {
     let resolver = IdResolver::default();
     let (owner_caps, receiver_caps, handle, _) =
         boot_two_instances_with_receiver_caps(&resolver, ref_state).await;
@@ -699,10 +699,13 @@ async fn run_pair_script(
 
     drive_to_sync_fixpoint(&two, &handle).await;
 
+    let mut projection_lag = handle.sql_projection_lag(true, &exclude).await;
+    projection_lag.extend(handle.sql_projection_lag(false, &exclude).await);
     (
         handle.loro_tree_state(true, &exclude).await,
         handle.loro_tree_state(false, &exclude).await,
         writes,
+        projection_lag,
     )
 }
 
@@ -710,11 +713,31 @@ fn caps_two(caps: &holon_pbt_core::composition::CapMap) -> std::sync::Arc<dyn Su
     caps.expect::<dyn SutTwoInstance>()
 }
 
-fn assert_converged(owner: &TreeState, receiver: &TreeState, writes: usize, label: &str) {
+fn assert_converged(
+    owner: &TreeState,
+    receiver: &TreeState,
+    writes: usize,
+    projection_lag: &[String],
+    label: &str,
+) {
+    // Peer-to-peer agreement is only half the claim. Both peers can hold the
+    // same Loro tree while a projection pass rolled its batch back or withheld
+    // an op, leaving SQL — everything the UI reads — behind. Judge that FIRST,
+    // and before the `writes == 0` return below: boot alone drives dozens of
+    // projection passes, so a script whose every precondition was unsatisfiable
+    // still has a real SQL projection to judge. Skipping it there would let a
+    // vacuous draw hide a lagging projection.
+    assert!(
+        projection_lag.is_empty(),
+        "{label}: the peers' Loro trees may agree, but a side's SQL projection is BEHIND its \
+         Loro tree after {writes} write(s) and a sync fixed point. {} divergence(s):\n{}",
+        projection_lag.len(),
+        projection_lag.join("\n")
+    );
     if writes == 0 {
         // Every generated step's precondition was unsatisfiable. Nothing was
-        // exercised, so there is nothing to judge — and calling it green would
-        // be a vacuous pass.
+        // exercised, so there is nothing more to judge — and calling the
+        // CONVERGENCE claim green would be a vacuous pass.
         return;
     }
     if owner == receiver {
@@ -740,6 +763,23 @@ fn assert_converged(owner: &TreeState, receiver: &TreeState, writes: usize, labe
     );
 }
 
+/// The lag claim is judged even when the draw exercised nothing: booting the
+/// pair drove dozens of projection passes, so there is a real SQL projection to
+/// judge, and returning on `writes == 0` first would report such a draw green
+/// over a projection that is behind.
+#[test]
+#[should_panic(expected = "SQL projection is BEHIND")]
+fn a_draw_that_exercised_nothing_still_judges_the_projection_lag() {
+    let empty = TreeState::new();
+    assert_converged(
+        &empty,
+        &empty,
+        0,
+        &["receiver block:c2: held in Loro, ABSENT from block_raw".to_string()],
+        "every precondition unsatisfiable",
+    );
+}
+
 proptest! {
     #![proptest_config(proptest::test_runner::Config {
         cases: std::env::var("PAIR_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(24),
@@ -751,22 +791,17 @@ proptest! {
     /// **Inc 0 keystone.** Both peers author concurrently — structure and text
     /// — over a read-write pairing, and the pair converges.
     ///
-    /// `#[ignore]`d while
-    /// `cross_peer_indent_then_join_stalls_the_receiver_projection` is
-    /// OPEN: roughly one run in five draws that shape and reds on it, which
-    /// would make every landing gate flaky on a defect this increment does not
-    /// own. Measured 2026-09-02: 4 of 5 runs at 24 cases green, the fifth red
-    /// on case 20. Run it with
-    /// `PAIR_CASES=24 cargo nextest run --run-ignored all -E 'test(concurrent_two_writer_pair_converges)'`.
+    /// It drew the receiver-projection stall in roughly one run of five until
+    /// the projection grounded an UPDATE's `parent_id` and the run loop
+    /// re-drove a failed pass. Case count is `PAIR_CASES` (default 24).
     #[test]
-    #[ignore = "reds ~1 run in 5 on the OPEN receiver-projection stall; see cross_peer_indent_then_join_stalls_the_receiver_projection"]
     fn concurrent_two_writer_pair_converges(
         script in proptest::collection::vec(pair_step(), 1..7)
     ) {
         let rt = rt();
         let ref_state = wide_e2e_ref();
-        let (owner, receiver, writes) = rt.block_on(run_pair_script(&ref_state, &script));
-        assert_converged(&owner, &receiver, writes, &format!("script {script:?}"));
+        let (owner, receiver, writes, lag) = rt.block_on(run_pair_script(&ref_state, &script));
+        assert_converged(&owner, &receiver, writes, &lag, &format!("script {script:?}"));
     }
 }
 
@@ -798,9 +833,9 @@ fn edit_on_receiver_concurrent_with_create_on_owner_converges() {
     ];
     let rt = rt();
     let ref_state = wide_e2e_ref();
-    let (owner, receiver, writes) = rt.block_on(run_pair_script(&ref_state, &script));
+    let (owner, receiver, writes, lag) = rt.block_on(run_pair_script(&ref_state, &script));
     assert!(writes == 2, "worst shape: expected 2 writes, got {writes}");
-    assert_converged(&owner, &receiver, writes, "worst shape");
+    assert_converged(&owner, &receiver, writes, &lag, "worst shape");
 
     // Teeth: convergence on two peers that both lost the receiver's edit would
     // also be "equal". Require the phone-side text to be present on BOTH.
@@ -856,50 +891,38 @@ fn concurrent_structural_moves_on_both_peers_converge() {
     ];
     let rt = rt();
     let ref_state = wide_e2e_ref();
-    let (owner, receiver, writes) = rt.block_on(run_pair_script(&ref_state, &script));
+    let (owner, receiver, writes, lag) = rt.block_on(run_pair_script(&ref_state, &script));
     assert!(
         writes == 4,
         "concurrent moves: expected 4 writes, got {writes}"
     );
-    assert_converged(&owner, &receiver, writes, "concurrent moves");
+    assert_converged(&owner, &receiver, writes, &lag, "concurrent moves");
 }
 
-/// **OPEN DEFECT, pinned — the cross-peer indent+join CLASS.**
+/// **Regression pin — the cross-peer indent+join CLASS.**
 ///
-/// An `indent` and a `join_block` applied across the two peers stall the
-/// RECEIVER's Loro→SQL projection. The CRDT layer is fine — the trees merge and
-/// the peers agree — but the receiver's outbound reconcile fails with
+/// An `indent` and a `join_block` applied across the two peers used to stall
+/// the RECEIVER's Loro→SQL projection permanently. The CRDT layer was never at
+/// fault — the trees merge and the peers agree. The projection emitted
 ///
 /// ```text
-/// [TursoBackend::Actor] Commit failed, rolling back: deferred foreign key constraint failed on commit
-/// [LoroSyncController] Outbound reconcile failed: BlockConsolidator sink write failed: ...
-///   (ops[N]: create:block:receiver-root<-sentinel:no_parent,
-///            create:block:<uuid><-block:receiver-root,
-///            update:block:fe-target<-block:fe-blocked, ...)
+/// update:block:fe-target<-block:fe-blocked
 /// ```
 ///
-/// and is never retried. `LoroSyncController::run_loop`
-/// (`crates/holon-loro/src/loro_sync_controller.rs:438-451`) is wake-driven: a
-/// failed reconcile bumps `error_count`, logs, and waits for the NEXT doc
-/// change. Nothing re-drives the failed batch, so ONE failure is permanent and
-/// `converge_projections` never reaches its fixed point. A STALL, not a
-/// livelock — the single-case log carries exactly one reconcile failure.
+/// re-parenting onto the block the `join` had just deleted from `block_raw`, so
+/// the deferred `parent_id` self-FK failed at COMMIT and rolled the whole batch
+/// back. `LoroSyncController::run_loop` is wake-driven, so with nothing to
+/// re-drive the failed batch that ONE failure was permanent and
+/// `converge_projections` never reached its fixed point.
 ///
-/// The loro fork emits `WARN loro_internal::state: Missing in parent's
-/// children` on the same tick, which is the D70 neighbourhood surfacing as a
-/// warning rather than the `tree_state.rs` panic — worth a look from the
-/// fork-rebase lane.
+/// Fixed in two halves: the projection grounds an UPDATE's `parent_id` the same
+/// way it already grounded a CREATE's, and the run loop re-drives a failed or
+/// incomplete pass a bounded number of times before raising a degraded banner.
 ///
 /// Two shapes are pinned because the defect is a CLASS, not one interleaving:
 /// this one puts the `indent` on the receiver, its sibling below puts four of
-/// five writes on the owner. Both stall the same way.
-///
-/// `#[ignore]`d because the defect is OPEN and belongs to the Loro→SQL
-/// projection, not to this increment: Inc 0 answers whether the replicate-all
-/// path converges in the CRDT, and it does. Un-ignore when the projection both
-/// surfaces the failure and re-drives it.
+/// five writes on the owner.
 #[test]
-#[ignore = "OPEN: a failed reconcile after a cross-peer indent+join is never re-driven, so the receiver projection stalls"]
 fn cross_peer_indent_then_join_stalls_the_receiver_projection() {
     let script = vec![
         PairStep::Write {
@@ -915,17 +938,26 @@ fn cross_peer_indent_then_join_stalls_the_receiver_projection() {
     ];
     let rt = rt();
     let ref_state = wide_e2e_ref();
-    let (owner, receiver, writes) = rt.block_on(run_pair_script(&ref_state, &script));
+    let (owner, receiver, writes, lag) = rt.block_on(run_pair_script(&ref_state, &script));
     assert_eq!(writes, 2);
-    assert_converged(&owner, &receiver, writes, "indent+join");
+    assert_converged(&owner, &receiver, writes, &lag, "indent+join");
 }
 
 /// The same class, owner-heavy: the shrunk counterexample the lane's verifier
 /// reached independently, with four of its five writes on the OWNER. Pinned
 /// beside its sibling so a fix that only handles a receiver-side `indent`
 /// cannot look complete.
+/// `#[ignore]`d for a DIFFERENT, newly-visible defect — not the FK stall, which
+/// is fixed and which this shape no longer reproduces. With the SQL-vs-Loro
+/// oracle active this script reds deterministically (3/3) on
+/// `receiver block:c2: held in Loro, ABSENT from block_raw`: no op ever deleted
+/// the row, the projection never withheld or failed anything, and it goes on
+/// emitting UPDATEs that silently no-op against the missing row. Recorded as
+/// `docs/Testing/bugfunnel/entries/
+/// 2026-09-02-receiver-sql-loses-a-block-its-loro-tree-still-holds.md`. Kept as
+/// a pin, not deleted: it is the only deterministic reproducer.
 #[test]
-#[ignore = "OPEN: same class — a failed reconcile after a cross-peer indent+join is never re-driven"]
+#[ignore = "OPEN, different defect: the receiver's block_raw loses block:c2 while its Loro tree keeps it — see the 2026-09-02-receiver-sql-loses-a-block bugfunnel entry"]
 fn owner_heavy_indent_then_join_stalls_the_receiver_projection() {
     let script = vec![
         PairStep::Write {
@@ -956,9 +988,9 @@ fn owner_heavy_indent_then_join_stalls_the_receiver_projection() {
     ];
     let rt = rt();
     let ref_state = wide_e2e_ref();
-    let (owner, receiver, writes) = rt.block_on(run_pair_script(&ref_state, &script));
+    let (owner, receiver, writes, lag) = rt.block_on(run_pair_script(&ref_state, &script));
     assert_eq!(writes, 5);
-    assert_converged(&owner, &receiver, writes, "owner-heavy indent+join");
+    assert_converged(&owner, &receiver, writes, &lag, "owner-heavy indent+join");
 }
 
 /// The REVERSE leg, which the generator never draws (`SyncNow` always draws

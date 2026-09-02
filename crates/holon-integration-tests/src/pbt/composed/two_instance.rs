@@ -352,6 +352,53 @@ impl TwoInstanceHandle {
         counts
     }
 
+    /// Where one side's SQL projection LAGS its Loro tree: blocks Loro holds
+    /// that `block_raw` is missing, or holds under a different parent.
+    ///
+    /// The peer-to-peer oracle compares Loro to Loro, so it goes green the
+    /// moment the CRDTs agree — even when a projection pass rolled its batch
+    /// back or withheld an op and SQL, which is everything the UI reads, is
+    /// still behind. That is precisely the receiver-projection stall, and
+    /// nothing in this slice could see it.
+    ///
+    /// One direction only: SQL is a projection OF Loro, so every Loro block
+    /// must appear in `block_raw`. Rows in SQL that Loro does not hold are the
+    /// documented bootstrap condition (the projection withholds deletes until
+    /// it is armed, so raw-inserted seed rows outlive their absence from Loro)
+    /// and are not lag.
+    pub async fn sql_projection_lag(
+        &self,
+        owner: bool,
+        exclude: &BTreeSet<EntityUri>,
+    ) -> Vec<String> {
+        let loro = self.loro_tree_state(owner, exclude).await;
+        let backend = if owner {
+            &self.owner_backend
+        } else {
+            &self.receiver_backend
+        };
+        let sql: BTreeMap<String, EntityUri> = backend
+            .block_raw_snapshot()
+            .await
+            .into_iter()
+            .map(|b| (b.id.to_string(), b.parent_id))
+            .collect();
+        let side = if owner { "owner" } else { "receiver" };
+        loro.iter()
+            .filter_map(|(id, snap)| match sql.get(id) {
+                None => Some(format!(
+                    "{side} {id}: held in Loro, ABSENT from block_raw (parent {})",
+                    snap.block.parent_id
+                )),
+                Some(parent) if *parent != snap.block.parent_id => Some(format!(
+                    "{side} {id}: parent disagrees — Loro {} vs block_raw {}",
+                    snap.block.parent_id, parent
+                )),
+                Some(_) => None,
+            })
+            .collect()
+    }
+
     fn with_transport_counters(&self, mut witness: SyncRoundWitness) -> SyncRoundWitness {
         let wire = self.transport.wire();
         witness.transport = if witness.rounds_run == 0 {

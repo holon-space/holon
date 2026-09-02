@@ -245,6 +245,39 @@ const CREATE_CHUNK_BLOCKS: usize = ingest_progress::PROGRESS_EVERY_BLOCKS;
 /// reports it via `authoritative_name_chain`, the write path via
 /// `doc_id_to_path`. Keying by site stops whichever fires first from muting the
 /// other.
+/// How many times an org-path flush re-drives a projection pass that withheld
+/// FK-ungrounded ops before failing loud. A withhold forces the next pass onto
+/// the full walk against sink truth, so the second attempt is the one that
+/// normally pays the owed op; the third is headroom.
+const DOWNSTREAM_FLUSH_ATTEMPTS: usize = 3;
+
+/// [`FileSyncController::flush_downstream`]'s policy, as a free function so it
+/// is testable without booting a controller.
+async fn flush_downstream_with_redrive(
+    downstream: Option<&Arc<dyn DownstreamProjection>>,
+    context: &str,
+) -> Result<()> {
+    let Some(downstream) = downstream else {
+        return Ok(());
+    };
+    let mut last = 0usize;
+    for _ in 0..DOWNSTREAM_FLUSH_ATTEMPTS {
+        match downstream
+            .flush()
+            .await
+            .map_err(|e| anyhow::anyhow!("downstream flush {context}: {e}"))?
+        {
+            holon_core::ProjectionPass::Converged => return Ok(()),
+            holon_core::ProjectionPass::Incomplete { withheld } => last = withheld,
+        }
+    }
+    anyhow::bail!(
+        "downstream flush {context}: the projection still withheld {last} op(s) after \
+         {DOWNSTREAM_FLUSH_ATTEMPTS} attempts, so their SQL rows were never written — the org \
+         path's callers would otherwise treat this as a completed write"
+    )
+}
+
 const IDENTITY_PREFLIGHT_SITE: &str = "identity-file-preflight";
 const PATH_DERIVATION_SITE: &str = "page-file-path-derivation";
 const IMAGE_PATH_SITE: &str = "image-file-path-derivation";
@@ -1151,6 +1184,22 @@ impl FileSyncController {
         self
     }
 
+    /// Flush the downstream projection, re-driving a pass that WITHHELD ops.
+    ///
+    /// Every org path that calls this treats a returned `Ok` as "the sink rows
+    /// are written" — that is the single-sink-writer contract the org
+    /// reconciler relies on, because it deliberately does not write rows
+    /// itself. A pass that withheld FK-ungrounded ops has not written them, so
+    /// mapping that to `Ok(())` would break the contract with nothing to show
+    /// for it.
+    ///
+    /// The re-drive carries no delay: a withhold sets the projection's
+    /// `seeded` flag false, and the next pass therefore reseeds from sink truth
+    /// synchronously. Waiting would add boot latency without changing anything.
+    async fn flush_downstream(&self, context: &str) -> Result<()> {
+        flush_downstream_with_redrive(self.downstream.as_ref(), context).await
+    }
+
     /// Wire the C2b history store (R3b): the org-ingest doc-page create then
     /// records one op_group through it. Absent in org-standalone wirings.
     pub fn with_history_store(mut self, history: Arc<dyn holon_api::HistoryStore>) -> Self {
@@ -1566,12 +1615,7 @@ impl FileSyncController {
             .map_err(|e| anyhow::anyhow!("heal update for {}: {e:#}", path.display()))?;
         // Publish the healed row to the SQL sink (same single-sink-writer
         // contract as the ingest / delete paths' flush).
-        if let Some(downstream) = &self.downstream {
-            downstream
-                .flush()
-                .await
-                .map_err(|e| anyhow::anyhow!("downstream flush after title-less heal: {e}"))?;
-        }
+        self.flush_downstream("after title-less heal").await?;
         Ok(true)
     }
 
@@ -1800,12 +1844,7 @@ impl FileSyncController {
 
         // Publish the consolidator's accumulated deletes to the SQL sink
         // (same single-sink-writer contract as the ingest path's flush).
-        if let Some(downstream) = &self.downstream {
-            downstream
-                .flush()
-                .await
-                .map_err(|e| anyhow::anyhow!("downstream projection flush after delete: {e}"))?;
-        }
+        self.flush_downstream("after delete").await?;
 
         self.forget_file_state(canonical);
         // Also clear the diff base so a later re-create of the same document
@@ -2145,11 +2184,7 @@ impl FileSyncController {
                                     document_uri
                                 )
                             })?;
-                        if let Some(downstream) = &self.downstream {
-                            downstream.flush().await.map_err(|e| {
-                                anyhow::anyhow!("downstream flush after rename retitle: {e}")
-                            })?;
-                        }
+                        self.flush_downstream("after rename retitle").await?;
                         info!(
                             "[FileSyncController] Rename retitled page {} to new file stem {:?}",
                             document_uri, new_stem
@@ -4117,11 +4152,9 @@ impl FileSyncController {
         // degraded mode, where the command-bus batch + `place` already wrote
         // the rows and their order keys directly.
         match &self.downstream {
-            Some(downstream) => {
-                downstream
-                    .flush()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("downstream projection flush: {e}"))?;
+            Some(_) => {
+                self.flush_downstream("after scan creates + placements")
+                    .await?;
             }
             None => {
                 // Fail loud: a create the consolidator persisted (create_in_tree
@@ -8214,5 +8247,89 @@ mod holder_order_tests {
         let rendered = ids(&doc.document_order(&uri("doc")));
         assert_eq!(rendered.len(), 2, "no block may be lost to a cycle");
         assert!(rendered.contains(&"a".to_string()) && rendered.contains(&"b".to_string()));
+    }
+}
+
+/// The org path does not write block rows itself — it sends intents and then
+/// flushes, and treats the flush returning `Ok` as "the rows are written". A
+/// projection pass that WITHHELD FK-ungrounded ops has not written them, so
+/// mapping that to `Ok(())` breaks the contract with nothing to show for it.
+#[cfg(test)]
+mod downstream_flush_tests {
+    use std::sync::Mutex;
+
+    use holon_core::ProjectionPass;
+
+    use super::*;
+
+    /// Returns each scripted outcome in turn, then `Converged` forever.
+    struct ScriptedProjection {
+        outcomes: Mutex<std::vec::IntoIter<ProjectionPass>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedProjection {
+        fn new(outcomes: Vec<ProjectionPass>) -> Arc<dyn DownstreamProjection> {
+            Arc::new(Self {
+                outcomes: Mutex::new(outcomes.into_iter()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DownstreamProjection for ScriptedProjection {
+        async fn flush(&self) -> holon_core::traits::Result<ProjectionPass> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self
+                .outcomes
+                .lock()
+                .unwrap()
+                .next()
+                .unwrap_or(ProjectionPass::Converged))
+        }
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_flush_is_re_driven_until_it_converges() {
+        let projection = ScriptedProjection::new(vec![
+            ProjectionPass::Incomplete { withheld: 2 },
+            ProjectionPass::Converged,
+        ]);
+        flush_downstream_with_redrive(Some(&projection), "test")
+            .await
+            .expect("a pass that converges on the re-drive is a completed write");
+    }
+
+    #[tokio::test]
+    async fn a_flush_that_never_converges_fails_loud_naming_the_owed_ops() {
+        let projection = ScriptedProjection::new(
+            (0..DOWNSTREAM_FLUSH_ATTEMPTS)
+                .map(|_| ProjectionPass::Incomplete { withheld: 7 })
+                .collect(),
+        );
+        let err = flush_downstream_with_redrive(Some(&projection), "after scan")
+            .await
+            .expect_err("a still-incomplete projection must NOT read as a completed write");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("withheld 7 op(s)"), "{msg}");
+        assert!(msg.contains("after scan"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_converged_flush_costs_one_call() {
+        let projection = ScriptedProjection::new(vec![ProjectionPass::Converged]);
+        flush_downstream_with_redrive(Some(&projection), "test")
+            .await
+            .expect("converged");
+    }
+
+    /// No projection wired is degraded mode, where the command bus already
+    /// wrote the rows — not a failure.
+    #[tokio::test]
+    async fn no_downstream_projection_is_not_a_failure() {
+        flush_downstream_with_redrive(None, "test")
+            .await
+            .expect("degraded mode has no downstream feed to flush");
     }
 }

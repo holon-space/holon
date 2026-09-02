@@ -189,7 +189,7 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
         4,
     ),
     (
-        "crates/holon-integration-tests/tests/loro_suite/loro_projection_atomic_advance.rs",
+        "crates/holon-integration-tests/tests/loro_suite/projection_harness.rs",
         1,
     ),
     ("crates/holon-loro-testing/src/quiescence.rs", 1),

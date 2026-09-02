@@ -3,7 +3,7 @@ id: 2026-09-02-receiver-projection-stalls-after-one-failed-reconcile
 date: 2026-09-02
 gap: COVERAGE
 secondary: ORACLE
-status: OPEN
+status: FIXED
 summary: >-
   A cross-peer indent+join merge makes one outbound Loro→SQL reconcile fail on a
   deferred foreign-key violation, and because the reconcile loop is wake-driven
@@ -96,17 +96,33 @@ surfaced because `converge_projections` has a settle budget that expired.
 
 ## Remedy
 
-OPEN. Nothing fixed here; this lane owns the convergence question, not the
-projection.
+FIXED (plan v3 Inc 1). Three pieces, all in
+`crates/holon-loro/src/loro_sync_controller.rs`.
 
-Two separable pieces, and the plan's Inc 1 contract needs both — today there is
-neither:
+1. **Root cause — an UPDATE's `parent_id` was never grounded.** A traced
+   single-case run (`lane-logs/probe-2026-09-02-outbound-trace.log`) shows the
+   receiver apply `delete:block:fe-blocked`, then emit
+   `update:block:fe-target<-block:fe-blocked` in the next incremental batch:
+   the merged tree still names the block the `join` deleted, so the update's FK
+   target no longer exists at COMMIT. `retain_grounded_creates` grounded only
+   CREATE ops; the identical gate for UPDATE ops
+   (`retain_grounded_parent_updates`) did not exist, and the incremental path's
+   orphan guard likewise inspected creates alone. Both now cover updates, and
+   the incremental guard also treats a parent this batch DELETES as ungrounded.
+2. **Surface the failure.** `LoroSyncController` holds the `DegradedSignalBus`
+   and raises a sticky `SqlProjectionFailed` condition on the subject
+   `loro-sql-projection` when the projection will not converge. A converged
+   pass is that condition's all-clear.
+3. **Bounded re-drive.** `drive_with_redrive` re-runs the pass up to four times
+   with doubling backoff. `project()` now returns `ProjectionPass`, so a pass
+   that WITHHELD FK-ungrounded ops is `Incomplete` rather than indistinguishable
+   from success — a withheld op no longer looks like a converged projection, and
+   `live`/`seeded` are not advanced past it.
 
-1. **Surface the failure.** A failed reconcile must reach the degraded signal
-   bus, not just `error!`. Fail-loud, per the project's error-handling rule.
-2. **Bounded re-drive.** A failed batch must be retried a bounded number of
-   times and then escalated. There is no retry today, so "make the retry
-   bounded" is not the fix — the fix is to build one.
+Verified: both pins pass with the `#[ignore]`s removed (10.6 s and 13.2 s,
+against a 41 s convergence-budget timeout before), and the property
+`concurrent_two_writer_pair_converges` is un-ignored. Unit coverage for the
+retry policy and both grounding gates is in the same file.
 
 Reproduce with:
 
@@ -117,7 +133,6 @@ cargo nextest run -p holon-integration-tests -p holon-gpui \
   stalls_the_receiver_projection
 ```
 
-The property that found it, `concurrent_two_writer_pair_converges`, is also
-`#[ignore]`d: it draws this class in roughly one run of five, which would make
-every landing gate flaky on a defect it does not own. Un-ignore all of them when
-the projection is fixed.
+The property that found it, `concurrent_two_writer_pair_converges`, drew this
+class in roughly one run of five. All three are un-ignored, so the plain
+`--test two_instance_composed_pbt` run covers them.

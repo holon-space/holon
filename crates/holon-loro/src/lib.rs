@@ -26,10 +26,8 @@ pub mod durable_state;
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 pub mod debounced_commit_worker;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
+/// Where a degraded condition becomes a banner. Not iroh-gated and pure-Rust:
+/// the projection controller raises `SqlProjectionFailed` on every target.
 pub mod degraded_signal_bus;
 #[cfg(all(
     feature = "iroh-sync",
@@ -121,35 +119,11 @@ pub use consolidator::BlockConsolidator;
 pub use container_registry::ContainerRegistry;
 pub use container_registry::RegisteredContainer;
 pub use container_registry::SubtreeIndex;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
 pub use degraded_signal_bus::DegradedChange;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
 pub use degraded_signal_bus::DegradedConditionKey;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
 pub use degraded_signal_bus::DegradedSignalBus;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
 pub use degraded_signal_bus::DegradedSubscription;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
 pub use degraded_signal_bus::ShareDegraded;
-#[cfg(all(
-    feature = "iroh-sync",
-    not(all(target_arch = "wasm32", target_os = "unknown"))
-))]
 pub use degraded_signal_bus::ShareDegradedReason;
 pub use event_bus::*;
 pub use event_ring::DEFAULT_EVENT_RING_CAPACITY;

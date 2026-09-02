@@ -238,6 +238,78 @@ impl FullReason {
     }
 }
 
+/// What one [`LoroProjection::project`] pass achieved. Defined beside the
+/// `DownstreamProjection` trait so the org path's synchronous `flush` caller
+/// sees the same outcome the run loop does.
+pub use holon_core::ProjectionPass;
+
+/// The outcome a pass that withheld `ungrounded` op(s) must report.
+fn pass_outcome(ungrounded: usize) -> ProjectionPass {
+    if ungrounded > 0 {
+        ProjectionPass::Incomplete {
+            withheld: ungrounded,
+        }
+    } else {
+        ProjectionPass::Converged
+    }
+}
+
+/// Whether deletes this pass withheld are OWED to the sink — i.e. whether the
+/// pass must report [`ProjectionPass::Incomplete`] because of them.
+///
+/// The delete gate fires for two unrelated reasons and they must not be
+/// conflated. An UNARMED projection withholds deletes by design: Loro is still
+/// being seeded, the sink legitimately holds raw-inserted seed-layout rows Loro
+/// does not have yet, and the all-clear is `arm()`, not another pass. Calling
+/// that incomplete would make every cold boot exhaust its retry budget and
+/// raise a banner — and, since the org path now fails on a still-incomplete
+/// flush, would fail the boot scan outright.
+///
+/// Once ARMED the gate can only have fired on an unsettled snapshot, and then a
+/// withheld delete is owed to the sink exactly like a withheld create. The
+/// share backend's prune-delete is one of these, which is why the check that
+/// guards it could not otherwise detect its own case.
+fn withheld_deletes_are_owed(armed: bool) -> bool {
+    armed
+}
+
+/// Whether a pass may seed the in-memory `live` base from its own snapshot.
+///
+/// Seeding after a withhold records the withheld change as ALREADY PROJECTED:
+/// the next incremental pass diffs against a base that claims the op landed,
+/// finds no difference, and the sink keeps the stale row forever. So a pass
+/// that withheld anything must leave `live`/`seeded` alone and stay on the full
+/// walk against sink truth, which is where the owed op gets re-emitted. This is
+/// a one-line rule with a silent, unbounded failure mode, so it is a named
+/// function used by the call site rather than an inline conjunction.
+fn may_seed_live(after_settled: bool, ungrounded: usize) -> bool {
+    after_settled && ungrounded == 0
+}
+
+/// Subject of the global Loro→SQL projection's degraded condition. Not a
+/// shared tree — the `shared_tree_id` field on [`ShareDegraded`] is the bus's
+/// subject slot, and this projection's subject is the global doc.
+pub const GLOBAL_PROJECTION_SUBJECT: &str = "loro-sql-projection";
+
+/// How many passes one wake spends trying to converge, and the first retry
+/// delay (doubled per attempt).
+///
+/// A failed batch rolls back whole and schedules a reseed from sink truth, and
+/// a withheld op needs a base that grounds it; both are things the NEXT pass
+/// can fix, so a handful of attempts is the right budget. Unbounded retry would
+/// spin on a doc that genuinely cannot project, which is a banner, not a CPU
+/// burn.
+const RECONCILE_MAX_ATTEMPTS: usize = 4;
+const RECONCILE_RETRY_BACKOFF: Duration = Duration::from_millis(50);
+
+/// The sticky condition key the projection raises and clears.
+pub fn projection_degraded_key() -> crate::degraded_signal_bus::DegradedConditionKey {
+    crate::degraded_signal_bus::DegradedConditionKey {
+        subject: GLOBAL_PROJECTION_SUBJECT.to_string(),
+        kind: crate::degraded_signal_bus::ShareDegradedReason::SQL_PROJECTION_FAILED,
+    }
+}
+
 /// Bidirectional sync between Loro and the abstract command/event bus.
 pub struct LoroSyncController {
     doc_store: Arc<RwLock<LoroDocumentStore>>,
@@ -256,6 +328,11 @@ pub struct LoroSyncController {
     last_synced: Arc<StdMutex<Frontiers>>,
     wake: Arc<Notify>,
     error_count: Arc<AtomicUsize>,
+    /// Where a projection that will not converge becomes a banner. Required,
+    /// not optional: a stalled projection means SQL — everything the UI reads —
+    /// is behind Loro, and the only alternative to disclosing it is showing
+    /// stale rows as if they were current.
+    degraded: Arc<crate::degraded_signal_bus::DegradedSignalBus>,
 }
 
 /// Lifetime handle returned by `start()`. Dropping it cancels the background
@@ -315,7 +392,11 @@ impl LoroSyncControllerHandle {
 }
 
 impl LoroSyncController {
-    pub fn new(doc_store: Arc<RwLock<LoroDocumentStore>>, projection: Arc<LoroProjection>) -> Self {
+    pub fn new(
+        doc_store: Arc<RwLock<LoroDocumentStore>>,
+        projection: Arc<LoroProjection>,
+        degraded: Arc<crate::degraded_signal_bus::DegradedSignalBus>,
+    ) -> Self {
         let last_synced = projection.last_synced();
         Self {
             doc_store,
@@ -323,6 +404,7 @@ impl LoroSyncController {
             last_synced,
             wake: Arc::new(Notify::new()),
             error_count: Arc::new(AtomicUsize::new(0)),
+            degraded,
         }
     }
 
@@ -468,12 +550,15 @@ impl LoroSyncController {
         // on every doc change (local writes, peer imports). Each wake drives one
         // outbound reconcile. There is no SQL→Loro mirror and no inbound EventBus
         // consumer; Loro is the authority and this loop is its sole projector.
+        //
+        // A wake is the ONLY input, so a pass that fails or comes back
+        // incomplete gets no second chance on its own: without the bounded
+        // re-drive below, one rolled-back batch strands SQL behind Loro until
+        // the user happens to edit again, and the UI shows stale rows with no
+        // sign anything is wrong.
         loop {
             self.wake.notified().await;
-            if let Err(e) = self.on_loro_changed().await {
-                self.error_count.fetch_add(1, Ordering::SeqCst);
-                error!("[LoroSyncController] Outbound reconcile failed: {}", e);
-            }
+            drive_with_redrive(|| self.on_loro_changed(), &self.degraded, &self.error_count).await;
         }
     }
 
@@ -482,9 +567,65 @@ impl LoroSyncController {
     /// Drive the downstream Loro→SQL projection. Delegates to the shared
     /// [`LoroProjection`] (the same instance org's initial scan flushes), which
     /// serializes concurrent callers and owns the `last_synced` watermark.
-    async fn on_loro_changed(&self) -> Result<()> {
+    async fn on_loro_changed(&self) -> Result<ProjectionPass> {
         self.projection.project().await
     }
+}
+
+/// Re-drive `pass` until it converges, up to [`RECONCILE_MAX_ATTEMPTS`] times
+/// with doubling backoff. When the budget runs out the projection stays
+/// degraded and LOUD — a sticky banner on the degraded bus, not a log line
+/// nothing reads. A converged pass clears the banner.
+///
+/// Split from the run loop so the retry policy is testable without a live doc.
+async fn drive_with_redrive<F, Fut>(
+    mut pass: F,
+    degraded: &crate::degraded_signal_bus::DegradedSignalBus,
+    error_count: &AtomicUsize,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<ProjectionPass>>,
+{
+    let mut backoff = RECONCILE_RETRY_BACKOFF;
+    let mut why = String::new();
+    for attempt in 1..=RECONCILE_MAX_ATTEMPTS {
+        match pass().await {
+            Ok(ProjectionPass::Converged) => {
+                degraded.clear(&projection_degraded_key());
+                return;
+            }
+            Ok(ProjectionPass::Incomplete { withheld }) => {
+                why = format!(
+                    "{withheld} op(s) withheld because their parent row would not exist at COMMIT"
+                );
+                warn!(
+                    attempt,
+                    "[LoroSyncController] Outbound reconcile incomplete: {why}"
+                );
+            }
+            Err(e) => {
+                error_count.fetch_add(1, Ordering::SeqCst);
+                why = format!("{e:#}");
+                error!(
+                    attempt,
+                    "[LoroSyncController] Outbound reconcile failed: {why}"
+                );
+            }
+        }
+        if attempt < RECONCILE_MAX_ATTEMPTS {
+            tokio::time::sleep(backoff).await;
+            backoff *= 2;
+        }
+    }
+    let summary = format!(
+        "the Loro→SQL projection did not converge in {RECONCILE_MAX_ATTEMPTS} attempts, so SQL \
+         (what the UI reads) is behind Loro: {why}"
+    );
+    error!("[LoroSyncController] {summary}");
+    degraded.emit(crate::degraded_signal_bus::ShareDegraded {
+        shared_tree_id: GLOBAL_PROJECTION_SUBJECT.to_string(),
+        reason: crate::degraded_signal_bus::ShareDegradedReason::SqlProjectionFailed(summary),
+    });
 }
 
 pub use holon_core::SinkReader;
@@ -701,7 +842,7 @@ impl LoroProjection {
     /// reseed-on-unsettled, and the unarmed/oversized-batch bootstrap.
     /// Diffing against a stable base means re-projecting an unchanged
     /// snapshot emits zero ops regardless of any frontier position.
-    pub async fn project(&self) -> Result<()> {
+    pub async fn project(&self) -> Result<ProjectionPass> {
         let _guard = self.project_lock.lock().await;
         let t0 = std::time::Instant::now();
 
@@ -747,13 +888,13 @@ impl LoroProjection {
             let layout_pending: Vec<crate::loro_backend::PendingChange> =
                 std::mem::take(&mut *self.layout_pending.lock().unwrap());
 
-            // Idle wake: no facts and NEITHER oplog has moved → nothing to do.
+            // Idle wake: no facts and NEITHER oplog has moved — nothing to do.
             if pending.is_empty()
                 && layout_pending.is_empty()
                 && last == current
                 && layout_last == layout_current
             {
-                return Ok(());
+                return Ok(ProjectionPass::Converged);
             }
 
             // Take the O(changed) path only for a bounded, event-supplied batch.
@@ -824,32 +965,41 @@ impl LoroProjection {
                             }
                         }
                         let after_len = before_len + creates - deletes;
-                        // Orphan-create guard: a create whose parent block is
-                        // NEITHER already in the sink base (`live`) NOR created by
-                        // this same batch will FK-reject at COMMIT and roll the
-                        // whole batch back — silently dropping every co-batched
-                        // row. The incremental fast path reads only the CHANGED
-                        // nodes, so an ancestor that changed in an earlier, already-
-                        // drained interval (whose facts were consumed by a prior
-                        // pass) can be missing from this batch while its descendants
-                        // are present. When that happens we must NOT emit the
-                        // partial batch; fall through to the full reseed below,
-                        // which reads the WHOLE current tree and re-emits the
-                        // subtree with its parent. (Seed layout / `sentinel`
-                        // non-`block:` parents are always satisfiable.)
+                        // Ungrounded-parent guard. Any op that names a
+                        // `block_raw.parent_id` whose row will not exist at COMMIT
+                        // trips the deferred self-FK and rolls the WHOLE batch back,
+                        // silently dropping every co-batched row. Two ways an
+                        // O(changed) batch produces one:
+                        //   * a CREATE whose ancestor changed in an earlier, already- drained
+                        //     interval, so it is missing from this batch; or
+                        //   * an UPDATE that re-parents a block onto a parent this batch (or an
+                        //     earlier one) DELETED — the cross-peer indent+join shape, where the
+                        //     join deletes the block a concurrently-indented node was re-parented
+                        //     under.
+                        // Neither may be emitted; fall through to the full reseed
+                        // below, which reads the WHOLE current tree against sink
+                        // truth. (Seed layout / `sentinel` non-`block:` parents are
+                        // always satisfiable.)
                         let has_orphan = {
                             let batch_created: std::collections::HashSet<&str> = ops
                                 .iter()
                                 .filter(|(name, _)| name == "create")
                                 .filter_map(|(_, e)| e.get("id").and_then(|v| v.as_string()))
                                 .collect();
+                            let batch_deleted: std::collections::HashSet<&str> = ops
+                                .iter()
+                                .filter(|(name, _)| name == "delete")
+                                .filter_map(|(_, e)| e.get("id").and_then(|v| v.as_string()))
+                                .collect();
                             ops.iter().any(|(name, e)| {
-                                if name != "create" {
+                                if name != "create" && name != "update" {
                                     return false;
                                 }
                                 match e.get("parent_id").and_then(|v| v.as_string()) {
                                     Some(pid) if pid.starts_with("block:") => {
-                                        !live.contains_key(pid) && !batch_created.contains(pid)
+                                        !batch_created.contains(pid)
+                                            && (!live.contains_key(pid)
+                                                || batch_deleted.contains(pid))
                                     }
                                     _ => false,
                                 }
@@ -873,9 +1023,9 @@ impl LoroProjection {
                         self.seeded.store(false, Ordering::SeqCst);
                         full_reason = Some(FullReason::Orphan);
                         tracing::warn!(
-                            "[LoroProjection] incremental batch has orphan create(s) (a changed \
-                             node's parent is absent from this O(changed) batch); reseeding from \
-                             sink truth to re-emit the subtree with its parent"
+                            "[LoroProjection] incremental batch names a parent that will not \
+                             exist at COMMIT (absent from this O(changed) batch, or deleted by \
+                             it); reseeding from sink truth"
                         );
                     } else {
                         let snapshot_ms = t0.elapsed().as_millis();
@@ -906,7 +1056,7 @@ impl LoroProjection {
                                         }
                                     }
                                 }
-                                return Ok(());
+                                return Ok(ProjectionPass::Converged);
                             }
                             Err(e) => {
                                 // The sink write failed (batch rolled back). Leave
@@ -986,11 +1136,15 @@ impl LoroProjection {
         // (Loro still seeding — raw-inserted seed-layout rows not yet mirrored) or
         // the snapshot is unsettled (a live node was transiently meta-incomplete,
         // so a still-live block looks "deleted"). Creates / updates always flow.
+        let mut ungrounded = 0usize;
         if !armed || !after_settled {
             let n = ops.len();
             ops.retain(|(name, _)| name != "delete");
             let withheld = n - ops.len();
             if withheld > 0 {
+                if withheld_deletes_are_owed(armed) {
+                    ungrounded += withheld;
+                }
                 tracing::warn!(
                     "[LoroProjection] withholding {} delete(s) (armed={}, snapshot_settled={})",
                     withheld,
@@ -1015,9 +1169,28 @@ impl LoroProjection {
         {
             let withheld = retain_grounded_creates(&mut ops, &before);
             if withheld > 0 {
+                ungrounded += withheld;
                 tracing::warn!(
                     "[LoroProjection] withholding {} ungrounded orphan create(s) whose parent_id \
                      chain does not reach the sink base (snapshot_settled={})",
+                    withheld,
+                    after_settled,
+                );
+            }
+        }
+        // The same gate for UPDATEs. An update that re-parents a block onto a
+        // row that will not exist at COMMIT trips the identical deferred FK —
+        // and a torn merge produces exactly that: the cross-peer indent+join
+        // shape re-parents onto the block the join deleted. Grounding creates
+        // alone left this half open, so one such update rolled the whole batch
+        // back.
+        {
+            let withheld = retain_grounded_parent_updates(&mut ops, &before);
+            if withheld > 0 {
+                ungrounded += withheld;
+                tracing::warn!(
+                    "[LoroProjection] withholding {} update(s) re-parenting onto a block absent \
+                     from the sink base and from this batch (snapshot_settled={})",
                     withheld,
                     after_settled,
                 );
@@ -1056,10 +1229,19 @@ impl LoroProjection {
             return Err(e);
         }
 
-        // Seed / refresh the incremental state — only on a settled snapshot — so
-        // the next pass can take the fast path (and so a later reseed diffs against
-        // `live`).
-        if after_settled {
+        // Seed / refresh the incremental state — only on a settled snapshot that
+        // reached the sink WHOLE — so the next pass can take the fast path (and
+        // so a later reseed diffs against `live`). Seeding `live = after` after
+        // withholding ops would record the withheld change as already projected:
+        // the next incremental pass would see no difference and the sink would
+        // keep the stale parent forever. Leaving `live` alone keeps the next
+        // pass on the full walk against sink truth, which is where the withheld
+        // op gets re-emitted.
+        if ungrounded > 0 {
+            self.seeded.store(false, Ordering::SeqCst);
+            *self.pending_reseed_reason.lock().unwrap() = Some(FullReason::Orphan);
+        }
+        if may_seed_live(after_settled, ungrounded) {
             let mut idx = collab.with_read(|doc| Ok(crate::loro_backend::build_tid_index(doc)))?;
             idx.extend(layout.with_read(|doc| Ok(crate::loro_backend::build_tid_index(doc)))?);
             *self.tid_index.lock().unwrap() = idx;
@@ -1074,7 +1256,11 @@ impl LoroProjection {
             self.layout_pending.lock().unwrap().clear();
         }
 
-        Ok(())
+        // A pass that withheld FK-ungrounded ops did NOT converge the sink: the
+        // dropped change is still owed to SQL and only another pass — against a
+        // base that grounds it — can pay it. Saying so lets the run loop
+        // re-drive instead of treating a partial projection as finished.
+        Ok(pass_outcome(ungrounded))
     }
 
     /// Apply the diff ops through the consolidator and advance the watermark.
@@ -1222,7 +1408,7 @@ impl LoroProjection {
 
 #[async_trait::async_trait]
 impl holon_core::DownstreamProjection for LoroProjection {
-    async fn flush(&self) -> holon_core::traits::Result<()> {
+    async fn flush(&self) -> holon_core::traits::Result<ProjectionPass> {
         self.project()
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
@@ -1479,6 +1665,140 @@ fn topological_sort_deletes<'a>(
     creates_order
 }
 
+/// A wake is the projector's only input, so a pass that fails or comes back
+/// incomplete must be re-driven here or not at all — and when the budget runs
+/// out the stall has to become a banner, because a projection that stops is a
+/// UI showing stale rows with no other symptom.
+#[cfg(test)]
+mod redrive_tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use super::*;
+    use crate::degraded_signal_bus::DegradedSignalBus;
+    use crate::degraded_signal_bus::ShareDegradedReason;
+
+    /// Runs `outcomes` in order, one per attempt; panics if driven past the end
+    /// (which would mean the budget is unbounded).
+    fn scripted(outcomes: Vec<Result<ProjectionPass>>) -> impl FnMut() -> ScriptedPass {
+        let mut it = outcomes.into_iter();
+        move || {
+            ScriptedPass(Some(
+                it.next().expect("re-drive exceeded its attempt budget"),
+            ))
+        }
+    }
+
+    struct ScriptedPass(Option<Result<ProjectionPass>>);
+
+    impl std::future::Future for ScriptedPass {
+        type Output = Result<ProjectionPass>;
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Ready(self.0.take().expect("polled after completion"))
+        }
+    }
+
+    fn fail() -> Result<ProjectionPass> {
+        Err(anyhow::anyhow!(
+            "deferred foreign key constraint failed on commit"
+        ))
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_failed_reconcile_is_re_driven_and_a_later_success_leaves_no_banner() {
+        let bus = DegradedSignalBus::new();
+        let errors = AtomicUsize::new(0);
+        drive_with_redrive(
+            scripted(vec![fail(), fail(), Ok(ProjectionPass::Converged)]),
+            &bus,
+            &errors,
+        )
+        .await;
+        assert_eq!(errors.load(Ordering::SeqCst), 2);
+        assert!(
+            bus.subscribe().current.is_empty(),
+            "a reconcile that eventually converged must not leave a degraded banner"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_reconcile_that_never_converges_is_bounded_and_disclosed() {
+        let bus = DegradedSignalBus::new();
+        let errors = AtomicUsize::new(0);
+        drive_with_redrive(
+            scripted((0..RECONCILE_MAX_ATTEMPTS).map(|_| fail()).collect()),
+            &bus,
+            &errors,
+        )
+        .await;
+        assert_eq!(
+            errors.load(Ordering::SeqCst),
+            RECONCILE_MAX_ATTEMPTS,
+            "the retry budget must be exactly {RECONCILE_MAX_ATTEMPTS} attempts"
+        );
+        let current = bus.subscribe().current;
+        assert_eq!(current.len(), 1, "the stall must reach the degraded bus");
+        assert_eq!(current[0].shared_tree_id, GLOBAL_PROJECTION_SUBJECT);
+        assert!(matches!(
+            current[0].reason,
+            ShareDegradedReason::SqlProjectionFailed(ref why)
+                if why.contains("deferred foreign key")
+        ));
+    }
+
+    /// A pass that WITHHELD FK-ungrounded ops left the sink behind Loro. It
+    /// returned `Ok`, so only the `Incomplete` outcome can distinguish it from
+    /// a converged pass — if it did not, the projection would stall
+    /// silently without a single error ever being raised.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn an_incomplete_pass_is_re_driven_and_disclosed_if_it_never_completes() {
+        let bus = DegradedSignalBus::new();
+        let errors = AtomicUsize::new(0);
+        drive_with_redrive(
+            scripted(
+                (0..RECONCILE_MAX_ATTEMPTS)
+                    .map(|_| Ok(ProjectionPass::Incomplete { withheld: 3 }))
+                    .collect(),
+            ),
+            &bus,
+            &errors,
+        )
+        .await;
+        assert_eq!(
+            errors.load(Ordering::SeqCst),
+            0,
+            "a withheld op is not a sink error"
+        );
+        let current = bus.subscribe().current;
+        assert_eq!(current.len(), 1);
+        assert!(matches!(
+            current[0].reason,
+            ShareDegradedReason::SqlProjectionFailed(ref why) if why.contains("3 op(s) withheld")
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_converged_pass_clears_a_standing_banner() {
+        let bus = DegradedSignalBus::new();
+        let errors = AtomicUsize::new(0);
+        drive_with_redrive(
+            scripted((0..RECONCILE_MAX_ATTEMPTS).map(|_| fail()).collect()),
+            &bus,
+            &errors,
+        )
+        .await;
+        assert_eq!(bus.subscribe().current.len(), 1);
+
+        drive_with_redrive(scripted(vec![Ok(ProjectionPass::Converged)]), &bus, &errors).await;
+        assert!(
+            bus.subscribe().current.is_empty(),
+            "the next successful projection is this condition's all-clear"
+        );
+    }
+}
+
 /// The boot gate must never be able to park the projector forever: a wedged
 /// org scan (gate never opened) and a torn-down session (every gate holder
 /// dropped) both have to resolve into a DISCLOSED degraded start, because a
@@ -1713,6 +2033,40 @@ fn retain_grounded_creates(
         match e.get("id").and_then(|v| v.as_string()) {
             Some(id) => grounded.contains(id),
             None => true,
+        }
+    });
+    n - ops.len()
+}
+
+/// Withhold every `update` whose new `parent_id` names a `block:` row that will
+/// not exist at COMMIT — neither in the sink base nor created by this batch.
+///
+/// The create-side twin is [`retain_grounded_creates`]; run this AFTER it, so a
+/// create that was itself withheld cannot ground an update. Deletes in the same
+/// batch are irrelevant here: `diff_snapshots_to_ops` only deletes a row that
+/// is absent from `after`, and an update re-parenting onto it would then have
+/// to name a block the authority no longer holds.
+///
+/// Returns how many ops were withheld.
+fn retain_grounded_parent_updates(
+    ops: &mut Vec<(String, holon_api::StorageEntity)>,
+    before: &HashMap<String, SnapshotBlock>,
+) -> usize {
+    let batch_created: std::collections::HashSet<String> = ops
+        .iter()
+        .filter(|(name, _)| name == "create")
+        .filter_map(|(_, e)| e.get("id").and_then(|v| v.as_string()).map(str::to_string))
+        .collect();
+    let n = ops.len();
+    ops.retain(|(name, e)| {
+        if name != "update" {
+            return true;
+        }
+        match e.get("parent_id").and_then(|v| v.as_string()) {
+            Some(pid) if pid.starts_with("block:") => {
+                before.contains_key(pid) || batch_created.contains(pid)
+            }
+            _ => true,
         }
     });
     n - ops.len()
@@ -2533,5 +2887,160 @@ mod orphan_gate_tests {
         assert_eq!(ops.len(), 2);
         assert!(ops.iter().any(|(n, _)| n == "update"));
         assert!(ops.iter().any(|(n, _)| n == "delete"));
+    }
+
+    fn reparent_op(id: &str, parent: &str) -> (String, holon_api::StorageEntity) {
+        let mut e = holon_api::StorageEntity::new();
+        e.insert("id".into(), Value::String(id.to_string()));
+        e.insert("parent_id".into(), Value::String(parent.to_string()));
+        ("update".to_string(), e)
+    }
+
+    /// The cross-peer indent+join shape: an `indent` re-parents `fe-target`
+    /// under `fe-blocked` while a concurrent `join_block` deletes `fe-blocked`.
+    /// The merged tree still names the deleted block as the parent, so the
+    /// update's FK target does not exist at COMMIT and the WHOLE batch rolls
+    /// back — taking every co-batched row with it.
+    #[test]
+    fn an_update_reparenting_onto_a_block_absent_from_the_sink_is_withheld() {
+        let mut ops = vec![
+            create_op("block:receiver-root", "sentinel:no_parent"),
+            reparent_op("block:fe-target", "block:fe-blocked"),
+        ];
+        let before = sink(&["block:journals"]);
+        let withheld = retain_grounded_parent_updates(&mut ops, &before);
+        assert_eq!(withheld, 1);
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].0, "create");
+    }
+
+    #[test]
+    fn an_update_reparenting_onto_a_sink_block_is_kept() {
+        let mut ops = vec![reparent_op("block:fe-target", "block:fe-parent")];
+        let before = sink(&["block:fe-parent"]);
+        assert_eq!(retain_grounded_parent_updates(&mut ops, &before), 0);
+        assert_eq!(ops.len(), 1);
+    }
+
+    /// Creates precede every update in the emitted batch, so a parent this
+    /// batch creates is a valid FK target for an update that follows it.
+    #[test]
+    fn an_update_reparenting_onto_a_block_this_batch_creates_is_kept() {
+        let mut ops = vec![
+            create_op("block:new-parent", "sentinel:no_parent"),
+            reparent_op("block:fe-target", "block:new-parent"),
+        ];
+        let before = sink(&[]);
+        assert_eq!(retain_grounded_parent_updates(&mut ops, &before), 0);
+        assert_eq!(ops.len(), 2);
+    }
+
+    /// An update that changes content but not the parent carries no
+    /// `parent_id`, and a non-`block:` parent (seed layout / sentinel) is
+    /// always a valid target.
+    /// The owed op is not lost by the withhold: once the parent it needs is in
+    /// the sink, the SAME op survives the gate. That is what the next pass's
+    /// full walk against sink truth re-emits — the withhold defers, it does not
+    /// drop.
+    #[test]
+    fn a_withheld_update_survives_the_gate_once_its_parent_reaches_the_sink() {
+        let op = reparent_op("block:fe-target", "block:fe-blocked");
+
+        let mut before_parent_lands = vec![op.clone()];
+        assert_eq!(
+            retain_grounded_parent_updates(&mut before_parent_lands, &sink(&[])),
+            1
+        );
+        assert!(before_parent_lands.is_empty());
+
+        let mut after_parent_lands = vec![op];
+        assert_eq!(
+            retain_grounded_parent_updates(&mut after_parent_lands, &sink(&["block:fe-blocked"])),
+            0,
+            "the op the earlier pass withheld must be emittable once its parent row exists"
+        );
+        assert_eq!(after_parent_lands.len(), 1);
+    }
+
+    /// Both halves of the withhold contract, pinned as one rule each.
+    ///
+    /// Safety here rests on a single flag: a pass that withheld ops must NOT
+    /// seed `live` from its own snapshot, because seeding records the withheld
+    /// change as already projected and the next incremental pass then sees no
+    /// difference — the sink keeps the stale row with no error anywhere. A
+    /// future edit that "simplifies" the condition back to `after_settled`
+    /// alone would strand ops silently, so the rule is a named function with
+    /// its own test rather than an inline conjunction.
+    #[test]
+    fn a_pass_that_withheld_ops_reports_incomplete_and_may_not_seed_live() {
+        assert_eq!(pass_outcome(0), ProjectionPass::Converged);
+        assert_eq!(
+            pass_outcome(3),
+            ProjectionPass::Incomplete { withheld: 3 },
+            "a withheld op is owed to the sink, so the pass did not converge"
+        );
+
+        assert!(
+            may_seed_live(true, 0),
+            "a settled pass that withheld nothing is exactly what seeds the base"
+        );
+        assert!(
+            !may_seed_live(true, 1),
+            "seeding after a withhold records the withheld op as projected — the next incremental \
+             pass would then find no difference and the sink would keep the stale row forever"
+        );
+        assert!(
+            !may_seed_live(false, 0),
+            "an unsettled snapshot must not become the diff base"
+        );
+    }
+
+    /// A withheld DELETE is owed to the sink too — once the projection is
+    /// ARMED. It used to be counted only into a local variable that was logged
+    /// and dropped, so `ProjectionPass` could never report it: the share
+    /// backend's guard, whose whole subject is a prune-DELETE landing before
+    /// shared descendants re-project, could not detect its own case.
+    ///
+    /// The unarmed half must stay OUT. An unarmed projection withholds deletes
+    /// by design (the sink holds raw-inserted seed rows Loro has not mirrored
+    /// yet) and its all-clear is `arm()`, not another pass — counting it would
+    /// make every cold boot exhaust the retry budget, and the org path, which
+    /// now fails on a still-incomplete flush, would fail the boot scan.
+    #[test]
+    fn a_withheld_delete_is_owed_once_armed_but_never_during_the_unarmed_boot_window() {
+        assert!(
+            withheld_deletes_are_owed(true),
+            "an armed pass withholds deletes only on an unsettled snapshot, and that delete is \
+             still owed to the sink"
+        );
+        assert!(
+            !withheld_deletes_are_owed(false),
+            "the unarmed boot window withholds deletes by design; its all-clear is arm(), so \
+             counting it would fail every cold boot scan"
+        );
+
+        assert_eq!(
+            pass_outcome(withheld_deletes_are_owed(true) as usize),
+            ProjectionPass::Incomplete { withheld: 1 },
+            "an armed pass that withheld a delete must not read as converged"
+        );
+        assert_eq!(
+            pass_outcome(withheld_deletes_are_owed(false) as usize),
+            ProjectionPass::Converged
+        );
+    }
+
+    #[test]
+    fn updates_without_a_block_parent_pass_through() {
+        let mut content_only = holon_api::StorageEntity::new();
+        content_only.insert("id".into(), Value::String("block:x".into()));
+        content_only.insert("content".into(), Value::String("hi".into()));
+        let mut ops = vec![
+            ("update".to_string(), content_only),
+            reparent_op("block:root", "sentinel:no_parent"),
+        ];
+        let before = sink(&[]);
+        assert_eq!(retain_grounded_parent_updates(&mut ops, &before), 0);
+        assert_eq!(ops.len(), 2);
     }
 }

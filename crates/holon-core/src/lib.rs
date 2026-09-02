@@ -44,6 +44,7 @@ pub use boundary_enforcer::BoundaryRejection;
 pub use boundary_enforcer::InertBoundaryEnforcer;
 pub use canonical_path::CanonicalPath;
 pub use downstream_projection::DownstreamProjection;
+pub use downstream_projection::ProjectionPass;
 pub use entity_cache::CacheFactory;
 pub use entity_cache::EntityCache;
 pub use file_format::FileFormatAdapter;

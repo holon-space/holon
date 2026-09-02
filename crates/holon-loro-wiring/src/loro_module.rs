@@ -334,7 +334,13 @@ impl Module for LoroModule {
                 }
             }
 
-            let controller = LoroSyncController::new(doc_store_arc, projection);
+            // The projection's disclosure channel: a Loro→SQL reconcile that
+            // will not converge leaves the UI reading stale rows, so it becomes
+            // a banner rather than a log line.
+            let degraded =
+                resolver.resolve::<Arc<holon_loro::degraded_signal_bus::DegradedSignalBus>>();
+            let controller =
+                LoroSyncController::new(doc_store_arc, projection, (*degraded).clone());
 
             // Phase 4: resolve the shared convergent block feed (built once in
             // `EventInfraModule` as `BlockFeed`, available in both modes) and

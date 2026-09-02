@@ -583,11 +583,17 @@ impl FrontendInjectorExt for Injector {
                         .optional_resolve_async::<dyn holon_core::DownstreamProjection>()
                         .await
                     {
-                        if let Err(e) = projection.flush().await {
-                            tracing::warn!(
+                        match projection.flush().await {
+                            Err(e) => tracing::warn!(
                                 "[FrontendSession] seed-layout projection flush failed (run-loop \
                                  will reconcile): {e:#}"
-                            );
+                            ),
+                            Ok(pass) if pass.withheld() > 0 => tracing::warn!(
+                                "[FrontendSession] seed-layout projection flush withheld {} \
+                                 FK-ungrounded op(s) (run-loop will reconcile)",
+                                pass.withheld()
+                            ),
+                            Ok(_) => {}
                         }
                     } else {
                         tracing::debug!(
