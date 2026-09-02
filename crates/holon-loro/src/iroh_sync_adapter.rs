@@ -260,9 +260,19 @@ mod adapter {
             .connect(peer_addr, alpn)
             .await
             .context("Failed to connect to peer")?;
-        crate::share_enrollment::initiator_enroll(&conn, capability, shared_tree_id)
-            .await
-            .context("[init] enrollment rejected by acceptor")?;
+        // Classify BEFORE adding context: every failure past `connect()` would
+        // otherwise share one message, and a timeout would be indistinguishable
+        // from the acceptor's decision to refuse. `classify_enrollment_failure`
+        // reads the QUIC close code and tags a genuine refusal with the typed
+        // `EnrollmentRefused`, which the caller recovers by downcast.
+        if let Err(e) =
+            crate::share_enrollment::initiator_enroll(&conn, capability, shared_tree_id).await
+        {
+            return Err(
+                crate::share_enrollment::classify_enrollment_failure(&conn, e)
+                    .context("[init] enrollment did not complete"),
+            );
+        }
         sync_on_connection_initiator(conn, doc).await
     }
 

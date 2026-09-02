@@ -3419,11 +3419,38 @@ pub trait RefPageIdentity {
 
 // ─── Two-instance true sharing (SyncTransport plan Inc0/Inc1) ─────────
 
+/// WHICH wire a two-instance round ran on. Named in the witness so a slice
+/// parameterised over both transports cannot report a green it earned on the
+/// other one — a test that means to exercise production must be able to assert
+/// it did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SyncTransportKind {
+    /// No round has run yet, so no wire has been chosen.
+    #[default]
+    NoRoundYet,
+    /// The deterministic model: an in-process append-log relay.
+    Relay,
+    /// Production: `replicate_all` over live iroh endpoints.
+    Iroh,
+}
+
+impl SyncTransportKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoRoundYet => "none",
+            Self::Relay => "relay",
+            Self::Iroh => "iroh",
+        }
+    }
+}
+
 /// What ONE bounded sync round did, as the PBT observes it. The counters are
 /// the executed-witness: a "nothing was transported" assertion is only
 /// meaningful beside proof that the round RAN and consulted the transport.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncRoundWitness {
+    /// The wire the rounds ran on. `NoRoundYet` iff `rounds_run == 0`.
+    pub transport: SyncTransportKind,
     /// Rounds driven so far on this SUT (monotonic).
     pub rounds_run: u64,
     /// Containers the last round walked. `0` means the orchestrator did
@@ -3438,12 +3465,21 @@ pub struct SyncRoundWitness {
     /// Containers the publisher declined to publish for want of a membership
     /// proof — the "nothing left the device" witness on an unshared vault.
     pub unauthorized: Vec<String>,
-    /// Cumulative transport consultations (push + pull + list) across all
-    /// rounds, read off the relay itself.
+    /// Cumulative transport consultations across all rounds, read off the
+    /// transport itself: relay `push + pull + list`, or iroh dial attempts.
     pub transport_consultations: u64,
     /// Total envelopes the transport holds — the "was anything transported at
-    /// all" observable.
+    /// all" observable. Relay-only: a direct peer link stores nothing, so the
+    /// iroh leg leaves this `0` and proves itself with
+    /// [`Self::connections_opened`] / [`Self::bytes_on_wire`] instead.
     pub transport_envelopes: usize,
+    /// Peer connections this side actually opened. On the iroh leg this is the
+    /// witness that makes a `0`-imported round a refusal rather than an
+    /// absence of attempt. Always `0` on the relay, which opens none.
+    pub connections_opened: u64,
+    /// Bytes the live QUIC connections carried (tx + rx, read off iroh's own
+    /// connection stats). Non-zero proves real network I/O, not a stub.
+    pub bytes_on_wire: u64,
 }
 
 /// SUT-side control of a TWO-INSTANCE (owner + receiver) composed slice: share

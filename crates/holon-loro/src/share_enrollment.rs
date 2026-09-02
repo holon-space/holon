@@ -747,6 +747,78 @@ mod wire {
     /// `ACCEPT_IO_TIMEOUT`.
     const ENROLL_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
+    /// QUIC application close code the acceptor sets when — and ONLY when —
+    /// the roster REFUSED the peer. A dialer cannot see the acceptor's
+    /// [`AuthzReject`]; this code is the one deliberate signal that crosses
+    /// the wire, so it is what a caller classifies on. Anything else that can
+    /// go wrong past `connect()` (an I/O timeout, a stream that never opens, a
+    /// malformed frame) closes with [`ENROLLMENT_FAILED_CODE`] instead, so an
+    /// infrastructure failure can never be read as a security decision.
+    pub const ENROLLMENT_REFUSED_CODE: u32 = 1;
+
+    /// Close code for an enrollment that failed for any reason OTHER than a
+    /// roster refusal. Distinct from [`ENROLLMENT_REFUSED_CODE`] on purpose.
+    pub const ENROLLMENT_FAILED_CODE: u32 = 2;
+
+    /// Acceptor-side: the roster turned this peer down, carrying WHY.
+    /// A typed error rather than a formatted string, so the accept loop
+    /// decides the close code by matching a type instead of reading prose.
+    #[derive(Debug)]
+    pub struct AcceptorRefused(pub AuthzReject);
+
+    impl std::fmt::Display for AcceptorRefused {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "enrollment rejected: {}", self.0)
+        }
+    }
+
+    impl std::error::Error for AcceptorRefused {}
+
+    /// Initiator-side: the acceptor refused this connection at the enrollment
+    /// gate. Carries no reason — the acceptor deliberately does not send one —
+    /// so its whole content is "this was a decision, not a failure".
+    ///
+    /// Attached to the dial error by [`classify_enrollment_failure`]; recover
+    /// it with `err.downcast_ref::<EnrollmentRefused>()`.
+    #[derive(Debug)]
+    pub struct EnrollmentRefused;
+
+    impl std::fmt::Display for EnrollmentRefused {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("the acceptor refused enrollment")
+        }
+    }
+
+    impl std::error::Error for EnrollmentRefused {}
+
+    /// Decide whether a failed enrollment was the acceptor's REFUSAL or an
+    /// infrastructure failure, and tag it so a caller can tell them apart.
+    ///
+    /// Reads the connection's QUIC close reason — a typed
+    /// `ConnectionError::ApplicationClosed` carrying the code the acceptor
+    /// set — never the text of `err`. Every failure past `connect()` already
+    /// travels under the same "enrollment" context, so a substring test
+    /// cannot separate a refusal from a 10s timeout.
+    ///
+    /// A connection with no application close reason is NOT a refusal: an
+    /// unclassifiable failure must stay loud rather than be absorbed as a
+    /// security decision.
+    pub fn classify_enrollment_failure(
+        conn: &iroh::endpoint::Connection,
+        err: anyhow::Error,
+    ) -> anyhow::Error {
+        let refused = matches!(
+            conn.close_reason(),
+            Some(iroh::endpoint::ConnectionError::ApplicationClosed(ref frame))
+                if frame.error_code == ENROLLMENT_REFUSED_CODE.into()
+        );
+        if refused {
+            anyhow::Error::new(EnrollmentRefused).context(format!("{err:#}"))
+        } else {
+            err
+        }
+    }
+
     async fn bounded<F, T>(what: &str, fut: F) -> Result<T>
     where
         F: std::future::Future<Output = Result<T>>,
@@ -828,7 +900,7 @@ mod wire {
         let peer = peer_fingerprint(conn);
         let authorized = roster
             .authorize(now, &challenge, &msg.capability_id, &msg.proof, peer)
-            .map_err(|reject| anyhow::anyhow!("enrollment rejected: {reject}"))?;
+            .map_err(|reject| anyhow::Error::new(AcceptorRefused(reject)))?;
         // Ack so the initiator knows the sync stream may proceed.
         bounded("send ack", write_frame(&mut send, b"OK"))
             .await
@@ -883,7 +955,32 @@ mod wire {
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
+pub use wire::AcceptorRefused;
+#[cfg(all(
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub use wire::ENROLLMENT_FAILED_CODE;
+#[cfg(all(
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub use wire::ENROLLMENT_REFUSED_CODE;
+#[cfg(all(
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub use wire::EnrollmentRefused;
+#[cfg(all(
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
 pub use wire::acceptor_enroll;
+#[cfg(all(
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub use wire::classify_enrollment_failure;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))

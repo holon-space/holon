@@ -179,6 +179,10 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
         "crates/holon-integration-tests/src/pbt/composed/two_instance.rs",
         3,
     ),
+    (
+        "crates/holon-integration-tests/src/pbt/composed/two_instance_transport.rs",
+        1,
+    ),
     ("crates/holon-integration-tests/src/pbt/convergence.rs", 1),
     (
         "crates/holon-integration-tests/src/pbt/loro_sync/stub_sut.rs",

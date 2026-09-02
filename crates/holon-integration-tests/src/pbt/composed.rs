@@ -127,6 +127,7 @@ pub mod seed_primitives;
 /// of truth (the lib slices `use` these).
 #[cfg(any(test, feature = "pbt"))]
 pub mod two_instance;
+pub mod two_instance_transport;
 pub mod wide_e2e;
 
 /// The out-of-process LIVE-MCP rung of the composed keystone:

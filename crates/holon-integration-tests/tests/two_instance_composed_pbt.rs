@@ -32,10 +32,14 @@ use std::collections::BTreeSet;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::two_instance::TwoInstanceE2E;
 use holon_integration_tests::pbt::composed::two_instance::boot_two_instances;
+use holon_integration_tests::pbt::composed::two_instance::boot_two_instances_on;
+use holon_integration_tests::pbt::composed::two_instance_transport::TransportChoice;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::capabilities::SutReceiverBackend;
 use holon_pbt_core::capabilities::SutTwoInstance;
+use holon_pbt_core::capabilities::SyncRoundWitness;
+use holon_pbt_core::capabilities::SyncTransportKind;
 use proptest_state_machine::prop_state_machine;
 
 prop_state_machine! {
@@ -48,6 +52,58 @@ prop_state_machine! {
     })]
     #[test]
     fn two_instance_composed_pbt(sequential 1..8 => ComposedSut<TwoInstanceE2E>);
+}
+
+/// The executed-witness, in the vocabulary of whichever wire ran. Every
+/// negative assertion in this file stands next to a call of this: "nothing
+/// crossed" only means something beside proof the transport was consulted.
+///
+/// The two wires prove it differently and MUST NOT be conflated. The relay is
+/// a store-and-forward log, so its evidence is consultations and the envelopes
+/// it holds. A direct iroh link stores nothing, so its evidence is the QUIC
+/// connections opened and the bytes they carried.
+/// `expected` MUST be a literal kind (or one derived from the `TransportChoice`
+/// the test asked for) — never `handle.transport_kind()`, which reads the kind
+/// off the very transport under test and so compares the witness against
+/// itself. A `build()` that returned a relay for `TransportChoice::Iroh` passed
+/// that version of this assertion.
+fn assert_transport_ran(w: &SyncRoundWitness, expected: SyncTransportKind) {
+    assert_eq!(
+        w.transport,
+        expected,
+        "the round ran on the {} wire, not the {} one this assertion is about",
+        w.transport.as_str(),
+        expected.as_str()
+    );
+    assert!(
+        w.containers_visited > 0,
+        "the round ran but walked ZERO containers — it never reached the replication set, so any \
+         result below proves nothing"
+    );
+    assert!(
+        w.transport_consultations > 0,
+        "the {} transport was never consulted; the result is an absence of attempt, not a \
+         decision",
+        expected.as_str()
+    );
+    if expected == SyncTransportKind::Iroh {
+        assert!(
+            w.connections_opened > 0,
+            "the iroh leg opened ZERO connections — `replicate_all` advertised nothing dialable, \
+             so nothing about production was exercised"
+        );
+        // Bytes are read off the connection iroh hands back, which only a
+        // dial that PASSED the enrollment gate produces. A refused round is
+        // witnessed by the connection count and the refusal itself.
+        if w.imported > 0 {
+            assert!(
+                w.bytes_on_wire > 0,
+                "the iroh leg imported {} container(s) while moving ZERO bytes — the counters \
+                 disagree with the wire",
+                w.imported
+            );
+        }
+    }
 }
 
 fn rt() -> tokio::runtime::Runtime {
@@ -69,7 +125,7 @@ fn two_instances_boot_with_distinct_peer_ids_and_transport_nothing_unshared() {
     let ref_state = wide_e2e_ref();
     rt.block_on(async {
         let resolver = IdResolver::default();
-        let (caps, _handle, _) = boot_two_instances(&resolver, &ref_state).await;
+        let (caps, handle, _) = boot_two_instances(&resolver, &ref_state).await;
 
         let two = caps.expect::<dyn SutTwoInstance>();
         let (owner_peer, receiver_peer) = two.instance_peer_ids().await;
@@ -94,32 +150,26 @@ fn two_instances_boot_with_distinct_peer_ids_and_transport_nothing_unshared() {
 
         // Executed witness FIRST: without it the assertions below are vacuous.
         assert_eq!(witness.rounds_run, 3, "the slice must have driven 3 rounds");
-        assert!(
-            witness.containers_visited > 0,
-            "sync_once ran but walked ZERO containers — it never reached the replication set, so \
-             'nothing crossed' proves nothing"
-        );
-        assert!(
-            witness.transport_consultations > 0,
-            "sync_once never consulted the transport; the negative result is an absence of \
-             attempt, not a refusal"
-        );
+        assert_transport_ran(&witness, TransportChoice::from_env().kind());
         assert!(
             !witness.unauthorized.is_empty(),
             "an unshared round must report every container as UNAUTHORIZED (no membership proof \
-             to attach); none were reported, so the orchestrator did not evaluate authorization"
+             on the relay, no provable capability on iroh); none were reported, so authorization \
+             was never evaluated"
         );
         assert_eq!(
             witness.pushed, 0,
-            "an unshared vault published {} container(s) to the relay — state left the device \
-             under no membership proof",
+            "an unshared vault published {} container(s) — state left the device under no \
+             membership proof",
             witness.pushed
         );
-        assert_eq!(
-            witness.transport_envelopes, 0,
-            "the relay holds {} envelope(s) from an UNSHARED vault",
-            witness.transport_envelopes
-        );
+        if TransportChoice::from_env().kind() == SyncTransportKind::Relay {
+            assert_eq!(
+                witness.transport_envelopes, 0,
+                "the relay holds {} envelope(s) from an UNSHARED vault",
+                witness.transport_envelopes
+            );
+        }
         assert_eq!(
             witness.imported, 0,
             "the receiver imported {} envelope(s) from an UNSHARED vault",
@@ -144,23 +194,39 @@ fn two_instances_boot_with_distinct_peer_ids_and_transport_nothing_unshared() {
     });
 }
 
-/// Inc1 gate: share the whole vault, run one round, and require the receiver to
-/// converge — store AND org — with both sharing invariants proven to have RUN.
+/// Inc1 gate over the ENV-SELECTED wire: share the whole vault, run one round,
+/// and require the receiver to converge — store AND org — with both sharing
+/// invariants proven to have RUN.
 #[test]
 fn one_way_share_converges_on_the_receiver() {
+    one_way_share_converges_over(TransportChoice::from_env());
+}
+
+/// The SAME property pinned to PRODUCTION (D71.b): `replicate_all` over live
+/// iroh endpoints. Pinned rather than env-selected so the landing gate covers
+/// the shipping transport without anyone remembering to set a variable — the
+/// whole point of parameterising the slice is that prod cannot drift out of
+/// test coverage.
+#[test]
+fn one_way_share_converges_on_the_receiver_over_iroh() {
+    one_way_share_converges_over(TransportChoice::Iroh);
+}
+
+fn one_way_share_converges_over(transport: TransportChoice) {
     let rt = rt();
     // `wide_e2e_ref` extracts the cap set by booting its OWN runtime, so it must
     // be built outside `block_on` — nested runtimes panic.
     let ref_state = wide_e2e_ref();
     rt.block_on(async {
         let resolver = IdResolver::default();
-        let (caps, handle, _) = boot_two_instances(&resolver, &ref_state).await;
+        let (caps, handle, _) = boot_two_instances_on(&resolver, &ref_state, transport).await;
 
         let two = caps.expect::<dyn SutTwoInstance>();
         let recv = caps.expect::<dyn SutReceiverBackend>();
 
         two.share_container("holon_tree", "receiver").await;
         let witness = two.sync_now(true).await;
+        assert_transport_ran(&witness, transport.kind());
         assert!(
             witness.pushed > 0,
             "a shared vault with content pushed NOTHING (refusals: {:?})",
@@ -264,16 +330,41 @@ fn both_sharing_invariants_are_selected_and_run() {
 /// projection did not materialize an IMPORTED node.
 #[test]
 fn post_boot_create_reaches_the_receiver_on_the_next_round() {
+    post_boot_create_reaches_the_receiver_over(TransportChoice::from_env());
+}
+
+/// The same layered localizer pinned to PRODUCTION (D71.b).
+#[test]
+fn post_boot_create_reaches_the_receiver_over_iroh() {
+    post_boot_create_reaches_the_receiver_over(TransportChoice::Iroh);
+}
+
+fn post_boot_create_reaches_the_receiver_over(transport: TransportChoice) {
     let rt = rt();
     let ref_state = wide_e2e_ref();
     rt.block_on(async {
         let resolver = IdResolver::default();
-        let (caps, handle, _) = boot_two_instances(&resolver, &ref_state).await;
+        let (caps, handle, _) = boot_two_instances_on(&resolver, &ref_state, transport).await;
         let two = caps.expect::<dyn SutTwoInstance>();
         let recv = caps.expect::<dyn SutReceiverBackend>();
 
         two.share_container("holon_tree", "receiver").await;
         two.sync_now(true).await;
+        // Settle BOTH sides before the baseline snapshot. The production wire's
+        // version-vector exchange is BIDIRECTIONAL — one round also carries the
+        // receiver's own blocks back into the owner, and the owner's projection
+        // materializes them a beat later. The relay's one-way `push_once` never
+        // does, so a baseline taken mid-drain is stable there and stale here.
+        holon_integration_tests::pbt::composed::wide_e2e::converge_handle(
+            handle.owner(),
+            std::time::Duration::from_secs(15),
+        )
+        .await;
+        holon_integration_tests::pbt::composed::wide_e2e::converge_handle(
+            handle.receiver(),
+            std::time::Duration::from_secs(15),
+        )
+        .await;
 
         // Post-boot create on the OWNER, through the production create path.
         let before = recv.owner_block_ids().await;
@@ -307,6 +398,7 @@ fn post_boot_create_reaches_the_receiver_on_the_next_round() {
         );
 
         let w = two.sync_now(true).await;
+        assert_transport_ran(&w, transport.kind());
         holon_integration_tests::pbt::composed::wide_e2e::converge_handle(
             handle.receiver(),
             std::time::Duration::from_secs(15),

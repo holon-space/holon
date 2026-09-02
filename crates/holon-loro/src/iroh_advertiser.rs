@@ -13,8 +13,12 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use iroh::Endpoint;
-use iroh::EndpointAddr;
+/// The iroh transport handles this module's public API already speaks
+/// ([`IrohAdvertiser::endpoint_for`], [`IrohAdvertiser::start_share`]'s return,
+/// [`crate::ContainerRegistry::replicate_all`]'s). Re-exported so a caller can
+/// name them without taking its own direct `iroh` dependency.
+pub use iroh::Endpoint;
+pub use iroh::EndpointAddr;
 use iroh::SecretKey;
 use loro::LoroDoc;
 use tokio::sync::RwLock;
@@ -27,6 +31,9 @@ use crate::iroh_sync_adapter::create_endpoint;
 use crate::iroh_sync_adapter::create_endpoint_with_key;
 use crate::iroh_sync_adapter::make_alpn;
 use crate::iroh_sync_adapter::sync_doc_handle_connection;
+use crate::share_enrollment::AcceptorRefused;
+use crate::share_enrollment::ENROLLMENT_FAILED_CODE;
+use crate::share_enrollment::ENROLLMENT_REFUSED_CODE;
 use crate::share_enrollment::ShareRoster;
 use crate::share_enrollment::acceptor_enroll;
 
@@ -289,10 +296,19 @@ async fn accept_loop(
                         );
                     }
                     Err(e) => {
+                        // The close code is the ONE signal the dialer can read
+                        // to tell a refusal from an I/O failure, so it is set
+                        // by matching the typed error, never by phrasing.
+                        let refused = e.downcast_ref::<AcceptorRefused>().is_some();
                         warn!(
-                            "[advertiser:{id}] REJECTED unauthorized peer at enrollment gate: {e:#}"
+                            "[advertiser:{id}] enrollment gate closed the connection \
+                             (refused={refused}): {e:#}"
                         );
-                        conn.close(1u32.into(), b"enrollment refused");
+                        if refused {
+                            conn.close(ENROLLMENT_REFUSED_CODE.into(), b"enrollment refused");
+                        } else {
+                            conn.close(ENROLLMENT_FAILED_CODE.into(), b"enrollment failed");
+                        }
                         return;
                     }
                 }
@@ -508,6 +524,118 @@ mod tests {
         assert_eq!(roster.lock().await.enrolled_count(), 1);
 
         adv.drop_share(tree_id).await?;
+        Ok(())
+    }
+
+    /// A refusal must be distinguishable from an I/O failure, by TYPE.
+    ///
+    /// Every enrollment failure past `connect()` travels under the same
+    /// "enrollment" context, so classifying on message text calls a timeout,
+    /// a stream that never opens and a dropped connection all "refused" — and
+    /// an unshared-vault negative then passes on a network fault instead of on
+    /// a security decision. Three live dials, one per shape:
+    ///
+    /// 1. a GATED share turning down a forged capability — the only refusal;
+    /// 2. an acceptor that closes with [`ENROLLMENT_FAILED_CODE`] — the shape
+    ///    the real accept loop uses when enrollment fails for any non-roster
+    ///    reason;
+    /// 3. an acceptor that drops the connection with no application close at
+    ///    all — the unclassifiable case, which must stay loud.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn only_a_roster_refusal_is_typed_as_an_enrollment_refusal() -> Result<()> {
+        use crate::iroh_sync_adapter::sync_doc_initiate_enrolled;
+        use crate::share_enrollment::CapabilitySecret;
+        use crate::share_enrollment::EnrollmentRefused;
+        use crate::share_enrollment::ExpiryTime;
+        use crate::share_enrollment::ShareRoster;
+
+        fn is_refusal(e: &anyhow::Error) -> bool {
+            e.downcast_ref::<EnrollmentRefused>().is_some()
+        }
+
+        // --- 1. a real roster refusal ---
+        let tree_id = "classifyRefusal";
+        let server_doc = Arc::new(LoroDoc::new());
+        server_doc.set_peer_id(31)?;
+        let roster = Arc::new(tokio::sync::Mutex::new(ShareRoster::new(
+            tree_id,
+            CapabilitySecret::generate(),
+            ExpiryTime(chrono::Utc::now().timestamp() + 3600),
+            4,
+        )));
+        let adv = IrohAdvertiser::new();
+        let addr = adv
+            .start_share_gated(tree_id.into(), server_doc, roster, None, None)
+            .await?;
+        let alpn = make_alpn(ALPN_PREFIX, tree_id);
+        let forged = CapabilitySecret::generate();
+        let doc1 = LoroDoc::new();
+        doc1.set_peer_id(32)?;
+        let ep1 = create_endpoint(vec![alpn.clone()]).await?;
+        let refusal = sync_doc_initiate_enrolled(&ep1, &doc1, &alpn, addr, &forged, tree_id)
+            .await
+            .expect_err("a forged capability must be refused");
+        assert!(
+            is_refusal(&refusal),
+            "the roster's refusal was not typed as one: {refusal:#}"
+        );
+        adv.drop_share(tree_id).await?;
+
+        // --- 2. an acceptor that FAILED rather than refused ---
+        let fail_id = "classifyFailed";
+        let fail_alpn = make_alpn(ALPN_PREFIX, fail_id);
+        let fail_ep = create_endpoint(vec![fail_alpn.clone()]).await?;
+        let fail_addr = fail_ep.addr();
+        let fail_task = tokio::spawn(async move {
+            if let Some(incoming) = fail_ep.accept().await
+                && let Ok(conn) = incoming.await
+            {
+                conn.close(
+                    crate::share_enrollment::ENROLLMENT_FAILED_CODE.into(),
+                    b"enrollment failed",
+                );
+                conn.closed().await;
+            }
+        });
+        let doc2 = LoroDoc::new();
+        doc2.set_peer_id(33)?;
+        let ep2 = create_endpoint(vec![fail_alpn.clone()]).await?;
+        let failure =
+            sync_doc_initiate_enrolled(&ep2, &doc2, &fail_alpn, fail_addr, &forged, fail_id)
+                .await
+                .expect_err("an acceptor that closes mid-enrollment must fail the dial");
+        assert!(
+            !is_refusal(&failure),
+            "an I/O failure was typed as a REFUSAL, so an unshared-vault negative would pass on a \
+             network fault instead of on a security decision: {failure:#}"
+        );
+        fail_task.abort();
+
+        // --- 3. no application close at all ---
+        let drop_id = "classifyDropped";
+        let drop_alpn = make_alpn(ALPN_PREFIX, drop_id);
+        let drop_ep = create_endpoint(vec![drop_alpn.clone()]).await?;
+        let drop_addr = drop_ep.addr();
+        let drop_task = tokio::spawn(async move {
+            if let Some(incoming) = drop_ep.accept().await {
+                drop(incoming.await);
+            }
+        });
+        let doc3 = LoroDoc::new();
+        doc3.set_peer_id(34)?;
+        let ep3 = create_endpoint(vec![drop_alpn.clone()]).await?;
+        let dropped =
+            sync_doc_initiate_enrolled(&ep3, &doc3, &drop_alpn, drop_addr, &forged, drop_id)
+                .await
+                .expect_err("a dropped connection must fail the dial");
+        assert!(
+            !is_refusal(&dropped),
+            "a connection that carried NO application close was typed as a refusal; an \
+             unclassifiable failure must stay loud: {dropped:#}"
+        );
+        drop_task.abort();
+
         Ok(())
     }
 

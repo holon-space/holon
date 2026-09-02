@@ -1,11 +1,18 @@
 //! **`TwoInstanceE2E` — the composed slice with a SECOND real instance.**
 //!
 //! Two `compose_sut(full_headless)` sessions in ONE process (owner + receiver),
-//! an [`InMemoryRelay`] between them, and one [`TestClock`] driving every lease
+//! a transport between them, and one [`TestClock`] driving every lease
 //! decision. Everything else is the keystone's: the same `ComposedSlice`
 //! kernel, the same `E2ETransition` enum, the same shared invariant catalog.
 //! The slice contributes only the axes that genuinely differ — a second boot,
 //! the sharing caps, and a narrowed alphabet.
+//!
+//! ## Two wires, one property (D71.b)
+//! The transport is the ONLY parameter: the same transitions and the same
+//! oracles run over the deterministic in-process relay AND over production —
+//! `replicate_all` on live iroh endpoints. See
+//! [`super::two_instance_transport`]. Test and production cannot drift when
+//! both are the same test.
 //!
 //! @pbt kind slice
 //! @pbt covers two-instance-share, two-instance-sync — one-way share +
@@ -38,7 +45,6 @@ use std::time::Duration;
 
 use holon_api::EntityUri;
 use holon_api::TestClock;
-use holon_loro::sync_transport::InMemoryRelay;
 use holon_loro::sync_transport::StablePeerId;
 use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::capabilities::SutBackend;
@@ -46,20 +52,15 @@ use holon_pbt_core::capabilities::SutOrgRead;
 use holon_pbt_core::capabilities::SutReceiverBackend;
 use holon_pbt_core::capabilities::SutTwoInstance;
 use holon_pbt_core::capabilities::SyncRoundWitness;
+use holon_pbt_core::capabilities::SyncTransportKind;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::InvariantId;
-use holon_sharing::acceptor::AcceptorContext;
 use holon_sharing::lease::Issuer;
 use holon_sharing::lease::Lease;
 use holon_sharing::lease::MembershipCert;
 use holon_sharing::lease::MembershipChain;
 use holon_sharing::policy::Capabilities;
 use holon_sharing::policy::Principal;
-use holon_sharing::policy::UnverifiedVerifier;
-use holon_sharing::sync::OutboundAuth;
-use holon_sharing::sync::SyncSession;
-use holon_sharing::sync::pull_once;
-use holon_sharing::sync::push_once;
 use holon_sharing::types::BlockId;
 use holon_sharing::types::UnverifiedAuthority;
 use proptest::prelude::*;
@@ -68,6 +69,10 @@ use proptest_state_machine::ReferenceStateMachine;
 
 use crate::pbt::composed::builder::compose_sut_seeded_with_peer_id;
 use crate::pbt::composed::harness::ComposedSlice;
+use crate::pbt::composed::two_instance_transport::RoundRequest;
+use crate::pbt::composed::two_instance_transport::Side;
+use crate::pbt::composed::two_instance_transport::TransportChoice;
+use crate::pbt::composed::two_instance_transport::TwoInstanceTransport;
 use crate::pbt::composed::wide_e2e::CONVERGE_BUDGET;
 use crate::pbt::composed::wide_e2e::SETTLE;
 use crate::pbt::composed::wide_e2e::WideHandle;
@@ -77,8 +82,6 @@ use crate::pbt::composed::wide_e2e::set_for_wiring;
 use crate::pbt::composed::wide_e2e::wide_e2e_ref;
 use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::reference_state::ReferenceState;
-use crate::pbt::sharing_state::OWNER_PRINCIPAL;
-use crate::pbt::sharing_state::RECEIVER_PRINCIPAL;
 use crate::pbt::transitions::CreateBlockUnderFocus;
 use crate::pbt::transitions::E2ETransition;
 use crate::pbt::transitions::Nothing;
@@ -110,8 +113,6 @@ struct SharingRuntime {
     /// `ShareContainer` runs — which is exactly why an unshared `SyncNow`
     /// transports nothing: there is no proof to attach.
     grant: Option<MembershipChain>,
-    owner_session: SyncSession,
-    receiver_session: SyncSession,
     witness: SyncRoundWitness,
     /// The owner's block ids as of the last owner→receiver round — the exact
     /// set that round could have carried. See
@@ -136,7 +137,9 @@ pub struct TwoInstanceHandle {
     owner_org: Option<Arc<dyn SutOrgRead>>,
     receiver_backend: Arc<dyn SutBackend>,
     receiver_org: Option<Arc<dyn SutOrgRead>>,
-    relay: InMemoryRelay,
+    /// The wire the rounds run on — the model relay or production iroh. The
+    /// ONLY thing that differs between the two legs of this slice.
+    transport: Box<dyn TwoInstanceTransport>,
     clock: Arc<TestClock>,
     /// Ids the receiver held immediately after boot — its own seed plus the
     /// programmatic default layout both instances mint under the same fixed
@@ -152,8 +155,9 @@ impl TwoInstanceHandle {
     pub fn receiver(&self) -> &WideHandle {
         &self.receiver
     }
-    pub fn relay(&self) -> &InMemoryRelay {
-        &self.relay
+    /// Which wire this handle's rounds run on.
+    pub fn transport_kind(&self) -> SyncTransportKind {
+        self.transport.kind()
     }
     pub fn clock(&self) -> &Arc<TestClock> {
         &self.clock
@@ -209,8 +213,16 @@ impl TwoInstanceHandle {
     }
 
     fn with_transport_counters(&self, mut witness: SyncRoundWitness) -> SyncRoundWitness {
-        witness.transport_consultations = self.relay.witness().total();
-        witness.transport_envelopes = self.relay.stored_envelopes();
+        let wire = self.transport.wire();
+        witness.transport = if witness.rounds_run == 0 {
+            SyncTransportKind::NoRoundYet
+        } else {
+            self.transport.kind()
+        };
+        witness.transport_consultations = wire.consultations;
+        witness.transport_envelopes = wire.envelopes;
+        witness.connections_opened = wire.connections_opened;
+        witness.bytes_on_wire = wire.bytes_on_wire;
         witness
     }
 
@@ -275,10 +287,15 @@ impl SutTwoInstance for TwoInstanceHandle {
     }
 
     async fn sync_now(&self, owner_to_receiver: bool) -> SyncRoundWitness {
-        let (publisher, consumer, sender) = if owner_to_receiver {
-            (&self.owner, &self.receiver, OWNER_PEER_ID)
+        let (publisher, consumer, sender, publisher_side) = if owner_to_receiver {
+            (&self.owner, &self.receiver, OWNER_PEER_ID, Side::Owner)
         } else {
-            (&self.receiver, &self.owner, RECEIVER_PEER_ID)
+            (
+                &self.receiver,
+                &self.owner,
+                RECEIVER_PEER_ID,
+                Side::Receiver,
+            )
         };
         let pub_registry = Self::registry(publisher, "publishing");
         let con_registry = Self::registry(consumer, "consuming");
@@ -289,33 +306,6 @@ impl SutTwoInstance for TwoInstanceHandle {
             .expect("sharing runtime lock")
             .grant
             .clone();
-        // The admitting side of THIS round. Both the audience stamped on the
-        // push and the identity the pull verifies against must be that peer, or
-        // the owner ends up checking the receiver's authorization instead of its
-        // own.
-        let admitter = Principal(
-            if owner_to_receiver {
-                RECEIVER_PRINCIPAL
-            } else {
-                OWNER_PRINCIPAL
-            }
-            .to_string(),
-        );
-        let auth = OutboundAuth {
-            sender: StablePeerId(sender),
-            audience: admitter.clone(),
-            epoch: 0,
-            // Unshared: an EMPTY chain. `push_once` then publishes NOTHING and
-            // reports every container as `unauthorized` — state must not reach an
-            // untrusted relay under an unproven claim. The acceptor's own refusal
-            // paths are covered by its unit tests, not by leaking here.
-            chain: grant.unwrap_or_else(|| MembershipChain::new(Vec::new())),
-        };
-        let ctx = AcceptorContext {
-            receiver: &admitter,
-            clock: self.clock.as_ref(),
-            verifier: &UnverifiedVerifier,
-        };
 
         // Snapshot what the owner holds BEFORE publishing: that is precisely the
         // state this round can carry, and the convergence oracle judges against
@@ -331,40 +321,34 @@ impl SutTwoInstance for TwoInstanceHandle {
         // The round RUNS even with nothing shared: it walks the replication set
         // and consults the transport. That is what makes the negative assertion
         // ("nothing crossed") non-vacuous.
-        let (push, pull) = {
-            let mut guard = self.state.lock().expect("sharing runtime lock");
-            let SharingRuntime {
-                owner_session,
-                receiver_session,
-                ..
-            } = &mut *guard;
-            let (pub_session, con_session) = if owner_to_receiver {
-                (owner_session, receiver_session)
-            } else {
-                (receiver_session, owner_session)
-            };
-            let push = push_once(&pub_registry, &self.relay, pub_session, &auth)
-                .await
-                .expect("push_once surfaces transport failure as Err; the slice must not hide it");
-            let pull = pull_once(&con_registry, &self.relay, con_session, &ctx)
-                .await
-                .expect("pull_once surfaces transport failure as Err; the slice must not hide it");
-            (push, pull)
-        };
+        let outcome = self
+            .transport
+            .round(RoundRequest {
+                publisher: &pub_registry,
+                consumer: &con_registry,
+                publisher_side,
+                sender: StablePeerId(sender),
+                grant,
+                clock: self.clock.as_ref(),
+            })
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "the {} transport failed a round; a sync failure must surface, never read as \
+                     'nothing converged': {e:#}",
+                    self.transport.kind().as_str()
+                )
+            });
 
         let mut guard = self.state.lock().expect("sharing runtime lock");
         let witness = &mut guard.witness;
         witness.rounds_run += 1;
-        witness.containers_visited = push.containers_visited.max(pull.containers_visited);
-        witness.pushed = push.pushed.len();
-        witness.imported = pull.imported.len();
-        witness.refusals = pull
-            .refusals
-            .iter()
-            .map(|(c, d)| format!("{c}: {d:?}"))
-            .collect();
-        witness.unmounted = pull.unmounted.iter().map(ToString::to_string).collect();
-        witness.unauthorized = push.unauthorized.iter().map(ToString::to_string).collect();
+        witness.containers_visited = outcome.containers_visited;
+        witness.pushed = outcome.pushed;
+        witness.imported = outcome.imported;
+        witness.refusals = outcome.refusals;
+        witness.unmounted = outcome.unmounted;
+        witness.unauthorized = outcome.unauthorized;
         let out = witness.clone();
         if let Some(owner_now) = owner_now {
             guard.owner_ids_at_last_round = owner_now;
@@ -471,8 +455,18 @@ pub async fn boot_two_instances(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
 ) -> (CapMap, Arc<TwoInstanceHandle>, BTreeSet<EntityUri>) {
+    boot_two_instances_on(resolver, ref_state, TransportChoice::from_env()).await
+}
+
+/// Boot both instances on a NAMED wire. `boot_two_instances` reads the wire
+/// from the environment; a test that must pin one calls this.
+pub async fn boot_two_instances_on(
+    resolver: &IdResolver,
+    ref_state: &ReferenceState,
+    transport: TransportChoice,
+) -> (CapMap, Arc<TwoInstanceHandle>, BTreeSet<EntityUri>) {
     let (owner_caps, _receiver_caps, handle, scaffold) =
-        boot_two_instances_with_receiver_caps(resolver, ref_state).await;
+        boot_two_instances_with_receiver_caps_on(resolver, ref_state, transport).await;
     (owner_caps, handle, scaffold)
 }
 
@@ -488,6 +482,16 @@ pub async fn boot_two_instances(
 pub async fn boot_two_instances_with_receiver_caps(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
+) -> (CapMap, CapMap, Arc<TwoInstanceHandle>, BTreeSet<EntityUri>) {
+    boot_two_instances_with_receiver_caps_on(resolver, ref_state, TransportChoice::from_env()).await
+}
+
+/// Boot both instances, on a NAMED wire, and hand back BOTH cap maps. The
+/// core the other three `boot_two_instances*` entry points delegate to.
+async fn boot_two_instances_with_receiver_caps_on(
+    resolver: &IdResolver,
+    ref_state: &ReferenceState,
+    transport: TransportChoice,
 ) -> (CapMap, CapMap, Arc<TwoInstanceHandle>, BTreeSet<EntityUri>) {
     let (mut owner_caps, owner, scaffold) =
         boot_and_seed_wide_with_peer_id(resolver, ref_state, Some(OWNER_PEER_ID)).await;
@@ -518,7 +522,7 @@ pub async fn boot_two_instances_with_receiver_caps(
         owner_org: owner_caps.get::<dyn SutOrgRead>(),
         receiver_backend,
         receiver_org: receiver_caps.get::<dyn SutOrgRead>(),
-        relay: InMemoryRelay::new(),
+        transport: transport.build(),
         clock: crate::pbt::frontend_slice::components::keystone_boot_clock(),
         receiver_boot_ids,
         state: Mutex::new(SharingRuntime::default()),
