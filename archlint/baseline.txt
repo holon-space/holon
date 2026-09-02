@@ -5,7 +5,7 @@
 # as debt-free. Ratchet DOWN: as violations are fixed, regenerate with
 #   ./archlint/archlint --update-baseline
 # See archlint/BURNDOWN.md for the category table and burn-down priority.
-# Snapshot total: 111 violation(s) across 11 rule(s).
+# Snapshot total: 110 violation(s) across 11 rule(s).
 #
 #   deleted_cell_symbol: 2
 #   entity_uri_from_raw: 9
@@ -13,7 +13,7 @@
 #   fallback: 14
 #   frontend-provider-dep: 1
 #   frontend-raw-sql: 3
-#   loro_doc_escape: 36
+#   loro_doc_escape: 35
 #   no-underscore-params: 37
 #   ok: 4
 #   raw_sql_in_frontend: 3
@@ -72,7 +72,6 @@ loro_doc_escape	crates/holon-loro/src/loro_document.rs	let _sub = doc2.doc().sub
 loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-child")).is_none(),
 loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-child")).is_none(),
 loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-new-child"))
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc = a_global.doc();
 loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();
 loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();
 loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();

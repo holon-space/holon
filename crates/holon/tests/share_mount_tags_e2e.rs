@@ -101,35 +101,37 @@ fn share_backend(dir: &TempDir, handle: DbHandle) -> Arc<LoroShareBackend> {
 /// as the FK anchor.
 async fn seed_page(backend: &LoroShareBackend, id: &str, title: &str, tags: &[&str]) {
     let collab = backend.test_global_doc().await;
-    let doc_arc = collab.doc();
-    let doc = &*doc_arc;
-    let tree = doc.get_tree(TREE_NAME);
+    collab
+        .with_write_origin("test_seed_page", |txn| {
+            let tree = txn.get_tree(TREE_NAME);
 
-    let page = tree.create(None).expect("create page node");
-    let meta = tree.get_meta(page).expect("page meta");
-    meta.insert("id", loro::LoroValue::from(id)).expect("id");
-    let text: LoroText = meta
-        .ensure_mergeable_text("content_raw")
-        .expect("content_raw");
-    text.insert(0, title).expect("title");
-    // Tags live in the node's `meta` as a JSON array string — the shape
-    // `LoroBackend::set_block_tags` writes and `read_block_from_tree` reads.
-    let tags_json = serde_json::to_string(tags).expect("tags json");
-    meta.insert("tags", loro::LoroValue::from(tags_json.as_str()))
-        .expect("tags");
+            let page = tree.create(None).expect("create page node");
+            let meta = tree.get_meta(page).expect("page meta");
+            meta.insert("id", loro::LoroValue::from(id)).expect("id");
+            let text: LoroText = meta
+                .ensure_mergeable_text("content_raw")
+                .expect("content_raw");
+            text.insert(0, title).expect("title");
+            // Tags live in the node's `meta` as a JSON array string — the shape
+            // `LoroBackend::set_block_tags` writes and `read_block_from_tree` reads.
+            let tags_json = serde_json::to_string(tags).expect("tags json");
+            meta.insert("tags", loro::LoroValue::from(tags_json.as_str()))
+                .expect("tags");
 
-    for (i, child) in ["Flights", "Hotel"].iter().enumerate() {
-        let node = tree.create(Some(page)).expect("create child");
-        let cmeta = tree.get_meta(node).expect("child meta");
-        cmeta
-            .insert("id", loro::LoroValue::from(format!("{id}-{i}").as_str()))
-            .expect("child id");
-        let ctext: LoroText = cmeta
-            .ensure_mergeable_text("content_raw")
-            .expect("child content_raw");
-        ctext.insert(0, child).expect("child title");
-    }
-    doc.commit();
+            for (i, child) in ["Flights", "Hotel"].iter().enumerate() {
+                let node = tree.create(Some(page)).expect("create child");
+                let cmeta = tree.get_meta(node).expect("child meta");
+                cmeta
+                    .insert("id", loro::LoroValue::from(format!("{id}-{i}").as_str()))
+                    .expect("child id");
+                let ctext: LoroText = cmeta
+                    .ensure_mergeable_text("content_raw")
+                    .expect("child content_raw");
+                ctext.insert(0, child).expect("child title");
+            }
+            Ok(())
+        })
+        .expect("seed page write");
 }
 
 async fn sidebar_titles(handle: &DbHandle) -> Vec<String> {

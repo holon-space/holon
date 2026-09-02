@@ -3334,17 +3334,19 @@ mod tests {
     /// The mount node's block URI in A's global tree after a share.
     async fn mount_uri_of(backend_a: &LoroShareBackend) -> String {
         let a_global = backend_a.global_doc().await.unwrap();
-        // ALLOW(loro_doc_escape): test read of a settled tree, no write batch open
-        let doc = a_global.doc();
-        let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
-        let mount_tid = tree
-            .get_nodes(false)
-            .iter()
-            .find(|n| {
-                !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist)
-                    && shared_tree::is_mount_node(&tree, n.id)
+        let mount_tid = a_global
+            .with_read(|doc| {
+                let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+                Ok(tree
+                    .get_nodes(false)
+                    .iter()
+                    .find(|n| {
+                        !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist)
+                            && shared_tree::is_mount_node(&tree, n.id)
+                    })
+                    .map(|n| n.id))
             })
-            .map(|n| n.id)
+            .unwrap()
             .expect("A's global tree must hold a mount node after share");
         EntityUri::block_from_tree_id(mount_tid.peer, mount_tid.counter).to_string()
     }
@@ -3378,8 +3380,12 @@ mod tests {
         );
         let a_global = backend_a.global_doc().await.unwrap();
         assert!(
-            // ALLOW(loro_doc_escape): test read of a settled tree, no write batch open
-            find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("mount-born-child"))
+            a_global
+                .with_read(|doc| Ok(find_tree_id_by_stable_id(
+                    doc,
+                    &EntityUri::block("mount-born-child")
+                )))
+                .unwrap()
                 .is_none(),
             "the child must NOT land in the global doc (it would never reach the peer)"
         );

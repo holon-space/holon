@@ -196,7 +196,7 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     ("crates/holon-loro/src/import_atomicity_probe.rs", 7),
     ("crates/holon-loro/src/loro_backend.rs", 8),
     ("crates/holon-loro/src/loro_document.rs", 3),
-    ("crates/holon-loro/src/loro_share_backend.rs", 15),
+    ("crates/holon-loro/src/loro_share_backend.rs", 14),
     ("crates/holon-loro/src/loro_sync_controller.rs", 1),
     ("crates/holon-sharing/src/sync.rs", 1),
     ("crates/holon-loro-wiring/src/loro_module.rs", 1),

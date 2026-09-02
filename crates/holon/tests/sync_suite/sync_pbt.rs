@@ -434,21 +434,28 @@ mod tests {
         /// mount.
         async fn mount_uri(be: &LoroShareBackend, shared_tree_id: &str) -> String {
             let collab = be.test_global_doc().await;
-            let doc_arc = collab.doc();
-            let tree = doc_arc.get_tree(TREE_NAME);
-            for n in tree.get_nodes(false) {
-                if matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist) {
-                    continue;
-                }
-                if let Ok(meta) = tree.get_meta(n.id)
-                    && let Some(loro::ValueOrContainer::Value(v)) = meta.get("shared_tree_id")
-                    && v.as_string().map(|s| s.as_str()) == Some(shared_tree_id)
-                {
-                    return holon_api::EntityUri::block_from_tree_id(n.id.peer, n.id.counter)
-                        .to_string();
-                }
-            }
-            panic!("no mount node for {shared_tree_id}");
+            collab
+                .with_read(|doc| {
+                    let tree = doc.get_tree(TREE_NAME);
+                    for n in tree.get_nodes(false) {
+                        if matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist) {
+                            continue;
+                        }
+                        if let Ok(meta) = tree.get_meta(n.id)
+                            && let Some(loro::ValueOrContainer::Value(v)) =
+                                meta.get("shared_tree_id")
+                            && v.as_string().map(|s| s.as_str()) == Some(shared_tree_id)
+                        {
+                            return Ok(holon_api::EntityUri::block_from_tree_id(
+                                n.id.peer,
+                                n.id.counter,
+                            )
+                            .to_string());
+                        }
+                    }
+                    panic!("no mount node for {shared_tree_id}");
+                })
+                .unwrap()
         }
 
         /// Drive a block create through the production intent boundary
