@@ -145,25 +145,12 @@ Both gaps this entry names are closed:
   `delete_subtree`) against two live backends, so a write that lands in the
   wrong local document is observable.
 
-**Still open, and it is not this bug:** on a shallow share, a structural write
-panics the pinned loro fork (decision D70) the moment it merges against ANY op
-the other peer has not synced yet — `tree_state.rs:1198`,
-`is_node_deleted(target).unwrap()` on a node the receiving state never saw.
-
-The measured shape is wider than "two devices adding blocks": the other op does
-not have to be structural, ONE PEER TYPING is enough, and it panics in either
-order. Proptest shrank two independent randomized runs to
-`[create on A, restart-and-edit on B]` and `[edit on B, create on A, sync]`. A
-fully synced text edit followed by a create survives, so the concurrency is what
-breaks it, not the ops.
-
-It reproduces with raw `LoroTree::create` plus a raw `LoroText::insert`,
-bypassing every Holon path, so it is the engine and not the routing; shares are
-always shallow now that `retention="full"` is refused, so it is user-reachable.
-Pinned by the `#[ignore]`d
-`structure_merged_against_a_concurrent_op_panics_the_shallow_share_engine`.
-Step 3 of the original remedy — re-run the two-instance dogfood — should wait
-for D70, since the second device only has to be typing to hit it.
+**A separate engine defect found alongside this bug, now fixed:** on a shallow
+share, a structural write used to panic the pinned loro fork (decision D70) when
+it merged against any concurrent op on the other peer. Upstream loro `ddc47ecc`
+fixes it, and Holon picked it up by rebasing the fork and bumping the pin; the
+reproducer is now the convergence assertion
+`structure_merged_against_a_concurrent_op_converges_on_a_shallow_share`.
 
 ## Adjacent observations from the same run, not filed separately
 

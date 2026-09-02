@@ -112,11 +112,12 @@ ulid = "1.1"
 fluent-uri = { version = "0.3", features = ["serde"] }
 
 # === Data structures ===
-# Bumped 1.11.1 -> 1.13.7 to ride the Holon loro fork (branch `fork-at-shallow`),
-# which implements `fork_at` / `SnapshotAt` on shallow-snapshot docs — required
-# for live share-sync projection (ADR 0028 §H4). The fix is redirected via the
-# `[patch.crates-io]` entry below. 1.13.7 also carries perf + a checkout-hang fix.
-loro = "= 1.13.7"
+# Pinned to the version the Holon loro fork (branch `fork-at-shallow`) is based
+# on, which implements `fork_at` / `SnapshotAt` on shallow-snapshot docs —
+# required for live share-sync projection (ADR 0028 §H4). The fix is redirected
+# via the `[patch.crates-io]` entry below; a mismatch here makes cargo drop the
+# patch and fail resolution against the `loro_fractional_index = 1.6.0` pin.
+loro = "= 1.13.9"
 # Holon's own crates stay on loro_fractional_index 1.6.0 (registry). The fork's
 # loro-internal pulls its workspace loro_fractional_index 1.13.0 as a separate
 # path package — both are loro-family and coexist without touching other deps.
@@ -347,17 +348,18 @@ ed25519-dalek = { path = ".cargo/patches/ed25519-dalek" }
 core-graphics = { path = ".cargo/patches/core-graphics" }
 
 # Holon loro fork — implements `fork_at` / `SnapshotAt` on shallow-snapshot docs
-# (branch `fork-at-shallow`, based on loro-internal-v1.13.7). Needed because a
+# (branch `fork-at-shallow`, based on loro-internal-v1.13.9). Needed because a
 # recipient's shared subtree is a shallow-imported doc, and the per-share SQL
 # projection worker forks it at a watermark to compute incremental diffs
-# (crates/holon-loro/src/loro_share_backend.rs:362). Upstream 1.13.7 still bails
+# (crates/holon-loro/src/loro_share_backend.rs:362). Upstream 1.13.9 still bails
 # with NotImplemented("fork_at on shallow docs"); this fork fills the at/after-
 # shallow-root case. Patching `loro` catches ALL crates.io references (incl.
 # lorotree-spike's literal `loro = "1.0"`), so the whole workspace uses the
 # fork's loro-internal — no duplicate registry/path loro-internal.
 # PR upstream is planned (fork-and-contribute); drop this patch when a released
 # loro version ships fork_at-on-shallow.
-loro = { git = "https://github.com/nightscape/loro.git", rev = "855da28b" }
+#
+loro = { git = "https://github.com/nightscape/loro.git", rev = "6f5b2d7e" }
 
 # Holon wmi fork — narrows `windows` and `windows-core` to one shared major.
 # wmi 0.18.4 requires each as `>=0.59, <0.63`; cargo resolves the two edges

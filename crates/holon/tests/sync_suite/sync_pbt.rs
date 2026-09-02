@@ -844,94 +844,6 @@ mod tests {
             }
         }
 
-        /// Structural-write bookkeeping for the generator.
-        ///
-        /// Steers cases around the engine defect pinned by
-        /// `structure_merged_against_a_concurrent_op_panics_the_shallow_share_engine`:
-        /// on a shallow share, a tree create merged against ANY op the other
-        /// peer made concurrently panics the fork — the other op does not have
-        /// to be structural, a plain text edit is enough, and it panics in
-        /// either order. Each rule below was forced by a shrunk counterexample
-        /// from a randomized batch, and all of them exist only for that defect
-        /// — delete them when the fork is fixed.
-        #[derive(Default)]
-        struct Structural {
-            /// The one peer that authors structure in this case.
-            ///
-            /// A deliberate over-approximation: two authors with ONE handover
-            /// converge, and only a third structural op panics
-            /// (`A…sync…B…sync…A`). Allowing the handover is measurably not
-            /// safe here though — under the live sync workers the generator
-            /// cannot tell which side of that line a case lands on, and
-            /// permitting it put 3 of 4 randomized runs into
-            /// `tree_state.rs:1198`. So structure gets a single author until
-            /// the fork is fixed, at which point all of these rules go.
-            author: Option<char>,
-            /// Per peer: does it hold local ops of ANY kind the other peer has
-            /// not taken? BOTH can, so this cannot be one slot — an `A` edit
-            /// followed by a `B` edit leaves both sides in flight, and a create
-            /// on either of them is then the panicking merge.
-            unsynced_a: bool,
-            unsynced_b: bool,
-            /// The peer holding an unsynced STRUCTURAL write.
-            unsynced_structure_from: Option<char>,
-        }
-
-        impl Structural {
-            fn unsynced(&self, who: char) -> bool {
-                if who == 'A' {
-                    self.unsynced_a
-                } else {
-                    self.unsynced_b
-                }
-            }
-
-            fn mark_unsynced(&mut self, who: char) {
-                if who == 'A' {
-                    self.unsynced_a = true;
-                } else {
-                    self.unsynced_b = true;
-                }
-            }
-
-            fn other(who: char) -> char {
-                if who == 'A' { 'B' } else { 'A' }
-            }
-
-            /// May `who` author structure now? Only as the case's single
-            /// author, and only when the other peer has nothing in flight for
-            /// the create to be merged against.
-            fn may_author_structure(&mut self, who: char) -> bool {
-                let uncontended = !self.unsynced(Self::other(who));
-                let mine = self.author.is_none_or(|current| current == who);
-                if uncontended && mine {
-                    self.author = Some(who);
-                    self.mark_unsynced(who);
-                    self.unsynced_structure_from = Some(who);
-                    true
-                } else {
-                    false
-                }
-            }
-
-            /// May `who` make an ordinary (non-structural) edit now? Not while
-            /// the other peer's structural write is still in flight — that is
-            /// the same merge, reached from the other side.
-            fn may_edit(&mut self, who: char) -> bool {
-                let blocked = self.unsynced_structure_from.is_some_and(|peer| peer != who);
-                if !blocked {
-                    self.mark_unsynced(who);
-                }
-                !blocked
-            }
-
-            fn synced(&mut self) {
-                self.unsynced_a = false;
-                self.unsynced_b = false;
-                self.unsynced_structure_from = None;
-            }
-        }
-
         /// Drop every expectation that names `content`. A delete on ONE peer
         /// retracts the expectation on BOTH: the peers sync live (each shared
         /// doc has an auto-sync worker), so the other peer may lose the block
@@ -1097,13 +1009,11 @@ mod tests {
             // Makes every structurally created block's id and content unique
             // across the case, so the content-keyed oracle stays unambiguous.
             let mut seq: usize = 0;
-            // Structural authorship bookkeeping — see `claim_structural`.
-            let mut structural = Structural::default();
 
             for action in actions {
                 match action {
                     Action::EditOnA(s) => {
-                        if ref_a.share_usable && structural.may_edit('A') {
+                        if ref_a.share_usable {
                             let d = a.manager_for_test().get_doc(&shared_tree_id).unwrap();
                             append_text_on_root(&d, &s);
                             ref_a.alive_suffixes.push(s);
@@ -1113,7 +1023,7 @@ mod tests {
                         }
                     }
                     Action::EditOnB(s) => {
-                        if ref_b.share_usable && structural.may_edit('B') {
+                        if ref_b.share_usable {
                             let d = b.manager_for_test().get_doc(&shared_tree_id).unwrap();
                             append_text_on_root(&d, &s);
                             ref_b.alive_suffixes.push(s);
@@ -1242,7 +1152,6 @@ mod tests {
                             ref_b.tombstoned = tombstoned;
                             ref_a.reparented = reparented.clone();
                             ref_b.reparented = reparented;
-                            structural.synced();
 
                             // P-CONVERGE: node_contents equal after pull.
                             assert_eq!(
@@ -1341,7 +1250,6 @@ mod tests {
                     }
                     Action::MarkOnA(kind) => {
                         if ref_a.share_usable
-                            && structural.may_edit('A')
                             && let Some(suffix) = ref_a.alive_suffixes.last().cloned()
                         {
                             let d = a.manager_for_test().get_doc(&shared_tree_id).unwrap();
@@ -1358,7 +1266,6 @@ mod tests {
                     }
                     Action::MarkOnB(kind) => {
                         if ref_b.share_usable
-                            && structural.may_edit('B')
                             && let Some(suffix) = ref_b.alive_suffixes.last().cloned()
                         {
                             let d = b.manager_for_test().get_doc(&shared_tree_id).unwrap();
@@ -1384,11 +1291,7 @@ mod tests {
                         // is a harness ambiguity, not a production bug.
                         // This action edits on B, so it is a B mutation for the
                         // in-flight-structure rule.
-                        if !ref_a.share_usable
-                            || !ref_b.share_usable
-                            || ref_a.corrupt_pending
-                            || !structural.may_edit('B')
-                        {
+                        if !ref_a.share_usable || !ref_b.share_usable || ref_a.corrupt_pending {
                             continue;
                         }
 
@@ -1463,10 +1366,9 @@ mod tests {
                         }
                         // A demonstrably holds B's edit now: the peers are in
                         // sync, so nothing is in flight any more.
-                        structural.synced();
                     }
                     Action::CreateUnderMountOnA(s) => {
-                        if ref_a.share_usable && structural.may_author_structure('A') {
+                        if ref_a.share_usable {
                             seq += 1;
                             let parent = mount_uri(&a, &shared_tree_id).await;
                             let (id, content) = (format!("block:s{seq}"), format!("{s}-{seq}"));
@@ -1475,7 +1377,7 @@ mod tests {
                         }
                     }
                     Action::CreateUnderMountOnB(s) => {
-                        if ref_b.share_usable && structural.may_author_structure('B') {
+                        if ref_b.share_usable {
                             seq += 1;
                             let parent = mount_uri(&b, &shared_tree_id).await;
                             let (id, content) = (format!("block:s{seq}"), format!("{s}-{seq}"));
@@ -1484,7 +1386,7 @@ mod tests {
                         }
                     }
                     Action::CreateUnderSharedRootOnA(s) => {
-                        if ref_a.share_usable && structural.may_author_structure('A') {
+                        if ref_a.share_usable {
                             seq += 1;
                             let (id, content) = (format!("block:s{seq}"), format!("{s}-{seq}"));
                             create_child(&a, "block:shared-parent", &id, &content).await;
@@ -1492,7 +1394,7 @@ mod tests {
                         }
                     }
                     Action::CreateUnderSharedRootOnB(s) => {
-                        if ref_b.share_usable && structural.may_author_structure('B') {
+                        if ref_b.share_usable {
                             seq += 1;
                             let (id, content) = (format!("block:s{seq}"), format!("{s}-{seq}"));
                             create_child(&b, "block:shared-parent", &id, &content).await;
@@ -1504,7 +1406,6 @@ mod tests {
                         // children hang under would take them with it, which
                         // the content-keyed reference model does not model.
                         if ref_a.share_usable
-                            && structural.may_author_structure('A')
                             && let Some(idx) = deletable_index(&ref_a)
                         {
                             let (id, content) = ref_a.children.remove(idx);
@@ -1516,7 +1417,6 @@ mod tests {
                     }
                     Action::DeleteChildOnB => {
                         if ref_b.share_usable
-                            && structural.may_author_structure('B')
                             && let Some(idx) = deletable_index(&ref_b)
                         {
                             let (id, content) = ref_b.children.remove(idx);
@@ -1527,10 +1427,7 @@ mod tests {
                         }
                     }
                     Action::MoveChildOnA => {
-                        if ref_a.share_usable
-                            && structural.may_author_structure('A')
-                            && ref_a.children.len() >= 2
-                        {
+                        if ref_a.share_usable && ref_a.children.len() >= 2 {
                             let (child_id, child_content) = ref_a.children.last().cloned().unwrap();
                             let (parent_id, parent_content) =
                                 ref_a.children.first().cloned().unwrap();
@@ -1671,33 +1568,20 @@ mod tests {
             ]));
         }
 
-        /// Pins an ENGINE defect this lane found and does NOT fix: on a
-        /// shallow-history shared doc, a tree node created on one peer panics
-        /// loro's tree-diff when it is merged against ANY op the other peer
-        /// made concurrently — another create, or merely a text edit
-        /// (`tree_state.rs:apply_diff_and_convert`,
-        /// `is_node_deleted(target).unwrap()` on a node the receiving state
-        /// never saw), which then poisons the doc mutex.
+        /// On a shallow-history shared doc, a tree node created on one peer
+        /// CONVERGES when it is merged against an op the other peer made
+        /// concurrently — here a plain text edit on the shared root, the
+        /// weakest form of contention.
         ///
-        /// It is not Holon write routing: the reproducer below drives raw
-        /// `LoroTree::create` and `LoroText::insert` on the shared docs,
-        /// bypassing every Holon write path. Concurrency is what it needs —
-        /// the same ops with a sync in between converge.
-        ///
-        /// Shares are always shallow in production (`retention = "full"` is
-        /// refused since the B1 history-leak fix), so this is reachable from
-        /// the UI the moment one person adds a block while the other types.
-        /// Fixing it means either patching the loro fork's shallow-doc tree
-        /// diff or exporting shares with subtree-only history instead of a
-        /// shallow snapshot (the B1 remedy in
-        /// `docs/Reference/SUBTREE_SHARING.md`) — a design change outside this
-        /// lane, which owns write routing only.
-        ///
-        /// This is also what `Structural::may_author_structure` and
-        /// `Structural::may_edit` steer the generator around.
+        /// The reproducer drives raw `LoroTree::create` and `LoroText::insert`
+        /// on the shared docs, bypassing every Holon write path, so it
+        /// exercises the engine rather than write routing. Shares are
+        /// always shallow in production (`retention = "full"` is
+        /// refused since the B1 history-leak fix), so this is the shape
+        /// the UI reaches the moment one person adds a block while the
+        /// other types.
         #[test]
-        #[ignore = "known engine defect: a tree create merged against a concurrent op panics loro on a shallow share"]
-        fn structure_merged_against_a_concurrent_op_panics_the_shallow_share_engine() {
+        fn structure_merged_against_a_concurrent_op_converges_on_a_shallow_share() {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(4)
                 .enable_all()
