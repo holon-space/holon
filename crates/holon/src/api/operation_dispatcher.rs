@@ -7,6 +7,7 @@
 //! (QueryableCache<T>) and the dispatcher implement OperationProvider, allowing
 //! recursive composition.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -65,6 +66,35 @@ pub struct OperationDispatcher {
     /// resolves for exactly the entities that exist; the `Default` value knows
     /// only the built-in schemes.
     link_classifier: holon_api::link_parser::LinkTargetClassifier,
+    /// Entities the composition root deliberately left unwired, each with the
+    /// configuration that removed it. An unregistered entity is two different
+    /// states — "no such entity" and "this build turned it off" — and only the
+    /// composition root can tell them apart, so it says which one this is.
+    unavailable_entities: UnavailableEntities,
+}
+
+/// Why an entity has no provider in THIS container, keyed by entity name. Built
+/// by the composition root and resolved by [`OperationModule`]; a container
+/// that registers none behaves exactly as before.
+#[derive(Debug, Clone, Default)]
+pub struct UnavailableEntities(pub HashMap<EntityName, String>);
+
+impl UnavailableEntities {
+    pub fn new(entries: impl IntoIterator<Item = (&'static str, String)>) -> Self {
+        Self(
+            entries
+                .into_iter()
+                .map(|(name, reason)| (EntityName::new(name), reason))
+                .collect(),
+        )
+    }
+
+    /// Canonicalized on the way in, like every other entity lookup: the
+    /// dispatcher's resolved name is a raw `&str` whose `_`/`-` spelling need
+    /// not match the one the composition root registered.
+    fn reason_for(&self, entity: &str) -> Option<&str> {
+        self.0.get(&EntityName::new(entity)).map(String::as_str)
+    }
 }
 
 /// Whether the params reaching the dispatcher carry text a human or an agent
@@ -144,6 +174,13 @@ impl OperationDispatcher {
     /// an `Err` and the provider never runs.
     pub fn set_net_guard(&mut self, guard: Arc<dyn crate::api::net_guard::NetGuard>) {
         self.net_guard = Some(guard);
+    }
+
+    /// Record which entities this container left unwired and why, so a dispatch
+    /// against one fails naming the configuration instead of the missing
+    /// registration.
+    pub fn set_unavailable_entities(&mut self, unavailable: UnavailableEntities) {
+        self.unavailable_entities = unavailable;
     }
 
     /// Add an observer to this dispatcher
@@ -983,7 +1020,17 @@ impl OperationDispatcher {
                         entity_name, op_name, entity_names
                     );
                     return Err(
-                        format!("No provider registered for entity: {}", entity_name).into(),
+                        match self.unavailable_entities.reason_for(resolved_entity_name) {
+                            Some(reason) => format!(
+                                "Entity '{entity_name}' is unavailable in this session: {reason}"
+                            )
+                            .into(),
+                            None => format!(
+                                "No provider registered for entity: {entity_name} (operation: \
+                             '{op_name}')"
+                            )
+                            .into(),
+                        },
                     );
                 }
 
@@ -1494,6 +1541,12 @@ impl Module for OperationModule {
                         as Arc<dyn crate::api::net_guard::NetGuard>
                 });
             dispatcher.set_net_guard(net_guard);
+
+            // A container that switched an entity off says which setting did
+            // it; one that registers nothing keeps the plain not-found answer.
+            if let Some(unavailable) = r.optional_resolve_async::<UnavailableEntities>().await {
+                dispatcher.set_unavailable_entities((*unavailable).clone());
+            }
 
             // Every free-standing type the registry carries gets a write
             // authority derived from ITS definition. `FreeStandingTypeViews`

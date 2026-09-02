@@ -1159,10 +1159,7 @@ impl HolonMcpServer {
                     // `{:#}` renders the FULL anyhow chain (every `.context`
                     // layer down to the typed source, e.g. `ParentNotFound`),
                     // not just the outermost message.
-                    format!(
-                        "Operation '{}' on '{}' failed: {:#}",
-                        params.operation, params.entity_name, e
-                    ),
+                    format!("{e:#}"),
                     None,
                 )
             })?;

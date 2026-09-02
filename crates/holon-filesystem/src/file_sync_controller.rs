@@ -629,7 +629,7 @@ pub struct FileSyncController {
     /// A page rename derives a NEW path from the new title, so retiring the old
     /// file needs the previous one. `alias_registrar` also holds that mapping,
     /// but it is a Loro-backed seam the composition root wires only when CRDT
-    /// storage is enabled — in the shipped SqlOnly default it is `None`, and
+    /// storage is enabled — in SqlOnly it is `None`, and
     /// sourcing the previous home from it alone left every renamed page
     /// DOUBLE-HOMED (`inv-every-page-has-its-own-file`). This map is
     /// mode-independent: the controller is the sole writer of page files, so it

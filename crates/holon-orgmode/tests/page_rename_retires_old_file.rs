@@ -1,7 +1,7 @@
 //! A renamed page must keep owning exactly ONE file — in EVERY storage mode.
 //!
 //! `dyn AliasRegistrar` is registered only inside the `loro_enabled` arm of the
-//! composition root, so in the shipped SqlOnly default the controller holds
+//! composition root, so in SqlOnly the controller holds
 //! `None` and the rename cleanup in `materialize_page_identity_file` had no
 //! record of the page's previous home: the new title's file was written, the
 //! old title's file survived, and the page was DOUBLE-HOMED
@@ -445,7 +445,7 @@ async fn a_renamed_page_retires_its_old_file_with_an_alias_registrar() {
     a_rename_leaves_exactly_one_home(Some(Arc::new(MapAliasRegistrar::default()))).await;
 }
 
-/// SqlOnly wiring (`dyn AliasRegistrar` ABSENT — the shipped default). The
+/// SqlOnly wiring (`dyn AliasRegistrar` ABSENT). The
 /// controller must retire the old home from its OWN record of what it wrote.
 #[tokio::test]
 async fn a_renamed_page_retires_its_old_file_without_an_alias_registrar() {
@@ -737,8 +737,8 @@ async fn a_cold_boot_fast_path_still_registers_the_docs_alias() {
 /// path another doc is known to home, so the owner keeps writing.
 ///
 /// Driven through BOTH wirings: the refusal reads `doc_home`, which
-/// exists in every storage mode, so the SqlOnly default must be
-/// protected too and not only the Loro one.
+/// exists in every storage mode, so SqlOnly must be protected
+/// too and not only the Loro arm.
 ///
 /// See `docs/Testing/bugfunnel/entries/
 /// 2026-08-30-cold-boot-alias-gap-misroutes-writeback.md`.
@@ -824,7 +824,7 @@ async fn a_namesake_docs_writeback_leaves_the_owners_file_writable() {
     a_namesake_never_takes_the_owners_file(Some(Arc::new(MapAliasRegistrar::default()))).await;
 }
 
-/// SqlOnly wiring (the shipped default): `doc_home` is the only record
+/// SqlOnly wiring: `doc_home` is the only record
 /// of the owner's file, and the refusal has to hold on it alone.
 #[tokio::test]
 async fn a_namesake_docs_writeback_leaves_the_owners_file_writable_without_a_registrar() {

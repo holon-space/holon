@@ -414,10 +414,7 @@ impl TestEnvironmentBuilder {
             vault: holon_frontend::config::VaultConfig {
                 root: Some(temp_dir.path().to_path_buf()),
             },
-            crdt: holon_frontend::config::CrdtPreferences {
-                enabled: if enable_loro { Some(true) } else { None },
-                ..Default::default()
-            },
+            crdt: crdt_preferences(enable_loro),
             ..Default::default()
         };
         let config_dir = temp_dir.path().to_path_buf();
@@ -633,15 +630,7 @@ pub(crate) async fn run_epoch_flip_rejection_check(
         vault: holon_frontend::config::VaultConfig {
             root: Some(temp_path.to_path_buf()),
         },
-        crdt: holon_frontend::config::CrdtPreferences {
-            // Flip the consolidator: whatever the live app pinned, boot the opposite.
-            enabled: if currently_loro_enabled {
-                None
-            } else {
-                Some(true)
-            },
-            ..Default::default()
-        },
+        crdt: flipped_crdt_preferences(currently_loro_enabled),
         ..Default::default()
     };
     let session_config = SessionConfig::new(holon_api::UiInfo::permissive()).without_wait();
@@ -877,9 +866,16 @@ impl TestEnvironment {
         self.enable_loro.set(enable);
     }
 
-    /// Whether Loro is enabled for this environment.
+    /// The mode this environment's container actually boots in. Read off the
+    /// SAME `HolonConfig` `start_app` builds rather than off the caller's flag,
+    /// so a construction that loses an explicit `false` reports the mode that
+    /// really runs instead of the one that was asked for.
     pub fn loro_enabled(&self) -> bool {
-        self.enable_loro.get()
+        HolonConfig {
+            crdt: crdt_preferences(self.enable_loro.get()),
+            ..Default::default()
+        }
+        .crdt_enabled()
     }
 
     /// The DI-resolved Loro doc store of a running Loro-enabled Turso session.
@@ -911,14 +907,7 @@ impl TestEnvironment {
             vault: holon_frontend::config::VaultConfig {
                 root: Some(self.temp_dir.path().to_path_buf()),
             },
-            crdt: holon_frontend::config::CrdtPreferences {
-                enabled: if self.enable_loro.get() {
-                    Some(true)
-                } else {
-                    None
-                },
-                ..Default::default()
-            },
+            crdt: crdt_preferences(self.enable_loro.get()),
             ..Default::default()
         };
         let config_dir = self.temp_dir.path().to_path_buf();
@@ -2988,4 +2977,68 @@ fn data_row_id(row: &holon_api::StorageEntity) -> String {
 
 fn data_row_field_names(row: &holon_api::StorageEntity) -> Vec<&std::sync::Arc<str>> {
     row.keys().collect()
+}
+
+/// The CRDT preferences every `TestEnvironment` container boots with. The
+/// caller's choice is stated explicitly in BOTH directions: an absent key means
+/// "no opinion" and resolves to the shipped default, so encoding `false` as
+/// absence would silently boot the opposite mode.
+fn crdt_preferences(enable_loro: bool) -> holon_frontend::config::CrdtPreferences {
+    holon_frontend::config::CrdtPreferences {
+        enabled: Some(enable_loro),
+        ..Default::default()
+    }
+}
+
+/// The consolidator the epoch-rejection check boots with: the opposite of the
+/// one the live app pinned. Stated explicitly, or the "flip" can degenerate
+/// into booting the same mode and the guard has nothing to reject.
+fn flipped_crdt_preferences(
+    currently_loro_enabled: bool,
+) -> holon_frontend::config::CrdtPreferences {
+    crdt_preferences(!currently_loro_enabled)
+}
+
+#[cfg(test)]
+mod crdt_mode_tests {
+    use super::*;
+
+    /// The mode a container reports must be the mode it BOOTS, resolved through
+    /// `HolonConfig::crdt_enabled` exactly as production resolves it. Reporting
+    /// the caller's own flag instead lets a construction lose an explicit
+    /// `false` while every SqlOnly test still reads as SqlOnly.
+    #[test]
+    fn a_requested_mode_survives_into_the_resolved_config() {
+        for requested in [true, false] {
+            let resolved = HolonConfig {
+                crdt: crdt_preferences(requested),
+                ..Default::default()
+            }
+            .crdt_enabled();
+            assert_eq!(
+                resolved, requested,
+                "set_enable_loro({requested}) must boot a container whose resolved mode is \
+                 {requested}"
+            );
+        }
+    }
+
+    /// The epoch-rejection helper must actually flip. Both directions, because
+    /// only one of them regressed.
+    #[test]
+    fn the_epoch_check_boots_the_opposite_consolidator() {
+        for live in [true, false] {
+            let flipped = HolonConfig {
+                crdt: flipped_crdt_preferences(live),
+                ..Default::default()
+            }
+            .crdt_enabled();
+            assert_eq!(
+                flipped, !live,
+                "a live consolidator of loro={live} must be flipped to {}, or the guard has \
+                 nothing to reject",
+                !live
+            );
+        }
+    }
 }

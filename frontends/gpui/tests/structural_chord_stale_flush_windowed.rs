@@ -22,8 +22,8 @@
 //! reverted (its echo converges the editor), and a plain blur does not revert
 //! either.
 //!
-//! MODE: SqlOnly, the SHIPPED DEFAULT (`crdt.enabled` unset) — the mode the
-//! dogfood ran. The Loro arm is kept as a labelled control.
+//! MODE: SqlOnly (`crdt.enabled = false`) — the mode the dogfood ran. The Loro
+//! arm is kept as a labelled control.
 //!
 //! Run: cargo test -p holon-gpui --features pbt --test
 //! structural_chord_stale_flush_windowed

@@ -5,8 +5,8 @@
 //! dispatchable over the wire, but it drives the COMPOSED `full_headless`
 //! session, whose block CRUD authority is the Loro `LoroBlockOperations`
 //! provider — the only provider that advertised the `dismiss_advice` op. The
-//! desktop GPUI app defaults to SqlOnly (loro:false, `wiring.rs:168`), where
-//! the block CRUD authority is `SqlOperationProvider`. That provider did NOT
+//! SqlOnly wiring (`crdt.enabled = false`, `wiring.rs`) instead routes block
+//! CRUD to `SqlOperationProvider`. That provider did NOT
 //! advertise or handle `dismiss_advice`, so the woven advice row's own
 //! `dismiss_advice` op_button dispatched into the dispatcher and hit
 //! "No provider registered for entity: 'block'" — the dismiss gesture was dead

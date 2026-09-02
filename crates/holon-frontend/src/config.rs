@@ -556,8 +556,13 @@ impl HolonConfig {
             .unwrap_or_else(|| config_dir.join(".loro"))
     }
 
+    /// Whether the CRDT layer is wired. Defaults to `true` on every platform:
+    /// sharing and offline merge live behind it, and a desktop booting without
+    /// it cannot share with a phone at all. `crdt.enabled = false` in
+    /// `holon.toml` (or `HOLON_CRDT_ENABLED=false` / `--crdt-enabled=false`)
+    /// selects SqlOnly, which stays a first-class mode.
     pub fn crdt_enabled(&self) -> bool {
-        self.crdt.enabled.unwrap_or(false)
+        self.crdt.enabled.unwrap_or(true)
     }
 
     /// Whether the embedded MCP server should launch at boot. Defaults to
@@ -1097,6 +1102,49 @@ mod tests {
         assert!(
             err.to_string().contains("Config errors"),
             "error must surface the config parse failure: {err}"
+        );
+    }
+
+    /// The shipped desktop default enables the CRDT layer, the same value
+    /// mobile force-applies at its boot seam. Without it a desktop
+    /// instance registers no `LoroModule`, so `tree.share_subtree` has no
+    /// provider and a desktop→phone share is impossible until the user finds a
+    /// config key nothing points them at. SqlOnly stays reachable as an
+    /// explicit opt-out (`crdt.enabled = false`), never as the default.
+    #[test]
+    fn desktop_default_enables_crdt() {
+        assert!(
+            HolonConfig::default().crdt_enabled(),
+            "the built-in default must enable the CRDT layer — sharing depends on it"
+        );
+    }
+
+    /// First run: no `holon.toml` on disk. The resolved default must be the
+    /// same one `HolonConfig::default()` carries, not a second default that
+    /// only the file-absent path sees.
+    #[test]
+    fn first_run_with_no_config_file_enables_crdt() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!dir.path().join("holon.toml").exists());
+
+        let config = HolonConfig::load_runtime(dir.path()).expect("first run is not an error");
+        assert!(
+            config.crdt_enabled(),
+            "a first-run desktop boot must resolve CRDT enabled"
+        );
+    }
+
+    /// The opt-out is still an opt-out: an explicit `false` wins over the
+    /// default.
+    #[test]
+    fn explicit_false_still_disables_crdt() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("holon.toml"), "[crdt]\nenabled = false\n").unwrap();
+
+        let config = HolonConfig::load_runtime(dir.path()).expect("valid config");
+        assert!(
+            !config.crdt_enabled(),
+            "`crdt.enabled = false` must still select SqlOnly — it is the documented opt-out"
         );
     }
 

@@ -8,14 +8,13 @@
 //! The subscriber is `share_ui::spawn_degraded_bus_bridge`, spawned by
 //! `launch_holon_window_impl`. Its spawn used to be nested inside
 //! `if let Some(backend) = share_backend`, and `share_backend` is
-//! `Arc<LoroShareBackend>` — unregistered whenever `crdt.enabled` is unset,
-//! i.e. in the SHIPPED DEFAULT. This test opens a real window over a SqlOnly
-//! container through the production launcher and asserts the bus has a
-//! subscriber afterwards.
+//! `Arc<LoroShareBackend>` — unregistered whenever `crdt.enabled` is false.
+//! This test opens a real window over a SqlOnly container through the
+//! production launcher and asserts the bus has a subscriber afterwards.
 //!
 //! @pbt kind windowed
 //! @pbt covers degraded-disclosure-subscriber — after the production GPUI
-//! window launch over a SqlOnly (shipped-default) container, the
+//! window launch over a SqlOnly container, the
 //! `DegradedSignalBus` has a live subscriber, so a raised condition reaches
 //! `ShareUiState` and can be rendered as a banner (BugFunnel 2026-08-04
 //! ENVIRONMENT)
@@ -47,14 +46,14 @@ fn shipped_window_launch_subscribes_to_the_degraded_bus_in_sql_only_mode() {
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     let env = runtime.block_on(async { TestEnvironment::new(runtime.clone()).unwrap() });
-    // The shipped default: `crdt.enabled` unset ⇒ no LoroModule ⇒ no
+    // SqlOnly: `crdt.enabled = false` ⇒ no LoroModule ⇒ no
     // `Arc<LoroShareBackend>`. This is the configuration the dogfood boot ran
     // in and the one the old `share_backend` guard silenced.
     env.set_enable_loro(false);
     runtime.block_on(async { env.start_app(true).await.expect("start_app") });
     assert!(
         !env.loro_enabled(),
-        "this test is only meaningful in the SqlOnly (shipped-default) mode"
+        "this test is only meaningful in SqlOnly mode"
     );
 
     let session = env.session_arc();

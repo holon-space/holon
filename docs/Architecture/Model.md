@@ -41,6 +41,11 @@ concepts separate even where the config isn't:
 | Merge fidelity (per field) | op-CRDT ≻ base-3-way ≻ LWW |
 | Transport | Iroh P2P on / off |
 
+Every platform ships with the CRDT layer ON (`crdt.enabled` defaults to `true`,
+ruling D69.a 2026-09-02): sharing and offline merge live behind it, and a
+desktop booting without it cannot share with a phone at all. SqlOnly remains a
+first-class point in the grid, reached by an explicit `crdt.enabled = false`.
+
 ## Loro is three capabilities, not one
 
 1. **Merge algebra** — RGA text merge, tree move semantics; a pure function

@@ -24,12 +24,11 @@
 //! built with no operations, so `handle_text_sync` can never produce an
 //! `Execute` and the rung passes vacuously (proven, see lane-report-99.md).
 //!
-//! MODE: SqlOnly, the SHIPPED DEFAULT (`crdt.enabled` unset) — the mode the
-//! dogfood ran. `TestEnvironment` defaults to Loro, where the blur `set_field`
-//! is dropped as a redundant second content writer
-//! (`ViewEventHandler::loro_content_writer`), so a Loro-only rung would report
-//! a green that means nothing about the finding. The Loro arm is kept as a
-//! labelled control.
+//! MODE: SqlOnly (`crdt.enabled = false`) — the mode the dogfood ran.
+//! `TestEnvironment` defaults to Loro, where the blur `set_field` is dropped as
+//! a redundant second content writer (`ViewEventHandler::loro_content_writer`),
+//! so a Loro-only rung would report a green that means nothing about the
+//! finding. The Loro arm is kept as a labelled control.
 //!
 //! Run: cargo test -p holon-gpui --features pbt --test
 //! task_keyword_blur_windowed

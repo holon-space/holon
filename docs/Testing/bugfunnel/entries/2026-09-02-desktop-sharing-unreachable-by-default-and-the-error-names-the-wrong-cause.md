@@ -3,7 +3,7 @@ id: 2026-09-02-desktop-sharing-unreachable-by-default-and-the-error-names-the-wr
 date: 2026-09-02
 gap: ENVIRONMENT
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   Desktop defaults `crdt.enabled` to false while mobile force-enables it, so a
   desktop-to-phone share is impossible out of the box, and the resulting error
@@ -75,7 +75,29 @@ silent absence would violate fail-loud. CRDT has no such line.
 
 ## Remedy
 
-Not fixed here. Three candidates, in increasing order of ambition:
+FIXED (ruling D69.a, Martin 2026-09-02) — candidates 1 and 3 below, together:
+
+- `HolonConfig::crdt_enabled` now defaults to `true`
+  (`crates/holon-frontend/src/config.rs`). Every platform ships the CRDT layer
+  on; SqlOnly is reached by an explicit `crdt.enabled = false`, and stays a
+  first-class mode. Pinned by `desktop_default_enables_crdt` /
+  `first_run_with_no_config_file_enables_crdt` /
+  `explicit_false_still_disables_crdt` in the same file.
+- A container that switches an entity off now says which setting did it.
+  `add_frontend` logs the disclosure line at boot and registers
+  `UnavailableEntities` for `tree` when the layer is off
+  (`crates/holon-app/src/wiring.rs`); the dispatcher's not-found branch reports
+  that reason instead of a bare missing registration
+  (`crates/holon/src/api/operation_dispatcher.rs`). A share dispatched with
+  `crdt.enabled = false` now fails with "Entity 'tree' is unavailable in this
+  session: the CRDT layer is off (`crdt.enabled = false`); sharing needs it".
+  Pinned by `crates/holon-app/tests/sharing_requires_crdt.rs`.
+- The second edge is half-closed: every not-found refusal now carries the
+  operation name, so `block`/`update` reads as an unknown operation rather than
+  an unregistered entity. The available-entity set still reaches only the
+  tracing log, not the MCP reply.
+
+The three candidates as originally recorded:
 
 1. Log the same one-line disclosure at boot that `configure_mcp` logs, naming
    `crdt.enabled` and stating that sharing is unavailable. Cheapest, and it

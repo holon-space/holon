@@ -229,13 +229,12 @@ impl HolonService {
         // HolonService is a session facade (human web-worker/UI, or the MCP
         // server acting for an agent); its configured `origin` states which.
         // Rule/sync/ingest ops do not route through it.
+        // No `.context` naming the operation: `DispatchingOperationEngine`
+        // already prefixes every failure with the entity and operation, and a
+        // second copy buries the cause underneath repeated names.
         self.engine
             .execute_operation(entity_name, op_name, params, self.origin.clone())
             .await
-            .context(format!(
-                "Failed to execute operation '{}' on entity '{}'",
-                op_name, entity_name
-            ))
     }
 
     /// List available operations for an entity.

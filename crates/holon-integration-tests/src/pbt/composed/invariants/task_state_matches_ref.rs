@@ -4,9 +4,9 @@
 //! Its sibling `inv-task-state-storage-coherence` additionally needs
 //! `SutLoroTaskState`, so it selects only where a Loro projection is wired: it
 //! runs (and catches) in the Loro arm, and DESELECTS in the SqlOnly arm — the
-//! shipped default. This arm needs only the SQL projection, present in BOTH
-//! wirings, so a live authoring gesture's task-state effect is compared against
-//! the model in both modes rather than in one.
+//! `crdt.enabled = false` opt-out. This arm needs only the SQL projection, in
+//! BOTH wirings, so a live authoring gesture's task-state effect is compared
+//! against the model in both modes rather than in one.
 
 use std::marker::PhantomData;
 

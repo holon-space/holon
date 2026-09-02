@@ -543,7 +543,7 @@ mod split_focus_handoff_tests {
     }
 
     /// Both rungs of [`OpDispatchWriter`], over ONE SqlOnly frontend (Loro off
-    /// — the shipped default), on the op whose result carries a focus
+    /// — the explicit opt-out), on the op whose result carries a focus
     /// target.
     ///
     /// The storage rung must NOT move focus (it dispatches below the frontend

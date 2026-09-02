@@ -216,6 +216,28 @@ impl FrontendInjectorExt for Injector {
                 .map_err(|e| anyhow::anyhow!("Failed to register EventInfraModule: {}", e))?;
         }
 
+        // SqlOnly is a deliberate mode, and the entities it drops must say so.
+        // `LoroShareBackend` serves `tree` only inside the branch below, so
+        // with the layer off `tree.share_subtree` would otherwise fail as a
+        // bare missing registration — indistinguishable from a broken build.
+        if !loro_enabled {
+            tracing::warn!(
+                "[wiring] CRDT layer disabled (crdt.enabled = false) — sharing and offline merge \
+                 are unavailable in this session"
+            );
+            self.provide::<holon::api::operation_dispatcher::UnavailableEntities>(Provider::root(
+                |_| {
+                    Shared::new(holon::api::operation_dispatcher::UnavailableEntities::new(
+                        [(
+                            holon_loro::loro_share_backend::TREE_ENTITY,
+                            "the CRDT layer is off (`crdt.enabled = false`); sharing needs it"
+                                .to_string(),
+                        )],
+                    ))
+                },
+            ));
+        }
+
         // Loro CRDT (must be before OrgMode so OrgMode can detect it)
         if loro_enabled {
             let loro_dir = loro_dir.clone();

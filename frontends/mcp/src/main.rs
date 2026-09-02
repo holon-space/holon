@@ -40,7 +40,30 @@ struct Config {
     transport_mode: TransportMode,
     orgmode_root: Option<PathBuf>,
     orgmode_loro_dir: Option<PathBuf>,
-    loro_enabled: bool,
+    /// What this invocation said about the CRDT layer. `None` states no
+    /// opinion, leaving the resolver's default; `Some(false)` is the explicit
+    /// opt-out and must stay distinguishable from it.
+    loro_enabled: Option<bool>,
+}
+
+/// Read `HOLON_CRDT_ENABLED` into the three states the resolver distinguishes.
+fn parse_crdt_env(raw: Option<&str>) -> Option<bool> {
+    raw.map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
+}
+
+/// The `HolonConfig` this binary boots from its parsed arguments.
+fn holon_config_for(config: Config) -> holon_frontend::HolonConfig {
+    holon_frontend::HolonConfig {
+        db_path: Some(config.db_path),
+        vault: holon_frontend::config::VaultConfig {
+            root: config.orgmode_root,
+        },
+        crdt: holon_frontend::config::CrdtPreferences {
+            enabled: config.loro_enabled,
+            storage_dir: config.orgmode_loro_dir,
+        },
+        ..Default::default()
+    }
 }
 
 fn parse_args() -> Result<Config> {
@@ -50,9 +73,7 @@ fn parse_args() -> Result<Config> {
     let mut transport_mode = TransportMode::Stdio;
     let mut orgmode_root: Option<PathBuf> = None;
     let mut orgmode_loro_dir: Option<PathBuf> = None;
-    let mut loro_enabled = std::env::var("HOLON_CRDT_ENABLED")
-        .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
-        .unwrap_or(false);
+    let mut loro_enabled = parse_crdt_env(std::env::var("HOLON_CRDT_ENABLED").ok().as_deref());
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -79,7 +100,7 @@ fn parse_args() -> Result<Config> {
                 orgmode_loro_dir = Some(PathBuf::from(path_str));
             }
             "--loro" => {
-                loro_enabled = true;
+                loro_enabled = Some(true);
             }
             "--help" | "-h" => {
                 // Write help to stderr to avoid interfering with stdout in stdio mode
@@ -378,22 +399,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Build HolonConfig from parsed MCP args
-    let holon_config = holon_frontend::HolonConfig {
-        db_path: Some(config.db_path),
-        vault: holon_frontend::config::VaultConfig {
-            root: config.orgmode_root,
-        },
-        crdt: holon_frontend::config::CrdtPreferences {
-            enabled: if config.loro_enabled {
-                Some(true)
-            } else {
-                None
-            },
-            storage_dir: config.orgmode_loro_dir,
-        },
-        ..Default::default()
-    };
+    let transport_mode = config.transport_mode.clone();
+    let holon_config = holon_config_for(config);
     let config_dir = holon_frontend::config::resolve_config_dir(None);
     let session_config = holon_frontend::SessionConfig::new(holon_api::UiInfo::permissive());
 
@@ -525,7 +532,7 @@ async fn main() -> Result<()> {
     }
 
     // Run server based on transport mode
-    match config.transport_mode {
+    match transport_mode {
         TransportMode::Stdio => {
             run_stdio_server(engine, debug, type_registry).await?;
         }
@@ -536,4 +543,60 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `HOLON_CRDT_ENABLED=false` is the documented opt-out
+    /// (`holon-frontend/src/config.rs::crdt_enabled`). It must survive the trip
+    /// through this binary's own env parse and reach `HolonConfig` as an
+    /// explicit `false` — collapsing it into "absent" hands the resolver the
+    /// CRDT default instead, and the user who asked for SqlOnly boots Loro.
+    #[test]
+    fn the_env_opt_out_reaches_the_resolved_config() {
+        let cases = [
+            (Some("false"), false),
+            (Some("FALSE"), false),
+            (Some("0"), false),
+            (Some(""), false),
+            (Some("true"), true),
+            (Some("1"), true),
+        ];
+        for (raw, expected) in cases {
+            let parsed = parse_crdt_env(raw);
+            assert_eq!(
+                parsed,
+                Some(expected),
+                "HOLON_CRDT_ENABLED={raw:?} must parse to an explicit Some({expected})"
+            );
+            let config = holon_config_for(sample_config(parsed));
+            assert_eq!(
+                config.crdt_enabled(),
+                expected,
+                "HOLON_CRDT_ENABLED={raw:?} must resolve to crdt_enabled() == {expected}"
+            );
+        }
+    }
+
+    /// No env var and no `--loro` flag: the binary states no opinion, so the
+    /// resolver's default applies.
+    #[test]
+    fn an_unset_env_leaves_the_default_to_the_resolver() {
+        assert_eq!(parse_crdt_env(None), None);
+        let config = holon_config_for(sample_config(None));
+        assert_eq!(config.crdt.enabled, None);
+        assert!(config.crdt_enabled());
+    }
+
+    fn sample_config(loro_enabled: Option<bool>) -> Config {
+        Config {
+            db_path: PathBuf::from(":memory:"),
+            transport_mode: TransportMode::Stdio,
+            orgmode_root: None,
+            orgmode_loro_dir: None,
+            loro_enabled,
+        }
+    }
 }

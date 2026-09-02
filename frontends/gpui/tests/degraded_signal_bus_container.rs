@@ -10,13 +10,13 @@
 //! ```
 //!
 //! Root cause: `Arc<DegradedSignalBus>` was registered ONLY by `LoroModule`,
-//! which `add_frontend` configures iff `crdt.enabled` — and that defaults to
-//! `false`. So the shipped default container had no bus, and every failed MCP
-//! integration degraded to an unattributable blank page.
+//! which `add_frontend` configures iff `crdt.enabled`. A SqlOnly container
+//! therefore had no bus, and every failed MCP integration degraded to an
+//! unattributable blank page.
 //!
 //! This test builds the container the shipped binary builds (`GpuiModule`,
-//! the same module `main.rs` hands to fluxdi) with the SHIPPED DEFAULTS for
-//! `crdt.enabled` (absent → SqlOnly) and asserts the bus resolves. It only
+//! the same module `main.rs` hands to fluxdi) across every setting of
+//! `crdt.enabled` and asserts the bus resolves. It only
 //! runs `configure` — registration is the surface under test, not boot.
 //!
 //! @pbt kind harness
@@ -65,10 +65,16 @@ fn shipped_module(dir: &std::path::Path, crdt_enabled: Option<bool>) -> GpuiModu
     }
 }
 
-/// `crdt.enabled` absent — the SHIPPED default, and the configuration the
-/// dogfood boot ran in.
+/// `crdt.enabled = false` — SqlOnly, the configuration the dogfood boot ran in.
 #[test]
 fn shipped_gpui_container_provides_degraded_signal_bus_in_sql_only_mode() {
+    assert_bus_resolves(Some(false));
+}
+
+/// `crdt.enabled` absent: the resolver picks the shipped default. Asserted as
+/// its own arm so the two explicit arms above cannot both stand in for it.
+#[test]
+fn shipped_gpui_container_provides_degraded_signal_bus_on_the_default() {
     assert_bus_resolves(None);
 }
 

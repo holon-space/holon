@@ -6,7 +6,7 @@
 //! @pbt covers task-state-drift — the SUT holds a task state the model does not
 //!   predict, or misses one it does
 //! @pbt slips-if-removed a live authoring gesture's task-state effect goes
-//!   unobserved IN THE SHIPPED DEFAULT: the sibling
+//!   unobserved IN THE SqlOnly ARM: the sibling
 //!   `inv-task-state-storage-coherence` needs `SutLoroTaskState` and so
 //!   deselects in the SqlOnly arm — and `inv-blocks-match-ref/block_raw`
 //!   reports whichever facet diverges FIRST, so a promotion (which also moves

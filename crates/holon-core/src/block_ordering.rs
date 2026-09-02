@@ -140,7 +140,7 @@ pub trait BlockOrdering: Send + Sync {
     ///
     /// Returns `true` when handled by the Loro backing (the block is now in
     /// the tree and the SQL row follows via the outbound projector), `false`
-    /// in SqlOnly mode (default) so the caller uses its SQL create path.
+    /// from the trait default (SqlOnly) so the caller uses its SQL create path.
     ///
     /// Why this exists: the OrgMode initial scan creates parser blocks in SQL
     /// and then calls [`place`](Self::place), which needs the block already in
@@ -198,12 +198,12 @@ pub trait BlockOrdering: Send + Sync {
     }
 
     /// Whether `id` has a node in the separate authoritative tree.
-    /// `Ok(None)` (default) when there is no separate tree — SqlOnly mode,
-    /// or a backing where the store IS the tree — so the question doesn't
-    /// apply. `Ok(Some(false))` is the pre-Loro-vault upgrade signal: the
-    /// block exists in the SQL store but the Loro tree never adopted it
-    /// (no seed pass ran when `[loro] enabled` flipped on). The org-scan
-    /// reconciler uses this to re-seed such blocks via
+    /// `Ok(None)` from the trait default, when there is no separate tree —
+    /// SqlOnly, or a backing where the store IS the tree — so the question
+    /// doesn't apply. `Ok(Some(false))` is the pre-Loro-vault upgrade
+    /// signal: the block exists in the SQL store but the Loro tree never
+    /// adopted it (no seed pass ran when `[loro] enabled` flipped on). The
+    /// org-scan reconciler uses this to re-seed such blocks via
     /// [`create_in_tree`](Self::create_in_tree).
     async fn in_tree(&self, _: &EntityUri) -> Result<Option<bool>> {
         Ok(None)

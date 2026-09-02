@@ -4412,8 +4412,8 @@ impl HeadlessFrontendComponent {
         // `KeystrokeBlockTreeWriter::apply_split_block` converts its byte
         // position to `right` presses against the block's editable `MutableText`,
         // resolved through the `BlockCellRegistry` — which exists only when the
-        // CRDT is on. So a SqlOnly build (`crdt.enabled = false`, the shipped
-        // default) takes the dispatch floor; advertising the keystroke writer
+        // CRDT is on. So a SqlOnly build (`crdt.enabled = false`, the explicit
+        // opt-out) takes the dispatch floor; advertising the keystroke writer
         // there would fail mid-run with "no editable content cell".
         let cells_wired = self.loro_doc_store().is_some();
         let block_tree: Arc<dyn SutBlockTreeWrite> = match self.resolver.get() {
@@ -4440,7 +4440,7 @@ impl HeadlessFrontendComponent {
         // modes: a keystroke routes through `HeadlessEditorMirror`'s cell-free
         // `EditorViewModel` → `vm_commit_edit` → `set_field("content")`, which is
         // exactly the sink production GPUI uses when no Loro cell is attached
-        // (`crdt.enabled = false`, the shipped default). Withholding it here left
+        // (`crdt.enabled = false`, the SqlOnly opt-out). Withholding it here left
         // that mode's typing path with zero keystone coverage (tasks #20/#52).
         let shim = Arc::new(DriverBoundFrontendWrite::new(self.clone(), driver));
         caps.insert(shim.clone() as Arc<dyn SutFocusWrite>);

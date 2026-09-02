@@ -15,10 +15,9 @@
 //! depends on the storage mode:
 //!   * Loro/cell-attached: the entity `Cell`'s remote-delta subscription, which
 //!     survives row-set rebuilds.
-//!   * SqlOnly (the SHIPPED DEFAULT, `crdt.enabled` unset): the per-row data
-//!     subscription, which any row-set rebuild orphans, plus the undo/redo
-//!     `ReseedGesture`.
-//! The dogfood ran the shipped default. `TestEnvironment` defaults to Loro, so
+//!   * SqlOnly (`crdt.enabled = false`): the per-row data subscription, which
+//!     any row-set rebuild orphans, plus the undo/redo `ReseedGesture`.
+//! The dogfood ran SqlOnly. `TestEnvironment` defaults to Loro, so
 //! a single-arm rung here would have exercised the immune mode and reported a
 //! green that means nothing about the finding — hence both arms, with the mode
 //! asserted in each.
@@ -354,7 +353,7 @@ fn drive_undo_then_blur(
     std::mem::forget(app);
 }
 
-/// THE ARM THE FINDING IS ABOUT: the shipped default. A focused SqlOnly editor
+/// THE ARM THE FINDING IS ABOUT: SqlOnly. A focused SqlOnly editor
 /// has no cell to converge from — only the row-set-orphanable data
 /// subscription and the undo/redo re-seed.
 #[test]

@@ -1350,10 +1350,10 @@ pub fn authority_routing_disclosure(wiring: &Wiring) -> String {
     )
 }
 
-/// The floor the SHIPPED-DEFAULT (SQL block-CRUD authority) share of accepted
-/// keystone draws must clear — see `sql_crud_authority_draw_share_meets_floor`.
-/// Production defaults `crdt.enabled` to false, so a keystone that resolves
-/// every draw to the Loro CRUD authority tests a mode nobody ships. The value
+/// The floor the SqlOnly (SQL block-CRUD authority) share of accepted keystone
+/// draws must clear — see `sql_crud_authority_draw_share_meets_floor`.
+/// `crdt.enabled = false` is a supported mode, so a keystone that resolves
+/// every draw to the Loro CRUD authority leaves it untested. The value
 /// is a floor on the LIVE draw, not a target: the SQL-CRUD share is
 /// `P(Turso ∧ ¬Loro)`, measured at 0.220 over 4096 deterministic draws, so this
 /// line leaves headroom for generator tuning while still catching a collapse
@@ -1383,7 +1383,7 @@ pub const MIN_SQLONLY_TYPING_CASE_SHARE: f64 = 1.0 / 32.0;
 /// `crdt.enabled`, so it decides whether `LoroBlockOperations` or the fallback
 /// `SqlOperationProvider` is the block-CRUD authority. Tying it to the Loro
 /// adapter keeps the manifest honest (no Loro adapter ⇒ no Loro authority) and
-/// makes the SHIPPED DEFAULT — `crdt.enabled = false` — a drawable mode.
+/// makes the SqlOnly opt-out — `crdt.enabled = false` — a drawable mode.
 pub fn set_for_wiring(wiring: &Wiring) -> ComponentSet {
     let mut wiring = wiring.clone();
     wiring.actors.remove(&Actor::UI);
@@ -2445,17 +2445,17 @@ mod tests {
         );
     }
 
-    /// **Task #22 — the SHIPPED DEFAULT mode must be a reachable draw.**
+    /// **Task #22 — the SqlOnly opt-out must be a reachable draw.**
     ///
-    /// Production defaults `crdt.enabled` to `false`
-    /// (`holon-frontend/src/config.rs::crdt_enabled`), so the shipped desktop
-    /// app registers NO `CrudAuthority` and block CRUD falls back to
-    /// `SqlOperationProvider`. In the composed keystone that mode is
+    /// `crdt.enabled = false` (`holon-frontend/src/config.rs::crdt_enabled`,
+    /// the explicit opt-out from the CRDT default) registers NO
+    /// `CrudAuthority`, so block CRUD is served by `SqlOperationProvider`.
+    /// In the composed keystone that mode is
     /// `loro_enabled = false`, which `compose_sut` reads off
     /// `Projection::EditorState`. A draw whose manifest carries no
     /// `StorageAdapter::Loro` therefore MUST resolve to the SQL authority —
     /// otherwise the keystone claims a Loro CRUD authority the manifest never
-    /// wired, and the shipped default never runs.
+    /// wired, and the SqlOnly opt-out never runs.
     #[test]
     fn a_turso_draw_without_loro_routes_block_crud_to_sql() {
         let sql_only = Wiring::sql_only();
@@ -2468,12 +2468,13 @@ mod tests {
             !set.has_projection(Projection::EditorState),
             "a Loro-free manifest must not select EditorState — EditorState IS the Loro-CRUD \
              switch (compose_sut passes it as `loro_enabled`), so selecting it turns the CRDT on \
-             for a draw that never wired Loro and hides the shipped default; got {set:?}"
+             for a draw that never wired Loro and hides the SqlOnly opt-out; got {set:?}"
         );
         let line = authority_routing_disclosure(&sql_only);
         assert!(
             line.contains("block-CRUD=Sql(SqlOperationProvider)"),
-            "the shipped default (crdt off) must resolve block CRUD to the SQL provider: {line}"
+            "the SqlOnly opt-out (crdt off) must resolve block CRUD to the SQL provider: \
+             {line}"
         );
     }
 
@@ -2506,11 +2507,10 @@ mod tests {
         let share = sql_crud as f64 / draws as f64;
         assert!(
             share >= MIN_SQL_CRUD_DRAW_SHARE,
-            "shipped-default coverage floor: only {sql_crud}/{draws} ({share:.3}) accepted draws \
+            "SqlOnly coverage floor: only {sql_crud}/{draws} ({share:.3}) accepted draws \
              resolve block CRUD to `SqlOperationProvider`, below the \
-             {MIN_SQL_CRUD_DRAW_SHARE:.3} floor — the mode the desktop app actually ships \
-             (crdt.enabled defaults to false) would run in fewer keystone cases than the floor \
-             allows"
+             {MIN_SQL_CRUD_DRAW_SHARE:.3} floor — the `crdt.enabled = false` mode would run in \
+             fewer keystone cases than the floor allows"
         );
     }
 
@@ -2560,7 +2560,7 @@ mod tests {
         });
     }
 
-    /// The shipped-default draw used by the two typing-engagement guards below
+    /// The SqlOnly draw used by the two typing-engagement guards below
     /// (`{Org, Turso}`, no Loro ⇒ `crdt.enabled = false`).
     fn sqlonly_wiring() -> Wiring {
         Wiring::custom(
@@ -2582,13 +2582,13 @@ mod tests {
             .collect()
     }
 
-    /// **Tasks #20 / #52 — the shipped default must be TYPEABLE, per case.**
+    /// **Tasks #20 / #52 — the SqlOnly mode must be TYPEABLE, per case.**
     ///
     /// The keystone's alphabet is narrowed by the composed SUT's cap set
     /// (`aggregate_transitions` → `caps_available`). A SqlOnly draw that hosts
     /// no `SutEditorMirrorWrite` drops
-    /// `TypeChars`/`DeleteBackward`/`MoveCursor` entirely, so the mode the
-    /// desktop app actually ships had ZERO typing coverage — the escape
+    /// `TypeChars`/`DeleteBackward`/`MoveCursor` entirely, so the SqlOnly
+    /// mode had ZERO typing coverage — the escape
     /// route of both the post-split sibling-order and the stale-marks prod
     /// bugs.
     ///
@@ -2642,7 +2642,7 @@ mod tests {
         let wiring = sqlonly_wiring();
         assert!(
             !set_for_wiring(&wiring).has_projection(Projection::EditorState),
-            "premise: this draw runs the shipped default (SQL block-CRUD authority)"
+            "premise: this draw runs SqlOnly (SQL block-CRUD authority)"
         );
         // Boots one composed SqlOnly SUT to read its real cap set (cached).
         let (sql_cases, sql_share) = committed_typing_share(&wide_e2e_ref_for(&wiring));
@@ -2652,10 +2652,10 @@ mod tests {
         );
         assert!(
             sql_share >= MIN_SQLONLY_TYPING_CASE_SHARE,
-            "shipped-default TYPING coverage floor: only {sql_cases}/{CASES} ({sql_share:.3}) \
+            "SqlOnly TYPING coverage floor: only {sql_cases}/{CASES} ({sql_share:.3}) \
              generated SqlOnly cases committed a typed edit into block content, below the \
-             {MIN_SQLONLY_TYPING_CASE_SHARE:.3} floor — the keystone cannot type in the mode the \
-             desktop app ships (crdt.enabled defaults to false), so no property covers its \
+             {MIN_SQLONLY_TYPING_CASE_SHARE:.3} floor — the keystone cannot type with \
+             `crdt.enabled = false`, so no property covers its \
              editor→`set_field(\"content\")` write path"
         );
     }
@@ -2716,8 +2716,8 @@ mod tests {
                 .expect("the typed target must exist in block_raw");
             assert_eq!(
                 sut_content, expected,
-                "a SqlOnly keystroke must commit through the editor sink into `block_raw` — the \
-                 shipped default's `set_field(\"content\")` write path"
+                "a SqlOnly keystroke must commit through the editor sink into `block_raw` — \
+                 that mode's `set_field(\"content\")` write path"
             );
 
             let report = <WideE2E as ComposedSlice>::run_report(
@@ -2796,8 +2796,8 @@ mod tests {
              projection-sinks=Sql(block_raw,matview); org-writeback=on"
         );
 
-        // The SHIPPED DEFAULT: the same draw minus the Loro adapter routes block
-        // CRUD to the SQL provider over the same SQL sink.
+        // SqlOnly: the same draw minus the Loro adapter routes block CRUD to
+        // the SQL provider over the same SQL sink.
         let sql_only = Wiring::custom(
             vec![StorageAdapter::Org, StorageAdapter::Turso],
             vec![],

@@ -10,8 +10,9 @@
 //!   the reactive mirror (change becomes visible to the view model). Fires in
 //!   every configuration.
 //! - `projection` (holon-loro `LoroSyncController`) — full Loro→SQL projection
-//!   pass. Fires ONLY when CRDT sync is enabled (`crdt_enabled`); the default
-//!   desktop config never emits it.
+//!   pass. Fires whenever CRDT sync is enabled (`crdt_enabled`), which is the
+//!   shipped default; a SqlOnly session (`crdt.enabled = false`) never emits
+//!   it.
 //!
 //! The `e2e` stage (holon-api `latency_e2e.rs`) closes the interaction on its
 //! delivered row and carries the verdict; the others are diagnostic components.
