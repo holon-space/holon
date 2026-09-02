@@ -34,6 +34,7 @@ use holon_api::render_types::Arg;
 use holon_api::render_types::RenderExpr;
 use holon_loro_testing::ref_ext::LoroRefExt;
 use holon_pbt_core::Wiring;
+use holon_pbt_core::capabilities::commit_active_editor_if_dirty;
 
 use super::action_actor_state::ActionActorState;
 use super::block_state::BlockState;
@@ -2094,17 +2095,29 @@ impl ReferenceState {
         // `inv-focus-matches-ref` compares the pre-gesture focus root against
         // the SUT's newborn.
         self.ui.tab.focused_block = Some(new_id.clone());
-        // NOT MODELLED HERE, deliberately, and it is a KNOWN gap rather than an
-        // oversight: the birth also seats a CARET, so production has an editor
-        // open over the newborn, and `inv-editor-text/mirror` /
-        // `inv-editor-caret/mirror` therefore sit Unobservable (both sides
-        // absent) across this gesture. Opening the ref editor here reds
-        // `inv-editor-text/mirror` — ref "a" vs SUT MutableText "" — because the
-        // driver commits the text as a `set_field` and then seeds the mirror
-        // from the authority, and the cell it reads has not received the write
-        // at seed time. Closing this needs the driver to TYPE the text through
-        // the editor keystroke sink instead of dispatching `set_field`, which
-        // changes what the transition drives and is its own decision.
+        // The focus authority moves to the newborn, so any editor open over
+        // ANOTHER block is blurred — prod's on_blur commits its user-authored
+        // pending text, exactly as at the other two authority-move sites
+        // (`transitions::model_chord_click_focus`, `FocusEditableText`).
+        commit_active_editor_if_dirty(self);
+        // The editor must then be CLOSED, not left standing. The birth mounts
+        // no ref editor over the newborn (see below), so a surviving
+        // `active_editor` names a block prod is no longer editing, and every
+        // reader of that field is then wrong about a live editor: it made
+        // `model_chord_click_focus` skip a click prod performs, leaving the ref
+        // caret a whole block-length behind the SUT
+        // (docs/Testing/bugfunnel/entries/
+        // 2026-09-02-slot-birth-leaves-a-stale-ref-editor-that-suppresses-the-chord-click.md).
+        self.ui.tab.active_editor = None;
+        // Mounting a ref editor over the NEWBORN is the remaining gap, and it
+        // is deliberate: prod does seat a caret there, so `inv-editor-text/
+        // mirror` and `inv-editor-caret/mirror` sit Unobservable (both sides
+        // absent) across this gesture — which is what the close above restores.
+        // Opening one here instead reds `inv-editor-text/mirror` (ref "a" vs
+        // SUT MutableText "") because the driver commits the text as a
+        // `set_field` and seeds the mirror from a cell that has not received
+        // the write yet. Closing THAT needs the driver to TYPE through the
+        // editor keystroke sink, which changes what the transition drives.
         new_id
     }
 

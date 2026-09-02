@@ -42,24 +42,24 @@
 /// see the same focus move the SUT's real input pipeline produced.
 ///
 /// When no click happens, the ref must leave the editor and its caret
-/// untouched. THE SKIP PREDICATE IS THE SUT'S, VERBATIM: both production
-/// click paths seed the caret only under
-/// `self.engine.focused_block().as_ref() != Some(entity_id)` — grep that
-/// expression in `holon-frontend/src/user_driver.rs`; it occurs exactly
+/// untouched. The skip predicate has TWO arms, global focus and active
+/// editor, where production has ONE: both click paths seed the caret only
+/// under `self.engine.focused_block().as_ref() != Some(entity_id)` — grep
+/// that expression in `holon-frontend/src/user_driver.rs`; it occurs exactly
 /// twice, in `ReactiveEngineDriver::click_entity_with_modifiers` and
 /// `send_key_chord`, and both cite this function by name. Read those two
-/// sites before touching this one; a predicate that drifts from them
-/// re-opens the divergence class below.
+/// sites before touching this one.
 ///
-/// Guarding on the ACTIVE EDITOR alone is NOT that predicate. It coincided
-/// with it only while every ref focus move also opened an editor; the
-/// creation-slot birth (`birth_block_under_slot`) seats focus and a caret
-/// seed at 0 WITHOUT mounting a ref editor, so a chord op on the newborn
-/// re-seeded the ref caret to end-of-text while the SUT's click was skipped
-/// and its Tab adopted the armed 0 (`inv-editor-caret/mirror`: ref
-/// `content.len()` vs SUT 0). The earlier `SplitBlock → <chord op>` face of
-/// the same class is why the editor arm exists; both arms are kept because
-/// either state alone means "no click".
+/// The editor arm is not redundant with the focus arm, because the two ref
+/// fields can disagree: `FocusEditableText` opens an editor without moving
+/// navigation focus, and the `SplitBlock → <chord op>` face of the class
+/// below is what put the arm here. It is also the arm that can diverge from
+/// prod, since prod never consults an editor — so it is only sound while
+/// `active_editor` names a block prod is really editing. Any ref path that
+/// moves focus away must therefore commit-and-close it;
+/// `birth_block_under_slot` failing to do so let this predicate skip a click
+/// prod performs (`inv-editor-caret/mirror`: ref 0 vs SUT `content.len()`,
+/// bugfunnel `2026-09-02-slot-birth-leaves-a-stale-ref-editor-that-suppresses-the-chord-click`).
 pub fn model_chord_click_focus<
     R: holon_pbt_core::capabilities::RefBlockTree
         + holon_pbt_core::capabilities::RefBlockTreeMut
