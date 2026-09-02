@@ -166,6 +166,22 @@ pub enum ShareDegradedReason {
         provider: String,
         installed_path: String,
     },
+    /// This device was paired to an owner AFTER it had been used on its own, so
+    /// the store it now shows is the owner's plus the `blocks` it wrote here,
+    /// re-imported under their own ids. Informational rather than a fault, and
+    /// deliberately not a choice: the ruling (D78.d) is that content written on
+    /// this device is kept. `conflict_copies` of those blocks held an id the
+    /// owner also had, with different content, and are kept as a child of the
+    /// owner's block. `archive` holds the pre-pair document and is the handle
+    /// on anything the re-import could not carry. `shared_tree_id` carries the
+    /// pairing entity name.
+    ///
+    /// All-clear: none — a pair happens once and what it says stays true.
+    PairingReimportedLocalContent {
+        blocks: usize,
+        conflict_copies: usize,
+        archive: String,
+    },
 }
 
 impl ShareDegradedReason {
@@ -177,6 +193,7 @@ impl ShareDegradedReason {
     pub const INTEGRATION_NOT_ENABLED: &'static str = "integration-not-enabled";
     pub const INTEGRATION_SIDECAR_NOT_BUNDLED: &'static str = "integration-sidecar-not-bundled";
     pub const INTEGRATION_SIDECAR_SUPERSEDED: &'static str = "integration-sidecar-superseded";
+    pub const PAIRING_REIMPORTED_LOCAL_CONTENT: &'static str = "pairing-reimported-local-content";
     pub const REHYDRATION_FAILED: &'static str = "rehydration-failed";
     pub const SHARED_SUBTREE_NOT_MATERIALIZED: &'static str = "shared-subtree-not-materialized";
     pub const SNAPSHOT_LOAD_FAILED: &'static str = "snapshot-load-failed";
@@ -205,6 +222,7 @@ impl ShareDegradedReason {
             Self::VaultIngestFailed { .. } => Self::VAULT_INGEST_FAILED,
             Self::SharedSubtreeNotMaterialized { .. } => Self::SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::WritebackDegraded(_) => Self::WRITEBACK_DEGRADED,
+            Self::PairingReimportedLocalContent { .. } => Self::PAIRING_REIMPORTED_LOCAL_CONTENT,
         }
     }
 }

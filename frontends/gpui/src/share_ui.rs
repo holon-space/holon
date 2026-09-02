@@ -334,6 +334,27 @@ impl ShareUiState {
                     format: None,
                 });
             }
+            // Informational, and `Info` rather than a warning colour on
+            // purpose: nothing is degraded, and nothing is being asked. The
+            // user is told what this device contributed to the store it just
+            // adopted, and where its pre-pair documents went.
+            ShareDegradedReason::PairingReimportedLocalContent {
+                blocks,
+                conflict_copies,
+                archive,
+            } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::Info,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: format!(
+                        "{blocks} block(s) written on this device were added to the paired store, \
+                         {conflict_copies} of them kept as a copy under the owner's block of the \
+                         same id; the pre-pair document is in {archive}"
+                    ),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
             ShareDegradedReason::SharedSubtreeNotMaterialized { file } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::SharedSubtreeNotMaterialized,

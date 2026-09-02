@@ -177,6 +177,20 @@ impl TwoInstanceHandle {
         &self.clock
     }
 
+    /// The directory one side's global Loro snapshot lives in.
+    ///
+    /// The pre-pair archive (D78.d) is a subdirectory of this, so an oracle
+    /// that judges the archive has to read the store's real path rather than
+    /// the harness's idea of it.
+    pub fn store_dir(&self, owner: bool) -> std::path::PathBuf {
+        let side = if owner { "owner" } else { "receiver" };
+        let handle = if owner { &self.owner } else { &self.receiver };
+        Self::registry(handle, side)
+            .store()
+            .storage_dir()
+            .to_path_buf()
+    }
+
     /// Block ids present in one side's LORO TREE — the layer BETWEEN the
     /// transport and the SQL store. Reading it is how a convergence failure is
     /// localized to the export side (absent here) or the projection side

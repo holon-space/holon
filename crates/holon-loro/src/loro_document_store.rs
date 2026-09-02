@@ -78,8 +78,10 @@ pub struct LoroDocumentStore {
     peer_id: Option<u64>,
 }
 
-const GLOBAL_DOC_ID: &str = "holon_tree";
-const GLOBAL_SNAPSHOT_NAME: &str = "holon_tree.loro";
+/// The replicated document's id and file name — the one document a device
+/// pair swaps.
+pub const GLOBAL_DOC_ID: &str = "holon_tree";
+pub const GLOBAL_SNAPSHOT_NAME: &str = "holon_tree.loro";
 const LAYOUT_DOC_ID: &str = "holon_layout";
 const LAYOUT_SNAPSHOT_NAME: &str = "holon_layout.loro";
 

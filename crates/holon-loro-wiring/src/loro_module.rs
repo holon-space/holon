@@ -22,6 +22,7 @@ use holon::core::SqlOperationProvider;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
 use holon_core::OriginTaggedWrites;
+use holon_core::block_ordering::BlockOrdering;
 use holon_loro::DocScope;
 use holon_loro::LoroBlockOperations;
 use holon_loro::LoroBlocksDataSource;
@@ -60,9 +61,10 @@ pub fn block_sql_write_provider(
 pub struct LoroConfig {
     /// Root directory for Loro document storage
     pub storage_dir: PathBuf,
-    /// Peer id this session's global doc is minted under. `None` = the
-    /// env/random fallback. Injected by `SessionConfig::loro_peer_id` so two
-    /// sessions in one process (the two-instance sharing PBT) never collide.
+    /// Peer id this session's global doc is minted under. `None` = the env
+    /// variable, or a random id. Injected by `SessionConfig::loro_peer_id` so
+    /// two sessions in one process (the two-instance sharing PBT) never
+    /// collide.
     pub peer_id: Option<u64>,
 }
 
@@ -96,6 +98,12 @@ impl Module for LoroModule {
         // Register LoroDocumentStore
         injector.provide::<LoroDocumentStore>(Provider::root(|resolver| {
             let config = resolver.resolve::<LoroConfig>();
+            // Before the store can hand out a document: a pair killed between
+            // its two renames left the global document in the staging or the
+            // archive directory, and opening the store first would create an
+            // empty one and save over the pair.
+            holon_loro::pairing_swap::complete_interrupted_swap(&config.storage_dir)
+                .expect("[LoroModule] finishing an interrupted pairing swap");
             Shared::new(
                 LoroDocumentStore::new(config.storage_dir.clone()).with_peer_id(config.peer_id),
             )
@@ -266,6 +274,38 @@ impl Module for LoroModule {
                     info!(
                         "[LoroModule] moved {moved} layout block(s) out of the replicated global \
                          doc into the device-local layout doc"
+                    );
+                }
+            }
+
+            // A pair whose re-import never ran leaves the owner's store in
+            // place and this device's own content only in the archive. Finish
+            // it here, where the block-ordering authority the re-import writes
+            // through exists, and before the watermark advance, so the blocks
+            // it writes reach SQL.
+            #[cfg(all(
+                feature = "iroh-sync",
+                not(all(target_arch = "wasm32", target_os = "unknown"))
+            ))]
+            {
+                let store_dir = {
+                    let store = doc_store_arc.read().await;
+                    store.storage_dir().to_path_buf()
+                };
+                if let Some(marker) = holon_loro::pairing_swap::read_marker(&store_dir)
+                    .expect("[LoroModule] reading the pairing marker")
+                {
+                    let pairing = resolver
+                        .resolve_async::<Arc<holon_loro::device_pairing_op::DevicePairing>>()
+                        .await;
+                    let done = pairing
+                        .complete_interrupted_pairing(&marker)
+                        .await
+                        .expect("[LoroModule] finishing an interrupted pairing re-import");
+                    info!(
+                        "[LoroModule] finished an interrupted pair to {}: re-imported {} block(s), \
+                         {} kept as a conflict copy",
+                        marker.owner, done.blocks, done.conflict_copies
                     );
                 }
             }
@@ -482,13 +522,38 @@ fn register_subtree_share(injector: &Injector) {
     // Whole-store pairing. Shares the advertiser with the subtree shares above:
     // one endpoint per device, so a paired peer and a share peer are the same
     // QUIC identity to every acceptor roster.
+    // The re-import leg (D78.d) writes through the SHARED `BlockOrdering`,
+    // resolved lazily: this provider is a member of the set the operation
+    // dispatcher is built from, so resolving it here would be a cycle — and a
+    // second ordering built here would be a Loro-blind writer.
+    let ordering_injector = injector.clone();
+    let projection_injector = injector.clone();
     injector.provide::<Arc<holon_loro::device_pairing_op::DevicePairing>>(Provider::root(
-        |resolver| {
+        move |resolver| {
             let doc_store = resolver.resolve::<LoroDocumentStore>();
             let advertiser = resolver.resolve::<Arc<IrohAdvertiser>>();
+            let bus = resolver.resolve::<Arc<holon_loro::degraded_signal_bus::DegradedSignalBus>>();
+            let ordering_injector = ordering_injector.clone();
+            let ordering: holon_loro::device_pairing_op::OrderingResolver = Arc::new(move || {
+                let injector = ordering_injector.clone();
+                Box::pin(async move { injector.resolve_async::<dyn BlockOrdering>().await })
+            });
+            let projection_injector = projection_injector.clone();
+            let projection: holon_loro::device_pairing_op::ProjectionResolver =
+                Arc::new(move || {
+                    let injector = projection_injector.clone();
+                    Box::pin(async move {
+                        injector
+                            .resolve_async::<dyn holon_core::DownstreamProjection>()
+                            .await
+                    })
+                });
             Shared::new(Arc::new(holon_loro::device_pairing_op::DevicePairing::new(
                 (*doc_store).clone(),
                 (*advertiser).clone(),
+                ordering,
+                projection,
+                (*bus).clone(),
             )))
         },
     ));

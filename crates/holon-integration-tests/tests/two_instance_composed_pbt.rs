@@ -1628,71 +1628,6 @@ fn a_read_only_pairing_cannot_write_back_to_the_owner() {
     });
 }
 
-/// A note the user jots into today's journal is the likeliest content on an
-/// otherwise-fresh device, and it is not the app's: pairing must refuse and
-/// name it, because adopting the owner's store drops it.
-#[test]
-fn production_pairing_refuses_a_receiver_that_holds_a_journal_note() {
-    let rt = rt();
-    let ref_state = wide_e2e_ref();
-    rt.block_on(async {
-        let resolver = IdResolver::default();
-        let (_caps, handle, _) =
-            holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
-
-        let day = receiver_day_block(&handle).await;
-        let note = holon_api::EntityUri::block("receiver-journal-note");
-        handle
-            .receiver_create_block(&day, "bought milk", &note)
-            .await;
-
-        let (_, accepted) = run_production_pairing(&handle).await;
-
-        let refusal = accepted.expect_err(&format!(
-            "pairing a receiver that holds a note under its journal day block {day} SUCCEEDED; \
-             the note is outside the owner's store, so the pair drops it"
-        ));
-        assert!(
-            refusal.contains(note.as_str()),
-            "the refusal must name the note so the user knows what pairing would drop; got: \
-             {refusal}"
-        );
-    });
-}
-
-/// A page created while the focus is on the layout root is the user's. The
-/// bundled layout is a closed set of ids, so anything else under it is content
-/// pairing would drop.
-#[test]
-fn production_pairing_refuses_a_receiver_that_holds_a_page_under_the_layout_root() {
-    let rt = rt();
-    let ref_state = wide_e2e_ref();
-    rt.block_on(async {
-        let resolver = IdResolver::default();
-        let (_caps, handle, _) =
-            holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
-
-        let layout_root = holon_api::EntityUri::parse(holon_api::ROOT_LAYOUT_BLOCK_ID)
-            .expect("the layout root id is a URI");
-        let page = holon_api::EntityUri::block("receiver-layout-page");
-        handle
-            .receiver_create_block(&layout_root, "my notes", &page)
-            .await;
-
-        let (_, accepted) = run_production_pairing(&handle).await;
-
-        let refusal = accepted.expect_err(
-            "pairing a receiver that holds a page under the layout root SUCCEEDED; the layout \
-             closure swallowed user content",
-        );
-        assert!(
-            refusal.contains(page.as_str()),
-            "the refusal must name the page so the user knows what pairing would drop; got: \
-             {refusal}"
-        );
-    });
-}
-
 /// **D86.** A read grant nothing downstream enforces is refused at the offer,
 /// not minted and reported as granted.
 #[test]
@@ -1830,10 +1765,14 @@ async fn mount_the_owners_subtree_on_the_receiver(
         .expect("share_subtree's response carries a ticket")
         .to_string();
 
+    // The mount hangs under the receiver's journal day block, not under the
+    // layout root: the layout lives in the DEVICE-LOCAL document (D77.b) and
+    // has no row in the block store `accept_shared_subtree` resolves parents
+    // against, so a layout parent fails the accept before pairing is reached.
     let mut accept = holon_api::StorageEntity::new();
     accept.insert(
         "parent_id".into(),
-        holon_api::Value::String(holon_api::ROOT_LAYOUT_BLOCK_ID.to_string()),
+        holon_api::Value::String(receiver_day_block(handle).await.to_string()),
     );
     accept.insert("ticket".into(), holon_api::Value::String(ticket));
     dispatch_tree_op(
@@ -1869,4 +1808,411 @@ async fn dispatch_tree_op(
     engine
         .execute_operation(&entity, op, params, holon_api::OpOrigin::User)
         .await
+}
+// ─── D78.d: pairing a phone that was already used STANDALONE ────────────────
+
+/// Ids the receiver authors while standalone. Fixed, so a red names the same
+/// block every run and two runs' failure messages are comparable.
+const SOLO_NOTE: &str = "block:solo-note";
+const SOLO_CHILD: &str = "block:solo-child";
+const SOLO_GRANDCHILD: &str = "block:solo-grandchild";
+
+/// What a week of standalone phone use leaves behind: a note under the day
+/// block this device's OWN auto-create rule minted, and two levels under it.
+///
+/// The day block is the load-bearing part. Its id is a pure function of the
+/// date, so the owner minted the SAME id for the same day — which is exactly
+/// the collision pairing must resolve by re-parenting rather than by merging
+/// two independently-minted nodes.
+async fn write_solo_content(
+    handle: &std::sync::Arc<
+        holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    >,
+) -> holon_api::EntityUri {
+    let day = receiver_day_block(handle).await;
+    for (parent, content, id) in [
+        (day.as_str(), "bought milk", SOLO_NOTE),
+        (SOLO_NOTE, "two litres", SOLO_CHILD),
+        (SOLO_CHILD, "the blue carton", SOLO_GRANDCHILD),
+    ] {
+        handle
+            .receiver_create_block(
+                &holon_api::EntityUri::parse(parent).expect("a well-formed solo parent uri"),
+                content,
+                &holon_api::EntityUri::parse(id).expect("a well-formed solo block uri"),
+            )
+            .await;
+    }
+    day
+}
+
+/// Boot with an empty receiver, let the RECEIVER write standalone, then run the
+/// PRODUCTION pairing and settle. The writes land before any pairing, which is
+/// the whole scenario: the phone minted its own journals family at boot and
+/// hung content off it, so pairing meets a store whose fixed ids already
+/// collide with the owner's.
+async fn solo_then_pair(
+    ref_state: &holon_integration_tests::pbt::reference_state::ReferenceState,
+) -> (
+    holon_api::EntityUri,
+    Result<(), String>,
+    std::sync::Arc<holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle>,
+) {
+    let resolver = IdResolver::default();
+    let (caps, handle, _) = holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, ref_state, TransportChoice::Relay).await;
+
+    let day = write_solo_content(&handle).await;
+    let (_, accepted) = run_production_pairing(&handle).await;
+
+    // The harness's own grant, so the RELAY wire carries the receiver→owner
+    // leg. Pairing has already done its work by here (archive, bootstrap,
+    // re-import); this is the transport scaffolding every other test in this
+    // file uses, and without it the union oracle could only ever read one side.
+    let two = caps_two(&caps);
+    two.share_container("holon_tree", "receiver").await;
+    drive_to_sync_fixpoint(&two, &handle).await;
+    (day, accepted, handle)
+}
+
+/// **Pairing a phone that was already used standalone (D78.d).**
+///
+/// The ruling: pairing a non-empty receiver does NOT merge two CRDT histories.
+/// The receiver archives its documents, bootstraps from the owner's snapshot,
+/// and re-imports its own content as ordinary new operations — a node whose id
+/// the owner also holds is not re-created, its children are appended under the
+/// owner's node of that id.
+///
+/// Four oracles, one per clause:
+/// (a) content union — every receiver-authored block is live on BOTH sides
+///     under its own uuid, with its content;
+/// (b) one live node per fixed id, the device-local layout family excluded;
+/// (c) the archive directory holds the pre-pair documents;
+/// (d) no user block was lost or twinned.
+#[test]
+fn pairing_a_receiver_that_was_used_standalone_keeps_its_content_and_one_node_per_fixed_id() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let (day, accepted, handle) = solo_then_pair(&ref_state).await;
+        accepted.unwrap_or_else(|e| {
+            panic!(
+                "pairing a receiver that holds standalone content was REFUSED; D78.d replaces the \
+                 refusal with archive + bootstrap + re-import: {e}"
+            )
+        });
+
+        let owner_tree = handle.loro_tree_state(true, &BTreeSet::new()).await;
+        let receiver_tree = handle.loro_tree_state(false, &BTreeSet::new()).await;
+        let solo = [
+            (SOLO_NOTE, "bought milk", day.as_str()),
+            (SOLO_CHILD, "two litres", SOLO_NOTE),
+            (SOLO_GRANDCHILD, "the blue carton", SOLO_CHILD),
+        ];
+
+        // (a) content union, with the phone's uuids and its parent links kept.
+        for (side, tree) in [("owner", &owner_tree), ("receiver", &receiver_tree)] {
+            for (id, content, parent) in solo {
+                let block = tree.get(id).unwrap_or_else(|| {
+                    panic!(
+                        "{side}: `{id}`, written on the phone BEFORE it was paired, is absent — \
+                         pairing lost content the phone had already stored"
+                    )
+                });
+                assert!(
+                    block.block.content.contains(content),
+                    "{side}: `{id}` reads {:?}, not the {content:?} the phone wrote",
+                    block.block.content
+                );
+                assert_eq!(
+                    block.block.parent_id.as_str(),
+                    parent,
+                    "{side}: `{id}` was re-imported under {:?}, not under `{parent}` — the \
+                     re-parent table put the phone's content somewhere else",
+                    block.block.parent_id.as_str()
+                );
+            }
+        }
+
+        // (b) one live node per fixed id, the device-local layout excluded.
+        let layout = layout_subtree(&owner_tree);
+        let owner_counts = handle.live_node_counts(true).await;
+        let receiver_counts = handle.live_node_counts(false).await;
+        for (side, counts) in [("owner", &owner_counts), ("receiver", &receiver_counts)] {
+            let dups: Vec<String> = duplicate_ids(counts, None)
+                .into_iter()
+                .filter(|line| {
+                    let id = line.split(" ×").next().expect("an `id ×n` duplicate line");
+                    !layout.contains(id)
+                })
+                .collect();
+            assert!(
+                dups.is_empty(),
+                "{side}: {} non-layout block id(s) resolve to MORE than one live node after \
+                 pairing a standalone-used receiver — both devices minted them and pairing merged \
+                 both mintings instead of re-importing under the owner's node:\n  {}",
+                dups.len(),
+                dups.join("\n  ")
+            );
+            for id in ["block:journals", day.as_str()] {
+                assert_eq!(
+                    counts.get(id).copied().unwrap_or(0),
+                    1,
+                    "{side}: the fixed id `{id}` names {:?} live node(s), not exactly one",
+                    counts.get(id).copied().unwrap_or(0)
+                );
+            }
+        }
+
+        // (c) the archive holds the pre-pair documents.
+        let archive = handle.store_dir(false).join("archive");
+        let archived: Vec<std::path::PathBuf> = std::fs::read_dir(&archive)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "the receiver kept no `{}` directory after pairing ({e}) — the ruling requires \
+                     the pre-pair store to be moved aside, never deleted, so the step is \
+                     reversible",
+                    archive.display()
+                )
+            })
+            .flat_map(|stamp| {
+                std::fs::read_dir(stamp.expect("a readable archive entry").path())
+                    .expect("a readable archive timestamp directory")
+            })
+            .map(|f| f.expect("a readable archived file").path())
+            .filter(|p| p.extension().is_some_and(|e| e == "loro"))
+            .collect();
+        assert!(
+            !archived.is_empty(),
+            "`{}` holds no `*.loro` file — the receiver's pre-pair documents were not archived",
+            archive.display()
+        );
+
+        // (d) no user block lost, none twinned.
+        for (side, counts) in [("owner", &owner_counts), ("receiver", &receiver_counts)] {
+            for (id, _, _) in solo {
+                assert_eq!(
+                    counts.get(id).copied().unwrap_or(0),
+                    1,
+                    "{side}: `{id}` names {:?} live node(s), not exactly one — pairing either \
+                     dropped a block the phone wrote or left two copies of it",
+                    counts.get(id).copied().unwrap_or(0)
+                );
+            }
+        }
+    });
+}
+
+/// Everything a pair that never completed must NOT have left behind on the
+/// receiver: no archive, no in-progress marker, no pairing record.
+fn assert_store_untouched(
+    handle: &std::sync::Arc<
+        holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    >,
+    after: &str,
+) {
+    let dir = handle.store_dir(false);
+    for (name, path) in [
+        ("archive", dir.join("archive")),
+        (
+            "in-progress marker",
+            dir.join(holon_loro::pairing_swap::MARKER_NAME),
+        ),
+        (
+            "pairing record",
+            dir.join(holon_loro::pairing_swap::RECORD_NAME),
+        ),
+    ] {
+        assert!(
+            !path.exists(),
+            "{after}: the receiver's {name} at {} exists, so a refused pair moved this device's \
+             documents anyway",
+            path.display()
+        );
+    }
+}
+
+/// Every block the receiver wrote before pairing is still live on it.
+async fn assert_solo_content_live(
+    handle: &std::sync::Arc<
+        holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    >,
+    after: &str,
+) {
+    let tree = handle.loro_tree_state(false, &BTreeSet::new()).await;
+    for id in [SOLO_NOTE, SOLO_CHILD, SOLO_GRANDCHILD] {
+        assert!(
+            tree.contains_key(id),
+            "{after}: `{id}`, written on this device before pairing, is gone"
+        );
+    }
+}
+
+/// An invite whose container this device has no document for — a stale invite,
+/// or one minted against another vault. It must be refused with the store still
+/// intact, because a pair that has already archived cannot un-archive.
+#[test]
+fn an_invite_for_a_container_this_device_lacks_is_refused_before_anything_moves() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (_caps, handle, _) = holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
+        write_solo_content(&handle).await;
+
+        let invite = mint_pairing_invite(&handle, "write")
+            .await
+            .expect("the offer mints");
+        let mut foreign = holon_loro::device_pairing_op::PairingInvite::decode(&invite)
+            .expect("the minted invite decodes");
+        for ticket in &mut foreign.containers {
+            ticket.shared_tree_id = format!("{}-from-another-vault", ticket.shared_tree_id);
+        }
+        let foreign = foreign.encode().expect("the tampered invite encodes");
+
+        let refusal = consume_pairing_invite(&handle, &foreign)
+            .await
+            .expect_err("an invite for a container this device lacks must be refused");
+        assert!(
+            refusal.contains("from-another-vault") && refusal.contains("no document for"),
+            "the refusal must name the container it could not find, and must come from the \
+             pre-dial check rather than from a dial that already put the invite on the wire; \
+             got: {refusal}"
+        );
+        assert_solo_content_live(&handle, "after a foreign invite was refused").await;
+        assert_store_untouched(&handle, "after a foreign invite was refused");
+    });
+}
+
+/// An owner that cannot be reached destroys nothing: the dial happens into the
+/// staging store, so a failure there leaves the live one as it was.
+#[test]
+fn an_owner_that_cannot_be_reached_leaves_this_devices_store_intact() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (_caps, handle, _) = holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
+        write_solo_content(&handle).await;
+
+        let invite = mint_pairing_invite(&handle, "write")
+            .await
+            .expect("the offer mints");
+        dispatch_pairing_op(
+            handle.owner(),
+            "owner",
+            "pair_cancel",
+            holon_api::StorageEntity::new(),
+        )
+        .await
+        .expect("pair_cancel withdraws the live offer");
+
+        consume_pairing_invite(&handle, &invite)
+            .await
+            .expect_err("a withdrawn offer cannot be dialed");
+        assert_solo_content_live(&handle, "after the dial failed").await;
+        assert_store_untouched(&handle, "after the dial failed");
+    });
+}
+
+/// A device belongs to one owner. Pairing it again would capture the FIRST
+/// owner's vault as "this device's own content" and re-import it into the
+/// second owner's store, which replicates it there.
+#[test]
+fn pairing_a_device_that_is_already_paired_is_refused() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let (_day, accepted, handle) = solo_then_pair(&ref_state).await;
+        accepted.expect("the first pair succeeds");
+
+        dispatch_pairing_op(
+            handle.owner(),
+            "owner",
+            "pair_cancel",
+            holon_api::StorageEntity::new(),
+        )
+        .await
+        .expect("pair_cancel withdraws the first offer");
+        let second = mint_pairing_invite(&handle, "write")
+            .await
+            .expect("a second offer mints on the owner");
+
+        let refusal = consume_pairing_invite(&handle, &second)
+            .await
+            .expect_err("a device that is already paired must refuse a second pair");
+        assert!(
+            refusal.contains("already paired"),
+            "the refusal must say the device is already paired; got: {refusal}"
+        );
+        assert_solo_content_live(&handle, "after a second pair was refused").await;
+    });
+}
+
+/// The re-import is what the user SEES, so it must reach the block store the UI
+/// reads, not only the Loro tree. Pinned separately because a re-import that
+/// writes past the dispatcher would satisfy every tree oracle above and still
+/// leave the phone's notes invisible.
+#[test]
+fn re_imported_content_reaches_the_receivers_block_store() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let (_day, accepted, handle) = solo_then_pair(&ref_state).await;
+        accepted.expect("pairing a standalone-used receiver succeeds");
+
+        let lag = handle.sql_projection_lag(false, &BTreeSet::new()).await;
+        assert!(
+            lag.is_empty(),
+            "{} block(s) are in the receiver's Loro tree but not (or not with the same parent) in \
+             the block store the UI reads:\n  {}",
+            lag.len(),
+            lag.join("\n  ")
+        );
+    });
+}
+
+/// A page created under the layout root is the user's, and pairing must keep
+/// it. It lives in the DEVICE-LOCAL layout document, which is outside the
+/// replication set a pair adopts — so what this pins is the swap's scope: it
+/// moves the global document and nothing else.
+#[test]
+fn pairing_keeps_a_page_created_under_the_device_local_layout_root() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (caps, handle, _) = holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
+
+        let layout_root = holon_api::EntityUri::parse(holon_api::ROOT_LAYOUT_BLOCK_ID)
+            .expect("the layout root id is a URI");
+        let page = holon_api::EntityUri::block("receiver-layout-page");
+        handle
+            .receiver_create_block(&layout_root, "my notes", &page)
+            .await;
+
+        let (_, accepted) = run_production_pairing(&handle).await;
+        accepted.expect("pairing a receiver that holds a page under the layout root succeeds");
+        drive_to_sync_fixpoint(&caps_two(&caps), &handle).await;
+
+        let tree = handle.loro_tree_state(false, &BTreeSet::new()).await;
+        let block = tree.get(page.as_str()).unwrap_or_else(|| {
+            panic!("`{page}`, created under the layout root before pairing, did not survive it")
+        });
+        assert_eq!(
+            block.block.parent_id.as_str(),
+            layout_root.as_str(),
+            "`{page}` was re-imported under {:?}, not under the layout root it was created in",
+            block.block.parent_id.as_str()
+        );
+        assert_eq!(
+            handle
+                .live_node_counts(false)
+                .await
+                .get(page.as_str())
+                .copied()
+                .unwrap_or(0),
+            1,
+            "`{page}` names more than one live node after pairing"
+        );
+    });
 }
