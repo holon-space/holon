@@ -535,9 +535,21 @@ Notes:
   `.config/nextest.toml`, and it boots TWO full sessions per case, so running it
   beside the rest of the suite wants a concurrency pin or a test-group rather
   than a bare parallel invocation.
+- **Two more load-sensitive, pass-with-note flakes under the parallel land leg**
+  (D64.a). Both pass isolated; a red on either is classified, not judged:
+  - `turso_block_query_source_round_trip_pbt` — times out under the parallel
+    leg; 21s isolated.
+  - `turso_storage_repros::tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale`
+    — 853ms isolated against a 5s budget, 7.5s contended.
 - **The vault-scale latency guard runs in the nextest test-group
   `vault-scale-latency`** (`max-threads = 1`) because it is load-sensitive:
   853ms isolated against a 5s budget, 7.5s contended.
+- **The keystone's `inv-sql-budget` pin on `OpenTabViaModifierClick` is
+  pass-with-note** (`opentab-sql-reads-budget` in
+  `docs/Testing/KeystoneKnownReds.md`). Its raw read count varies 22–24 against
+  a pin of 23, so it reds at ~1/32 runs independently of load: a 32-run vs
+  31-run population A/B measured 1/32 on pure main and 1/31 on the chain with
+  `crates/holon-pbt-core/src/budget.rs` byte-unchanged between them.
 - **A/B baseline**: run the identical command on a main-base tree and on the
   lane tip, then compare the two failure-name sets with `comm -23`. A name that
   appears only on the lane tip is the lane's regression.

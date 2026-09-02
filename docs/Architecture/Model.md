@@ -28,6 +28,11 @@ The read path is **one incremental computation**:
 | 4 | **Reactive pipeline** | matviews → CDC → `LiveData<Block>` / cells | Convergent state, not an event log; recovery is resync (`Replace`), not acks. Every derived holder = live recompute at quiescence — the derived-data contract, [Reactivity.md](Reactivity.md). |
 | 5 | **UI** | ViewModel `Mutable`s + `Cell`s | Displays fields and captures intent; owns no entity values. Structural ops are commit points. |
 
+A replica at layer 1 is attached by **data, not Rust**: a format plugin or a
+declarative connection sidecar emits typed rows as JSON Lines, which reach layer
+3 only through the one dispatcher —
+[ADR 0034](../adr/0034-low-code-connections-formats-and-systems-as-sidecars.md).
+
 ## Four orthogonal mode axes
 
 "SqlOnly" is a *point in this grid*, not a different architecture. The
@@ -125,6 +130,12 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     suppresses its ingest). This is the deliberate carve-out from "org files
     are truth": for a mounted subtree the org file is a materialized view, and
     convergence still travels only through Loro/P2P, never through the file.
+
+    **Own-device pairing is the other sanctioned P2P shape, and it is not a
+    share:** it replicates the WHOLE store, keeps the UI layout in a second
+    device-local Loro document outside `ContainerRegistry`, and refuses to run
+    while any per-subtree mount exists —
+    [ADR 0033](../adr/0033-own-device-pairing-whole-store-replication.md).
 
     The mount node is projected as a **Page** so the subtree owns a dedicated
     file, and there is a deliberate **Loro↔SQL shape difference at the mount

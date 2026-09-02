@@ -36,6 +36,10 @@ logs/security/
 .claude/worktrees/
 .claude-flow/
 
+# Per-lane scratch scripts and binaries
+lane-scripts/
+lane-bin/
+
 # IDE
 .idea/
 

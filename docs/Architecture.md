@@ -256,6 +256,17 @@ Detailed documentation lives in `docs/Architecture/`:
 
 See also [wiki/overview.md](../wiki/overview.md) for the navigational layer and [wiki/index.md](../wiki/index.md) for per-crate / per-concept pages.
 
+## Architecture decisions
+
+Ratified decisions live in [`docs/adr/`](adr/), numbered in ratification order.
+The ones that govern how Holon reaches other devices and other systems:
+
+| ADR | Covers |
+| --- | --- |
+| [0028](adr/0028-sharing-policy-overlay.md) | Container-scoped sharing: policy overlay, capability vocabulary |
+| [0033](adr/0033-own-device-pairing-whole-store-replication.md) | Own-device pairing: whole-store replication, device-local layout doc, acceptor-enforced capabilities, archive-and-re-import for a phone used before pairing |
+| [0034](adr/0034-low-code-connections-formats-and-systems-as-sidecars.md) | Low-code connections: JSON-Lines typed rows as the neutral contract, one wasm provider host, jaq as the mapping language, UTCP-manual-plus-`holon` sidecars |
+
 ## Key Files
 
 | Path | Description |
