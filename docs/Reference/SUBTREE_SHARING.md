@@ -154,6 +154,31 @@ resolution step serves every operation. Add a cross-peer convergence invariant
 first: a single-instance test cannot see this, because the instance reads back
 exactly what it wrote.
 
+✅ **Resolved.** Content writes were routed first; **structural** writes
+(create, delete, move) followed on 2026-09-02, after a two-instance dogfood
+found them still landing in the global doc. The remaining hole was the MOUNT as
+a parent: after a share the page the UI navigates to *is* the mount, so every
+create a user drove on a shared page carried the mount's id. `ParentRoute` /
+`route_through_mount` in `loro_backend.rs` now resolve a mount parent to its
+share's doc with the shared root as the effective parent, and `list_children`
+answers for the mount the same way; a mount whose share doc is not loaded is a
+loud `Err` naming block and share, never a global write. Covered by
+`create_under_mount_node_lands_in_shared_doc`,
+`list_children_of_the_mount_lists_the_shared_roots_children`, and the P-STRUCT
+oracle in the subtree-share PBT.
+
+⚠ **A structural edit merged against a concurrent one still breaks** — decision
+D70. On a shallow share, a structural write panics the pinned loro fork's tree
+diff (`tree_state.rs:1198`, `is_node_deleted(target).unwrap()` on a node the
+receiving state never saw) as soon as it merges with ANY op the other peer has
+not synced yet — the other op does not have to be structural, one peer TYPING is
+enough, and it panics in either order. A fully synced text edit followed by a
+create survives, so it is the concurrency and not the ops themselves. Shares are
+always shallow now that `retention = "full"` is refused, so this is reachable
+through ordinary use. Pinned by the `#[ignore]`d
+`structure_merged_against_a_concurrent_op_panics_the_shallow_share_engine`, and
+the reason the PBT keeps structural writes uncontended.
+
 ### B4 — remote-triggered panic + oversized-frame deadlock in the wire framing
 
 `iroh_sync_adapter.rs:86`: `assert!(len <= MAX_MSG_SIZE, ...)`. Any peer can

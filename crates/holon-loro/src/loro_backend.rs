@@ -497,6 +497,19 @@ fn block_uri_from_meta(meta: &loro::LoroMap, node: loro::TreeID) -> EntityUri {
     EntityUri::block(&stable_id)
 }
 
+/// [`read_block_from_tree`] for a node whose parent lives in ANOTHER doc: a
+/// shared subtree's root is grafted under the mount's parent in the personal
+/// tree, so its parent uri cannot be read from the shared tree it belongs to.
+fn read_block_from_tree_with_parent(
+    tree: &loro::LoroTree,
+    node: loro::TreeID,
+    parent_id: EntityUri,
+) -> Block {
+    let mut block = read_block_from_tree(tree, node, None);
+    block.parent_id = parent_id;
+    block
+}
+
 fn read_block_from_tree(
     tree: &loro::LoroTree,
     node: loro::TreeID,
@@ -1856,7 +1869,7 @@ fn compute_depth(tree: &loro::LoroTree, parent: loro::TreeParentId) -> usize {
 /// nodes keep their internal relationships.
 fn collect_shared_tree_blocks(
     shared_tree: &loro::LoroTree,
-    mount_parent: Option<loro::TreeID>,
+    mount_parent: EntityUri,
     mount_depth: usize,
     traversal: &holon_api::repository::Traversal,
     result: &mut Vec<Block>,
@@ -1878,13 +1891,15 @@ fn collect_shared_tree_blocks(
             continue;
         }
 
-        // Shared tree roots get the mount node's parent as their parent_id
-        let parent_tid = match tree_node.parent {
-            loro::TreeParentId::Root => mount_parent,
-            loro::TreeParentId::Node(pid) => Some(pid),
-            _ => None,
+        // Shared tree roots get the mount node's parent as their parent_id.
+        // That parent is a node in the PERSONAL tree, so its uri comes in
+        // pre-resolved — reading it out of `shared_tree` would fail.
+        let block = match tree_node.parent {
+            loro::TreeParentId::Node(pid) => {
+                read_block_from_tree(shared_tree, tree_node.id, Some(pid))
+            }
+            _ => read_block_from_tree_with_parent(shared_tree, tree_node.id, mount_parent.clone()),
         };
-        let block = read_block_from_tree(shared_tree, tree_node.id, parent_tid);
         result.push(block);
     }
 }
@@ -1937,6 +1952,30 @@ impl ParentWriteTarget {
             ParentWriteTarget::Global => None,
             ParentWriteTarget::Shared { shared_tree_id, .. } => Some(shared_tree_id),
         }
+    }
+}
+
+/// A resolved parent: the doc the child lands in, plus the parent to resolve
+/// INSIDE that doc. The two differ for a mount node — the mount lives in the
+/// global tree but stands in for a shared subtree, so a child of the mount
+/// belongs under the shared root in the shared doc. Every write that takes a
+/// parent (create, batch create, re-parent, positioned move) goes through this
+/// one resolution, so structure and content cannot route differently.
+struct ParentRoute {
+    target: ParentWriteTarget,
+    parent: EntityUri,
+}
+
+impl ParentRoute {
+    fn global(parent: EntityUri) -> Self {
+        Self {
+            target: ParentWriteTarget::Global,
+            parent,
+        }
+    }
+
+    fn doc_key(&self) -> Option<&str> {
+        self.target.doc_key()
     }
 }
 
@@ -2115,6 +2154,51 @@ impl LoroBackend {
         Err(ApiError::BlockNotFound { id: id.to_string() })
     }
 
+    /// One sibling level inside a shared doc. A half-born child is withheld
+    /// rather than erred, exactly as the global path does.
+    fn children_in_shared_doc(
+        &self,
+        doc: &Arc<loro::LoroDoc>,
+        parent: loro::TreeID,
+        parent_id: &str,
+    ) -> Result<Vec<String>, ApiError> {
+        let tree = doc.get_tree(TREE_NAME);
+        let mut result = Vec::new();
+        for tid in tree.children(parent).unwrap_or_default() {
+            match classify(&tree, tid) {
+                LiveNode::Settled(sid) => result.push(EntityUri::block(&sid).to_string()),
+                LiveNode::HalfBorn => warn_half_born("list_children", tid, parent_id),
+                LiveNode::MetaUnreadable => {
+                    return Err(ApiError::InternalError {
+                        message: format!(
+                            "shared child {tid:?} of {parent_id} has no readable meta"
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// The shared doc holding `id`, or `None` when the global tree does (or
+    /// nothing does). Same probe order as [`Self::resolve_write_target`], but
+    /// "found nowhere" is not an error: readers that own a richer failure
+    /// message (or a legitimate empty answer) resolve their own way afterwards.
+    async fn shared_read_target(
+        &self,
+        id: &str,
+    ) -> Result<Option<(Arc<loro::LoroDoc>, loro::TreeID)>, ApiError> {
+        let target = match self.resolve_write_target(id).await {
+            Ok(target) => target,
+            Err(ApiError::BlockNotFound { .. }) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        Ok(match target {
+            WriteTarget::Global(_) => None,
+            WriteTarget::Shared { doc, tree_id, .. } => Some((doc, tree_id)),
+        })
+    }
+
     /// Find the shared doc whose tree holds `tree_id` as a live node.
     fn scan_shared_for_tree_id(&self, tree_id: loro::TreeID) -> Option<WriteTarget> {
         let store = self.shared_trees.as_ref()?;
@@ -2229,18 +2313,20 @@ impl LoroBackend {
     }
 
     /// Resolve the doc a to-be-created child must land in, by its parent.
-    /// `no_parent`/sentinel → the global doc (roots live globally). Otherwise
-    /// probe the parent's owning doc exactly as [`Self::resolve_write_target`]
-    /// does (global-first, then shared by stale TreeID, then shared by stable
-    /// id). A parent found nowhere falls back to Global: it may be seeded later
-    /// in the same batch, and `resolve_parent_tree_id`'s tree-walk covers that
-    /// (or errors loudly there).
+    /// `no_parent`/sentinel → the global doc (roots live globally). A mount
+    /// node → the shared doc it stands for, with the shared root as the
+    /// effective parent (see [`Self::route_through_mount`]). Otherwise probe
+    /// the parent's owning doc exactly as [`Self::resolve_write_target`] does
+    /// (global-first, then shared by stale TreeID, then shared by stable id). A
+    /// parent found nowhere falls back to Global: it may be seeded later in the
+    /// same batch, and `resolve_parent_tree_id`'s tree-walk covers that (or
+    /// errors loudly there).
     async fn resolve_write_target_for_parent(
         &self,
         parent: &EntityUri,
-    ) -> Result<ParentWriteTarget, ApiError> {
+    ) -> Result<ParentRoute, ApiError> {
         if parent.is_no_parent() || parent.is_sentinel() {
-            return Ok(ParentWriteTarget::Global);
+            return Ok(ParentRoute::global(parent.clone()));
         }
         if let Some(tree_id) = self.resolve_to_tree_id(parent.as_str()).await {
             let alive_global = self
@@ -2252,7 +2338,10 @@ impl LoroBackend {
                     ),
                 })?;
             if alive_global {
-                return Ok(ParentWriteTarget::Global);
+                return match self.route_through_mount(parent, tree_id)? {
+                    Some(route) => Ok(route),
+                    None => Ok(ParentRoute::global(parent.clone())),
+                };
             }
             if let Some(WriteTarget::Shared {
                 shared_tree_id,
@@ -2260,9 +2349,12 @@ impl LoroBackend {
                 ..
             }) = self.scan_shared_for_tree_id(tree_id)
             {
-                return Ok(ParentWriteTarget::Shared {
-                    shared_tree_id,
-                    doc,
+                return Ok(ParentRoute {
+                    target: ParentWriteTarget::Shared {
+                        shared_tree_id,
+                        doc,
+                    },
+                    parent: parent.clone(),
                 });
             }
         }
@@ -2272,14 +2364,74 @@ impl LoroBackend {
             ..
         }) = self.scan_shared_for_stable_id(parent.as_str())
         {
-            return Ok(ParentWriteTarget::Shared {
-                shared_tree_id,
-                doc,
+            return Ok(ParentRoute {
+                target: ParentWriteTarget::Shared {
+                    shared_tree_id,
+                    doc,
+                },
+                parent: parent.clone(),
             });
         }
         // ALLOW(fallback): parent not resolvable yet ⇒ global create; a genuinely
         // missing parent errors loudly at `resolve_parent_tree_id` inside the write.
-        Ok(ParentWriteTarget::Global)
+        Ok(ParentRoute::global(parent.clone()))
+    }
+
+    /// If `tree_id` is a mount node in the global tree, route the write into
+    /// the shared doc it points at, under that share's root. A mount is the
+    /// stand-in the global tree keeps for a subtree that was pruned into a
+    /// shared doc, so its children live in the share — writing them to the
+    /// global doc loses them for every peer, permanently and silently.
+    ///
+    /// Both failure modes are loud rather than routed to the global doc: a
+    /// mount whose metadata does not parse, and a mount whose shared doc is
+    /// not loaded.
+    fn route_through_mount(
+        &self,
+        parent: &EntityUri,
+        tree_id: loro::TreeID,
+    ) -> Result<Option<ParentRoute>, ApiError> {
+        let info = self
+            .collab_doc
+            .with_read(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                Ok(if is_mount_node(&tree, tree_id) {
+                    Some(read_mount_info(&tree, tree_id))
+                } else {
+                    None
+                })
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("route_through_mount: read global tree failed: {e}"),
+            })?;
+        let Some(info) = info else {
+            return Ok(None);
+        };
+        let info = info.ok_or_else(|| ApiError::InvalidOperation {
+            message: format!(
+                "block {parent} is a mount node whose mount metadata does not parse — refusing to \
+                 write its child to the global doc"
+            ),
+        })?;
+        let doc = self
+            .shared_trees
+            .as_ref()
+            .and_then(|store| store.get_shared_doc(&info.shared_tree_id))
+            .ok_or_else(|| ApiError::InvalidOperation {
+                message: format!(
+                    "block {parent} mounts shared tree {}, whose document is not loaded — \
+                     refusing to write its child to the global doc, where no peer would ever see \
+                     it",
+                    info.shared_tree_id
+                ),
+            })?;
+        Ok(Some(ParentRoute {
+            target: ParentWriteTarget::Shared {
+                shared_tree_id: info.shared_tree_id,
+                doc,
+            },
+            parent: EntityUri::block_from_tree_id(info.shared_root.peer, info.shared_root.counter),
+        }))
     }
 
     pub async fn update_block_text(&self, id: &str, new_text: &str) -> Result<(), ApiError> {
@@ -2731,9 +2883,9 @@ impl LoroBackend {
         // shared doc. The global `id_cache` must never receive a shared TreeID
         // (its keys index the global tree only), so the shared arm resolves the
         // parent against a throwaway cache and skips `cache_stable_id` below.
-        let parent_target = self.resolve_write_target_for_parent(&parent_id).await?;
-        let write_doc = self.parent_doc(&parent_target);
-        let is_global = matches!(parent_target, ParentWriteTarget::Global);
+        let parent_route = self.resolve_write_target_for_parent(&parent_id).await?;
+        let write_doc = self.parent_doc(&parent_route.target);
+        let is_global = matches!(parent_route.target, ParentWriteTarget::Global);
         let id_cache = if is_global {
             self.id_cache.clone()
         } else {
@@ -2743,7 +2895,7 @@ impl LoroBackend {
         // absent: use the caller-supplied id, else the freshly-minted stable id.
         let child_uri = id.clone().unwrap_or_else(|| EntityUri::block(&stable_id));
         let request = NewBlockWithProperties {
-            parent_id: parent_id.clone(),
+            parent_id: parent_route.parent.clone(),
             id: child_uri.clone(),
             content: content.clone(),
             properties: properties.clone(),
@@ -2802,15 +2954,19 @@ impl LoroBackend {
         // a parent against the tree would MISS (it does not exist yet) and pay a
         // full node walk per request: the very quadratic this batch removes.
         let mut group_of_id: HashMap<String, usize> = HashMap::new();
-        for (idx, request) in requests.into_iter().enumerate() {
+        for (idx, mut request) in requests.into_iter().enumerate() {
             if let Some(slot) = group_of_id.get(request.parent_id.id()).copied() {
                 group_of_id.insert(request.id.id().to_string(), slot);
                 groups[slot].1.push((idx, request));
                 continue;
             }
-            let target = self
+            let route = self
                 .resolve_write_target_for_parent(&request.parent_id)
                 .await?;
+            // A mount parent is rewritten to the shared root it stands for, so
+            // the node resolves inside the doc it now lands in.
+            request.parent_id = route.parent;
+            let target = route.target;
             let slot = match groups
                 .iter()
                 .position(|(t, _)| t.doc_key() == target.doc_key())
@@ -2992,21 +3148,23 @@ impl LoroBackend {
         // In the LoroTree model, changing parent_id means moving the node.
         // ALLOW(entity_uri_from_raw): new_parent_id String from cell-registry field
         // write Value
-        let new_parent_uri = EntityUri::from_raw(&new_parent_id);
+        let requested_parent_uri = EntityUri::from_raw(&new_parent_id);
 
         // Reject a cross-doc re-parent (into/out of a shared subtree) before any
         // mutation; same-doc re-parents route to the owning doc.
         let source_target = self.resolve_write_target_checked(id).await?;
-        let parent_target = self
-            .resolve_write_target_for_parent(&new_parent_uri)
+        let parent_route = self
+            .resolve_write_target_for_parent(&requested_parent_uri)
             .await?;
-        if source_target.doc_key() != parent_target.doc_key() {
+        // A mount destination means "under the shared root it stands for".
+        let new_parent_uri = parent_route.parent.clone();
+        if source_target.doc_key() != parent_route.doc_key() {
             return Err(ApiError::InvalidOperation {
                 message: format!(
                     "cross-boundary move of a shared subtree is not supported yet: block {id} \
                      lives in doc {:?} but new parent {new_parent_id} lives in doc {:?}",
                     source_target.doc_key(),
-                    parent_target.doc_key()
+                    parent_route.doc_key()
                 ),
             });
         }
@@ -3062,22 +3220,24 @@ impl LoroBackend {
     ) -> Result<(), ApiError> {
         // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both
         // id formats)
-        let new_parent_uri = EntityUri::from_raw(new_parent_id);
+        let requested_parent_uri = EntityUri::from_raw(new_parent_id);
 
         // Reject a cross-doc positioned move before any mutation; same-doc moves
         // route to the owning doc.
         let source_target = self.resolve_write_target_checked(target_id).await?;
-        let parent_target = self
-            .resolve_write_target_for_parent(&new_parent_uri)
+        let parent_route = self
+            .resolve_write_target_for_parent(&requested_parent_uri)
             .await?;
-        if source_target.doc_key() != parent_target.doc_key() {
+        // A mount destination means "under the shared root it stands for".
+        let new_parent_uri = parent_route.parent.clone();
+        if source_target.doc_key() != parent_route.doc_key() {
             return Err(ApiError::InvalidOperation {
                 message: format!(
                     "cross-boundary move of a shared subtree is not supported yet: block \
                      {target_id} lives in doc {:?} but new parent {new_parent_id} lives in doc \
                      {:?}",
                     source_target.doc_key(),
-                    parent_target.doc_key()
+                    parent_route.doc_key()
                 ),
             });
         }
@@ -3877,8 +4037,11 @@ impl CoreOperations for LoroBackend {
                     if is_mount_node(&tree, tree_node.id) {
                         if let Some(info) = read_mount_info(&tree, tree_node.id) {
                             let mount_parent = match tree_node.parent {
-                                loro::TreeParentId::Node(pid) => Some(pid),
-                                _ => None,
+                                loro::TreeParentId::Node(pid) => {
+                                    let meta = tree.get_meta(pid)?;
+                                    block_uri_from_meta(&meta, pid)
+                                }
+                                _ => EntityUri::no_parent(),
                             };
                             mount_infos.push((info, mount_parent, depth));
                         }
@@ -3906,7 +4069,7 @@ impl CoreOperations for LoroBackend {
                     let shared_tree = shared_doc.get_tree(TREE_NAME);
                     collect_shared_tree_blocks(
                         &shared_tree,
-                        *mount_parent,
+                        mount_parent.clone(),
                         *mount_depth,
                         &traversal,
                         &mut result,
@@ -3921,6 +4084,36 @@ impl CoreOperations for LoroBackend {
     async fn list_children(&self, parent_id: &str) -> Result<Vec<String>, ApiError> {
         let shared_trees = self.shared_trees.clone();
         let id_cache = self.id_cache.clone();
+
+        // The mount stands in for the shared root, so ITS children are the
+        // shared root's children. The write path already reads the mount id
+        // that way (`route_through_mount`); a read that answered "no children"
+        // would make the two sides disagree about what the mount id means.
+        let mount_route = match self.resolve_to_tree_id(parent_id).await {
+            Some(tree_id) => {
+                // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param
+                let parent_uri = EntityUri::from_raw(parent_id);
+                self.route_through_mount(&parent_uri, tree_id)?
+            }
+            None => None,
+        };
+        if let Some(route) = mount_route {
+            let ParentWriteTarget::Shared { doc, .. } = route.target else {
+                unreachable!("route_through_mount only ever resolves to a shared doc");
+            };
+            let shared_root =
+                uri_to_tree_id(&route.parent).expect("mount info carries the shared root's TreeID");
+            return self.children_in_shared_doc(&doc, shared_root, parent_id);
+        }
+
+        // A parent inside a shared subtree lives in that share's doc, not in
+        // the global tree it was pruned from. Reading its children from the
+        // global tree finds nothing — and `delete_subtree` / `move_block` walk
+        // children, so an unrouted read makes every structural op on shared
+        // content fail.
+        if let Some((doc, tree_id)) = self.shared_read_target(parent_id).await? {
+            return self.children_in_shared_doc(&doc, tree_id, parent_id);
+        }
 
         self.collab_doc
             .with_read(|doc| {
@@ -4112,17 +4305,19 @@ impl CoreOperations for LoroBackend {
                 ),
             });
         }
-        let parent_target = self.resolve_write_target_for_parent(&new_parent).await?;
-        if source_target.doc_key() != parent_target.doc_key() {
+        let parent_route = self.resolve_write_target_for_parent(&new_parent).await?;
+        if source_target.doc_key() != parent_route.doc_key() {
             return Err(ApiError::InvalidOperation {
                 message: format!(
                     "cross-boundary move of a shared subtree is not supported yet: block {id} \
                      lives in doc {:?} but new parent {new_parent} lives in doc {:?}",
                     source_target.doc_key(),
-                    parent_target.doc_key()
+                    parent_route.doc_key()
                 ),
             });
         }
+        // A mount destination means "under the shared root it stands for".
+        let new_parent = parent_route.parent.clone();
 
         let block_before = self.get_block(id.as_str()).await?;
         let (write_doc, tree_id) = self.target_doc(&source_target);
@@ -4224,9 +4419,14 @@ impl CoreOperations for LoroBackend {
         // intra-batch parent chains (a block whose parent is a sibling created
         // earlier in the same batch, not yet in any tree) make per-block
         // regrouping ambiguous. Interim: single-doc batches only.
+        let mut blocks = blocks;
         let mut owning: Option<ParentWriteTarget> = None;
-        for nb in &blocks {
-            let target = self.resolve_write_target_for_parent(&nb.parent_id).await?;
+        for nb in &mut blocks {
+            let route = self.resolve_write_target_for_parent(&nb.parent_id).await?;
+            // A mount parent is rewritten to the shared root it stands for, so
+            // the node resolves inside the doc it now lands in.
+            nb.parent_id = route.parent;
+            let target = route.target;
             match &owning {
                 None => owning = Some(target),
                 Some(prev) if prev.doc_key() == target.doc_key() => {}

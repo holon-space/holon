@@ -188,8 +188,12 @@ mod tests {
         use std::path::Path;
         use std::sync::Arc;
 
+        use holon_api::EntityName;
         use holon_api::InlineMark;
+        use holon_api::StorageEntity;
         use holon_api::Value;
+        use holon_core::OperationProvider;
+        use holon_loro::LoroBlockOperations;
         use holon_loro::degraded_signal_bus::DegradedChange;
         use holon_loro::degraded_signal_bus::DegradedSignalBus;
         use holon_loro::degraded_signal_bus::ShareDegraded;
@@ -204,6 +208,7 @@ mod tests {
         use holon_loro::multi_peer::TREE_NAME;
         use holon_loro::multi_peer::get_alive_nodes;
         use holon_loro::shared_snapshot_store::SharedSnapshotStore;
+        use holon_loro::shared_tree::SharedTreeStore;
         use loro::LoroDoc;
         use loro::LoroText;
         use loro::TreeID;
@@ -242,6 +247,21 @@ mod tests {
             /// defaults differ from spike S3's contract.
             MarkOnA(MarkKind),
             MarkOnB(MarkKind),
+            /// Create a child under the MOUNT node — the shape a user drives.
+            /// After a share the page the UI navigates to IS the mount, so the
+            /// create carries the mount's id as `parent_id`.
+            CreateUnderMountOnA(String),
+            CreateUnderMountOnB(String),
+            /// Create a child under the shared ROOT by its stable id (the id
+            /// the reader resolves through the mount).
+            CreateUnderSharedRootOnA(String),
+            CreateUnderSharedRootOnB(String),
+            /// Delete the most recently added child of the shared subtree.
+            DeleteChildOnA,
+            DeleteChildOnB,
+            /// Re-parent the newest child under the oldest one — a structural
+            /// move entirely INSIDE the shared subtree.
+            MoveChildOnA,
         }
 
         /// Subset of `InlineMark` variants whose Loro-key is a single
@@ -293,6 +313,15 @@ mod tests {
             /// Marks the test applied to this peer's shared root that must
             /// survive every subsequent action (including restart / sync).
             expected_marks: Vec<ExpectedMark>,
+            /// Children of the shared subtree this peer must be able to see,
+            /// as `(block id, content)`. Seeded with the two pre-share
+            /// children; structural ops add and remove entries.
+            children: Vec<(String, String)>,
+            /// Contents this peer must NOT see any more (structurally deleted).
+            tombstoned: Vec<String>,
+            /// `(child content, new parent content)` pairs this peer's tree
+            /// must reflect after a move.
+            reparented: Vec<(String, String)>,
             /// Share is expected to be in the manager + advertiser.
             share_registered: bool,
             /// Share is expected to be editable / content is intact.
@@ -306,6 +335,12 @@ mod tests {
                 Self {
                     alive_suffixes: Vec::new(),
                     expected_marks: Vec::new(),
+                    children: vec![
+                        ("block:child-1".to_string(), "Child 1".to_string()),
+                        ("block:child-2".to_string(), "Child 2".to_string()),
+                    ],
+                    tombstoned: Vec::new(),
+                    reparented: Vec::new(),
                     share_registered: true,
                     share_usable: true,
                     corrupt_pending: false,
@@ -316,10 +351,44 @@ mod tests {
         /// Everything we need to reconstruct a backend on the same dir
         /// — used by `RestartA` / `RestartB` to simulate process restart
         /// while preserving on-disk state.
-        async fn backend_fresh(
-            dir_path: &Path,
-            bus: Arc<DegradedSignalBus>,
-        ) -> Arc<LoroShareBackend> {
+        /// A peer: the share backend plus the Loro document store it was built
+        /// over. The store is what the production write provider
+        /// (`LoroBlockOperations`) is constructed from, so the PBT drives block
+        /// ops through the same store the share machinery mutates.
+        struct Peer {
+            be: Arc<LoroShareBackend>,
+            store: Arc<RwLock<LoroDocumentStore>>,
+        }
+
+        impl std::ops::Deref for Peer {
+            type Target = LoroShareBackend;
+
+            fn deref(&self) -> &LoroShareBackend {
+                &self.be
+            }
+        }
+
+        impl Peer {
+            /// The production write provider, wired exactly as DI wires it:
+            /// this peer's doc store plus its shared-tree registry.
+            fn ops(&self) -> LoroBlockOperations {
+                LoroBlockOperations::new(self.store.clone())
+                    .with_shared_trees(self.be.manager_for_test() as Arc<dyn SharedTreeStore>)
+            }
+
+            /// The wired write backend `LoroBlockOperations` delegates to.
+            /// `move_block` is driven here rather than through
+            /// `execute_operation`: the op-level mover needs a `BlockOrdering`
+            /// that only the full DI dispatcher supplies, and the routing
+            /// question this PBT asks lives in the backend either way.
+            async fn backend(&self) -> holon_loro::loro_backend::LoroBackend {
+                let global = self.be.test_global_doc().await;
+                holon_loro::loro_backend::LoroBackend::from_document(global)
+                    .with_shared_trees(self.be.manager_for_test() as Arc<dyn SharedTreeStore>)
+            }
+        }
+
+        async fn backend_fresh(dir_path: &Path, bus: Arc<DegradedSignalBus>) -> Peer {
             let store = Arc::new(RwLock::new(LoroDocumentStore::new(dir_path.to_path_buf())));
             let snapshot_store = Arc::new(SharedSnapshotStore::new(
                 dir_path.to_path_buf(),
@@ -333,25 +402,105 @@ mod tests {
             // stranger and the known_peers dedup-by-id fails.
             let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
             // `LoroShareBackend::new` already returns `Arc<Self>`.
-            LoroShareBackend::new(store, snapshot_store, manager, advertiser, bus, key)
+            let be =
+                LoroShareBackend::new(store.clone(), snapshot_store, manager, advertiser, bus, key);
+            Peer { be, store }
         }
 
-        async fn backend_at(dir_path: &Path, bus: Arc<DegradedSignalBus>) -> Arc<LoroShareBackend> {
-            let be = backend_fresh(dir_path, bus).await;
+        async fn backend_at(dir_path: &Path, bus: Arc<DegradedSignalBus>) -> Peer {
+            let peer = backend_fresh(dir_path, bus).await;
+            let be = &peer.be;
             let collab = be.test_global_doc().await;
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
-            let _ = rehydrate_shared_trees(&be, doc).await.unwrap();
-            be
+            let _ = rehydrate_shared_trees(be, doc).await.unwrap();
+            drop(doc_arc);
+            peer
         }
 
         /// Initial backend — creates a fresh `TempDir`. Skips
         /// rehydration (nothing to rehydrate on a fresh dir).
-        async fn backend() -> (Arc<LoroShareBackend>, Arc<DegradedSignalBus>, TempDir) {
+        async fn backend() -> (Peer, Arc<DegradedSignalBus>, TempDir) {
             let dir = TempDir::new().unwrap();
             let bus = Arc::new(DegradedSignalBus::new());
-            let be = backend_fresh(dir.path(), bus.clone()).await;
-            (be, bus, dir)
+            let peer = backend_fresh(dir.path(), bus.clone()).await;
+            (peer, bus, dir)
+        }
+
+        /// The mount node's block URI in `be`'s global tree for
+        /// `shared_tree_id`. This is the id the UI carries as
+        /// `parent_id` when the user adds a block to a shared page:
+        /// after a share (or an accept) the page in the tree IS the
+        /// mount.
+        async fn mount_uri(be: &LoroShareBackend, shared_tree_id: &str) -> String {
+            let collab = be.test_global_doc().await;
+            let doc_arc = collab.doc();
+            let tree = doc_arc.get_tree(TREE_NAME);
+            for n in tree.get_nodes(false) {
+                if matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist) {
+                    continue;
+                }
+                if let Ok(meta) = tree.get_meta(n.id)
+                    && let Some(loro::ValueOrContainer::Value(v)) = meta.get("shared_tree_id")
+                    && v.as_string().map(|s| s.as_str()) == Some(shared_tree_id)
+                {
+                    return holon_api::EntityUri::block_from_tree_id(n.id.peer, n.id.counter)
+                        .to_string();
+                }
+            }
+            panic!("no mount node for {shared_tree_id}");
+        }
+
+        /// Drive a block create through the production intent boundary
+        /// (`OperationProvider::execute_operation`) — the same surface the
+        /// dispatcher, MCP and the editor reach.
+        async fn create_child(peer: &Peer, parent_uri: &str, id: &str, content: &str) {
+            let mut params = StorageEntity::new();
+            params.insert("parent_id".into(), Value::String(parent_uri.to_string()));
+            params.insert("id".into(), Value::String(id.to_string()));
+            params.insert("content".into(), Value::String(content.to_string()));
+            peer.ops()
+                .execute_operation(&EntityName::new("block"), "create", params)
+                .await
+                .unwrap_or_else(|e| panic!("create {id} under {parent_uri} failed: {e}"));
+        }
+
+        async fn delete_child(peer: &Peer, id: &str) {
+            let mut params = StorageEntity::new();
+            params.insert("id".into(), Value::String(id.to_string()));
+            peer.ops()
+                .execute_operation(&EntityName::new("block"), "delete_subtree", params)
+                .await
+                .unwrap_or_else(|e| panic!("delete_subtree {id} failed: {e}"));
+        }
+
+        async fn move_child(peer: &Peer, id: &str, new_parent: &str) {
+            use holon_api::repository::CoreOperations;
+            // ALLOW(entity_uri_from_raw): ids the test itself minted
+            let (id_uri, parent_uri) = (
+                holon_api::EntityUri::from_raw(id),
+                holon_api::EntityUri::from_raw(new_parent),
+            );
+            peer.backend()
+                .await
+                .move_block(&id_uri, parent_uri, None)
+                .await
+                .unwrap_or_else(|e| panic!("move_block {id} under {new_parent} failed: {e}"));
+        }
+
+        /// `(content, parent content)` for every alive node in a shared doc.
+        fn content_parents(doc: &LoroDoc) -> Vec<(String, String)> {
+            let nodes = get_alive_nodes(doc);
+            let by_id: std::collections::HashMap<TreeID, String> =
+                nodes.iter().map(|(id, _, c)| (*id, c.clone())).collect();
+            nodes
+                .iter()
+                .filter_map(|(_, parent, content)| {
+                    parent
+                        .and_then(|p| by_id.get(&p))
+                        .map(|pc| (content.clone(), pc.clone()))
+                })
+                .collect()
         }
 
         async fn seed(be: &LoroShareBackend, stable_id: &str, parent: Option<&str>, content: &str) {
@@ -641,6 +790,16 @@ mod tests {
                 }
             }
 
+            // P-STRUCT on each usable peer (see `check_structure`).
+            if ref_a.share_usable {
+                let d = a.manager_for_test().get_doc(shared_tree_id).unwrap();
+                check_structure("A", &d, ref_a, shared_tree_id);
+            }
+            if ref_b.share_usable {
+                let d = b.manager_for_test().get_doc(shared_tree_id).unwrap();
+                check_structure("B", &d, ref_b, shared_tree_id);
+            }
+
             // P-MARKS: every mark recorded in `expected_marks` must be
             // observable on the shared root text — by suffix range +
             // Loro key. Surfaces:
@@ -672,6 +831,157 @@ mod tests {
                         "P-MARKS/B: missing marks {missing:?} in shared doc {shared_tree_id}\n  \
                          text:     {text:?}\n  expected: {:?}\n  observed: {observed:?}",
                         ref_b.expected_marks
+                    );
+                }
+            }
+        }
+
+        /// Structural-write bookkeeping for the generator.
+        ///
+        /// Steers cases around the engine defect pinned by
+        /// `structure_merged_against_a_concurrent_op_panics_the_shallow_share_engine`:
+        /// on a shallow share, a tree create merged against ANY op the other
+        /// peer made concurrently panics the fork — the other op does not have
+        /// to be structural, a plain text edit is enough, and it panics in
+        /// either order. Each rule below was forced by a shrunk counterexample
+        /// from a randomized batch, and all of them exist only for that defect
+        /// — delete them when the fork is fixed.
+        #[derive(Default)]
+        struct Structural {
+            /// The one peer that authors structure in this case.
+            ///
+            /// A deliberate over-approximation: two authors with ONE handover
+            /// converge, and only a third structural op panics
+            /// (`A…sync…B…sync…A`). Allowing the handover is measurably not
+            /// safe here though — under the live sync workers the generator
+            /// cannot tell which side of that line a case lands on, and
+            /// permitting it put 3 of 4 randomized runs into
+            /// `tree_state.rs:1198`. So structure gets a single author until
+            /// the fork is fixed, at which point all of these rules go.
+            author: Option<char>,
+            /// Per peer: does it hold local ops of ANY kind the other peer has
+            /// not taken? BOTH can, so this cannot be one slot — an `A` edit
+            /// followed by a `B` edit leaves both sides in flight, and a create
+            /// on either of them is then the panicking merge.
+            unsynced_a: bool,
+            unsynced_b: bool,
+            /// The peer holding an unsynced STRUCTURAL write.
+            unsynced_structure_from: Option<char>,
+        }
+
+        impl Structural {
+            fn unsynced(&self, who: char) -> bool {
+                if who == 'A' {
+                    self.unsynced_a
+                } else {
+                    self.unsynced_b
+                }
+            }
+
+            fn mark_unsynced(&mut self, who: char) {
+                if who == 'A' {
+                    self.unsynced_a = true;
+                } else {
+                    self.unsynced_b = true;
+                }
+            }
+
+            fn other(who: char) -> char {
+                if who == 'A' { 'B' } else { 'A' }
+            }
+
+            /// May `who` author structure now? Only as the case's single
+            /// author, and only when the other peer has nothing in flight for
+            /// the create to be merged against.
+            fn may_author_structure(&mut self, who: char) -> bool {
+                let uncontended = !self.unsynced(Self::other(who));
+                let mine = self.author.is_none_or(|current| current == who);
+                if uncontended && mine {
+                    self.author = Some(who);
+                    self.mark_unsynced(who);
+                    self.unsynced_structure_from = Some(who);
+                    true
+                } else {
+                    false
+                }
+            }
+
+            /// May `who` make an ordinary (non-structural) edit now? Not while
+            /// the other peer's structural write is still in flight — that is
+            /// the same merge, reached from the other side.
+            fn may_edit(&mut self, who: char) -> bool {
+                let blocked = self.unsynced_structure_from.is_some_and(|peer| peer != who);
+                if !blocked {
+                    self.mark_unsynced(who);
+                }
+                !blocked
+            }
+
+            fn synced(&mut self) {
+                self.unsynced_a = false;
+                self.unsynced_b = false;
+                self.unsynced_structure_from = None;
+            }
+        }
+
+        /// Drop every expectation that names `content`. A delete on ONE peer
+        /// retracts the expectation on BOTH: the peers sync live (each shared
+        /// doc has an auto-sync worker), so the other peer may lose the block
+        /// at any moment without the case ever asking for a pull.
+        fn retract(r: &mut RefPeer, content: &str) {
+            r.children.retain(|(_, c)| c != content);
+            r.reparented.retain(|(c, p)| c != content && p != content);
+        }
+
+        /// Index of the newest child that is nobody's parent — the only child a
+        /// `delete_subtree` can remove without taking a tracked sibling with
+        /// it.
+        fn deletable_index(r: &RefPeer) -> Option<usize> {
+            (0..r.children.len()).rev().find(|&i| {
+                let content = &r.children[i].1;
+                !r.reparented.iter().any(|(_, parent)| parent == content)
+            })
+        }
+
+        /// P-STRUCT: the shared subtree's STRUCTURE on this peer matches the
+        /// reference — every child it must see is alive in ITS shared doc,
+        /// every deleted one is gone, and every moved one hangs under its new
+        /// parent.
+        ///
+        /// **The convergence rule this oracle is written to:** the two peers
+        /// sync LIVE, so an expectation only ever holds one way — a structural
+        /// write is asserted on its author immediately and on the other peer
+        /// after a sync, while a delete retracts the expectation on BOTH peers
+        /// at once, because the other peer may converge on its own at any
+        /// moment without the case asking for a pull.
+        ///
+        /// This is the invariant a mis-routed structural write breaks: a create
+        /// that lands in the peer's own global doc reads back fine through the
+        /// block API, but is absent from the shared doc — so it never leaves
+        /// the device, and the peers diverge for good.
+        fn check_structure(label: &str, doc: &LoroDoc, r: &RefPeer, shared_tree_id: &str) {
+            let contents = node_contents(doc);
+            for (id, content) in &r.children {
+                assert!(
+                    contents.contains(content),
+                    "P-STRUCT/{label}: child {id} ({content:?}) missing from shared doc \
+                     {shared_tree_id}; alive: {contents:?}"
+                );
+            }
+            for content in &r.tombstoned {
+                assert!(
+                    !contents.contains(content),
+                    "P-STRUCT/{label}: deleted child {content:?} still alive in shared doc \
+                     {shared_tree_id}; alive: {contents:?}"
+                );
+            }
+            if !r.reparented.is_empty() {
+                let pairs = content_parents(doc);
+                for (child, parent) in &r.reparented {
+                    assert!(
+                        pairs.contains(&(child.clone(), parent.clone())),
+                        "P-STRUCT/{label}: {child:?} is not a child of {parent:?} in shared doc \
+                         {shared_tree_id}; pairs: {pairs:?}"
                     );
                 }
             }
@@ -776,18 +1086,23 @@ mod tests {
             // Tracks whether a corrupt-then-restart has fired on A,
             // so at end-of-case we can assert P-DEGRADED-ON-CORRUPT.
             let mut expected_load_failures_on_a: usize = 0;
+            // Makes every structurally created block's id and content unique
+            // across the case, so the content-keyed oracle stays unambiguous.
+            let mut seq: usize = 0;
+            // Structural authorship bookkeeping — see `claim_structural`.
+            let mut structural = Structural::default();
 
             for action in actions {
                 match action {
                     Action::EditOnA(s) => {
-                        if ref_a.share_usable {
+                        if ref_a.share_usable && structural.may_edit('A') {
                             let d = a.manager_for_test().get_doc(&shared_tree_id).unwrap();
                             append_text_on_root(&d, &s);
                             ref_a.alive_suffixes.push(s);
                         }
                     }
                     Action::EditOnB(s) => {
-                        if ref_b.share_usable {
+                        if ref_b.share_usable && structural.may_edit('B') {
                             let d = b.manager_for_test().get_doc(&shared_tree_id).unwrap();
                             append_text_on_root(&d, &s);
                             ref_b.alive_suffixes.push(s);
@@ -853,6 +1168,39 @@ mod tests {
                             }
                             ref_a.expected_marks = merged_marks.clone();
                             ref_b.expected_marks = merged_marks;
+
+                            // Structure merges the same way: the union of both
+                            // sides' children minus everything either side
+                            // deleted, and the union of both sides' moves.
+                            let mut children = ref_a.children.clone();
+                            for c in &ref_b.children {
+                                if !children.contains(c) {
+                                    children.push(c.clone());
+                                }
+                            }
+                            let mut tombstoned = ref_a.tombstoned.clone();
+                            for t in &ref_b.tombstoned {
+                                if !tombstoned.contains(t) {
+                                    tombstoned.push(t.clone());
+                                }
+                            }
+                            children.retain(|(_, content)| !tombstoned.contains(content));
+                            let mut reparented = ref_a.reparented.clone();
+                            for p in &ref_b.reparented {
+                                if !reparented.contains(p) {
+                                    reparented.push(p.clone());
+                                }
+                            }
+                            reparented.retain(|(child, parent)| {
+                                !tombstoned.contains(child) && !tombstoned.contains(parent)
+                            });
+                            ref_a.children = children.clone();
+                            ref_b.children = children;
+                            ref_a.tombstoned = tombstoned.clone();
+                            ref_b.tombstoned = tombstoned;
+                            ref_a.reparented = reparented.clone();
+                            ref_b.reparented = reparented;
+                            structural.synced();
 
                             // P-CONVERGE: node_contents equal after pull.
                             assert_eq!(
@@ -937,6 +1285,7 @@ mod tests {
                     }
                     Action::MarkOnA(kind) => {
                         if ref_a.share_usable
+                            && structural.may_edit('A')
                             && let Some(suffix) = ref_a.alive_suffixes.last().cloned()
                         {
                             let d = a.manager_for_test().get_doc(&shared_tree_id).unwrap();
@@ -950,6 +1299,7 @@ mod tests {
                     }
                     Action::MarkOnB(kind) => {
                         if ref_b.share_usable
+                            && structural.may_edit('B')
                             && let Some(suffix) = ref_b.alive_suffixes.last().cloned()
                         {
                             let d = b.manager_for_test().get_doc(&shared_tree_id).unwrap();
@@ -973,7 +1323,13 @@ mod tests {
                         // with a fresh valid one — defeating the test
                         // intent of `CorruptSharedOnA`. The interaction
                         // is a harness ambiguity, not a production bug.
-                        if !ref_a.share_usable || !ref_b.share_usable || ref_a.corrupt_pending {
+                        // This action edits on B, so it is a B mutation for the
+                        // in-flight-structure rule.
+                        if !ref_a.share_usable
+                            || !ref_b.share_usable
+                            || ref_a.corrupt_pending
+                            || !structural.may_edit('B')
+                        {
                             continue;
                         }
 
@@ -1046,6 +1402,82 @@ mod tests {
                             }
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
+                        // A demonstrably holds B's edit now: the peers are in
+                        // sync, so nothing is in flight any more.
+                        structural.synced();
+                    }
+                    Action::CreateUnderMountOnA(s) => {
+                        if ref_a.share_usable && structural.may_author_structure('A') {
+                            seq += 1;
+                            let parent = mount_uri(&a, &shared_tree_id).await;
+                            let (id, content) = (format!("block:s{seq}"), format!("{s}-{seq}"));
+                            create_child(&a, &parent, &id, &content).await;
+                            ref_a.children.push((id, content));
+                        }
+                    }
+                    Action::CreateUnderMountOnB(s) => {
+                        if ref_b.share_usable && structural.may_author_structure('B') {
+                            seq += 1;
+                            let parent = mount_uri(&b, &shared_tree_id).await;
+                            let (id, content) = (format!("block:s{seq}"), format!("{s}-{seq}"));
+                            create_child(&b, &parent, &id, &content).await;
+                            ref_b.children.push((id, content));
+                        }
+                    }
+                    Action::CreateUnderSharedRootOnA(s) => {
+                        if ref_a.share_usable && structural.may_author_structure('A') {
+                            seq += 1;
+                            let (id, content) = (format!("block:s{seq}"), format!("{s}-{seq}"));
+                            create_child(&a, "block:shared-parent", &id, &content).await;
+                            ref_a.children.push((id, content));
+                        }
+                    }
+                    Action::CreateUnderSharedRootOnB(s) => {
+                        if ref_b.share_usable && structural.may_author_structure('B') {
+                            seq += 1;
+                            let (id, content) = (format!("block:s{seq}"), format!("{s}-{seq}"));
+                            create_child(&b, "block:shared-parent", &id, &content).await;
+                            ref_b.children.push((id, content));
+                        }
+                    }
+                    Action::DeleteChildOnA => {
+                        // Only a leaf: deleting a node that other tracked
+                        // children hang under would take them with it, which
+                        // the content-keyed reference model does not model.
+                        if ref_a.share_usable
+                            && structural.may_author_structure('A')
+                            && let Some(idx) = deletable_index(&ref_a)
+                        {
+                            let (id, content) = ref_a.children.remove(idx);
+                            delete_child(&a, &id).await;
+                            retract(&mut ref_a, &content);
+                            retract(&mut ref_b, &content);
+                            ref_a.tombstoned.push(content);
+                        }
+                    }
+                    Action::DeleteChildOnB => {
+                        if ref_b.share_usable
+                            && structural.may_author_structure('B')
+                            && let Some(idx) = deletable_index(&ref_b)
+                        {
+                            let (id, content) = ref_b.children.remove(idx);
+                            delete_child(&b, &id).await;
+                            retract(&mut ref_a, &content);
+                            retract(&mut ref_b, &content);
+                            ref_b.tombstoned.push(content);
+                        }
+                    }
+                    Action::MoveChildOnA => {
+                        if ref_a.share_usable
+                            && structural.may_author_structure('A')
+                            && ref_a.children.len() >= 2
+                        {
+                            let (child_id, child_content) = ref_a.children.last().cloned().unwrap();
+                            let (parent_id, parent_content) =
+                                ref_a.children.first().cloned().unwrap();
+                            move_child(&a, &child_id, &parent_id).await;
+                            ref_a.reparented.push((child_content, parent_content));
+                        }
                     }
                 }
 
@@ -1097,17 +1529,30 @@ mod tests {
                 "[a-z]{1,6}".prop_map(|s| Action::CrossPeerSyncAfterRestart(format!(" [X:{s}]")));
             let mark_a = arbitrary_mark_kind().prop_map(Action::MarkOnA);
             let mark_b = arbitrary_mark_kind().prop_map(Action::MarkOnB);
+            let mount_a = "[a-z]{1,6}".prop_map(|s| Action::CreateUnderMountOnA(format!("mA:{s}")));
+            let mount_b = "[a-z]{1,6}".prop_map(|s| Action::CreateUnderMountOnB(format!("mB:{s}")));
+            let root_a =
+                "[a-z]{1,6}".prop_map(|s| Action::CreateUnderSharedRootOnA(format!("rA:{s}")));
+            let root_b =
+                "[a-z]{1,6}".prop_map(|s| Action::CreateUnderSharedRootOnB(format!("rB:{s}")));
             let step = prop_oneof![
                 6 => edit_a,
                 6 => edit_b,
                 3 => Just(Action::SettleSaves),
-                3 => Just(Action::PullBtoA),
+                4 => Just(Action::PullBtoA),
                 2 => Just(Action::RestartA),
                 2 => Just(Action::RestartB),
                 3 => mark_a,
                 3 => mark_b,
                 1 => Just(Action::CorruptSharedOnA),
                 1 => cross_peer,
+                4 => mount_a,
+                4 => mount_b,
+                3 => root_a,
+                3 => root_b,
+                2 => Just(Action::DeleteChildOnA),
+                2 => Just(Action::DeleteChildOnB),
+                2 => Just(Action::MoveChildOnA),
             ];
             prop::collection::vec(step, 0..8)
         }
@@ -1136,6 +1581,156 @@ mod tests {
                 Action::RestartA,
                 Action::RestartB,
                 Action::CrossPeerSyncAfterRestart(" [X:a]".to_string()),
+            ]));
+        }
+
+        /// Deterministic regression for the structural-routing defect the
+        /// 2026-09-02 two-instance dogfood found: a block created inside a
+        /// shared subtree went to the peer's own global doc, so it never
+        /// reached the other device — silently and permanently. Covers create
+        /// under the mount (the shape the UI drives), create under the shared
+        /// root, a move inside the subtree, and a delete — each followed by a
+        /// sync, so the peer must see every one of them.
+        #[test]
+        fn structural_edits_in_a_shared_subtree_reach_the_peer() {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(run_case(vec![
+                Action::CreateUnderMountOnA("mA:one".to_string()),
+                Action::PullBtoA,
+                Action::CreateUnderSharedRootOnA("rA:two".to_string()),
+                Action::PullBtoA,
+                Action::CreateUnderMountOnA("mA:three".to_string()),
+                Action::PullBtoA,
+                Action::MoveChildOnA,
+                Action::PullBtoA,
+                Action::DeleteChildOnA,
+                Action::PullBtoA,
+            ]));
+        }
+
+        /// Pins an ENGINE defect this lane found and does NOT fix: on a
+        /// shallow-history shared doc, a tree node created on one peer panics
+        /// loro's tree-diff when it is merged against ANY op the other peer
+        /// made concurrently — another create, or merely a text edit
+        /// (`tree_state.rs:apply_diff_and_convert`,
+        /// `is_node_deleted(target).unwrap()` on a node the receiving state
+        /// never saw), which then poisons the doc mutex.
+        ///
+        /// It is not Holon write routing: the reproducer below drives raw
+        /// `LoroTree::create` and `LoroText::insert` on the shared docs,
+        /// bypassing every Holon write path. Concurrency is what it needs —
+        /// the same ops with a sync in between converge.
+        ///
+        /// Shares are always shallow in production (`retention = "full"` is
+        /// refused since the B1 history-leak fix), so this is reachable from
+        /// the UI the moment one person adds a block while the other types.
+        /// Fixing it means either patching the loro fork's shallow-doc tree
+        /// diff or exporting shares with subtree-only history instead of a
+        /// shallow snapshot (the B1 remedy in
+        /// `docs/Reference/SUBTREE_SHARING.md`) — a design change outside this
+        /// lane, which owns write routing only.
+        ///
+        /// This is also what `Structural::may_author_structure` and
+        /// `Structural::may_edit` steer the generator around.
+        #[test]
+        #[ignore = "known engine defect: a tree create merged against a concurrent op panics loro on a shallow share"]
+        fn structure_merged_against_a_concurrent_op_panics_the_shallow_share_engine() {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let (a, _bus_a, _da) = backend().await;
+                let (b, _bus_b, _db) = backend().await;
+                seed(&a, "root-a", None, "root-a").await;
+                seed(&a, "shared-parent", Some("root-a"), "Shared heading").await;
+                seed(&a, "child-1", Some("shared-parent"), "Child 1").await;
+                seed(&b, "root-b", None, "root-b").await;
+                let resp = a
+                    .share_subtree("block:shared-parent", "none".into())
+                    .await
+                    .unwrap();
+                let j: JsonValue = match resp.response.unwrap() {
+                    Value::String(s) => serde_json::from_str(&s).unwrap(),
+                    _ => panic!(),
+                };
+                let ticket = j["ticket"].as_str().unwrap().to_string();
+                let stid = j["shared_tree_id"].as_str().unwrap().to_string();
+                b.accept_shared_subtree("block:root-b", ticket)
+                    .await
+                    .unwrap();
+
+                fn raw_create(doc: &LoroDoc, label: &str) {
+                    let tree = doc.get_tree(TREE_NAME);
+                    let root = tree.roots()[0];
+                    let node = tree.create(Some(root)).unwrap();
+                    let meta = tree.get_meta(node).unwrap();
+                    meta.insert("id", loro::LoroValue::from(label)).unwrap();
+                    let t: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
+                    t.insert(0, label).unwrap();
+                    doc.commit();
+                }
+
+                let da = a.manager_for_test().get_doc(&stid).unwrap();
+                let db = b.manager_for_test().get_doc(&stid).unwrap();
+                raw_create(&da, "concurrent-on-a");
+                // Not even a structural op on the other side — a plain text
+                // edit on the shared root is enough.
+                append_text_on_root(&db, " [B:typing]");
+                holon_loro::multi_peer::SyncBackend::sync_pair(
+                    &holon_loro::multi_peer::DirectSync,
+                    &da,
+                    &db,
+                )
+                .unwrap();
+                assert_eq!(node_contents(&da), node_contents(&db));
+                a.advertiser_for_test().close_all().await;
+                b.advertiser_for_test().close_all().await;
+            });
+        }
+
+        /// The accepter side of the same routing question: a block created
+        /// under the mount B got from `accept_shared_subtree` must land in the
+        /// shared doc and reach the sharer.
+        #[test]
+        fn structural_edits_on_the_accepter_reach_the_sharer() {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(run_case(vec![
+                Action::CreateUnderMountOnB("mB:one".to_string()),
+                Action::PullBtoA,
+                Action::CreateUnderSharedRootOnB("rB:two".to_string()),
+                Action::PullBtoA,
+                Action::DeleteChildOnB,
+                Action::PullBtoA,
+            ]));
+        }
+
+        /// Shrunk counterexample from `subtree_share_round_trip_pbt`: A deletes
+        /// a child and nothing in the case asks for a pull, yet B converges on
+        /// its own once A's restart re-registers its share with the live
+        /// advertiser. The first P-STRUCT model asserted B still had the block;
+        /// a live-syncing pair cannot hold that.
+        #[test]
+        fn a_delete_reaches_the_peer_without_an_explicit_pull() {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(run_case(vec![
+                Action::DeleteChildOnA,
+                Action::SettleSaves,
+                Action::RestartA,
+                Action::SettleSaves,
             ]));
         }
 

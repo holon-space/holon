@@ -3,7 +3,7 @@ id: 2026-09-02-structural-edits-in-a-shared-subtree-never-reach-the-peer
 date: 2026-09-02
 gap: ENVIRONMENT
 secondary: ORACLE
-status: OPEN
+status: FIXED
 summary: >-
   Creating or deleting a block inside a shared subtree writes to the global Loro
   doc instead of the shared one, so the change never reaches the peer and the
@@ -111,26 +111,59 @@ and ignore the mount id, as this lane's `scripts-lane/round.sh` does.
 
 ## Remedy
 
-Not fixed here; this lane is exploratory and the fix is a design change in the
-write path, not a patch.
+**Fixed 2026-09-02** by the `share-create-routing` lane. The mechanism was
+narrower than the root-cause section above says, and the correction matters for
+anyone reading this later.
 
-The shape of the fix: route `create` by its `parent_id` and the structural ops
-by their target id through the same mount registry that text writes already
-consult, so one resolution step serves every operation instead of text having a
-private path.
+`create` was ALREADY routed by its parent —
+`create_under_shared_parent_lands_in_shared_doc` passed on the unfixed base.
+The hole was the **mount node as the parent**. After a share, the page the UI
+navigates to IS the mount (this entry's own "the sharer's page loses its stable
+id" observation), so every create a user drives on a shared page carries the
+mount's id as `parent_id`, and the mount is alive in the global tree — so the
+parent resolved to the global doc and the child was born there. Same for the
+accepter, whose page is likewise a mount.
 
-Ordering, per the repo's red-first rule:
+The fix, in `crates/holon-loro/src/loro_backend.rs`: one resolution
+(`ParentRoute`) returns the doc a child lands in PLUS the parent to resolve
+inside that doc, and `route_through_mount` maps a mount parent to its share's
+doc with the shared root as the effective parent. A mount whose share document
+is not loaded, or whose mount metadata does not parse, is a loud `Err` naming
+block and share — never a global write. Delete and move needed the read side
+routed too (`list_children` for a parent inside a share, and for the mount
+itself, plus the shared root's parent uri, which was panicking `get_meta`).
 
-1. Add the cross-peer convergence invariant, and watch it go red on create and
-   delete while staying green on `set_field`. That red is the proof the oracle
-   gap is closed.
-2. Route structural writes through the mount registry.
-3. Re-run the two-instance dogfood.
+Both gaps this entry names are closed:
 
-Until it is fixed, sharing is safe only for content nobody adds to or deletes
-from, which is not a useful share. `docs/Reference/SUBTREE_SHARING.md` should
-stop describing B3 as uniformly unfixed and record that the text half landed and
-the structural half did not — the half-fix is what makes this dangerous.
+- **ORACLE** — P-STRUCT in `crates/holon/tests/sync_suite/sync_pbt.rs`: every
+  child of the shared subtree a peer must see is alive in ITS shared doc, every
+  deleted one is gone, every moved one hangs under its new parent. It went red
+  for exactly this reason before the fix ("P-STRUCT/A: child block:s1 missing
+  from shared doc; alive: [Child 1, Child 2, Shared heading]") on both peers.
+- **ENVIRONMENT** — the share PBT now drives structural ops on BOTH peers
+  through the production intent boundary (`execute_operation` with `create` /
+  `delete_subtree`) against two live backends, so a write that lands in the
+  wrong local document is observable.
+
+**Still open, and it is not this bug:** on a shallow share, a structural write
+panics the pinned loro fork (decision D70) the moment it merges against ANY op
+the other peer has not synced yet — `tree_state.rs:1198`,
+`is_node_deleted(target).unwrap()` on a node the receiving state never saw.
+
+The measured shape is wider than "two devices adding blocks": the other op does
+not have to be structural, ONE PEER TYPING is enough, and it panics in either
+order. Proptest shrank two independent randomized runs to
+`[create on A, restart-and-edit on B]` and `[edit on B, create on A, sync]`. A
+fully synced text edit followed by a create survives, so the concurrency is what
+breaks it, not the ops.
+
+It reproduces with raw `LoroTree::create` plus a raw `LoroText::insert`,
+bypassing every Holon path, so it is the engine and not the routing; shares are
+always shallow now that `retention="full"` is refused, so it is user-reachable.
+Pinned by the `#[ignore]`d
+`structure_merged_against_a_concurrent_op_panics_the_shallow_share_engine`.
+Step 3 of the original remedy — re-run the two-instance dogfood — should wait
+for D70, since the second device only has to be typing to hit it.
 
 ## Adjacent observations from the same run, not filed separately
 

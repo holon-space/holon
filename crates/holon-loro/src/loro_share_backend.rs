@@ -3331,6 +3331,110 @@ mod tests {
         backend_b.advertiser.close_all().await;
     }
 
+    /// The mount node's block URI in A's global tree after a share.
+    async fn mount_uri_of(backend_a: &LoroShareBackend) -> String {
+        let a_global = backend_a.global_doc().await.unwrap();
+        // ALLOW(loro_doc_escape): test read of a settled tree, no write batch open
+        let doc = a_global.doc();
+        let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+        let mount_tid = tree
+            .get_nodes(false)
+            .iter()
+            .find(|n| {
+                !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist)
+                    && shared_tree::is_mount_node(&tree, n.id)
+            })
+            .map(|n| n.id)
+            .expect("A's global tree must hold a mount node after share");
+        EntityUri::block_from_tree_id(mount_tid.peer, mount_tid.counter).to_string()
+    }
+
+    /// Creating a child under the MOUNT node is the shape a user drives: after
+    /// a share the page the UI navigates to is the mount, so `parent_id` is the
+    /// mount's id, not the shared root's. The new child belongs to the shared
+    /// doc under the shared root — landing it in the global doc means it never
+    /// reaches the peer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn create_under_mount_node_lands_in_shared_doc() {
+        use holon_api::repository::CoreOperations;
+        let (backend_a, backend_b, write_backend, shared_tree_id, _da, _db) = share_setup().await;
+        let mount_uri = mount_uri_of(&backend_a).await;
+
+        write_backend
+            .create_block(
+                // ALLOW(entity_uri_from_raw): mount uri built from a TreeID above
+                EntityUri::from_raw(&mount_uri),
+                holon_api::BlockContent::text("born under the mount"),
+                Some(EntityUri::block("mount-born-child")),
+            )
+            .await
+            .expect("create under a mount node must succeed");
+
+        assert_eq!(
+            shared_text(&backend_a, &shared_tree_id, "mount-born-child").as_deref(),
+            Some("born under the mount"),
+            "a child created under the mount must land in the SHARED doc"
+        );
+        let a_global = backend_a.global_doc().await.unwrap();
+        assert!(
+            // ALLOW(loro_doc_escape): test read of a settled tree, no write batch open
+            find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("mount-born-child"))
+                .is_none(),
+            "the child must NOT land in the global doc (it would never reach the peer)"
+        );
+
+        let synced = backend_b.sync_with_peers(&shared_tree_id).await.unwrap();
+        assert_eq!(synced, 1);
+        assert_eq!(
+            shared_text(&backend_b, &shared_tree_id, "mount-born-child").as_deref(),
+            Some("born under the mount"),
+            "B must see the created child after a pull"
+        );
+
+        backend_a.advertiser.close_all().await;
+        backend_b.advertiser.close_all().await;
+    }
+
+    /// Read/write symmetry on the mount id: the write path takes a mount as a
+    /// parent and lands the child under the shared root, so listing the mount's
+    /// children must answer with the shared root's children. Answering "none"
+    /// would leave the two sides disagreeing about what the mount id means.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn list_children_of_the_mount_lists_the_shared_roots_children() {
+        use holon_api::repository::CoreOperations;
+        let (backend_a, backend_b, write_backend, _stid, _da, _db) = share_setup().await;
+        let mount_uri = mount_uri_of(&backend_a).await;
+
+        write_backend
+            .create_block(
+                // ALLOW(entity_uri_from_raw): mount uri built from a TreeID
+                EntityUri::from_raw(&mount_uri),
+                holon_api::BlockContent::text("added under the mount"),
+                Some(EntityUri::block("mount-listed-child")),
+            )
+            .await
+            .unwrap();
+
+        let via_mount = write_backend.list_children(&mount_uri).await.unwrap();
+        let via_shared_root = write_backend
+            .list_children("block:shared-parent")
+            .await
+            .unwrap();
+        assert_eq!(
+            via_mount, via_shared_root,
+            "the mount and the shared root must answer with the same children"
+        );
+        assert!(
+            via_mount.contains(&"block:mount-listed-child".to_string()),
+            "the child created under the mount must be listed under it, got {via_mount:?}"
+        );
+
+        backend_a.advertiser.close_all().await;
+        backend_b.advertiser.close_all().await;
+    }
+
     /// A cross-doc move (out of a shared subtree into the global doc) rejects
     /// loudly; a same-doc move WITHIN the shared subtree succeeds.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3387,21 +3491,7 @@ mod tests {
         let (backend_a, backend_b, write_backend, _stid, _da, _db) = share_setup().await;
 
         // Find the mount node A's global tree holds after the share.
-        let a_global = backend_a.global_doc().await.unwrap();
-        let mount_uri = {
-            let doc = a_global.doc();
-            let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
-            let mount_tid = tree
-                .get_nodes(false)
-                .iter()
-                .find(|n| {
-                    !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist)
-                        && shared_tree::is_mount_node(&tree, n.id)
-                })
-                .map(|n| n.id)
-                .expect("A's global tree must hold a mount node after share");
-            EntityUri::block_from_tree_id(mount_tid.peer, mount_tid.counter).to_string()
-        };
+        let mount_uri = mount_uri_of(&backend_a).await;
 
         let err = write_backend
             .update_block_text(&mount_uri, "should not land")
