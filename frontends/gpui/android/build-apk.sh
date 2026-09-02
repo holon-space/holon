@@ -33,10 +33,14 @@ MANIFEST="$SCRIPT_DIR/AndroidManifest.xml"
 NDK_VER="29.0.14206865"
 NDK="$SDK/ndk/$NDK_VER"
 
+# Honour CARGO_TARGET_DIR: cargo writes the .so there, so looking only under
+# $PROJECT_ROOT/target reports a missing .so that was in fact just built. A
+# shared target dir is how a jj workspace reuses another checkout's warm cache.
+TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}"
 if [ "$PROFILE" = "debug" ]; then
-    SO_DIR="$PROJECT_ROOT/target/aarch64-linux-android/debug"
+    SO_DIR="$TARGET_DIR/aarch64-linux-android/debug"
 else
-    SO_DIR="$PROJECT_ROOT/target/aarch64-linux-android/release"
+    SO_DIR="$TARGET_DIR/aarch64-linux-android/release"
 fi
 
 SO="$SO_DIR/libholon_gpui.so"

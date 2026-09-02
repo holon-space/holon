@@ -14,50 +14,47 @@ RUST_FONTCONFIG_DLOPEN := "on"
 # the dir containing THIS justfile, so two parents up is the real workspace root.
 project_root := parent_directory(parent_directory(justfile_directory()))
 assets := project_root / "assets"
+# `sdk` locates the emulator only. The build-tools, platform, NDK and manifest
+# paths live in `android/build-apk.sh`, which owns packaging; duplicating them
+# here is what let the two implementations drift apart.
 sdk := env("ANDROID_SDK_HOME", env("HOME") / "Library/Android/sdk")
-bt := sdk / "build-tools/36.0.0"
-platform := sdk / "platforms/android-36/android.jar"
-ndk := env("ANDROID_NDK_HOME", sdk / "ndk/29.0.14206865")
 package := "space.holon.gpui"
 activity := package / "dev.gpui.mobile.GpuiNativeActivity"
 build_dir := "android/build"
-manifest := "android/AndroidManifest.xml"
 
 # List available recipes
 default:
     @just --list
 
+# The pinned toolchain does not carry `aarch64-linux-android`, so a fresh
+# checkout fails in `cfg-if` with E0463 "can't find crate for `core`" — a
+# message that names the missing target only in a trailing note. Install it
+# when absent, as the `check-android` gate and the release workflow both do.
+# Guarded by the `installed` check because `rustup target add` is a network
+# touch even for a target that is already present.
+
 # Build the .so for Android (release by default)
 build profile="release":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! rustup target list --installed | grep -qx aarch64-linux-android; then
+        rustup target add aarch64-linux-android
+    fi
     cargo ndk -t arm64-v8a -P 33 build \
         -p holon-gpui --no-default-features --features mobile \
         --lib {{ if profile == "release" { "--release" } else { "" } }}
 
-# Package the .so into a signed APK
+# Delegates to `android/build-apk.sh` — the ONE packager. A second recipe that
+# re-implemented the aapt2/zipalign/apksigner steps here drifted out of sync
+# with the manifest: it linked no resources (which `@mipmap/ic_launcher` needs)
+# and packaged no `classes.dex` (which `hasCode="true"` +
+# `dev.gpui.mobile.GpuiNativeActivity` need), so `just deploy` could not produce
+# a launchable APK. One implementation is the only way that divergence stays
+# impossible.
+
+# Package the .so into a signed APK (via android/build-apk.sh)
 apk profile="release":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    BD="$(pwd)/{{ build_dir }}"
-    SO="{{ project_root }}/target/aarch64-linux-android/{{ profile }}/libholon_gpui.so"
-    if [ ! -f "$SO" ]; then
-        echo "ERROR: $SO not found. Run: just build {{ profile }}"
-        exit 1
-    fi
-    echo "Packaging APK from $SO ($(du -h "$SO" | cut -f1))"
-    rm -rf "$BD"
-    mkdir -p "$BD/lib/arm64-v8a"
-    cp "$SO" "$BD/lib/arm64-v8a/"
-    cp {{ ndk }}/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so \
-       "$BD/lib/arm64-v8a/"
-    {{ bt }}/aapt2 link -o "$BD/holon-unaligned.apk" \
-        --manifest {{ manifest }} -I {{ platform }} \
-        --min-sdk-version 33 --target-sdk-version 36
-    cd "$BD" && zip -0 holon-unaligned.apk lib/arm64-v8a/libholon_gpui.so lib/arm64-v8a/libc++_shared.so
-    {{ bt }}/zipalign -f 4 "$BD/holon-unaligned.apk" "$BD/holon.apk"
-    {{ bt }}/apksigner sign --ks ~/.android/debug.keystore \
-        --ks-pass pass:android --ks-key-alias androiddebugkey \
-        "$BD/holon.apk"
-    echo "APK ready: $BD/holon.apk ($(du -h "$BD/holon.apk" | cut -f1))"
+    android/build-apk.sh {{ profile }}
 
 # Install APK on connected device/emulator
 install:

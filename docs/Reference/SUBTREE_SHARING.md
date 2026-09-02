@@ -21,26 +21,41 @@ unavailable and docs are local-only).
 > for real vaults. The design below is otherwise sound; the blockers are
 > fixable without redesign.
 
-> ✅ **Status (PR `senior-review-loro-iroh-sharing`):** B1, B2, B3, and B4 are
-> **fixed** in this branch; B5 is **partially fixed** (acceptor timeouts + ALPN
-> re-check landed; the ticket-v2 PSK authorization handshake is deliberately
-> deferred — see [Known gaps](#known-gaps-lower-severity-previously-tracked)).
+> ✅ **Status:** B1, B2, B4 and B5 are **fixed**. B3 is **half fixed, and the
+> half that works is what makes it dangerous**: text and property writes are
+> mount-aware and replicate to the peer, while `create` and `delete` write to
+> the global doc and never leave the device, silently. A share therefore looks
+> healthy under editing and diverges permanently the moment anyone adds or
+> removes a block. See
+> [B3](#b3--structural-writes-go-to-the-global-doc-and-never-reach-the-peer)
+> and
+> `docs/Testing/bugfunnel/entries/2026-09-02-structural-edits-in-a-shared-subtree-never-reach-the-peer.md`.
+>
+> Sharing is **not** ready for real vaults, and the reason is correctness, not
+> authorization: alongside B3, a shared page loses its `Page` tag and becomes
+> unreachable in the UI on both peers
+> (`docs/Testing/bugfunnel/entries/2026-09-02-sharing-a-page-drops-its-page-tag-and-it-vanishes-from-both-sidebars.md`).
 > The blocker sections below are preserved as the review record; each notes its
-> resolution inline. Sharing is still **not** enabled for real vaults until the
-> B5 authz handshake lands.
+> resolution inline.
 
 ## Ticket format
 
-JSON, wrapped in URL-safe base64 (no padding). Schema v1:
+JSON, wrapped in URL-safe base64 (no padding). Schema v2:
 
 ```json
 {
-  "v": 1,
+  "v": 2,
   "shared_tree_id": "<uuid>",
   "addr": { /* iroh EndpointAddr */ },
-  "alpn": "loro-sync/<shared_tree_id>"
+  "alpn": "loro-sync/<shared_tree_id>",
+  "capability": "<base64 PSK the acceptor proves in the handshake>",
+  "expires_at": <unix seconds>
 }
 ```
+
+`capability` carries the pre-shared secret the sync handshake verifies, and
+`expires_at` bounds the ticket's life, so a ticket is a **time-limited** bearer
+capability rather than an unbounded one.
 
 `v` lets the schema evolve. Decoders reject other versions loudly
 (`ticket.rs`).
@@ -96,21 +111,48 @@ or a user re-accepts after wiping local state.
 outbound sync; and mint peer-id from `(device, share, boot-epoch)` or persist a
 monotonic counter-floor per share so a reused counter is impossible.
 
-### B3 — edits to shared content route to the global doc and are silently lost
+### B3 — structural writes go to the global doc and never reach the peer
+
+⚠ **Half fixed, and the working half hides the broken half.**
 
 Reads follow mount nodes into the shared doc (`loro_backend.rs` mount
-traversal), but **every write** (`update_block_text`, `update_block`,
-`move_block`, …) does `self.collab_doc.with_write(...)` on the **global** doc
-only — no write path targets a shared doc. Compounding it, `share_subtree`
-prunes the subtree directly on the doc without invalidating `LoroBackend`'s
-`id_cache`, so on the sharer a post-share edit resolves the stale cached
-`TreeID`, writes into the *deleted* global node, and is never rendered (reads
-come from the shared doc) nor synced. On the accepter the same edit returns
-`BlockNotFound`.
+traversal). Writes split two ways:
 
-**Fix:** either sharing is read-only by design — then reject writes to
-shared/mounted content loudly on both sides — or add mount-aware write routing
-plus cache invalidation on prune. Ship neither silently.
+| Write | Doc it lands in | Reaches the peer |
+|---|---|---|
+| `insert_text` / `delete_text` / `set_field` / `set_state` | shared | yes, seconds |
+| `create` / `delete` | global | **no, ever** |
+
+Text and property writes resolve the owning shared doc through the mount
+registry (`shared_trees`, `loro_block_operations.rs:67,99`) and replicate
+correctly in both directions.
+
+`create` never consults that registry. `loro_block_operations.rs:747-748`
+pins the global doc outright:
+
+```rust
+// All blocks live in the single global tree
+let doc_id = String::new();
+```
+
+That comment does not hold once a subtree is shared. `parent_id` is in hand at
+that point and is exactly the key that identifies the owning shared doc.
+`find_doc_for_block` (`loro_block_operations.rs:106-109`) discards its id
+argument and always returns the global backend, so deletes take the same wrong
+route.
+
+The consequence is silent permanent divergence: a block added on one device
+stays on that device, a block deleted on one device stays alive on the other,
+and neither app logs anything. Measured on two live peers, macOS desktop and
+Android, in `docs/Testing/bugfunnel/entries/2026-09-02-structural-edits-in-a-shared-subtree-never-reach-the-peer.md`
+— including the on-disk proof that a created node sits in `holon_tree.loro`
+and is absent from `shares/<id>.loro`.
+
+**Fix:** route `create` by its `parent_id` and the structural ops by their
+target id through the same mount registry the text writes already use, so one
+resolution step serves every operation. Add a cross-peer convergence invariant
+first: a single-instance test cannot see this, because the instance reads back
+exactly what it wrote.
 
 ### B4 — remote-triggered panic + oversized-frame deadlock in the wire framing
 
@@ -139,9 +181,10 @@ And there are **no timeouts** on the acceptor — the initiator is wrapped in
 `drain_until_eof` / `conn.closed().await` in the accept-loop is an unbounded
 wait (trivial slowloris: send a 4-byte length, then stall).
 
-**Fix (Phase 2):** ticket-embedded pre-shared secret verified in the handshake;
-per-share peer-id allowlist checked inside `sync_doc_handle_connection`; a
-timeout around every acceptor await.
+**Resolution:** fixed. The ticket carries a `capability` pre-shared secret that
+the handshake verifies, and an `expires_at` that bounds its life (see
+[Ticket format](#ticket-format)); the acceptor re-checks the ALPN inside the
+handler and every acceptor await is timeout-bounded.
 
 ## Threat model
 
@@ -270,12 +313,16 @@ divergent edits.
 
 ## Lifecycle & robustness gaps (MAJOR)
 
-- **No unshare / `drop_share` path.** The `save_workers` doc-comment promises
-  "dropped when `unregister` is called" but no such method exists; nothing
-  calls `IrohAdvertiser::drop_share`. Manager registration, three workers, and
-  the advertiser endpoint leak per share for the process lifetime. If the user
-  deletes the mount block, `gc_orphans` deletes `<id>.loro` but the still-
-  attached save worker re-writes it on the next commit, un-deleting the share.
+- **Teardown exists.** `unshare` and `gc_orphans` are both registered
+  operations on entity `tree`, alongside `share_subtree` and
+  `accept_shared_subtree`; `list_operations` on that entity returns all four.
+  `unshare` takes the share's `mount_block_id` and tears down in a
+  resurrection-safe order — per-share workers first, so no worker can re-write
+  the snapshot after it is deleted, then the advertiser endpoint, then the
+  shared-doc registration, then the mount node. `gc_orphans` deletes
+  `shares/<id>.loro` and its `.peers.json` sidecar for shares with no
+  surviving mount node, and returns the deleted ids; it runs only when invoked,
+  and any confirmation gate belongs to the UI.
 - **Destructive-then-`Err` paths.** After the prune commits, failures in
   `save_all` / `start_advertising_stable` / `Ticket::encode` all return `Err`
   with the subtree already destructively replaced by a mount — the caller is
@@ -388,8 +435,10 @@ Property tests worth adding (each proves a blocker's fix):
   sibling subtrees (B1);
 - a crash between outbound sync and snapshot save does not mint a reused peer
   counter (B2);
-- a write to shared/mounted content either syncs or is rejected loudly, never
-  silently dropped (B3);
+- two peers holding one share converge after **every** operation kind, `create`
+  and `delete` included, comparing the subtree by `(child id, content,
+  properties)` — each peer mints its own mount-block id, so comparing
+  `parent_id` reports a false divergence (B3);
 - a peer sending a 4-byte length then stalling does not hang the acceptor past
   a timeout, and an oversize length returns `Err` (not panic) (B4/B5);
 - `unmount` with reintegration leaves all kept (non-shared) nodes alive
