@@ -569,6 +569,13 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     .optional_resolve_async::<dyn AliasRegistrar>()
                     .await;
 
+                // The read-only slice of the doc→home map, published to the
+                // operation dispatcher. Absent in the org-standalone container,
+                // which registers no dispatcher to read it.
+                let read_only_docs = resolver
+                    .optional_resolve_async::<std::sync::Arc<holon_core::ReadOnlyDocuments>>()
+                    .await;
+
                 // 3-way text merger for the no-store conflict path (spec 0008
                 // §3.1). Present in both containers; the controller consults it
                 // only in `Consolidator::Store` (SqlOnly) mode.
@@ -635,6 +642,9 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 }
                 if let Some(registrar) = alias_registrar {
                     controller = controller.with_alias_registrar(registrar);
+                }
+                if let Some(read_only_docs) = read_only_docs {
+                    controller = controller.with_read_only_documents((*read_only_docs).clone());
                 }
                 if let Some(merger) = text_merge {
                     controller = controller.with_text_merge(merger);

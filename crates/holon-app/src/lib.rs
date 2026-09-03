@@ -40,6 +40,7 @@ pub mod no_turso;
 #[cfg(test)]
 mod no_turso_test;
 pub mod ordered_block_crud;
+pub mod read_only_format_gate;
 pub mod rehome_entity;
 pub mod seed;
 pub mod session;

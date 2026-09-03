@@ -23,6 +23,7 @@ use anyhow::anyhow;
 use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::repository::CoreOperations;
+use holon_core::WriteTierAuthority;
 use holon_core::block_ordering::BlockCreateRequest;
 use holon_core::cell::CellBacking;
 use holon_core::cell_registry::CellCache;
@@ -54,6 +55,14 @@ pub struct BlockCellRegistry {
     /// registry that only knew the global doc would report it missing.
     layout_doc: Option<Arc<LoroDoc>>,
     backend: Arc<LoroBackend>,
+    /// The dispatcher's write-tier authority, and a runtime to ask it on.
+    ///
+    /// A content cell writes the block's `LoroText` container directly, so it
+    /// is a writer in the sense of Model.md invariant 4 and must carry the same
+    /// decision the dispatcher carries — not a second rule (`ReadOnlyDocuments`
+    /// answers both). Resolution is async and `live_field_any` is not, hence
+    /// the handle.
+    write_tier: Option<(Arc<dyn WriteTierAuthority>, tokio::runtime::Handle)>,
 }
 
 impl BlockCellRegistry {
@@ -74,7 +83,44 @@ impl BlockCellRegistry {
             doc,
             layout_doc: Some(layout_doc),
             backend,
+            write_tier: None,
         }
+    }
+
+    /// Install the dispatcher's write-tier authority. Without it a content cell
+    /// on a read-only-format block would write the vault's CRDT doc behind the
+    /// dispatcher's back.
+    pub fn with_write_tier(
+        mut self,
+        authority: Arc<dyn WriteTierAuthority>,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
+        self.write_tier = Some((authority, runtime));
+        self
+    }
+
+    /// The refusal a USER's write to `uri` earns, per the dispatcher's own
+    /// authority.
+    ///
+    /// The org-only vault — nearly every vault — settles this on the
+    /// synchronous `any_read_only_documents` read and never leaves the thread.
+    /// A vault that does hold a read-only-format file pays one bridged store
+    /// read per editor mount, on a thread of its own so `block_on` stays legal
+    /// wherever the frontend resolved the cell from.
+    fn write_tier_refusal(&self, uri: &EntityUri) -> Result<Option<holon_core::EditRefused>> {
+        let Some((authority, runtime)) = &self.write_tier else {
+            return Ok(None);
+        };
+        if !authority.any_read_only_documents() {
+            return Ok(None);
+        }
+        let id = uri.to_string();
+        std::thread::scope(|s| {
+            s.spawn(|| runtime.block_on(authority.refusal_for(&id)))
+                .join()
+                .map_err(|_| anyhow!("write-tier lookup for {uri} panicked"))?
+                .map_err(|e| anyhow!("write-tier lookup for {uri}: {e}"))
+        })
     }
 
     /// Convenience constructor that takes a raw `Arc<LoroDoc>`. Used by
@@ -90,6 +136,7 @@ impl BlockCellRegistry {
             doc,
             layout_doc: None,
             backend,
+            write_tier: None,
         }
     }
 
@@ -285,6 +332,41 @@ impl EntityCellRegistry for BlockCellRegistry {
                  requested type (supported: bool, i64, String, Value)"
             ))
         }
+    }
+
+    /// The editor's cell. `content` is the only field a user types into, so it
+    /// is the only one the write tier can refuse; the rest are the same cells
+    /// the store's own legs take.
+    fn editable_field_any(
+        &self,
+        uri: &EntityUri,
+        field: &str,
+        type_id: TypeId,
+    ) -> Result<Arc<dyn Any + Send + Sync>> {
+        let cell_any = self.live_field_any(uri, field, type_id)?;
+        if field != "content" {
+            return Ok(cell_any);
+        }
+        let Some(refusal) = self.write_tier_refusal(uri)? else {
+            return Ok(cell_any);
+        };
+        let (authority, _) = self
+            .write_tier
+            .as_ref()
+            .expect("a refusal implies an installed authority");
+        let cell = cell_any
+            .downcast::<holon_core::cell::Cell<String>>()
+            .map_err(|_| anyhow!("the `content` cell for {uri} is not a Cell<String>"))?;
+        // NOT cached: the cache holds the container handle every writer shares,
+        // and only this one is refused.
+        let guarded = holon_core::cell::ReadOnlyTextCellBacking::new(
+            cell.inner_arc().clone(),
+            authority.clone(),
+            refusal,
+        )?;
+        Ok(Arc::new(holon_core::cell::Cell::from_backing(
+            Arc::new(guarded) as Arc<dyn CellBacking<String>>
+        )) as Arc<dyn Any + Send + Sync>)
     }
 
     fn on_entity_deleted(&self, uri: &EntityUri) {

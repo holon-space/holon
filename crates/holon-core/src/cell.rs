@@ -66,6 +66,11 @@ impl<T: 'static + Send + Sync + Clone> Cell<T> {
     pub fn inner_arc(&self) -> &Arc<dyn CellBacking<T>> {
         &self.inner
     }
+
+    /// See [`CellBacking::write_refusal`].
+    pub fn write_refusal(&self) -> Option<&crate::EditRefused> {
+        self.inner.write_refusal()
+    }
 }
 
 /// Backing trait for [`Cell<T>`]. Implementations choose the storage and
@@ -82,6 +87,14 @@ pub trait CellBacking<T: 'static + Send + Sync + Clone>: Send + Sync + 'static {
     /// `Cell<String>::apply_text_op` calls this to decide whether to
     /// dispatch the rich op or fail loudly.
     fn as_text_backing(&self) -> Option<&dyn TextCellBacking> {
+        None
+    }
+
+    /// The refusal every write to this cell earns, when its document's file
+    /// format has no writer. `None` on a writable cell. A frontend reads it to
+    /// render the field as what it is rather than to discover on the first
+    /// keystroke that the edit bounces.
+    fn write_refusal(&self) -> Option<&crate::EditRefused> {
         None
     }
 }
@@ -258,6 +271,96 @@ impl Cell<String> {
                 )
             }
         }
+    }
+}
+
+// ── ReadOnlyTextCellBacking ─────────────────────────────────────────────
+
+/// A text cell whose block is homed in a `WriteTier::ReadOnly` file.
+///
+/// Reads delegate to the real backing — the file's content is exactly what the
+/// editor must show — and every write returns the SAME [`crate::EditRefused`]
+/// the dispatcher returns, taken from the SAME
+/// [`WriteTierAuthority`](crate::WriteTierAuthority). Model.md invariant 4: the
+/// cell is a writer of the block's `LoroText` container, so it carries the one
+/// writer's decision instead of a second rule of its own.
+pub struct ReadOnlyTextCellBacking {
+    inner: Arc<dyn CellBacking<String>>,
+    authority: Arc<dyn crate::WriteTierAuthority>,
+    refusal: crate::EditRefused,
+}
+
+impl ReadOnlyTextCellBacking {
+    /// Errors when `inner` is not text-rich: the wrapper must present the same
+    /// cursor and delta surface the editor already binds to, and a silently
+    /// degraded one would break the editor rather than the edit.
+    pub fn new(
+        inner: Arc<dyn CellBacking<String>>,
+        authority: Arc<dyn crate::WriteTierAuthority>,
+        refusal: crate::EditRefused,
+    ) -> Result<Self> {
+        if inner.as_text_backing().is_none() {
+            return Err(anyhow!(
+                "ReadOnlyTextCellBacking wraps a backing without text-rich support: {refusal}"
+            ));
+        }
+        Ok(Self {
+            inner,
+            authority,
+            refusal,
+        })
+    }
+
+    fn text(&self) -> &dyn TextCellBacking {
+        self.inner
+            .as_text_backing()
+            .expect("constructor rejected a non-text-rich backing")
+    }
+
+    fn refuse<T>(&self) -> Result<T> {
+        self.authority.disclose(&self.refusal);
+        Err(anyhow!(self.refusal.clone()))
+    }
+}
+
+impl CellBacking<String> for ReadOnlyTextCellBacking {
+    fn current(&self) -> String {
+        self.inner.current()
+    }
+
+    fn signal(&self) -> BoxStream<'static, String> {
+        self.inner.signal()
+    }
+
+    fn apply_replace(&self, _: String) -> BoxFuture<'static, Result<()>> {
+        let refused = self.refuse::<()>();
+        Box::pin(async move { refused })
+    }
+
+    fn as_text_backing(&self) -> Option<&dyn TextCellBacking> {
+        Some(self)
+    }
+
+    fn write_refusal(&self) -> Option<&crate::EditRefused> {
+        Some(&self.refusal)
+    }
+}
+
+impl TextCellBacking for ReadOnlyTextCellBacking {
+    fn apply_text_op(&self, _: TextOp) -> Result<()> {
+        self.refuse()
+    }
+
+    fn anchor_cursor(&self, char_offset: usize, bias: CursorBias) -> CursorAnchor {
+        self.text().anchor_cursor(char_offset, bias)
+    }
+
+    fn resolve_cursor(&self, anchor: &CursorAnchor) -> usize {
+        self.text().resolve_cursor(anchor)
+    }
+
+    fn remote_deltas(&self) -> BoxStream<'static, TextDelta> {
+        self.text().remote_deltas()
     }
 }
 

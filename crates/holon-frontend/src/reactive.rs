@@ -4372,7 +4372,10 @@ impl BuilderServices for ReactiveEngine {
             Some(reg) => {
                 use crate::cell::EntityCellRegistryExt;
                 let reg_dyn: &dyn crate::cell::EntityCellRegistry = reg.as_ref();
-                reg_dyn.live_field::<String>(block_id, field)
+                // The editor's seam, not the store's: a keystroke originates in
+                // the store, so it is judged by the same write-tier authority
+                // the dispatcher holds (Model.md invariant 4).
+                reg_dyn.editable_field::<String>(block_id, field)
             }
             None => Err(anyhow::anyhow!(
                 "editable_text not configured for this ReactiveEngine (BlockCellRegistry not \

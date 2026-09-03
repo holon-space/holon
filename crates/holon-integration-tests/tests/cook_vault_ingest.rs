@@ -646,3 +646,330 @@ fn vault_ingest_records_no_undo_log_entries() {
         );
     });
 }
+
+/// The store content of `id`, or `None` when no such row exists.
+async fn stored_content(
+    env: &holon_integration_tests::TestEnvironment,
+    id: &str,
+) -> Option<String> {
+    rows(
+        env,
+        &format!("SELECT content FROM block_raw WHERE id = '{id}'"),
+    )
+    .await
+    .first()
+    .and_then(|r| text(r, "content").map(str::to_string))
+}
+
+const RECIPE_STEP: &str = "block:Pancakes.cook::b::0";
+
+/// Red 6 — the write half at the ONE writer. Typing into a recipe step
+/// dispatches an ordinary block `set_field`; the store must refuse it naming
+/// the format, because an edit the store takes and the disk cannot is a fork
+/// that survives every restart (entry
+/// `2026-09-03-refused-write-back-still-persists-in-the-vault-loro-doc`).
+#[test]
+fn an_edit_to_a_recipe_block_is_refused_at_the_dispatcher() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let env = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .with_vault_file("Notes.org", NOTES_ORG)
+            .build(rt.clone())
+            .await
+            .expect("a vault holding a `.cook` file must boot");
+
+        assert!(
+            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
+            "precondition: the recipe's first step must be in the store"
+        );
+        let before = stored_content(&env, RECIPE_STEP)
+            .await
+            .expect("the step row must exist before the edit");
+
+        let refusal = env
+            .test_ctx()
+            .execute_op(
+                "block",
+                "set_field",
+                params(&[
+                    ("id", holon_api::Value::String(RECIPE_STEP.to_string())),
+                    ("field", holon_api::Value::String("content".to_string())),
+                    (
+                        "value",
+                        holon_api::Value::String("TYPED BY THE USER".to_string()),
+                    ),
+                ])
+                .into_iter()
+                .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v))
+                .collect(),
+            )
+            .await
+            .expect_err("editing a block of a read-only-format file must be refused");
+        let refusal = refusal.to_string();
+        assert!(
+            refusal.contains("read-only format") && refusal.contains("Pancakes.cook"),
+            "the refusal must name the format and the authoritative file, got: {refusal}"
+        );
+
+        env.wait_for_org_files_stable(25, Duration::from_millis(1500))
+            .await;
+        assert_eq!(
+            stored_content(&env, RECIPE_STEP).await.as_deref(),
+            Some(before.as_str()),
+            "the refused edit reached the store anyway — it now diverges from the file and \
+             replays on every boot"
+        );
+
+        // The write-authority store — the Loro tree, not the lagging
+        // projection. A refusal that lands after the CRDT leg committed is no
+        // refusal: the op replays on every boot from `.loro/holon_tree.loro`,
+        // which lives in the vault and survives a wiped database (entry
+        // `2026-09-03-refused-write-back-still-persists-in-the-vault-loro-doc`).
+        let authoritative = env
+            .injector()
+            .expect("a booted app has an injector")
+            .resolve_async::<dyn holon_filesystem::BlockReader>()
+            .await
+            .get_block_authoritative(&holon_api::EntityUri::parse(RECIPE_STEP).unwrap())
+            .await
+            .expect("read the recipe step from the write-authority store");
+        assert_eq!(
+            authoritative.map(|b| b.content),
+            Some(before.clone()),
+            "the refused edit minted an op in the write-authority store — it replays on every \
+             boot and the file can never win"
+        );
+
+        // The org leg in the same vault stays editable: the rule is the write
+        // tier, not the presence of a second format.
+        env.test_ctx()
+            .execute_op(
+                "block",
+                "set_field",
+                params(&[
+                    (
+                        "id",
+                        holon_api::Value::String("block:notes-child".to_string()),
+                    ),
+                    ("field", holon_api::Value::String("content".to_string())),
+                    (
+                        "value",
+                        holon_api::Value::String("An Edited Note".to_string()),
+                    ),
+                ])
+                .into_iter()
+                .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v))
+                .collect(),
+            )
+            .await
+            .expect("an org block in the same vault must still be editable");
+    });
+}
+
+/// Red 7 — disclosure. The refusal must reach the window, not only the log:
+/// the whole defect class is an edit that looks like it worked.
+#[test]
+fn a_refused_recipe_edit_raises_a_degraded_condition() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let env = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .build(rt.clone())
+            .await
+            .expect("a vault holding a `.cook` file must boot");
+
+        assert!(
+            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
+            "precondition: the recipe's first step must be in the store"
+        );
+
+        let bus = env
+            .injector()
+            .expect("a booted app has an injector")
+            .resolve_async::<std::sync::Arc<holon_loro::DegradedSignalBus>>()
+            .await;
+
+        let _ = env
+            .test_ctx()
+            .execute_op(
+                "block",
+                "set_field",
+                params(&[
+                    ("id", holon_api::Value::String(RECIPE_STEP.to_string())),
+                    ("field", holon_api::Value::String("content".to_string())),
+                    ("value", holon_api::Value::String("TYPED".to_string())),
+                ])
+                .into_iter()
+                .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v))
+                .collect(),
+            )
+            .await;
+
+        let raised = bus.subscribe().current;
+        let disclosed = raised.iter().any(|d| {
+            d.condition_key().kind == holon_loro::ShareDegradedReason::EDIT_REFUSED_READ_ONLY_FORMAT
+                && d.shared_tree_id.contains("Pancakes.cook")
+        });
+        assert!(
+            disclosed,
+            "the refusal was not disclosed to the window; raised conditions: {:?}",
+            raised
+                .iter()
+                .map(|d| (d.condition_key().kind, d.shared_tree_id.clone()))
+                .collect::<Vec<_>>()
+        );
+    });
+}
+
+/// Red 8 — boot noise. A vault of recipes nobody touched must not log a
+/// write-back refusal: the sweep that reports one only ever mints files for
+/// pages that have none, and a recipe has one. An ERROR nothing can act on
+/// trains the reader to ignore the refusals that matter.
+#[test]
+fn booting_a_vault_of_recipes_logs_no_write_back_refusal() {
+    // The collector installs the process's subscriber and must be touched
+    // before the SUT runs, or the capture comes back empty (entry
+    // `error-capture-layer-install-gotcha`) — so no `init_tracing` here.
+    let collector = holon_integration_tests::test_tracing::SpanCollector::global();
+    let _scope = holon_integration_tests::test_tracing::begin_test_scope();
+    collector.reset();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let env = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .with_vault_file("Omelette.cook", OMELETTE_COOK)
+            .with_vault_file("Notes.org", NOTES_ORG)
+            .build(rt.clone())
+            .await
+            .expect("a vault holding `.cook` files must boot");
+
+        rows_eventually(&env, "SELECT id FROM recipe", 2, "both recipes ingested").await;
+        env.wait_for_org_files_stable(25, Duration::from_millis(2000))
+            .await;
+
+        let refusals: Vec<String> = collector
+            .captured_problems()
+            .into_iter()
+            .filter(|p| p.message.contains(".cook"))
+            .map(|p| p.message)
+            .collect();
+        assert!(
+            refusals.is_empty(),
+            "boot logged {} error(s) about recipes nobody edited: {refusals:#?}",
+            refusals.len()
+        );
+    });
+}
+
+/// Red 9 — the path the user's KEYSTROKES take. The editor writes content
+/// through a `Cell<String>` resolved from the production `BlockCellRegistry`,
+/// straight onto the block's `LoroText`; that cell is a writer too, so it must
+/// carry the same write-tier decision the dispatcher makes (Model.md
+/// invariant 4). Ungated it forks the vault's own CRDT doc silently: no
+/// refusal, no banner, and the op replays on every boot.
+#[test]
+fn a_keystroke_on_a_recipe_block_is_refused_at_the_cell() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let env = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .with_vault_file("Notes.org", NOTES_ORG)
+            .build(rt.clone())
+            .await
+            .expect("a vault holding a `.cook` file must boot");
+
+        assert!(
+            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
+            "precondition: the recipe's first step must be in the store"
+        );
+        let injector = env.injector().expect("a booted app has an injector");
+        let reader = injector
+            .resolve_async::<dyn holon_filesystem::BlockReader>()
+            .await;
+        let step_uri = holon_api::EntityUri::parse(RECIPE_STEP).unwrap();
+        let before = reader
+            .get_block_authoritative(&step_uri)
+            .await
+            .expect("read the recipe step from the write-authority store")
+            .expect("the step must be in the write-authority store")
+            .content;
+
+        let registry = injector
+            .resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
+            .await;
+        let registry_dyn: &dyn holon_core::cell_registry::EntityCellRegistry = registry.as_ref();
+        let cell = {
+            use holon_core::cell_registry::EntityCellRegistryExt;
+            registry_dyn
+                .editable_field::<String>(&step_uri, "content")
+                .expect("the production registry resolves the step's content cell")
+        };
+
+        let bus = injector
+            .resolve_async::<std::sync::Arc<holon_loro::DegradedSignalBus>>()
+            .await;
+
+        let refusal = cell
+            .apply_text_op(holon_core::cell::TextOp::Insert {
+                pos_codepoint: 0,
+                text: "HACKED ".to_string(),
+            })
+            .expect_err("a keystroke on a read-only-format block must be refused at the cell");
+        let refusal = format!("{refusal:#}");
+        assert!(
+            refusal.contains("read-only format") && refusal.contains("Pancakes.cook"),
+            "the cell's refusal must name the format and the authoritative file, got: {refusal}"
+        );
+
+        // The write-authority store, not the lagging projection: an op minted
+        // here lives in `.loro/holon_tree.loro` inside the vault and replays on
+        // every boot, so the file can never win.
+        let authoritative = reader
+            .get_block_authoritative(&step_uri)
+            .await
+            .expect("re-read the recipe step from the write-authority store");
+        assert_eq!(
+            authoritative.map(|b| b.content),
+            Some(before.clone()),
+            "the keystroke minted an op in the write-authority store"
+        );
+        assert_eq!(
+            cell.current(),
+            before,
+            "the cell's own text moved — the CRDT container took the edit"
+        );
+
+        let raised = bus.subscribe().current;
+        let disclosed = raised.iter().any(|d| {
+            d.condition_key().kind == holon_loro::ShareDegradedReason::EDIT_REFUSED_READ_ONLY_FORMAT
+                && d.shared_tree_id.contains("Pancakes.cook")
+        });
+        assert!(
+            disclosed,
+            "the cell refused silently; raised conditions: {:?}",
+            raised
+                .iter()
+                .map(|d| (d.condition_key().kind, d.shared_tree_id.clone()))
+                .collect::<Vec<_>>()
+        );
+
+        // The org leg of the same vault keeps its editable cell.
+        let notes_uri = holon_api::EntityUri::parse("block:notes-child").unwrap();
+        let notes_cell = {
+            use holon_core::cell_registry::EntityCellRegistryExt;
+            registry_dyn
+                .editable_field::<String>(&notes_uri, "content")
+                .expect("the org block's content cell resolves")
+        };
+        notes_cell
+            .apply_text_op(holon_core::cell::TextOp::Insert {
+                pos_codepoint: 0,
+                text: "X".to_string(),
+            })
+            .expect("an org-homed block stays writable through its cell");
+    });
+}
