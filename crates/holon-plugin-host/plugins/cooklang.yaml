@@ -1,0 +1,18 @@
+# The `.cook` format, declared rather than wired: nothing in Rust names
+# cooklang any more, and the same file shape admits the next format.
+format: cooklang
+guest: cooklang.wasm
+extensions: [cook]
+# A plugin earns write-back only by declaring a reverse export, which this
+# contract version has none of; `.cook` files in the vault are authoritative.
+write_tier: read_only
+scopes:
+  - type: recipe
+    owner_column: source_path
+    # `servings` is deliberately absent: cooklang admits non-integer servings
+    # (`4|6|8`) that the INTEGER column cannot hold, and the metadata reaches
+    # the recipe page through the document block's properties either way.
+    columns: [id, source_path, title, course]
+  - type: ingredient_use
+    owner_column: recipe_id
+    columns: [id, recipe_id, raw_name, quantity, unit, step_index]

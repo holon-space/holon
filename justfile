@@ -656,6 +656,39 @@ check-worker-wasm:
         --lib --no-default-features \
         2>&1 | tee target/gate-logs/holon-worker-native-test.log
 
+# Staleness guard for the tracked guest `.wasm` artifacts. They are build
+# OUTPUTS living in the tree: nothing else ties
+# `crates/holon-plugin-host/plugins/cooklang.wasm` to `guests/cooklang/src/`,
+# so a source edit without a rebuild leaves every plugin test green on the old
+# binary. Rebuilds each guest into a scratch dir and compares sha256.
+# Inc 3 (deleting `crates/holon-kitchen/src/cook.rs`) requires this green:
+# after it the guest IS the cooklang parser, with no native leg left to
+# disagree with a stale one.
+guests-verify:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! rustup target list --installed | grep -qx wasm32-unknown-unknown; then
+        rustup target add wasm32-unknown-unknown
+    fi
+    scratch=$(mktemp -d)
+    trap 'rm -rf "$scratch"' EXIT
+    status=0
+    for entry in cooklang:crates/holon-plugin-host/plugins \
+                 testkit:crates/holon-plugin-host/tests/fixtures; do
+        name=${entry%%:*}
+        dir=${entry#*:}
+        guests/build.sh "$name" "$scratch"
+        tracked=$(shasum -a 256 "$dir/$name.wasm" | cut -d' ' -f1)
+        rebuilt=$(shasum -a 256 "$scratch/$name.wasm" | cut -d' ' -f1)
+        if [ "$tracked" != "$rebuilt" ]; then
+            echo "STALE GUEST ARTIFACT: $dir/$name.wasm is $tracked, a rebuild of guests/$name is $rebuilt — run: guests/build.sh $name $dir"
+            status=1
+        else
+            echo "guest $name: $tracked matches its source"
+        fi
+    done
+    exit $status
+
 # Rot guard for the BROWSER target. `check-worker-wasm` above covers only
 # wasm32-wasip1-threads, so a crate that compiles native and wasi but not
 # wasm32-unknown-unknown was caught by no gate at all — a native-only dep in
@@ -1120,26 +1153,28 @@ prepush:
 landing-gate:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== landing [1/10]: fmt =="
+    echo "== landing [1/11]: fmt =="
     cargo fmt --all -- --check
-    echo "== landing [2/10]: typecheck incl. every test target =="
+    echo "== landing [2/11]: typecheck incl. every test target =="
     just gate-compile
-    echo "== landing [3/10]: browser-target typecheck =="
+    echo "== landing [3/11]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== landing [4/10]: out-of-workspace browser frontend =="
+    echo "== landing [4/11]: out-of-workspace browser frontend =="
     just check-dioxus-web-wasm
-    echo "== landing [5/10]: out-of-workspace wasi worker =="
+    echo "== landing [5/11]: out-of-workspace wasi worker =="
     just check-worker-wasm
-    echo "== landing [6/10]: architecture rules =="
+    echo "== landing [6/11]: architecture rules =="
     just gate-arch
-    echo "== landing [7/10]: keystone smoke =="
+    echo "== landing [7/11]: keystone smoke =="
     just keystone-smoke
-    echo "== landing [8/10]: loro consolidator suite =="
+    echo "== landing [8/11]: loro consolidator suite =="
     just loro-suite
-    echo "== landing [9/10]: hand-authored regressions =="
+    echo "== landing [9/11]: hand-authored regressions =="
     just hand-authored
-    echo "== landing [10/10]: latency SLO (D50.a) =="
+    echo "== landing [10/11]: latency SLO (D50.a) =="
     just latency-slo-gate
+    echo "== landing [11/11]: guest wasm artifacts match their source =="
+    just guests-verify
     echo "== landing gate PASS =="
 
 # --- Observability ----------------------------------------------------------

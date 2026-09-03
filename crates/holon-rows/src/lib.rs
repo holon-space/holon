@@ -7,10 +7,12 @@
 
 mod emit;
 mod envelope;
+mod ids;
 mod parse;
 
 pub use emit::emit_row_sets;
 pub use envelope::CONTRACT_VERSION;
 pub use envelope::Envelope;
 pub use envelope::ScopeHeader;
+pub use ids::checked_local_id;
 pub use parse::parse_row_sets;

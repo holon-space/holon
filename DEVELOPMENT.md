@@ -681,3 +681,60 @@ just -f frontends/gpui/justfile apk
 
 The `[target.*-linux-android] linker = …` entries in `.cargo/config.toml` are
 inert under `cargo ndk`, which overrides them via env.
+
+## WASM format plugins
+
+A vault format can be served by a `.wasm` guest plus a yaml sidecar instead of
+by a Rust crate (`crates/holon-plugin-host`, ADR 0034). The sidecar declares the
+extensions, the row scopes and their columns; the host refuses anything the
+guest emits that the sidecar does not declare.
+
+Guest sources live in `guests/<name>/`, each its own workspace and `Cargo.lock`,
+excluded from the root workspace. The built artifact is checked in beside its
+sidecar:
+
+```
+guests/build.sh cooklang                    # → crates/holon-plugin-host/plugins/cooklang.wasm
+guests/build.sh testkit crates/holon-plugin-host/tests/fixtures
+```
+
+`wasm-opt` is applied when binaryen is on PATH and skipped with a printed
+warning when it is not, so a size figure always says whether it is
+post-processed. A guest must stay under 1 MiB: that is jj's
+`snapshot.max-new-file-size`, and above it the artifact is silently left out of
+the commit.
+
+The tracked `.wasm` files are build outputs living in the tree, so nothing but
+a gate ties one to its source — edit `guests/cooklang/src/lib.rs`, skip the
+rebuild, and the whole plugin suite stays green on the old binary:
+
+```
+just guests-verify     # rebuild every guest into a scratch dir, compare sha256
+```
+
+It is step 11 of `just landing-gate`. **Inc 3 — deleting
+`crates/holon-kitchen/src/cook.rs` — requires it green**: after that the guest
+IS the cooklang parser, and no native leg is left to disagree with a stale one.
+
+It is a landing gate rather than a CI step because the build is only
+bit-reproducible on a machine whose paths match the one that produced the
+tracked artifact: `panic!` locations embed absolute source paths of the
+registry deps, which differ on a CI runner.
+
+The interpreter's cost is measured, not assumed:
+
+```
+cargo nextest run --release -p holon-plugin-host --test-threads 1 \
+  --run-ignored all --no-capture -E 'binary(vault_scan_latency)'
+```
+
+Cross-target rot guards. The host itself compiles for both wasm targets, but
+`cargo check -p holon-plugin-host --target wasm32-unknown-unknown` alone fails
+in `getrandom 0.2` — a PRE-EXISTING property of `holon-core`'s graph, not of the
+plugin host. The browser feature set is only reachable through the frontend, so
+the honest check is:
+
+```
+cargo check -p holon-frontend -p holon-plugin-host --target wasm32-unknown-unknown
+cargo check -p holon-plugin-host --target wasm32-wasip1-threads
+```
