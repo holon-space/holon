@@ -365,6 +365,22 @@ impl FrontendInjectorExt for Injector {
             );
             self.provide::<holon_core::FormatRegistry>(Provider::root(move |_| formats.clone()));
 
+            // Which documents the formats above refuse to write. The file-sync
+            // controller fills it as it records each document's home; the
+            // operation dispatcher's write-tier gate reads it.
+            self.provide::<Arc<holon_core::ReadOnlyDocuments>>(Provider::root(|_| {
+                Shared::new(Arc::new(holon_core::ReadOnlyDocuments::new()))
+            }));
+            self.provide::<dyn holon_core::WriteTierAuthority>(Provider::root(|resolver| {
+                let documents = resolver.resolve::<Arc<holon_core::ReadOnlyDocuments>>();
+                let bus = resolver.resolve::<Arc<holon_loro::DegradedSignalBus>>();
+                Arc::new(crate::read_only_format_gate::ReadOnlyFormatGate::new(
+                    resolver.clone(),
+                    (*documents).clone(),
+                    (*bus).clone(),
+                )) as Arc<dyn holon_core::WriteTierAuthority>
+            }));
+
             // 3-way text merger for the no-store conflict path (spec 0008 §3.1).
             // Registered unconditionally here — NOT inside the `loro_enabled`
             // block — because the conflict path it serves is SqlOnly/`Direct`

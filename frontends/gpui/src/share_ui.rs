@@ -169,6 +169,10 @@ pub enum DegradedKind {
     /// Disclosed degrade per the share write-back track (inc 1): the edit is
     /// NOT lost, only the file projection lags.
     SharedSubtreeNotMaterialized,
+    /// Red — an edit named a block of a file whose format Holon cannot write,
+    /// so the operation was refused and nothing changed. Without this the edit
+    /// would live in the store and never on disk.
+    EditRefusedReadOnlyFormat,
     /// Red — the org write-back stream died and its supervisor could not keep
     /// it alive. Edits still reach Loro + SQL, but they stop reaching disk, so
     /// the vault on disk silently falls behind the app until this clears.
@@ -323,6 +327,19 @@ impl ShareUiState {
                     shared_tree_id: event.shared_tree_id,
                     condition: Some(condition.clone()),
                     format: Some(format),
+                });
+            }
+            ShareDegradedReason::EditRefusedReadOnlyFormat { format } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::EditRefusedReadOnlyFormat,
+                    detail: format!(
+                        "{} is {format}, which Holon reads but cannot write — edit the file on \
+                         disk",
+                        event.shared_tree_id
+                    ),
+                    shared_tree_id: event.shared_tree_id,
+                    condition: Some(condition.clone()),
+                    format: None,
                 });
             }
             ShareDegradedReason::WritebackDegraded(detail) => {
@@ -1728,6 +1745,11 @@ fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
             // `toast_message` replaces this with a format-naming headline
             // whenever the toast carries a `format`.
             "File sync degraded (bad vault file)",
+        ),
+        DegradedKind::EditRefusedReadOnlyFormat => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Edit refused — read-only file",
         ),
         DegradedKind::UndoFailed => (
             gpui::rgba(0xef4444ff),

@@ -38,6 +38,7 @@ pub mod sync_gate;
 pub mod traits;
 pub mod undo;
 pub mod util;
+pub mod write_tier_gate;
 
 pub use boundary_enforcer::BoundaryEnforcer;
 pub use boundary_enforcer::BoundaryRejection;
@@ -63,6 +64,10 @@ pub use sync_gate::SyncGate;
 pub use sync_gate::SyncGateClosed;
 pub use sync_gate::SyncGateState;
 pub use sync_gate::SyncGateWatcher;
+pub use write_tier_gate::EditRefused;
+pub use write_tier_gate::ReadOnlyDocuments;
+pub use write_tier_gate::ReadOnlyHome;
+pub use write_tier_gate::WriteTierAuthority;
 
 #[cfg(test)]
 mod block_operations_tests;

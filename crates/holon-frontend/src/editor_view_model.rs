@@ -1674,6 +1674,137 @@ mod tests {
         );
     }
 
+    /// A recording text-rich backing: the ops it takes are the ops that would
+    /// reach the vault's `LoroText`.
+    struct RecordingTextBacking {
+        text: std::sync::Mutex<String>,
+        ops: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl holon_core::cell::CellBacking<String> for RecordingTextBacking {
+        fn current(&self) -> String {
+            self.text.lock().unwrap().clone()
+        }
+        fn signal(&self) -> futures::stream::BoxStream<'static, String> {
+            Box::pin(futures::stream::empty())
+        }
+        fn apply_replace(
+            &self,
+            _: String,
+        ) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn as_text_backing(&self) -> Option<&dyn holon_core::cell::TextCellBacking> {
+            Some(self)
+        }
+    }
+
+    impl holon_core::cell::TextCellBacking for RecordingTextBacking {
+        fn apply_text_op(&self, op: holon_core::cell::TextOp) -> anyhow::Result<()> {
+            self.ops.lock().unwrap().push(format!("{op:?}"));
+            Ok(())
+        }
+        fn anchor_cursor(
+            &self,
+            char_offset: usize,
+            bias: holon_core::cell::CursorBias,
+        ) -> holon_core::cell::CursorAnchor {
+            holon_core::cell::CursorAnchor::new(Box::new(char_offset), bias)
+        }
+        fn resolve_cursor(&self, anchor: &holon_core::cell::CursorAnchor) -> usize {
+            *anchor.inner.downcast_ref::<usize>().expect("offset anchor")
+        }
+        fn remote_deltas(
+            &self,
+        ) -> futures::stream::BoxStream<'static, holon_core::cell::TextDelta> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    struct RecipeTier {
+        disclosed: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl holon_core::WriteTierAuthority for RecipeTier {
+        fn any_read_only_documents(&self) -> bool {
+            true
+        }
+        async fn refusal_for(
+            &self,
+            _: &str,
+        ) -> holon_core::Result<Option<holon_core::EditRefused>> {
+            Ok(Some(holon_core::EditRefused::ReadOnlyFormat {
+                format: "cooklang".into(),
+                path: std::path::PathBuf::from("/vault/Pancakes.cook"),
+            }))
+        }
+        fn disclose(&self, refusal: &holon_core::EditRefused) {
+            self.disclosed.lock().unwrap().push(refusal.to_string());
+        }
+    }
+
+    /// The keystroke path GPUI and the TUI share. A block homed in a read-only
+    /// format gets a refusing cell from `editable_text`, so typing into it
+    /// reaches no CRDT op, leaves the editor's authoritative buffer alone, and
+    /// discloses — the same decision the dispatcher makes, on the path the user
+    /// actually takes (Model.md invariant 4).
+    #[test]
+    fn a_keystroke_on_a_read_only_cell_reaches_no_crdt_op() {
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        use holon_core::cell::CellBacking;
+
+        let ops = Arc::new(Mutex::new(Vec::new()));
+        let disclosed = Arc::new(Mutex::new(Vec::new()));
+        let inner = Arc::new(RecordingTextBacking {
+            text: Mutex::new("Crack the eggs into a bowl.".to_string()),
+            ops: ops.clone(),
+        }) as Arc<dyn CellBacking<String>>;
+        let authority = Arc::new(RecipeTier {
+            disclosed: disclosed.clone(),
+        }) as Arc<dyn holon_core::WriteTierAuthority>;
+        let refusal = holon_core::EditRefused::ReadOnlyFormat {
+            format: "cooklang".into(),
+            path: std::path::PathBuf::from("/vault/Pancakes.cook"),
+        };
+        let guarded = holon_core::cell::ReadOnlyTextCellBacking::new(inner, authority, refusal)
+            .expect("a Loro-shaped backing wraps");
+        let cell = Cell::from_backing(Arc::new(guarded) as Arc<dyn CellBacking<String>>);
+        assert!(
+            cell.write_refusal().is_some(),
+            "the frontend must be able to see the field is not writable"
+        );
+
+        let mut ctrl = test_controller();
+        ctrl.attach_cell(cell);
+        let err = ctrl
+            .apply_local_edit("HACKED Crack the eggs into a bowl.")
+            .expect_err("typing into a read-only-format block must be refused");
+
+        assert!(
+            ops.lock().unwrap().is_empty(),
+            "a text op reached the CRDT container: {:?}",
+            ops.lock().unwrap()
+        );
+        assert_eq!(
+            ctrl.buffer(),
+            "Crack the eggs into a bowl.",
+            "the refused keystroke moved the editor's authoritative buffer"
+        );
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("read-only format") && err.contains("Pancakes.cook"),
+            "the refusal must name the format and the file, got: {err}"
+        );
+        assert_eq!(
+            disclosed.lock().unwrap().len(),
+            1,
+            "the refusal must be disclosed, not only returned"
+        );
+    }
+
     #[test]
     fn cell_authority_reflects_merged_content_after_external_join() {
         // Regression (2026-07-10): after a `join_block`, the surviving block's

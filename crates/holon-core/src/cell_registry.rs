@@ -46,6 +46,23 @@ pub trait EntityCellRegistry: Send + Sync {
         type_id: TypeId,
     ) -> Result<Arc<dyn Any + Send + Sync>>;
 
+    /// The cell a USER types into, as opposed to the container handle the
+    /// store's own write leg takes.
+    ///
+    /// Same backing, wrapped in whatever refusal the block's write tier earns
+    /// (Model.md invariant 4): a keystroke ORIGINATES in the store, so it is
+    /// judged, while the ingest and sync legs reach [`Self::live_field_any`]
+    /// with an origin the dispatcher already judged. Defaults to the unjudged
+    /// cell for registries with no tier to apply.
+    fn editable_field_any(
+        &self,
+        uri: &EntityUri,
+        field: &str,
+        type_id: TypeId,
+    ) -> Result<Arc<dyn Any + Send + Sync>> {
+        self.live_field_any(uri, field, type_id)
+    }
+
     /// Drop cached cells for `uri`. Called by chord ops on `delete` /
     /// `join_block`-deletes-id to prevent a same-id re-create from
     /// observing a stale cell wrapping an orphaned backing.
@@ -171,6 +188,13 @@ pub trait EntityCellRegistryExt {
         uri: &EntityUri,
         field: &str,
     ) -> Result<Cell<T>>;
+
+    /// Typed [`EntityCellRegistry::editable_field_any`].
+    fn editable_field<T: 'static + Send + Sync + Clone>(
+        &self,
+        uri: &EntityUri,
+        field: &str,
+    ) -> Result<Cell<T>>;
 }
 
 impl EntityCellRegistryExt for dyn EntityCellRegistry + '_ {
@@ -180,6 +204,25 @@ impl EntityCellRegistryExt for dyn EntityCellRegistry + '_ {
         field: &str,
     ) -> Result<Cell<T>> {
         let any_arc = self.live_field_any(uri, field, TypeId::of::<T>())?;
+        downcast_cell::<T>(any_arc, uri, field)
+    }
+
+    fn editable_field<T: 'static + Send + Sync + Clone>(
+        &self,
+        uri: &EntityUri,
+        field: &str,
+    ) -> Result<Cell<T>> {
+        let any_arc = self.editable_field_any(uri, field, TypeId::of::<T>())?;
+        downcast_cell::<T>(any_arc, uri, field)
+    }
+}
+
+fn downcast_cell<T: 'static + Send + Sync + Clone>(
+    any_arc: Arc<dyn Any + Send + Sync>,
+    uri: &EntityUri,
+    field: &str,
+) -> Result<Cell<T>> {
+    {
         // The registry stored an `Arc<Cell<T>>` for the requested `T`;
         // downcast to recover. If the registry returned a different
         // concrete type for this (uri, field, TypeId), that's a

@@ -94,6 +94,14 @@ pub enum ShareDegradedReason {
     /// a user can open. Typed rather than pre-formatted so the frontend
     /// decides how to present it.
     SharedSubtreeNotMaterialized { file: String },
+    /// An edit named a block whose file's format Holon cannot write, so the
+    /// operation dispatcher refused it and the store never took it. `format` is
+    /// the refusing adapter's own name; `shared_tree_id` is the file, so one
+    /// condition stands per authoritative file.
+    ///
+    /// All-clear: none. The file is read-only for as long as its format is, so
+    /// the condition is true for the session.
+    EditRefusedReadOnlyFormat { format: String },
     /// The org write-back stream died and its supervisor could not keep it
     /// alive — edits reach Loro + SQL but stop reaching disk. String carries
     /// the supervisor's escalation summary (what died, how often).
@@ -184,6 +192,7 @@ impl ShareDegradedReason {
     pub const SQL_PROJECTION_FAILED: &'static str = "sql-projection-failed";
     pub const VAULT_INGEST_FAILED: &'static str = "vault-ingest-failed";
     pub const WRITEBACK_DEGRADED: &'static str = "writeback-degraded";
+    pub const EDIT_REFUSED_READ_ONLY_FORMAT: &'static str = "edit-refused-read-only-format";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`DegradedConditionKey`]. Total: every degradation is a sticky
@@ -205,6 +214,7 @@ impl ShareDegradedReason {
             Self::VaultIngestFailed { .. } => Self::VAULT_INGEST_FAILED,
             Self::SharedSubtreeNotMaterialized { .. } => Self::SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::WritebackDegraded(_) => Self::WRITEBACK_DEGRADED,
+            Self::EditRefusedReadOnlyFormat { .. } => Self::EDIT_REFUSED_READ_ONLY_FORMAT,
         }
     }
 }

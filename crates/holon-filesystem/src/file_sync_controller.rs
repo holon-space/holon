@@ -32,6 +32,7 @@ use holon_api::block::Block;
 use holon_api::capability::Consolidator;
 use holon_core::CanonicalPath;
 use holon_core::DownstreamProjection;
+use holon_core::ReadOnlyDocuments;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FormatRegistry;
@@ -669,6 +670,12 @@ pub struct FileSyncController {
     /// can always record where it put one.
     doc_home: HashMap<EntityUri, CanonicalPath>,
 
+    /// The read-only slice of `doc_home`, published upward. The controller is
+    /// the only component that knows both a document and the file homing it,
+    /// so it is the only one that can tell the operation dispatcher which
+    /// documents may not be written.
+    read_only_docs: Option<Arc<ReadOnlyDocuments>>,
+
     /// Shell command to run after each org file write (from holon.toml).
     post_write_hook: Option<String>,
 
@@ -920,6 +927,7 @@ impl FileSyncController {
             root_dir,
             alias_registrar: None,
             doc_home: HashMap::new(),
+            read_only_docs: None,
             post_write_hook: None,
             image_data: None,
             formats,
@@ -1144,6 +1152,13 @@ impl FileSyncController {
 
     pub fn with_alias_registrar(mut self, registrar: Arc<dyn AliasRegistrar>) -> Self {
         self.alias_registrar = Some(registrar);
+        self
+    }
+
+    /// Publish which documents are homed in a read-only format, so the
+    /// operation dispatcher can refuse a write before it reaches the store.
+    pub fn with_read_only_documents(mut self, docs: Arc<ReadOnlyDocuments>) -> Self {
+        self.read_only_docs = Some(docs);
         self
     }
 
@@ -1513,18 +1528,18 @@ impl FileSyncController {
         }
     }
 
-    /// Disclose a refused write to a read-only-format file, at ERROR, once the
-    /// caller has decided not to write. Named separately from the general
-    /// write-back failure disclosure because the remedy differs: nothing is
-    /// broken, the file is simply authoritative input.
-    fn disclose_readonly_refusal(&self, doc_id: &EntityUri, path: &Path, site: &str) {
-        tracing::error!(
+    /// Note that a projection write stopped at a read-only-format file.
+    ///
+    /// Not an error and not a disclosure: an edit that would reach here is
+    /// already refused at the operation dispatcher's write-tier gate and
+    /// disclosed there, so what arrives is the store echoing back what this
+    /// same file just told it.
+    fn note_readonly_skip(&self, doc_id: &EntityUri, path: &Path, site: &str) {
+        tracing::debug!(
             doc = %doc_id,
             path = %path.display(),
             site,
-            "WRITE-BACK REFUSED: {} is a read-only format (authoritative input only). The store \
-             holds changes for {doc_id} that will NOT reach this file, and no other file is \
-             written in its place. Edit the file on disk to change it.",
+            "write-back skipped: {} is a read-only format (authoritative input only)",
             path.display(),
         );
     }
@@ -2006,10 +2021,32 @@ impl FileSyncController {
     fn note_doc_home(&mut self, doc_id: &EntityUri, path: &Path) {
         self.doc_home
             .insert(doc_id.clone(), CanonicalPath::new(path));
+        self.publish_write_tier(doc_id, path);
+    }
+
+    /// Mirror `doc_id`'s home tier into the registry the dispatcher's
+    /// write-tier gate reads.
+    fn publish_write_tier(&self, doc_id: &EntityUri, path: &Path) {
+        let Some(docs) = &self.read_only_docs else {
+            return;
+        };
+        match self.formats.adapter_for(path) {
+            Some(adapter) if adapter.write_tier() == WriteTier::ReadOnly => {
+                docs.record(doc_id, adapter.format_name(), path)
+            }
+            _ => docs.forget(doc_id),
+        }
     }
 
     /// Drop every per-file tracking entry for a vanished path.
     fn forget_file_state(&mut self, canonical: &CanonicalPath) {
+        if let Some(docs) = &self.read_only_docs {
+            for (doc_id, home) in &self.doc_home {
+                if home == canonical {
+                    docs.forget(doc_id);
+                }
+            }
+        }
         self.doc_home.retain(|_, home| home != canonical);
         self.last_projection.remove(canonical);
         self.last_projection_hash.remove(canonical);
@@ -2029,10 +2066,15 @@ impl FileSyncController {
     /// The diff `base` itself is keyed by document id, not path, so it needs no
     /// migration.
     fn migrate_file_state(&mut self, from: &CanonicalPath, to: &CanonicalPath) {
-        for home in self.doc_home.values_mut() {
+        let mut moved: Vec<EntityUri> = Vec::new();
+        for (doc_id, home) in self.doc_home.iter_mut() {
             if home == from {
                 *home = to.clone();
+                moved.push(doc_id.clone());
             }
+        }
+        for doc_id in &moved {
+            self.publish_write_tier(doc_id, to.as_path_buf());
         }
         if let Some(v) = self.last_projection.remove(from) {
             self.last_projection.insert(to.clone(), v);
@@ -4690,11 +4732,11 @@ impl FileSyncController {
         // authoritative on disk: the store holds its blocks, but nothing may
         // render over it, and the name-chain path derived below would name a
         // DIFFERENT file (the org extension), so proceeding would mint a
-        // second home rather than refuse. Disclosed at ERROR, never silent.
+        // second home rather than refuse.
         if !self.home_is_writable(doc_id) {
             if let Some(home) = self.doc_home.get(doc_id) {
                 let home = home.as_path_buf().clone();
-                self.disclose_readonly_refusal(doc_id, &home, "on_block_changed");
+                self.note_readonly_skip(doc_id, &home, "on_block_changed");
             }
             return Ok(false);
         }
@@ -5993,16 +6035,9 @@ impl FileSyncController {
             // A document already homed in a read-only-format file is NOT
             // fileless — it owns an authoritative one. Its name-chain path
             // carries the org extension, so materializing here would give the
-            // same page a second, divergent home.
+            // Skipping it refuses nothing — no store change is pending — so it
+            // is not disclosed.
             if !self.home_is_writable(&doc_id) {
-                if let Some(home) = self.doc_home.get(&doc_id) {
-                    let home = home.as_path_buf().clone();
-                    self.disclose_readonly_refusal(
-                        &doc_id,
-                        &home,
-                        "materialize_missing_page_files",
-                    );
-                }
                 continue;
             }
             let vault_path = match self.doc_id_to_path(&doc_id, PathIntent::WriteOwnFile).await {
@@ -6752,7 +6787,7 @@ impl FileSyncController {
                 .get(doc_id)
                 .map(|h| h.as_path_buf().clone())
                 .unwrap_or_else(|| path.to_path_buf());
-            self.disclose_readonly_refusal(doc_id, &home, "write_back");
+            self.note_readonly_skip(doc_id, &home, "write_back");
             return Ok(false);
         }
         if self
@@ -6760,7 +6795,7 @@ impl FileSyncController {
             .adapter_for(path)
             .is_some_and(|a| a.write_tier() == WriteTier::ReadOnly)
         {
-            self.disclose_readonly_refusal(doc_id, path, "write_back_target");
+            self.note_readonly_skip(doc_id, path, "write_back_target");
             return Ok(false);
         }
 

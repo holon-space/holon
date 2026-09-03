@@ -61,6 +61,8 @@ pub struct OperationDispatcher {
     guard_world: Option<Arc<dyn crate::api::guard_world::GuardWorld>>,
     /// ADR 0032 §3 — the marking legality of an operation's whole delta.
     net_guard: Option<Arc<dyn crate::api::net_guard::NetGuard>>,
+    /// Whether the file behind a block's document accepts writes at all.
+    write_tier: Option<Arc<dyn holon_core::WriteTierAuthority>>,
     /// Classifies `[[…]]` targets in live-edit content. Built from the
     /// `TypeRegistry` at wiring time so a UI-authored `[[<entity>:<id>]]`
     /// resolves for exactly the entities that exist; the `Default` value knows
@@ -172,6 +174,12 @@ impl OperationDispatcher {
     /// Install the ADR 0032 §3 net guard. Consulted before every dispatched
     /// operation, after the two gates above; a refused operation is returned as
     /// an `Err` and the provider never runs.
+    /// Install the write-tier seam. Without it a vault holding a read-only
+    /// format accepts edits its files can never take.
+    pub fn set_write_tier_authority(&mut self, authority: Arc<dyn holon_core::WriteTierAuthority>) {
+        self.write_tier = Some(authority);
+    }
+
     pub fn set_net_guard(&mut self, guard: Arc<dyn crate::api::net_guard::NetGuard>) {
         self.net_guard = Some(guard);
     }
@@ -499,6 +507,45 @@ impl OperationDispatcher {
             )
             .into()),
         }
+    }
+
+    /// The write-tier decision for one dispatched operation.
+    ///
+    /// A block homed in a `WriteTier::ReadOnly` file is a projection of input
+    /// Holon cannot write back, so accepting a write against it would leave the
+    /// store saying one thing and the disk another. The refusal is typed
+    /// ([`EditRefused`]) so the UI discloses it as a state of the document
+    /// rather than as a generic failure.
+    ///
+    /// `parent_id` is judged as well as `id`: a `create` names its destination
+    /// there and no subject at all.
+    ///
+    /// Only writes that ORIGINATE in the store are judged. `Ingest` is the file
+    /// telling the store what it says, and `Sync` is a peer's already-merged
+    /// history — refusing either would break the replica it comes from rather
+    /// than protect the file.
+    async fn enforce_write_tier(
+        &self,
+        resolved_entity_name: &str,
+        params: &StorageEntity,
+        origin: &OpOrigin,
+    ) -> Result<()> {
+        let Some(authority) = &self.write_tier else {
+            return Ok(());
+        };
+        if resolved_entity_name != "block" || matches!(origin, OpOrigin::Ingest | OpOrigin::Sync) {
+            return Ok(());
+        }
+        for key in ["id", "parent_id"] {
+            let Some(subject) = params.get(key).and_then(|v| v.as_string()) else {
+                continue;
+            };
+            if let Some(refusal) = authority.refusal_for(subject).await? {
+                authority.disclose(&refusal);
+                return Err(Box::new(refusal));
+            }
+        }
+        Ok(())
     }
 
     /// Fail-loud guard that a composed backend actually installed the ADR 0032
@@ -1059,6 +1106,11 @@ impl OperationDispatcher {
                 self.enforce_net_guard(resolved_entity_name, op_name, &params)
                     .await?;
 
+                // THE write-tier gate: a block whose file Holon cannot write
+                // back may not be edited into the store.
+                self.enforce_write_tier(resolved_entity_name, &params, &origin)
+                    .await?;
+
                 info!(
                     "[OperationDispatcher] Routing operation to provider: entity={}, op={}",
                     resolved_entity_name, op_name
@@ -1541,6 +1593,17 @@ impl Module for OperationModule {
                         as Arc<dyn crate::api::net_guard::NetGuard>
                 });
             dispatcher.set_net_guard(net_guard);
+
+            // The write-tier gate. Answering needs a block reader and the
+            // vault's format registry, so a composition root with a vault
+            // registers one; a container without files registers none and
+            // every block it holds is writable.
+            if let Some(authority) = r
+                .optional_resolve_async::<dyn holon_core::WriteTierAuthority>()
+                .await
+            {
+                dispatcher.set_write_tier_authority(authority);
+            }
 
             // A container that switched an entity off says which setting did
             // it; one that registers nothing keeps the plain not-found answer.
