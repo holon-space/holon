@@ -62,3 +62,23 @@ the render-source failure needs isolating first (a literal text node that does
 not paint is the more alarming half). Test parity: a fixture with a declared but
 unconfigured integration, plus an invariant that such a view renders a
 disclosure rather than an empty body.
+
+## Dogfood re-run 2026-09-03 — worse than reported
+
+Re-driven by the `dogfood-search` lane. The view now renders NOTHING:
+`describe_ui {"block_id":"block:shopping-view"}` answers `(empty)`, so not even
+the literal title survives.
+
+That narrows the mechanism. `shopping_item` EXISTS and is queryable — `SELECT
+count(*) FROM shopping_item` returns 0, no error — so the render source
+
+    column(text("To buy, by aisle", #{muted: true}), live_query(#{sql: "SELECT
+    id, name, cat, count FROM shopping_item WHERE deleted_at IS NULL AND
+    checked = 0 ORDER BY cat, name", ...}))
+
+is a `column` whose live_query child legitimately has zero rows. An empty
+live_query is collapsing its SIBLING literal text along with itself, rather
+than rendering as an empty list beside the heading. The bug is therefore in the
+column/live_query render leg, not in the shopping feature or in peer absence —
+and any page whose column mixes literal text with an empty live_query will show
+the same blank.

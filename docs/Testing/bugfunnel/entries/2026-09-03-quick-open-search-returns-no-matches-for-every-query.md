@@ -100,3 +100,11 @@ receiver, `update_window` on a closed window) now log an ERROR instead of
 - `crates/holon-app/tests/quick_open_search_at_vault_scale.rs` — deterministic
   pin at real-vault scale, incl. a per-keystroke latency budget that fails if a
   search becomes slow enough to lose the newest-response race again.
+
+## Dogfood re-run 2026-09-03
+
+Re-driven live on the real vault copy (2277 blocks, GPUI on port 8730, lane
+`dogfood-search`). cmd-K, `Suppe` -> the `Linsensuppe` page under Pages plus a
+recipe line under In content; `Compass` -> 2 pages and 6 content hits. The
+permanently-empty overlay is gone. Screenshots `07-search-suppe.png`,
+`08-search-compass.png`.

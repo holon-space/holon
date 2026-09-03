@@ -121,3 +121,14 @@ entry when taken up.
   generated content also arrives as `É`. `ADVERSARIAL_QUERIES` carries the
   many-to-one characters, but the generated content alphabet is `[a-z]`, so
   those queries are vacuous there — the teeth are the hand-authored case above.
+
+## Dogfood re-run 2026-09-03
+
+Re-driven live on the real vault copy (lane `dogfood-search`). This vault holds
+no `Übung`, so the check used its own content: the query `NÄCHSTEN` finds the
+block whose stored text reads `... an den nächsten`. Folding works in the
+direction the entry reports as broken. Screenshot `10-search-NAECHSTEN.png`.
+
+The nested-`replace()` folding this run exercised is what
+`2026-09-03-search-folding-crashes-the-app-on-cyrillic-and-greek` (FIXED)
+reports; the `GLOB` fold-class pattern above replaces it.

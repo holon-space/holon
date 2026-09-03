@@ -76,3 +76,12 @@ are converted: `quick_open_search` and `search_link_candidates`, which backs the
   probability mass, so the property is exercised on every random draw too.
 - `crates/holon-app/tests/quick_open_search_at_vault_scale.rs` asserts `%`, `_`,
   `100%` and `a_b` each match exactly the one block that literally contains them.
+
+## Dogfood re-run 2026-09-03
+
+Re-driven live on the real vault copy (lane `dogfood-search`). `o_e` -> `No
+matches for "o_e"`, matching the 0 blocks that contain that literal string;
+`%` -> only the blocks that literally contain a per-cent sign (`33%`,
+`%_fdw%`, `8.8%`, `98%`) out of 28 such blocks, and no Pages section, because
+no page name contains one. Screenshots `11-search-underscore.png`,
+`12-search-percent.png`.
