@@ -557,7 +557,7 @@ areas:
         mode_axes: "—"
         entry: "`crates/holon-mcp-client/src/mcp_sidecar.rs`"
       - feature: Todoist
-        what: "The reference connector: REST transport, OAuth2, sync policy, undo"
+        what: "The reference connector: MCP over HTTP, static token, oauth false, sync policy, undo"
         pin_note: "*(none — see Unpinned)*"
         ruled_by: "[Integrations.md](Integrations.md)"
         mode_axes: "—"

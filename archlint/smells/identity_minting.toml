@@ -1,0 +1,84 @@
+# Single minting authority for entity identity (ADR 0029, Model.md
+# invariant 13). Entity identity is minted at exactly one boundary per
+# derivation class, through `crates/holon-api/src/identity_minting.rs`'s
+# witness types (`MintedId`, `CarriedId`) and the primitives they wrap
+# (`EntityUri::block_random` for class (b) unique-random). Minting anywhere
+# else — a frontend, a `Default` impl, a hand-formatted `format!("block:{…}")`
+# — reintroduces the duplicate-identity bug class ADR 0029 measured (34% of
+# the live vault as duplicate rows from re-minting on re-parse). Route the
+# create through `IdentityMinting` / the sanctioned constructor instead.
+#
+# `Uuid::new_v4` also mints non-entity handles (session ids, watch ids, RPC
+# correlation ids, temp paths) that are not entity identity at all — those are
+# excluded below as out-of-family, not as debt.
+
+[[smell]]
+id = "identity_minting"
+pattern = '\b(EntityUri::block_random|Uuid::new_v4)\s*\('
+case_sensitive = true
+files = "**/*.rs"
+exclude = [
+    # Defining modules (the mint primitives + the witness-type authority):
+    "crates/holon-api/src/entity_uri.rs",
+    "crates/holon-api/src/effect_id.rs",
+    "crates/holon-api/src/identity_minting.rs",
+    # Tests / examples / integration-tests exercise the mint primitives directly:
+    "**/tests/**",
+    "**/*_test.rs",
+    "**/*_tests.rs",
+    "crates/holon/examples/**",
+    "crates/holon-integration-tests/**",
+    # Whole-file test modules not caught by the globs above (the only matches
+    # in each file are inside an inline `#[cfg(test)] mod tests`):
+    "crates/holon-petri/src/lib.rs",
+    "crates/holon-loro/src/container_registry.rs",
+    "crates/holon/src/testing/e2e_test_helpers.rs",
+    # PBT sync-scenario generator: mints synthetic tree nodes for fuzzing, not
+    # a production entity boundary.
+    "crates/holon-loro/src/multi_peer.rs",
+    # Out-of-family: not entity identity. Session/tool-call/watch/RPC/handle
+    # ids, not `block:`-family ids.
+    "crates/holon-frontend/src/command_provider.rs",
+    "frontends/mcp/src/server.rs",
+    "frontends/mcp/src/browser_relay.rs",
+    "frontends/mcp/src/dense_projection.rs",
+    # Comment-only reference to the parser's mint (below), not a call site.
+    "crates/holon-filesystem/src/file_sync_controller.rs",
+    # --- ADR 0029 debt: real entity mints outside the authority, not yet migrated ---
+    # split_block's SqlOnly branch (self-documented Inc 5 seam: Loro-side
+    # minting is a separate increment from this Turso lane).
+    "crates/holon-core/src/traits.rs",
+    # extract_or_generate_id: parse-boundary mint with no recognition step
+    # (resolve-before-mint, ADR 0029 "Recognition" amendment, is unimplemented
+    # here).
+    "crates/holon-org-format/src/parser.rs",
+    # Newborn creation-slot id: a frontend mint (D2 prohibition 3).
+    "crates/holon-frontend/src/reactive.rs",
+    # `Default for Block` mints via `EntityUri::block_random()` — named in
+    # ADR 0029 D2 prohibition 3 ("Default impls never mint") as a violation to
+    # burn down.
+    "crates/holon-api/src/block.rs",
+    # Loro create path's block-id fallback when no id is supplied by the
+    # caller (two sites): the Loro-side counterpart of the traits.rs seam, and
+    # loro_share_backend.rs's hand-formatted `format!("block:{…}")` mount/pairing
+    # ids (D2 prohibition 2).
+    "crates/holon-loro/src/loro_backend.rs",
+    "crates/holon-loro/src/loro_share_backend.rs",
+    # A frontend mints entity identity for a pasted-image block — named in
+    # ADR 0029 D2 prohibition 3 as "a violation to burn down".
+    "frontends/gpui/src/views/editor_view.rs",
+    # `add_subtask` and `PatchOp::Create` mint via hand-formatted
+    # `ensure_block_prefix` (D2 prohibition 2, named in ADR 0029); `watch_id`
+    # in the same file is an out-of-family MCP handle.
+    "frontends/mcp/src/tools.rs",
+]
+message = """
+Entity identity minted outside the single minting authority \
+(`crates/holon-api/src/identity_minting.rs`, ADR 0029, Model.md invariant \
+13). Only the sanctioned constructor for the entity's derivation class may \
+mint its id — route the create through `IdentityMinting` / the witness types \
+(`MintedId`, `CarriedId`) instead of calling `EntityUri::block_random` or \
+`Uuid::new_v4` directly. Minting outside the authority reintroduces the \
+duplicate-identity bug class ADR 0029 measured. \
+To suppress: // ALLOW(identity_minting): <reason>
+"""

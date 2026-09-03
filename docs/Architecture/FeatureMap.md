@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 72 transitions; the repo declares 74 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 73 transitions; the repo declares 75 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -119,7 +119,7 @@ Open reds here: `history-ingest-create-unrecorded`, `history-join-phantom-row`.
 | Task ranking | Task blocks materialized into a Petri net for WSJF ranking | *(no keystone invariant)* | [0017](../adr/0017-petri-net-task-ranking-engine.md) | — | `crates/holon-petri/src/lib.rs` |
 | Task state cycle | `state_toggle` click cycles a task through its states | `ToggleState`; `inv-task-state-matches-ref`, `inv-task-state-storage-coherence`, `inv-viewmodel-state-toggle-correct` | [0024](../adr/0024-unified-action-execution.md) | Storage (the coherence twin needs the Loro task-state cap) | `crates/holon-frontend/src/shadow_builders/state_toggle.rs` |
 
-Open reds here: `task-state-storage-coherence`.
+Open reds here: `task-state-storage-coherence`, `state-toggle-row-absent`.
 
 ## Storage & sync
 
@@ -134,7 +134,7 @@ Open reds here: `task-state-storage-coherence`.
 | Page identity / name chains | A page's file path is its chain of **page** ancestors | `RenamePage`, `BlockToPage`, `CreatePageAtFreedPath`; `inv-no-page-under-non-page`, `inv-every-page-has-its-own-file`, `inv-companion-has-no-child-page-headings` | [Model.md §Page identity](Model.md) (Martin ruled Option A, keep-the-refusal) | File adapter | `crates/holon-filesystem/src/sync_ports.rs` |
 | Documents & directories | Creating, renaming, deleting docs and dirs on disk | `CreateDocument`, `RenameDocument`, `DeleteDocument`, `CreateDirectory`; `inv-no-write-outside-vault-root` | [0011](../adr/0011-filesystem-port-trait.md) | File adapter | `crates/holon-filesystem/src/` |
 | Tombstones | A tombstone outlives every registered replica's base | *(no keystone invariant)* | Model.md inv 9 | Storage | [Replication.md](Replication.md) |
-| P2P sync | Iroh transport carrying Loro deltas between devices | `AddPeer`, `PeerEdit`, `PeerCharEdit`, `SyncWithPeer`, `MergeFromPeer`, `SyncNow` | [0001](../adr/0001-hybrid-sync-architecture.md); Model.md inv 11 | Transport | `crates/holon-loro/src/iroh_advertiser.rs` |
+| P2P sync | Iroh transport carrying Loro deltas between devices | `AddPeer`, `PeerEdit`, `PeerCharEdit`, `SyncWithPeer`, `MergeFromPeer`, `SyncNow` | [0001](../adr/0001-hybrid-sync-architecture.md); Model.md inv 11 | Transport | `crates/holon-loro/src/iroh_sync_adapter.rs` |
 | Git / jj vault init | Initializing version control over the vault directory | `GitInit`, `JjGitInit` | — | File adapter | `crates/holon-filesystem/src/` |
 
 Open reds here: `org-blocks-ref-diverge`, `page-without-own-file`, `loro-frontier-height`.
@@ -154,7 +154,7 @@ Open reds here: `org-blocks-ref-diverge`, `page-without-own-file`, `loro-frontie
 | Feature | What it is | Pinned by | Ruled by | Mode axes | Key entry point |
 |---|---|---|---|---|---|
 | MCP client sidecars | YAML-declared external connectors bridged to `OperationProvider` | `EmitMcpData`; CDC re-eval / duplicate detection only | [0001](../adr/0001-hybrid-sync-architecture.md), [0006](../adr/0006-actor-terminology-and-mcp-dual-role.md) | — | `crates/holon-mcp-client/src/mcp_sidecar.rs` |
-| Todoist | The reference connector: REST transport, OAuth2, sync policy, undo | *(none — see Unpinned)* | [Integrations.md](Integrations.md) | — | `assets/integrations/todoist.yaml` |
+| Todoist | The reference connector: MCP over HTTP, static token, oauth false, sync policy, undo | *(none — see Unpinned)* | [Integrations.md](Integrations.md) | — | `assets/integrations/todoist.yaml` |
 | Other sidecars | gcal, gmail, claude-history, jsonplaceholder | *(none)* | [Integrations.md](Integrations.md) | — | `assets/integrations/` |
 | Write authorization | What an integration is permitted to write back | *(none in the keystone)* | [0028](../adr/0028-sharing-policy-overlay.md) (adjacent) | — | `crates/holon-mcp-client/src/write_authorization.rs` |
 | LogSeq DB import | Reads a LogSeq DB graph (Transit-JSON in SQLite `kvs`) into blocks | *(standalone test `logseq_db_import_store.rs`, not the keystone)* | — | File adapter | `crates/holon-logseq-db/src/ingest.rs` |
@@ -244,6 +244,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `CreateBlockUnderFocus` — creation-slot gesture mint under focus root
 - `Nothing` — no-op interleaving for schedule diversity
 - `PressKey` — raw key chord -> bubble_input resolution
+- `ReceiverCreateBlock` — a peer-authored block under an owner-authored parent, and its arrival on the owner after a reverse round.
 - `StartApp` — application startup + seeded sidebar watch
 
 ### Invariant ids
@@ -259,6 +260,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `inv-net-totality` — an operation the system can fire that the derived net does not describe, so every net-based analysis (conflicts, cycles, the marking oracle) silently reports on a partial world
 - `inv-shows-source-when-no-query`
 - `inv-state-toggle-toy`
+- `inv-two-writer-peer-writes-land` — generic ComposedSut StateMachineTest: per-tick reconcile + catalog check + non-vacuity floor
 - `inv-value-fn-provider-arg-variance-13` — the ReactiveEngine / interpret_pure / ProviderCache coupling drops rows, churns Arc identity, or flickers
 - `inv-value-fn-provider-identity` — a transient wrong StateToggle in an intermediate emission that a later structural re-render masks
 - `inv-viewmodel-entity-ids-subset-of-data` — a rendered entity id that is neither a root query-data row nor a ref-known block
@@ -268,8 +270,15 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 
 - `bulk-add-sibling-order-under-journals`
 - `deletebackward-sql-reads-budget`
+- `drawer-open-matches-ref`
 - `lib-type-chars-home-profile-derived`
+- `loro-backend-change-count`
+- `opentab-sql-reads-budget`
+- `pinblock-lazy-day-page-shell`
+- `proptest-sm-shrink-seen-transitions`
+- `turso-block-query-source-round-trip`
 - `typechars-sql-reads-budget`
+- `vault-scale-main-panel-delivery`
 
 ## Sources
 

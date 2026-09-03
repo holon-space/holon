@@ -1,6 +1,6 @@
 # Replication & Consolidation Model
 
-*Part of [Architecture](../Architecture.md)*
+*Part of [Architecture](../Architecture.md). Reconciled with code on 2026-09-03.*
 
 > **Status: target architecture (2026-05).** This document captures the model
 > we converged on for how blocks (and other entities) are kept in sync across
@@ -21,10 +21,12 @@ component holds all of it, and the components are wildly heterogeneous:
   band* (the user or an AI agent edits the file directly — we cannot funnel
   those writes).
 - **Loro** (when enabled) holds a CRDT replica of the tree; optional.
-- **Todoist** holds tasks in *its own* id-space; external; partial. *(No Todoist
-  integration is currently wired — the `holon-todoist` crate was deleted; the
-  future path is MCP. Todoist stands in here for any external, partial,
-  server-authoritative component.)*
+- **Todoist** holds tasks in *its own* id-space; external; partial. *(The
+  `holon-todoist` crate was deleted; a Todoist MCP sidecar is bundled
+  (`crates/holon-mcp-client/src/bundled_sidecars.rs`) but off unless
+  explicitly enabled per-vault. Nothing exercises its sync, write-back, or
+  undo — see `FeatureMap.md` §Unpinned. Todoist stands in here for any
+  external, partial, server-authoritative component.)*
 - **Turso** holds a queryable SQL cache of everything; ephemeral (deleted on
   most app starts).
 - **The UI** holds the rendered subset and originates user edits.

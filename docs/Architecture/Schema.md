@@ -40,18 +40,29 @@ the `schema_module` trait module, `dynamic_schema_module`, `turso`,
 `resource`, etc., but **not** `schema_modules`, so there is no
 `crate::storage::schema_modules` path.
 
-| Module | Provides | Requires | Kind |
+The table below mirrors `crates/holon-turso/src/schema_modules.rs` in file order —
+regenerate it from that file's `impl SchemaModule` blocks rather than editing it
+by hand.
+
+| Module (`name()`) | Provides | Requires | Kind |
 |--------|----------|----------|------|
-| `CoreSchemaModule` | `block_raw`, `directory`, `file` | (none) | base tables |
-| `BlockSchemaModule` | `block_requires`, `block_tags` | `block_raw` | junction tables |
-| `BlockMatviewSchemaModule` | `block` | `block_raw`, `block_requires`, `block_tags` | matview |
-| `BlockRequirementEdgesSchemaModule` | `block_requirement_edges` | `block`, `block_requires` | chained matview |
-| `BlockHierarchySchemaModule` | `block_with_path` | `block` | matview (recursive CTE) |
-| `NavigationSchemaModule` | `navigation_history`, `navigation_cursor`, `current_focus`, `focus_roots` | `block` | tables + 2 matviews |
-| `SyncStateSchemaModule` | `sync_states` | (none) | base table |
-| `OperationsSchemaModule` | `operation` | (none) | base table |
-| `LinkSchemaModule` | `block_link` | `block` | base table (populated by `LinkEventSubscriber`, not SQL) |
-| `IdentitySchemaModule` | `canonical_entity`, `entity_alias`, `proposal_queue` | (none) | base tables (unpopulated seam) |
+| `CoreSchemaModule` (`core`) | `block_raw`, `file`, `clock` | (none) | base tables |
+| `BlockSchemaModule` (`block_junction`) | `block_requires`, `block_tags`, `advice_suppressed`, `block_contributes_to` | `block_raw` | junction tables |
+| `BlockMatviewSchemaModule` (`block_matview`) | `block`, plus one edge-aggregate view per `block_edge_fields()` entry | `block_raw`, plus each edge field's join table | matview (provides/requires computed from the edge-field descriptors) |
+| `BlockRequirementEdgesSchemaModule` (`block_requirement_edges`) | `block_requirement_edges` | `block`, `block_requires` | chained matview |
+| `TrustProposalsSchemaModule` (`trust_proposals`) | `trust_proposals` | `block_raw` | matview |
+| `BlockHierarchySchemaModule` (`block_hierarchy`) | `block_with_path` | `block` | matview (recursive CTE) |
+| `NavigationSchemaModule` (`navigation`) | `navigation_history`, `navigation_cursor`, `current_focus`, `focus_roots` | `block` | 2 tables + 2 matviews |
+| `SyncStateSchemaModule` (`sync_state`) | `sync_states` | (none) | base table |
+| `IntegrationStateSchemaModule` (`integration_state`) | `integration_state` | (none) | base table |
+| `OperationsSchemaModule` (`operations`) | `operation` | (none) | base table |
+| `HistorySchemaModule` (`history`) | `block_history` | (none) | base table |
+| `BlockDerivedSchemaModule` (`block_derived`) | `block_derived` | (none) | base table |
+| `AutomationsJournalSchemaModule` (`automations_journal`) | `automations_journal` | `block_history` | matview |
+| `JournalDayPagesSchemaModule` (`journal_day_pages`) | `journal_day_pages` | `block`, `block_tags` | matview |
+| `JournalFeedSchemaModule` (`journal_feed`) | `journal_feed` | `journal_day_pages` | chained matview |
+| `LinkSchemaModule` (`links`) | `block_links`, `block_redirects`, `backlinks` | `block_raw` | 2 base tables + matview (`block_links` populated by `LinkEventSubscriber`, not SQL) |
+| `IdentitySchemaModule` (`identity`) | `canonical_entity`, `entity_alias`, `proposal_queue` | (none) | base tables (unpopulated seam) |
 
 **Runtime-defined types**: `DynamicSchemaModule`
 (`crates/holon-turso/src/dynamic_schema_module.rs`) builds a `SchemaModule`
@@ -194,13 +205,14 @@ behaviour.
 
 ## Directories and files
 
-`directory` and `file` (owned by `CoreSchemaModule`, alongside `block_raw`)
-track the on-disk vault layout independent of block content:
+`file` (owned by `CoreSchemaModule` alongside `block_raw` and `clock`,
+`crates/holon-turso/sql/schema/files.sql`) tracks the on-disk vault layout
+independent of block content. Directories are blocks, not their own table:
+`parent_id` points at the directory entity in `block_raw`.
 
 | Table | Columns |
 |---|---|
-| `directory` | `id` (PK), `name`, `parent_id`, `depth`, `_change_origin` |
-| `file` | `id` (PK), `name`, `parent_id`, `content_hash`, `document_id`, `_change_origin` |
+| `file` | `id` (PK), `name`, `parent_id`, `content_hash`, `document_id`, `properties`, `property_kinds`, `_change_origin` |
 
 ## Key files
 

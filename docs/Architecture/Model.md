@@ -7,6 +7,8 @@ storage, or UI code. Details live in [Replication](Replication.md),
 [UI](UI.md); if this page and a detail doc disagree, this page states the
 intent and the detail doc may be stale — flag it, don't silently pick one.*
 
+*Reconciled with code on 2026-09-03.*
+
 ## One sentence
 
 Holon is one logical block tree, replicated across heterogeneous partial
@@ -42,7 +44,7 @@ concepts separate even where the config isn't:
 | Axis | Values |
 |------|--------|
 | Storage backend | Loro store on / off |
-| File adapter | org / none (a `crates/holon-markdown` was implemented then removed 2026-07-06 as unwired dead code — org is the sole selectable adapter; re-addable from git history) |
+| File adapter | org and `.cook` — the two entries of the vault `FormatRegistry` (`crates/holon-app/src/wiring.rs:359-364`). `crates/holon-markdown` is a workspace member (`Cargo.toml:19`) carrying two read-only adapters, LogSeq (`logseq.rs:81`) and Obsidian (`obsidian.rs:121`); neither is in the registry because both claim `md` and the registry refuses that at construction until a vault-flavor discriminator picks between them (ruling D56.a, `wiring.rs:356-358`) |
 | Merge fidelity (per field) | op-CRDT ≻ base-3-way ≻ LWW |
 | Transport | Iroh P2P on / off |
 
@@ -76,7 +78,7 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
 
 ## Invariants
 
-(1)–(7) are [Replication §9](Replication.md); (8)–(12) extend them.
+(1)–(7) are [Replication §9](Replication.md); (8)–(13) extend them.
 
 1. One base per replica, diffed against — never against the cache.
 2. One consolidator per sibling-set owns order; sinks store its fi verbatim.
@@ -156,6 +158,18 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     (`id`/`depth`/`content_type`/`source_name`, `_expected_*` watermarks —
     routed to SQL), and the unseeded-vault content case. Per-backing status
     lives in [Storage §Cells](Storage.md).
+13. **One minting authority per derivation class owns entity identity**
+    ([ADR 0029](../adr/0029-entity-identity-single-minting-authority.md)):
+    the single sanctioned constructor for a class — unique-random
+    (`EntityUri::block_random`), convergent-by-path (`PageId::for_path`),
+    deterministic-by-typed-inputs (`effect_id.rs`) — mints, once, at the
+    boundary where a thing first enters the system; every other site
+    resolves-before-minting or is excluded debt
+    (`archlint/smells/identity_minting.toml`). A frontend never mints, a
+    `Default` impl never mints, and a hand-formatted `format!("block:{…}")`
+    never substitutes for the constructor — each reintroduces the
+    duplicate-identity bug class the ADR measured (34% of the live vault as
+    duplicate rows from re-minting on re-parse).
 
 ## Page identity: name-chains derive only through page ancestors
 

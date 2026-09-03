@@ -1,6 +1,6 @@
 # Operation System
 
-*Part of [Architecture](../Architecture.md)*
+*Part of [Architecture](../Architecture.md). Reconciled with code on 2026-09-03.*
 
 ## Cells vs Operations: when to use which
 
@@ -98,9 +98,9 @@ pub enum UndoAction {
 }
 ```
 
-#### UndoStack (In-Memory)
+#### UndoStack (persisted per replica)
 
-`DispatchingOperationEngine` (`crates/holon/src/api/operation_engine.rs`, owned by `BackendEngine` as `op_engine`) holds an in-memory `Arc<RwLock<UndoStack>>` for session-level undo/redo. The struct lives in `crates/holon-core/src/undo.rs`:
+`DispatchingOperationEngine` (`crates/holon/src/api/operation_engine.rs`, owned by `BackendEngine` as `op_engine`) holds an `Arc<RwLock<UndoStack>>` for session-level undo/redo. The struct lives in `crates/holon-core/src/undo.rs`. On every production boot, `BackendEngine::enable_undo_persistence` (`crates/holon/src/api/backend_engine.rs:1098`, called from `crates/holon/src/di/registration.rs:205`) replaces the plain in-memory engine with one backed by `SqlUndoStore` (`crates/holon/src/api/undo_persistence.rs:43`): the whole stack is serialized to a single snapshot row in the replica-local `undo_log` table on every push, and reloaded at boot. A `SqlUndoStateReader` re-verifies each entry's `Precondition` against live state before replay, so a stale entry (state diverged since the snapshot) is dropped loudly rather than replayed wrong. The `undo_log` table is per replica DB, not container-scoped: it does not sync, so undo history does not follow a container across devices.
 
 ```rust
 pub struct UndoStack {
@@ -120,9 +120,11 @@ pub struct UndoStack {
 | `can_undo()` / `can_redo()` | Check if undo/redo is available |
 | `next_undo_display_name()` | Get display name for UI (e.g., "Undo: Mark complete") |
 
-#### OperationLogStore (Persistent)
+#### OperationLogStore (a separate, still write-only log)
 
-> **Status: write-only today.** `OperationLogObserver` is registered (`crates/holon/src/di/registration.rs`) and appends every executed operation to the log, but nothing reads the log back: `mark_undone`/`mark_redone` have no production callers and no frontend queries the `operation` table. The only live undo/redo path is the in-memory `UndoStack` above — persistent undo/redo that survives restarts is the *target* this store was built for, not shipped behavior.
+`OperationLogStore` is a distinct mechanism from the `UndoStack` persistence above: it appends every executed operation to the `operation` table as a provenance record, not an undo snapshot.
+
+> **Status: write-only today.** `OperationLogObserver` is registered (`crates/holon/src/di/registration.rs`) and appends every executed operation to the log, but nothing reads the log back: `mark_undone`/`mark_redone` have no production callers and no frontend queries the `operation` table. Undo/redo itself is served by the persisted `UndoStack` above, not by this store.
 
 `OperationLogStore` stores operations in a database table:
 
@@ -198,7 +200,7 @@ pub enum OperationStatus {
 
 #### Undo/Redo Flow
 
-The flows below describe the *persistent-log* path (future). The live flow runs entirely against the in-memory `UndoStack` inside `DispatchingOperationEngine` (`crates/holon/src/api/operation_engine.rs`) — same shape, but no status marking and nothing survives a restart.
+The flows below describe the *`OperationLogStore` status-marking* path (future — `mark_undone`/`mark_redone` have no production callers). The live undo/redo flow runs against the persisted `UndoStack` inside `DispatchingOperationEngine` (`crates/holon/src/api/operation_engine.rs`) — same shape, with no status marking on the `operation` table.
 
 **Undo Flow:**
 
@@ -246,7 +248,7 @@ impl OperationObserver for OperationLogObserver {
 
 #### UI Integration
 
-Future: for UI undo/redo state, query the `operation` table (no frontend does this today — UI undo/redo state comes from the in-memory `UndoStack`):
+Future: for UI undo/redo state, query the `operation` table (no frontend does this today — UI undo/redo state comes from the persisted `UndoStack`):
 
 ```sql
 -- Undo candidate: most recent non-undone operation
@@ -263,6 +265,8 @@ ORDER BY id DESC LIMIT 1;
 CDC will notify the UI when operations are logged or status changes.
 
 ### Query-Triggered Actions (Action Watcher)
+
+> **Status: LEGACY, superseded by `holon_rule` (ADR 0024).** `holon_rule_watcher.rs` is the current rule mechanism; `action_watcher.rs`, described below, still exists and both watchers run today. New rule logic should use `holon_rule`.
 
 Action blocks (`#+BEGIN_SRC action`) are the reactive automation counterpart to render blocks. Both are siblings of a query block under the same parent heading. When the query's CDC stream fires, render blocks produce UI widgets; action blocks produce `execute_operation` calls routed through the command bus.
 
