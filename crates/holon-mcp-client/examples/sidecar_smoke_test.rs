@@ -134,12 +134,15 @@ async fn connect(
     holon_mcp_client::McpRunningService,
 )> {
     let token = cfg.auth.as_ref().and_then(|a| a.static_token.clone());
-    if let Some(http) = &cfg.transport.http {
+    let transport = cfg
+        .transport
+        .as_ref()
+        .context("transport must declare either `http` or `child_process`")?;
+    if let Some(http) = &transport.http {
         connect_mcp(&http.uri, token.as_deref())
             .await
             .with_context(|| format!("connect_mcp({})", http.uri))
-    } else if let Some(ChildProcessTransport { command, args, env }) = &cfg.transport.child_process
-    {
+    } else if let Some(ChildProcessTransport { command, args, env }) = &transport.child_process {
         connect_mcp_child(command, args, env)
             .await
             .with_context(|| format!("connect_mcp_child({command})"))

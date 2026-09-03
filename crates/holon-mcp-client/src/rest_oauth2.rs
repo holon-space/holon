@@ -52,7 +52,7 @@ use crate::integration_config::VarLookup;
 use crate::redaction::Redactor;
 
 /// OAuth2 refresh-token-grant configuration, as declared under
-/// `transport.rest.auth.oauth2` in a sidecar.
+/// `holon.auth.oauth2` in a sidecar.
 ///
 /// Secrets are never inlined: `client_id`/`client_secret` are referenced by env
 /// name (`*_env`), file path (`*_file`) or OS-keychain entry (`*_keychain`),

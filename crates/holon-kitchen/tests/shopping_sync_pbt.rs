@@ -33,7 +33,54 @@ use holon_kitchen::shopping_sync::CommitBatch;
 use holon_kitchen::shopping_sync::ShoppingPeer;
 use holon_kitchen::shopping_sync::ShoppingRowReader;
 use holon_kitchen::shopping_sync::sync_once;
+use holon_rows::RowMapper;
 use proptest::prelude::*;
+
+/// The shipped sidecar. The mock peer answers a pull the way production reads
+/// one: the body through this file's `response` mapping, then the rows.
+const SIDECAR: &str = include_str!("../../../assets/integrations/shopping.yaml");
+
+/// A snapshot built the way production builds one: the response through the
+/// shipped sidecar's `response` mapping, then the rows.
+fn snapshot_from_body(
+    body: &serde_json::Map<String, serde_json::Value>,
+    fetched_at: &str,
+) -> Result<CompleteSnapshot> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(SIDECAR).expect("the sidecar parses");
+    let filter = doc["holon"]["tools"]["pull_list"]["response"]
+        .as_str()
+        .expect("holon.tools.pull_list.response is a jaq filter");
+    let mapper = RowMapper::compile("shopping/pull_list.response", filter)?;
+    let rows = mapper.map_to_row_sets(&serde_json::Value::Object(body.clone()))?;
+    CompleteSnapshot::from_rows(&rows, fetched_at)
+}
+
+/// `(id, verb, name, cat)` for every command the batch carries, read off the
+/// row stream the write leg actually sends.
+fn commands_of(batch: &CommitBatch) -> Vec<(String, String, String, String)> {
+    let stream = batch.to_row_stream();
+    stream["rows"]
+        .as_array()
+        .expect("the row stream carries rows")
+        .iter()
+        .filter(|entry| entry["type"] == "shopping_command")
+        .map(|entry| {
+            let row = &entry["row"];
+            let field = |key: &str| {
+                row[key]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("a command row carries `{key}`"))
+                    .to_string()
+            };
+            (
+                field("command_id"),
+                field("verb"),
+                field("name"),
+                field("cat"),
+            )
+        })
+        .collect()
+}
 
 const DEVICE_ID: &str = "device-under-test";
 const CATS: &[&str] = &["R", "B"];
@@ -158,7 +205,7 @@ impl ShoppingPeer for MockPeer {
             Some(cached) => cached,
             None => inner.state.clone(),
         };
-        CompleteSnapshot::from_response(&served.body(), "2026-09-01T10:00:00Z")
+        snapshot_from_body(&served.body(), "2026-09-01T10:00:00Z")
     }
 
     async fn commit(&self, batch: &CommitBatch) -> Result<CommitAck> {
@@ -168,21 +215,16 @@ impl ShoppingPeer for MockPeer {
         // What a cached GET issued right after this commit would still show.
         let pre_commit = inner.state.clone();
 
-        for command in &batch.commands {
-            let json = command.to_json();
-            let id = json["id"].as_str().unwrap_or_default().to_string();
-            let verb = json["cmd"].as_str().unwrap_or_default().to_string();
-            let name = json["good"]["name"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            let cat = json["good"]["cat"].as_str().unwrap_or_default().to_string();
+        for (id, verb, name, cat) in commands_of(batch) {
             if !inner.applied_ids.insert(id.clone()) {
                 continue;
             }
             match verb.as_str() {
+                // Intent words, not this peer's wire words: a `CommitBatch`
+                // reaches the mock before the sidecar's `request` mapping,
+                // which is where `remove` becomes the peer's `del`.
                 "add" => inner.state.items.push((name.clone(), cat.clone())),
-                "del" => {
+                "remove" => {
                     inner
                         .state
                         .items
@@ -500,7 +542,7 @@ fn a_permanently_stale_read_fails_the_round_instead_of_re_committing() {
                 picked: Vec::new(),
                 version: 1,
             };
-            CompleteSnapshot::from_response(&frozen.body(), "2026-09-01T10:00:00Z")
+            snapshot_from_body(&frozen.body(), "2026-09-01T10:00:00Z")
         }
 
         async fn commit(&self, _batch: &CommitBatch) -> Result<CommitAck> {

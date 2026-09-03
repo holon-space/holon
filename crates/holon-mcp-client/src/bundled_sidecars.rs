@@ -15,7 +15,7 @@
 /// Bump it whenever a sidecar-format requirement lands that a previously valid
 /// file does not satisfy — that is exactly the event that turns every installed
 /// copy into a stale one, and the bump is what makes it say so.
-pub const SIDECAR_SCHEMA_VERSION: u32 = 1;
+pub const SIDECAR_SCHEMA_VERSION: u32 = 2;
 
 /// One compiled-in sidecar.
 pub struct BundledSidecar {

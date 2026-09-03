@@ -1,0 +1,224 @@
+{
+  "utcp_version": "1.1.3",
+  "manual_version": "1.0.0",
+  "tools": [
+    {
+      "name": "pull_list",
+      "description": "Fetch the complete snapshot of the shared list: items, pickedItems, version, options.cats. Send the highest version seen so far in BOTH oldVersion and version; _nocache must be a fresh epoch-millis value on every call because the write leg re-reads to confirm its own commit landed.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "oldVersion": {
+            "type": "integer",
+            "description": "Highest version seen so far; 0 before the first pull."
+          },
+          "version": {
+            "type": "integer",
+            "description": "Same value as oldVersion."
+          },
+          "_nocache": {
+            "type": "integer",
+            "description": "Fresh epoch milliseconds; cache-buster."
+          }
+        },
+        "required": [
+          "oldVersion",
+          "version",
+          "_nocache"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "pickedItemsVersion": {
+            "type": "integer",
+            "description": "Optional; when absent reuse version."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "cat": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "cat"
+              ]
+            }
+          },
+          "pickedItems": {
+            "type": "object",
+            "description": "Map keyed by item name; value carries cat and optionally count/date. Membership means checked.",
+            "additionalProperties": {
+              "type": "object"
+            }
+          },
+          "options": {
+            "type": "object",
+            "properties": {
+              "cats": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Category vocabulary. Entry is either 'code' or 'code_icon_color'; the code is the segment before the first underscore."
+              }
+            }
+          }
+        },
+        "required": [
+          "version",
+          "items",
+          "pickedItems",
+          "options"
+        ]
+      },
+      "tool_call_template": {
+        "name": "that_shopping_list",
+        "call_template_type": "http",
+        "url": "${SHOPPING_LIST_URL}",
+        "http_method": "GET",
+        "content_type": "application/json"
+      },
+      "tags": [
+        "shopping",
+        "list",
+        "read"
+      ]
+    },
+    {
+      "name": "commit",
+      "description": "Apply a batch of add/del commands. The query 'version' is the version of the pull this batch was reconciled against. Response carries the new version. A command id makes a retry idempotent, so DO NOT remint ids when re-sending the same logical batch.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "Old version, sent as a query parameter."
+          },
+          "body": {
+            "type": "object",
+            "properties": {
+              "oldVersion": {
+                "type": "integer"
+              },
+              "oldPickedItemsVersion": {
+                "type": "integer"
+              },
+              "device": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              },
+              "lang": {
+                "type": "string"
+              },
+              "commands": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "cmd": {
+                      "type": "string",
+                      "enum": [
+                        "add",
+                        "del"
+                      ]
+                    },
+                    "good": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "cat": {
+                          "type": "string"
+                        },
+                        "new": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "cat",
+                        "new"
+                      ]
+                    },
+                    "id": {
+                      "type": "string",
+                      "description": "Idempotency key, '{roundMillis}_{16 hex}'."
+                    }
+                  },
+                  "required": [
+                    "cmd",
+                    "good",
+                    "id"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "oldVersion",
+              "oldPickedItemsVersion",
+              "device",
+              "lang",
+              "commands"
+            ]
+          }
+        },
+        "required": [
+          "version",
+          "body"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "pickedItemsVersion": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version"
+        ]
+      },
+      "tool_call_template": {
+        "name": "that_shopping_list",
+        "call_template_type": "http",
+        "url": "${SHOPPING_LIST_URL}/commit",
+        "http_method": "POST",
+        "content_type": "application/json",
+        "body_field": "body"
+      },
+      "tags": [
+        "shopping",
+        "list",
+        "write"
+      ]
+    }
+  ]
+}

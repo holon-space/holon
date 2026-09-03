@@ -72,6 +72,8 @@ async fn connect_scenario(db: &DbHandle, scenario: &str) -> McpIntegration {
         serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("parse {path}: {e}"));
     let cp = cfg
         .transport
+        .as_mut()
+        .expect("sidecar must declare an MCP transport")
         .child_process
         .as_mut()
         .expect("claude-history sidecar must declare child_process transport");

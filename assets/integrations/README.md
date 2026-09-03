@@ -248,41 +248,61 @@ default_view: claude-history-view  # else: the row has no view to open
 
 ## 4. Transports
 
-A sidecar picks exactly one transport under `transport:`. All plug into the same
-connector engine behind the `McpCallSurface` seam.
+A sidecar that reaches an MCP **server** picks exactly one transport under
+`transport:`. All plug into the same connector engine behind the
+`McpCallSurface` seam.
 
 | `transport:` key | Reaches | Notes |
 |---|---|---|
 | `child_process` | an MCP server over stdio | e.g. `claude-history.yaml` |
 | `http` | an MCP server over **Streamable HTTP** | e.g. `todoist.yaml`. **`http` = MCP-over-HTTP**, historical name |
-| `rest` | a plain HTTP/JSON API **directly** | UTCP-manual style; no MCP server. **read-only** |
+
+A plain HTTP/JSON API has no MCP server and therefore **no `transport:` section
+at all**: it is described by the `utcp:` manual plus the `holon:` section
+([below](#direct-http-apis-utcp--holon)). A sidecar declares one or the other;
+both, or neither, is refused at load.
 
 > Naming caveat: `http` here means *MCP transported over HTTP*, not a generic
-> REST call. The direct-API transport is `rest`. (UTCP can also describe MCP, so
-> transports stay plural — `mcp | rest`, with `graphql` a possible future arm.)
+> REST call. (UTCP can also describe MCP, so `transport:` stays a set rather
+> than a single key, with `graphql` a possible future arm.)
 
-### The `rest` transport (direct HTTP API)
+### Direct HTTP APIs: `utcp:` + `holon:`
 
-Use `rest` when the external system has **no MCP server** — just a JSON API. The
-sidecar carries a small UTCP-style manual: a `base_url`, an optional auth header
-(referencing an env var — **never inline a secret**), and named `calls`, each a
-GET endpoint. A `RestCallSurface` serves those calls behind the `McpCallSurface`
-seam, so `sync.list_tool` names a `call` and the *entire rest of the pipeline is
+Use this pair when the external system has **no MCP server** — just a JSON API.
+The sidecar then carries two top-level sections:
+
+- **`utcp:`** — a **verbatim UTCP 1.x manual**: the same document a standard
+  UTCP client reads, exportable unchanged. Nothing Holon-specific goes inside
+  it. Each entry of `tools:` names a tool and states, in its
+  `tool_call_template`, the **absolute** `url` and `http_method` that reach it.
+- **`holon:`** — everything the standard has no field for: the auth, the poll
+  cadence, and, per tool name, the query parameters, request body, response
+  codec and the mappings between the peer's JSON and Holon's rows.
+
+A `RestCallSurface` serves those tools behind the `McpCallSurface` seam, so
+`sync.list_tool` names a manual tool and the *entire rest of the pipeline is
 unchanged*.
 
 ```yaml
-transport:
-  rest:
-    base_url: https://api.example.com          # may be ${VAR}
-    auth:                                       # optional
-      header: Authorization
-      value: "Bearer ${EXAMPLE_TOKEN}"          # env ref only, never a literal secret
-    calls:
-      list-things:
-        method: GET                             # only GET today (read-only)
-        path: /things/{ownerId}                 # {arg} filled from tool-call args
-        query: { limit: "50" }                  # literals or {arg} placeholders
-        result_key: things                      # wrap a bare-array body as {things: [...]}
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: list-things
+      description: Things owned by one owner.   # optional, for discovery
+      tool_call_template:
+        call_template_type: http                # only `http` is served
+        url: https://api.example.com/things/{ownerId}   # absolute; may be ${VAR}
+        http_method: GET
+
+holon:
+  auth:                                         # optional
+    header: Authorization
+    value: "Bearer ${EXAMPLE_TOKEN}"            # env ref only, never a literal secret
+  tools:
+    list-things:
+      query: { limit: "50" }                    # literals or {arg} placeholders
+      result_key: things                        # wrap a bare-array body as {things: [...]}
 
 entities:
   ex_things:
@@ -291,40 +311,41 @@ entities:
     sync: { list_tool: list-things, extract_path: things }
 ```
 
-- **`path` / `query` `{arg}` placeholders** are filled from the tool-call
+- **`url` / `query` `{arg}` placeholders** are filled from the tool-call
   arguments at request time (distinct from `${VAR}`, which is a startup-time
   secret/config reference). A missing arg fails loud.
+- **`holon.tools` is keyed by the manual's tool name.** A key naming a tool the
+  manual never declared is refused at load — a mapping that could never run.
 - **`result_key`** bridges REST's arbitrary top-level shapes to the tool-response
   contract: a bare array (`[ {...}, {...} ]`) is wrapped as
   `{ <result_key>: [ ... ] }` so `sync.extract_path` can select it. Omit it when
   the API already returns an object with the field.
 - **Response → block shape**: the selected array's objects map field-by-field
-  onto the entity `schema`, exactly as for the MCP transports.
+  onto the entity `schema`, exactly as for the MCP transports. For a peer whose
+  shape does not map field-by-field, `response:` below does the job instead.
 
 #### Auth: `static header` | `oauth2`
 
-The `rest` transport's `auth:` is one of two arms (secrets never inlined):
+`holon.auth:` is one of two arms (secrets never inlined):
 
 ```yaml
-transport:
-  rest:
-    auth:                                       # static-header arm (back-compat)
-      header: Authorization
-      value: "Bearer ${EXAMPLE_TOKEN}"          # ${VAR} from env / settings
+holon:
+  auth:                                         # static-header arm
+    header: Authorization
+    value: "Bearer ${EXAMPLE_TOKEN}"            # ${VAR} from env / settings
 ```
 
 ```yaml
-transport:
-  rest:
-    auth:
-      oauth2:                                   # OAuth2 refresh-token grant
-        token_url: https://oauth2.googleapis.com/token
-        client_id_env: GCAL_CLIENT_ID           # or client_id_file
-        client_secret_env: GCAL_CLIENT_SECRET   # or client_secret_file
-        # ${CONFIG_DIR} is the config dir of the profile that is running
-        # (HOLON_CONFIG_DIR when set). A path outside it is refused at load.
-        refresh_token_file: ${CONFIG_DIR}/gcal-refresh-token   # mode 0600
-        scopes: [https://www.googleapis.com/auth/calendar.readonly]  # informational
+holon:
+  auth:
+    oauth2:                                     # OAuth2 refresh-token grant
+      token_url: https://oauth2.googleapis.com/token
+      client_id_env: GCAL_CLIENT_ID             # or client_id_file
+      client_secret_env: GCAL_CLIENT_SECRET     # or client_secret_file
+      # ${CONFIG_DIR} is the config dir of the profile that is running
+      # (HOLON_CONFIG_DIR when set). A path outside it is refused at load.
+      refresh_token_file: ${CONFIG_DIR}/gcal-refresh-token   # mode 0600
+      scopes: [https://www.googleapis.com/auth/calendar.readonly]  # informational
 ```
 
 The `oauth2` arm exchanges a long-lived **refresh token** for short-lived
@@ -345,24 +366,23 @@ consumers, sharing one provider-parameterized
 
 Three generic knobs cover common JSON-API needs (each optional, opt-in):
 
-- **Now-tokens** in any `path`/`query` value: `{now}`, `{now-1d}`, `{now+14d}`,
+- **Now-tokens** in any `url`/`query` value: `{now}`, `{now-1d}`, `{now+14d}`,
   `{now+30m}` render to an RFC 3339 UTC timestamp at request time (a rolling
   window without a dynamic clock in YAML). Distinct from `${VAR}` (startup
   secret) and `{arg}` (per-call data); a malformed offset fails loud.
-- **Pagination** on a `json` call follows a response continuation token across
+- **Pagination** on a `json` tool follows a response continuation token across
   pages, concatenating each page's item array, bounded fail-loud by `max_pages`:
 
   ```yaml
-  calls:
-    list-events:
-      method: GET
-      path: /calendars/{calendar_id}/events
-      query: { timeMin: "{now-1d}", timeMax: "{now+14d}", singleEvents: "true" }
-      pagination:
-        items_path: items          # array concatenated across pages
-        next_token_path: nextPageToken
-        token_param: pageToken     # sent as ?pageToken=<token> on the next call
-        max_pages: 50              # exceeding it (token still present) is a loud error
+  holon:
+    tools:
+      list-events:
+        query: { timeMin: "{now-1d}", timeMax: "{now+14d}", singleEvents: "true" }
+        pagination:
+          items_path: items          # array concatenated across pages
+          next_token_path: nextPageToken
+          token_param: pageToken     # sent as ?pageToken=<token> on the next call
+          max_pages: 50              # exceeding it (token still present) is a loud error
   ```
 
 - **Field projection** under an entity's `sync:` lifts nested JSON scalars into
@@ -383,25 +403,74 @@ Worked read-only example: **`jsonplaceholder.yaml`** — the public
 end-to-end against a local mock server in
 `crates/holon-mcp-client/tests/rest_transport_mock.rs`.
 
-#### Freshness: `rest` polls (no subscriptions)
+#### Mapping: `response` and `request` (`jaq` expressions)
 
-A plain HTTP API cannot push `resources/updated` notifications, so the `rest`
-transport runs a **poll-only** background runner: every sync entity is refreshed
+`project` handles a response that is already a list of flat-ish records. When a
+peer's shape does not map field-by-field — two collections that fold into one
+row set, a map keyed by name, a category vocabulary encoded in a string — the
+mapping belongs in the sidecar, not in Rust. Two per-tool keys do that, each a
+**`jaq` expression** (a `jq` dialect, compiled once at load; a malformed filter
+is refused there rather than on the first call):
+
+- **`response`** maps one response document into a **holon-rows JSON Lines
+  stream**: the envelope value first, then one value per row. The envelope is
+  `{holon_rows: 1, scopes: [ {type, owner_column, owner_value} ]}` and each row
+  is `{type: "<scope type>", row: { …cells… }}`. A scope with zero rows is
+  legal and load-bearing — it is how the last row of a set gets swept. See
+  `crates/holon-rows/src/lib.rs` and `envelope.rs`.
+- **`request`** maps a `{scopes, rows}` object into the call's **argument
+  object** — the write leg of the same seam. Its single output is what the
+  tool's `query`/`body` placeholders are then filled from.
+
+```yaml
+holon:
+  tools:
+    pull_list:
+      response: |
+        . as $r
+        | {holon_rows: 1, scopes: [
+            {type: "thing", owner_column: "list", owner_value: "shopping"}
+          ]},
+          ($r.items[] | {type: "thing", row: {id: .name, list: "shopping", name: .name}})
+    commit:
+      request: |
+        .rows as $rows
+        | { commands: [ $rows[] | select(.type == "command") | .row ] }
+```
+
+Both expressions fail loud: `error("…")` inside the filter is the right way to
+refuse a malformed record, because silently skipping one turns it into a
+deletion under replace-scope semantics.
+
+Worked example: **`shopping.yaml`** — a bidirectional peer whose read leg folds
+two item collections into one row set and whose write leg turns command rows
+into the peer's `commands` array.
+
+#### Freshness: polling (no subscriptions)
+
+A plain HTTP API cannot push `resources/updated` notifications, so a `utcp:`
+sidecar runs a **poll-only** background runner: every sync entity is refreshed
 on a fixed cadence, and each poll **diffs** against the engine's in-memory
 mirror, so an unchanged response applies nothing (no needless cache churn). The
 cadence resolves per entity, most specific first:
 
 1. the entity's own `sync.interval` (e.g. `sync: { interval: 60s }`),
-2. the transport-wide `transport.rest.poll_interval`,
+2. the manual-wide `holon.poll_interval`,
 3. the built-in default (**300s**).
 
 ```yaml
-transport:
-  rest:
-    base_url: https://api.example.com
-    poll_interval: 5m          # transport-wide default cadence for rest sync entities
-    calls:
-      list-things: { method: GET, path: /things }
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: list-things
+      tool_call_template:
+        call_template_type: http
+        url: https://api.example.com/things
+        http_method: GET
+
+holon:
+  poll_interval: 5m          # manual-wide default cadence for sync entities
 
 entities:
   ex_things:
@@ -420,11 +489,12 @@ letting the replica go stale.
 
 #### Response formats: `json` | `atom` | `rss` (feeds)
 
-A `rest` call decodes its response body per a `format:` codec (default `json`,
-back-compatible). The transport axis (how you reach the source) stays orthogonal
-to the body codec (how the response is shaped), so **syndication feeds need no
-new transport** — an Atom/RSS feed is fetched exactly like any GET, only the
-codec differs:
+A tool decodes its response body per a `holon.tools.<name>.format:` codec
+(default `json`). The manual states a `content_type`; `format` states how Holon
+DECODES what arrives, which for a syndication feed is not the same thing. How
+you reach the source stays orthogonal to how the response is shaped, so
+**syndication feeds need no new transport** — an Atom/RSS feed is fetched
+exactly like any GET, only the codec differs:
 
 - `format: json` (default) — the JSON path described above.
 - `format: atom` — decodes an Atom feed (RFC 4287); each `<entry>` →
@@ -443,15 +513,21 @@ feed (zero entries) is legitimate.
 Feed example sidecar (a blog's Atom feed, no auth):
 
 ```yaml
-transport:
-  rest:
-    base_url: https://blog.example.com
-    calls:
-      list-posts:
-        method: GET
-        path: /feed.atom
-        format: atom          # or: rss
-        result_key: entries
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: list-posts
+      tool_call_template:
+        call_template_type: http
+        url: https://blog.example.com/feed.atom
+        http_method: GET
+
+holon:
+  tools:
+    list-posts:
+      format: atom          # or: rss
+      result_key: entries
 
 entities:
   blog_posts:
@@ -487,7 +563,7 @@ the dependency tree).
 - **`rest` background runner.** ✅ Done — `build_mcp_integration` now wires a
   `rest` sidecar into a **poll-only** background runner (`finish_rest_integration`:
   no MCP peer, no subscriptions, one poll ticker per sync entity; see
-  [Freshness](#freshness-rest-polls-no-subscriptions) above). It rejects the
+  [Freshness](#freshness-polling-no-subscriptions) above). It rejects the
   out-of-scope shapes loudly at connect: `vtable`/`write_through` (needs an MCP
   peer to back the FDW cursor) and `sync.list_resource` (REST serves GET *calls*,
   not MCP resources).

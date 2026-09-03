@@ -90,6 +90,8 @@ async fn connect(
     let mut cfg = load_fixture(fixture);
     let cp = cfg
         .transport
+        .as_mut()
+        .expect("sidecar must declare an MCP transport")
         .child_process
         .as_mut()
         .expect("fixture must declare child_process transport");

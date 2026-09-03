@@ -315,7 +315,13 @@ impl SyncTokenStore for NoTokens {
 /// The provider binary the shipped sidecar names, when it exists on this
 /// machine. Absent ⇒ the fixture arm runs instead.
 fn real_provider_command(cfg: &IntegrationFileConfig) -> Option<String> {
-    let cmd = cfg.transport.child_process.as_ref()?.command.clone();
+    let cmd = cfg
+        .transport
+        .as_ref()?
+        .child_process
+        .as_ref()?
+        .command
+        .clone();
     std::path::Path::new(&cmd).exists().then_some(cmd)
 }
 
@@ -511,6 +517,8 @@ async fn connect_fixture(fixture: &str) -> anyhow::Result<McpConnectionResult> {
         serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("parse {path}: {e}"));
     let cp = cfg
         .transport
+        .as_mut()
+        .expect("sidecar must declare an MCP transport")
         .child_process
         .as_mut()
         .expect("fixture declares child_process transport");

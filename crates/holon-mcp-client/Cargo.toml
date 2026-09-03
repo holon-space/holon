@@ -33,6 +33,7 @@ roxmltree = "0.20"
 chrono.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
+holon-rows.workspace = true
 holon-profiles.workspace = true
 holon-secrets.workspace = true
 holon-turso.workspace = true

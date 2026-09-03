@@ -28,19 +28,23 @@ use crate::shopping::ShoppingReconciler;
 /// The entity every local intent is written against.
 pub const SHOPPING_ITEM_ENTITY: &str = "shopping_item";
 
-/// The `/commit` verbs the capture pinned. A check toggle is deliberately
+/// The two intents a reconciler can push. A check toggle is deliberately
 /// absent: see [`PushIntent`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandVerb {
     Add,
-    Del,
+    Remove,
 }
 
 impl CommandVerb {
-    fn as_wire(&self) -> &'static str {
+    /// HOLON's name for the intent, not the peer's. What a given list app
+    /// spells these two as is that app's vocabulary and lives in its sidecar's
+    /// `request` mapping — this string only has to be stable enough for the
+    /// mapping to select on, and for the idempotency key to hash.
+    fn as_intent(&self) -> &'static str {
         match self {
             CommandVerb::Add => "add",
-            CommandVerb::Del => "del",
+            CommandVerb::Remove => "remove",
         }
     }
 }
@@ -55,14 +59,27 @@ pub struct CommitCommand {
 }
 
 impl CommitCommand {
-    pub fn to_json(&self) -> serde_json::Value {
+    /// This command as one row line of the write leg's stream.
+    fn to_row(&self) -> serde_json::Value {
         serde_json::json!({
-            "cmd": self.verb.as_wire(),
-            "good": { "name": self.key.name, "cat": self.key.cat, "new": true },
-            "id": self.id,
+            "type": COMMAND_TYPE,
+            "row": {
+                "id": self.id,
+                "list": "shopping",
+                "verb": self.verb.as_intent(),
+                "name": self.key.name,
+                "cat": self.key.cat,
+                "command_id": self.id,
+            },
         })
     }
 }
+
+/// The row types the write leg emits. The connection's `request` mapping
+/// selects on these names, so they are the contract between the reconciler and
+/// the sidecar — the peer's own envelope field names appear in neither.
+const BATCH_TYPE: &str = "shopping_commit";
+const COMMAND_TYPE: &str = "shopping_command";
 
 /// One `/commit` request: the versions it is based on, who is committing, and
 /// the ordered commands.
@@ -100,7 +117,7 @@ impl CommitBatch {
             .map(|intent| {
                 let (verb, key) = match intent {
                     PushIntent::Add(row) => (CommandVerb::Add, row.key()),
-                    PushIntent::Remove { key, .. } => (CommandVerb::Del, key.clone()),
+                    PushIntent::Remove { key, .. } => (CommandVerb::Remove, key.clone()),
                 };
                 let id = command_id(round_ms, verb, &key);
                 CommitCommand { verb, key, id }
@@ -114,8 +131,32 @@ impl CommitBatch {
         }
     }
 
-    pub fn commands_json(&self) -> serde_json::Value {
-        serde_json::Value::Array(self.commands.iter().map(CommitCommand::to_json).collect())
+    /// This batch as a row stream, for the connection's `request` mapping to
+    /// turn into the peer's own envelope.
+    ///
+    /// The peer's own spelling of these commands — `del` for a removal, the
+    /// `good` wrapper, the `new: true` literal the capture pinned — is NOT
+    /// here. It lives in that peer's sidecar `request` mapping. What travels
+    /// is the intent, under Holon's name for it.
+    pub fn to_row_stream(&self) -> serde_json::Value {
+        let mut rows = vec![serde_json::json!({
+            "type": BATCH_TYPE,
+            "row": {
+                "id": "shopping",
+                "list": "shopping",
+                "old_version": self.old_version,
+                "old_picked_items_version": self.old_picked_items_version,
+                "device_id": self.device_id,
+            },
+        })];
+        rows.extend(self.commands.iter().map(CommitCommand::to_row));
+        serde_json::json!({
+            "scopes": [
+                { "type": BATCH_TYPE, "owner_column": "list", "owner_value": "shopping" },
+                { "type": COMMAND_TYPE, "owner_column": "list", "owner_value": "shopping" },
+            ],
+            "rows": rows,
+        })
     }
 }
 
@@ -128,7 +169,7 @@ impl CommitBatch {
 /// correct: that is a new intent, decided against a list read since.
 fn command_id(round_ms: i64, verb: CommandVerb, key: &ItemKey) -> String {
     let mut hasher = DefaultHasher::new();
-    verb.as_wire().hash(&mut hasher);
+    verb.as_intent().hash(&mut hasher);
     key.hash(&mut hasher);
     format!("{round_ms}_{:016x}", hasher.finish())
 }

@@ -142,19 +142,30 @@ exists to end. Stated cost: users must learn jq, and its errors are terse.
 A connection sidecar has two top-level sections:
 
 ```yaml
-utcp:            # a VERBATIM UTCP 1.x manual; importable/exportable unchanged
-  utcp_version: "1.0"
-  tools: [...]   # standard http call templates, ${VAR} secrets
-holon:           # keyed by tool name; what the standard lacks
-  commit-items:
-    query: {version: "{version}"}
-    body: {oldVersion: "{version}", device: {id: "{deviceId}"}, lang: en, commands: "{commands}"}
-    response: ".version as $v | {version: $v}"
+utcp:                       # a VERBATIM UTCP 1.x manual; exportable unchanged
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:                    # standard http call templates, ${VAR} secrets
+    - name: commit
+      tool_call_template: {call_template_type: http, url: "${LIST_URL}/commit", http_method: POST}
+holon:                      # what the standard lacks
   poll_interval: 60s
+  auth: {...}               # transport-wide, as before
+  tools:                    # keyed by the manual's tool name
+    commit:
+      query: {version: "{version}"}
+      body: {oldVersion: "{version}", device: {id: "{deviceId}"}, commands: "{commands}"}
+      response: "<jaq: one response → a holon-rows stream>"
+      request: "<jaq: a {scopes, rows} stream → this call's arguments>"
 ```
 
+Per-tool entries sit under `holon.tools` rather than directly under `holon`, so
+a peer that named a tool `auth` or `poll_interval` is still representable. The
+worked example is `assets/integrations/shopping.yaml`.
+
 The `utcp` section round-trips to and from any standard client, because it
-contains no unknown keys. A user imports a published UTCP or OpenAPI manual and
+contains no unknown keys — byte-for-byte, pinned by
+`crates/holon-mcp-client/tests/utcp_manual_roundtrip.rs`. A user imports a published UTCP or OpenAPI manual and
 authors only the `holon` section. Holon parses the manual with **its own serde
 types** for spec 1.x — three top-level fields and one call-template struct —
 and takes **no dependency on `rs-utcp`**. A tool named in `holon` but absent from
@@ -181,9 +192,27 @@ rule, whereas the `utcp:` section here is valid UTCP from day one. The two
 designs converge the moment upstream merges, at which point the `holon` section
 folds into the manual.
 
+**Holon's own reader applies the ignore-unknown-keys rule NOW, ahead of
+upstream.** A `utcp:` key this build does not model is ignored, PRESERVED so an
+export gives it back, and disclosed with a warning naming the dotted key; a tool
+whose `call_template_type` this build cannot drive is SKIPPED with a warning and
+the rest of the manual still loads. That is deliberately the opposite of the
+reference client's behaviour above, and it is what makes "import a published
+manual unchanged" true rather than aspirational: a real 1.x manual carrying
+`info`, `auth`, `query_params` or extra call-template fields loads as it stands.
+Preservation is by content, not position — an unmodelled key is written back
+after the keys this build names. Pinned by
+`crates/holon-mcp-client/tests/utcp_manual_roundtrip.rs`.
+
+The `holon:` section gets the OPPOSITE treatment and refuses unknown keys
+loudly, with the accepted-field list. Those keys are ours: a typo there is a
+mapping that would silently never run, where a tolerated stranger in `utcp:` is
+merely a field we do not use.
+
 Two upstream PRs — an ignore-unknown-keys rule and a manual-carried mapping — are
-a side lane filed from a fork of the SPEC repository. That fork is a staging area
-for contributions, never a runtime dependency. `rs-utcp` is not forked: it is a
+a side lane filed from a fork of the SPEC repository. **PR-1 is the upstream
+mirror of the rule Holon's reader already applies**, not a prerequisite for it.
+That fork is a staging area for contributions, never a runtime dependency. `rs-utcp` is not forked: it is a
 major version behind, and Holon's own transport already does the envelope, query,
 cadence and secret redaction it lacks.
 
@@ -245,9 +274,17 @@ so invariant 4 survives and no connector becomes a second writer.
   today.
 - Known kill criteria, each with a measurement rather than an opinion: wasmi too
   slow (a full recipe-directory scan against the current parser, with the 200 ms
-  p95 interaction→projection SLO as the line); jaq per-row cost (response → rows
-  over a 10 000-item list, same SLO, with filter-compile and per-row time
-  measured separately — a filter recompiled per row is the defect, not jaq);
+  p95 interaction→projection SLO as the line); jaq cost, **stated per
+  interaction and delta-bounded** — a full peer response is a poll or sync
+  event, not an interaction, and the mapping runs off the interaction thread, so
+  the line is what one interaction's DELTA costs, not what one cold full-snapshot
+  costs. Filter-compile and per-response time are still measured separately: a
+  filter recompiled per response is the defect, not jaq. MEASURED 2026-09-03
+  (`crates/holon-kitchen/tests/shopping_mapping_cost.rs`): compile 1 ms once per
+  connection; a 10 000-item full snapshot maps in 1266 ms, linear at ~0.13 ms
+  per item, so a few hundred items cost single-digit milliseconds. **Ruled
+  D92.a — accepted**; revisit via delta sync when a real peer exceeds ~1 500
+  items. Also unchanged:
   `.wasm` guests bloating the APK and the worker bundle (a stated size budget
   before any guest ships).
 

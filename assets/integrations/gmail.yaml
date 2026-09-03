@@ -1,7 +1,7 @@
 # Sidecar-format generation. The app runs its own bundled copy of this file
 # unless an INSTALLED copy declares the generation the running build understands
 # (crates/holon-mcp-client/src/bundled_sidecars.rs).
-schema_version: 1
+schema_version: 2
 
 # The Integrations sidebar row: what it says, what glyph it wears, and the page
 # `integration.open_default_view` focuses in the main panel. `default_view` is
@@ -10,13 +10,13 @@ display_name: "Gmail"
 icon: inbox
 default_view: gmail-view
 
-# Gmail — direct REST API (`transport: rest`) + generic OAuth2.
+# Gmail — direct HTTP API (`utcp:` + `holon:`) + generic OAuth2.
 #
-# WHY REST (not an MCP server): the `rest` transport is pure in-app HTTP with no
+# WHY DIRECT HTTP (not an MCP server): this path is pure in-app HTTP with no
 # subprocess, so this exact sidecar runs unchanged on desktop AND on Android/iOS
-# (Martin's ruling). Gmail is a plain JSON API, reached directly via the
-# UTCP-style manual below and authenticated with the transport's generic
-# `oauth2` arm (refresh-token grant — nothing Google-named in the engine).
+# (Martin's ruling). Gmail is a plain JSON API, reached directly via the UTCP
+# manual below and authenticated with the generic `oauth2` arm (refresh-token
+# grant — nothing Google-named in the engine).
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # ONE-TIME SETUP
@@ -109,7 +109,7 @@ default_view: gmail-view
 #   threadId}` and nothing else; every header, label set and internalDate needs
 #   a `messages.get` PER MESSAGE. The sync path issues ONE list call per entity
 #   and has no per-record fan-out (`enumerate_from` exists only on the
-#   write-through `vtable` path, which the read-only `rest` transport rejects) —
+#   write-through `vtable` path, which the read-only direct-HTTP path rejects) —
 #   the same missing mechanism that pins gcal to the primary calendar. TODO:
 #   sync-side `enumerate_from` (bounded, fail-loud max_fan_out) driving
 #   `messages.get?format=metadata` from `gmail_message.id`, which would add
@@ -128,84 +128,98 @@ default_view: gmail-view
 # * Read-only. `writes` stays at its `disabled` default; nothing here marks
 #   mail read, labels it, or sends.
 
-transport:
-  rest:
-    base_url: https://gmail.googleapis.com/gmail/v1
-    # REST has no push freshness; poll every 5 minutes (per-entity sync.interval
-    # would override this). Bounds staleness without hammering the API.
-    poll_interval: 5m
-    auth:
-      # Generic OAuth2 refresh-token grant. Secrets are referenced by name only.
-      oauth2:
-        token_url: https://oauth2.googleapis.com/token
-        # Where Settings → Integrations → Configure… sends the system browser.
-        # Without it the in-app consent flow refuses (it has nowhere to go) and
-        # only the scripted bootstrap remains.
-        auth_url: https://accounts.google.com/o/oauth2/v2/auth
-        # Google issues a refresh token only for an offline-access request, and
-        # only re-issues one when consent is forced. Both live here rather than
-        # in the flow engine, which knows nothing about any one provider.
-        auth_params:
-          access_type: offline
-          prompt: consent
-        # Credentials are sourced from files here, because Holon is a GUI app and
-        # environment variables do not reach it cleanly. `client_secret_file` is
-        # 0600-enforced (refused loudly if group/world-readable), exactly like
-        # `refresh_token_file`; `client_id_file` is not perm-checked (the OAuth
-        # client id is not secret). See the extraction one-liner in the setup doc.
-        #
-        # Alternative (env / app-settings): drop the *_file keys and use
-        #   client_id_env: GMAIL_CLIENT_ID
-        #   client_secret_env: GMAIL_CLIENT_SECRET
-        client_id_file: ${CONFIG_DIR}/gmail-client-id
-        client_secret_file: ${CONFIG_DIR}/gmail-client-secret
-        # Written by scripts/google-oauth-bootstrap.sh (mode 0600, never by Holon).
-        # ${CONFIG_DIR} is the config directory of the profile that is RUNNING
-        # (HOLON_CONFIG_DIR when set, the default otherwise). A path outside it
-        # — a `~/` reference included — is refused at load: it would let a
-        # sandbox instance authenticate with the real profile's account.
-        refresh_token_file: ${CONFIG_DIR}/gmail-refresh-token
-        # Informational only (documents what the refresh token was consented
-        # for; not sent on the refresh grant).
-        #
-        # gmail.readonly, not the narrower gmail.metadata: `q` search is
-        # rejected under gmail.metadata, and `snippet` is body-derived text
-        # that scope withholds. Both are load-bearing below.
-        scopes:
-          - https://www.googleapis.com/auth/gmail.readonly
-    calls:
-      # Label vocabulary. Response: { "labels": [ {id, name, type,
-      # messageListVisibility, labelListVisibility} ] }. Unpaginated, and the
-      # per-label counts (messagesUnread, …) come only from labels.get.
-      list-labels:
-        method: GET
-        path: /users/me/labels
-      # Unread inbox threads. Response: { "threads": [ {id, snippet,
-      # historyId} ], "nextPageToken"?, "resultSizeEstimate" }.
-      list-unread-threads:
-        method: GET
-        path: /users/me/threads
-        query:
-          q: "in:inbox is:unread"
-          maxResults: "100"
-        pagination:
-          items_path: threads
-          next_token_path: nextPageToken
-          token_param: pageToken
-          max_pages: 20
-      # Unread inbox messages, same `q` so the two entities describe one set at
-      # two granularities. Response items are stubs: { id, threadId }.
-      list-unread-messages:
-        method: GET
-        path: /users/me/messages
-        query:
-          q: "in:inbox is:unread"
-          maxResults: "100"
-        pagination:
-          items_path: messages
-          next_token_path: nextPageToken
-          token_param: pageToken
-          max_pages: 20
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: list-labels
+      description: >-
+        Label vocabulary. Response: { "labels": [ {id, name, type,
+        messageListVisibility, labelListVisibility} ] }. Unpaginated, and the
+        per-label counts (messagesUnread, …) come only from labels.get.
+      tool_call_template:
+        call_template_type: http
+        url: https://gmail.googleapis.com/gmail/v1/users/me/labels
+        http_method: GET
+    - name: list-unread-threads
+      description: >-
+        Unread inbox threads. Response: { "threads": [ {id, snippet, historyId}
+        ], "nextPageToken"?, "resultSizeEstimate" }.
+      tool_call_template:
+        call_template_type: http
+        url: https://gmail.googleapis.com/gmail/v1/users/me/threads
+        http_method: GET
+    - name: list-unread-messages
+      description: >-
+        Unread inbox messages, same `q` so the two entities describe one set at
+        two granularities. Response items are stubs: { id, threadId }.
+      tool_call_template:
+        call_template_type: http
+        url: https://gmail.googleapis.com/gmail/v1/users/me/messages
+        http_method: GET
+
+holon:
+  # REST has no push freshness; poll every 5 minutes (per-entity sync.interval
+  # would override this). Bounds staleness without hammering the API.
+  poll_interval: 5m
+  auth:
+    # Generic OAuth2 refresh-token grant. Secrets are referenced by name only.
+    oauth2:
+      token_url: https://oauth2.googleapis.com/token
+      # Where Settings → Integrations → Configure… sends the system browser.
+      # Without it the in-app consent flow refuses (it has nowhere to go) and
+      # only the scripted bootstrap remains.
+      auth_url: https://accounts.google.com/o/oauth2/v2/auth
+      # Google issues a refresh token only for an offline-access request, and
+      # only re-issues one when consent is forced. Both live here rather than
+      # in the flow engine, which knows nothing about any one provider.
+      auth_params:
+        access_type: offline
+        prompt: consent
+      # Credentials are sourced from files here, because Holon is a GUI app and
+      # environment variables do not reach it cleanly. `client_secret_file` is
+      # 0600-enforced (refused loudly if group/world-readable), exactly like
+      # `refresh_token_file`; `client_id_file` is not perm-checked (the OAuth
+      # client id is not secret). See the extraction one-liner in the setup doc.
+      #
+      # Alternative (env / app-settings): drop the *_file keys and use
+      #   client_id_env: GMAIL_CLIENT_ID
+      #   client_secret_env: GMAIL_CLIENT_SECRET
+      client_id_file: ${CONFIG_DIR}/gmail-client-id
+      client_secret_file: ${CONFIG_DIR}/gmail-client-secret
+      # Written by scripts/google-oauth-bootstrap.sh (mode 0600, never by Holon).
+      # ${CONFIG_DIR} is the config directory of the profile that is RUNNING
+      # (HOLON_CONFIG_DIR when set, the default otherwise). A path outside it
+      # — a `~/` reference included — is refused at load: it would let a
+      # sandbox instance authenticate with the real profile's account.
+      refresh_token_file: ${CONFIG_DIR}/gmail-refresh-token
+      # Informational only (documents what the refresh token was consented
+      # for; not sent on the refresh grant).
+      #
+      # gmail.readonly, not the narrower gmail.metadata: `q` search is
+      # rejected under gmail.metadata, and `snippet` is body-derived text
+      # that scope withholds. Both are load-bearing below.
+      scopes:
+        - https://www.googleapis.com/auth/gmail.readonly
+  tools:
+    list-unread-threads:
+      query:
+        q: "in:inbox is:unread"
+        maxResults: "100"
+      pagination:
+        items_path: threads
+        next_token_path: nextPageToken
+        token_param: pageToken
+        max_pages: 20
+    list-unread-messages:
+      query:
+        q: "in:inbox is:unread"
+        maxResults: "100"
+      pagination:
+        items_path: messages
+        next_token_path: nextPageToken
+        token_param: pageToken
+        max_pages: 20
 
 entity_prefix: "gmail_"
 
@@ -289,9 +303,6 @@ entities:
       project:
         thread_id:
           path: ["threadId"]
-
-tools: {}
-
 # Derived views (generic `views:` mechanism). Each becomes
 # `CREATE MATERIALIZED VIEW {entity_prefix}{name} AS {sql}` at startup.
 #

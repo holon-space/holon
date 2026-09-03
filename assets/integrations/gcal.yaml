@@ -1,7 +1,7 @@
 # Sidecar-format generation. The app runs its own bundled copy of this file
 # unless an INSTALLED copy declares the generation the running build understands
 # (crates/holon-mcp-client/src/bundled_sidecars.rs).
-schema_version: 1
+schema_version: 2
 
 # The Integrations sidebar row: what it says, what glyph it wears, and the page
 # `integration.open_default_view` focuses in the main panel. `default_view` is
@@ -10,14 +10,13 @@ display_name: "Google Calendar"
 icon: calendar
 default_view: gcal-view
 
-# Google Calendar — direct REST API (`transport: rest`) + generic OAuth2.
+# Google Calendar — direct HTTP API (`utcp:` + `holon:`) + generic OAuth2.
 #
-# WHY REST (not an MCP server): the `rest` transport is pure in-app HTTP with no
+# WHY DIRECT HTTP (not an MCP server): this path is pure in-app HTTP with no
 # subprocess, so this exact sidecar runs unchanged on desktop AND on Android/iOS
 # (Martin's ruling). Google Calendar has no MCP server; it is a plain JSON API,
-# reached directly via the UTCP-style manual below and authenticated with the
-# transport's generic `oauth2` arm (refresh-token grant — nothing Google-named
-# in the engine).
+# reached directly via the UTCP manual below and authenticated with the generic
+# `oauth2` arm (refresh-token grant — nothing Google-named in the engine).
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # ONE-TIME SETUP
@@ -96,84 +95,95 @@ default_view: gcal-view
 # * Events are pinned to the **primary** calendar. Multi-calendar fan-out (one
 #   list-events call per row of gcal_calendar) needs per-parent enumeration on
 #   the SYNC path; today `enumerate_from` lives only on the write-through
-#   `vtable` path, which the read-only `rest` transport rejects. TODO: add
+#   `vtable` path, which the read-only direct-HTTP path rejects. TODO: add
 #   sync-side `enumerate_from` (bounded, fail-loud max_fan_out) to sync events
 #   across all calendars and populate `event.calendar_id` from the parent id.
 #   Until then `gcal_event.calendar_id` is NULL (every row is the primary
 #   calendar).
 
-transport:
-  rest:
-    base_url: https://www.googleapis.com/calendar/v3
-    # REST has no push freshness; poll every 5 minutes (per-entity sync.interval
-    # would override this). Bounds staleness without hammering the API.
-    poll_interval: 5m
-    auth:
-      # Generic OAuth2 refresh-token grant. Secrets are referenced by name only.
-      oauth2:
-        token_url: https://oauth2.googleapis.com/token
-        # Where Settings → Integrations → Configure… sends the system browser.
-        # Without it the in-app consent flow refuses (it has nowhere to go) and
-        # only the scripted bootstrap remains.
-        auth_url: https://accounts.google.com/o/oauth2/v2/auth
-        # Google issues a refresh token only for an offline-access request, and
-        # only re-issues one when consent is forced. Both live here rather than
-        # in the flow engine, which knows nothing about any one provider.
-        auth_params:
-          access_type: offline
-          prompt: consent
-        # Credentials are sourced from files here, because Holon is a GUI app and
-        # environment variables do not reach it cleanly. `client_secret_file` is
-        # 0600-enforced (refused loudly if group/world-readable), exactly like
-        # `refresh_token_file`; `client_id_file` is not perm-checked (the OAuth
-        # client id is not secret). See the extraction one-liner in the setup doc.
-        #
-        # Alternative (env / app-settings): drop the *_file keys and use
-        #   client_id_env: GCAL_CLIENT_ID
-        #   client_secret_env: GCAL_CLIENT_SECRET
-        # Alternative (OS keychain — macOS, Windows, Linux Secret Service):
-        #   client_secret_keychain: { service: space.holon.gcal, account: client-secret }
-        client_id_file: ${CONFIG_DIR}/gcal-client-id
-        client_secret_file: ${CONFIG_DIR}/gcal-client-secret
-        # Written by scripts/google-oauth-bootstrap.sh (mode 0600, never by Holon).
-        # ${CONFIG_DIR} is the config directory of the profile that is RUNNING
-        # (HOLON_CONFIG_DIR when set, the default otherwise). A path outside it
-        # — a `~/` reference included — is refused at load: it would let a
-        # sandbox instance authenticate with the real profile's account.
-        refresh_token_file: ${CONFIG_DIR}/gcal-refresh-token
-        # Informational only (documents what the refresh token was consented
-        # for; not sent on the refresh grant).
-        scopes:
-          - https://www.googleapis.com/auth/calendar.readonly
-    calls:
-      # Calendar list. Response: { "items": [ {id, summary, primary, selected} ],
-      # "nextPageToken"? }. Paginated (usually one page).
-      list-calendars:
-        method: GET
-        path: /users/me/calendarList
-        pagination:
-          items_path: items
-          next_token_path: nextPageToken
-          token_param: pageToken
-          max_pages: 20
-      # Events for the pinned primary calendar over a rolling window. `{now-1d}`
-      # / `{now+14d}` render to RFC3339 UTC at request time (generic now-token,
-      # distinct from `${VAR}` secrets and `{arg}` path/query data).
-      # singleEvents=true expands recurrences; orderBy=startTime requires it.
-      list-events:
-        method: GET
-        path: /calendars/{calendar_id}/events
-        query:
-          timeMin: "{now-1d}"
-          timeMax: "{now+14d}"
-          singleEvents: "true"
-          orderBy: "startTime"
-          maxResults: "250"
-        pagination:
-          items_path: items
-          next_token_path: nextPageToken
-          token_param: pageToken
-          max_pages: 50
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: list-calendars
+      description: >-
+        Calendar list. Response: { "items": [ {id, summary, primary, selected}
+        ], "nextPageToken"? }. Paginated (usually one page).
+      tool_call_template:
+        call_template_type: http
+        url: https://www.googleapis.com/calendar/v3/users/me/calendarList
+        http_method: GET
+    - name: list-events
+      description: >-
+        Events for the pinned primary calendar over a rolling window.
+        singleEvents=true expands recurrences; orderBy=startTime requires it.
+      tool_call_template:
+        call_template_type: http
+        url: https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events
+        http_method: GET
+
+holon:
+  # REST has no push freshness; poll every 5 minutes (per-entity sync.interval
+  # would override this). Bounds staleness without hammering the API.
+  poll_interval: 5m
+  auth:
+    # Generic OAuth2 refresh-token grant. Secrets are referenced by name only.
+    oauth2:
+      token_url: https://oauth2.googleapis.com/token
+      # Where Settings → Integrations → Configure… sends the system browser.
+      # Without it the in-app consent flow refuses (it has nowhere to go) and
+      # only the scripted bootstrap remains.
+      auth_url: https://accounts.google.com/o/oauth2/v2/auth
+      # Google issues a refresh token only for an offline-access request, and
+      # only re-issues one when consent is forced. Both live here rather than
+      # in the flow engine, which knows nothing about any one provider.
+      auth_params:
+        access_type: offline
+        prompt: consent
+      # Credentials are sourced from files here, because Holon is a GUI app and
+      # environment variables do not reach it cleanly. `client_secret_file` is
+      # 0600-enforced (refused loudly if group/world-readable), exactly like
+      # `refresh_token_file`; `client_id_file` is not perm-checked (the OAuth
+      # client id is not secret). See the extraction one-liner in the setup doc.
+      #
+      # Alternative (env / app-settings): drop the *_file keys and use
+      #   client_id_env: GCAL_CLIENT_ID
+      #   client_secret_env: GCAL_CLIENT_SECRET
+      # Alternative (OS keychain — macOS, Windows, Linux Secret Service):
+      #   client_secret_keychain: { service: space.holon.gcal, account: client-secret }
+      client_id_file: ${CONFIG_DIR}/gcal-client-id
+      client_secret_file: ${CONFIG_DIR}/gcal-client-secret
+      # Written by scripts/google-oauth-bootstrap.sh (mode 0600, never by Holon).
+      # ${CONFIG_DIR} is the config directory of the profile that is RUNNING
+      # (HOLON_CONFIG_DIR when set, the default otherwise). A path outside it
+      # — a `~/` reference included — is refused at load: it would let a
+      # sandbox instance authenticate with the real profile's account.
+      refresh_token_file: ${CONFIG_DIR}/gcal-refresh-token
+      # Informational only (documents what the refresh token was consented
+      # for; not sent on the refresh grant).
+      scopes:
+        - https://www.googleapis.com/auth/calendar.readonly
+  tools:
+    list-calendars:
+      pagination:
+        items_path: items
+        next_token_path: nextPageToken
+        token_param: pageToken
+        max_pages: 20
+    list-events:
+      # `{now-1d}` / `{now+14d}` render to RFC3339 UTC at request time (generic
+      # now-token, distinct from `${VAR}` secrets and `{arg}` path/query data).
+      query:
+        timeMin: "{now-1d}"
+        timeMax: "{now+14d}"
+        singleEvents: "true"
+        orderBy: "startTime"
+        maxResults: "250"
+      pagination:
+        items_path: items
+        next_token_path: nextPageToken
+        token_param: pageToken
+        max_pages: 50
 
 entity_prefix: "gcal_"
 
@@ -265,9 +275,6 @@ entities:
           path: ["end.dateTime", "end.date"]
         all_day:
           exists: "start.date"
-
-tools: {}
-
 # Derived views (generic `views:` mechanism). Each becomes
 # `CREATE MATERIALIZED VIEW {entity_prefix}{name} AS {sql}` at startup.
 #

@@ -29,6 +29,26 @@ use holon_kitchen::shopping_sync::ShoppingRowReader;
 use holon_kitchen::shopping_sync::SyncOutcome;
 use holon_kitchen::shopping_sync::local_intent_operation;
 use holon_kitchen::shopping_sync::sync_once;
+use holon_rows::RowMapper;
+
+/// The shipped sidecar. The fake peer answers a pull the way production reads
+/// one: the body through this file's `response` mapping, then the rows.
+const SIDECAR: &str = include_str!("../../../assets/integrations/shopping.yaml");
+
+/// A snapshot built the way production builds one: the response through the
+/// shipped sidecar's `response` mapping, then the rows.
+fn snapshot_from_body(
+    body: &serde_json::Map<String, serde_json::Value>,
+    fetched_at: &str,
+) -> Result<CompleteSnapshot> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(SIDECAR).expect("the sidecar parses");
+    let filter = doc["holon"]["tools"]["pull_list"]["response"]
+        .as_str()
+        .expect("holon.tools.pull_list.response is a jaq filter");
+    let mapper = RowMapper::compile("shopping/pull_list.response", filter)?;
+    let rows = mapper.map_to_row_sets(&serde_json::Value::Object(body.clone()))?;
+    CompleteSnapshot::from_rows(&rows, fetched_at)
+}
 
 const TABLE: &str = "shopping_item_raw";
 const DEVICE_ID: &str = "device-under-test";
@@ -106,29 +126,33 @@ impl ShoppingPeer for FakePeer {
             "version": state.version,
             "options": {"prices": false, "cats": CATS},
         });
-        CompleteSnapshot::from_response(
+        snapshot_from_body(
             body.as_object().expect("the fake body is an object"),
-            now_rfc3339(),
+            &now_rfc3339(),
         )
     }
 
     async fn commit(&self, batch: &CommitBatch) -> Result<CommitAck> {
         let mut state = self.state.lock().expect("peer state");
-        for command in &batch.commands {
-            let verb = command.to_json()["cmd"]
-                .as_str()
-                .expect("a command names its verb")
-                .to_string();
-            state
-                .received
-                .push((verb.clone(), command.key.name.clone()));
+        let stream = batch.to_row_stream();
+        let rows = stream["rows"]
+            .as_array()
+            .expect("the row stream carries rows");
+        for entry in rows.iter().filter(|e| e["type"] == "shopping_command") {
+            let row = &entry["row"];
+            let field = |key: &str| {
+                row[key]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("a command row carries `{key}`"))
+                    .to_string()
+            };
+            let (verb, name, cat) = (field("verb"), field("name"), field("cat"));
+            state.received.push((verb.clone(), name.clone()));
             match verb.as_str() {
-                "add" => state
-                    .items
-                    .push((command.key.name.clone(), command.key.cat.clone())),
-                "del" => state
-                    .items
-                    .retain(|(n, c)| !(n == &command.key.name && c == &command.key.cat)),
+                // Intent words: the batch reaches this mock before the
+                // sidecar mapping that spells `remove` as this peer's `del`.
+                "add" => state.items.push((name, cat)),
+                "remove" => state.items.retain(|(n, c)| !(n == &name && c == &cat)),
                 other => anyhow::bail!("the fake peer received an unknown command '{other}'"),
             }
         }
@@ -339,7 +363,7 @@ async fn deleting_a_shopping_item_is_pushed_to_the_peer_and_does_not_come_back()
     sync_round(&ctx, &peer, &reconciler).await?;
     assert_eq!(
         peer.commands(),
-        vec![("del".to_string(), "Spaghetti".to_string())],
+        vec![("remove".to_string(), "Spaghetti".to_string())],
         "the deletion must reach the peer as a `del` command"
     );
     assert!(

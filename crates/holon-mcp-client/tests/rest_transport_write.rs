@@ -131,21 +131,26 @@ async fn start_mock() -> Mock {
 fn commit_yaml(base: &str) -> String {
     format!(
         r#"
-schema_version: 1
-transport:
-  rest:
-    base_url: "{base}"
-    calls:
-      commit:
-        method: POST
-        path: /api/list/{{listId}}/commit
-        query:
-          version: "{{version}}"
-        body:
-          oldVersion: "{{version}}"
-          lang: en
-          commands: "{{commands}}"
-        response_version_path: version
+schema_version: 2
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: commit
+      tool_call_template:
+        call_template_type: http
+        url: "{base}/api/list/{{listId}}/commit"
+        http_method: POST
+holon:
+  tools:
+    commit:
+      query:
+        version: "{{version}}"
+      body:
+        oldVersion: "{{version}}"
+        lang: en
+        commands: "{{commands}}"
+      response_version_path: version
 entities: {{}}
 tools: {{}}
 "#
@@ -155,16 +160,21 @@ tools: {{}}
 fn get_with_body_yaml(base: &str) -> String {
     format!(
         r#"
-schema_version: 1
-transport:
-  rest:
-    base_url: "{base}"
-    calls:
-      read:
-        method: GET
-        path: /api/list/{{listId}}
-        body:
-          oldVersion: "1"
+schema_version: 2
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: read
+      tool_call_template:
+        call_template_type: http
+        url: "{base}/api/list/{{listId}}"
+        http_method: GET
+holon:
+  tools:
+    read:
+      body:
+        oldVersion: "1"
 entities: {{}}
 tools: {{}}
 "#
@@ -309,7 +319,7 @@ async fn a_body_on_a_get_call_is_refused_at_configuration_time() {
 #[tokio::test]
 async fn an_unknown_method_is_refused_at_configuration_time() {
     let mock = start_mock().await;
-    let yaml = commit_yaml(&mock.base_url).replace("method: POST", "method: TRACE");
+    let yaml = commit_yaml(&mock.base_url).replace("http_method: POST", "http_method: TRACE");
     let err = surface_from(&yaml).expect_err("TRACE is not a method this transport issues");
     assert!(
         format!("{err:#}").contains("TRACE"),
@@ -338,14 +348,16 @@ async fn a_delete_call_carries_no_body_and_still_reaches_the_wire() {
     let mock = start_mock().await;
     let yaml = format!(
         r#"
-schema_version: 1
-transport:
-  rest:
-    base_url: "{}"
-    calls:
-      commit:
-        method: DELETE
-        path: /api/list/{{listId}}/commit
+schema_version: 2
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: commit
+      tool_call_template:
+        call_template_type: http
+        url: "{}/api/list/{{listId}}/commit"
+        http_method: DELETE
 entities: {{}}
 tools: {{}}
 "#,
@@ -372,14 +384,16 @@ fn the_known_methods_round_trip_through_the_config() {
     for method in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
         let yaml = format!(
             r#"
-schema_version: 1
-transport:
-  rest:
-    base_url: "http://127.0.0.1:1"
-    calls:
-      c:
-        method: {method}
-        path: /x
+schema_version: 2
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: c
+      tool_call_template:
+        call_template_type: http
+        url: "http://127.0.0.1:1/x"
+        http_method: {method}
 entities: {{}}
 tools: {{}}
 "#

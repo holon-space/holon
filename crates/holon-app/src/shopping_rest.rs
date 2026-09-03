@@ -1,11 +1,11 @@
-//! The shopping-list peer over the `rest` transport declared in
+//! The shopping-list peer over the `utcp:` connection declared in
 //! `assets/integrations/shopping.yaml`.
 //!
-//! Both legs are sidecar calls, so the endpoint shape, the commit envelope and
-//! the version path all live in YAML; what stays here is the peer's own
-//! semantics — that only a fully parsed body becomes a [`CompleteSnapshot`],
-//! and that a commit's ack is read from the transport's provider-neutral
-//! version key.
+//! Both legs are sidecar calls and both MAPPINGS are sidecar filters, so the
+//! endpoint shape, the commit envelope, the version path and the peer's JSON
+//! vocabulary all live in YAML. What stays here is the peer's own semantics —
+//! that only a fully mapped body becomes a [`CompleteSnapshot`], and that a
+//! commit's ack is read from the transport's provider-neutral version key.
 
 use std::borrow::Cow;
 use std::sync::atomic::AtomicI64;
@@ -22,10 +22,10 @@ use holon_mcp_client::mcp_call_surface::McpCallSurface;
 use holon_mcp_client::rest_transport::RESPONSE_VERSION_KEY;
 use rmcp::model::CallToolRequestParam;
 
-/// The sidecar call that fetches one whole list.
-pub const LIST_CALL: &str = "list-items";
-/// The sidecar call that commits a batch of commands.
-pub const COMMIT_CALL: &str = "commit-items";
+/// The manual's tool that fetches one whole list.
+pub const LIST_CALL: &str = "pull_list";
+/// The manual's tool that commits a batch of commands.
+pub const COMMIT_CALL: &str = "commit";
 
 pub struct RestShoppingPeer {
     surface: std::sync::Arc<dyn McpCallSurface>,
@@ -38,7 +38,7 @@ pub struct RestShoppingPeer {
 }
 
 impl RestShoppingPeer {
-    /// The list is named by the sidecar's `base_url` — the whole share link,
+    /// The list is named by the manual's tool `url` — the whole share link,
     /// ending in the list id — so nothing here parses or carries a list id.
     pub fn new(surface: std::sync::Arc<dyn McpCallSurface>, device_id: impl Into<String>) -> Self {
         Self {
@@ -92,26 +92,24 @@ impl ShoppingPeer for RestShoppingPeer {
         // reports the write as missing and gets it sent a second time.
         args.insert("nocache".into(), serde_json::json!(epoch_ms()));
         let response = self.call(LIST_CALL, args).await?;
+        let rows = self
+            .surface
+            .map_response(LIST_CALL, &serde_json::Value::Object(response))?;
         // The fetch time is stamped here, where the body is known to have
-        // parsed: it becomes the `last_seen_remote` watermark, and a watermark
+        // mapped: it becomes the `last_seen_remote` watermark, and a watermark
         // from a fetch that failed would license a later absence-as-deletion.
-        let snapshot = CompleteSnapshot::from_response(&response, chrono::Utc::now().to_rfc3339())?;
+        let snapshot = CompleteSnapshot::from_rows(&rows, chrono::Utc::now().to_rfc3339())?;
         self.observe(snapshot.version().list);
         Ok(snapshot)
     }
 
     async fn commit(&self, batch: &CommitBatch) -> Result<CommitAck> {
-        let mut args = serde_json::Map::new();
-        args.insert("version".into(), serde_json::json!(batch.old_version));
-        args.insert(
-            "pickedItemsVersion".into(),
-            serde_json::json!(batch.old_picked_items_version),
-        );
-        args.insert(
-            "deviceId".into(),
-            serde_json::Value::String(self.device_id.clone()),
-        );
-        args.insert("commands".into(), batch.commands_json());
+        // The batch's device id is the reconciler's; this peer's own is what
+        // the install is known by, so the batch carries it into the mapping
+        // rather than the mapping reaching for a second source.
+        let mut stream = batch.to_row_stream();
+        stream["rows"][0]["row"]["device_id"] = serde_json::Value::String(self.device_id.clone());
+        let args = self.surface.map_request(COMMIT_CALL, &stream)?;
 
         let response = self.call(COMMIT_CALL, args).await?;
         let version = response
