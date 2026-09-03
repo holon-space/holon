@@ -403,6 +403,27 @@ The task list shows total polls, busy time, and last-poll — a task that is
 `RUNNING` with a large busy time and few polls is monopolizing a worker thread
 (the starvation signature). Bind address overridable via `TOKIO_CONSOLE_BIND`.
 
+## `target/` disk usage
+
+Cargo names each intermediate build directory
+(`target/<profile>/build/<crate>/<hash>/`) by a hash over its resolved feature
+set. Every host-profile gate in the Justfile now resolves the SAME set via the
+`CANON`/`CANON_FEATURES` variables (D85.c) — an off-shape invocation (a bare
+`cargo check --workspace`, a different `--features` spelling) mints a fresh,
+never-reclaimed directory instead of reusing one; one such mismatch was
+measured adding 711 directories in a single run. Compose `CANON` in new
+recipes rather than retyping `-p`/`--features`; narrow what RUNS with
+`--test <name>` or nextest's `-E`, never with `-p` (that narrows the feature
+resolve too).
+
+`just target-gc [target-dir]` (`scripts/target-gc.py`) reclaims whatever churn
+still accumulates: for each (crate, target) it keeps the newest 2 directories
+and deletes the rest. Dry run by default; `just target-gc` itself passes
+`--apply` since it runs as the last step of `landing-gate`. It refuses to run
+(exit 3) while a cargo/rustc/sccache process is using the target directory.
+Run `python3 scripts/target-gc.py <dir>` directly for a dry-run report without
+deleting anything.
+
 ## Log Analysis
 
 The application logs to `/tmp/holon.log` using the `tracing` crate (format: `timestamp LEVEL module: [Component] message`).

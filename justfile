@@ -8,6 +8,31 @@ set dotenv-load
 # here so every checkout inherits it. `export` puts it in recipes' environment.
 export RUST_FONTCONFIG_DLOPEN := "on"
 
+# --- Canonical compile shape (D85.c) ----------------------------------------
+# Every host-profile gate MUST resolve the same package set and the same feature
+# set. Cargo's build-dir name is a metadata hash over the resolved features, so a
+# recipe that spells its selection differently mints a fresh
+# `target/debug/build/<crate>/<hash>/` for every target it touches and abandons
+# the old one forever — one off-shape `cargo check` was measured adding 711 unit
+# directories, and holon-app reached 878 of them for 34 test targets.
+#
+# Narrow what RUNS with `--test <name>` or nextest's `-E`, never with `-p`: `-p`
+# narrows the feature resolve too, which is the churn. `--workspace` also
+# satisfies D64.a for free (the `holon` crate's tests only compile alongside
+# holon-app).
+#
+# `just target-gc` reclaims whatever churn predates this.
+CANON_FEATURES := "holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-gpui/pbt"
+CANON := "--workspace --features " + CANON_FEATURES
+
+# Off-shape by necessity, each for a reason no variable can absorb:
+#   * `cargo run` / `cargo watch` app launches — `cargo run` rejects `--workspace`.
+#   * wasm and android checks — a different `--target` triple owns its own
+#     target subdirectory, so it cannot share a hash with the host profile.
+#   * out-of-workspace manifests (holon-worker, dioxus-web) and `cargo mutants`.
+#   * scripts/capability-cert-native.sh, which needs `holon/test-helpers`;
+#     folding that into CANON_FEATURES would change what every gate compiles.
+
 # Gate/check recipes write their logs to `target/gate-logs/<name>.log`, never to
 # a fixed /tmp path: `target/` is per jj workspace, so parallel lanes no longer
 # overwrite one another's verdict in a shared file (a lane was once observed
@@ -104,12 +129,12 @@ pbt name='general' cases='64' *FLAGS:
     case "{{name}}" in
         general)
             PROPTEST_CASES={{cases}} cargo test \
-                -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
+                {{CANON}} --test general_e2e_composed_pbt \
                 -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-general.log
             ;;
         petri)
             PROPTEST_CASES={{cases}} cargo test \
-                -p holon --test petri_e2e_pbt \
+                {{CANON}} --test petri_e2e_pbt \
                 -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-petri.log
             ;;
         orgmode)
@@ -119,15 +144,15 @@ pbt name='general' cases='64' *FLAGS:
             # recipe until 2026-08-04, which is why a renderer regression reached
             # a green report.
             PROPTEST_CASES={{cases}} cargo test \
-                -p holon-orgmode --test round_trip_pbt \
+                {{CANON}} --test round_trip_pbt \
                 -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-orgmode.log
             PROPTEST_CASES={{cases}} cargo test \
-                -p holon-orgmode --test org_block_round_trip_pbt \
+                {{CANON}} --test org_block_round_trip_pbt \
                 -- --nocapture {{FLAGS}} 2>&1 | tee -a target/gate-logs/pbt-orgmode.log
             ;;
         loro)
             PROPTEST_CASES={{cases}} cargo test \
-                -p holon --test api_suite loro_backend_pbt \
+                {{CANON}} --test api_suite loro_backend_pbt \
                 -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-loro.log
             ;;
         *)
@@ -152,7 +177,7 @@ loro-suite:
     set -euo pipefail
     mkdir -p target/gate-logs
     L=target/gate-logs/loro-suite.log
-    cargo nextest run -p holon-integration-tests --features holon-integration-tests/pbt \
+    cargo nextest run {{CANON}} \
         --test loro_suite --no-fail-fast 2>&1 | tee "$L"
     grep -qE 'Summary \[.*\b[1-9][0-9]* tests run' "$L" \
         || { echo "loro-suite: ran 0 tests — the filter or target is wrong"; exit 1; }
@@ -206,7 +231,7 @@ hand-authored *FLAGS:
     export HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1}
     export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-}
     cargo test \
-        -p holon-integration-tests --features pbt --test hand_authored_regressions \
+        {{CANON}} --test hand_authored_regressions \
         -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-hand-authored.log
 
 # Weave-time full keystone sweep (orchestrator-run, typically in background)
@@ -291,7 +316,7 @@ keystone-scale size='25000' cases='1' settle_ms='900000' per_doc='200' *FLAGS:
         HOLON_SOAK_BLOCKS_PER_DOC={{per_doc}} HOLON_PBT_FORCE_FULL=1 \
         RUST_LOG="holon_latency=debug" \
         PROPTEST_CASES={{cases}} cargo test \
-        -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
+        {{CANON}} --test general_e2e_composed_pbt \
         -- --nocapture {{FLAGS}} 2>&1 | tee "$log"
 
 # The ONE keystone driven over the LIVE MCP surface (LiveMcpE2E composition,
@@ -315,7 +340,7 @@ keystone-mcp port='8710' cases='8' weights='':
     fi
     HOLON_PBT_LIVE_MCP=1 MCP_SERVER_PORT={{port}} PROPTEST_CASES={{cases}} \
         HOLON_PBT_WEIGHTS="{{weights}}" cargo test \
-        -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
+        {{CANON}} --test general_e2e_composed_pbt \
         general_e2e_composed_pbt_live_mcp \
         -- --nocapture 2>&1 | tee target/gate-logs/pbt-keystone-mcp.log
 
@@ -361,7 +386,7 @@ pbt-extended-gen cases='64' *FLAGS:
     set -euo pipefail
     mkdir -p target/gate-logs
     PROPTEST_CASES={{cases}} HOLON_PBT_EXTENDED_GEN=1 cargo test \
-        -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
+        {{CANON}} --test general_e2e_composed_pbt \
         -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-extended-gen.log
 
 # Layout-override sweep — the ONE keystone with the index.org override arms (prql/gql/sql
@@ -375,7 +400,7 @@ pbt-layout-override cases='64' *FLAGS:
     set -euo pipefail
     mkdir -p target/gate-logs
     PROPTEST_CASES={{cases}} HOLON_PBT_LAYOUT_OVERRIDE=1 cargo test \
-        -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
+        {{CANON}} --test general_e2e_composed_pbt \
         -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-layout-override.log
 
 # Measure end-to-end UI action latency (indent / outdent / cycle-state / split / ...).
@@ -389,7 +414,7 @@ measure-latency cases='16' *FLAGS:
     set -euo pipefail
     mkdir -p target/gate-logs
     RUST_LOG="holon_latency=debug" PROPTEST_CASES={{cases}} \
-        cargo test -p holon-integration-tests --features pbt \
+        cargo test {{CANON}} \
         --test general_e2e_composed_pbt -- --nocapture {{FLAGS}} \
         > target/gate-logs/holon-latency.log 2>&1 || true
     echo "raw log: target/gate-logs/holon-latency.log ($(grep -c holon_latency target/gate-logs/holon-latency.log || true) events)"
@@ -442,7 +467,7 @@ latency-gate ceilings='docs/Testing/latency-ceilings.txt':
     status=0
     RUST_LOG="holon_latency=debug" \
         HOLON_HAND_AUTHORED_SIDECAR="hand-authored-regressions/latency-ratchet.jsonl" \
-        cargo test -p holon-integration-tests --features pbt \
+        cargo test {{CANON}} \
         --test hand_authored_regressions -- --nocapture > "$log" 2>&1 || status=$?
     [ "$status" -eq 0 ] || echo "latency-gate: NOTE — replay exited $status; latency data below is still judged (see $log)"
     # Floor of 18: every rung is driven >= 20 times by construction, so a count
@@ -482,7 +507,7 @@ latency-slo-gate *FLAGS:
              crates/holon-api/src/latency_slo.rs; do
         [ -f "$f" ] || { echo "latency-slo-gate: wrong tree — missing $f" >&2; exit 2; }
     done
-    cargo test -p holon-integration-tests --features pbt --test latency_slo_gate \
+    cargo test {{CANON}} --test latency_slo_gate \
         -- --nocapture --test-threads=1 {{FLAGS}} 2>&1 \
         | tee target/gate-logs/latency-slo-gate.log
 
@@ -517,7 +542,7 @@ soak size='5000' actions='320' settle_ms='30000' per_doc='200' soften='':
         HOLON_SOAK_BLOCKS_PER_DOC={{per_doc}} HOLON_PBT_FORCE_FULL=1 \
         HOLON_PBT_INVARIANTS="{{soften}}" \
         RUST_LOG="holon_latency=debug" PROPTEST_CASES="$cases" \
-        cargo test -p holon-integration-tests --features pbt \
+        cargo test {{CANON}} \
         --test general_e2e_composed_pbt -- --nocapture \
         > "$log" 2>&1 || echo "NOTE: test exited non-zero (see $log tail) — latency data below is still valid"
     wait "$sampler" 2>/dev/null || true
@@ -581,7 +606,7 @@ pbt-lib-slices:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo nextest run -p holon-integration-tests --lib --features pbt \
+    cargo nextest run {{CANON}} --lib -E 'package(holon-integration-tests)' \
         2>&1 | tee target/gate-logs/pbt-lib-slices.log
 
 # --- Mutation Testing -------------------------------------------------------
@@ -614,16 +639,19 @@ build *FLAGS: icons
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo build --workspace {{FLAGS}} 2>&1 | tee target/gate-logs/holon-build.log
+    cargo build {{CANON}} {{FLAGS}} 2>&1 | tee target/gate-logs/holon-build.log
 
 # Clippy across workspace
 clippy:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo clippy --workspace --all-targets 2>&1 | tee target/gate-logs/holon-clippy.log
+    cargo clippy {{CANON}} --all-targets 2>&1 | tee target/gate-logs/holon-clippy.log
 
-# Run all workspace tests (not PBTs — those are slow)
+# Run all workspace tests (not PBTs — those are slow). Deliberately OFF the
+# canonical feature shape above: unifying would pull in every pbt-gated test
+# this recipe exists to skip, which is a "which tests run" change, not a
+# compile-shape one.
 test:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -751,7 +779,7 @@ lint:
     cargo fmt --check || { echo "FAIL: formatting"; failed=1; }
     echo ""
     echo "=== cargo clippy ==="
-    cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee target/gate-logs/holon-clippy.log || { echo "FAIL: clippy"; failed=1; }
+    cargo clippy {{CANON}} --all-targets -- -D warnings 2>&1 | tee target/gate-logs/holon-clippy.log || { echo "FAIL: clippy"; failed=1; }
     echo ""
     echo "=== cargo deny ==="
     cargo deny check 2>&1 | tee target/gate-logs/holon-deny.log || { echo "FAIL: deny"; failed=1; }
@@ -850,7 +878,7 @@ analyze-clippy:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo clippy --workspace --all-targets 2>&1 \
+    cargo clippy {{CANON}} --all-targets 2>&1 \
         | tee target/gate-logs/holon-analyze-clippy.log
 
 # Copy-paste / duplication detection via polydup.
@@ -1026,30 +1054,33 @@ gate-compile:
     # and the recipe passes however red the compile is.
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo check --workspace --all-targets \
-        --features holon-integration-tests/pbt,holon-gpui/pbt \
+    cargo check {{CANON}} --all-targets \
         2>&1 | tee target/gate-logs/gate-compile.log
     just check-web-arm
 
-# Web arm (dioxus-web under test) typecheck. `gate-compile` above resolves
-# `--features holon-integration-tests/pbt,holon-gpui/pbt`, which does NOT enable
-# `web-arm` — so the driver, the relay oracle and the keystone-replay layer
-# compiled under no gate at all and could rot silently between browser runs.
-#
-# Compile-only, and that is sufficient: every web-arm test is `#[ignore]`d
-# because it needs a served `dist/` and a local Chrome, so this recipe needs
-# neither. `--all-targets` is what reaches the test files themselves; without it
-# only the library half is checked.
-#
-# Typecheck the browser arm, which no other gate compiles.
+# Reclaim superseded `target/<profile>/build/<crate>/<hash>/` directories
+# (D85.c part A): a hash dir is garbage once a newer dir for the same
+# crate/target exists. The CANON feature shape above is what stops NEW churn;
+# this sweeps whatever churn predates it, or slips in from an off-shape recipe
+# (`profile`, `sample-pbt`, `scripts/capability-cert*.sh`, wasm/android checks).
+# Refuses to run while cargo/rustc is using the target dir. Dry run by default.
+target-gc target_dir='target' *FLAGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    /usr/bin/python3 scripts/target-gc.py {{target_dir}} --apply {{FLAGS}}
+
+# Web arm (dioxus-web under test) typecheck — the SAME shape as `gate-compile`
+# above (CANON_FEATURES carries web-arm too, D85.c), so this call costs cargo
+# nothing once gate-compile has run: it re-asks the identical question and gets
+# a cached no-op. Kept as its own recipe/log so `precommit`/`landing-gate` can
+# report it as a distinct step and so `just check-web-arm` still works standalone.
 check-web-arm:
     #!/usr/bin/env bash
     # pipefail is REQUIRED, exactly as in gate-compile above: without it the
     # exit status is `tee`'s and the recipe passes however red the compile is.
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo check -p holon-integration-tests --all-targets \
-        --features web-arm,pbt \
+    cargo check {{CANON}} --all-targets \
         2>&1 | tee target/gate-logs/check-web-arm.log
 
 # Architecture rules (archlint + the Rust-side structural tests). Its own
@@ -1062,7 +1093,7 @@ gate-arch:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo nextest run -p holon-architecture-tests 2>&1 | tee target/gate-logs/gate-arch.log
+    cargo nextest run {{CANON}} --test architecture_rules 2>&1 | tee target/gate-logs/gate-arch.log
 
 # Tier 1 pre-commit gate: gate-integrity lints, defensive-code ratchet, typecheck.
 # The justfile guard runs FIRST and costs ~10ms: a never-fail recipe invalidates
@@ -1109,7 +1140,7 @@ prepush:
     just check-dioxus-web-wasm
     echo "== Tier 2 [4/4]: full keystone (PROPTEST_CASES=16) =="
     PROPTEST_CASES=16 cargo test \
-        -p holon-integration-tests --features pbt --test general_e2e_composed_pbt \
+        {{CANON}} --test general_e2e_composed_pbt \
         2>&1 | tee target/gate-logs/prepush-keystone.log
     echo "== Tier 2 PASS =="
 
@@ -1120,26 +1151,28 @@ prepush:
 landing-gate:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== landing [1/10]: fmt =="
+    echo "== landing [1/11]: fmt =="
     cargo fmt --all -- --check
-    echo "== landing [2/10]: typecheck incl. every test target =="
+    echo "== landing [2/11]: typecheck incl. every test target =="
     just gate-compile
-    echo "== landing [3/10]: browser-target typecheck =="
+    echo "== landing [3/11]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== landing [4/10]: out-of-workspace browser frontend =="
+    echo "== landing [4/11]: out-of-workspace browser frontend =="
     just check-dioxus-web-wasm
-    echo "== landing [5/10]: out-of-workspace wasi worker =="
+    echo "== landing [5/11]: out-of-workspace wasi worker =="
     just check-worker-wasm
-    echo "== landing [6/10]: architecture rules =="
+    echo "== landing [6/11]: architecture rules =="
     just gate-arch
-    echo "== landing [7/10]: keystone smoke =="
+    echo "== landing [7/11]: keystone smoke =="
     just keystone-smoke
-    echo "== landing [8/10]: loro consolidator suite =="
+    echo "== landing [8/11]: loro consolidator suite =="
     just loro-suite
-    echo "== landing [9/10]: hand-authored regressions =="
+    echo "== landing [9/11]: hand-authored regressions =="
     just hand-authored
-    echo "== landing [10/10]: latency SLO (D50.a) =="
+    echo "== landing [10/11]: latency SLO (D50.a) =="
     just latency-slo-gate
+    echo "== landing [11/11]: target-gc (D85.c, this lane's own target/ only) =="
+    just target-gc || echo "target-gc: non-fatal (busy or nothing to reclaim), see above"
     echo "== landing gate PASS =="
 
 # --- Observability ----------------------------------------------------------
@@ -1179,6 +1212,6 @@ gherkin-replay-capture feature='frontends/gpui/tests/features/ordinary_block_int
     mkdir -p "$dir"
     echo "capturing frames to $dir"
     HOLON_CAPTURE_DIR="$dir" GHERKIN_FEATURE="$(pwd)/{{feature}}" \
-        cargo test -p holon-gpui --features pbt --test gpui_gherkin_replay -- --test-threads=1
+        cargo test {{CANON}} --test gpui_gherkin_replay -- --test-threads=1
     just obs-collect
     echo "frames: $dir"
