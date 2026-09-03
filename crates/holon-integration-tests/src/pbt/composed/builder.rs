@@ -406,6 +406,10 @@ async fn compose_sut_seeded_impl(
         // selected for the wide composed PBT and (via `sut_absent`) keeps the degraded
         // `inv-viewmodel-shows-source-when-no-query` twin deselected here.
         caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
+        // `SutSearch` (quick-open): hosted on the same Turso-backed arm — the
+        // production `quick_open_search` predicate needs the `block` matview
+        // and the `block_tags` junction, which only this config has.
+        caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutSearch>);
         // `SutHistory` (C2 provenance oracle read cap): this frontend's
         // `BackendEngine` unconditionally wires a real `TursoHistoryStore`, so
         // expose `block_history` to the phantom/missed-history correspondences.

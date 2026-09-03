@@ -3,7 +3,7 @@ id: 2026-09-03-search-does-not-fold-case-for-non-ascii-letters
 date: 2026-09-03
 gap: COVERAGE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   Search folds case for ASCII but not for umlauts, so a German query typed with
   a capital Ü matches nothing while 28 blocks contain ü.
@@ -54,3 +54,34 @@ the lower-case content to match. Note this bug is masked today by
 `2026-09-03-quick-open-search-returns-no-matches-for-every-query` — search
 returns nothing for any query — so the fix order is that entry first, this one
 second, and the umlaut test only becomes meaningful after search works at all.
+
+## Resolution (2026-09-03, lane `search-fix`)
+
+FIXED for case; unicode NORMALIZATION remains open (see below).
+
+`LIKE` folds ASCII and nothing else, so folding is now done on both sides.
+`SearchMatch` simple-lowercases the query in Rust, and `folded_column` wraps the
+stored column in one `replace()` per distinct cased non-ASCII letter the query
+contains — so the cost is bounded by the query, never by the vault. Simple, not
+full, folding: `ß` uppercases to `SS`, which a per-character `replace()` cannot
+express, so it folds to itself (and `ẞ` with it, guarded by the round-trip check
+in `simple_upper`) rather than half-folding into a match the pattern can never
+reach.
+
+NOT fixed and deliberately out of scope: NFC/NFD normalization. An NFD-decomposed
+`u` + combining diaeresis still does not match an NFC `ü`. That is a separate
+change (normalize at the ingest boundary, not in the predicate) and needs its own
+entry when taken up.
+
+## Covering tests
+
+- Hand-authored keystone case `search-folds-case-for-non-ascii-letters`
+  (`crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl`).
+  Red-for-the-right-reason with the engine reverted:
+  `quick_open_search("übung") missed block:searchumlaut in the In content
+  section: its content "Übung" contains the query ... so nothing was truncated`.
+- `crates/holon-app/tests/quick_open_search_at_vault_scale.rs` — `Übung`,
+  `übung`, `ÜBUNG` and `üBuNg` must all find the one stored `Übung` block.
+- The keystone `Search` oracle folds with the same simple-folding rule, and its
+  generator case-perturbs drawn queries in Unicode (not ASCII), so a `é` in
+  generated content also arrives as `É`.

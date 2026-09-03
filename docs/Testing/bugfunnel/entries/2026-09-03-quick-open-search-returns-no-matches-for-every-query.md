@@ -3,7 +3,7 @@ id: 2026-09-03-quick-open-search-returns-no-matches-for-every-query
 date: 2026-09-03
 gap: COVERAGE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   The cmd-k quick-open overlay reports "No matches" for every query on a
   2257-block vault, including terms whose backing SQL returns rows.
@@ -67,3 +67,36 @@ Open. The fix must start with the covering test, per the feature contract: add a
 search transition to the keystone catalog plus an invariant that a query whose
 backing predicate matches at least one block must not render the empty state.
 That test has to go red on this build before the overlay is touched.
+
+## Resolution (2026-09-03, lane `search-fix`)
+
+FIXED. The mechanism was never in the overlay: it was the Pages branch's `JOIN`
+against the `block` MATVIEW. Measured on the 2257-block / 129-page fixture, the
+two spellings of the same predicate:
+
+    ... FROM block b JOIN block_tags bt ON bt.block_id = b.id
+        WHERE bt.tag = 'Page' AND b.content LIKE '%Compass%'   -> 10.74 s
+    ... FROM block b WHERE b.id IN (SELECT block_id FROM block_tags
+        WHERE tag = 'Page') AND b.content LIKE '%Compass%'     ->  0.053 s
+
+That is the whole "silent" part of the escape. `run_search` drops any response a
+newer keystroke has overtaken (`s.generation == generation`), so at 5-10 s per
+call every response lost the race and the overlay kept rendering its empty
+state — no error was swallowed, no error ever existed. The predicate now uses
+the `IN` subquery; end-to-end `quick_open_search` on the same fixture is 106 ms
+for a selective query.
+
+The fail-loud leg was checked and reinforced rather than added: a query error
+already becomes `s.error` and is rendered instead of the empty state, and the
+two places that could have discarded a result silently (`tx.send` on a dropped
+receiver, `update_window` on a closed window) now log an ERROR instead of
+`let _ =`.
+
+## Covering tests
+
+- `crates/holon-integration-tests/src/pbt/transitions/search.rs` — keystone
+  `Search` transition: hits are compared against the reference model's own
+  substring match, per section, for soundness and (untruncated) completeness.
+- `crates/holon-app/tests/quick_open_search_at_vault_scale.rs` — deterministic
+  pin at real-vault scale, incl. a per-keystroke latency budget that fails if a
+  search becomes slow enough to lose the newest-response race again.

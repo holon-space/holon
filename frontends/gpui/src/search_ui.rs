@@ -180,6 +180,7 @@ pub fn run_search(
 ) {
     let (tx, rx) =
         futures::channel::oneshot::channel::<Result<holon_api::QuickOpenResults, String>>();
+    let query_for_log = query.clone();
     rt_handle.spawn(async move {
         let outcome = match session.query_engine() {
             Some(qe) => qe
@@ -190,13 +191,19 @@ pub fn run_search(
                 "Search needs the Turso query backend, which this session doesn't have".to_string(),
             ),
         };
-        let _ = tx.send(outcome);
+        if let Err(unsent) = tx.send(outcome) {
+            tracing::error!(
+                query = %query,
+                outcome = ?unsent,
+                "quick_open_search: the overlay dropped its receiver before the result arrived"
+            );
+        }
     });
 
     async_cx
         .spawn(async move |cx| {
             let outcome = rx.await;
-            let _ = cx.update_window(window_handle, |_, _window, cx| {
+            let delivered = cx.update_window(window_handle, |_, _window, cx| {
                 state.update(cx, |s, cx| {
                     // Drop stale responses (a newer keystroke already fired).
                     if s.generation == generation {
@@ -235,6 +242,13 @@ pub fn run_search(
                     }
                 });
             });
+            if let Err(e) = delivered {
+                tracing::error!(
+                    query = %query_for_log,
+                    error = %e,
+                    "quick_open_search: results could not reach the overlay — the window is gone"
+                );
+            }
         })
         .detach();
 }

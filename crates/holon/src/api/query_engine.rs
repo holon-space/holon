@@ -78,7 +78,8 @@ impl QueryEngine for BackendEngine {
 
     async fn search_link_candidates(&self, filter: &str) -> Result<Vec<LinkCandidate>> {
         use crate::storage::BLOCK_READ_TABLE;
-        let escaped = filter.replace('\'', "''");
+        let m = SearchMatch::new(filter);
+        let (bare, qualified) = (m.contained_in("content"), m.contained_in("b.content"));
         // Subquery wrapping required — Turso rejects bare UNION.
         // The two branches are DISJOINT so no entity is listed twice: the
         // content branch excludes Page-tagged blocks (which the page branch
@@ -86,11 +87,11 @@ impl QueryEngine for BackendEngine {
         // twice in the `[[` popup — once as a block, once as a page.
         // Page rows surface the first content line (the title) as the label.
         let sql = format!(
-            "SELECT * FROM (SELECT id, content AS label FROM {BLOCK_READ_TABLE} WHERE content \
-             LIKE '%{escaped}%' AND id NOT IN (SELECT block_id FROM block_tags WHERE tag = 'Page') \
-             LIMIT 15) UNION ALL SELECT * FROM (SELECT b.id, substr(b.content, 1, instr(b.content \
-             || char(10), char(10)) - 1) AS label FROM {BLOCK_READ_TABLE} b JOIN block_tags bt ON \
-             bt.block_id = b.id WHERE bt.tag = 'Page' AND b.content LIKE '%{escaped}%' LIMIT 5)"
+            "SELECT * FROM (SELECT id, content AS label FROM {BLOCK_READ_TABLE} WHERE {bare} AND \
+             id NOT IN (SELECT block_id FROM block_tags WHERE tag = 'Page') LIMIT 15) UNION ALL \
+             SELECT * FROM (SELECT b.id, substr(b.content, 1, instr(b.content || char(10), \
+             char(10)) - 1) AS label FROM {BLOCK_READ_TABLE} b WHERE b.id IN (SELECT block_id \
+             FROM block_tags WHERE tag = 'Page') AND {qualified} LIMIT 5)"
         );
         let rows = BackendEngine::execute_query(self, sql, HashMap::new(), None).await?;
         parse_link_candidates(rows)
@@ -102,22 +103,28 @@ impl QueryEngine for BackendEngine {
         if trimmed.is_empty() {
             return Ok(holon_api::QuickOpenResults::default());
         }
-        let escaped = trimmed.replace('\'', "''");
+        let m = SearchMatch::new(trimmed);
+        let (anywhere, prefix) = (m.contained_in("b.content"), m.prefix_of("b.content"));
 
         // Pages: blocks carrying the 'Page' tag whose content matches. Label is
         // the first content line (the page title). Prefix matches rank first.
+        //
+        // The Page predicate is an `IN` subquery, never a JOIN against the
+        // `block` matview: the joined spelling costs 10.7s on a 2257-block
+        // vault against 53ms for this one (measured), which put every keystroke
+        // past the newest-response guard and rendered search permanently empty.
         let pages_sql = format!(
             "SELECT b.id AS id, substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) \
-             AS label FROM {BLOCK_READ_TABLE} b JOIN block_tags bt ON bt.block_id = b.id WHERE \
-             bt.tag = 'Page' AND b.content LIKE '%{escaped}%' ORDER BY (b.content LIKE \
-             '{escaped}%') DESC, length(b.content) ASC LIMIT 20"
+             AS label FROM {BLOCK_READ_TABLE} b WHERE b.id IN (SELECT block_id FROM block_tags \
+             WHERE tag = 'Page') AND {anywhere} ORDER BY ({prefix}) DESC, length(b.content) ASC \
+             LIMIT 20"
         );
         // Content: non-page blocks whose content matches. Label is the matched
         // content (full block content — the modal truncates for display).
         let content_sql = format!(
-            "SELECT b.id AS id, b.content AS label FROM {BLOCK_READ_TABLE} b WHERE b.content LIKE \
-             '%{escaped}%' AND b.id NOT IN (SELECT block_id FROM block_tags WHERE tag = 'Page') \
-             ORDER BY (b.content LIKE '{escaped}%') DESC, length(b.content) ASC LIMIT 30"
+            "SELECT b.id AS id, b.content AS label FROM {BLOCK_READ_TABLE} b WHERE {anywhere} AND \
+             b.id NOT IN (SELECT block_id FROM block_tags WHERE tag = 'Page') ORDER BY ({prefix}) \
+             DESC, length(b.content) ASC LIMIT 30"
         );
 
         let pages = parse_link_candidates(
@@ -241,8 +248,8 @@ impl QueryEngine for BackendEngine {
             .join(", ");
         let titles_sql = format!(
             "SELECT b.id AS id, substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) \
-             AS label FROM {BLOCK_READ_TABLE} b JOIN block_tags bt ON bt.block_id = b.id WHERE \
-             bt.tag = 'Page' AND b.id IN ({in_list})"
+             AS label FROM {BLOCK_READ_TABLE} b WHERE b.id IN (SELECT block_id FROM block_tags \
+             WHERE tag = 'Page') AND b.id IN ({in_list})"
         );
         let title_rows =
             BackendEngine::execute_query(self, titles_sql, HashMap::new(), None).await?;
@@ -372,6 +379,73 @@ impl QueryEngine for BackendEngine {
         )
         .declared_keywords(id.as_str())
         .await
+    }
+}
+
+/// Unicode *simple* lowercase: the lowercase form when that is a single
+/// character, else the character unchanged. Only simple folding is available
+/// here because a `GLOB` character class holds single characters, so `ß` → `ss`
+/// is inexpressible.
+fn simple_lower(c: char) -> char {
+    let mut lower = c.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(l), None) => l,
+        _ => c,
+    }
+}
+
+/// The `simple_lower` counterpart, so a fold is only applied where the two
+/// round-trip: `ß` uppercases to `SS` and therefore folds to itself, and so
+/// does `ẞ`, which would otherwise fold onto a `ß` the pattern never reaches.
+fn simple_upper(c: char) -> char {
+    let mut upper = c.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(u), None) if simple_lower(u) == c => u,
+        _ => c,
+    }
+}
+
+/// A user-typed search string parsed into a case-insensitive SQL `GLOB`
+/// pattern in which every character the user typed matches only itself.
+///
+/// `GLOB` rather than `LIKE` because the fold has to live in the pattern:
+/// `GLOB` is case-sensitive, so each cased letter carries its own two-element
+/// character class and folding costs one flat class per character. Folding the
+/// stored side instead — the `LIKE` spelling — nests one `replace()` per cased
+/// letter, and that depth overflowed the stack on a Cyrillic or Greek phrase
+/// (entry `search-folding-crashes-the-app-on-cyrillic-and-greek`).
+struct SearchMatch {
+    /// The pattern between the quotes, already escaped for both `GLOB` and the
+    /// SQL string literal that carries it.
+    body: String,
+}
+
+impl SearchMatch {
+    fn new(query: &str) -> Self {
+        let mut body = String::new();
+        for c in query.chars() {
+            let lower = simple_lower(c);
+            let upper = simple_upper(lower);
+            match c {
+                _ if upper != lower => body.extend(['[', lower, upper, ']']),
+                // `GLOB` has no escape character, so a one-element class is the
+                // only way to spell its own metacharacters literally.
+                '*' | '?' | '[' => body.extend(['[', c, ']']),
+                '\'' => body.push_str("''"),
+                _ => body.push(c),
+            }
+        }
+        Self { body }
+    }
+
+    /// Predicate: `column` contains the query anywhere.
+    fn contained_in(&self, column: &str) -> String {
+        format!("{column} GLOB '*{}*'", self.body)
+    }
+
+    /// Predicate: `column` starts with the query — the prefix ranker.
+    fn prefix_of(&self, column: &str) -> String {
+        format!("{column} GLOB '{}*'", self.body)
     }
 }
 

@@ -1963,6 +1963,28 @@ pub trait SutQueryResults {
     async fn root_query_row_count(&self) -> Option<usize>;
 }
 
+/// One quick-open hit, in the section the search put it in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHit {
+    pub id: EntityUri,
+    /// What the overlay shows for the hit: a page's title line, or a content
+    /// block's full text.
+    pub label: String,
+    /// True for the Pages section, false for the In-content section.
+    pub is_page_section: bool,
+}
+
+/// SUT-side quick-open search surface — the same
+/// `QueryEngine::quick_open_search` the cmd-K overlay calls, so a keystone
+/// `Search` step exercises the production predicate rather than a test-only
+/// re-implementation of it.
+#[holon_macros::capmap_adapter]
+pub trait SutSearch {
+    /// Both quick-open sections, flattened and tagged. Fails loud: a query
+    /// error is returned (rendered) instead of reading as "no matches".
+    async fn quick_open_search(&self, query: &str) -> Result<Vec<SearchHit>, String>;
+}
+
 // ─── Phase 6d — Layout/Bounds cluster ────────────────────────────────
 //
 // Re-export trait over `holon_pbt_core::user_driver::UserDriver` geometry
