@@ -339,6 +339,50 @@ struct PreparedOp {
     /// they MUST run after every referenced `block_raw` row exists — i.e.
     /// after all `row_statements` of the whole batch.
     edge_statements: Vec<String>,
+    /// Every id these statements REMOVE from the table, a delete cascade's
+    /// descendants included. A batch subtracts these from the rows it holds to
+    /// its "still exists" postcondition: a row the batch itself removed is not
+    /// a row the sink lost. Empty for anything that leaves the row in place,
+    /// a tombstone included.
+    removed_ids: Vec<String>,
+}
+
+/// The `parent_id` values a batch has already staged in `row_statements` ahead
+/// of the op being prepared.
+///
+/// A prepare reads the database as it stood BEFORE the batch, but the batch's
+/// own statements execute in op order inside one transaction. A delete's
+/// descendant walk therefore has to fold in the moves staged before it, or it
+/// cascades onto a child the same batch has already reparented to safety and
+/// deletes a row nothing asked to delete.
+///
+/// It only ever SUBTRACTS. A child staged INTO the deleted subtree is left
+/// alone: its row keeps a `parent_id` pointing at a deleted block, and the
+/// deferred self-FK rejects the whole batch at COMMIT — loud, and recoverable
+/// by a reseed, which silently widening the cascade would not be.
+#[derive(Default)]
+struct StagedParents(HashMap<String, String>);
+
+impl StagedParents {
+    /// Record the `parent_id` an already-prepared create/update writes.
+    fn stage(&mut self, params: &StorageEntity) {
+        let (Some(id), Some(parent)) = (
+            params.get("id").and_then(|v| v.as_string()),
+            params.get("parent_id").and_then(|v| v.as_string()),
+        ) else {
+            return;
+        };
+        self.0.insert(id.to_string(), parent.to_string());
+    }
+
+    /// `children` as the database has them, minus those a staged move takes
+    /// out from under `parent`.
+    fn still_under(&self, parent: &str, children: Vec<String>) -> Vec<String> {
+        children
+            .into_iter()
+            .filter(|child| self.0.get(child).is_none_or(|staged| staged == parent))
+            .collect()
+    }
 }
 
 /// SQL-based operation provider that writes directly to a Turso table.
@@ -1477,6 +1521,7 @@ impl SqlOperationProvider {
         Ok(PreparedOp {
             row_statements,
             edge_statements,
+            removed_ids: Vec::new(),
         })
     }
 
@@ -1694,6 +1739,7 @@ impl SqlOperationProvider {
         Ok(Some(PreparedOp {
             row_statements,
             edge_statements,
+            removed_ids: Vec::new(),
         }))
     }
 
@@ -1718,6 +1764,7 @@ impl SqlOperationProvider {
         &self,
         plan: &DeletePlan,
         params: &StorageEntity,
+        staged: &StagedParents,
     ) -> Result<PreparedOp> {
         match plan {
             DeletePlan::Tombstone { column, at } => {
@@ -1727,14 +1774,88 @@ impl SqlOperationProvider {
                     .ok_or_else(|| "Missing 'id' parameter".to_string())?;
                 Ok(self.tombstone_statements(id, column, at))
             }
-            DeletePlan::Purge => self.prepare_purge(params).await,
+            DeletePlan::Purge => self.prepare_purge(params, staged).await,
         }
+    }
+
+    /// Postcondition of a batch: every row it UPDATEd, and did not itself
+    /// create or delete, exists.
+    ///
+    /// SQL grants an UPDATE against a missing row silently — zero rows, no
+    /// error — so a sink row lost behind the caller's back stays lost and the
+    /// caller goes on re-emitting UPDATEs that do nothing. Erroring here makes
+    /// the divergence loud AND recoverable: the Loro projection reacts to a
+    /// failed batch by dropping its in-memory base and reseeding from sink
+    /// truth, which re-emits the row as a create.
+    ///
+    /// `cascade_removed` names the rows a delete in THIS batch swept up as
+    /// descendants. Updating one of those is a caller contradicting itself —
+    /// it asserts the row is alive and deletes an ancestor of it in the same
+    /// breath — which is a different diagnosis from a row that went missing
+    /// for no reason this batch can see, and the message says which.
+    async fn assert_updated_rows_exist(
+        &self,
+        ids: &[String],
+        cascade_removed: &HashSet<String>,
+    ) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let list = ids
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let present: HashSet<String> = self
+            .db_handle
+            .query(
+                &format!("SELECT id FROM {} WHERE id IN ({list})", self.table_name),
+                HashMap::new(),
+            )
+            .await
+            .map_err(|e| format!("assert_updated_rows_exist: {e}"))?
+            .into_iter()
+            .filter_map(|row| {
+                row.get("id")
+                    .and_then(|v| v.as_string())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        let missing: Vec<&String> = ids.iter().filter(|id| !present.contains(*id)).collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let (cascaded, lost): (Vec<&String>, Vec<&String>) = missing
+            .iter()
+            .partition(|id| cascade_removed.contains(**id));
+        if !lost.is_empty() {
+            return Err(format!(
+                "batch UPDATE hit {} row(s) that do not exist in `{}`: {lost:?} — the sink lost \
+                 rows the caller still believes in, and an UPDATE to a missing row is a silent \
+                 no-op that can never restore them",
+                lost.len(),
+                self.table_name,
+            )
+            .into());
+        }
+        Err(format!(
+            "batch UPDATEd {} row(s) its own delete cascade removed from `{}`: {cascaded:?} — the \
+             caller asserts these rows are alive and deletes an ancestor of them in the same \
+             batch, so its tree and the sink now disagree and only a reseed settles it",
+            cascaded.len(),
+            self.table_name,
+        )
+        .into())
     }
 
     /// The batch write leg's delete: the same plan and the same SQL the
     /// single-op route runs, without the inverse an undoable op needs.
-    async fn prepare_delete(&self, params: &StorageEntity) -> Result<PreparedOp> {
-        self.delete_statements(&self.delete_plan("delete")?, params)
+    async fn prepare_delete(
+        &self,
+        params: &StorageEntity,
+        staged: &StagedParents,
+    ) -> Result<PreparedOp> {
+        self.delete_statements(&self.delete_plan("delete")?, params, staged)
             .await
     }
 
@@ -1750,6 +1871,7 @@ impl SqlOperationProvider {
     /// fact about the named row alone.
     fn tombstone_statements(&self, id: &str, column: &str, at: &str) -> PreparedOp {
         PreparedOp {
+            removed_ids: Vec::new(),
             row_statements: vec![format!(
                 "UPDATE {table} SET {column} = '{at}' WHERE id = '{id}'",
                 table = self.table_name,
@@ -1761,7 +1883,11 @@ impl SqlOperationProvider {
         }
     }
 
-    async fn prepare_purge(&self, params: &StorageEntity) -> Result<PreparedOp> {
+    async fn prepare_purge(
+        &self,
+        params: &StorageEntity,
+        staged: &StagedParents,
+    ) -> Result<PreparedOp> {
         let id = params
             .get("id")
             .and_then(|v| v.as_string())
@@ -1799,7 +1925,7 @@ impl SqlOperationProvider {
                         .map(|s| s.to_string())
                 })
                 .collect();
-            for child in children {
+            for child in staged.still_under(&parent, children) {
                 if !visited.insert(child.clone()) {
                     return Err(format!(
                         "prepare_purge: parent cycle detected while cascading delete of '{id}' — \
@@ -1854,6 +1980,7 @@ impl SqlOperationProvider {
         Ok(PreparedOp {
             row_statements,
             edge_statements,
+            removed_ids: all_ids.into_iter().chain([id.to_string()]).collect(),
         })
     }
 
@@ -3654,6 +3781,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         let mut p = prepared.unwrap_or(PreparedOp {
                             row_statements: Vec::new(),
                             edge_statements: Vec::new(),
+                            removed_ids: Vec::new(),
                         });
                         p.edge_statements.extend(link_statements);
                         prepared = Some(p);
@@ -3718,7 +3846,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     _ => None,
                 };
 
-                let prepared = self.delete_statements(&plan, &params).await?;
+                // A single-op delete stages nothing ahead of itself.
+                let prepared = self
+                    .delete_statements(&plan, &params, &StagedParents::default())
+                    .await?;
                 self.execute_prepared(prepared).await?;
 
                 match (plan, inverse) {
@@ -4490,6 +4621,18 @@ impl OriginTaggedWrites for SqlOperationProvider {
         // (junction) statements.
         let mut row_sql: Vec<String> = Vec::new();
         let mut edge_sql: Vec<String> = Vec::new();
+        let mut staged = StagedParents::default();
+        // Every id this batch UPDATEs and does not itself create or delete. An UPDATE
+        // whose row is missing changes nothing and reports nothing, so without
+        // this the sink can silently fall behind the projection's authority
+        // forever — the only way that state ends is a reseed, and nothing asks
+        // for one.
+        let mut updated_ids: Vec<String> = Vec::new();
+        let mut created_ids: HashSet<String> = HashSet::new();
+        // Every id a delete in this batch removes, its cascaded descendants
+        // included. Collected across the WHOLE batch so the diagnosis does not
+        // depend on where the delete sits in the op vec.
+        let mut removed_ids: HashSet<String> = HashSet::new();
 
         for op in operations {
             let BatchOp {
@@ -4543,9 +4686,25 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     Some(p) => p,
                     None => continue,
                 },
-                "delete" => self.prepare_delete(&params).await?,
+                "delete" => self.prepare_delete(&params, &staged).await?,
                 other => return Err(format!("Unknown batch operation: {}", other).into()),
             };
+            removed_ids.extend(prepared.removed_ids.iter().cloned());
+            if let Some(id) = params.get("id").and_then(|v| v.as_string()) {
+                match op_name.as_str() {
+                    "create" => {
+                        created_ids.insert(id.to_string());
+                    }
+                    "update" => updated_ids.push(id.to_string()),
+                    // An id the caller itself named in a `delete` is gone by
+                    // its own intent, whichever side of the update it sits on.
+                    // A row the cascade swept up is NOT: see
+                    // `assert_updated_rows_exist`.
+                    "delete" => updated_ids.retain(|u| u.as_str() != id),
+                    _ => {}
+                }
+            }
+            staged.stage(&params);
             row_sql.extend(prepared.row_statements);
             edge_sql.extend(prepared.edge_statements);
 
@@ -4618,6 +4777,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
             _tx_t0.elapsed().as_millis(),
         );
 
+        updated_ids.retain(|id| !created_ids.contains(id));
+        self.assert_updated_rows_exist(&updated_ids, &removed_ids)
+            .await?;
+
         Ok(vec![OperationResult::irreversible(Vec::new()); count])
     }
 }
@@ -4633,6 +4796,74 @@ mod set_field_property_kinds_test;
 #[cfg(test)]
 #[path = "json_value_parse_differential_test.rs"]
 mod json_value_parse_differential_test;
+
+/// The delete-cascade's descendant walk reads pre-batch database state, so
+/// what the batch itself has already staged is the difference between deleting
+/// a subtree and deleting a block the caller moved to safety in the same
+/// transaction.
+#[cfg(test)]
+mod staged_parents_tests {
+    use super::StagedParents;
+    use super::StorageEntity;
+    use super::Value;
+
+    fn params(pairs: &[(&str, &str)]) -> StorageEntity {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).into(), Value::String((*v).to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn a_child_the_batch_reparented_away_is_not_cascaded_onto() {
+        let mut staged = StagedParents::default();
+        staged.stage(&params(&[
+            ("id", "block:c2"),
+            ("parent_id", "block:parent"),
+        ]));
+        assert_eq!(
+            staged.still_under("block:c1", vec!["block:c2".into()]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_child_the_batch_did_not_touch_is_still_cascaded_onto() {
+        let mut staged = StagedParents::default();
+        staged.stage(&params(&[
+            ("id", "block:other"),
+            ("parent_id", "block:parent"),
+        ]));
+        assert_eq!(
+            staged.still_under("block:c1", vec!["block:c2".into()]),
+            vec!["block:c2".to_string()]
+        );
+    }
+
+    /// A staged write that re-states the SAME parent is not a move, so the
+    /// child stays in the subtree being deleted.
+    #[test]
+    fn a_restated_parent_keeps_the_child_in_the_cascade() {
+        let mut staged = StagedParents::default();
+        staged.stage(&params(&[("id", "block:c2"), ("parent_id", "block:c1")]));
+        assert_eq!(
+            staged.still_under("block:c1", vec!["block:c2".into()]),
+            vec!["block:c2".to_string()]
+        );
+    }
+
+    /// An update that names no `parent_id` (a content edit) says nothing about
+    /// placement; treating it as a move would strand the child.
+    #[test]
+    fn an_update_without_a_parent_stages_nothing() {
+        let mut staged = StagedParents::default();
+        staged.stage(&params(&[("id", "block:c2"), ("content", "edited")]));
+        assert_eq!(
+            staged.still_under("block:c1", vec!["block:c2".into()]),
+            vec!["block:c2".to_string()]
+        );
+    }
+}
 
 #[cfg(test)]
 mod write_schema_tests {
