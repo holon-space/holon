@@ -3,7 +3,7 @@ id: 2026-09-03-search-treats-like-metacharacters-as-wildcards
 date: 2026-09-03
 gap: COVERAGE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   The search query is interpolated into a LIKE pattern without escaping % or _,
   so those characters act as wildcards and every hit is a false positive.
@@ -53,3 +53,26 @@ Open. Escape `%`, `_` and the escape character itself and pass an explicit
 keystone case whose query contains each metacharacter and whose oracle is
 `instr(content, query) > 0`. As with the umlaut entry, this is masked today by
 search returning nothing for every query, so it is fixed after that one.
+
+## Resolution (2026-09-03, lane `search-fix`)
+
+FIXED. `SearchMatch`/`LikeOperand`
+(`crates/holon/src/api/query_engine.rs`) parse the typed string into a complete
+`LIKE` operand — escaped literal plus its `ESCAPE '\'` clause — so `%`, `_` and
+the escape character match only themselves. `Display` renders the whole operand,
+so a call site cannot supply the quotes and forget the `ESCAPE`. Both callers
+are converted: `quick_open_search` and `search_link_candidates`, which backs the
+`[[` link popup and had the identical defect.
+
+## Covering tests
+
+- Hand-authored keystone cases `search-percent-is-a-literal-not-a-wildcard` and
+  `search-underscore-is-a-literal-not-a-single-char-wildcard`
+  (`crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl`).
+  Red-for-the-right-reason with the engine reverted:
+  `quick_open_search("%") returned block:journals whose content "Journals" does
+  not contain the query — a LIKE metacharacter was treated as a wildcard`.
+- The keystone `Search` generator draws metacharacter queries with their own
+  probability mass, so the property is exercised on every random draw too.
+- `crates/holon-app/tests/quick_open_search_at_vault_scale.rs` asserts `%`, `_`,
+  `100%` and `a_b` each match exactly the one block that literally contains them.

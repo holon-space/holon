@@ -2050,6 +2050,34 @@ impl SutQueryResults for HeadlessFrontendComponent {
 }
 
 #[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutSearch for HeadlessFrontendComponent {
+    async fn quick_open_search(
+        &self,
+        query: &str,
+    ) -> Result<Vec<holon_pbt_core::capabilities::SearchHit>, String> {
+        use holon_api::query_engine::QueryEngine;
+        let results = self
+            .engine()
+            .quick_open_search(query)
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+        let hit = |c: holon_api::LinkCandidate, is_page_section: bool| {
+            holon_pbt_core::capabilities::SearchHit {
+                id: c.id,
+                label: c.label,
+                is_page_section,
+            }
+        };
+        Ok(results
+            .pages
+            .into_iter()
+            .map(|c| hit(c, true))
+            .chain(results.content.into_iter().map(|c| hit(c, false)))
+            .collect())
+    }
+}
+
+#[async_trait::async_trait(?Send)]
 impl SutBackend for HeadlessFrontendComponent {
     async fn live_block_snapshot(&self) -> Vec<Block> {
         // The `inv-blocks-match-ref/matview` reader reads the `block` MATVIEW, which

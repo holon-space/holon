@@ -78,7 +78,8 @@ impl QueryEngine for BackendEngine {
 
     async fn search_link_candidates(&self, filter: &str) -> Result<Vec<LinkCandidate>> {
         use crate::storage::BLOCK_READ_TABLE;
-        let escaped = filter.replace('\'', "''");
+        let m = SearchMatch::new(filter)?;
+        let (bare, qualified) = (m.contained_in("content"), m.contained_in("b.content"));
         // Subquery wrapping required — Turso rejects bare UNION.
         // The two branches are DISJOINT so no entity is listed twice: the
         // content branch excludes Page-tagged blocks (which the page branch
@@ -86,11 +87,11 @@ impl QueryEngine for BackendEngine {
         // twice in the `[[` popup — once as a block, once as a page.
         // Page rows surface the first content line (the title) as the label.
         let sql = format!(
-            "SELECT * FROM (SELECT id, content AS label FROM {BLOCK_READ_TABLE} WHERE content \
-             LIKE '%{escaped}%' AND id NOT IN (SELECT block_id FROM block_tags WHERE tag = 'Page') \
-             LIMIT 15) UNION ALL SELECT * FROM (SELECT b.id, substr(b.content, 1, instr(b.content \
-             || char(10), char(10)) - 1) AS label FROM {BLOCK_READ_TABLE} b JOIN block_tags bt ON \
-             bt.block_id = b.id WHERE bt.tag = 'Page' AND b.content LIKE '%{escaped}%' LIMIT 5)"
+            "SELECT * FROM (SELECT id, content AS label FROM {BLOCK_READ_TABLE} WHERE {bare} AND \
+             id NOT IN (SELECT block_id FROM block_tags WHERE tag = 'Page') LIMIT 15) UNION ALL \
+             SELECT * FROM (SELECT b.id, substr(b.content, 1, instr(b.content || char(10), \
+             char(10)) - 1) AS label FROM {BLOCK_READ_TABLE} b WHERE b.id IN (SELECT block_id \
+             FROM block_tags WHERE tag = 'Page') AND {qualified} LIMIT 5)"
         );
         let rows = BackendEngine::execute_query(self, sql, HashMap::new(), None).await?;
         parse_link_candidates(rows)
@@ -102,22 +103,28 @@ impl QueryEngine for BackendEngine {
         if trimmed.is_empty() {
             return Ok(holon_api::QuickOpenResults::default());
         }
-        let escaped = trimmed.replace('\'', "''");
+        let m = SearchMatch::new(trimmed)?;
+        let (anywhere, prefix) = (m.contained_in("b.content"), m.prefix_of("b.content"));
 
         // Pages: blocks carrying the 'Page' tag whose content matches. Label is
         // the first content line (the page title). Prefix matches rank first.
+        //
+        // The Page predicate is an `IN` subquery, never a JOIN against the
+        // `block` matview: the joined spelling costs 10.7s on a 2257-block
+        // vault against 53ms for this one (measured), which put every keystroke
+        // past the newest-response guard and rendered search permanently empty.
         let pages_sql = format!(
             "SELECT b.id AS id, substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) \
-             AS label FROM {BLOCK_READ_TABLE} b JOIN block_tags bt ON bt.block_id = b.id WHERE \
-             bt.tag = 'Page' AND b.content LIKE '%{escaped}%' ORDER BY (b.content LIKE \
-             '{escaped}%') DESC, length(b.content) ASC LIMIT 20"
+             AS label FROM {BLOCK_READ_TABLE} b WHERE b.id IN (SELECT block_id FROM block_tags \
+             WHERE tag = 'Page') AND {anywhere} ORDER BY ({prefix}) DESC, length(b.content) ASC \
+             LIMIT 20"
         );
         // Content: non-page blocks whose content matches. Label is the matched
         // content (full block content — the modal truncates for display).
         let content_sql = format!(
-            "SELECT b.id AS id, b.content AS label FROM {BLOCK_READ_TABLE} b WHERE b.content LIKE \
-             '%{escaped}%' AND b.id NOT IN (SELECT block_id FROM block_tags WHERE tag = 'Page') \
-             ORDER BY (b.content LIKE '{escaped}%') DESC, length(b.content) ASC LIMIT 30"
+            "SELECT b.id AS id, b.content AS label FROM {BLOCK_READ_TABLE} b WHERE {anywhere} AND \
+             b.id NOT IN (SELECT block_id FROM block_tags WHERE tag = 'Page') ORDER BY ({prefix}) \
+             DESC, length(b.content) ASC LIMIT 30"
         );
 
         let pages = parse_link_candidates(
@@ -241,8 +248,8 @@ impl QueryEngine for BackendEngine {
             .join(", ");
         let titles_sql = format!(
             "SELECT b.id AS id, substr(b.content, 1, instr(b.content || char(10), char(10)) - 1) \
-             AS label FROM {BLOCK_READ_TABLE} b JOIN block_tags bt ON bt.block_id = b.id WHERE \
-             bt.tag = 'Page' AND b.id IN ({in_list})"
+             AS label FROM {BLOCK_READ_TABLE} b WHERE b.id IN (SELECT block_id FROM block_tags \
+             WHERE tag = 'Page') AND b.id IN ({in_list})"
         );
         let title_rows =
             BackendEngine::execute_query(self, titles_sql, HashMap::new(), None).await?;
@@ -375,6 +382,130 @@ impl QueryEngine for BackendEngine {
     }
 }
 
+/// Unicode *simple* lowercase: the lowercase form when that is a single
+/// character, else the character unchanged. Only simple folding is available
+/// here because a `GLOB` character class holds single characters, so `ß` → `ss`
+/// is inexpressible.
+fn simple_lower(c: char) -> char {
+    let mut lower = c.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(l), None) => l,
+        _ => c,
+    }
+}
+
+/// Every character sharing a `simple_lower` form, keyed by that form — the
+/// equivalence classes of the fold, so a class holds `ß` *and* `ẞ`, `k` *and*
+/// the Kelvin sign, all four spellings of the `ǅ` digraph.
+///
+/// Derived by scanning the Unicode scalar values rather than listed, so a
+/// character added by a future Unicode table joins its class with no edit here.
+/// Classes of one are dropped: those characters need no class at all.
+static FOLD_CLASSES: std::sync::LazyLock<HashMap<char, Box<[char]>>> =
+    std::sync::LazyLock::new(|| {
+        let mut groups: HashMap<char, Vec<char>> = HashMap::new();
+        for c in (0..=0x0010_FFFF_u32).filter_map(char::from_u32) {
+            if c.is_lowercase() || c.is_uppercase() || simple_lower(c) != c {
+                groups.entry(simple_lower(c)).or_default().push(c);
+            }
+        }
+        groups.retain(|_, members| members.len() > 1);
+        groups
+            .into_iter()
+            .map(|(fold, mut members)| {
+                members.sort_unstable();
+                (fold, members.into_boxed_slice())
+            })
+            .collect()
+    });
+
+/// The largest `GLOB` pattern the storage engine accepts, in bytes
+/// (`MAX_GLOB_PATTERN_LENGTH`, turso `core/vdbe/value.rs`). A class costs up to
+/// eight bytes per query character, so the ceiling is reached at roughly 12 500
+/// ASCII or 8 300 Cyrillic characters.
+const MAX_GLOB_PATTERN_BYTES: usize = 50_000;
+
+/// A query whose folded pattern would exceed [`MAX_GLOB_PATTERN_BYTES`]. Parsed
+/// at construction so no over-long pattern can reach the engine, where the same
+/// condition surfaces as an opaque "GLOB pattern too complex".
+#[derive(Debug)]
+pub struct SearchQueryTooLong {
+    pattern_bytes: usize,
+}
+
+impl std::fmt::Display for SearchQueryTooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "search query is too long: case folding expands it to a {}-byte GLOB pattern, over \
+             the {MAX_GLOB_PATTERN_BYTES}-byte limit the storage engine accepts",
+            self.pattern_bytes
+        )
+    }
+}
+
+impl std::error::Error for SearchQueryTooLong {}
+
+/// A user-typed search string parsed into a case-insensitive SQL `GLOB`
+/// pattern in which every character the user typed matches only itself.
+///
+/// `GLOB` rather than `LIKE` because the fold has to live in the pattern:
+/// `GLOB` is case-sensitive, so each cased character carries a character class
+/// holding its whole [`FOLD_CLASSES`] equivalence class, and folding costs one
+/// flat class per character. Folding the stored side instead — the `LIKE`
+/// spelling — nests one `replace()` per cased letter, and that depth overflowed
+/// the stack on a Cyrillic or Greek phrase (entry
+/// `search-folding-crashes-the-app-on-cyrillic-and-greek`).
+///
+/// The pattern is bounded by [`MAX_GLOB_PATTERN_BYTES`]; a longer query is
+/// refused as [`SearchQueryTooLong`] rather than sent to the engine.
+#[derive(Debug)]
+struct SearchMatch {
+    /// The pattern between the quotes, already escaped for both `GLOB` and the
+    /// SQL string literal that carries it.
+    body: String,
+}
+
+impl SearchMatch {
+    fn new(query: &str) -> Result<Self, SearchQueryTooLong> {
+        let mut body = String::new();
+        for c in query.chars() {
+            match c {
+                // `GLOB` has no escape character, so a one-element class is the
+                // only way to spell its own metacharacters literally. None of
+                // the three is cased, so this arm never hides a fold class.
+                '*' | '?' | '[' => body.extend(['[', c, ']']),
+                '\'' => body.push_str("''"),
+                _ => match FOLD_CLASSES.get(&simple_lower(c)) {
+                    Some(members) => {
+                        body.push('[');
+                        body.extend(members.iter().copied());
+                        body.push(']');
+                    }
+                    None => body.push(c),
+                },
+            }
+        }
+        // Both predicates wrap the body in at most one leading and one trailing
+        // `*`, so this is the largest pattern either of them can produce.
+        let pattern_bytes = body.len() + 2;
+        if pattern_bytes > MAX_GLOB_PATTERN_BYTES {
+            return Err(SearchQueryTooLong { pattern_bytes });
+        }
+        Ok(Self { body })
+    }
+
+    /// Predicate: `column` contains the query anywhere.
+    fn contained_in(&self, column: &str) -> String {
+        format!("{column} GLOB '*{}*'", self.body)
+    }
+
+    /// Predicate: `column` starts with the query — the prefix ranker.
+    fn prefix_of(&self, column: &str) -> String {
+        format!("{column} GLOB '{}*'", self.body)
+    }
+}
+
 /// Parse `(id, label)` search rows into typed [`LinkCandidate`]s, failing loud
 /// on a missing/invalid `id` (parse-don't-validate at the storage boundary).
 /// Shared by [`QueryEngine::search_link_candidates`] and
@@ -422,5 +553,124 @@ impl SqlQueryEngine for BackendEngine {
         context: Option<QueryContext>,
     ) -> Result<Vec<holon_api::StorageEntity>> {
         BackendEngine::execute_query(self, sql, params, context).await
+    }
+}
+
+#[cfg(test)]
+mod fold_class_tests {
+    use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
+
+    use super::MAX_GLOB_PATTERN_BYTES;
+    use super::SearchMatch;
+
+    /// The reference oracle, restated here independently of the engine: the
+    /// same simple fold the keystone's `Search` transition compares against
+    /// (`holon-integration-tests/src/pbt/transitions/search.rs`).
+    fn oracle_fold(c: char) -> char {
+        let mut lower = c.to_lowercase();
+        match (lower.next(), lower.next()) {
+            (Some(l), None) => l,
+            _ => c,
+        }
+    }
+
+    /// The characters of the one class `SearchMatch` emitted, or `None` when it
+    /// emitted the character bare.
+    fn emitted_class(c: char) -> Option<BTreeSet<char>> {
+        let body = SearchMatch::new(&c.to_string())
+            .expect("one character is never too long")
+            .body;
+        let inner = body.strip_prefix('[')?.strip_suffix(']')?;
+        Some(inner.chars().collect())
+    }
+
+    /// Every character whose fold is shared must be reachable from every other
+    /// spelling of it. This is the property the two-element class violated:
+    /// `ẞ` was absent from `ß`'s class, so all-caps German `STRAẞE` could not
+    /// be found by any query.
+    #[test]
+    fn glob_class_is_the_oracles_whole_equivalence_class_across_the_bmp() {
+        let mut expected: BTreeMap<char, BTreeSet<char>> = BTreeMap::new();
+        for c in (0..=0xFFFF_u32).filter_map(char::from_u32) {
+            expected.entry(oracle_fold(c)).or_default().insert(c);
+        }
+
+        let mut checked = 0_usize;
+        for c in (0..=0xFFFF_u32).filter_map(char::from_u32) {
+            if !c.is_lowercase() && !c.is_uppercase() && oracle_fold(c) == c {
+                continue;
+            }
+            let equivalents = &expected[&oracle_fold(c)];
+            match emitted_class(c) {
+                Some(class) => assert_eq!(
+                    &class, equivalents,
+                    "query {c:?} (U+{:04X}) emitted class {class:?}, but the oracle folds \
+                     {equivalents:?} together — every one of those must be findable",
+                    c as u32
+                ),
+                None => assert_eq!(
+                    equivalents.len(),
+                    1,
+                    "query {c:?} (U+{:04X}) was emitted bare, but the oracle folds it together \
+                     with {equivalents:?}",
+                    c as u32
+                ),
+            }
+            checked += 1;
+        }
+        assert!(
+            checked > 2000,
+            "the sweep must reach the cased BMP, checked only {checked}"
+        );
+    }
+
+    /// The characters the verifier found unreachable, named so a regression
+    /// says which family broke.
+    #[test]
+    fn the_many_to_one_folds_reach_every_spelling() {
+        for (query, must_contain) in [
+            ('ß', 'ẞ'),
+            ('ẞ', 'ß'),
+            ('ǅ', 'Ǆ'),
+            ('ǆ', 'ǅ'),
+            ('Ǆ', 'ǆ'),
+            ('k', '\u{212A}'),
+            ('\u{212A}', 'K'),
+            ('ω', '\u{2126}'),
+            ('å', '\u{212B}'),
+        ] {
+            let class = emitted_class(query)
+                .unwrap_or_else(|| panic!("{query:?} must fold, so it must emit a class"));
+            assert!(
+                class.contains(&must_contain),
+                "searching for {query:?} must find stored {must_contain:?}, class was {class:?}"
+            );
+        }
+    }
+
+    /// The engine's own pattern ceiling, refused at the boundary instead of
+    /// surfacing as an opaque "GLOB pattern too complex" from storage.
+    #[test]
+    fn an_over_long_query_is_refused_at_the_exact_threshold() {
+        // A Cyrillic letter costs 4 bytes of class body (2 chars × 2 bytes).
+        let per_char = SearchMatch::new("а").expect("one char").body.len();
+        let fits = (MAX_GLOB_PATTERN_BYTES - 2) / per_char;
+        assert_eq!(
+            SearchMatch::new(&"а".repeat(fits))
+                .expect("the threshold itself fits")
+                .body
+                .len()
+                + 2,
+            MAX_GLOB_PATTERN_BYTES,
+            "the largest accepted query must land exactly on the limit"
+        );
+        let err = SearchMatch::new(&"а".repeat(fits + 1))
+            .expect_err("one character over the threshold must be refused");
+        assert!(
+            err.to_string()
+                .contains(&MAX_GLOB_PATTERN_BYTES.to_string()),
+            "the error must name the limit, got {err}"
+        );
     }
 }

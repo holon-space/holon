@@ -140,6 +140,7 @@ mod rehome_entity;
 mod remove_watch;
 mod rename_document;
 pub(crate) mod rename_page;
+mod search;
 mod select_bias;
 pub mod set_edge_field;
 mod setup_watch;
@@ -223,6 +224,7 @@ pub use rehome_entity::RehomeEntity;
 pub use remove_watch::RemoveWatch;
 pub use rename_document::RenameDocument;
 pub use rename_page::RenamePage;
+pub use search::Search;
 pub use set_edge_field::SetEdgeField;
 pub use setup_watch::SetupWatch;
 pub use share_container::ShareContainer;
@@ -319,6 +321,7 @@ crate::declare_e2e_transitions! {
         ToggleDrawer(ToggleDrawer),
         ToggleCollapse(ToggleCollapse),
         DeliverBlockContent(DeliverBlockContent),
+        Search(Search),
         // True sharing (two-instance slice only — cap-gated on `SutTwoInstance`,
         // which no single-instance slice provides).
         ShareContainer(ShareContainer),
@@ -582,6 +585,7 @@ mod required_caps_guard {
         // ViewControl / McpEmit / HistoryWrite
         one!(SwitchView, c::SutViewControl);
         one!(EmitMcpData, c::SutMcpEmit);
+        one!(Search, c::SutSearch);
         one!(Redo, c::SutHistoryWrite);
         one!(UndoLastMutation, c::SutHistoryWrite);
         // BlockInteract
