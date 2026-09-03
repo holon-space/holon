@@ -2,7 +2,7 @@
 id: 2026-09-02-receiver-sql-loses-a-block-its-loro-tree-still-holds
 date: 2026-09-02
 gap: ORACLE
-status: OPEN
+status: FIXED
 summary: >-
   After an owner-heavy indent+join the receiver's `block_raw` is missing
   `block:c2`, which its Loro tree still holds. No op ever deleted the row and
@@ -100,21 +100,66 @@ base that has drifted from sink truth, and only a reseed can notice. Whether
 `block:c2`'s row was deleted after a pass seeded `live`, or was never inserted,
 is not established.
 
-## Remedy
+## Root cause — MEASURED
 
-OPEN. Not owned by this lane, which owns the FK stall.
+`SqlOperationProvider::prepare_purge` builds the delete's descendant list by
+querying `SELECT id FROM block_raw WHERE parent_id = ...`. That query runs in
+the batch's PREPARE phase, before any of the batch's own statements execute, so
+it reads the database as it stood BEFORE the batch.
 
-The pin is left `#[ignore]`d with this entry named in the reason, so the defect
-stays pinned and deterministic rather than being deleted for being
-inconvenient. Its sibling and the property `concurrent_two_writer_pair_converges`
-stay un-ignored and green WITH the new oracle active, so the oracle is in the
-gate for every other shape.
-
-Reproduce with:
+The `join` write emits ONE batch that carries the reparent AND the delete, in
+that order (`lane-logs/probe-095427.log`):
 
 ```
-cargo nextest run -p holon-integration-tests \
-  --features holon-integration-tests/pbt \
-  --test two_instance_composed_pbt --run-ignored all \
-  owner_heavy_indent_then_join_stalls_the_receiver_projection
+[LoroSyncController OUTBOUND] mode=incremental ops=6 aggregate_ids=[
+  "update:block:c2", ..., "delete:block:c1", ...]
+[CASCADE-PROBE] purge block:c1 cascades to ["block:c2"]
 ```
+
+`update:block:c2` moves `block:c2` off `block:c1`, yet the cascade walk still
+found it under `block:c1` — its statement had not run. So the batch deleted a
+row it had just moved to safety. Loro keeps `block:c2`; `block_raw` loses it;
+every later `update:block:c2` matches no row, changes nothing, reports nothing.
+
+The org write-back hypothesis in the section above is REFUTED: the loss is one
+cascade inside one transaction, with no disk round trip involved.
+
+## Remedy — FIXED
+
+Two independent halves, each measured to make the pin green ALONE:
+
+1. **The cascade folds in the batch's own staged moves.** `StagedParents`
+   (`crates/holon/src/core/sql_operation_provider.rs`) records the `parent_id`
+   every already-prepared create/update writes; `prepare_purge` subtracts the
+   children a staged move takes out from under the deleted block. It only
+   subtracts — a child staged INTO the deleted subtree keeps a `parent_id`
+   pointing at a deleted row and the deferred self-FK rejects the batch at
+   COMMIT, which is loud and reseed-recoverable.
+2. **A batch UPDATE against a missing row is now an error.**
+   `assert_updated_rows_exist` checks, after the commit, that every id the batch
+   UPDATEd (and did not itself create or delete) exists. The Err reaches
+   `LoroProjection::emit_ops`, which drops the in-memory base and reseeds from
+   sink truth — so the class of "sink lost a row nobody deleted" now converges
+   instead of no-opping forever.
+
+   The report distinguishes its two causes, because they send a reader to
+   different places: a row this batch's own delete cascade swept up while the
+   batch also UPDATEd it is the caller contradicting itself, and a row missing
+   for a reason this batch cannot see is a sink loss. Both Err — both are
+   recovered by the same reseed — and half (1) is what keeps the first one out
+   of the honest projection traffic.
+
+Tests: `owner_heavy_indent_then_join_stalls_the_receiver_projection` (un-ignored,
+green on the `two_instance_composed_pbt` binary),
+`crates/holon/tests/batch_delete_cascade_updates.rs` (5 cases over the
+production batch seam and the real `block_raw` schema: which cause is reported
+for each shape, and that op order does not change it), and
+`mod staged_parents_tests` in `sql_operation_provider.rs`.
+
+Teeth: with the `still_under` overlay reverted the pin reds again with the
+identical message (`lane-logs/rev2-teeth-143913.log`;
+`lane-logs/probe-095427.log` on base code). Narrowing the assertion to exempt
+cascade-removed rows ALSO reds the pin — the owner loses `block:c2` for real
+and only the reseed restores it (`lane-logs/rev2-pin-144143.log` red vs
+`lane-logs/rev2-pin-144353.log` green), so the report is load-bearing, not
+cosmetic.

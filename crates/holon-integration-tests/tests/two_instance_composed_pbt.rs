@@ -947,17 +947,13 @@ fn cross_peer_indent_then_join_stalls_the_receiver_projection() {
 /// reached independently, with four of its five writes on the OWNER. Pinned
 /// beside its sibling so a fix that only handles a receiver-side `indent`
 /// cannot look complete.
-/// `#[ignore]`d for a DIFFERENT, newly-visible defect — not the FK stall, which
-/// is fixed and which this shape no longer reproduces. With the SQL-vs-Loro
-/// oracle active this script reds deterministically (3/3) on
-/// `receiver block:c2: held in Loro, ABSENT from block_raw`: no op ever deleted
-/// the row, the projection never withheld or failed anything, and it goes on
-/// emitting UPDATEs that silently no-op against the missing row. Recorded as
+/// It is also the reproducer for the batch delete-cascade loss recorded as
 /// `docs/Testing/bugfunnel/entries/
-/// 2026-09-02-receiver-sql-loses-a-block-its-loro-tree-still-holds.md`. Kept as
-/// a pin, not deleted: it is the only deterministic reproducer.
+/// 2026-09-02-receiver-sql-loses-a-block-its-loro-tree-still-holds.md`: the
+/// `join` batch carries `update:block:c2` (reparenting it off `block:c1`) ahead
+/// of `delete:block:c1`, and the delete's descendant walk — which reads the
+/// database as it stood BEFORE the batch — cascaded onto `block:c2` anyway.
 #[test]
-#[ignore = "OPEN, different defect: the receiver's block_raw loses block:c2 while its Loro tree keeps it — see the 2026-09-02-receiver-sql-loses-a-block bugfunnel entry"]
 fn owner_heavy_indent_then_join_stalls_the_receiver_projection() {
     let script = vec![
         PairStep::Write {
