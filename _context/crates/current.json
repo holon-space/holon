@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/_sw_integ/crates",
+  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/docs-truth/crates",
   "root": {
     "name": ".",
     "path": ".",
@@ -183,6 +183,9 @@
                 "parent": "holon",
                 "files": [
                   {
+                    "name": "accepted_rules.rs"
+                  },
+                  {
                     "name": "action_watcher.rs"
                   },
                   {
@@ -211,6 +214,9 @@
                   },
                   {
                     "name": "mod.rs"
+                  },
+                  {
+                    "name": "net_guard.rs"
                   },
                   {
                     "name": "operation_dispatcher.rs"
@@ -255,6 +261,9 @@
                     "name": "block_to_page_plan.rs"
                   },
                   {
+                    "name": "json_value_parse_differential_test.rs"
+                  },
+                  {
                     "name": "merge_blocks_plan.rs"
                   },
                   {
@@ -264,7 +273,16 @@
                     "name": "operation_log.rs"
                   },
                   {
+                    "name": "pantry_operations.rs"
+                  },
+                  {
+                    "name": "properties_bag_write.rs"
+                  },
+                  {
                     "name": "queryable_cache.rs"
+                  },
+                  {
+                    "name": "set_field_property_kinds_test.rs"
                   },
                   {
                     "name": "sql_block_operations.rs"
@@ -283,6 +301,12 @@
                   },
                   {
                     "name": "traits.rs"
+                  },
+                  {
+                    "name": "type_declaration.rs"
+                  },
+                  {
+                    "name": "typed_row_sink.rs"
                   }
                 ]
               },
@@ -551,6 +575,9 @@
                     "name": "tabs_main_panel_delivery.rs"
                   },
                   {
+                    "name": "tabs_new_tab_appends_blank.rs"
+                  },
+                  {
                     "name": "turso_ivm_cdc_zero_changes_repro.rs"
                   },
                   {
@@ -592,6 +619,12 @@
               },
               {
                 "name": "block_op_catalog_parity.rs"
+              },
+              {
+                "name": "capability_certification.rs"
+              },
+              {
+                "name": "computed_tier_dual_path.rs"
               },
               {
                 "name": "convert_block_to_page_e2e.rs"
@@ -648,6 +681,9 @@
                 "name": "json_aggregation_e2e_test.rs"
               },
               {
+                "name": "kitchen_cookable_now_e2e.rs"
+              },
+              {
                 "name": "link_candidate_dedup_e2e.rs"
               },
               {
@@ -660,6 +696,9 @@
                 "name": "petri_e2e_pbt.rs"
               },
               {
+                "name": "prod_db_skew_dryrun.rs"
+              },
+              {
                 "name": "promote_task_keyword_compound.rs"
               },
               {
@@ -669,7 +708,16 @@
                 "name": "reliability_tests.rs"
               },
               {
+                "name": "schema_catalog_follows_service_ddl.rs"
+              },
+              {
+                "name": "share_mount_tags_e2e.rs"
+              },
+              {
                 "name": "sharing_boundary_enforcement_pbt.rs"
+              },
+              {
+                "name": "shopping_authoring_door_e2e.rs"
               },
               {
                 "name": "stress_tests.rs"
@@ -925,7 +973,7 @@
             "description": "The **A2 subset parser** (ruling: C4 derived-fields, \"A2 subset-first parser on the unchanged `=` surface\"). It parses a deliberate *syntactic subset* of Rhai directly into a typed [`Computation`], so a derived field declared as a `= …` property can be SQL-planted (seat A) instead of forced onto the Rhai projection stage (seat B).",
             "pattern": "Recursive-descent parser",
             "pattern_status": "planned",
-            "content": "@c4 component\n@c4 layer Engine\nPattern: Recursive-descent parser\n\nThe **A2 subset parser** (ruling: C4 derived-fields, \"A2 subset-first parser\non the unchanged `=` surface\"). It parses a deliberate *syntactic subset* of\nRhai directly into a typed [`Computation`], so a derived field declared as a\n`= …` property can be SQL-planted (seat A) instead of forced onto the Rhai\nprojection stage (seat B).\n\nThe subset:\n\n```text\nexpr        := if_expr | switch_expr | comparison\nif_expr     := 'if' comparison block ('else' 'if' comparison block)* 'else' block\nswitch_expr := 'switch' comparison '{' arm (',' arm)* ','? '}'\narm         := ('-'? number) '=>' expr | '_' '=>' expr     // labels: distinct numeric literals\nblock       := '{' expr '}'\ncomparison  := additive ( ('=='|'!='|'<'|'<='|'>'|'>=') additive )?\nadditive    := multiplicative ( ('+'|'-') multiplicative )*\nmultiplicative := unary ( ('*'|'/') unary )*\nunary       := '-'? primary\nprimary     := number | identifier | '(' expr ')'\n```\n\n`if`/`switch` both lower to [`Computation::Case`] (see its docs): `switch`\nkeeps its scrutinee; `if` uses a `true` scrutinee with each branch's\n`match_value` being the boolean condition.\n\nThis is a **total function that fails loud with a typed error** — it does\nNOT swallow. The *caller* (petri `=`-prop path) treats a parse error as the\ndisclosed signal to fall back to the full Rhai compiler\n([`Computation::Script`]); falling back to Rhai is the deliberate,\ndisclosed design, not the parser hiding a problem.",
+            "content": "@c4 component\n@c4 layer Engine\nPattern: Recursive-descent parser\n\nThe **A2 subset parser** (ruling: C4 derived-fields, \"A2 subset-first parser\non the unchanged `=` surface\"). It parses a deliberate *syntactic subset* of\nRhai directly into a typed [`Computation`], so a derived field declared as a\n`= …` property can be SQL-planted (seat A) instead of forced onto the Rhai\nprojection stage (seat B).\n\nThe subset:\n\n```text\nexpr        := if_expr | switch_expr | and_expr\nif_expr     := 'if' and_expr block ('else' 'if' and_expr block)* 'else' block\nswitch_expr := 'switch' comparison '{' arm (',' arm)* ','? '}'\narm         := ('-'? number) '=>' expr | '_' '=>' expr     // labels: distinct numeric literals\nblock       := '{' expr '}'\nand_expr    := comparison ( '&&' comparison )*   // operands boolean by syntax\ncomparison  := additive ( ('=='|'!='|'<'|'<='|'>'|'>=') additive )?\nadditive    := multiplicative ( ('+'|'-') multiplicative )*\nmultiplicative := unary ( ('*'|'/') unary )*\nunary       := '-'? primary\nprimary     := number | string | identifier | is_def_var | '(' expr ')' | '()'\nis_def_var  := 'is_def_var' '(' string ')'      // the string must be an identifier\n```\n\n`if`/`switch` both lower to [`Computation::Case`] (see its docs): `switch`\nkeeps its scrutinee; `if` uses a `true` scrutinee with each branch's\n`match_value` being the boolean condition.\n\n`+` produces [`Computation::Concat`] instead of [`Computation::Arith`] when\neither operand is text — a string literal, or a column the caller declared\nTEXT in the [`FieldTypes`] passed to [`parse_typed`]. `()` is\n[`Value::Null`], the only \"nothing\" inhabitant `Value` and SQL share.\n\nThis is a **total function that fails loud with a typed error** — it does\nNOT swallow. The *caller* (petri `=`-prop path) treats a parse error as the\ndisclosed signal to fall back to the full Rhai compiler\n([`Computation::Script`]); falling back to Rhai is the deliberate,\ndisclosed design, not the parser hiding a problem.",
             "source_file": "holon-api/src/expr_parser.rs",
             "parent": "holon-api",
             "layer": "Engine",
@@ -944,6 +992,10 @@
                     "name": "supervision.rs"
                   }
                 ]
+              },
+              {
+                "name": "scratch_teeth_test",
+                "path": "holon-api/src/scratch_teeth_test"
               }
             ],
             "files": [
@@ -1008,6 +1060,9 @@
                 "name": "history.rs"
               },
               {
+                "name": "icon_name.rs"
+              },
+              {
                 "name": "identity_minting.rs"
               },
               {
@@ -1024,6 +1079,9 @@
               },
               {
                 "name": "latency_e2e.rs"
+              },
+              {
+                "name": "latency_slo.rs"
               },
               {
                 "name": "lib.rs"
@@ -1066,6 +1124,9 @@
               },
               {
                 "name": "render_eval.rs"
+              },
+              {
+                "name": "render_requirements.rs"
               },
               {
                 "name": "render_types.rs"
@@ -1123,6 +1184,18 @@
               },
               {
                 "name": "descriptor_guard_roundtrip.rs"
+              },
+              {
+                "name": "descriptor_marking_delta_roundtrip.rs"
+              },
+              {
+                "name": "is_def_var_identifier_corpus.rs"
+              },
+              {
+                "name": "person_profile_display_name_seat_a.rs"
+              },
+              {
+                "name": "typed_computed_field_declaration.rs"
               }
             ]
           }
@@ -1226,6 +1299,9 @@
                 "name": "mcp_integrations.rs"
               },
               {
+                "name": "move_guard.rs"
+              },
+              {
                 "name": "no_turso.rs"
               },
               {
@@ -1235,13 +1311,25 @@
                 "name": "ordered_block_crud.rs"
               },
               {
+                "name": "rehome_entity.rs"
+              },
+              {
                 "name": "seed.rs"
               },
               {
                 "name": "session.rs"
               },
               {
+                "name": "shopping_operations.rs"
+              },
+              {
+                "name": "shopping_rest.rs"
+              },
+              {
                 "name": "turso_seams.rs"
+              },
+              {
+                "name": "type_admission.rs"
               },
               {
                 "name": "wiring.rs"
@@ -1256,16 +1344,31 @@
                 "name": "arc_affects_consistency.rs"
               },
               {
+                "name": "authority_place_reservation.rs"
+              },
+              {
                 "name": "backlinks_section_seed.rs"
               },
               {
                 "name": "boundary_behavior_correspondence.rs"
               },
               {
+                "name": "computed_persisted_boot_column.rs"
+              },
+              {
                 "name": "doc_membership_page_boundary_below_root.rs"
               },
               {
+                "name": "edge_field_duplicate_targets.rs"
+              },
+              {
                 "name": "fresh_db_boot_seed_smoke.rs"
+              },
+              {
+                "name": "home_profile_lookup_latency.rs"
+              },
+              {
+                "name": "integration_open_default_view_op.rs"
               },
               {
                 "name": "integration_set_field_op.rs"
@@ -1283,13 +1386,40 @@
                 "name": "integrations_settings_vm.rs"
               },
               {
+                "name": "loro_seam_edge_fields.rs"
+              },
+              {
+                "name": "marks_span_precondition.rs"
+              },
+              {
+                "name": "move_block_to_root.rs"
+              },
+              {
+                "name": "move_guard_no_turso.rs"
+              },
+              {
+                "name": "move_guard_policy.rs"
+              },
+              {
                 "name": "org_store_org_round_trip.rs"
               },
               {
                 "name": "platform_capabilities_disclosure.rs"
               },
               {
+                "name": "rehome_entity_op.rs"
+              },
+              {
                 "name": "seed_copy_on_write.rs"
+              },
+              {
+                "name": "settings_shopping_list_url_credential.rs"
+              },
+              {
+                "name": "sharing_requires_crdt.rs"
+              },
+              {
+                "name": "shopping_pull_mock.rs"
               },
               {
                 "name": "slashmenu_correspondence.rs"
@@ -1299,6 +1429,12 @@
               },
               {
                 "name": "turso_block_round_trip_pbt.rs"
+              },
+              {
+                "name": "type_admission_boot_sweep.rs"
+              },
+              {
+                "name": "type_admission_cve.rs"
               }
             ]
           }
@@ -1379,6 +1515,73 @@
             "files": [
               {
                 "name": "lib.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-capability",
+        "path": "holon-capability",
+        "c4_level": "component",
+        "description": "Capability profiles: what each durable FORMAT can carry without loss.",
+        "pattern": "Specification",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Specification\n@c4 uses holon-api \"the Value carriers a profile constrains\" \"Rust\"\n\nCapability profiles: what each durable FORMAT can carry without loss.\n\nA profile is DATA — a yaml file next to the adapter, parsed here into\nclosed enums — not a type parameter. Datatypes are runtime-declared, so\ncapability cannot be monomorphized (design Fork 2).\n\nThe point of the crate is that a clause can be FALSIFIED: [`certify`]\ndrives the format's real round trip and reports a [`Violation`] for each\ndeclared restriction that is not real, and a [`TighteningPrompt`] for each\nrestriction the format does not actually need.\n\n**Every CERTIFIED clause is falsifiable; uncertified clauses are marked as\nsuch in the yaml.** Increment 2b.1 certifies three:\n`property_keys.reserved_prefixes`, `property_values.types` and\n`property_values.empty_string`. The rest of axes 3 and 4 are declared with a\n`file:line` citation and carry `# NOT YET CERTIFIED (2b.2)` — a citation is\nEVIDENCE, not a gate, and a reader must not mistake one for the other. A\nprofile is only as trustworthy as the clauses the certifier actually drives.\n\n## Dependency direction, both ways\n\nThis crate depends on `holon-api` and on NO format crate. The reverse is\nequally forbidden: a format crate must not gain a non-test dependency on\nthis one, or it starts reading its own profile at runtime and the profile\nstops being an independent statement ABOUT it. Each [`CertifiableFormat`]\nimpl therefore lives in the format crate's `tests/` directory. Both\ndirections are pinned by\n`crates/holon-architecture-tests/tests/architecture_rules.rs`.",
+        "source_file": "holon-capability/src/lib.rs",
+        "layer": "Adapters",
+        "relationships": [
+          {
+            "target": "holon-api",
+            "label": "the Value carriers a profile constrains",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-capability/src",
+            "files": [
+              {
+                "name": "axes.rs"
+              },
+              {
+                "name": "certify.rs"
+              },
+              {
+                "name": "clause.rs"
+              },
+              {
+                "name": "declaration.rs"
+              },
+              {
+                "name": "diff.rs"
+              },
+              {
+                "name": "fixture.rs"
+              },
+              {
+                "name": "home.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "profile.rs"
+              },
+              {
+                "name": "registry.rs"
+              },
+              {
+                "name": "supports.rs"
+              },
+              {
+                "name": "violation.rs"
               }
             ]
           }
@@ -1522,6 +1725,9 @@
                 "name": "fractional_index.rs"
               },
               {
+                "name": "integration_attribution.rs"
+              },
+              {
                 "name": "lib.rs"
               },
               {
@@ -1562,6 +1768,15 @@
               },
               {
                 "name": "util.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-core/tests",
+            "files": [
+              {
+                "name": "format_registry.rs"
               }
             ]
           }
@@ -1928,6 +2143,9 @@
                     "name": "input_box.rs"
                   },
                   {
+                    "name": "integration_status.rs"
+                  },
+                  {
                     "name": "list.rs"
                   },
                   {
@@ -2101,6 +2319,9 @@
                 "name": "input_trigger.rs"
               },
               {
+                "name": "integration_vars.rs"
+              },
+              {
                 "name": "lane_filtered_provider.rs"
               },
               {
@@ -2135,6 +2356,9 @@
               },
               {
                 "name": "operations.rs"
+              },
+              {
+                "name": "param_collection.rs"
               },
               {
                 "name": "pbt_caps.rs"
@@ -2233,13 +2457,22 @@
                 "name": "drawer_open_state.rs"
               },
               {
+                "name": "inert_integration_disclosure.rs"
+              },
+              {
                 "name": "numeric_column_text.rs"
               },
               {
                 "name": "pending_question_render.rs"
               },
               {
+                "name": "settings_secret_field_render.rs"
+              },
+              {
                 "name": "sidebar_creation_slot.rs"
+              },
+              {
+                "name": "slot_reconcile.rs"
               },
               {
                 "name": "state_toggle_bool_binding.rs"
@@ -2355,7 +2588,13 @@
             "dirs": [
               {
                 "name": "fixture-logs-2026-07-31",
-                "path": "holon-integration-tests/hand-authored-regressions/fixture-logs-2026-07-31"
+                "path": "holon-integration-tests/hand-authored-regressions/fixture-logs-2026-07-31",
+                "dirs": [
+                  {
+                    "name": "synthetic",
+                    "path": "holon-integration-tests/hand-authored-regressions/fixture-logs-2026-07-31/synthetic"
+                  }
+                ]
               }
             ]
           },
@@ -2436,6 +2675,9 @@
                             "name": "complexity_trend.rs"
                           },
                           {
+                            "name": "declared_column_gaps.rs"
+                          },
+                          {
                             "name": "display_placement_canonical_inert.rs"
                           },
                           {
@@ -2475,6 +2717,9 @@
                             "name": "frontend_root_not_error.rs"
                           },
                           {
+                            "name": "home_profile_matches_derived.rs"
+                          },
+                          {
                             "name": "inline_row_mount_present.rs"
                           },
                           {
@@ -2506,6 +2751,9 @@
                           },
                           {
                             "name": "matview_recompute_matches.rs"
+                          },
+                          {
+                            "name": "net_totality.rs"
                           },
                           {
                             "name": "no_errors.rs"
@@ -2559,6 +2807,12 @@
                             "name": "two_instance_convergence.rs"
                           },
                           {
+                            "name": "two_writer_peer_writes_land.rs"
+                          },
+                          {
+                            "name": "typed_matview_matches_ref.rs"
+                          },
+                          {
                             "name": "undo_redo_reference_heal.rs"
                           },
                           {
@@ -2590,6 +2844,9 @@
                           },
                           {
                             "name": "viewmodel_state_toggle_correct.rs"
+                          },
+                          {
+                            "name": "viewmodel_task_rows_have_state_toggle.rs"
                           },
                           {
                             "name": "viewmodel_tree_virtual_slots.rs"
@@ -2624,6 +2881,9 @@
                       },
                       {
                         "name": "correspondences.rs"
+                      },
+                      {
+                        "name": "declared_column_gaps.rs"
                       },
                       {
                         "name": "first_divergent.rs"
@@ -2662,6 +2922,9 @@
                         "name": "settle_latency.rs"
                       },
                       {
+                        "name": "slo_probe.rs"
+                      },
+                      {
                         "name": "soak_seed.rs"
                       },
                       {
@@ -2675,6 +2938,9 @@
                       },
                       {
                         "name": "two_instance.rs"
+                      },
+                      {
+                        "name": "two_instance_transport.rs"
                       },
                       {
                         "name": "wide_e2e.rs"
@@ -2822,6 +3088,9 @@
                             "name": "frontend_root_not_error.rs"
                           },
                           {
+                            "name": "home_profile_matches_derived.rs"
+                          },
+                          {
                             "name": "inline_row_mount_present.rs"
                           },
                           {
@@ -2850,6 +3119,9 @@
                           },
                           {
                             "name": "mod.rs"
+                          },
+                          {
+                            "name": "net_totality.rs"
                           },
                           {
                             "name": "no_errors.rs"
@@ -2888,6 +3160,9 @@
                             "name": "sticky_accordion_spec.rs"
                           },
                           {
+                            "name": "task_rows_have_state_toggle.rs"
+                          },
+                          {
                             "name": "task_state_matches_ref.rs"
                           },
                           {
@@ -2895,6 +3170,12 @@
                           },
                           {
                             "name": "two_instance_convergence.rs"
+                          },
+                          {
+                            "name": "two_writer_peer_writes_land.rs"
+                          },
+                          {
+                            "name": "typed_matview_matches_ref.rs"
                           },
                           {
                             "name": "undo_redo_reference_heal.rs"
@@ -3064,6 +3345,9 @@
                         "name": "toggle.rs"
                       },
                       {
+                        "name": "typed_entities.rs"
+                      },
+                      {
                         "name": "watches.rs"
                       }
                     ]
@@ -3137,6 +3421,12 @@
                       },
                       {
                         "name": "create_page_at_freed_path.rs"
+                      },
+                      {
+                        "name": "create_typed_entity.rs"
+                      },
+                      {
+                        "name": "declare_typed_schema.rs"
                       },
                       {
                         "name": "delete_backward.rs"
@@ -3226,10 +3516,16 @@
                         "name": "press_key.rs"
                       },
                       {
+                        "name": "receiver_create_block.rs"
+                      },
+                      {
                         "name": "redo.rs"
                       },
                       {
                         "name": "register_entity_scheme.rs"
+                      },
+                      {
+                        "name": "rehome_entity.rs"
                       },
                       {
                         "name": "remove_watch.rs"
@@ -3380,6 +3676,9 @@
                     "name": "mod.rs"
                   },
                   {
+                    "name": "net_cap.rs"
+                  },
+                  {
                     "name": "op_write_cap.rs"
                   },
                   {
@@ -3426,6 +3725,9 @@
                   },
                   {
                     "name": "transition_dispatch.rs"
+                  },
+                  {
+                    "name": "typed_entity_schemas.rs"
                   },
                   {
                     "name": "types.rs"
@@ -3525,6 +3827,141 @@
             "path": "holon-integration-tests/tests",
             "dirs": [
               {
+                "name": "boot_suite",
+                "path": "holon-integration-tests/tests/boot_suite",
+                "files": [
+                  {
+                    "name": "boot_projector_gated_on_scan.rs"
+                  },
+                  {
+                    "name": "boot_scan_bad_file_survives.rs"
+                  },
+                  {
+                    "name": "cold_boot_share_disclosure.rs"
+                  },
+                  {
+                    "name": "forward_edge_ingest_regression.rs"
+                  },
+                  {
+                    "name": "idonly_folder_companion_identity_collision.rs"
+                  },
+                  {
+                    "name": "journals_restart_survival.rs"
+                  },
+                  {
+                    "name": "junction_survives_reboot_repro.rs"
+                  },
+                  {
+                    "name": "main.rs"
+                  },
+                  {
+                    "name": "marks_lengthening_batch_no_quarantine.rs"
+                  },
+                  {
+                    "name": "mcp_mirrored_entity_write_authority.rs"
+                  },
+                  {
+                    "name": "phantom_loro_exists_repro.rs"
+                  },
+                  {
+                    "name": "wiki_link_ingest_marks_junction.rs"
+                  }
+                ]
+              },
+              {
+                "name": "catalog_suite",
+                "path": "holon-integration-tests/tests/catalog_suite",
+                "files": [
+                  {
+                    "name": "advice_dismiss_prod_session_wiring.rs"
+                  },
+                  {
+                    "name": "advice_step4_red.rs"
+                  },
+                  {
+                    "name": "arc_marking_equality.rs"
+                  },
+                  {
+                    "name": "class_one_invariant_classifier.rs"
+                  },
+                  {
+                    "name": "cross_medium_caps.rs"
+                  },
+                  {
+                    "name": "dogfood_recorded_replay.rs"
+                  },
+                  {
+                    "name": "gherkin_negative_replay.rs"
+                  },
+                  {
+                    "name": "gpui_mcp_replay.rs"
+                  },
+                  {
+                    "name": "holon_rule_runtime_discovery_prod_session.rs"
+                  },
+                  {
+                    "name": "live_self_check_suite.rs"
+                  },
+                  {
+                    "name": "logseq_parity_replay.rs"
+                  },
+                  {
+                    "name": "main.rs"
+                  },
+                  {
+                    "name": "no_tracked_proptest_regressions.rs"
+                  },
+                  {
+                    "name": "parentage_assertion_replay.rs"
+                  },
+                  {
+                    "name": "pn_catalog_truthfulness_probe.rs"
+                  },
+                  {
+                    "name": "step_vocabulary_agreement.rs"
+                  },
+                  {
+                    "name": "step_vocabulary_laws.rs"
+                  },
+                  {
+                    "name": "task_vocabulary_reaches_the_store.rs"
+                  }
+                ]
+              },
+              {
+                "name": "editing_suite",
+                "path": "holon-integration-tests/tests/editing_suite",
+                "files": [
+                  {
+                    "name": "cycle_task_state_cold_boot_reingest.rs"
+                  },
+                  {
+                    "name": "editor_pure_pbt.rs"
+                  },
+                  {
+                    "name": "main.rs"
+                  },
+                  {
+                    "name": "merge_blocks_pbt.rs"
+                  },
+                  {
+                    "name": "schedule_boundary_observables.rs"
+                  },
+                  {
+                    "name": "split_block_content_pbt.rs"
+                  },
+                  {
+                    "name": "split_undo_redo_reconcile.rs"
+                  },
+                  {
+                    "name": "undo_cycle_task_state_coverage.rs"
+                  },
+                  {
+                    "name": "undo_prod_session_wiring.rs"
+                  }
+                ]
+              },
+              {
                 "name": "fixtures",
                 "path": "holon-integration-tests/tests/fixtures",
                 "dirs": [
@@ -3568,6 +4005,15 @@
                     ]
                   },
                   {
+                    "name": "logseq-parity",
+                    "path": "holon-integration-tests/tests/fixtures/logseq-parity",
+                    "files": [
+                      {
+                        "name": "README.md"
+                      }
+                    ]
+                  },
+                  {
                     "name": "logseq_org_vault",
                     "path": "holon-integration-tests/tests/fixtures/logseq_org_vault",
                     "dirs": [
@@ -3588,6 +4034,216 @@
                   {
                     "name": "split_block_content_pbt",
                     "path": "holon-integration-tests/tests/fixtures/split_block_content_pbt"
+                  }
+                ]
+              },
+              {
+                "name": "frontend_suite",
+                "path": "holon-integration-tests/tests/frontend_suite",
+                "files": [
+                  {
+                    "name": "integration_configure_button_visibility.rs"
+                  },
+                  {
+                    "name": "integration_state_boot_population.rs"
+                  },
+                  {
+                    "name": "integration_state_boot_records_status.rs"
+                  },
+                  {
+                    "name": "integration_state_section_refreshes.rs"
+                  },
+                  {
+                    "name": "integrations_section_renders_every_row.rs"
+                  },
+                  {
+                    "name": "layout_bridge_smoke.rs"
+                  },
+                  {
+                    "name": "local_ui_state_precedence.rs"
+                  },
+                  {
+                    "name": "main.rs"
+                  },
+                  {
+                    "name": "navigate_back_keeps_panel_populated.rs"
+                  },
+                  {
+                    "name": "now_query_task_rows_render_structured.rs"
+                  },
+                  {
+                    "name": "perspective_slot_resolution.rs"
+                  },
+                  {
+                    "name": "sidebar_modifier_click_open_tab_probe.rs"
+                  },
+                  {
+                    "name": "split_block_stale_display_regression.rs"
+                  },
+                  {
+                    "name": "tour_spike.rs"
+                  },
+                  {
+                    "name": "widget_only_headline.rs"
+                  }
+                ]
+              },
+              {
+                "name": "loro_suite",
+                "path": "holon-integration-tests/tests/loro_suite",
+                "files": [
+                  {
+                    "name": "loro_create_persists_prod_session.rs"
+                  },
+                  {
+                    "name": "loro_kind_fidelity_through_projection.rs"
+                  },
+                  {
+                    "name": "loro_live_entity_wiring.rs"
+                  },
+                  {
+                    "name": "loro_memory_start_app.rs"
+                  },
+                  {
+                    "name": "loro_projection_atomic_advance.rs"
+                  },
+                  {
+                    "name": "loro_projection_withheld_delete.rs"
+                  },
+                  {
+                    "name": "loro_restart_unseeded_vault.rs"
+                  },
+                  {
+                    "name": "loro_sync_controller_pbt.rs"
+                  },
+                  {
+                    "name": "loro_unseeded_vault_split.rs"
+                  },
+                  {
+                    "name": "main.rs"
+                  },
+                  {
+                    "name": "projection_harness.rs"
+                  }
+                ]
+              },
+              {
+                "name": "org_suite",
+                "path": "holon-integration-tests/tests/org_suite",
+                "files": [
+                  {
+                    "name": "bidirectional_sync.rs"
+                  },
+                  {
+                    "name": "convert_block_to_page_materializes_child_file.rs"
+                  },
+                  {
+                    "name": "doc_id_writeback_stability.rs"
+                  },
+                  {
+                    "name": "idless_external_reedit_dup.rs"
+                  },
+                  {
+                    "name": "journals_seed_file_collision.rs"
+                  },
+                  {
+                    "name": "local_vault_fidelity.rs"
+                  },
+                  {
+                    "name": "logseq_org_vault_ingest.rs"
+                  },
+                  {
+                    "name": "main.rs"
+                  },
+                  {
+                    "name": "multiline_serializer_test.rs"
+                  },
+                  {
+                    "name": "org_roundtrip_pbt.rs"
+                  },
+                  {
+                    "name": "org_serializer_prod_content_parity.rs"
+                  },
+                  {
+                    "name": "probe_link_marks_roundtrip.rs"
+                  },
+                  {
+                    "name": "writeback_stale_cross_doc_prune.rs"
+                  }
+                ]
+              },
+              {
+                "name": "span_capture_suite",
+                "path": "holon-integration-tests/tests/span_capture_suite",
+                "files": [
+                  {
+                    "name": "declared_column_parity.rs"
+                  },
+                  {
+                    "name": "host_page_with_inline_subpages_ingest.rs"
+                  },
+                  {
+                    "name": "interaction_trace_connectivity.rs"
+                  },
+                  {
+                    "name": "main.rs"
+                  },
+                  {
+                    "name": "region_writeback_loss.rs"
+                  },
+                  {
+                    "name": "render_requirement_manifest.rs"
+                  },
+                  {
+                    "name": "split_doc_root_idless_duplicates.rs"
+                  },
+                  {
+                    "name": "substrate_corruption_faults.rs"
+                  }
+                ]
+              },
+              {
+                "name": "store_suite",
+                "path": "holon-integration-tests/tests/store_suite",
+                "files": [
+                  {
+                    "name": "chat_view_message_join.rs"
+                  },
+                  {
+                    "name": "fts_query_block_e2e.rs"
+                  },
+                  {
+                    "name": "main.rs"
+                  },
+                  {
+                    "name": "matview_duplicate_row_repro.rs"
+                  },
+                  {
+                    "name": "matview_reboot_duplicate_repro.rs"
+                  },
+                  {
+                    "name": "query_equivalence_pbt.rs"
+                  },
+                  {
+                    "name": "ref_entity_lookup_parity.rs"
+                  },
+                  {
+                    "name": "tag_with_comma_drops_whole_set.rs"
+                  },
+                  {
+                    "name": "turso_ivm_index_bug.rs"
+                  },
+                  {
+                    "name": "watch_guard_raii.rs"
+                  },
+                  {
+                    "name": "watch_query_ordering_spec_wiring.rs"
+                  },
+                  {
+                    "name": "watch_recovers_when_table_appears.rs"
+                  },
+                  {
+                    "name": "watch_ui.rs"
                   }
                 ]
               }
@@ -3628,6 +4284,9 @@
               },
               {
                 "name": "convert_block_to_page_materializes_child_file.rs"
+              },
+              {
+                "name": "cook_vault_ingest.rs"
               },
               {
                 "name": "cross_medium_caps.rs"
@@ -3699,6 +4358,9 @@
                 "name": "junction_survives_reboot_repro.rs"
               },
               {
+                "name": "latency_slo_gate.rs"
+              },
+              {
                 "name": "layout_bridge_smoke.rs"
               },
               {
@@ -3709,6 +4371,9 @@
               },
               {
                 "name": "local_vault_fidelity.rs"
+              },
+              {
+                "name": "logseq_db_import_store.rs"
               },
               {
                 "name": "logseq_org_vault_ingest.rs"
@@ -3739,6 +4404,9 @@
               },
               {
                 "name": "matview_reboot_duplicate_repro.rs"
+              },
+              {
+                "name": "mcp_add_subtask_edge_fields.rs"
               },
               {
                 "name": "mcp_list_keybindings_matches_registry.rs"
@@ -3772,6 +4440,9 @@
               },
               {
                 "name": "phantom_loro_exists_repro.rs"
+              },
+              {
+                "name": "place_all_restates_total_sibling_order.rs"
               },
               {
                 "name": "pn_catalog_truthfulness_probe.rs"
@@ -3894,6 +4565,113 @@
         ]
       },
       {
+        "name": "holon-kitchen",
+        "path": "holon-kitchen",
+        "c4_level": "unknown",
+        "description": "Kitchen domain: recipes and the shopping list, and (later) pantry and nutrition.",
+        "pattern": "Adapter",
+        "pattern_status": "planned",
+        "content": "Kitchen domain: recipes and the shopping list, and (later) pantry and\nnutrition.\n\nTwo read legs today. The cooklang adapter projects `.cook` files, which are\nauthoritative and are never written back here. [`shopping`] pulls the\nshopping-list peer, which owns its own list and issues no item ids, so this\ncrate carries the identity and reconciliation the generic entity mirror\ncannot supply.\n\nPer-format de-risking: this crate exercises the existing Block-shaped\n`FileFormatAdapter` on a second, non-org format — extension claiming,\ndocument identity, and read authority. It deliberately does NOT generalize\n`FileFormatAdapter`/`FileFormatParseResult` to be type-generic; that is BG\nInc-5's C7 and stays out of scope (see docs/Plans/Kitchen.md R1).",
+        "source_file": "holon-kitchen/src/lib.rs",
+        "dirs": [
+          {
+            "name": "assets",
+            "path": "holon-kitchen/assets",
+            "dirs": [
+              {
+                "name": "types",
+                "path": "holon-kitchen/assets/types",
+                "files": [
+                  {
+                    "name": "ingredient_use.yaml"
+                  },
+                  {
+                    "name": "pantry_item.yaml"
+                  },
+                  {
+                    "name": "recipe.yaml"
+                  },
+                  {
+                    "name": "recipe_profile.yaml"
+                  },
+                  {
+                    "name": "shopping_item.yaml"
+                  },
+                  {
+                    "name": "shopping_item_profile.yaml"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "src",
+            "path": "holon-kitchen/src",
+            "files": [
+              {
+                "name": "cook.rs"
+              },
+              {
+                "name": "cookable.rs"
+              },
+              {
+                "name": "file_format.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "params.rs"
+              },
+              {
+                "name": "rows.rs"
+              },
+              {
+                "name": "shopping.rs"
+              },
+              {
+                "name": "shopping_sync.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-kitchen/tests",
+            "dirs": [
+              {
+                "name": "fixtures",
+                "path": "holon-kitchen/tests/fixtures"
+              }
+            ],
+            "files": [
+              {
+                "name": "block_params.rs"
+              },
+              {
+                "name": "cook_ingest.rs"
+              },
+              {
+                "name": "recipe_page.rs"
+              },
+              {
+                "name": "rows_contract_differential_pbt.rs"
+              },
+              {
+                "name": "shopping_reconcile.rs"
+              },
+              {
+                "name": "shopping_sync_pbt.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
         "name": "holon-layout-testing",
         "path": "holon-layout-testing",
         "c4_level": "component",
@@ -3995,6 +4773,127 @@
         ]
       },
       {
+        "name": "holon-logseq-db",
+        "path": "holon-logseq-db",
+        "c4_level": "unknown",
+        "description": "Reading a LogSeq DB-version graph into Holon, and pushing edits back.",
+        "pattern_status": "planned",
+        "content": "Reading a LogSeq DB-version graph into Holon, and pushing edits back.\n\nA LogSeq DB graph is a standard SQLite file whose `kvs` table holds a\npersistent DataScript B+-tree, each node a self-contained Transit-JSON\ndocument. This crate decodes that tree into deduped datoms, projects the\ndatoms into Holon [`Block`]s, and enters them through `BlockOrdering` via\nthe `ingest` boundary.\n\nIt also WRITES: [`kvs_writer::push`] turns the difference between two\nobserved bases into the tail transactions LogSeq's own transactor would\nwrite, flushing them through the B+-trees when the tail overflows. The\nwrite scope is the title and `:block/tags`; every other shape is refused by\nname. See docs/Testing/LogseqDbPush.md.\n\nStage 1 scope and the identity-based acceptance gate are described in\n`plan-lsqdb-import.md`; the fixture-driven amendments are its §9b.",
+        "source_file": "holon-logseq-db/src/lib.rs",
+        "dirs": [
+          {
+            "name": "oracle",
+            "path": "holon-logseq-db/oracle"
+          },
+          {
+            "name": "src",
+            "path": "holon-logseq-db/src",
+            "files": [
+              {
+                "name": "base.rs"
+              },
+              {
+                "name": "built_in.rs"
+              },
+              {
+                "name": "datoms.rs"
+              },
+              {
+                "name": "ingest.rs"
+              },
+              {
+                "name": "kvs_writer.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "project.rs"
+              },
+              {
+                "name": "transit.rs"
+              },
+              {
+                "name": "tree.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-logseq-db/tests",
+            "dirs": [
+              {
+                "name": "fixtures",
+                "path": "holon-logseq-db/tests/fixtures",
+                "dirs": [
+                  {
+                    "name": "logseq-db",
+                    "path": "holon-logseq-db/tests/fixtures/logseq-db",
+                    "files": [
+                      {
+                        "name": "README.md"
+                      },
+                      {
+                        "name": "built-in-entities.json"
+                      },
+                      {
+                        "name": "internal-ident-reference.json"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "decode_pbt.rs"
+              },
+              {
+                "name": "fail_loud_contracts.rs"
+              },
+              {
+                "name": "holontest_import.rs"
+              },
+              {
+                "name": "import_base.rs"
+              },
+              {
+                "name": "ingest_ordering.rs"
+              },
+              {
+                "name": "kvs_round_trip.rs"
+              },
+              {
+                "name": "profile_certification.rs"
+              },
+              {
+                "name": "push.rs"
+              },
+              {
+                "name": "tail_flush.rs"
+              },
+              {
+                "name": "tree_edit.rs"
+              },
+              {
+                "name": "tree_order.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          },
+          {
+            "name": "flip-sweep.sh"
+          },
+          {
+            "name": "profile.yaml"
+          }
+        ]
+      },
+      {
         "name": "holon-loro",
         "path": "holon-loro",
         "c4_level": "component",
@@ -4079,6 +4978,9 @@
                 "name": "device_pairing.rs"
               },
               {
+                "name": "device_pairing_op.rs"
+              },
+              {
                 "name": "doc_lock.rs"
               },
               {
@@ -4098,6 +5000,9 @@
               },
               {
                 "name": "iroh_sync_adapter.rs"
+              },
+              {
+                "name": "layout_migration.rs"
               },
               {
                 "name": "lib.rs"
@@ -4164,6 +5069,18 @@
               },
               {
                 "name": "ticket.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-loro/tests",
+            "files": [
+              {
+                "name": "layout_create_idempotence.rs"
+              },
+              {
+                "name": "layout_migration.rs"
               }
             ]
           }
@@ -4664,6 +5581,12 @@
                 "name": "bundled_sidecars.rs"
               },
               {
+                "name": "command_resolution.rs"
+              },
+              {
+                "name": "credential_path.rs"
+              },
+              {
                 "name": "credential_store.rs"
               },
               {
@@ -4712,6 +5635,9 @@
                 "name": "oauth_bootstrap.rs"
               },
               {
+                "name": "redaction.rs"
+              },
+              {
                 "name": "rest_oauth2.rs"
               },
               {
@@ -4729,6 +5655,12 @@
             "name": "tests",
             "path": "holon-mcp-client/tests",
             "files": [
+              {
+                "name": "cache_tables_are_not_rowid_alias_tables.rs"
+              },
+              {
+                "name": "credential_confinement.rs"
+              },
               {
                 "name": "enablement_cutover.rs"
               },
@@ -4754,10 +5686,19 @@
                 "name": "rest_transport_mock.rs"
               },
               {
+                "name": "rest_transport_redaction.rs"
+              },
+              {
+                "name": "rest_transport_write.rs"
+              },
+              {
                 "name": "sidecar_conformance.rs"
               },
               {
                 "name": "sidecar_drift.rs"
+              },
+              {
+                "name": "unconfigured_is_a_gate.rs"
               }
             ]
           }
@@ -4870,6 +5811,64 @@
               },
               {
                 "name": "mcp_mock_e2e.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-net",
+        "path": "holon-net",
+        "c4_level": "unknown",
+        "description": "The derived Petri-net projection (ADR 0032 §2): rule blocks and operation descriptors compiled into one read-only net, plus the conflict and cycle analyses that run over it.",
+        "pattern_status": "planned",
+        "content": "The derived Petri-net projection (ADR 0032 §2): rule blocks and operation\ndescriptors compiled into one read-only net, plus the conflict and cycle\nanalyses that run over it.\n\nEverything here is a pure function of its sources, which is what makes the\nnet a derived artifact and never a second authority (ADR 0032 §2, ADR 0024\nP1a). It carries no state beyond the current derivation, so it cannot go\nstale whether a caller pulls it on demand or holds it as a reactive var\nrecomputed on source change — this crate stays pure under either delivery.\n\nPetri-net vocabulary — transition, place, arc, marking — lives in this\ncrate only. Dispatch keeps its `Operation*` names; [`bridge`] is the one\nplace the two vocabularies meet (ADR 0032 §8).",
+        "source_file": "holon-net/src/lib.rs",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-net/src",
+            "files": [
+              {
+                "name": "analysis.rs"
+              },
+              {
+                "name": "bridge.rs"
+              },
+              {
+                "name": "compile.rs"
+              },
+              {
+                "name": "guards.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "net.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-net/tests",
+            "files": [
+              {
+                "name": "analysis_pbt.rs"
+              },
+              {
+                "name": "catalog_totality.rs"
+              },
+              {
+                "name": "guard_classifier_pbt.rs"
+              },
+              {
+                "name": "transition_key.rs"
               }
             ]
           }
@@ -5034,6 +6033,9 @@
                 "name": "probe_drawer_order_leak.rs"
               },
               {
+                "name": "profile_certification.rs"
+              },
+              {
                 "name": "properties_prefix_headline_repro.rs"
               },
               {
@@ -5063,6 +6065,9 @@
         "files": [
           {
             "name": "Cargo.toml"
+          },
+          {
+            "name": "profile.yaml"
           }
         ]
       },
@@ -5166,6 +6171,9 @@
               },
               {
                 "name": "incremental_org_writeback_smoke.rs"
+              },
+              {
+                "name": "ingest_contract.rs"
               },
               {
                 "name": "ingest_data_loss_guard.rs"
@@ -5301,10 +6309,19 @@
                 "name": "arcs.rs"
               },
               {
+                "name": "kind_envelope.rs"
+              },
+              {
                 "name": "lib.rs"
               },
               {
+                "name": "marking.rs"
+              },
+              {
                 "name": "pattern.rs"
+              },
+              {
+                "name": "property_kinds.rs"
               },
               {
                 "name": "schema.rs"
@@ -5573,6 +6590,52 @@
             "files": [
               {
                 "name": "computed_null_round_trip.rs"
+              },
+              {
+                "name": "computed_tier_declaration.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-rows",
+        "path": "holon-rows",
+        "c4_level": "unknown",
+        "description": "JSON Lines of typed rows — the neutral contract between whatever produced rows (a format plugin, a remote system's response) and the one sink that writes them ([`holon_core::file_format::TypedRowSink`]).",
+        "pattern_status": "planned",
+        "content": "JSON Lines of typed rows — the neutral contract between whatever produced\nrows (a format plugin, a remote system's response) and the one sink that\nwrites them ([`holon_core::file_format::TypedRowSink`]).\n\nPure serde: no I/O, no clock, no filesystem, so the same code runs natively,\nin a wasm guest and in the web worker.",
+        "source_file": "holon-rows/src/lib.rs",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-rows/src",
+            "files": [
+              {
+                "name": "emit.rs"
+              },
+              {
+                "name": "envelope.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "parse.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-rows/tests",
+            "files": [
+              {
+                "name": "contract_pbt.rs"
               }
             ]
           }
@@ -5733,6 +6796,9 @@
             "name": "tests",
             "path": "holon-sharing/tests",
             "files": [
+              {
+                "name": "admit_hostile_envelope_pbt.rs"
+              },
               {
                 "name": "inc4_pbt.rs"
               },
@@ -5955,6 +7021,9 @@
                 "name": "matview_manager.rs"
               },
               {
+                "name": "schema_catalog.rs"
+              },
+              {
                 "name": "schema_module.rs"
               },
               {
@@ -5973,6 +7042,9 @@
                 "name": "turso_actor_stats.rs"
               },
               {
+                "name": "turso_adapter.rs"
+              },
+              {
                 "name": "util.rs"
               }
             ]
@@ -5981,6 +7053,12 @@
             "name": "tests",
             "path": "holon-turso/tests",
             "files": [
+              {
+                "name": "agg_subquery_matview_spike.rs"
+              },
+              {
+                "name": "antijoin_pbt.rs"
+              },
               {
                 "name": "automations_journal_cdc.rs"
               },
@@ -5992,6 +7070,9 @@
               },
               {
                 "name": "chained_matview_cdc_repro.rs"
+              },
+              {
+                "name": "concat_isnull_matview_probe.rs"
               },
               {
                 "name": "create_table_keyword_columns.rs"
@@ -6009,7 +7090,13 @@
                 "name": "derived_field_sidecar.rs"
               },
               {
+                "name": "edge_agg_retraction_across_reboot.rs"
+              },
+              {
                 "name": "group_by_matview_spike.rs"
+              },
+              {
+                "name": "integration_state_presentation_columns.rs"
               },
               {
                 "name": "json_extract_matview_spike.rs"
@@ -6021,10 +7108,25 @@
                 "name": "matview_lease_actor.rs"
               },
               {
+                "name": "matview_version_skew_boot.rs"
+              },
+              {
+                "name": "missing_deps_error_stays_typed.rs"
+              },
+              {
+                "name": "property_kinds_migration.rs"
+              },
+              {
                 "name": "recursive_cte_page_boundary.rs"
               },
               {
                 "name": "recursive_cte_shape_architecture.rs"
+              },
+              {
+                "name": "replace_into_matview_base.rs"
+              },
+              {
+                "name": "schema_catalog_boot.rs"
               },
               {
                 "name": "schema_source_ddl_lock.rs"

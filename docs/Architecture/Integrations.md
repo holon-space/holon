@@ -1,12 +1,12 @@
 # External Integrations & Frontend
 
-_Part of [Architecture](../Architecture.md)_
+_Part of [Architecture](../Architecture.md). Reconciled with code on 2026-09-03._
 
 ## External System Integration
 
 ### MCP Apps: Interactive UI Hosting
 
-> **Status: target architecture.** The `AppBridge` host implementation is not yet landed — no `AppBridge` struct exists in `frontends/`. The section below describes the intended design for the Dioxus web frontend (prototype).
+> **Status: target architecture, premised on a parked frontend.** No `AppBridge` struct exists anywhere in `frontends/`. The section below describes the intended design for the Dioxus web frontend, which is parked (vault `Multi-Frontend Strategy.org`) — GPUI is the shipping primary frontend. This design has no current host to land in.
 
 Holon embraces **[MCP Apps](https://github.com/modelcontextprotocol/ext-apps)** ([SEP-1865](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx)), the standard MCP extension that lets servers deliver interactive HTML UIs — charts, forms, dashboards, kanban boards — rendered securely in sandboxed iframes inside any compliant host. Holon acts as an MCP Apps **host**, embedding these UIs in its Dioxus web frontend.
 

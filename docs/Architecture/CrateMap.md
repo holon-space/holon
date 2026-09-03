@@ -16,13 +16,16 @@ Library + binary crates under `crates/` (C4 components of the Holon system).
 | `holon-app` | component | Composition | Composition Root | DI assembly crate (composition root) — owns every wiring that names concrete backends: Turso/Loro/OrgMode modules, MCP integrations, and `FrontendSession`. |
 | `holon-architecture-tests` | component | Testing | Test Harness | `cargo test` wrapper that shells out to `archlint --all` for a full-repo architecture sweep. |
 | `holon-block-roundtrip-testing` | component | Testing | Test Harness | Format-and-storage-agnostic generators and normalized comparison shapes for block round-trip property tests. |
+| `holon-capability` | component | Adapters | Specification | Capability profiles: what each durable FORMAT can carry without loss. |
 | `holon-core` | component | Core | Port | Core traits for Holon datasources |
 | `holon-engine` | component | Engine | Interpreter | Standalone Petri-net engine: YAML-defined nets with Rhai guards, WSJF ranking, and what-if analysis. |
 | `holon-expr` | component | Engine | Interpreter | Compiled Rhai expressions — the shared vocabulary between holon-api entity definitions and the holon-engine Petri-net guard evaluator. |
 | `holon-filesystem` | component | Core | Adapter | FileSystem + FileChangeSource ports with in-memory and notify-based adapters (ADR 0011). |
 | `holon-frontend` | component | Core | MVVM ViewModel | Frontend session abstraction and the MVVM **ViewModel** layer — owns the reactive `ReactiveViewModel` tree that the GPUI and TUI Views observe. |
 | `holon-integration-tests` | component | Testing | Test Harness | Shared test infrastructure for Holon integration tests |
+| `holon-kitchen` | — | — | Adapter | Kitchen domain: recipes and the shopping list, and (later) pantry and nutrition. |
 | `holon-layout-testing` | component | Testing | Test Harness | Shared layout-testing primitives for Holon's property-based UI tests. |
+| `holon-logseq-db` | — | — | — | Reading a LogSeq DB-version graph into Holon, and pushing edits back. |
 | `holon-loro` | component | Adapters | Adapter | Loro CRDT document engine and peer-to-peer synchronization. |
 | `holon-loro-testing` | component | Testing | Test Harness | Companion PBT crate for `holon-loro` — the first subsystem to OWN its composed-keystone contributions (co-location Phase 1, plan §5-loro). |
 | `holon-loro-wiring` | component | Adapters | Adapter | The wiring that binds the Loro CRDT backend to the `holon` engine. |
@@ -31,6 +34,7 @@ Library + binary crates under `crates/` (C4 components of the Holon system).
 | `holon-markdown` | component | Adapters | Adapter | `holon-markdown` — read-only (Tier R/O) ingest adapters for foreign vaults: Obsidian-flavored and LogSeq-flavored Markdown, parsed into the SAME `Block` + `MarkSpan` substrate as org (see `docs/Proposals/ForeignVaultCompat-2026-07-12.md`). |
 | `holon-mcp-client` | component | Adapters | Adapter | Reusable MCP client: connects to MCP servers and exposes their tools as `OperationProvider`s. |
 | `holon-mcp-mock` | component | Testing | Test Harness | A configurable mock MCP server that reproduces the challenging behaviours seen in real MCP servers, for E2E-testing holon's generic MCP connector. |
+| `holon-net` | — | — | — | The derived Petri-net projection (ADR 0032 §2): rule blocks and operation descriptors compiled into one read-only net, plus the conflict and cycle analyses that run over it. |
 | `holon-oracles` | component | Core | Monitor | Live oracles — keystone PBT invariants shipped into debug builds. |
 | `holon-org-format` | component | Adapters | Adapter | Org-mode format: pure parsing and rendering. |
 | `holon-orgmode` | component | Adapters | Adapter | Org-mode disk I/O and sync layer. |
@@ -38,6 +42,7 @@ Library + binary crates under `crates/` (C4 components of the Holon system).
 | `holon-pbt-core` | component | Testing | Strategy | Cross-PBT transition traits shared between `holon-layout-testing` and `holon-integration-tests`. |
 | `holon-petri` | component | Engine | Adapter | Materialization layer: Holon task blocks → Petri Net for WSJF ranking. |
 | `holon-profiles` | component | Core | Strategy | EntityProfile system: per-entity, per-row render + operation resolution. |
+| `holon-rows` | — | — | — | JSON Lines of typed rows — the neutral contract between whatever produced rows (a format plugin, a remote system's response) and the one sink that writes them ([`holon_core::file_format::TypedRowSink`]). |
 | `holon-rules` | component | Core | Shared Kernel | `holon_rule` YAML front-end (ADR 0024 Phase-2/3, plan §7.2) — the single-block rule surface: a guard (`when:` / arc `input:`) **and** its effect (`emit:` / arc `output:`), parsed at the boundary into a closed typed representation ([`HolonRule`]). Mirrors the ADR 0022 discipline (`parse_advice_rule` + typed error enum + newtypes; `deny_unknown_fields` so malformed rules fail loud). |
 | `holon-secrets` | component | Core | Adapter | OS-keychain storage for Holon's secret material. |
 | `holon-sharing` | component | Engine | Policy | `holon-sharing` — ADR 0028 sharing machinery (Increments 4-6: the H2 owner-scoped, totally-ordered crossing log + its migration/undo/enforcement seams; the D4/H8 owner-signed policy objects + lease membership; and the H4 owner-private alias ledger / re-encode baseline). |

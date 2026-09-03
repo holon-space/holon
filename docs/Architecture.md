@@ -242,7 +242,7 @@ Detailed documentation lives in `docs/Architecture/`:
 
 | File | Covers |
 | ------ | -------- |
-| [Model.md](Architecture/Model.md) | ★ **Read first** — the one-page mental model: five layers, mode axes, Loro's three capabilities, invariants 1–12 |
+| [Model.md](Architecture/Model.md) | ★ **Read first** — the one-page mental model: five layers, mode axes, Loro's three capabilities, invariants 1–13 |
 | [storage.md](Architecture/Storage.md) | QueryableCache, TursoBackend, CDC, DbHandle, Command Sourcing |
 | [render-pipeline.md](Architecture/RenderPipeline.md) | Query compilation (PRQL/GQL/SQL), EntityProfile, ReactiveViewModel, Three-Tier Events |
 | [operations.md](Architecture/Operations.md) | Operation System, Action Watcher, Undo/Redo, Procedural Macros |

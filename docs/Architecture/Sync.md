@@ -1,6 +1,6 @@
 # Sync Infrastructure
 
-*Part of [Architecture](../Architecture.md)*
+*Part of [Architecture](../Architecture.md). Reconciled with code on 2026-09-03.*
 
 
 
@@ -90,7 +90,7 @@ Loro, OrgMode, and Iroh are independently toggleable via environment variables:
 | Component | Env Var | Default |
 |-----------|---------|---------|
 | OrgMode | `HOLON_VAULT_ROOT` (path) | OFF |
-| Loro | `HOLON_CRDT_ENABLED` (truthy) | OFF |
+| Loro | `HOLON_CRDT_ENABLED` (truthy) | ON (`crates/holon-frontend/src/config.rs:564-566`, ruling D69.a) |
 | Iroh | (bundled with Loro, future: separate) | OFF |
 
 > **Vault contract (Model.md invariant 11):** the `HOLON_VAULT_ROOT` directory
@@ -184,7 +184,7 @@ Each block contains:
                    SqlOperationProvider → Turso (LWW) → CDC → UI
 ```
 
-**Inbound runtime SQL→Loro path is removed in Phase 2 of the Cells plan.** The only surviving SQL→Loro flow is the *startup seed* — at boot, the configured **file adapter** seeds the LoroDoc from its files. The file-sync controller is **format-agnostic** (it speaks only to a `FileFormatAdapter`) — org is the only format currently wired in; `MarkdownFormatAdapter` implements the same trait but has zero prod dependents today (see the `FileFormatAdapter` section below), so it is not yet an equal peer in practice. After boot, Loro is upstream of SQL; there is no path for SQL changes to flow back into Loro at runtime.
+**Inbound runtime SQL→Loro path is removed in Phase 2 of the Cells plan.** The only surviving SQL→Loro flow is the *startup seed* — at boot, the configured **file adapter** seeds the LoroDoc from its files. The file-sync controller is **format-agnostic** (it speaks only to a `FileFormatAdapter` through the `FormatRegistry`) — the vault registry holds org and `.cook`, and only org is written back (see the `FileFormatAdapter` section below). After boot, Loro is upstream of SQL; there is no path for SQL changes to flow back into Loro at runtime.
 
 **P2P Sync Flow (Iroh)**
 
@@ -454,21 +454,34 @@ impl P2POperations for LoroBackend { /* ... */ }
 
 ### FileFormatAdapter (file-backed sync)
 
-File-backed adapters (org-mode today, markdown/Obsidian/LogSeq next) share the parse-watch-write-echo-suppress loop. The format-specific surface is captured as a small trait in `crates/holon-core/src/file_format.rs`:
+File-backed adapters share the parse-watch-write-echo-suppress loop. The format-specific surface is captured as a trait in `crates/holon-core/src/file_format.rs:161`; the shape below is abridged:
 
 ```rust
 pub trait FileFormatAdapter: Send + Sync {
     fn extensions(&self) -> &'static [&'static str];
+    fn write_tier(&self) -> WriteTier;
     fn parse(&self, path: &Path, content: &str, parent_dir_id: &EntityUri, root: &Path)
         -> Result<FileFormatParseResult>;
     fn render_document(&self, doc: &Block, blocks: &[Block], file_path: &Path, file_id: &EntityUri) -> String;
     fn render_blocks(&self, blocks: &[Block], file_path: &Path, file_id: &EntityUri) -> String;
+    fn doc_id_from_content(&self, content: &str) -> Option<String>;
 }
 ```
 
-`OrgFormatAdapter` (`crates/holon-orgmode/src/file_format.rs`) is the **sole** impl today. `FileSyncController` holds `format: Arc<dyn FileFormatAdapter>` and routes parse + render through the trait. New formats land as new `*FormatAdapter` impls; the watcher, the change-origin filter, and `_change_origin`-based echo suppression stay generic — no new sync controller is needed per format. **(A configurable `MarkdownFormatAdapter` for Obsidian-style vaults — a `MarkdownDialect` of atomic feature switches, `::obsidian()`/`::commonmark()`/`::with_dialect(..)` — was implemented and then REMOVED 2026-07-06 as unwired dead code: it had zero prod dependents and the live disk path was always org-only. It is recoverable from git history; the `FileFormatAdapter` trait is the seam it dropped into and would drop into again.)**
+`write_tier` has no default: an adapter that says nothing about its write half would inherit "writable" by silence, and be found out only by overwriting a user's file.
 
-**Markdown block-id charset (round-trip rule).** *(Documents the removed `holon-markdown` adapter — retained as the design reference for any future re-add.)* The renderer emits a block's stable id as a trailing `^id` marker (`# Heading ^id`), and the parser re-anchors the block by reading it back. The marker only survives a reparse for ids in the charset `[A-Za-z0-9_-]` (alphanumerics + `-` + `_`) — exactly the charset UUIDs use, so machine-minted ids always round-trip. An id containing any other character (spaces, `.`, `:`, `/`, punctuation, non-ASCII — i.e. hand-authored ids) has no round-trip-safe encoding: there is **no scheme in user-visible markdown**. Rather than silently drop such an id (which would make the reparse mint a fresh UUID and lose the block's identity), the renderer **fails loudly** with `MarkdownRenderError::{OutOfCharsetBlockId, EmptyBlockId}`, propagated through the whole render path. The parser's `is_block_id_byte` and the renderer's `is_block_id_char` are the two halves of this charset and must stay identical. Pinned by `holon-markdown/tests/markdown_block_round_trip_pbt.rs`.
+There are four impls. `FileSyncController` holds `formats: Arc<FormatRegistry>` (`crates/holon-filesystem/src/file_sync_controller.rs:682`) and routes parse + render through the trait; the watcher, the change-origin filter, and `_change_origin`-based echo suppression stay generic, so no new sync controller is needed per format.
+
+| Impl | Crate | Extensions | Write tier | In the vault registry |
+|---|---|---|---|---|
+| `OrgFormatAdapter` | `holon-orgmode/src/file_format.rs:44` | `org` | read-write | yes |
+| `CookFormatAdapter` | `holon-kitchen/src/file_format.rs:34` | `cook` | read-only | yes |
+| `LogseqMarkdownAdapter` | `holon-markdown/src/logseq.rs:81` | `md`, `markdown` | read-only | no |
+| `ObsidianMarkdownAdapter` | `holon-markdown/src/obsidian.rs:121` | `md`, `markdown` | read-only | no |
+
+`crates/holon-markdown` is a workspace member (`Cargo.toml:19`) and compiles, but the vault `FormatRegistry` is built from the org and `.cook` adapters alone (`crates/holon-app/src/wiring.rs:359-364`). The two markdown adapters are held out deliberately: both claim `md`, and the registry refuses a duplicate extension at construction until a vault-flavor discriminator picks between them (ruling D56.a, `wiring.rs:356-358`).
+
+**Foreign markdown vaults are never written.** Both adapters report `WriteTier::ReadOnly`, and three layers enforce it: the controller-level `ReadOnlyWriteGuard`, the adapter's `writeback_drops` refusal, and a render panic. Pinned by `crates/holon-markdown/tests/write_guard.rs`; ingest is pinned by `logseq_ingest.rs` and `obsidian_ingest.rs`.
 
 #### Deferred adapter responsibilities (informed by the second impl)
 
