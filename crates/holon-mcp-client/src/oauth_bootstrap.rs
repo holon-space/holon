@@ -296,15 +296,17 @@ impl AuthorizationRequest {
             .filter(|u| !u.is_empty())
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "this integration's sidecar declares no `transport.rest.auth.oauth2.auth_url`, \
-                     so the consent flow has no authorization endpoint to send the browser to. Add \
-                     the provider's authorization endpoint to the sidecar."
+                    "this integration's sidecar declares no `{}.auth_url`, so the consent flow \
+                     has no authorization endpoint to send the browser to. Add the provider's \
+                     authorization endpoint to the sidecar.",
+                    crate::integration_config::HOLON_OAUTH2_KEY
                 )
             })?;
         anyhow::ensure!(
             !cfg.scopes.is_empty(),
-            "this integration's sidecar declares no `transport.rest.auth.oauth2.scopes`, so the \
-             consent flow would ask for no access at all."
+            "this integration's sidecar declares no `{}.scopes`, so the consent flow would ask \
+             for no access at all.",
+            crate::integration_config::HOLON_OAUTH2_KEY
         );
         Ok(Self {
             auth_url: parse_secure_endpoint("auth_url", auth_url)?,

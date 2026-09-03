@@ -107,6 +107,10 @@ holon-loro = { workspace = true, features = ["test-helpers"] }
 holon-loro-wiring = { workspace = true, features = ["testing"] }
 holon-sharing.workspace = true
 holon-orgmode = { workspace = true, features = ["di"] }
+# TEST-ONLY: the shopping e2e reads the shipped sidecar's own mapping so the
+# fake peer answers through the connection production uses.
+holon-rows.workspace = true
+serde_yaml.workspace = true
 proptest.workspace = true
 proptest-state-machine.workspace = true
 rhai.workspace = true

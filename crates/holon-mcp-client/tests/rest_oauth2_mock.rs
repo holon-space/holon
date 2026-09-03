@@ -189,42 +189,66 @@ fn temp_refresh_token(contents: &str) -> (tempfile::TempDir, String) {
     (dir, path.to_str().unwrap().to_string())
 }
 
-fn oauth_yaml(base: &str, refresh_file: &str, call: &str) -> String {
+/// `call` supplies the manual's `utcp.tools` list entries; `holon_tools`
+/// supplies the matching `holon.tools` map (empty for a tool that needs none).
+fn oauth_yaml_with(base: &str, refresh_file: &str, call: &str, holon_tools: &str) -> String {
     format!(
         r#"
-transport:
-  rest:
-    base_url: {base}
-    auth:
-      oauth2:
-        token_url: {base}/token
-        client_id_env: OAUTH_TEST_CLIENT_ID
-        client_secret_env: OAUTH_TEST_CLIENT_SECRET
-        refresh_token_file: {refresh_file}
-        scopes: [scope.readonly]
-    calls:
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
 {call}
+holon:
+  auth:
+    oauth2:
+      token_url: {base}/token
+      client_id_env: OAUTH_TEST_CLIENT_ID
+      client_secret_env: OAUTH_TEST_CLIENT_SECRET
+      refresh_token_file: {refresh_file}
+      scopes: [scope.readonly]
+  tools:
+{holon_tools}
 entities: {{}}
 tools: {{}}
 "#
     )
 }
 
-const GET_THING_CALL: &str = r#"      get-thing:
-        method: GET
-        path: /thing
-"#;
+fn oauth_yaml(base: &str, refresh_file: &str, call: &str) -> String {
+    oauth_yaml_with(base, refresh_file, call, "    {}\n")
+}
 
-fn paged_call(max_pages: u32) -> String {
+fn get_thing_call(base: &str) -> String {
     format!(
-        r#"      list-paged:
-        method: GET
-        path: /paged
-        pagination:
-          items_path: items
-          next_token_path: nextPageToken
-          token_param: pageToken
-          max_pages: {max_pages}
+        r#"    - name: get-thing
+      tool_call_template:
+        call_template_type: http
+        url: {base}/thing
+        http_method: GET
+"#
+    )
+}
+
+fn paged_call(base: &str) -> String {
+    format!(
+        r#"    - name: list-paged
+      tool_call_template:
+        call_template_type: http
+        url: {base}/paged
+        http_method: GET
+"#
+    )
+}
+
+fn paged_holon_tool(max_pages: u32) -> String {
+    format!(
+        r#"    list-paged:
+      pagination:
+        items_path: items
+        next_token_path: nextPageToken
+        token_param: pageToken
+        max_pages: {max_pages}
 "#
     )
 }
@@ -282,7 +306,7 @@ async fn call(surface: &RestCallSurface, name: &str) -> Result<serde_json::Value
 async fn oauth2_refreshes_and_attaches_bearer() {
     let mock = start_mock().await;
     let (_dir, rt) = temp_refresh_token("refresh-abc\n");
-    let yaml = oauth_yaml(&mock.base_url, &rt, GET_THING_CALL);
+    let yaml = oauth_yaml(&mock.base_url, &rt, &get_thing_call(&mock.base_url));
     let surface = surface_from(&yaml);
 
     let out = call(&surface, "get-thing").await.expect("call ok");
@@ -316,7 +340,7 @@ async fn oauth2_retries_once_on_401() {
     let mock = start_mock().await;
     mock.with(|s| s.protected_401_once = true);
     let (_dir, rt) = temp_refresh_token("refresh-abc");
-    let yaml = oauth_yaml(&mock.base_url, &rt, GET_THING_CALL);
+    let yaml = oauth_yaml(&mock.base_url, &rt, &get_thing_call(&mock.base_url));
     let surface = surface_from(&yaml);
 
     let out = call(&surface, "get-thing")
@@ -336,7 +360,7 @@ async fn oauth2_refresh_failure_redacts_all_secrets() {
     let mock = start_mock().await;
     mock.with(|s| s.token_endpoint_fails = true);
     let (_dir, rt) = temp_refresh_token("refresh-SECRET-abc");
-    let yaml = oauth_yaml(&mock.base_url, &rt, GET_THING_CALL);
+    let yaml = oauth_yaml(&mock.base_url, &rt, &get_thing_call(&mock.base_url));
     let surface = surface_from(&yaml);
 
     let err = call(&surface, "get-thing")
@@ -361,7 +385,12 @@ async fn oauth2_refresh_failure_redacts_all_secrets() {
 async fn pagination_follows_next_token_and_concatenates() {
     let mock = start_mock().await;
     let (_dir, rt) = temp_refresh_token("refresh-abc");
-    let yaml = oauth_yaml(&mock.base_url, &rt, &paged_call(10));
+    let yaml = oauth_yaml_with(
+        &mock.base_url,
+        &rt,
+        &paged_call(&mock.base_url),
+        &paged_holon_tool(10),
+    );
     let surface = surface_from(&yaml);
 
     let out = call(&surface, "list-paged").await.expect("paged call ok");
@@ -383,7 +412,12 @@ async fn pagination_exceeding_max_pages_fails_loud() {
     let mock = start_mock().await;
     mock.with(|s| s.paged_infinite = true);
     let (_dir, rt) = temp_refresh_token("refresh-abc");
-    let yaml = oauth_yaml(&mock.base_url, &rt, &paged_call(3));
+    let yaml = oauth_yaml_with(
+        &mock.base_url,
+        &rt,
+        &paged_call(&mock.base_url),
+        &paged_holon_tool(3),
+    );
     let surface = surface_from(&yaml);
 
     let err = call(&surface, "list-paged")
@@ -408,11 +442,19 @@ fn shipped_gcal_sidecar_shape() {
         serde_yaml::from_str(&yaml).expect("gcal.yaml parses as IntegrationFileConfig");
 
     assert_eq!(cfg.entity_prefix.as_deref(), Some("gcal_"));
-    let rest = cfg.transport.rest.as_ref().expect("rest transport");
-    assert_eq!(rest.base_url, "https://www.googleapis.com/calendar/v3");
+    let manual = cfg.utcp.as_ref().expect("utcp manual");
+    let holon = cfg.holon.as_ref().expect("holon section");
+    assert_eq!(
+        manual
+            .tool("list-calendars")
+            .expect("list-calendars tool")
+            .tool_call_template
+            .url,
+        "https://www.googleapis.com/calendar/v3/users/me/calendarList"
+    );
 
     // OAuth2 auth arm is present and well-formed.
-    let auth = rest.auth.as_ref().expect("auth block");
+    let auth = holon.auth.as_ref().expect("auth block");
     let oauth2 = auth.oauth2.as_ref().expect("oauth2 arm");
     assert_eq!(oauth2.token_url, "https://oauth2.googleapis.com/token");
     // Credentials are file-sourced (Holon is a GUI app; env vars don't reach it
@@ -439,7 +481,15 @@ fn shipped_gcal_sidecar_shape() {
     );
 
     // list-events carries the rolling window + pagination.
-    let events = rest.calls.get("list-events").expect("list-events call");
+    assert_eq!(
+        manual
+            .tool("list-events")
+            .expect("list-events tool")
+            .tool_call_template
+            .url,
+        "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
+    );
+    let events = holon.tools.get("list-events").expect("list-events config");
     assert_eq!(
         events.query.get("singleEvents").map(String::as_str),
         Some("true")

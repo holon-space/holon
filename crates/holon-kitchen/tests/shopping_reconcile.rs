@@ -7,6 +7,7 @@
 //! membership and the categories from the list's own `options.cats`, so a test
 //! that skipped the parser would be testing a shape the peer never sends.
 
+use anyhow::Result;
 use chrono::Duration;
 use holon_kitchen::shopping::CompleteSnapshot;
 use holon_kitchen::shopping::ItemKey;
@@ -15,6 +16,7 @@ use holon_kitchen::shopping::LocalShoppingItem;
 use holon_kitchen::shopping::PushIntent;
 use holon_kitchen::shopping::ShoppingCategory;
 use holon_kitchen::shopping::ShoppingReconciler;
+use holon_rows::RowMapper;
 
 const FETCHED_AT: &str = "2026-09-01T10:00:00Z";
 
@@ -55,16 +57,35 @@ fn body(
     .expect("the fixture body is an object")
 }
 
+/// The shipped sidecar. Reading the filter from the asset is what makes these
+/// snapshots the ones production builds: the mapping edited there is the
+/// mapping exercised here.
+const SIDECAR: &str = include_str!("../../../assets/integrations/shopping.yaml");
+
+/// A snapshot built the way production builds one: the response through the
+/// shipped sidecar's `response` mapping, then the rows.
+fn snapshot_from_body(
+    body: &serde_json::Map<String, serde_json::Value>,
+    fetched_at: &str,
+) -> Result<CompleteSnapshot> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(SIDECAR).expect("the sidecar parses");
+    let filter = doc["holon"]["tools"]["pull_list"]["response"]
+        .as_str()
+        .expect("holon.tools.pull_list.response is a jaq filter");
+    let mapper = RowMapper::compile("shopping/pull_list.response", filter)?;
+    let rows = mapper.map_to_row_sets(&serde_json::Value::Object(body.clone()))?;
+    CompleteSnapshot::from_rows(&rows, fetched_at)
+}
+
 fn snapshot(items: &[(&str, &str, Option<f64>)]) -> CompleteSnapshot {
-    CompleteSnapshot::from_response(&body(items, &[], 7), FETCHED_AT).expect("well-formed response")
+    snapshot_from_body(&body(items, &[], 7), FETCHED_AT).expect("well-formed response")
 }
 
 fn snapshot_with_picked(
     items: &[(&str, &str, Option<f64>)],
     picked: &[(&str, &str)],
 ) -> CompleteSnapshot {
-    CompleteSnapshot::from_response(&body(items, picked, 7), FETCHED_AT)
-        .expect("well-formed response")
+    snapshot_from_body(&body(items, picked, 7), FETCHED_AT).expect("well-formed response")
 }
 
 fn local(name: &str, cat: &str, count: Option<f64>) -> LocalShoppingItem {
@@ -117,7 +138,7 @@ fn a_duplicate_category_code_is_a_construction_error() {
         "options".into(),
         serde_json::json!({"prices": false, "cats": ["R", "R_shed_ABCDEF"]}),
     );
-    let err = CompleteSnapshot::from_response(&response, FETCHED_AT)
+    let err = snapshot_from_body(&response, FETCHED_AT)
         .expect_err("an ambiguous vocabulary would mislabel items");
     assert!(format!("{err:#}").contains("twice"), "{err:#}");
 }
@@ -419,10 +440,13 @@ fn a_record_without_a_name_fails_the_whole_snapshot() {
     let mut response = body(&[], &[], 7);
     response.insert("items".into(), serde_json::json!([{"cat": "B"}]));
 
-    let err = CompleteSnapshot::from_response(&response, FETCHED_AT)
-        .expect_err("a nameless item has no identity");
+    let err =
+        snapshot_from_body(&response, FETCHED_AT).expect_err("a nameless item has no identity");
     // Skipping it would silently turn a real item into a deletion.
-    assert!(format!("{err:#}").contains("`name` is missing"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("`name` must be a non-empty string"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -430,9 +454,9 @@ fn a_response_without_a_version_fails_the_whole_snapshot() {
     let mut response = body(&[("Milk", "R", None)], &[], 7);
     response.remove("version");
 
-    let err = CompleteSnapshot::from_response(&response, FETCHED_AT)
+    let err = snapshot_from_body(&response, FETCHED_AT)
         .expect_err("a snapshot with no version cannot base a commit");
-    assert!(format!("{err:#}").contains("version"), "{err:#}");
+    assert!(format!("{err:#}").contains("no `version`"), "{err:#}");
 }
 
 #[test]

@@ -1,74 +1,286 @@
 # Sidecar-format generation. The app runs its own bundled copy of this file
 # unless an INSTALLED copy declares the generation the running build understands
 # (crates/holon-mcp-client/src/bundled_sidecars.rs).
-schema_version: 1
+schema_version: 2
 
 display_name: "Shopping list"
 icon: list
 default_view: shopping-view
 
 # Shopping-list peer — both legs of a bidirectional sync (Holon is a peer, never
-# the master; docs/Plans/Kitchen.md §4). The wire contract is
-# docs/Plans/ThatShoppingList-API-2026-09-01.md.
+# the master; docs/Plans/Kitchen.md §4).
+#
+# The file has two sections. `utcp:` below is a VERBATIM UTCP 1.x manual: the
+# same document a standard UTCP client reads, exportable unchanged
+# (crates/holon-mcp-client/tests/utcp_manual_roundtrip.rs pins that). `holon:`
+# carries what the standard has no field for — the query parameters, the request
+# envelope, the poll cadence, and the mapping from a response to typed rows.
 #
 # `SHOPPING_LIST_URL` IS THE WHOLE SHARE LINK of one list, ending in the list id:
-# `<scheme>://<host>/!<token>/api/list/<listId>`. That is the string the user pastes,
-# exactly as the app hands it out — Holon derives nothing from it and parses none
-# of it. Both calls are plain relative paths off that base, which is why this
-# connector needs no list-id setting of its own.
+# `<scheme>://<host>/!<token>/api/list/<listId>`. That is the string the user
+# pastes, exactly as the app hands it out — Holon derives nothing from it and
+# parses none of it. Each tool's `url` is that link, plus the one relative
+# segment the call adds.
 #
-# The list call answers `{items, pickedItems, version, options}`. There is no
-# item id, no per-item timestamp and no etag, so the ingest is keyed
-# on `(name, cat)` and runs through `holon_kitchen::shopping::ShoppingReconciler`
-# rather than the generic entity mirror, which requires a server-issued id. That
-# is why this file declares no `entities`: the sidecar supplies the transport
-# manual, and the kitchen crate owns identity and reconciliation.
-#
-# `POST <base>/commit` is a batched-command write. The envelope is
-# declared here so a second connector gains a write leg by authoring YAML; the
-# `commands` array is the reconciler's output, passed through as a whole value.
-#
-# THE BASE URL IS THE CREDENTIAL for this endpoint: no auth header, an opaque
+# THE URL IS THE CREDENTIAL for this endpoint: no auth header, an opaque
 # `!`-prefixed token in a PATH segment, stable per list. Referencing it as
 # `${VAR}` is what marks it secret, which is what strips it from every error, log
-# line and toast the connector emits (assets/integrations/README.md §2). Never
-# write a resolved URL here.
+# line and toast (assets/integrations/README.md §2). Never write a resolved URL
+# here.
 
-transport:
-  rest:
-    base_url: ${SHOPPING_LIST_URL}
-    # The peer serves one unpaginated full snapshot per poll; 60s is the
-    # cadence worth having while a shopping list is open.
-    poll_interval: 60s
-    calls:
-      list-items:
-        method: GET
-        # Empty: the base URL already names this list. The captured request
-        # carries the version it last saw plus a cache-buster, and the
-        # cache-buster is load-bearing — the write leg re-reads to check its own
-        # commit landed, and a cached body there reports a write as missing and
-        # gets it sent twice.
-        path: ""
-        query:
-          oldVersion: "{oldVersion}"
-          version: "{version}"
-          _nocache: "{nocache}"
-      commit-items:
-        method: POST
-        path: /commit
-        query:
-          version: "{version}"
-        body:
-          oldVersion: "{version}"
-          oldPickedItemsVersion: "{pickedItemsVersion}"
-          device:
-            id: "{deviceId}"
-          lang: en
-          commands: "{commands}"
-        # The peer's own name for the new list version. Re-emitted under the
-        # transport's neutral key so the caller carries no field name of its own.
-        response_version_path: version
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    -
+        name: "pull_list"
+        description: "Fetch the complete snapshot of the shared list: items, pickedItems, version, options.cats. Send the highest version seen so far in BOTH oldVersion and version; _nocache must be a fresh epoch-millis value on every call because the write leg re-reads to confirm its own commit landed."
+        inputs:
+          type: "object"
+          properties:
+            oldVersion:
+              type: "integer"
+              description: "Highest version seen so far; 0 before the first pull."
+            version:
+              type: "integer"
+              description: "Same value as oldVersion."
+            _nocache:
+              type: "integer"
+              description: "Fresh epoch milliseconds; cache-buster."
+          required:
+            - "oldVersion"
+            - "version"
+            - "_nocache"
+        outputs:
+          type: "object"
+          properties:
+            version:
+              type: "integer"
+            pickedItemsVersion:
+              type: "integer"
+              description: "Optional; when absent reuse version."
+            items:
+              type: "array"
+              items:
+                type: "object"
+                properties:
+                  name:
+                    type: "string"
+                  cat:
+                    type: "string"
+                  count:
+                    type:
+                      - "number"
+                      - "null"
+                required:
+                  - "name"
+                  - "cat"
+            pickedItems:
+              type: "object"
+              description: "Map keyed by item name; value carries cat and optionally count/date. Membership means checked."
+              additionalProperties:
+                type: "object"
+            options:
+              type: "object"
+              properties:
+                cats:
+                  type: "array"
+                  items:
+                    type: "string"
+                  description: "Category vocabulary. Entry is either 'code' or 'code_icon_color'; the code is the segment before the first underscore."
+          required:
+            - "version"
+            - "items"
+            - "pickedItems"
+            - "options"
+        tool_call_template:
+          name: "that_shopping_list"
+          call_template_type: "http"
+          url: "${SHOPPING_LIST_URL}"
+          http_method: "GET"
+          content_type: "application/json"
+        tags:
+          - "shopping"
+          - "list"
+          - "read"
+    -
+        name: "commit"
+        description: "Apply a batch of add/del commands. The query 'version' is the version of the pull this batch was reconciled against. Response carries the new version. A command id makes a retry idempotent, so DO NOT remint ids when re-sending the same logical batch."
+        inputs:
+          type: "object"
+          properties:
+            version:
+              type: "integer"
+              description: "Old version, sent as a query parameter."
+            body:
+              type: "object"
+              properties:
+                oldVersion:
+                  type: "integer"
+                oldPickedItemsVersion:
+                  type: "integer"
+                device:
+                  type: "object"
+                  properties:
+                    id:
+                      type: "string"
+                  required:
+                    - "id"
+                lang:
+                  type: "string"
+                commands:
+                  type: "array"
+                  items:
+                    type: "object"
+                    properties:
+                      cmd:
+                        type: "string"
+                        enum:
+                          - "add"
+                          - "del"
+                      good:
+                        type: "object"
+                        properties:
+                          name:
+                            type: "string"
+                          cat:
+                            type: "string"
+                          new:
+                            type: "boolean"
+                        required:
+                          - "name"
+                          - "cat"
+                          - "new"
+                      id:
+                        type: "string"
+                        description: "Idempotency key, '{roundMillis}_{16 hex}'."
+                    required:
+                      - "cmd"
+                      - "good"
+                      - "id"
+              required:
+                - "oldVersion"
+                - "oldPickedItemsVersion"
+                - "device"
+                - "lang"
+                - "commands"
+          required:
+            - "version"
+            - "body"
+        outputs:
+          type: "object"
+          properties:
+            version:
+              type: "integer"
+            pickedItemsVersion:
+              type: "integer"
+          required:
+            - "version"
+        tool_call_template:
+          name: "that_shopping_list"
+          call_template_type: "http"
+          url: "${SHOPPING_LIST_URL}/commit"
+          http_method: "POST"
+          content_type: "application/json"
+          body_field: "body"
+        tags:
+          - "shopping"
+          - "list"
+          - "write"
 
-entities: {}
+holon:
+  # The peer serves one unpaginated full snapshot per poll; 60s is the cadence
+  # worth having while a shopping list is open.
+  poll_interval: 60s
+  tools:
+    pull_list:
+      # The manual declares these inputs; this says how they reach the wire.
+      # `_nocache` is load-bearing — the write leg re-reads to check its own
+      # commit landed, and a cached body there reports a write as missing and
+      # gets it sent twice.
+      query:
+        oldVersion: "{oldVersion}"
+        version: "{version}"
+        _nocache: "{nocache}"
+      # The response, as typed rows. This is the whole of what used to be
+      # `CompleteSnapshot::from_response` in holon-kitchen: the two item
+      # collections are selected and folded here, in the sidecar, because the
+      # peer issues no item id and identity is therefore `(name, cat)`.
+      #
+      # Every check below is a `del`-shaped hazard: skipping a malformed record
+      # would turn it into a deletion of a real item under replace-scope
+      # semantics, which is the one outcome absence-as-deletion must never
+      # produce from bad input.
+      response: |
+        def code_of: split("_")[0];
+        def nonempty($k): if type == "string" and test("\\S") then . else error("`\($k)` must be a non-empty string") end;
+        def whole($k): if type == "number" and . == floor then . else error("`\($k)` is not a whole number") end;
+        def count_of: if . == null then null elif type == "number" then . else error("`count` must be a number") end;
+        . as $r
+        | (if $r | has("version") then $r.version | whole("version") else error("the list response has no `version`") end) as $version
+        | (if ($r.pickedItemsVersion // null) == null then $version else ($r.pickedItemsVersion | whole("pickedItemsVersion")) end) as $picked_version
+        | (if ($r.options | type) == "object" then $r.options else error("the list response has no `options`") end) as $options
+        | (if ($options.cats | type) == "array" then $options.cats else error("`cats` is not an array") end) as $raw_cats
+        | ($raw_cats | map(if type == "string" then . else error("`options.cats` holds a non-string entry") end)) as $cats
+        | ($cats | map(code_of)) as $codes
+        | (if ($codes | map(select(. == "" or . == null)) | length) > 0 then error("`options.cats` holds an entry with no category code") else . end)
+        | (if ($codes | unique | length) != ($codes | length) then error("`options.cats` declares a category code twice") else . end)
+        | (if ($r.items | type) == "array" then $r.items else error("the list response has no `items`") end) as $items
+        | (if ($r.pickedItems | type) == "object" then $r.pickedItems else error("the list response has no `pickedItems`") end) as $picked
+        | ([ $items[]
+             | if type == "object" then . else error("`items` holds a non-object entry") end
+             | {name: (.name | nonempty("name")), cat: (.cat | nonempty("cat")), count: (.count | count_of), checked: false} ]
+           + [ $picked | to_entries[] | .key as $n | .value
+               | if type == "object" then . else error("a `pickedItems` entry is not an object") end
+               | {name: ($n | nonempty("name")), cat: (.cat | nonempty("cat")), count: (.count | count_of), checked: true} ]) as $all
+        | ($all | group_by([.name, .cat]) | map({
+              name: .[0].name,
+              cat: .[0].cat,
+              count: (if length == 1 then .[0].count else (map(.count // 1) | add) end),
+              checked: (map(.checked) | any)
+          })) as $folded
+        | {holon_rows: 1, scopes: [
+            {type: "shopping_list", owner_column: "list", owner_value: "shopping"},
+            {type: "shopping_category", owner_column: "list", owner_value: "shopping"},
+            {type: "shopping_item", owner_column: "list", owner_value: "shopping"}
+          ]},
+          {type: "shopping_list", row: {id: "shopping", list: "shopping", version: $version, picked_items_version: $picked_version}},
+          ($cats[] | . as $raw | split("_") as $s
+            | {type: "shopping_category", row: {id: ("shopping_cat:" + $s[0]), list: "shopping", wire: $raw, code: $s[0], icon: $s[1], color: $s[2]}}),
+          ($folded[]
+            | {type: "shopping_item", row: {id: ("shopping:" + .cat + ":" + .name), list: "shopping", name: .name, cat: .cat, count: .count, checked: .checked}})
 
-tools: {}
+    commit:
+      query:
+        version: "{version}"
+      body:
+        oldVersion: "{version}"
+        oldPickedItemsVersion: "{pickedItemsVersion}"
+        device:
+          id: "{deviceId}"
+        lang: en
+        commands: "{commands}"
+      # The peer's own name for the new list version. Re-emitted under the
+      # transport's neutral key so the caller carries no field name of its own.
+      response_version_path: version
+      # The write leg's mapping: the reconciler's command ROWS become this
+      # peer's `commands` array and the versions the batch is based on. Only
+      # `add` and `del` exist — a check toggle is deliberately unrepresentable,
+      # because the on-versus-off encoding was never isolated in a capture and a
+      # guess paired with an add/del risks deleting the item instead of ticking
+      # it.
+      request: |
+        .rows as $rows
+        | ($rows | map(select(.type == "shopping_commit")) | .[0].row
+           // error("the row stream carries no `shopping_commit` row")) as $batch
+        | {
+            version: $batch.old_version,
+            pickedItemsVersion: $batch.old_picked_items_version,
+            deviceId: $batch.device_id,
+            commands: [ $rows[] | select(.type == "shopping_command") | .row
+                        | {cmd: (if .verb == "add" then "add"
+                                 elif .verb == "remove" then "del"
+                                 else error("this peer has no command for the intent \(.verb)") end),
+                           good: {name: .name, cat: .cat, new: true},
+                           id: .command_id} ]
+          }

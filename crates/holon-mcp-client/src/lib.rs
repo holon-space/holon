@@ -32,6 +32,7 @@ pub mod redaction;
 pub mod rest_oauth2;
 pub mod rest_transport;
 pub mod sync_freshness;
+pub mod utcp_manual;
 pub mod write_authorization;
 
 pub use bundled_sidecars::BUNDLED_SIDECARS;

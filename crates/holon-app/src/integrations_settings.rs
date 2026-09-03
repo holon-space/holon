@@ -294,18 +294,12 @@ impl IntegrationsSettingsVm {
     ) -> anyhow::Result<(RestOAuth2Config, Option<String>)> {
         let content = holon_mcp_client::integration_config::provider_content(&self.dir, provider)?;
         let config = content.config;
-        let oauth2 = config
-            .transport
-            .rest
-            .as_ref()
-            .and_then(|rest| rest.auth.as_ref())
-            .and_then(|auth| auth.oauth2.as_ref())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "'{provider}' does not authenticate with OAuth2, so there is no consent flow \
+        let oauth2 = config.oauth2().ok_or_else(|| {
+            anyhow::anyhow!(
+                "'{provider}' does not authenticate with OAuth2, so there is no consent flow \
                      to run"
-                )
-            })?;
+            )
+        })?;
         anyhow::ensure!(
             oauth2.auth_url.is_some(),
             "'{provider}' declares no OAuth2 `auth_url`, so there is no authorization endpoint to \

@@ -253,8 +253,8 @@ fn surface_from(yaml: &str, root: &CredentialRoot) -> RestCallSurface {
     }
 }
 
-/// A sidecar whose `base_url` puts the credential in a path segment — the
-/// capability-URL shape.
+/// A sidecar whose manual puts the credential in a path segment of the tool's
+/// `url` — the capability-URL shape.
 fn capability_yaml(base: &str) -> String {
     capability_yaml_with(base, CAP_TOKEN_VAR)
 }
@@ -262,13 +262,15 @@ fn capability_yaml(base: &str) -> String {
 fn capability_yaml_with(base: &str, token_var: &str) -> String {
     format!(
         r#"
-transport:
-  rest:
-    base_url: {base}/c/${{{token_var}}}
-    calls:
-      get-things:
-        method: GET
-        path: /things
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: get-things
+      tool_call_template:
+        call_template_type: http
+        url: {base}/c/${{{token_var}}}/things
+        http_method: GET
 entities: {{}}
 tools: {{}}
 "#
@@ -281,13 +283,15 @@ tools: {{}}
 fn rotating_token_yaml(base: &str) -> String {
     format!(
         r#"
-transport:
-  rest:
-    base_url: {base}
-    calls:
-      get-things:
-        method: GET
-        path: /!{ROTATING_TOKEN}/api/things
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: get-things
+      tool_call_template:
+        call_template_type: http
+        url: {base}/!{ROTATING_TOKEN}/api/things
+        http_method: GET
 entities: {{}}
 tools: {{}}
 "#
@@ -299,20 +303,23 @@ tools: {{}}
 fn oauth_capability_yaml(base: &str, refresh_file: &str) -> String {
     format!(
         r#"
-transport:
-  rest:
-    base_url: {base}/c/${{{CAP_TOKEN_VAR}}}
-    auth:
-      oauth2:
-        token_url: {base}/token
-        client_id_env: REDACTION_TEST_CLIENT_ID
-        client_secret_env: REDACTION_TEST_CLIENT_SECRET
-        refresh_token_file: {refresh_file}
-        scopes: [scope.readonly]
-    calls:
-      get-things:
-        method: GET
-        path: /things
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: get-things
+      tool_call_template:
+        call_template_type: http
+        url: {base}/c/${{{CAP_TOKEN_VAR}}}/things
+        http_method: GET
+holon:
+  auth:
+    oauth2:
+      token_url: {base}/token
+      client_id_env: REDACTION_TEST_CLIENT_ID
+      client_secret_env: REDACTION_TEST_CLIENT_SECRET
+      refresh_token_file: {refresh_file}
+      scopes: [scope.readonly]
 entities: {{}}
 tools: {{}}
 "#
@@ -439,7 +446,7 @@ async fn non_json_body_error_hides_a_capability_token_in_the_url_path() {
 }
 
 #[tokio::test]
-async fn debug_of_the_manual_hides_a_capability_token_in_the_base_url() {
+async fn debug_of_the_manual_hides_a_capability_token_in_a_tool_url() {
     let base = start_mock(Mode::EchoUrlIn500).await;
     let surface = surface_from(&capability_yaml(&base), &no_credential_root());
 

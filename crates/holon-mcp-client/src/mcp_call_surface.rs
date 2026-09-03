@@ -24,6 +24,38 @@ pub trait McpCallSurface: Send + Sync + std::fmt::Debug {
         &self,
         params: ReadResourceRequestParam,
     ) -> Result<ReadResourceResult, ServiceError>;
+
+    /// The rows one call's response maps to, per the connection's declared
+    /// `response` filter.
+    ///
+    /// Defaulted to a loud refusal because only a `utcp:` connection carries
+    /// mappings: an MCP peer's tools are typed by the server, so a caller that
+    /// asked one for rows has confused two kinds of connection, and answering
+    /// with an empty set would delete everything that call owns under
+    /// replace-scope semantics.
+    fn map_response(
+        &self,
+        call_name: &str,
+        _: &serde_json::Value,
+    ) -> anyhow::Result<Vec<holon_core::file_format::TypedRowSet>> {
+        anyhow::bail!(
+            "call '{call_name}' reaches an MCP peer, which declares no `response` mapping; only a \
+             `utcp:` connection maps a response into rows"
+        )
+    }
+
+    /// The call arguments a row stream maps to — the write leg of
+    /// [`Self::map_response`], refused on the same grounds.
+    fn map_request(
+        &self,
+        call_name: &str,
+        _: &serde_json::Value,
+    ) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+        anyhow::bail!(
+            "call '{call_name}' reaches an MCP peer, which declares no `request` mapping; only a \
+             `utcp:` connection maps rows into a call"
+        )
+    }
 }
 
 /// Extract the structured JSON response object from an MCP tool result.

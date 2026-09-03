@@ -645,9 +645,11 @@ async fn every_local_write_goes_through_the_generic_operation_path() {
 
 #[test]
 fn the_shipped_sidecar_holds_no_resolved_url() {
+    // A UTCP manual states an absolute `url` per tool, so the share link
+    // appears once per call rather than once as a shared base.
     assert!(
-        SHOPPING_SIDECAR.contains("base_url: ${SHOPPING_LIST_URL}"),
-        "the shopping sidecar must reference its capability URL as a variable"
+        SHOPPING_SIDECAR.matches("${SHOPPING_LIST_URL}").count() >= 2,
+        "both of the shopping manual's tools must reference the capability URL as a variable"
     );
     // A resolved capability URL in the repo would be the credential itself.
     assert!(

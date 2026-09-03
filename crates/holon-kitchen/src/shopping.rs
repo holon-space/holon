@@ -21,6 +21,9 @@ use anyhow::Result;
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::FixedOffset;
+use holon_api::StorageEntity;
+use holon_api::Value;
+use holon_core::file_format::TypedRowSet;
 
 /// One entry of a list's `options.cats`.
 ///
@@ -35,19 +38,6 @@ pub struct CategoryEntry {
 }
 
 impl CategoryEntry {
-    /// Parse one `options.cats` entry. Total: an entry with more or fewer
-    /// segments than the observed two decorations still yields a usable code,
-    /// because a list whose owner added a category must not fail the fetch.
-    pub fn parse(raw: &str) -> Self {
-        let mut segments = raw.split('_');
-        let code = segments.next().unwrap_or_default().to_string();
-        Self {
-            code,
-            icon: segments.next().map(str::to_string),
-            color: segments.next().map(str::to_string),
-        }
-    }
-
     pub fn code(&self) -> &str {
         &self.code
     }
@@ -72,29 +62,6 @@ pub struct CategoryVocabulary {
 }
 
 impl CategoryVocabulary {
-    /// Build from a list's `options.cats` array.
-    ///
-    /// Two entries sharing a code is a construction error rather than a
-    /// last-one-wins: the code is what an item's `cat` resolves through, so an
-    /// ambiguous vocabulary would silently label items from the wrong aisle.
-    pub fn from_entries<S: AsRef<str>>(entries: &[S]) -> Result<Self> {
-        let mut by_code = BTreeMap::new();
-        for raw in entries {
-            let entry = CategoryEntry::parse(raw.as_ref());
-            anyhow::ensure!(
-                !entry.code().is_empty(),
-                "`options.cats` holds an entry with no category code: '{}'",
-                raw.as_ref()
-            );
-            anyhow::ensure!(
-                by_code.insert(entry.code().to_string(), entry).is_none(),
-                "`options.cats` declares the category code twice: '{}'",
-                raw.as_ref()
-            );
-        }
-        Ok(Self { by_code })
-    }
-
     /// Resolve an item's `cat` against this list's vocabulary.
     ///
     /// Total by construction: a code the list did not publish yields an
@@ -253,42 +220,52 @@ pub struct CompleteSnapshot {
 }
 
 impl CompleteSnapshot {
-    /// Parse one whole list response.
+    /// Build one whole-list snapshot from the rows the connection's `response`
+    /// mapping produced (`assets/integrations/shopping.yaml`,
+    /// `holon.tools.pull_list.response`).
     ///
-    /// The generic entity mirror cannot do this job: it keys rows on a
-    /// server-issued id column and fails loud without one, and this peer issues
-    /// none. So the two item collections are selected here and identity is
-    /// decided by [`ItemKey`].
-    pub fn from_response(
-        response: &serde_json::Map<String, serde_json::Value>,
-        fetched_at: impl Into<String>,
-    ) -> Result<Self> {
-        let vocabulary = parse_vocabulary(response)?;
+    /// Nothing here knows the peer's JSON shape. The mapping selects the two
+    /// item collections, folds duplicates on the `(name, cat)` identity this
+    /// id-less peer forces, and raises rather than skipping a malformed record
+    /// — so only a fetch that succeeded and mapped IN FULL can reach this
+    /// constructor. That is what licenses the reconciler to read absence as
+    /// deletion (`docs/Plans/Kitchen.md` §4).
+    pub fn from_rows(rows: &[TypedRowSet], fetched_at: impl Into<String>) -> Result<Self> {
+        let list = one_row(rows, "shopping_list")?;
         let version = ListVersion {
-            list: required_int(response, "version")?,
-            picked: match response.get("pickedItemsVersion") {
-                None | Some(serde_json::Value::Null) => required_int(response, "version")?,
-                Some(_) => required_int(response, "pickedItemsVersion")?,
-            },
+            list: int(list, "version")?,
+            picked: int(list, "picked_items_version")?,
         };
 
-        let mut items: BTreeMap<ItemKey, RemoteShoppingItem> = BTreeMap::new();
-        for (index, value) in required_array(response, "items")?.iter().enumerate() {
-            let record = value.as_object().ok_or_else(|| {
-                anyhow::anyhow!("`items` holds a non-object entry at #{index}: {value}")
-            })?;
-            let item = parse_active_item(record, &vocabulary)
-                .with_context(|| format!("shopping item #{index} in the fetched list"))?;
-            fold(&mut items, item);
+        let mut by_code: BTreeMap<String, CategoryEntry> = BTreeMap::new();
+        for row in rows_of(rows, "shopping_category") {
+            let entry = CategoryEntry {
+                code: text(row, "code")?,
+                icon: optional_text(row, "icon")?,
+                color: optional_text(row, "color")?,
+            };
+            anyhow::ensure!(
+                by_code.insert(entry.code.clone(), entry).is_none(),
+                "two `shopping_category` rows carry the same code, so an item's `cat` would \
+                 resolve through whichever the map kept"
+            );
         }
+        let vocabulary = CategoryVocabulary { by_code };
 
-        for (name, value) in required_object(response, "pickedItems")? {
-            let record = value.as_object().ok_or_else(|| {
-                anyhow::anyhow!("`pickedItems['{name}']` is not an object: {value}")
-            })?;
-            let item = parse_picked_item(name, record, &vocabulary)
-                .with_context(|| format!("checked-off shopping item '{name}'"))?;
-            fold(&mut items, item);
+        let mut items: BTreeMap<ItemKey, RemoteShoppingItem> = BTreeMap::new();
+        for row in rows_of(rows, "shopping_item") {
+            let item = RemoteShoppingItem {
+                name: text(row, "name")?,
+                category: vocabulary.resolve(&text(row, "cat")?),
+                count: optional_number(row, "count")?,
+                checked: boolean(row, "checked")?,
+            };
+            let key = item.key();
+            anyhow::ensure!(
+                items.insert(key.clone(), item).is_none(),
+                "two `shopping_item` rows carry the key {key:?}; the mapping folds duplicates, so \
+                 a repeated key means it did not"
+            );
         }
 
         Ok(Self {
@@ -326,131 +303,66 @@ impl CompleteSnapshot {
     }
 }
 
-/// Merge one wire row into the keyed set.
-///
-/// Two rows under one key are one item to us; folding their counts is the only
-/// reading that does not lose a unit, and an absent count means one of the
-/// thing. Checked wins over unchecked for the same reason §4 gives the rule its
-/// asymmetry: a wrong check costs a skipped item, a wrong uncheck costs a
-/// repeated purchase every trip until someone notices.
-fn fold(items: &mut BTreeMap<ItemKey, RemoteShoppingItem>, item: RemoteShoppingItem) {
-    let key = item.key();
-    match items.get_mut(&key) {
-        Some(held) => {
-            held.count = Some(held.count.unwrap_or(1.0) + item.count.unwrap_or(1.0));
-            held.checked |= item.checked;
-        }
-        None => {
-            items.insert(key, item);
-        }
+/// The single row of `type_name`, or a loud failure. A snapshot needs exactly
+/// one version, and both zero and two are a mapping that did not do its job.
+fn one_row<'a>(rows: &'a [TypedRowSet], type_name: &'static str) -> Result<&'a StorageEntity> {
+    let found: Vec<_> = rows_of(rows, type_name).collect();
+    match found.as_slice() {
+        [row] => Ok(row),
+        other => anyhow::bail!(
+            "the mapped stream carries {} `{type_name}` rows, and a snapshot has exactly one",
+            other.len()
+        ),
     }
 }
 
-fn parse_vocabulary(
-    response: &serde_json::Map<String, serde_json::Value>,
-) -> Result<CategoryVocabulary> {
-    let options = required_object(response, "options")?;
-    let cats = required_array(options, "cats")?;
-    let entries = cats
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .map(str::to_string)
-                .ok_or_else(|| anyhow::anyhow!("`options.cats` holds a non-string entry: {v}"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    CategoryVocabulary::from_entries(&entries)
+fn rows_of<'a>(
+    rows: &'a [TypedRowSet],
+    type_name: &'static str,
+) -> impl Iterator<Item = &'a StorageEntity> {
+    rows.iter()
+        .filter(move |s| s.type_name == type_name)
+        .flat_map(|s| s.rows.iter())
 }
 
-/// Parse an `items[]` record — an item the list still wants bought.
-///
-/// A record missing `name`/`cat`, or carrying them at the wrong JSON type,
-/// fails the whole snapshot. Skipping the bad record would silently turn it
-/// into a deletion of a real item, which is the one outcome absence-as-deletion
-/// must never produce from bad input.
-fn parse_active_item(
-    record: &serde_json::Map<String, serde_json::Value>,
-    vocabulary: &CategoryVocabulary,
-) -> Result<RemoteShoppingItem> {
-    Ok(RemoteShoppingItem {
-        name: required_name(record.get("name"))?,
-        category: vocabulary.resolve(&required_cat(record.get("cat"))?),
-        count: optional_count(record.get("count"))?,
-        checked: false,
-    })
-}
-
-/// Parse a `pickedItems` entry — the map is keyed by NAME and the value carries
-/// the category, so the two halves of the key come from different places.
-fn parse_picked_item(
-    name: &str,
-    record: &serde_json::Map<String, serde_json::Value>,
-    vocabulary: &CategoryVocabulary,
-) -> Result<RemoteShoppingItem> {
-    Ok(RemoteShoppingItem {
-        name: required_name(Some(&serde_json::Value::String(name.to_string())))?,
-        category: vocabulary.resolve(&required_cat(record.get("cat"))?),
-        count: optional_count(record.get("count"))?,
-        checked: true,
-    })
-}
-
-fn required_name(value: Option<&serde_json::Value>) -> Result<String> {
-    match value {
-        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Ok(s.clone()),
-        Some(other) => anyhow::bail!("`name` must be a non-empty string, got {other}"),
-        None => anyhow::bail!("`name` is missing"),
+fn text(row: &StorageEntity, column: &str) -> Result<String> {
+    match row.get(column) {
+        Some(Value::String(s)) if !s.trim().is_empty() => Ok(s.clone()),
+        other => anyhow::bail!("column `{column}` must be a non-empty string, got {other:?}"),
     }
 }
 
-fn required_cat(value: Option<&serde_json::Value>) -> Result<String> {
-    match value {
-        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Ok(s.clone()),
-        Some(other) => anyhow::bail!("`cat` must be a non-empty string, got {other}"),
-        None => anyhow::bail!("`cat` is missing"),
+fn optional_text(row: &StorageEntity, column: &str) -> Result<Option<String>> {
+    match row.get(column) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        other => anyhow::bail!("column `{column}` must be a string or null, got {other:?}"),
     }
 }
 
-fn optional_count(value: Option<&serde_json::Value>) -> Result<Option<f64>> {
-    match value {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::Number(n)) => {
-            Ok(Some(n.as_f64().ok_or_else(|| {
-                anyhow::anyhow!("`count` is not representable as a number: {n}")
-            })?))
-        }
-        Some(other) => anyhow::bail!("`count` must be a number, got {other}"),
+fn int(row: &StorageEntity, column: &str) -> Result<i64> {
+    match row.get(column) {
+        Some(Value::Integer(n)) => Ok(*n),
+        other => anyhow::bail!("column `{column}` must be a whole number, got {other:?}"),
     }
 }
 
-fn required_array<'a>(
-    object: &'a serde_json::Map<String, serde_json::Value>,
-    key: &str,
-) -> Result<&'a Vec<serde_json::Value>> {
-    object
-        .get(key)
-        .ok_or_else(|| anyhow::anyhow!("the list response has no `{key}`"))?
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("`{key}` is not an array"))
+/// A count arrives as either integer or float: the peer writes `2`, the fold of
+/// two rows under one key writes `2.0`, and both mean two of the thing.
+fn optional_number(row: &StorageEntity, column: &str) -> Result<Option<f64>> {
+    match row.get(column) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Integer(n)) => Ok(Some(*n as f64)),
+        Some(Value::Float(f)) => Ok(Some(*f)),
+        other => anyhow::bail!("column `{column}` must be a number or null, got {other:?}"),
+    }
 }
 
-fn required_object<'a>(
-    object: &'a serde_json::Map<String, serde_json::Value>,
-    key: &str,
-) -> Result<&'a serde_json::Map<String, serde_json::Value>> {
-    object
-        .get(key)
-        .ok_or_else(|| anyhow::anyhow!("the list response has no `{key}`"))?
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("`{key}` is not an object"))
-}
-
-fn required_int(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> Result<i64> {
-    object
-        .get(key)
-        .ok_or_else(|| anyhow::anyhow!("the list response has no `{key}`"))?
-        .as_i64()
-        .ok_or_else(|| anyhow::anyhow!("`{key}` is not a whole number"))
+fn boolean(row: &StorageEntity, column: &str) -> Result<bool> {
+    match row.get(column) {
+        Some(Value::Boolean(b)) => Ok(*b),
+        other => anyhow::bail!("column `{column}` must be a boolean, got {other:?}"),
+    }
 }
 
 /// A row of the local `shopping_item` table.

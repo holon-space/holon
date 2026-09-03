@@ -41,7 +41,7 @@ use crate::rest_transport::RestManual;
 use crate::sync_freshness::ProbedResourceCapabilities;
 
 /// Default poll cadence for a `rest` integration whose sync entities declare
-/// no per-entity `sync.interval` and whose `transport.rest.poll_interval` is
+/// no per-entity `sync.interval` and whose `holon.poll_interval` is
 /// unset. REST has no subscription freshness, so an unset interval must not
 /// mean "never refresh" — five minutes bounds staleness without hammering.
 const DEFAULT_REST_POLL_INTERVAL: Duration = Duration::from_secs(300);
@@ -1165,9 +1165,11 @@ fn reject_rest_out_of_scope(sidecar: &McpSidecar, provider_name: &str) -> anyhow
             && sync.list_resource.is_some()
         {
             anyhow::bail!(
-                "provider '{provider_name}': entity '{entity_name}' syncs via `list_resource` on \
-                 the `rest` transport, but REST serves GET *calls*, not MCP resources — use \
-                 `sync.list_tool` naming a `transport.rest.calls` entry instead."
+                "provider '{provider_name}': entity '{entity_name}' syncs via `list_resource` \
+                 on a `utcp:` connection, but a plain HTTP API serves GET *tools*, not MCP \
+                 resources — use `sync.list_tool` naming a tool the manual declares under `{}` \
+                 instead.",
+                crate::integration_config::MANUAL_TOOLS_KEY
             );
         }
     }

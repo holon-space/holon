@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context;
+use holon_rows::RowMapper;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -25,24 +27,35 @@ use crate::redaction::Redactor;
 use crate::rest_oauth2::RestOAuth2Config;
 use crate::rest_transport::RestAuth;
 
-/// Transport configuration as declared in the YAML file.
+/// The sidecar keys a remedy message may send an author to.
 ///
-/// Exactly one of the variants must be set. Two of them reach a server that
-/// *speaks MCP* (`child_process` = stdio, `http` = MCP-over-Streamable-HTTP);
-/// the third, `rest`, reaches a plain HTTP/JSON API *directly* via a
-/// UTCP-manual-style description (see [`RestTransport`]). All three plug into
-/// the same connector engine behind the
-/// [`crate::mcp_call_surface::McpCallSurface`] seam — one engine, plural
-/// transports.
+/// Named here, beside the structs that parse them, because a remedy that names
+/// a key the parser rejects is worse than no remedy: it costs the author a load
+/// failure to discover. `sidecar_remedy_keys_are_keys_the_parser_accepts` builds
+/// a sidecar out of these very constants and parses it, so the two cannot
+/// drift.
+pub const MANUAL_TOOLS_KEY: &str = "utcp.tools";
+/// Where a tool says which endpoint it is and how it is reached.
+pub const CALL_TEMPLATE_KEY: &str = "utcp.tools[].tool_call_template";
+/// Where a tool's Holon-side behaviour is declared.
+pub const HOLON_TOOLS_KEY: &str = "holon.tools";
+/// Where a connection's OAuth2 block lives.
+pub const HOLON_OAUTH2_KEY: &str = "holon.auth.oauth2";
+
+/// How a sidecar reaches an MCP *server*: `child_process` over stdio, or
+/// `http` over Streamable HTTP. Exactly one must be set.
+///
+/// A plain HTTP/JSON API has no MCP server and is described instead by the
+/// file's `utcp:` manual plus its `holon:` section — see
+/// [`IntegrationFileConfig::utcp`].
 ///
 /// Note on naming: `http` here is historical and means *MCP over HTTP*, not a
-/// generic REST call. The direct-API transport is `rest`.
+/// generic REST call.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransportConfig {
     pub child_process: Option<ChildProcessTransport>,
     pub http: Option<HttpTransport>,
-    pub rest: Option<RestTransport>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -61,38 +74,93 @@ pub struct HttpTransport {
     pub uri: String,
 }
 
-/// Direct HTTP-API transport (UTCP-manual style). Describes a plain JSON API by
-/// its base URL and a set of named `calls`. A
-/// [`crate::rest_transport::RestCallSurface`] serves these calls behind the
-/// same [`McpCallSurface`](crate::mcp_call_surface::McpCallSurface) seam the
-/// MCP transports use, so the rest of the connector engine is unchanged.
+/// What the UTCP manual does not carry, keyed the way the manual is: by tool
+/// name.
 ///
-/// Reads and writes: a call declares its method, an optional JSON request-body
-/// template and an optional response-version path, so a write leg is authored
-/// in YAML rather than in connector code.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// The standard describes WHERE a tool lives and what its inputs are named. It
+/// carries no request envelope, no query parameters, no cadence and no mapping
+/// from a response to anything. Those four are 100% of the runtime behaviour,
+/// so they live here, beside the manual rather than inside it — which keeps the
+/// `utcp:` section exportable to any standard client unchanged.
+///
+/// `tools` is a nested map rather than this struct being the tool map directly:
+/// a peer that named a tool `auth` or `poll_interval` would otherwise be
+/// unrepresentable.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct RestTransport {
-    /// Base URL; may be `${VAR}`-expanded. No trailing slash required.
-    pub base_url: String,
-    /// Optional auth header sent on every request. NEVER inline a secret —
-    /// reference an env/keychain name via `${VAR}` in `value`.
+pub struct HolonSection {
+    /// Sent on every call of this manual. NEVER inline a secret — reference an
+    /// env/keychain name via `${VAR}` in `value`.
     #[serde(default)]
     pub auth: Option<RestAuthConfig>,
-    /// Named endpoints, keyed by the tool name referenced from
-    /// `sync.list_tool`.
-    pub calls: HashMap<String, RestCallConfig>,
     /// Default poll cadence for sync entities that declare no per-entity
-    /// `sync.interval`. REST has no subscription freshness, so every sync
-    /// entity polls; this sets the transport-wide default (per-entity
-    /// `sync.interval` still overrides it, and an unset value falls to the
-    /// 300s built-in). Accepts an integer (seconds) or a humantime-style
-    /// string (`"5m"`).
+    /// `sync.interval`. A plain HTTP API pushes nothing, so every sync entity
+    /// polls; an unset value falls to the 300s built-in rather than to
+    /// "never".  Accepts an integer (seconds) or a humantime-style string
+    /// (`"5m"`).
     #[serde(default)]
     pub poll_interval: Option<crate::mcp_sidecar::SyncInterval>,
+    /// Keyed by the manual's tool name. A key naming no declared tool is
+    /// refused at load.
+    #[serde(default)]
+    pub tools: HashMap<String, HolonToolConfig>,
 }
 
-/// Auth for the `rest` transport. Exactly one arm must be set:
+/// One tool's Holon-side behaviour.
+///
+/// `query` and `body` values may contain `{arg}` placeholders filled from the
+/// call arguments at request time — distinct from `${VAR}`, which is a
+/// startup-time secret reference resolved in the manual's `url`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HolonToolConfig {
+    /// Query parameters; values may be literals or `{arg}` placeholders.
+    #[serde(default)]
+    pub query: HashMap<String, String>,
+    /// JSON request-body template for a writing method. Every string leaf is
+    /// placeholder-filled; a leaf that is EXACTLY one placeholder takes the
+    /// argument's own JSON value, so an array or object argument arrives with
+    /// its type intact. A body on `GET` is a configuration error.
+    #[serde(default)]
+    pub body: Option<serde_json::Value>,
+    /// Response body codec: `json` (default), `atom`, or `rss`. The manual
+    /// states a `content_type`; this states how Holon DECODES what arrives,
+    /// which for a syndication feed is not the same thing.
+    #[serde(default)]
+    pub format: crate::rest_transport::ResponseFormat,
+    /// If set, a non-object JSON body is wrapped as `{ result_key: <body> }` so
+    /// a `sync.extract_path` can select it (bare-array responses → object). For
+    /// `atom`/`rss` the decoded entry array is wrapped under this key (default
+    /// `entries`).
+    #[serde(default)]
+    pub result_key: Option<String>,
+    /// Optional response-token pagination (`json` only): follow a continuation
+    /// token (e.g. `nextPageToken`) across pages, bounded fail-loud by
+    /// `max_pages`.
+    #[serde(default)]
+    pub pagination: Option<crate::rest_transport::Pagination>,
+    /// Dotted path to the version/cursor token in the response of an
+    /// optimistic-concurrency API. When set, the value found there is
+    /// re-emitted under [`crate::rest_transport::RESPONSE_VERSION_KEY`], so
+    /// a caller feeds it into the next request without knowing this
+    /// provider's field name. A declared path that finds nothing fails
+    /// loud.
+    #[serde(default)]
+    pub response_version_path: Option<String>,
+    /// A `jaq` expression mapping this tool's response into a row stream: the
+    /// envelope first, then one value per row
+    /// (`crates/holon-rows/src/lib.rs`). This is where a peer's JSON shape
+    /// becomes Holon's, in the sidecar rather than in Rust.
+    #[serde(default)]
+    pub response: Option<String>,
+    /// A `jaq` expression mapping a row stream into this tool's call
+    /// arguments — the write leg of the same mapping. Its input is
+    /// `{scopes, rows}`; its single output is the argument object.
+    #[serde(default)]
+    pub request: Option<String>,
+}
+
+/// Auth for a `utcp:` manual's calls. Exactly one arm must be set:
 ///
 /// - a **static header** — `{ header: Authorization, value: "Bearer ${TOKEN}"
 ///   }` (back-compatible), or
@@ -140,59 +208,15 @@ impl RestAuthConfig {
                 Ok(RestAuth::OAuth2(provider))
             }
             (None, None, None) => anyhow::bail!(
-                "transport.rest.auth is empty — set either a static `{{ header, value }}` or an \
+                "holon.auth is empty — set either a static `{{ header, value }}` or an \
                  `oauth2` block"
             ),
             _ => anyhow::bail!(
-                "transport.rest.auth must set EXACTLY ONE of a static `{{ header, value }}` pair \
+                "holon.auth must set EXACTLY ONE of a static `{{ header, value }}` pair \
                  or an `oauth2` block (not a mix)"
             ),
         }
     }
-}
-
-/// A single endpoint. `path`, `query` and `body` values may contain `{arg}`
-/// placeholders filled from the tool-call arguments at request time.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RestCallConfig {
-    /// HTTP method: `GET`, `POST`, `PUT`, `PATCH` or `DELETE`,
-    /// case-insensitive.
-    pub method: String,
-    /// Path appended to `base_url`, e.g. `/posts` or `/users/{id}/posts`.
-    pub path: String,
-    /// Query parameters; values may be literals or `{arg}` placeholders.
-    #[serde(default)]
-    pub query: HashMap<String, String>,
-    /// Response body codec: `json` (default), `atom`, or `rss`. `atom`/`rss`
-    /// decode a syndication feed into the same record shape as JSON.
-    #[serde(default)]
-    pub format: crate::rest_transport::ResponseFormat,
-    /// If set, a non-object JSON body is wrapped as `{ result_key: <body> }` so
-    /// a `sync.extract_path` can select it (bare-array responses → object). For
-    /// `atom`/`rss` the decoded entry array is wrapped under this key (default
-    /// `entries`).
-    #[serde(default)]
-    pub result_key: Option<String>,
-    /// Optional response-token pagination (`json` only): follow a continuation
-    /// token (e.g. `nextPageToken`) across pages, bounded fail-loud by
-    /// `max_pages`.
-    #[serde(default)]
-    pub pagination: Option<crate::rest_transport::Pagination>,
-    /// JSON request-body template for a writing method. Every string leaf is
-    /// placeholder-filled; a leaf that is EXACTLY one placeholder takes the
-    /// argument's own JSON value, so an array or object argument arrives with
-    /// its type intact. A body on `GET` is a configuration error.
-    #[serde(default)]
-    pub body: Option<serde_json::Value>,
-    /// Dotted path to the version/cursor token in the response of an
-    /// optimistic-concurrency API. When set, the value found there is
-    /// re-emitted under [`crate::rest_transport::RESPONSE_VERSION_KEY`], so
-    /// a caller feeds it into the next request without knowing this
-    /// provider's field name. A declared path that finds nothing fails
-    /// loud.
-    #[serde(default)]
-    pub response_version_path: Option<String>,
 }
 
 /// Authentication configuration (only meaningful for HTTP transport).
@@ -233,7 +257,19 @@ pub struct IntegrationFileConfig {
     /// this integration has no view yet and the operation refuses.
     #[serde(default)]
     pub default_view: Option<String>,
-    pub transport: TransportConfig,
+    /// Set for an MCP peer. A plain HTTP/JSON API sets [`Self::utcp`] instead;
+    /// setting both, or neither, is refused at load.
+    #[serde(default)]
+    pub transport: Option<TransportConfig>,
+    /// A VERBATIM UTCP 1.x manual. Nothing Holon-specific goes inside it, so
+    /// it round-trips to and from any standard client unchanged; what the
+    /// standard lacks lives beside it in [`Self::holon`].
+    #[serde(default)]
+    pub utcp: Option<crate::utcp_manual::UtcpManual>,
+    /// The Holon half of a `utcp:` connection: auth, cadence, and per-tool
+    /// request/response mapping.
+    #[serde(default)]
+    pub holon: Option<HolonSection>,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
     /// Prefix prepended to all entity names for table names, ID schemes, etc.
@@ -257,6 +293,89 @@ pub struct IntegrationFileConfig {
     /// [`crate::mcp_sidecar::McpSidecar::views`]).
     #[serde(default)]
     pub views: Vec<crate::mcp_sidecar::ViewConfig>,
+}
+
+/// Build the direct-HTTP transport from a manual plus its `holon:` section.
+///
+/// This is where the two halves are married and where every mismatch between
+/// them is refused: a `holon:` entry for a tool the manual does not declare, a
+/// call template Holon cannot drive, a body on a GET. After this function a
+/// [`crate::rest_transport::RestCall`] is a call that can be made.
+fn build_rest_transport(
+    manual: crate::utcp_manual::UtcpManual,
+    holon: HolonSection,
+    lookup: &VarLookup<'_>,
+    redactor: Redactor,
+    root: &CredentialRoot,
+) -> anyhow::Result<McpTransport> {
+    let auth = match holon.auth {
+        Some(a) => a.resolve(lookup, &redactor, root)?,
+        None => RestAuth::None,
+    };
+    for name in holon.tools.keys() {
+        manual
+            .tool(name)
+            .with_context(|| format!("holon.tools.{name}"))?;
+    }
+
+    let mut calls = HashMap::with_capacity(manual.tools.len());
+    // Forward tolerance (the PR-1 rule): a key we do not model is kept and
+    // disclosed, never a reason to refuse a manual somebody else published.
+    for key in manual.unmodelled_keys() {
+        tracing::warn!(
+            "sidecar manual carries `{key}`, which this build does not model; it is preserved \
+             for export and otherwise ignored"
+        );
+    }
+
+    for tool in &manual.tools {
+        if let Some(why) = tool.tool_call_template.unsupported_reason(&tool.name) {
+            tracing::warn!("{why}");
+            continue;
+        }
+        let method = crate::rest_transport::HttpMethod::parse(&tool.tool_call_template.http_method)
+            .with_context(|| format!("utcp.tools.{}.tool_call_template.http_method", tool.name))?;
+        let cfg = holon.tools.get(&tool.name).cloned().unwrap_or_default();
+        // A GET carrying a request body is a mistake in the YAML, not a request
+        // anyone meant to make; refusing it here means no call site downstream
+        // has to consider the combination.
+        anyhow::ensure!(
+            !(method == crate::rest_transport::HttpMethod::Get && cfg.body.is_some()),
+            "holon.tools.{} declares a request `body` on a GET; a body belongs on \
+             POST/PUT/PATCH",
+            tool.name
+        );
+        let compile = |what: &str, src: Option<String>| -> anyhow::Result<Option<Arc<RowMapper>>> {
+            src.map(|src| {
+                RowMapper::compile(format!("holon.tools.{}.{what}", tool.name), &src).map(Arc::new)
+            })
+            .transpose()
+        };
+        calls.insert(
+            tool.name.clone(),
+            crate::rest_transport::RestCall {
+                method,
+                url: expand_vars(&tool.tool_call_template.url, lookup, &redactor)?,
+                query: cfg.query,
+                format: cfg.format,
+                result_key: cfg.result_key,
+                pagination: cfg.pagination,
+                body: cfg.body,
+                response_version_path: cfg.response_version_path,
+                response: compile("response", cfg.response)?,
+                request: compile("request", cfg.request)?,
+            },
+        );
+    }
+
+    Ok(McpTransport::Rest {
+        manual: crate::rest_transport::RestManual {
+            auth,
+            calls,
+            redactor,
+        },
+        poll_interval: holon.poll_interval,
+    })
 }
 
 /// Resolves `${VAR}` references in integration config strings.
@@ -304,10 +423,9 @@ impl IntegrationFileConfig {
     /// an OAuth provider is credentialed by the consent flow, so only it can be
     /// held back for want of one.
     pub fn oauth2(&self) -> Option<&RestOAuth2Config> {
-        self.transport
-            .rest
+        self.holon
             .as_ref()
-            .and_then(|rest| rest.auth.as_ref())
+            .and_then(|holon| holon.auth.as_ref())
             .and_then(|auth| auth.oauth2.as_ref())
     }
 
@@ -355,7 +473,11 @@ impl IntegrationFileConfig {
             _ => AuthMode::None,
         };
 
-        let transport = if let Some(cp) = self.transport.child_process {
+        let mcp = self.transport.unwrap_or(TransportConfig {
+            child_process: None,
+            http: None,
+        });
+        let transport = if let Some(cp) = mcp.child_process {
             McpTransport::ChildProcess {
                 command: expand_vars(&cp.command, lookup, &redactor)?,
                 args: cp
@@ -369,53 +491,18 @@ impl IntegrationFileConfig {
                     .map(|(k, v)| Ok((k.clone(), expand_vars(v, lookup, &redactor)?)))
                     .collect::<anyhow::Result<HashMap<_, _>>>()?,
             }
-        } else if let Some(http) = self.transport.http {
+        } else if let Some(http) = mcp.http {
             McpTransport::Http {
                 uri: expand_vars(&http.uri, lookup, &redactor)?,
             }
-        } else if let Some(rest) = self.transport.rest {
-            let auth = match rest.auth {
-                Some(a) => a.resolve(lookup, &redactor, root)?,
-                None => RestAuth::None,
-            };
-            let mut calls = HashMap::with_capacity(rest.calls.len());
-            for (name, c) in rest.calls {
-                let method = crate::rest_transport::HttpMethod::parse(&c.method)
-                    .with_context(|| format!("transport.rest.calls.{name}.method"))?;
-                // A GET carrying a request body is a mistake in the YAML, not a
-                // request anyone meant to make; refusing it here means no call
-                // site downstream has to consider the combination.
-                anyhow::ensure!(
-                    !(method == crate::rest_transport::HttpMethod::Get && c.body.is_some()),
-                    "transport.rest.calls.{name} declares a request `body` on a GET; a body \
-                     belongs on POST/PUT/PATCH"
-                );
-                calls.insert(
-                    name,
-                    crate::rest_transport::RestCall {
-                        method,
-                        path: c.path,
-                        query: c.query,
-                        format: c.format,
-                        result_key: c.result_key,
-                        pagination: c.pagination,
-                        body: c.body,
-                        response_version_path: c.response_version_path,
-                    },
-                );
-            }
-            let base_url = expand_vars(&rest.base_url, lookup, &redactor)?;
-            McpTransport::Rest {
-                manual: crate::rest_transport::RestManual {
-                    base_url,
-                    auth,
-                    calls,
-                    redactor,
-                },
-                poll_interval: rest.poll_interval,
-            }
+        } else if let Some(manual) = self.utcp {
+            let holon = self.holon.unwrap_or_default();
+            build_rest_transport(manual, holon, lookup, redactor, root)?
         } else {
-            anyhow::bail!("TransportConfig must set exactly one of child_process, http, or rest");
+            anyhow::bail!(
+                "a sidecar must declare either an MCP `transport` (child_process | http) or a \
+                 `utcp` manual"
+            );
         };
 
         let sidecar = McpSidecar {
@@ -952,7 +1039,11 @@ fn refuse_machine_specific_command(
     config: &IntegrationFileConfig,
     source_path: &str,
 ) -> anyhow::Result<()> {
-    let Some(child_process) = config.transport.child_process.as_ref() else {
+    let Some(child_process) = config
+        .transport
+        .as_ref()
+        .and_then(|t| t.child_process.as_ref())
+    else {
         return Ok(());
     };
     // `${VAR}` is expanded from the environment later, so a reference that
@@ -1010,11 +1101,12 @@ tools: {}
 "#;
         let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
 
-        let cp = config.transport.child_process.as_ref().unwrap();
+        let transport = config.transport.as_ref().unwrap();
+        let cp = transport.child_process.as_ref().unwrap();
         assert_eq!(cp.command, "npx");
         assert_eq!(cp.args, &["-y", "@anthropic/claude-code-history-mcp"]);
         assert_eq!(cp.env["CLAUDE_DATA_DIR"], "/Users/martin/.claude");
-        assert!(config.transport.http.is_none());
+        assert!(transport.http.is_none());
 
         assert!(config.auth.is_none());
         assert_eq!(config.entities.len(), 1);
@@ -1052,9 +1144,10 @@ tools:
 "#;
         let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
 
-        let http = config.transport.http.as_ref().unwrap();
+        let transport = config.transport.as_ref().unwrap();
+        let http = transport.http.as_ref().unwrap();
         assert_eq!(http.uri, "https://api.example.com/mcp");
-        assert!(config.transport.child_process.is_none());
+        assert!(transport.child_process.is_none());
 
         let auth = config.auth.as_ref().unwrap();
         assert_eq!(auth.static_token.as_deref(), Some("sk-test-key"));

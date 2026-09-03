@@ -38,20 +38,26 @@ use serde::Deserialize;
 use serde::Serialize;
 use tracing::warn;
 
+use holon_rows::RowMapper;
+
 use crate::mcp_call_surface::McpCallSurface;
 use crate::redaction::Redactor;
 use crate::rest_oauth2::OAuth2TokenProvider;
 
-/// A single HTTP endpoint, resolved from the sidecar's `transport.rest.calls`.
+/// A single HTTP endpoint: one tool of the sidecar's `utcp:` manual, married
+/// with that tool's `holon:` entry.
 ///
-/// `path` and `query` values may contain `{arg}` placeholders that are filled
-/// from the tool-call arguments at request time. This is distinct from the
-/// `${VAR}` env syntax (which is expanded once at startup for `base_url`/auth):
-/// `{arg}` is per-call data, `${VAR}` is a secret/config reference.
-#[derive(Debug, Clone)]
+/// `url`, `query` and `body` values may contain `{arg}` placeholders that are
+/// filled from the tool-call arguments at request time. This is distinct from
+/// the `${VAR}` env syntax, which is expanded once at startup: `{arg}` is
+/// per-call data, `${VAR}` is a secret/config reference.
+#[derive(Clone)]
 pub struct RestCall {
     pub method: HttpMethod,
-    pub path: String,
+    /// The manual's absolute `url`, `${VAR}` already resolved. It may itself
+    /// be secret — a capability URL carries its credential in a path segment —
+    /// so it is never displayed except through [`RestManual::redactor`].
+    pub url: String,
     pub query: HashMap<String, String>,
     /// How to decode the response body before extraction. `json` is the default
     /// (back-compat); `atom`/`rss` decode a syndication feed into the same
@@ -74,8 +80,25 @@ pub struct RestCall {
     /// [`crate::integration_config::RestCallConfig::body`].
     pub body: Option<serde_json::Value>,
     /// Dotted path to this provider's version/cursor token in the response. See
-    /// [`crate::integration_config::RestCallConfig::response_version_path`].
+    /// [`crate::integration_config::HolonToolConfig::response_version_path`].
     pub response_version_path: Option<String>,
+    /// Compiled response→rows mapping, when the sidecar declares one.
+    pub response: Option<Arc<RowMapper>>,
+    /// Compiled rows→arguments mapping, the write leg of the same seam.
+    pub request: Option<Arc<RowMapper>>,
+}
+
+impl std::fmt::Debug for RestCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Manual (not derived) because `url` can carry a credential in a path
+        // segment and a derived Debug would print it into a panic message.
+        f.debug_struct("RestCall")
+            .field("method", &self.method)
+            .field("query", &self.query.keys().collect::<Vec<_>>())
+            .field("format", &self.format)
+            .field("maps_response", &self.response.is_some())
+            .finish()
+    }
 }
 
 /// The key an extracted [`RestCall::response_version_path`] is re-emitted
@@ -218,9 +241,6 @@ pub enum ResponseFormat {
 /// keychain / files.
 #[derive(Clone)]
 pub struct RestManual {
-    /// May itself be secret: a capability URL carries its credential in a path
-    /// segment, so it is never displayed except through [`Self::redactor`].
-    pub base_url: String,
     /// How requests authenticate ([`RestAuth::None`] for a public API).
     pub auth: RestAuth,
     pub calls: HashMap<String, RestCall>,
@@ -233,11 +253,34 @@ impl std::fmt::Debug for RestManual {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Manual (not derived) so the auth secret never lands in a debug/log
         // line even when a `McpTransport::Rest { .. }` is printed in a panic.
+        // The URLs are SHOWN, redacted: which endpoint a manual serves is what
+        // makes a debug line worth reading, and a capability token inside one
+        // leaves as `<redacted>` like every other resolved secret.
         f.debug_struct("RestManual")
-            .field("base_url", &self.redactor.redact(&self.base_url))
             .field("auth", &self.auth)
-            .field("calls", &self.calls.keys().collect::<Vec<_>>())
+            .field("calls", &self.redacted_calls())
             .finish()
+    }
+}
+
+impl RestManual {
+    /// Each call as `NAME METHOD URL`, with every resolved secret stripped.
+    /// Sorted, because a `HashMap` would name them in a different order each
+    /// run and a diagnostic that reorders itself is hard to compare.
+    fn redacted_calls(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .calls
+            .iter()
+            .map(|(name, call)| {
+                format!(
+                    "{name} {} {}",
+                    call.method,
+                    self.redactor.redact_url(&call.url)
+                )
+            })
+            .collect();
+        lines.sort();
+        lines
     }
 }
 
@@ -250,12 +293,8 @@ pub struct RestCallSurface {
 impl std::fmt::Debug for RestCallSurface {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RestCallSurface")
-            .field(
-                "base_url",
-                &self.manual.redactor.redact(&self.manual.base_url),
-            )
             .field("auth", &self.manual.auth)
-            .field("calls", &self.manual.calls.keys().collect::<Vec<_>>())
+            .field("calls", &self.manual.redacted_calls())
             .finish()
     }
 }
@@ -301,18 +340,8 @@ impl RestCallSurface {
         })?;
 
         let args = params.arguments.unwrap_or_default();
-        let path = fill_placeholders(&call.path, &args)
-            .map_err(|e| anyhow::anyhow!("rest transport: call '{name}' path: {e}"))?;
-        // An EMPTY path addresses the base URL itself, which is how a sidecar
-        // whose `base_url` already names one resource declares its read call —
-        // appending a bare separator there would ask for a different URL.
-        let base = self.manual.base_url.trim_end_matches('/');
-        let relative = path.trim_start_matches('/');
-        let url = if relative.is_empty() {
-            base.to_string()
-        } else {
-            format!("{base}/{relative}")
-        };
+        let url = fill_placeholders(&call.url, &args)
+            .map_err(|e| anyhow::anyhow!("rest transport: call '{name}' url: {e}"))?;
 
         let mut query: Vec<(String, String)> = Vec::with_capacity(call.query.len());
         for (k, v) in &call.query {
@@ -591,6 +620,64 @@ impl RestCallSurface {
 
 #[async_trait]
 impl McpCallSurface for RestCallSurface {
+    /// The rows one call's response maps to, per the sidecar's `response`
+    /// filter.
+    ///
+    /// A call with no declared mapping is a loud failure rather than an empty
+    /// result: a caller that asked for rows and received none would read the
+    /// silence as "the peer serves nothing", which under replace-scope
+    /// semantics deletes everything that call owns.
+    fn map_response(
+        &self,
+        call_name: &str,
+        response: &serde_json::Value,
+    ) -> anyhow::Result<Vec<holon_core::file_format::TypedRowSet>> {
+        let call = self.manual.calls.get(call_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "rest transport: no call named '{call_name}' in the manual (known: {:?})",
+                self.manual.calls.keys().collect::<Vec<_>>()
+            )
+        })?;
+        let mapper = call.response.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("rest transport: call '{call_name}' declares no `response` mapping")
+        })?;
+        mapper
+            .map_to_row_sets(response)
+            .map_err(|e| self.err(format!("{e:#}")))
+    }
+
+    /// The call arguments a row stream maps to, per the sidecar's `request`
+    /// filter — the write leg of [`Self::map_response`].
+    fn map_request(
+        &self,
+        call_name: &str,
+        rows: &serde_json::Value,
+    ) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+        let call = self.manual.calls.get(call_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "rest transport: no call named '{call_name}' in the manual (known: {:?})",
+                self.manual.calls.keys().collect::<Vec<_>>()
+            )
+        })?;
+        let mapper = call.request.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("rest transport: call '{call_name}' declares no `request` mapping")
+        })?;
+        let mut produced = mapper.map(rows).map_err(|e| self.err(format!("{e:#}")))?;
+        match produced.len() {
+            1 => match produced.remove(0) {
+                serde_json::Value::Object(args) => Ok(args),
+                other => Err(self.err(format!(
+                    "rest transport: call '{call_name}' request mapping produced {other}, not an \
+                     argument object"
+                ))),
+            },
+            n => Err(self.err(format!(
+                "rest transport: call '{call_name}' request mapping produced {n} values; a call \
+                 takes exactly one argument object"
+            ))),
+        }
+    }
+
     async fn call_tool(
         &self,
         params: CallToolRequestParam,
@@ -622,9 +709,10 @@ impl McpCallSurface for RestCallSurface {
     ) -> Result<ReadResourceResult, ServiceError> {
         Err(ServiceError::McpError(ErrorData::internal_error(
             format!(
-                "rest transport does not support MCP resources (requested '{}'); describe reads \
-                 as GET calls under transport.rest.calls and use sync.list_tool instead",
-                params.uri
+                "rest transport does not support MCP resources (requested '{}'); declare the \
+                 read as a GET tool under {} and name it from sync.list_tool instead",
+                params.uri,
+                crate::integration_config::MANUAL_TOOLS_KEY
             ),
             None,
         )))

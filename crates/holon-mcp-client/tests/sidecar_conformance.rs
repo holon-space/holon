@@ -15,7 +15,7 @@
 //!      (in declared order, so chained views resolve), exactly as
 //!      `finish_integration` does at connect;
 //!   4. for `rest` sidecars, every entity's `sync.list_tool` names a declared
-//!      `transport.rest.calls` entry, every `project` target is a declared
+//!      `utcp.tools` entry, every `project` target is a declared
 //!      schema column, and `pagination.max_pages >= 1`.
 //!
 //! Provider-SPECIFIC behavior (e.g. gcal's exact +7d upcoming window, or its
@@ -155,16 +155,25 @@ fn every_rest_sidecar_sync_and_projection_reference_declared_names() {
         let file = name_of(&path);
         let cfg: IntegrationFileConfig =
             serde_yaml::from_str(&read(&path)).unwrap_or_else(|e| panic!("[{file}] parse: {e}"));
-        let Some(rest) = cfg.transport.rest.as_ref() else {
-            continue; // only the rest transport uses `calls`
+        let Some(manual) = cfg.utcp.as_ref() else {
+            continue; // only a `utcp:` manual declares HTTP tools
         };
+        let holon = cfg.holon.clone().unwrap_or_default();
 
-        // pagination bound is sane on every call.
-        for (call_name, call) in &rest.calls {
-            if let Some(pg) = &call.pagination {
+        // Every `holon.tools` key names a tool the manual actually declares.
+        for tool_name in holon.tools.keys() {
+            assert!(
+                manual.tool(tool_name).is_ok(),
+                "[{file}] holon.tools '{tool_name}' names no declared utcp.tools entry"
+            );
+        }
+
+        // pagination bound is sane on every tool.
+        for (tool_name, tool) in &holon.tools {
+            if let Some(pg) = &tool.pagination {
                 assert!(
                     pg.max_pages >= 1,
-                    "[{file}] call '{call_name}' pagination.max_pages must be >= 1"
+                    "[{file}] tool '{tool_name}' pagination.max_pages must be >= 1"
                 );
             }
         }
@@ -173,12 +182,12 @@ fn every_rest_sidecar_sync_and_projection_reference_declared_names() {
             let Some(sync) = entity.sync.as_ref() else {
                 continue;
             };
-            // A rest entity syncs via a named `calls` entry.
+            // A direct-HTTP entity syncs via a named manual tool.
             if let Some(list_tool) = &sync.list_tool {
                 assert!(
-                    rest.calls.contains_key(list_tool),
+                    manual.tool(list_tool).is_ok(),
                     "[{file}] entity '{entity_name}' sync.list_tool '{list_tool}' is not a \
-                     declared transport.rest.calls entry"
+                     declared utcp.tools entry"
                 );
             }
             // Every projection target must be a declared schema column, else the

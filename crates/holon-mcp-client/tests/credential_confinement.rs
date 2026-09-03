@@ -33,7 +33,7 @@ fn bundled_oauth2(provider: &str) -> Option<RestOAuth2Config> {
     let bundled = holon_mcp_client::bundled_sidecar(provider).expect("bundled");
     let config: IntegrationFileConfig =
         serde_yaml::from_str(bundled.yaml).expect("the bundled sidecar parses");
-    config.transport.rest?.auth?.oauth2
+    config.holon?.auth?.oauth2
 }
 
 /// Every declared credential location in one resolved credential set.
@@ -99,10 +99,9 @@ fn a_valid_credential_outside_the_config_dir_is_never_read() {
     let bundled = holon_mcp_client::bundled_sidecar("gcal").expect("bundled");
     let mut config: IntegrationFileConfig = serde_yaml::from_str(bundled.yaml).expect("parses");
     let oauth2 = config
-        .transport
-        .rest
+        .holon
         .as_mut()
-        .and_then(|r| r.auth.as_mut())
+        .and_then(|h| h.auth.as_mut())
         .and_then(|a| a.oauth2.as_mut())
         .expect("gcal declares an oauth2 arm");
     oauth2.client_id_file = Some(decoy.path().join("client-id").display().to_string());

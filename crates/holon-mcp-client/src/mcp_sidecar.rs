@@ -13,6 +13,11 @@ pub struct McpSidecar {
     /// `cc_session` with ID scheme `cc_session:`.
     #[serde(default)]
     pub entity_prefix: Option<String>,
+    /// Absent for a connection that mirrors nothing — a `utcp:` peer whose
+    /// rows arrive through a `response` mapping declares no cache-table entity
+    /// at all, and an empty block would be boilerplate teaching the next
+    /// author it is required.
+    #[serde(default)]
     pub entities: HashMap<String, EntityConfig>,
     /// Master write switch (leases/read-write ruling). Absent = `disabled` =
     /// today's fail-loud behaviour: every non-`read` tool is denied at

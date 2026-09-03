@@ -239,7 +239,13 @@ fn an_enabled_provider_still_honors_a_current_schema_installed_override() {
         .find(|(n, _)| n == "claude-history")
         .expect("enabled");
     assert_eq!(
-        cfg.transport.child_process.as_ref().unwrap().command,
+        cfg.transport
+            .as_ref()
+            .unwrap()
+            .child_process
+            .as_ref()
+            .unwrap()
+            .command,
         "my-own-binary",
         "an override declaring this build's schema version is used as written"
     );

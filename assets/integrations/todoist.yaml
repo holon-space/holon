@@ -1,7 +1,7 @@
 # Sidecar-format generation. The app runs its own bundled copy of this file
 # unless an INSTALLED copy declares the generation the running build understands
 # (crates/holon-mcp-client/src/bundled_sidecars.rs).
-schema_version: 1
+schema_version: 2
 
 # The Integrations sidebar row: what it says, what glyph it wears, and the page
 # `integration.open_default_view` focuses in the main panel. `default_view` is

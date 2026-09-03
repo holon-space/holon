@@ -85,15 +85,26 @@ fn manual_from(
         .expect("the sidecar resolves once the list URL is configured");
     match built.transport {
         McpTransport::Rest { manual, .. } => manual,
-        other => panic!("shopping.yaml declares a rest transport, got {other:?}"),
+        other => panic!("shopping.yaml declares a utcp connection, got {other:?}"),
     }
+}
+
+/// The list URL as the manual resolved it. The share link is the `pull_list`
+/// tool's own `url` — a UTCP manual states an absolute URL per tool and has no
+/// base to share.
+fn resolved_url(manual: &holon_mcp_client::rest_transport::RestManual) -> &str {
+    &manual
+        .calls
+        .get("pull_list")
+        .expect("the shopping manual declares `pull_list`")
+        .url
 }
 
 #[test]
 fn the_settings_preference_configures_the_connector_with_no_environment_variable() {
     let manual = manual_from(&preferences(&pref_url()), |_| None);
     assert_eq!(
-        manual.base_url,
+        resolved_url(&manual),
         pref_url(),
         "a URL set in Settings must configure the connector on its own — needing an export is \
          exactly what this preference removes"
@@ -106,7 +117,7 @@ fn an_exported_variable_outranks_the_settings_value() {
         (name == ENV_VAR).then(|| env_url())
     });
     assert_eq!(
-        manual.base_url,
+        resolved_url(&manual),
         env_url(),
         "the environment layer is the outer one; a sandbox launched with an exported credential \
          must not silently run on the persisted profile's"
@@ -173,7 +184,7 @@ fn the_pasted_token_is_registered_as_a_secret_and_never_reaches_an_error_string(
 
     // The shapes an upstream failure actually carries the URL in: the request
     // line, and a body that echoes back the path it was asked for.
-    let request_line = format!("GET {}/list/7 failed: 502", manual.base_url);
+    let request_line = format!("GET {}/list/7 failed: 502", resolved_url(&manual));
     let echoed_body = format!(r#"{{"error":"no route for /c/{PREF_TOKEN}/api/list/7"}}"#);
     let bare_token = format!("upstream rejected {PREF_TOKEN}");
 
@@ -234,7 +245,7 @@ fn a_list_url_persisted_in_holon_toml_configures_the_connector_after_a_restart()
 
     let manual = manual_from(&booted.preferences, |_| None);
     assert_eq!(
-        manual.base_url,
+        resolved_url(&manual),
         pref_url(),
         "the connector must be configured from the persisted preference alone, with no \
          environment variable set"
@@ -242,7 +253,7 @@ fn a_list_url_persisted_in_holon_toml_configures_the_connector_after_a_restart()
     assert!(
         !manual
             .redactor
-            .redact(&format!("GET {}/list/7 failed", manual.base_url))
+            .redact(&format!("GET {}/list/7 failed", resolved_url(&manual)))
             .contains(PREF_TOKEN),
         "a URL that arrived from disk must be registered with the redactor exactly as an \
          exported one is"

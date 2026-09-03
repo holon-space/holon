@@ -1,5 +1,5 @@
-//! End-to-end test of the `rest` transport against a LOCAL mock HTTP server
-//! (no network). Proves that a `transport: rest` sidecar drives the SAME
+//! End-to-end test of the direct-HTTP transport against a LOCAL mock HTTP
+//! server (no network). Proves that a `utcp:` + `holon:` sidecar drives the SAME
 //! connector read path (`SyncStrategy::fetch_records` over `McpCallSurface`) as
 //! the MCP transports, producing Layer-1 replica records from a plain JSON API.
 //!
@@ -204,14 +204,19 @@ async fn rest_transport_fetches_records_via_shared_sync_path() {
     let mock = start_mock().await;
     let yaml = format!(
         r#"
-transport:
-  rest:
-    base_url: {base}
-    calls:
-      list-posts:
-        method: GET
-        path: /posts
-        result_key: posts
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: list-posts
+      tool_call_template:
+        call_template_type: http
+        url: {base}/posts
+        http_method: GET
+holon:
+  tools:
+    list-posts:
+      result_key: posts
 entities:
   jp_posts:
     id_column: id
@@ -272,15 +277,20 @@ async fn fetch_feed(
 ) -> Vec<serde_json::Map<String, serde_json::Value>> {
     let yaml = format!(
         r#"
-transport:
-  rest:
-    base_url: {base}
-    calls:
-      list-feed:
-        method: GET
-        path: {path}
-        format: {format}
-        result_key: entries
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: list-feed
+      tool_call_template:
+        call_template_type: http
+        url: {base}{path}
+        http_method: GET
+holon:
+  tools:
+    list-feed:
+      format: {format}
+      result_key: entries
 entities:
   feed_items:
     id_column: id
@@ -374,16 +384,19 @@ async fn rest_transport_sends_auth_header_and_fills_path_placeholder() {
     }
     let yaml = format!(
         r#"
-transport:
-  rest:
-    base_url: {base}
-    auth:
-      header: Authorization
-      value: "Bearer ${{REST_TEST_TOKEN}}"
-    calls:
-      user-posts:
-        method: GET
-        path: /users/{{userId}}/posts
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: user-posts
+      tool_call_template:
+        call_template_type: http
+        url: {base}/users/{{userId}}/posts
+        http_method: GET
+holon:
+  auth:
+    header: Authorization
+    value: "Bearer ${{REST_TEST_TOKEN}}"
 entities: {{}}
 tools: {{}}
 "#,
@@ -428,8 +441,9 @@ tools: {{}}
 async fn rest_transport_read_resource_fails_loud() {
     let mock = start_mock().await;
     let yaml = format!(
-        "transport:\n  rest:\n    base_url: {base}\n    calls:\n      x:\n        method: \
-             GET\n        path: /posts\nentities: {{}}\ntools: {{}}\n",
+        "utcp:\n  utcp_version: \"1.1.3\"\n  manual_version: \"1.0.0\"\n  tools:\n    - name: \
+             x\n      tool_call_template:\n        call_template_type: http\n        url: \
+             {base}/posts\n        http_method: GET\nentities: {{}}\ntools: {{}}\n",
         base = mock.base_url
     );
     let surface = surface_from(&yaml, "p", &|_| None);
@@ -464,8 +478,8 @@ fn shipped_jsonplaceholder_sidecar_parses_as_rest() {
             manual,
             poll_interval,
         } => {
-            assert_eq!(manual.base_url, "https://jsonplaceholder.typicode.com");
-            assert!(manual.calls.contains_key("list-posts"));
+            let call = manual.calls.get("list-posts").expect("list-posts declared");
+            assert_eq!(call.url, "https://jsonplaceholder.typicode.com/posts");
             // Shipped example sets no poll_interval → resolves to the 300s default.
             assert!(poll_interval.is_none());
         }
@@ -483,17 +497,20 @@ fn unknown_transport_field_is_rejected() {
 
 #[test]
 fn rest_poll_interval_parses() {
-    // The transport-wide default cadence parses (humantime string) and threads
+    // The manual-wide default cadence parses (humantime string) and threads
     // onto the resolved transport variant.
     let yaml = r#"
-transport:
-  rest:
-    base_url: http://x
-    poll_interval: 90s
-    calls:
-      x:
-        method: GET
-        path: /p
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: x
+      tool_call_template:
+        call_template_type: http
+        url: http://x/p
+        http_method: GET
+holon:
+  poll_interval: 90s
 entities: {}
 tools: {}
 "#;
@@ -513,11 +530,11 @@ tools: {}
 }
 
 #[test]
-fn rest_unknown_field_under_transport_rest_is_rejected() {
-    // deny_unknown_fields on RestTransport: a typo under transport.rest fails
-    // loud at parse rather than being silently ignored.
-    let yaml = "transport:\n  rest:\n    base_url: http://x\n    poll_intervall: 90s\n    calls: \
-                     {}\nentities: {}\ntools: {}\n";
+fn unknown_field_under_holon_is_rejected() {
+    // deny_unknown_fields on HolonSection: a typo under `holon:` fails loud at
+    // parse rather than being silently ignored.
+    let yaml = "utcp:\n  utcp_version: \"1.1.3\"\n  manual_version: \"1.0.0\"\n  tools: \
+                     []\nholon:\n  poll_intervall: 90s\nentities: {}\ntools: {}\n";
     let err = serde_yaml::from_str::<IntegrationFileConfig>(yaml).unwrap_err();
     assert!(
         err.to_string().contains("poll_intervall") || err.to_string().contains("unknown field"),
@@ -746,14 +763,19 @@ fn posts_body(first_title: &str) -> String {
 fn poll_runner_yaml(base: &str) -> String {
     format!(
         r#"
-transport:
-  rest:
-    base_url: {base}
-    calls:
-      list-posts:
-        method: GET
-        path: /posts
-        result_key: posts
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: list-posts
+      tool_call_template:
+        call_template_type: http
+        url: {base}/posts
+        http_method: GET
+holon:
+  tools:
+    list-posts:
+      result_key: posts
 entities:
   jp_posts:
     id_column: id
