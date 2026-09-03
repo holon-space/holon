@@ -1,0 +1,398 @@
+<title>holon · Decisions · orchestrator (2026-09-03)</title>
+<!-- ^ REQUIRED at first copy: replace REPO-NAME with the repo/project this inbox
+     serves and SESSION-HINT with a short role for THIS session (e.g. "holon · Decisions · orchestrator"). Martin tells tabs and ID-namespaces apart by
+     this title; a bare "Decision Inbox" is indistinguishable across projects.
+     Optionally append more useful context after the repo name. Keep the title
+     STABLE afterwards — it also names the artifact in the gallery. -->
+
+
+<script type="text/x-decisions" id="decisions-src">
+// GRAMMAR (line-oriented, one decision per block). Edit ONLY between the markers.
+//   # <ID> <title>        starts a decision. ID is a slug or number, e.g. D7 or cache-name.
+//   > <text>              background. Repeatable; consecutive > lines join into one paragraph.
+//   ? <text>              first-principles note (optional). Repeatable.
+//   - <sub> | <label> | +pro | -con ...   an option. Fields are pipe-separated.
+//   * <sub> | <label> | ...               same, but marked RECOMMENDED.
+//   // ...                comment, ignored.  Blank lines ignored.
+// Inline markup in any text: **bold**, `code`, [label](https://url).
+// Anything else is a hard parse error shown as a red banner.
+<!-- DECISIONS-START -->
+# D85 Disk growth root cause is cargo feature-unification hash churn — normalize gates, add a repo GC, or both?
+> Lane disk-rootfix (report `.claude/worktrees/disk-rootfix/lane-report-disk-rootfix.md`) REFUTED the "leaking test helper" premise: no test helper writes under `target/`; the one sandbox fixture (`crates/holon-integration-tests/src/test_environment.rs:98`) holds a `TempDir` correctly. The growth is cargo's own: `target/debug/build/holon-app/<hash>/out/` holds a 238 MB linked test binary plus its object units (~229 MB per dir); holon-app has 34 test targets but 878 hash dirs (81 GB) because different gate invocations (`-p` sets, `--features` shapes) unify workspace features differently, so each shape mints a new metadata hash (6 distinct dependency counts × 2 profile hashes measured) and the old dirs are orphaned forever; cargo never GCs them. The 45-minute age sweep deletes live artifacts and misses old ones equally. A separate smaller leak (~20 `std::mem::forget` sites in windowed tests leaking TempDirs into the tmp dir, 16 GB) is being fixed without a ruling.
+? Artifacts should be superseded, not aged: a hash dir is garbage exactly when a newer dir for the same target exists, whatever its age.
+* c | Both: repo-owned GC first (keep the newest N hash dirs per crate/target, prune by supersession — a `just target-gc` recipe called by the land gate and `sw new`), then normalize the gate invocations to ONE feature selection so the churn stops | +immediate relief that is safe by construction; the root cause is removed afterwards | -two changes; the normalization touches every Justfile gate and must respect the D64.a rule (holon tests compile only together with holon-app)
+- b | GC only (supersession-based, keep newest N) | +one small tool; safe | -the churn continues; GC runs forever
+- a | Normalize gate invocations only | +root fix, no tool | -touches every gate; the 81 GB already there stays until a manual purge; any new gate shape re-introduces churn silently
+
+# D86 Production iroh pairing has NO read/write capability dimension — route its imports through `admit`, or give enrollment a capability?
+> Lane pair-prod (report `.claude/worktrees/pair-prod/lane-report-pair-prod.md` §2a, §6) measured that D72.a's "ONE acceptor boundary" is two today: `holon_sharing::acceptor::admit` (the function with the Read/Write rule and the full refusal taxonomy) has NO production caller — its only call site is the relay/envelope leg (`holon-sharing/src/sync.rs:232`). The production iroh leg authorises in `share_enrollment::acceptor_enroll` (`iroh_advertiser.rs:171-177`), which proves possession of a `CapabilitySecret` and is all-or-nothing. Consequence: a device paired over production iroh under a READ-ONLY cert can write, because nothing on that path ever reads the cert. The red test `a_read_only_pairing_cannot_write_back_to_the_owner` pins this and stays `#[ignore]`d until ruled. Related fact (§2b): whole-store replication over iroh is correct only by vacuity — `replicate_all` takes ONE roster bound to ONE tree id, so a second registered container could not authenticate; per-container rosters are the prerequisite for the first extra container.
+? One boundary means one function decides; two gates that disagree are a bypass by construction. The fix must make the iroh leg's decision the same code that the relay leg runs.
+* a | Route the iroh leg's imports through `admit`: after `acceptor_enroll` proves possession, every imported batch on the iroh connection passes `admit` with the peer's cert chain (capability from the chain, container binding, audience) before it reaches the doc; `acceptor_enroll` keeps transport-level proof only | +ONE decision function for both wires (D72.a as ruled); the existing refusal taxonomy and the admit-fuzz PBT cover the iroh leg for free | -per-batch cost on the hot path (cert chain parse once per connection, then a cheap check); the enrollment proof and the cert chain must be bound to the same identity (a new invariant to pin)
+- b | Give enrollment a capability dimension: two secrets per share (read secret / write secret), `acceptor_enroll` grants the capability the presented secret proves; imports on a read-only connection are refused at the transport | +cheapest per-batch path; no per-batch admit | -a SECOND authorisation vocabulary beside the cert chain (the relay leg keeps `admit`); two secrets to distribute and rotate; D72.a's "one boundary" stays unmet
+- c | Defer: ship pairing read/write-only (every paired device is a full writer), keep the test ignored, revisit before the first read-only share ships | +unblocks pair-prod now | -a known authz bypass lives in main with a name; contradicts D72.a
+
+# D87 Visual pass from the dogfood explorer: which of the eight proposals become a lane now?
+> The exploratory dogfood run (your standing order) inspected the GPUI app on the vault copy at one window width (resize was blocked) and found "no legible colour strategy": a warm near-white greyscale with one teal accent applied ONLY to main-panel bullets (where it carries no meaning), while focus, selection, links, tags and degraded state are all undifferentiated grey; the edited block is indistinguishable from its neighbours; body text wraps at ~110 characters across 824 px; the sidebar carries three leading glyphs per row so labels at one depth do not share a left edge, and depth is indentation-only; the right panel is empty with a floating hamburger; the two empty states (search overlay, shopping view) say nothing actionable — and after finding 1 (search returns nothing for every query) the search empty state must distinguish "no matches" from "search failed". Report with screenshot paths: `scratchpad/reports/dogfood-explore/lane-report-dogfood-explore.md` §Visual pass; screenshots in `scratchpad/reports/dogfood-explore/shots/` (01-boot, 03-shopping-view, 04-recipe-after-edit, 06-page-mixed, 07-search-suppe). The eight proposals, in the report's order: (1) four named accent roles — focus ring, selected row, links, tags — bullets repainted neutral; (2) a visible 2 px focus ring; (3) one warm red-brown as THE degraded/refusal colour, used by disclosures; (4) body column capped at ~70 characters; (5) one leading sidebar glyph, common left edge; (6) sidebar depth by weight, not indentation alone; (7) the empty right panel gets a purpose or goes; (8) empty-state copy that says what to do next, and "no matches" ≠ "search failed".
+? Colour that means nothing costs the colour that could mean something; the four roles in (1) are exactly the states the fail-loud rule needs the user to SEE (focus, selection, degraded).
+* a | Lane "visual-accent" now: (1)+(2)+(3)+(4)+(8) — the accent roles, focus ring, degraded colour, measure cap and empty-state copy; each with a GPUI windowed PBT pin (holon-feature skill) and before/after screenshots at two widths | +every item is a rule with a pin, not taste; (3)+(8) are the visible half of the fail-loud rule; (2) fixes a usability defect | -touches the theme tokens used by every builder; two widths must be driven (the resize blocker becomes part of the lane)
+- b | All eight in one lane | +one design pass | -(5)(6)(7) are layout/IA changes with no oracle beyond a screenshot; they will stall the lane behind taste calls
+- c | Only (2) focus ring + (8) empty states (the two that are defects, not taste) | +smallest | -the accent keeps decorating bullets; degraded state stays grey
+
+# D88 Does a share/pairing capability EXPIRE for an already-enrolled peer, or only close the enrollment window? (PROVISIONALLY applied as (a) so pair-prod can land — say if you want it otherwise)
+> pair-prod rev 2 (report `.claude/worktrees/pair-prod/lane-report-pair-prod.md` "Rev 2", finding S4a) moved the expiry check in `ShareRoster::authorize` BEFORE the already-enrolled short-circuit so a peer's access cannot outlive the invite TTL. That function is shared with subtree sharing, whose window is `DEFAULT_ENROLLMENT_WINDOW_SECS` = 30 days: the verifier MEASURED that with expiry-first an ACCEPTED subtree share authorises its enrolled peer on day 29 and REFUSES on day 31 — every existing share would stop syncing 30 days after minting, with no re-mint path and no disclosure. `authorize_owner_signed` (the cert-chain leg) is untouched. The pairing invite TTL is 15 minutes; `pair_cancel` (new) revokes explicitly. The constant's name says "enrollment window", which is how it behaved before rev 2. The orchestrator applied (a) provisionally in rev 3 (with pins: cannot enroll after the window; enrolled stays authorised until cancelled; a day-31 subtree share still syncs) so the lane can weave; your answer here confirms or reverses it.
+? A window bounds when a peer may JOIN; membership is ended by revocation, not by a clock the peer cannot see. Silent 30-day expiry of a working share is a fail-quiet shape.
+* a | Expiry closes the ENROLLMENT window only: an un-enrolled peer is refused after `expires_at`; an enrolled peer stays authorised until revoked (`pair_cancel` / share revocation) | +matches the constant's meaning and every existing share keeps working; revocation is explicit and loud | -a lost phone that was enrolled stays enrolled until the owner cancels (needs a visible device list — S3's `on_peer_connected` follow-up)
+- b | Expiry bounds ACCESS for pairing invites only; subtree shares keep enrolled-first (two rules in one function, selected by roster kind) | +pairing access cannot outlive its TTL | -two authorisation rules in one function; a paired device silently drops off after 15 min unless re-paired — unusable for own-device sync
+- c | Expiry-first for both (rev 2 as built) and shares re-mint on a schedule | +one rule | -every existing share dies 30 days after minting with no disclosure; re-minting machinery does not exist
+
+# D89 Open the two UTCP upstream PRs (forward-compatibility rule; manual-carried response mapping)?
+> Per D84.d the Holon sidecar embeds a verbatim UTCP manual and keeps its additions beside it; the two things the standard lacks were drafted as upstream contributions, verified against fresh clones of the spec (main 3aa837d) and the Python reference (dev 89a9832), with NOTHING pushed: `scratchpad/utcp-upstream/README.md` (what, why, the exact fork + `gh pr create` commands), `PR-1-forward-compat.md` (spec diff 71 lines: an unknown `call_template_type` skips that tool with a warning instead of failing the whole manual, unknown keys are ignored and preserved, an `x-` extension-key convention; Python diff 286 lines over 6 files with 3 new tests — the measured failures now load: unknown type → 1 tool registered + warning; the spec's own documented `info` key no longer raises; `x-` keys preserved; core suite 40 passed), `PR-2-manual-carried-response-mapping.md` (spec diff 98 lines: optional per-tool `response {language, expression}`, `jq` as the first registered language with jaq noted, mapping errors are tool errors, an unsupported language must refuse loudly). Opening a PR is outward-facing and under your name, so it needs your go.
+? Standards pay when others carry them: both PRs remove the exact reasons Holon could not adopt the manual as its runtime format; if merged, the `holon:` section folds into the manual.
+* a | Open both PRs from a fork under your account, as drafted (you run the README commands, or give the go and the orchestrator runs them) | +two small, test-backed changes; the discussion starts now | -maintainer time is unbounded; PR-2 is a design change they may reject
+- b | Open PR-1 only (the forward-compatibility rule — smallest, least controversial), hold PR-2 for the discussion on PR-1 | +highest acceptance odds first | -the mapping proposal waits
+- c | Do not open; keep the drafts as the record of what the sidecar's `holon:` section would fold into | +zero external commitment | -no chance of convergence; the fork-vs-embed question stays open forever
+
+# D90 The wasm plugin is 21.6× slower than native cook.rs — proceed to Inc 3 (delete cook.rs) as planned, or change the runtime strategy first?
+> Low-code Inc 2 is built and green (report `scratchpad/reports/lowcode-inc2a/lane-report-lowcode-inc2a.md` after weave; lane WS `.claude/worktrees/lowcode-inc2a`): `crates/holon-plugin-host` (wasmi 2.0.0, four-function ABI, JSON Lines through linear memory, fuel + memory limits, `PluginFormatAdapter` registered from a yaml sidecar, undeclared scopes/columns refused), the cooklang guest (a faithful port; 517 KB raw / 205 KB gzip, `wasm-opt` not installed), a testkit guest, and the red-first differential PBT with ZERO divergences. MEASURED, release build, one host kept alive, warmed: 200 generated recipes = **517.5 ms plugin vs 23.9 ms native** (2.59 ms vs 0.12 ms per recipe, 21.6×). Per interaction (one recipe on save) that is 77× under the 200 ms SLO; a COLD full-vault scan of 200 recipes misses the plan's 200 ms kill line by 2.6×. Today's real Rezepte folder has 3 recipes. The plan's Inc 3 deletes `cook.rs`, `rows.rs` and the cooklang dependency from `holon-kitchen` (no dual path); Inc 6 adds tree-sitter grammars as guests (same interpreter cost class).
+? The SLO is per interaction; a full scan is a boot/re-index event whose cost should be bounded by incrementality (parse only changed files, cache rows by content hash), not by interpreter speed. Keeping a native path "for speed" is exactly the dual path the refactor rule forbids.
+* a | Proceed to Inc 3 as planned (delete cook.rs; the plugin is the only cooklang path) AND make the vault scan incremental in the same increment: rows cached by file content hash in the store, re-parse only changed files, the cold first scan disclosed as progress (never a frozen UI) | +one path; the cost lands where it belongs (boot, once) and shrinks to zero on warm boots; incrementality benefits every format host | -a first-boot scan of a large recipe vault is slow (≈2.6 ms/recipe: 1000 recipes ≈ 2.6 s) until cached
+- b | Proceed to Inc 3 but swap the runtime to `wasm_runtime_layer` (wasmtime native, wasmi in the browser) for near-native speed on desktop/Android | +~10× faster natively | -two runtimes behind one API (single-maintainer crate), wasmtime on Android is Tier 3 with no CI; the browser keeps the interpreter anyway
+- c | Keep cook.rs as the native fast path beside the plugin | +fastest today | -the dual path the plan and the refactor rule forbid; every format would want one; the point of the program (attach formats WITHOUT Rust) is lost
+
+# D91 German timer units (`~{9%Minuten}`) refuse the whole recipe — in BOTH the old parser and the new cooklang guest. Accept them, and how?
+> The plan expected the upstream `cooklang` crate to accept what `cook.rs` refused, so the differential PBT would NAME the divergence. Measured instead: cooklang's own `parse` runs with `Extensions::all()`, whose `ADVANCED_UNITS` extension validates timer units against its English unit table and errors on `Minuten`, so the guest refuses exactly as `cook.rs` does — zero divergences, and dogfood entry `2026-09-02-a-german-timer-unit-refuses-the-whole-recipe` stays OPEN. Your three real recipes are German. The guest is a plugin: its extension set is a ONE-LINE choice in the guest source, and cooklang also supports a units/locale configuration (a `Converter` with a custom unit file) — either is low-code, neither is a parser change in Holon.
+? A recipe file the user wrote must never be refused wholesale for a unit word; parse-don't-validate means the timer is a (quantity, unit-string) pair the app renders as written, and unit knowledge is a converter's concern.
+* a | Parse with `ADVANCED_UNITS` OFF in the cooklang guest: timers carry their unit as the literal string; no unit validation at parse time; a later converter (if ever) maps known units | +every German (or any) unit parses; smallest change; matches parse-don't-validate | -no unit normalisation for timers (none exists today anyway)
+- b | Keep `ADVANCED_UNITS` ON and ship a German unit table (cooklang `Converter` config in the guest or the sidecar) | +units are validated and convertible | -a unit table per language; the next language refuses again; a config knob users must find
+- c | Keep refusing (status quo); the recipe shows the format refusal toast and no document | +strictest | -your own recipes stay unreadable; the dogfood entry stays OPEN
+<!-- DECISIONS-END -->
+</script>
+
+<div id="inbox"></div>
+<div id="bar">
+  <div id="bar-inner">
+    <span id="bar-label">Answer</span>
+    <code id="answer">(nothing selected yet)</code>
+    <button id="copy">Copy</button>
+  </div>
+</div>
+
+<style>
+:root {
+  --bg: #fbfaf8;
+  --surface: #ffffff;
+  --surface-2: #f4f2ee;
+  --border: #e0dcd4;
+  --border-strong: #c8c2b6;
+  --text: #26241f;
+  --text-dim: #6b665c;
+  --accent: #7a5c2e;
+  --accent-bg: #f3ecdd;
+  --pro: #3d6b46;
+  --con: #8a4b3f;
+  --err-bg: #fbe9e6;
+  --err-text: #8a2f22;
+  --bar-bg: #26241f;
+  --bar-text: #f6f3ec;
+  --shadow: 0 1px 2px rgba(0,0,0,.06);
+}
+:root:not([data-theme="light"]) { }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #17171a;
+    --surface: #1f1f23;
+    --surface-2: #26262b;
+    --border: #34343a;
+    --border-strong: #4c4c55;
+    --text: #e6e4df;
+    --text-dim: #9a968e;
+    --accent: #d9b877;
+    --accent-bg: #322c1f;
+    --pro: #82b98d;
+    --con: #dd9a8c;
+    --err-bg: #3a201c;
+    --err-text: #f0a396;
+    --bar-bg: #0e0e10;
+    --bar-text: #e6e4df;
+    --shadow: 0 1px 2px rgba(0,0,0,.4);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #17171a;
+  --surface: #1f1f23;
+  --surface-2: #26262b;
+  --border: #34343a;
+  --border-strong: #4c4c55;
+  --text: #e6e4df;
+  --text-dim: #9a968e;
+  --accent: #d9b877;
+  --accent-bg: #322c1f;
+  --pro: #82b98d;
+  --con: #dd9a8c;
+  --err-bg: #3a201c;
+  --err-text: #f0a396;
+  --bar-bg: #0e0e10;
+  --bar-text: #e6e4df;
+  --shadow: 0 1px 2px rgba(0,0,0,.4);
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+  margin: 0;
+  padding: 28px 20px 120px;
+}
+#inbox { max-width: 860px; margin: 0 auto; }
+code, kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+a { color: var(--accent); }
+
+.err {
+  background: var(--err-bg); color: var(--err-text);
+  border: 1px solid var(--err-text); border-radius: 6px;
+  padding: 10px 14px; margin-bottom: 18px; font-family: ui-monospace, monospace; font-size: 13px;
+}
+.err div { margin: 2px 0; }
+
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 18px 20px; margin-bottom: 18px; box-shadow: var(--shadow);
+}
+.card > h2 { margin: 0 0 8px; font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+.card > h2 .id {
+  color: var(--accent); font-family: ui-monospace, monospace;
+  font-size: 13px; margin-right: 8px;
+}
+.bg { margin: 0 0 10px; color: var(--text); }
+.fp {
+  margin: 0 0 14px; padding: 9px 12px; border-left: 2px solid var(--border-strong);
+  background: var(--surface-2); color: var(--text-dim); font-size: 14px;
+}
+.opts { display: grid; gap: 8px; }
+.opt {
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+  cursor: pointer; background: var(--surface); transition: border-color .12s, background .12s;
+}
+.opt:hover { border-color: var(--border-strong); }
+.opt.sel { border-color: var(--accent); background: var(--accent-bg); }
+.opt-head { display: flex; align-items: baseline; gap: 8px; }
+.opt-sub { font-family: ui-monospace, monospace; font-size: 12px; color: var(--text-dim); min-width: 1.4em; }
+.opt.sel .opt-sub { color: var(--accent); }
+.opt-label { font-weight: 500; }
+.rec {
+  margin-left: auto; font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 1px 7px;
+}
+.pc { margin: 6px 0 0 calc(1.4em + 8px); font-size: 13.5px; }
+.pc div { display: flex; gap: 7px; }
+.pc .m { font-family: ui-monospace, monospace; }
+.pc .pro .m { color: var(--pro); }
+.pc .con .m { color: var(--con); }
+.pc .t { color: var(--text-dim); }
+
+input[type="text"] {
+  font: inherit; font-size: 14px; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; width: 100%;
+  box-sizing: border-box;
+}
+input[type="text"]:focus { outline: none; border-color: var(--accent); }
+.refine { margin: 8px 0 0 calc(1.4em + 8px); display: none; }
+.opt.sel .refine { display: block; }
+.other .opt-label { color: var(--text-dim); font-weight: 400; }
+
+#bar {
+  position: fixed; left: 0; right: 0; bottom: 0;
+  background: var(--bar-bg); color: var(--bar-text); border-top: 1px solid var(--border-strong);
+}
+#bar-inner {
+  max-width: 860px; margin: 0 auto; padding: 12px 20px;
+  display: flex; align-items: center; gap: 12px;
+}
+#bar-label { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; opacity: .55; }
+#answer {
+  flex: 1; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+  font-size: 13px; user-select: all;
+}
+#copy {
+  font: inherit; font-size: 13px; cursor: pointer; color: var(--bar-text);
+  background: transparent; border: 1px solid var(--border-strong);
+  border-radius: 6px; padding: 5px 12px;
+}
+#copy:hover { background: rgba(127,127,127,.22); }
+</style>
+
+<script>
+(function () {
+  const S = "<!" + "-- DECISIONS-START --" + ">", E = "<!" + "-- DECISIONS-END --" + ">";
+  const raw = document.getElementById("decisions-src").textContent;
+  const start = raw.indexOf(S), end = raw.indexOf(E);
+  if (start < 0 || end < 0) throw new Error("decisions block markers missing");
+  const offset = raw.slice(0, start).split("\n").length;
+  const lines = raw.slice(start + S.length, end).split("\n");
+
+  const decisions = [], errors = [];
+  let cur = null;
+  lines.forEach((line, i) => {
+    const n = offset + i;
+    const t = line.trim();
+    if (!t || t.startsWith("//")) return;
+    const rest = t.slice(1).trim();
+    const need = () => { if (!cur) errors.push([n, t, "no decision started"]); return !!cur; };
+    switch (t[0]) {
+      case "#": {
+        const m = rest.match(/^(\S+)\s+(.+)$/);
+        if (!m) { errors.push([n, t, "expected: # <ID> <title>"]); return; }
+        cur = { id: m[1], title: m[2], bg: [], fp: [], opts: [] };
+        decisions.push(cur);
+        return;
+      }
+      case ">": if (need()) cur.bg.push(rest); return;
+      case "?": if (need()) cur.fp.push(rest); return;
+      case "-": case "*": {
+        if (!need()) return;
+        const f = t.slice(1).split("|").map(s => s.trim());
+        if (f.length < 2 || !f[0] || !f[1]) {
+          errors.push([n, t, "expected: - <sub> | <label> | +pro | -con"]);
+          return;
+        }
+        const pc = [];
+        for (const x of f.slice(2)) {
+          if (!x) continue;
+          if (x[0] !== "+" && x[0] !== "-") { errors.push([n, x, "pro/con must start with + or -"]); continue; }
+          pc.push({ kind: x[0] === "+" ? "pro" : "con", text: x.slice(1).trim() });
+        }
+        cur.opts.push({ sub: f[0], label: f[1], pc, rec: t[0] === "*" });
+        return;
+      }
+      default: errors.push([n, t, "unknown line prefix"]);
+    }
+  });
+
+  const esc = s => s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const md = s => esc(s)
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
+
+  const root = document.getElementById("inbox");
+  const answerEl = document.getElementById("answer");
+  const state = new Map();
+
+  if (errors.length) {
+    const box = document.createElement("div");
+    box.className = "err";
+    box.innerHTML = errors
+      .map(([n, txt, why]) => `<div>PARSE ERROR line ${n}: ${why} &mdash; ${esc(txt)}</div>`)
+      .join("");
+    root.appendChild(box);
+  }
+
+  function compose() {
+    const parts = [];
+    for (const d of decisions) {
+      const s = state.get(d.id);
+      if (!s) continue;
+      if (s.sub === "*other") {
+        if (s.other && s.other.trim()) parts.push(`${d.id}: ${s.other.trim()}`);
+      } else {
+        const note = (s.notes[s.sub] || "").trim();
+        parts.push(`${d.id}.${s.sub}${note ? ` (note: ${note})` : ""}`);
+      }
+    }
+    answerEl.textContent = parts.length ? parts.join("; ") : "(nothing selected yet)";
+  }
+
+  for (const d of decisions) {
+    state.set(d.id, null);
+    const card = document.createElement("section");
+    card.className = "card";
+
+    const h = document.createElement("h2");
+    h.innerHTML = `<span class="id">${esc(d.id)}</span>${md(d.title)}`;
+    card.appendChild(h);
+
+    if (d.bg.length) {
+      const p = document.createElement("p");
+      p.className = "bg";
+      p.innerHTML = md(d.bg.join(" "));
+      card.appendChild(p);
+    }
+    if (d.fp.length) {
+      const p = document.createElement("p");
+      p.className = "fp";
+      p.innerHTML = md(d.fp.join(" "));
+      card.appendChild(p);
+    }
+
+    const wrap = document.createElement("div");
+    wrap.className = "opts";
+    card.appendChild(wrap);
+
+    const select = (sub) => {
+      const prev = state.get(d.id);
+      state.set(d.id, { sub, other: prev ? prev.other : "", notes: prev ? prev.notes : {} });
+      wrap.querySelectorAll(".opt").forEach(el => el.classList.toggle("sel", el.dataset.sub === sub));
+      compose();
+    };
+
+    for (const o of d.opts) {
+      const el = document.createElement("div");
+      el.className = "opt";
+      el.dataset.sub = o.sub;
+      el.innerHTML =
+        `<div class="opt-head"><span class="opt-sub">${esc(o.sub)}</span>` +
+        `<span class="opt-label">${md(o.label)}</span>` +
+        (o.rec ? `<span class="rec">recommended</span>` : "") + `</div>` +
+        (o.pc.length
+          ? `<div class="pc">` + o.pc.map(x =>
+              `<div class="${x.kind}"><span class="m">${x.kind === "pro" ? "+" : "&minus;"}</span>` +
+              `<span class="t">${md(x.text)}</span></div>`).join("") + `</div>`
+          : "");
+
+      const refine = document.createElement("div");
+      refine.className = "refine";
+      const ri = document.createElement("input");
+      ri.type = "text";
+      ri.placeholder = "refine this option (optional note)…";
+      ri.addEventListener("click", e => e.stopPropagation());
+      ri.addEventListener("input", () => {
+        const s = state.get(d.id);
+        if (s) { s.notes[o.sub] = ri.value; compose(); }
+      });
+      refine.appendChild(ri);
+      el.appendChild(refine);
+
+      el.addEventListener("click", () => select(o.sub));
+      wrap.appendChild(el);
+    }
+
+    const other = document.createElement("div");
+    other.className = "opt other";
+    other.dataset.sub = "*other";
+    other.innerHTML = `<div class="opt-head"><span class="opt-sub">…</span><span class="opt-label">Other</span></div>`;
+    const oi = document.createElement("input");
+    oi.type = "text";
+    oi.placeholder = "something else…";
+    oi.style.marginTop = "8px";
+    oi.addEventListener("click", e => e.stopPropagation());
+    oi.addEventListener("input", () => {
+      if (!state.get(d.id) || state.get(d.id).sub !== "*other") select("*other");
+      state.get(d.id).other = oi.value;
+      compose();
+    });
+    other.appendChild(oi);
+    other.addEventListener("click", () => { select("*other"); oi.focus(); });
+    wrap.appendChild(other);
+
+    root.appendChild(card);
+  }
+
+  document.getElementById("copy").addEventListener("click", async (e) => {
+    await navigator.clipboard.writeText(answerEl.textContent);
+    e.target.textContent = "Copied";
+    setTimeout(() => { e.target.textContent = "Copy"; }, 1200);
+  });
+
+  compose();
+})();
+</script>
