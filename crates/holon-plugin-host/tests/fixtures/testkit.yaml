@@ -1,0 +1,10 @@
+# The misbehaving guest: every way a third-party plugin can be wrong, chosen by
+# the file's first line. Not a shipped format — it lives beside the tests.
+format: testkit
+guest: testkit.wasm
+extensions: [testkit]
+write_tier: read_only
+scopes:
+  - type: thing
+    owner_column: source_path
+    columns: [id, source_path]

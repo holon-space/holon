@@ -19,6 +19,7 @@ members = [
   "crates/holon-markdown",
   "crates/holon-kitchen",
   "crates/holon-rows",
+  "crates/holon-plugin-host",
   "crates/holon-filesystem",
   "crates/holon-frontend",
   "crates/holon-app",
@@ -47,6 +48,11 @@ members = [
   "experiments/lorotree-spike",
 ]
 exclude = [
+  # wasm plugin guests: each targets wasm32-unknown-unknown, carries its own
+  # `[workspace]` and `Cargo.lock`, and is built into a checked-in `.wasm`
+  # under `crates/holon-plugin-host/plugins/`. Nothing in the workspace
+  # path-depends on them.
+  "guests",
   # naga 27 (via wgpu) + codespan-reporting 0.12 = WriteColor trait error
   # when features are unified across the workspace. Known upstream bug:
   # https://github.com/gfx-rs/wgpu/issues/7915
@@ -156,6 +162,17 @@ rustls = { version = "0.23", default-features = false, features = [
   "tls12",
 ] }
 iroh = { version = "0.96.0", default-features = false }
+
+# === WASM plugin host ===
+# `validate` gates `Module::new` — without it the crate cannot load a module at
+# all. Pure Rust and `no_std`-capable, which is why it is the one runtime that
+# serves native, Android and both wasm targets from this single declaration.
+wasmi = { version = "2.0.0", default-features = false, features = [
+  "validate",
+  "stable",
+  "auto-dispatch",
+  "std",
+] }
 
 # === Testing ===
 proptest = "1.6"
@@ -268,6 +285,7 @@ holon-mcp-client = { path = "crates/holon-mcp-client" }
 holon-org-format = { path = "crates/holon-org-format" }
 holon-kitchen = { path = "crates/holon-kitchen" }
 holon-rows = { path = "crates/holon-rows" }
+holon-plugin-host = { path = "crates/holon-plugin-host" }
 holon-orgmode = { path = "crates/holon-orgmode", features = ["di"] }
 holon-markdown = { path = "crates/holon-markdown" }
 holon-filesystem = { path = "crates/holon-filesystem" }
