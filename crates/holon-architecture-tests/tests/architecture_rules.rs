@@ -199,6 +199,10 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     ("crates/holon-loro/src/block_cell_registry.rs", 2),
     ("crates/holon-loro/src/container_registry.rs", 2),
     ("crates/holon-loro/src/deleted_container_purge.rs", 2),
+    // Both are long-lived transport sites: the advertiser retains the document
+    // for the life of a pairing invite, and the iroh dial owns it for the
+    // length of the sync.
+    ("crates/holon-loro/src/device_pairing_op.rs", 2),
     ("crates/holon-loro/src/import_atomicity_probe.rs", 7),
     // +2: `layout_writer` and `block_sort_key`'s global arm, both re-wrapping an
     // existing `Arc<LoroDoc>` via `from_existing` so the wrapper keeps the same

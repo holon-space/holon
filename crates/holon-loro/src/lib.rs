@@ -36,6 +36,13 @@ pub mod degraded_signal_bus;
 pub mod device_key_store;
 /// A2 SAS device-pairing ceremony (ADR 0028 A2). Pure state machine, no iroh.
 pub mod device_pairing;
+/// Whole-store device pairing: the operations a second device adopts this
+/// user's replication set through.
+#[cfg(all(
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub mod device_pairing_op;
 mod doc_lock;
 pub mod event_bus;
 pub mod event_ring;

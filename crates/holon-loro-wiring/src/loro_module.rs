@@ -478,4 +478,22 @@ fn register_subtree_share(injector: &Injector) {
             (*backend).clone() as Arc<dyn OperationProvider>
         },
     ));
+
+    // Whole-store pairing. Shares the advertiser with the subtree shares above:
+    // one endpoint per device, so a paired peer and a share peer are the same
+    // QUIC identity to every acceptor roster.
+    injector.provide::<Arc<holon_loro::device_pairing_op::DevicePairing>>(Provider::root(
+        |resolver| {
+            let doc_store = resolver.resolve::<LoroDocumentStore>();
+            let advertiser = resolver.resolve::<Arc<IrohAdvertiser>>();
+            Shared::new(Arc::new(holon_loro::device_pairing_op::DevicePairing::new(
+                (*doc_store).clone(),
+                (*advertiser).clone(),
+            )))
+        },
+    ));
+    injector.provide_into_set::<dyn OperationProvider>(Provider::root(|resolver| {
+        let pairing = resolver.resolve::<Arc<holon_loro::device_pairing_op::DevicePairing>>();
+        (*pairing).clone() as Arc<dyn OperationProvider>
+    }));
 }

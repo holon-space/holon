@@ -399,6 +399,16 @@ impl TwoInstanceHandle {
             .collect()
     }
 
+    /// Author one block on the RECEIVER through its own production create
+    /// path, under a parent id the receiver already holds. `peer_create_block`
+    /// resolves the parent through the OWNER's oracle id map, which a
+    /// receiver-only id is not in.
+    pub async fn receiver_create_block(&self, parent: &EntityUri, content: &str, id: &EntityUri) {
+        self.receiver_create
+            .apply_create_under_focus(parent, content, Some(id))
+            .await;
+    }
+
     fn with_transport_counters(&self, mut witness: SyncRoundWitness) -> SyncRoundWitness {
         let wire = self.transport.wire();
         witness.transport = if witness.rounds_run == 0 {
@@ -702,12 +712,48 @@ pub async fn boot_two_instances_with_receiver_caps(
     boot_two_instances_with_receiver_caps_on(resolver, ref_state, TransportChoice::from_env()).await
 }
 
+/// Boot both instances on a NAMED wire with a receiver that holds NO content of
+/// its own — no `receiver-root.org`, only what every device seeds for itself at
+/// boot (the bundled layout, the journals machinery, the day block its rule
+/// mints).
+///
+/// This is the state whole-store pairing requires: `device.pair_with_owner`
+/// refuses a receiver that holds its own blocks, because adopting the owner's
+/// store would drop them. Every other two-instance test wants the disjoint
+/// seed, which is why that stays the default.
+pub async fn boot_two_instances_with_an_empty_receiver_on(
+    resolver: &IdResolver,
+    ref_state: &ReferenceState,
+    transport: TransportChoice,
+) -> (CapMap, Arc<TwoInstanceHandle>, BTreeSet<EntityUri>) {
+    let (owner_caps, _receiver_caps, handle, scaffold) =
+        boot_two_instances_seeded_on(resolver, ref_state, transport, &[]).await;
+    (owner_caps, handle, scaffold)
+}
+
 /// Boot both instances, on a NAMED wire, and hand back BOTH cap maps. The
 /// core the other three `boot_two_instances*` entry points delegate to.
 async fn boot_two_instances_with_receiver_caps_on(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
     transport: TransportChoice,
+) -> (CapMap, CapMap, Arc<TwoInstanceHandle>, BTreeSet<EntityUri>) {
+    boot_two_instances_seeded_on(
+        resolver,
+        ref_state,
+        transport,
+        &[("receiver-root.org", RECEIVER_SEED_ORG)],
+    )
+    .await
+}
+
+/// The boot core. `receiver_seed` is the receiver's own vault content — the
+/// disjoint seed for every convergence test, empty for a pairing receiver.
+async fn boot_two_instances_seeded_on(
+    resolver: &IdResolver,
+    ref_state: &ReferenceState,
+    transport: TransportChoice,
+    receiver_seed: &[(&str, &str)],
 ) -> (CapMap, CapMap, Arc<TwoInstanceHandle>, BTreeSet<EntityUri>) {
     let (mut owner_caps, owner, scaffold) =
         boot_and_seed_wide_with_peer_id(resolver, ref_state, Some(OWNER_PEER_ID)).await;
@@ -720,7 +766,7 @@ async fn boot_two_instances_with_receiver_caps_on(
     let receiver_bundle = compose_sut_seeded_with_peer_id(
         &set,
         &receiver_resolver,
-        &[("receiver-root.org", RECEIVER_SEED_ORG)],
+        receiver_seed,
         &[],
         RECEIVER_PEER_ID,
     )

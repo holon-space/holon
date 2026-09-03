@@ -2526,6 +2526,52 @@ mod tests {
         )
     }
 
+    /// `share_subtree` mints its roster with `DEFAULT_ENROLLMENT_WINDOW_SECS`,
+    /// which bounds who may still ENROLL. A recipient who accepted inside that
+    /// window keeps syncing afterwards; unsharing is what ends the share.
+    #[test]
+    fn an_accepted_subtree_share_still_authorises_its_enrolled_peer_at_day_31() {
+        use crate::share_enrollment::Challenge;
+        use crate::share_enrollment::EnrollmentProofMsg;
+        use crate::share_enrollment::ExpiryTime;
+        use crate::share_enrollment::PeerFingerprint;
+        use crate::share_enrollment::ShareRoster;
+
+        let minted_at = 1_700_000_000;
+        let capability = crate::share_enrollment::CapabilitySecret::generate();
+        let mut roster = ShareRoster::new(
+            "tree-shared",
+            capability.clone(),
+            ExpiryTime(minted_at + DEFAULT_ENROLLMENT_WINDOW_SECS),
+            4,
+        );
+        let challenge = Challenge::generate();
+        let proof = EnrollmentProofMsg::build(&capability, &challenge, "tree-shared");
+        let recipient = PeerFingerprint::from_bytes([7u8; 32]);
+        roster
+            .authorize(
+                minted_at + 60,
+                &challenge,
+                &proof.capability_id,
+                &proof.proof,
+                recipient,
+            )
+            .expect("the recipient accepts the share inside the enrollment window");
+
+        let day_31 = minted_at + 31 * 24 * 60 * 60;
+        let reconnect = Challenge::generate();
+        let authorized = roster
+            .authorize(
+                day_31,
+                &reconnect,
+                &proof.capability_id,
+                &proof.proof,
+                recipient,
+            )
+            .expect("an accepted share still authorises its recipient at day 31");
+        assert!(!authorized.newly_enrolled());
+    }
+
     /// A mount node found by its shared-tree id must come back with the block
     /// URI it stands for. If its own `STABLE_ID` has not landed the lookup
     /// errs: the caller writes the returned string as the mount's SQL block

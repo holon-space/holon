@@ -1376,3 +1376,497 @@ fn every_fixed_boot_id_resolves_to_one_live_node_after_a_round() {
         );
     }
 }
+
+// ─── Production whole-store pairing ─────────────────────────────────────────
+
+/// The entity and operation names the receiver-side pairing operation is
+/// dispatched under. Named here so the test drives the SHIPPING path — a
+/// pairing that only the harness can start proves nothing about a device.
+const PAIRING_ENTITY: &str = "device";
+const PAIR_OFFER_OP: &str = "pair_offer";
+const PAIR_ACCEPT_OP: &str = "pair_with_owner";
+
+/// Dispatch one operation on one side's production engine. The `Err` is
+/// returned rather than raised so a caller can put a missing operation INTO
+/// the oracle's failure message instead of masking the oracle with a panic.
+async fn dispatch_pairing_op(
+    handle: &holon_integration_tests::pbt::composed::wide_e2e::WideHandle,
+    side: &str,
+    op: &str,
+    params: holon_api::StorageEntity,
+) -> anyhow::Result<holon_api::OpOutcome> {
+    let engine = handle.engine().unwrap_or_else(|| {
+        panic!("the {side} instance has no backend engine; pairing dispatches through it")
+    });
+    let entity: holon_api::EntityName = PAIRING_ENTITY.to_string().into();
+    engine
+        .execute_operation(&entity, op, params, holon_api::OpOrigin::User)
+        .await
+}
+
+/// Read the invite out of `pair_offer`'s response — a JSON object carried as a
+/// string, the shape `share_subtree` returns its ticket in. `Err` carries the
+/// diagnostic for a response that holds no invite, kept separate so an oracle
+/// can quote it without quoting a live invite.
+fn invite_from_response(v: &holon_api::Value) -> Result<String, String> {
+    let Some(text) = v.as_string() else {
+        return Err(format!(
+            "`{PAIR_OFFER_OP}` returned a non-string response: {v:?}"
+        ));
+    };
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(json) => json["invite"].as_str().map(str::to_string).ok_or_else(|| {
+            format!("`{PAIR_OFFER_OP}` returned a response with no `invite` field: {text}")
+        }),
+        Err(e) => Err(format!(
+            "`{PAIR_OFFER_OP}` returned a response that is not JSON ({e}): {text}"
+        )),
+    }
+}
+
+/// What a failing pairing oracle may print about the offer. An invite is a
+/// bearer credential over every container for its whole TTL, so the fingerprint
+/// — never the invite — is what reaches the log.
+fn describe_offer(offer: &Result<String, String>) -> String {
+    match offer {
+        Ok(invite) => holon_loro::device_pairing_op::invite_fingerprint(invite),
+        Err(diagnostic) => diagnostic.clone(),
+    }
+}
+
+/// Run the production pairing: the owner mints an invite, the receiver consumes
+/// it. Returns the two dispatch results verbatim — including their errors,
+/// which the oracles quote.
+async fn run_production_pairing(
+    handle: &std::sync::Arc<
+        holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    >,
+) -> (Result<String, String>, Result<(), String>) {
+    let offer = mint_pairing_invite(handle, "write").await;
+    let invite = match offer {
+        Ok(invite) => invite,
+        Err(diagnostic) => {
+            // The offer's error is returned on BOTH legs: a test that only
+            // reads the accept result must still see why the pair never
+            // started.
+            return (Err(diagnostic.clone()), Err(diagnostic));
+        }
+    };
+    let accepted = consume_pairing_invite(handle, &invite).await;
+    (Ok(invite), accepted)
+}
+
+/// Mint one invite on the owner. `Err` carries why no invite exists.
+async fn mint_pairing_invite(
+    handle: &std::sync::Arc<
+        holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    >,
+    capability: &str,
+) -> Result<String, String> {
+    let mut params = holon_api::StorageEntity::new();
+    params.insert(
+        "capability".into(),
+        holon_api::Value::String(capability.into()),
+    );
+    match dispatch_pairing_op(handle.owner(), "owner", PAIR_OFFER_OP, params).await {
+        Ok(outcome) => match outcome.response {
+            Some(v) => invite_from_response(&v),
+            None => Err(format!("`{PAIR_OFFER_OP}` returned no response payload")),
+        },
+        Err(e) => Err(format!("`{PAIR_OFFER_OP}` failed: {e:#}")),
+    }
+}
+
+async fn consume_pairing_invite(
+    handle: &std::sync::Arc<
+        holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    >,
+    invite: &str,
+) -> Result<(), String> {
+    let mut params = holon_api::StorageEntity::new();
+    params.insert(
+        "invite".into(),
+        holon_api::Value::String(invite.to_string()),
+    );
+    dispatch_pairing_op(handle.receiver(), "receiver", PAIR_ACCEPT_OP, params)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("`{PAIR_ACCEPT_OP}` failed: {e:#}"))
+}
+
+/// **D68.b + D71.b.** The production pairing operation replicates the WHOLE
+/// store: after one pairing and a sync fixed point, every container the owner
+/// advertises is converged on the receiver.
+///
+/// This is deliberately not `pair_and_settle`, which mints the membership cert
+/// inside the harness. Here the cert, the advertiser and the dial all come from
+/// the operation under test, so a production path that stops granting — or
+/// stops replicating past the root container — fails here.
+#[test]
+fn production_pairing_replicates_the_whole_store() {
+    production_pairing_replicates_over(TransportChoice::from_env());
+}
+
+/// The same property pinned to the SHIPPING wire, so the landing gate covers
+/// iroh whether or not anyone sets the environment variable.
+#[test]
+fn production_pairing_replicates_the_whole_store_over_iroh() {
+    production_pairing_replicates_over(TransportChoice::Iroh);
+}
+
+fn production_pairing_replicates_over(transport: TransportChoice) {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (caps, handle, _) = holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, &ref_state, transport).await;
+        let two = caps_two(&caps);
+
+        let (invite, accepted) = run_production_pairing(&handle).await;
+        drive_to_sync_fixpoint(&two, &handle).await;
+
+        let owner_tree = handle.loro_tree_state(true, &BTreeSet::new()).await;
+        let device_local: BTreeSet<holon_api::EntityUri> = layout_subtree(&owner_tree)
+            .iter()
+            .map(|id| {
+                holon_api::EntityUri::parse(id)
+                    .unwrap_or_else(|e| panic!("the layout subtree holds a non-URI id {id:?}: {e}"))
+            })
+            .collect();
+        let owner = handle.loro_tree_state(true, &device_local).await;
+        let receiver = handle.loro_tree_state(false, &device_local).await;
+
+        assert!(
+            !owner.is_empty(),
+            "the owner's replicated tree is empty outside the device-local layout, so convergence \
+             here would be vacuous"
+        );
+        let missing: Vec<&String> = owner
+            .keys()
+            .filter(|id| receiver.get(*id) != owner.get(*id))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "after `{PAIRING_ENTITY}.{PAIR_OFFER_OP}` + `{PAIRING_ENTITY}.{PAIR_ACCEPT_OP}` and a \
+             sync fixed point on the {} wire, {} of {} replicated block(s) have not converged on \
+             the receiver: {missing:?}\n  offer: {}\n  accept: {accepted:?}",
+            transport.kind().as_str(),
+            missing.len(),
+            owner.len(),
+            describe_offer(&invite),
+        );
+    });
+}
+
+/// **D73.a.** A receiver that already holds a per-subtree MOUNT must be refused
+/// — loudly, naming each mount — rather than pairing into a store whose mounts
+/// the owner's snapshot knows nothing about.
+#[test]
+fn production_pairing_refuses_a_receiver_that_holds_mounts() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (_caps, handle, _) =
+            holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
+
+        let mount = mount_the_owners_subtree_on_the_receiver(&handle).await;
+        let (_, accepted) = run_production_pairing(&handle).await;
+
+        let refusal = accepted.expect_err(
+            "pairing a receiver that holds a mount SUCCEEDED; the mount's shared doc is outside \
+             the owner's replication set, so the pair silently drops it",
+        );
+        assert!(
+            refusal.contains(&mount),
+            "the refusal must name the mount that caused it so the user can unshare it; got: \
+             {refusal}"
+        );
+    });
+}
+
+/// **D72.a.** A receiver paired under a READ-only grant cannot write back: the
+/// owner's acceptor refuses the reverse leg, naming the missing capability.
+/// The capability decision must be the acceptor's — a receiver that merely
+/// declines to push would pass a weaker version of this.
+///
+/// The read/write rule lives in `holon_sharing::acceptor::admit`, which the
+/// production iroh leg never reaches: that leg authorizes in
+/// `share_enrollment::acceptor_enroll`, which proves possession of a
+/// `CapabilitySecret` and has no Read/Write dimension at all. So
+/// `Capability::Read` is unenforceable over the shipping wire, and closing that
+/// is an architecture decision, not a fix this test can drive.
+#[test]
+#[ignore = "OPEN (D86): `pair_offer` refuses a read grant outright, because the production iroh \
+            leg authorizes via CapabilitySecret enrollment and carries no Read/Write dimension — \
+            `acceptor::admit`, where the rule lives, has no caller on that path. Un-ignore \
+            together with that refusal once D86 lands the enforcing gate"]
+fn a_read_only_pairing_cannot_write_back_to_the_owner() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (caps, handle, _) =
+            holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
+        let two = caps_two(&caps);
+
+        let invite = mint_pairing_invite(&handle, "read")
+            .await
+            .expect("a read-only pair offer must be mintable");
+        consume_pairing_invite(&handle, &invite).await.expect(
+            "accepting a read-only invite must succeed — the grant is valid, it is the write \
+             that is not",
+        );
+        drive_to_sync_fixpoint(&two, &handle).await;
+
+        let reverse = two.sync_now(false).await;
+        assert!(
+            !reverse.unauthorized.is_empty(),
+            "the owner ADMITTED a read-only peer's write-back. Refusals: {:?}",
+            reverse.refusals
+        );
+    });
+}
+
+/// A note the user jots into today's journal is the likeliest content on an
+/// otherwise-fresh device, and it is not the app's: pairing must refuse and
+/// name it, because adopting the owner's store drops it.
+#[test]
+fn production_pairing_refuses_a_receiver_that_holds_a_journal_note() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (_caps, handle, _) =
+            holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
+
+        let day = receiver_day_block(&handle).await;
+        let note = holon_api::EntityUri::block("receiver-journal-note");
+        handle
+            .receiver_create_block(&day, "bought milk", &note)
+            .await;
+
+        let (_, accepted) = run_production_pairing(&handle).await;
+
+        let refusal = accepted.expect_err(&format!(
+            "pairing a receiver that holds a note under its journal day block {day} SUCCEEDED; \
+             the note is outside the owner's store, so the pair drops it"
+        ));
+        assert!(
+            refusal.contains(note.as_str()),
+            "the refusal must name the note so the user knows what pairing would drop; got: \
+             {refusal}"
+        );
+    });
+}
+
+/// A page created while the focus is on the layout root is the user's. The
+/// bundled layout is a closed set of ids, so anything else under it is content
+/// pairing would drop.
+#[test]
+fn production_pairing_refuses_a_receiver_that_holds_a_page_under_the_layout_root() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (_caps, handle, _) =
+            holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
+
+        let layout_root = holon_api::EntityUri::parse(holon_api::ROOT_LAYOUT_BLOCK_ID)
+            .expect("the layout root id is a URI");
+        let page = holon_api::EntityUri::block("receiver-layout-page");
+        handle
+            .receiver_create_block(&layout_root, "my notes", &page)
+            .await;
+
+        let (_, accepted) = run_production_pairing(&handle).await;
+
+        let refusal = accepted.expect_err(
+            "pairing a receiver that holds a page under the layout root SUCCEEDED; the layout \
+             closure swallowed user content",
+        );
+        assert!(
+            refusal.contains(page.as_str()),
+            "the refusal must name the page so the user knows what pairing would drop; got: \
+             {refusal}"
+        );
+    });
+}
+
+/// **D86.** A read grant nothing downstream enforces is refused at the offer,
+/// not minted and reported as granted.
+#[test]
+fn a_read_only_pair_offer_is_refused_until_the_wire_can_enforce_it() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (_caps, handle, _) =
+            holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
+
+        let offer = mint_pairing_invite(&handle, "read").await;
+        let Err(refusal) = offer else {
+            panic!("a read-only pair offer was MINTED, and the iroh leg grants write");
+        };
+        assert!(
+            refusal.contains("D86"),
+            "the refusal must name the open decision so the user can find out when read pairing \
+             arrives; got: {refusal}"
+        );
+    });
+}
+
+/// A second offer while one is live is refused: minting again would strand the
+/// live offer's advertisements, which no invite then names and `pair_cancel`
+/// can no longer reach.
+#[test]
+fn a_second_pair_offer_while_one_is_live_is_refused() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (_caps, handle, _) =
+            holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
+
+        mint_pairing_invite(&handle, "write")
+            .await
+            .expect("the first offer mints");
+        let second = mint_pairing_invite(&handle, "write").await;
+        let Err(refusal) = second else {
+            panic!("a second offer was minted while the first was still advertising");
+        };
+        assert!(
+            refusal.contains("pair_cancel"),
+            "the refusal must name the way out; got: {refusal}"
+        );
+    });
+}
+
+/// `pair_cancel` withdraws the offer: the invite it minted no longer pairs, and
+/// the containers it advertised can be offered again.
+#[test]
+fn pairing_after_pair_cancel_is_refused() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (_caps, handle, _) =
+            holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_an_empty_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
+
+        let invite = mint_pairing_invite(&handle, "write")
+            .await
+            .expect("the offer mints");
+        dispatch_pairing_op(
+            handle.owner(),
+            "owner",
+            "pair_cancel",
+            holon_api::StorageEntity::new(),
+        )
+        .await
+        .expect("pair_cancel withdraws the live offer");
+
+        let accepted = consume_pairing_invite(&handle, &invite).await;
+        assert!(
+            accepted.is_err(),
+            "a cancelled invite still paired; cancellation is the only revocation this offer has"
+        );
+        mint_pairing_invite(&handle, "write")
+            .await
+            .expect("after a cancel the containers are free to be offered again");
+    });
+}
+
+/// The receiver's journal day block — the one its own auto-create rule minted
+/// at boot, and the only child of `block:journals` that is not machinery.
+async fn receiver_day_block(
+    handle: &std::sync::Arc<
+        holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    >,
+) -> holon_api::EntityUri {
+    const JOURNALS: &str = "block:journals";
+    let tree = handle.loro_tree_state(false, &BTreeSet::new()).await;
+    let days: Vec<&String> = tree
+        .iter()
+        .filter(|(id, snap)| {
+            snap.block.parent_id.as_str() == JOURNALS && !id.starts_with("block:journals::")
+        })
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(
+        days.len(),
+        1,
+        "the receiver must hold exactly the one day block its auto-create rule mints; got {days:?}"
+    );
+    holon_api::EntityUri::parse(days[0])
+        .unwrap_or_else(|e| panic!("the day block id {:?} is not a URI: {e}", days[0]))
+}
+
+/// Give the receiver a mount by accepting a share of one of the owner's
+/// subtrees — the state D73.a refuses to pair over. Returns the mount block id.
+async fn mount_the_owners_subtree_on_the_receiver(
+    handle: &std::sync::Arc<
+        holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    >,
+) -> String {
+    let owner_tree = handle.loro_tree_state(true, &BTreeSet::new()).await;
+    let shareable = owner_tree
+        .keys()
+        .find(|id| id.as_str() != holon_api::DEFAULT_DOC_BLOCK_ID)
+        .expect("the owner's seeded tree holds a shareable block")
+        .clone();
+
+    let mut share = holon_api::StorageEntity::new();
+    share.insert("id".into(), holon_api::Value::String(shareable));
+    share.insert("retention".into(), holon_api::Value::String("none".into()));
+    let shared = dispatch_tree_op(handle.owner(), "owner", "share_subtree", share)
+        .await
+        .expect("share_subtree")
+        .response
+        .and_then(|v| v.as_string().map(str::to_string))
+        .expect("share_subtree returns a response");
+    let ticket = serde_json::from_str::<serde_json::Value>(&shared)
+        .expect("share_subtree's response is JSON")["ticket"]
+        .as_str()
+        .expect("share_subtree's response carries a ticket")
+        .to_string();
+
+    let mut accept = holon_api::StorageEntity::new();
+    accept.insert(
+        "parent_id".into(),
+        holon_api::Value::String(holon_api::ROOT_LAYOUT_BLOCK_ID.to_string()),
+    );
+    accept.insert("ticket".into(), holon_api::Value::String(ticket));
+    dispatch_tree_op(
+        handle.receiver(),
+        "receiver",
+        "accept_shared_subtree",
+        accept,
+    )
+    .await
+    .expect("accept_shared_subtree")
+    .response
+    .and_then(|v| v.as_string().map(str::to_string))
+    .map(|json| {
+        serde_json::from_str::<serde_json::Value>(&json)
+            .expect("accept_shared_subtree's response is JSON")["mount_block_id"]
+            .as_str()
+            .expect("accept_shared_subtree's response carries the mount block id")
+            .to_string()
+    })
+    .expect("accept_shared_subtree returns the mount block id")
+}
+
+async fn dispatch_tree_op(
+    handle: &holon_integration_tests::pbt::composed::wide_e2e::WideHandle,
+    side: &str,
+    op: &str,
+    params: holon_api::StorageEntity,
+) -> anyhow::Result<holon_api::OpOutcome> {
+    let engine = handle
+        .engine()
+        .unwrap_or_else(|| panic!("the {side} instance has no backend engine"));
+    let entity: holon_api::EntityName = "tree".to_string().into();
+    engine
+        .execute_operation(&entity, op, params, holon_api::OpOrigin::User)
+        .await
+}

@@ -228,11 +228,19 @@ impl FrontendInjectorExt for Injector {
             self.provide::<holon::api::operation_dispatcher::UnavailableEntities>(Provider::root(
                 |_| {
                     Shared::new(holon::api::operation_dispatcher::UnavailableEntities::new(
-                        [(
-                            holon_loro::loro_share_backend::TREE_ENTITY,
-                            "the CRDT layer is off (`crdt.enabled = false`); sharing needs it"
-                                .to_string(),
-                        )],
+                        [
+                            (
+                                holon_loro::loro_share_backend::TREE_ENTITY,
+                                "the CRDT layer is off (`crdt.enabled = false`); sharing needs it"
+                                    .to_string(),
+                            ),
+                            (
+                                "device",
+                                "the CRDT layer is off (`crdt.enabled = false`); pairing a second \
+                                 device replicates Loro documents, so it needs it"
+                                    .to_string(),
+                            ),
+                        ],
                     ))
                 },
             ));

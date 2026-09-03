@@ -564,12 +564,14 @@ impl ShareRoster {
 
     /// Core authorization decision. Ordering matters and is security-relevant:
     ///
-    /// 1. An **already-enrolled** peer is admitted immediately — its node key
-    ///    is QUIC-authenticated and already pinned, so it needs no fresh proof
-    ///    and is unaffected by capability expiry (its lease is separate).
-    /// 2. A **new** peer must pass, in order: capability-id match, non-expiry,
-    ///    proof verification (constant-time), then the peer cap. The first
-    ///    failing check is returned as a loud [`AuthzReject`].
+    /// 1. An **already-enrolled** peer needs no fresh proof and is outside
+    ///    [`ExpiryTime`]'s window — its node key is QUIC-authenticated and
+    ///    already pinned. Revocation ends that access (`device.pair_cancel`,
+    ///    unshare).
+    /// 2. **Expiry** refuses every peer that is not already enrolled.
+    /// 3. A **new** peer must pass, in order: capability-id match, proof
+    ///    verification (constant-time), then the peer cap. The first failing
+    ///    check is returned as a loud [`AuthzReject`].
     ///
     /// `now` is Unix seconds. `presented_capability_id` names the capability;
     /// `presented_proof` is the peer's [`ProofTag`] over `challenge` +
@@ -589,15 +591,15 @@ impl ShareRoster {
                 newly_enrolled: false,
             });
         }
-
-        if presented_capability_id != &self.capability_id {
-            return Err(AuthzReject::UnknownCapability);
-        }
         if self.expires_at.is_expired_at(now) {
             return Err(AuthzReject::Expired {
                 now,
                 expires_at: self.expires_at.0,
             });
+        }
+
+        if presented_capability_id != &self.capability_id {
+            return Err(AuthzReject::UnknownCapability);
         }
         let expected = self
             .capability_secret
@@ -623,8 +625,7 @@ impl ShareRoster {
     /// proving a capability, the connecting peer presents an owner-signed
     /// [`SignedDeviceEntry`]. Admission requires, in order:
     ///
-    /// 1. an already-enrolled peer short-circuits (same as the capability
-    ///    path);
+    /// 1. an already-enrolled peer short-circuits;
     /// 2. this share has an owner key ([`AuthzReject::NoOwnerRoster`]
     ///    otherwise);
     /// 3. the entry authorizes THIS connection's QUIC-authenticated fingerprint
@@ -1163,29 +1164,38 @@ mod tests {
     }
 
     #[test]
-    fn expired_capability_rejects_new_peer() {
+    fn a_peer_cannot_enroll_after_the_window_closes() {
         let (mut r, cap) = roster(1, 500);
         let ch = Challenge::generate();
         let msg = EnrollmentProofMsg::build(&cap, &ch, "tree-abc");
         let err = r
-            .authorize(1_000, &ch, &msg.capability_id, &msg.proof, peer(1))
+            .authorize(501, &ch, &msg.capability_id, &msg.proof, peer(1))
             .unwrap_err();
-        assert!(matches!(err, AuthzReject::Expired { .. }));
+        assert!(matches!(err, AuthzReject::Expired { .. }), "{err}");
+        assert_eq!(r.enrolled_count(), 0);
     }
 
     #[test]
-    fn expiry_does_not_evict_already_enrolled_peer() {
+    fn an_enrolled_peer_stays_authorised_past_the_window_until_cancelled() {
         let (mut r, cap) = roster(1, 500);
         let ch = Challenge::generate();
         let msg = EnrollmentProofMsg::build(&cap, &ch, "tree-abc");
         r.authorize(100, &ch, &msg.capability_id, &msg.proof, peer(1))
-            .expect("enrolled before expiry");
-        // Long after expiry, the enrolled peer still authorizes.
+            .expect("enrolled inside the window");
+
         let ch2 = Challenge::generate();
-        let a = r
-            .authorize(10_000, &ch2, &msg.capability_id, &msg.proof, peer(1))
-            .expect("enrolled peer keeps access past expiry");
-        assert!(!a.newly_enrolled());
+        let still = r
+            .authorize(501, &ch2, &msg.capability_id, &msg.proof, peer(1))
+            .expect("an enrolled peer keeps syncing past the enrollment window");
+        assert!(!still.newly_enrolled());
+
+        // Revocation drops the roster: `device.pair_cancel` withdraws the offer
+        // and the next one mints a capability the old peer cannot prove.
+        let (mut after_cancel, _) = roster(1, 10_000);
+        let err = after_cancel
+            .authorize(600, &ch2, &msg.capability_id, &msg.proof, peer(1))
+            .unwrap_err();
+        assert_eq!(err, AuthzReject::UnknownCapability);
     }
 
     #[test]
