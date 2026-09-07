@@ -200,6 +200,16 @@ pub enum PairingRefused {
     #[error("this device is not offering a pair, so there is nothing to cancel")]
     NoLiveOffer,
 
+    /// Nothing is owed: no pairing marker, so no archive is waiting to be
+    /// re-imported. Refused rather than reported as a no-op success, because
+    /// the only reason to press retry is a banner that says work is owed.
+    #[error(
+        "this device owes no pairing re-import: there is no `{}` in its store, so no archived \
+         content is waiting",
+        crate::pairing_swap::MARKER_NAME
+    )]
+    NoDeferredReimport,
+
     /// This device already belongs to an owner. Adopting a second store would
     /// capture the first owner's content as "this device's own" and re-import
     /// it into the second owner's store, which replicates it there.
@@ -283,12 +293,14 @@ fn conflict_copy(snap: &holon_api::SnapshotBlock, id: &str) -> BlockCreateReques
     request
 }
 
-/// What one re-import wrote.
+/// What one re-import wrote, and what it could not.
 #[derive(Debug, Default)]
 struct Reimport {
     blocks: usize,
     /// Ids whose content differed from the owner's, kept as conflict copies.
     divergent: Vec<String>,
+    /// Captured blocks left in the archive, each with the parent it wants.
+    orphans: Vec<String>,
 }
 
 /// The creates one re-import owes the adopted store.
@@ -296,6 +308,9 @@ struct Reimport {
 struct ReimportPlan {
     requests: Vec<BlockCreateRequest>,
     divergent: Vec<String>,
+    /// Captured ids with no parent in the adopted store and none among
+    /// `requests`, each rendered as `id (parent parent-id)`.
+    orphans: Vec<String>,
 }
 
 /// Decide what re-importing `own` into a store that already holds `adopted`
@@ -309,12 +324,16 @@ struct ReimportPlan {
 /// does not, and is re-created with its own id under `block:journals`. Nothing
 /// is date-parsed and nothing is special-cased.
 ///
+/// A captured id whose parent is in neither place is reported as an orphan
+/// rather than failing the plan, so what does have a home is written now and
+/// only the rest waits in the archive (D94.a).
+///
 /// Nothing here reads a store, so re-running it over its own result plans
 /// nothing: every id it wrote is then in `adopted`.
 fn plan_reimport(
     own: &[(String, holon_api::SnapshotBlock)],
     adopted: &std::collections::HashMap<String, holon_api::SnapshotBlock>,
-) -> anyhow::Result<ReimportPlan> {
+) -> ReimportPlan {
     let mut placed: std::collections::HashSet<String> = adopted.keys().cloned().collect();
     let mut plan = ReimportPlan::default();
     // `own` is parent-before-child already, but a parent whose own parent the
@@ -345,15 +364,12 @@ fn plan_reimport(
         }
     }
 
-    let orphans: Vec<String> = own
+    plan.orphans = own
         .iter()
         .filter(|(id, _)| !placed.contains(id.as_str()))
         .map(|(id, snap)| format!("{id} (parent {})", snap.block.parent_id))
         .collect();
-    if !orphans.is_empty() {
-        return Err(PairingRefused::ReimportHasNoParent { orphans }.into());
-    }
-    Ok(plan)
+    plan
 }
 
 /// How an invite may be named in a log or a failure message. The invite itself
@@ -434,6 +450,14 @@ where
     /// a device that holds mounts or whose store is not empty.
     #[holon_macros::affects("parent_id")]
     async fn pair_with_owner(&self, invite: String) -> Result<OperationResult>;
+
+    /// Re-attempt the re-import a boot deferred, and clear the marker when it
+    /// completes. The action behind the deferred-re-import banner: it is worth
+    /// pressing once the block the archived content hung under is back in the
+    /// store. Refuses when the store owes no re-import, and refuses by name
+    /// when the same blocks still have nowhere to go.
+    #[holon_macros::affects("parent_id")]
+    async fn pair_retry_reimport(&self) -> Result<OperationResult>;
 }
 
 /// What one `pair_offer` put on the wire, held so `pair_cancel` can take it all
@@ -772,20 +796,20 @@ impl DevicePairing {
         &self,
         own: &[(String, holon_api::SnapshotBlock)],
     ) -> anyhow::Result<Reimport> {
-        let plan = plan_reimport(own, &self.live_blocks().await?)?;
-        if plan.requests.is_empty() {
-            return Ok(Reimport::default());
+        let plan = plan_reimport(own, &self.live_blocks().await?);
+        if !plan.requests.is_empty() {
+            (self.ordering)()
+                .await
+                .create_in_tree_batch(&plan.requests)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("re-importing this device's content after pairing: {e}")
+                })?;
         }
-        (self.ordering)()
-            .await
-            .create_in_tree_batch(&plan.requests)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("re-importing this device's content after pairing: {e}")
-            })?;
         Ok(Reimport {
             blocks: plan.requests.len(),
             divergent: plan.divergent,
+            orphans: plan.orphans,
         })
     }
 
@@ -887,21 +911,69 @@ impl DevicePairing {
         });
     }
 
+    /// The sticky condition a deferred re-import raises, so the site that
+    /// lifts it names it through the compiler.
+    fn deferred_condition() -> crate::degraded_signal_bus::DegradedConditionKey {
+        crate::degraded_signal_bus::DegradedConditionKey {
+            subject: DEVICE_ENTITY.to_string(),
+            kind: ShareDegradedReason::PAIRING_REIMPORT_DEFERRED,
+        }
+    }
+
+    /// Disclose the blocks a re-import had nowhere to put, and leave the marker
+    /// for the next attempt.
+    ///
+    /// The archive keeps every one of them, so booting without them loses
+    /// nothing; refusing to boot would lose the whole store instead (D94.a).
+    /// Nothing re-runs on its own, which is why this is a raised condition
+    /// rather than a log line.
+    fn defer_reimport(
+        &self,
+        marker: &crate::pairing_swap::PairingMarker,
+        orphans: Vec<String>,
+    ) -> PairingCompletion {
+        self.bus.emit(ShareDegraded {
+            shared_tree_id: DEVICE_ENTITY.to_string(),
+            reason: ShareDegradedReason::PairingReimportDeferred {
+                orphans: orphans.len(),
+                archive: marker.archive.display().to_string(),
+            },
+        });
+        PairingCompletion::Deferred {
+            orphans,
+            archive: marker.archive.clone(),
+        }
+    }
+
     /// Finish a pair whose re-import did not run, or did not finish.
     ///
     /// Called at boot after [`crate::pairing_swap::complete_interrupted_swap`]
     /// has put the owner's document in place: the store is the owner's and the
     /// content this device wrote is still only in the archive.
+    ///
+    /// A block with no home is deferred rather than fatal, because it is the
+    /// one refusal a boot cannot get past: it holds until the owner's store
+    /// gains a parent (D94.a). Everything that does have a home is written and
+    /// flushed first, and the marker is removed only once nothing is owed —
+    /// so a kill anywhere in here leaves work the next boot re-plans and
+    /// re-runs, never a store the archive has already been dropped for.
+    ///
+    /// Every other failure — a corrupt archive, a store that will not write —
+    /// still propagates.
     pub async fn complete_interrupted_pairing(
         &self,
         marker: &crate::pairing_swap::PairingMarker,
-    ) -> anyhow::Result<Reimported> {
+    ) -> anyhow::Result<PairingCompletion> {
         let store_dir = self.store.storage_dir().to_path_buf();
         let reimported = self.reimport_from_archive(&marker.archive).await?;
         self.store
             .save_all()
             .await
             .context("flushing the store an interrupted pair left behind")?;
+        if !reimported.orphans.is_empty() {
+            self.disclose(&marker.archive, &reimported);
+            return Ok(self.defer_reimport(marker, reimported.orphans));
+        }
         crate::pairing_swap::write_record(
             &store_dir,
             &crate::pairing_swap::PairingRecord {
@@ -912,12 +984,29 @@ impl DevicePairing {
             },
         )?;
         crate::pairing_swap::remove_marker(&store_dir)?;
+        self.bus.clear(&Self::deferred_condition());
         self.disclose(&marker.archive, &reimported);
-        Ok(Reimported {
+        Ok(PairingCompletion::Completed(Reimported {
             blocks: reimported.blocks,
             conflict_copies: reimported.divergent.len(),
-        })
+        }))
     }
+}
+
+/// What one attempt at finishing an interrupted pair achieved.
+#[derive(Debug)]
+pub enum PairingCompletion {
+    /// The archive's content is in the store, the marker is gone, and the
+    /// device is recorded as its owner's.
+    Completed(Reimported),
+    /// Everything with a home is in the store; the listed blocks have no parent
+    /// in it, so the marker and the archive both stay: the archive is still the
+    /// only copy of them, and the marker is what makes the next boot and
+    /// `device.pair_retry_reimport` try again.
+    Deferred {
+        orphans: Vec<String>,
+        archive: std::path::PathBuf,
+    },
 }
 
 /// What finishing an interrupted pair wrote.
@@ -1043,6 +1132,32 @@ impl DevicePairingOperations<()> for DevicePairing {
         .with_response(Value::String(
             serde_json::json!({ "cancelled_containers": count }).to_string(),
         )))
+    }
+
+    async fn pair_retry_reimport(&self) -> Result<OperationResult> {
+        let store_dir = self.store.storage_dir().to_path_buf();
+        let Some(marker) = crate::pairing_swap::read_marker(&store_dir)? else {
+            return Err(PairingRefused::NoDeferredReimport.into());
+        };
+        match self.complete_interrupted_pairing(&marker).await? {
+            PairingCompletion::Completed(done) => Ok(OperationResult::declared_irreversible(
+                vec![],
+                "device.pair_retry_reimport: re-imported blocks are ordinary blocks now",
+            )
+            .with_response(Value::String(
+                serde_json::json!({
+                    "blocks": done.blocks,
+                    "conflict_copies": done.conflict_copies,
+                })
+                .to_string(),
+            ))),
+            // Still unsatisfiable, so the banner the user pressed stays up
+            // (`defer_reimport` re-raised it) and the refusal says which blocks
+            // are waiting on which parent.
+            PairingCompletion::Deferred { orphans, .. } => {
+                Err(PairingRefused::ReimportHasNoParent { orphans }.into())
+            }
+        }
     }
 
     async fn pair_with_owner(&self, invite: String) -> Result<OperationResult> {
@@ -1185,7 +1300,7 @@ mod tests {
             snap("block:journals", "block:root", "Journals"),
             snap("block:day", "block:journals", "Sunday"),
         ]);
-        let plan = plan_reimport(&[day.clone()], &owner).expect("a plan");
+        let plan = plan_reimport(&[day.clone()], &owner);
 
         assert_eq!(plan.divergent, vec!["block:day".to_string()]);
         let copy = plan
@@ -1207,7 +1322,7 @@ mod tests {
             snap("block:journals", "block:root", "Journals"),
             day.clone(),
         ]);
-        let plan = plan_reimport(&[day], &owner).expect("a plan");
+        let plan = plan_reimport(&[day], &owner);
         assert!(plan.requests.is_empty() && plan.divergent.is_empty());
     }
 
@@ -1221,7 +1336,7 @@ mod tests {
             snap("block:journals", "block:root", "Journals"),
             snap("block:day", "block:journals", "Sunday"),
         ]);
-        let first = plan_reimport(&own, &adopted).expect("a first plan");
+        let first = plan_reimport(&own, &adopted);
         assert_eq!(first.requests.len(), 2);
 
         for request in &first.requests {
@@ -1236,7 +1351,7 @@ mod tests {
             adopted.insert(id, written);
         }
 
-        let second = plan_reimport(&own, &adopted).expect("a second plan");
+        let second = plan_reimport(&own, &adopted);
         assert!(
             second.requests.is_empty(),
             "finishing an interrupted re-import wrote {} block(s) a second time: {:?}",
@@ -1250,14 +1365,37 @@ mod tests {
     }
 
     #[test]
-    fn a_block_whose_parent_neither_side_holds_is_refused_by_name() {
+    fn a_block_whose_parent_neither_side_holds_is_named_as_an_orphan() {
         let orphan = snap("block:note", "block:vanished", "bought milk");
         let owner = store_of(&[snap("block:journals", "block:root", "Journals")]);
-        let err = plan_reimport(&[orphan], &owner).expect_err("an orphan has nowhere to go");
-        let message = err.to_string();
-        assert!(
-            message.contains("block:note") && message.contains("block:vanished"),
-            "the refusal must name the block and the parent it wanted; got: {message}"
+        let plan = plan_reimport(&[orphan], &owner);
+        assert!(plan.requests.is_empty());
+        assert_eq!(
+            plan.orphans,
+            vec!["block:note (parent block:vanished)".to_string()],
+            "an orphan names the block and the parent it wanted"
+        );
+    }
+
+    #[test]
+    fn a_placeable_block_is_planned_even_when_a_sibling_subtree_is_orphaned() {
+        let own = [
+            snap("block:todo", "block:root", "call mum"),
+            snap("block:note", "block:vanished", "bought milk"),
+        ];
+        let owner = store_of(&[snap("block:root", "block:none", "Root")]);
+        let plan = plan_reimport(&own, &owner);
+        assert_eq!(
+            plan.requests
+                .iter()
+                .map(|r| r.id.to_string())
+                .collect::<Vec<_>>(),
+            vec!["block:todo".to_string()],
+            "the block with a home is written now, not withheld until the orphan has one"
+        );
+        assert_eq!(
+            plan.orphans,
+            vec!["block:note (parent block:vanished)".to_string()]
         );
     }
 

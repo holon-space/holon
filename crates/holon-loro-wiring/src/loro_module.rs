@@ -312,11 +312,31 @@ impl Module for LoroModule {
                         .complete_interrupted_pairing(&marker)
                         .await
                         .expect("[LoroModule] finishing an interrupted pairing re-import");
-                    info!(
-                        "[LoroModule] finished an interrupted pair to {}: re-imported {} block(s), \
-                         {} kept as a conflict copy",
-                        marker.owner, done.blocks, done.conflict_copies
-                    );
+                    match done {
+                        holon_loro::device_pairing_op::PairingCompletion::Completed(done) => {
+                            info!(
+                                "[LoroModule] finished an interrupted pair to {}: re-imported {} \
+                                 block(s), {} kept as a conflict copy",
+                                marker.owner, done.blocks, done.conflict_copies
+                            );
+                        }
+                        // Boots without them (D94.a): the archive keeps every
+                        // one, the marker keeps the retry, and the user has a
+                        // banner naming both.
+                        holon_loro::device_pairing_op::PairingCompletion::Deferred {
+                            orphans,
+                            archive,
+                        } => {
+                            tracing::warn!(
+                                "[LoroModule] the pair to {} left {} block(s) in {} that the \
+                                 owner's store has no parent for: {}",
+                                marker.owner,
+                                orphans.len(),
+                                archive.display(),
+                                orphans.join(", ")
+                            );
+                        }
+                    }
                 }
             }
 

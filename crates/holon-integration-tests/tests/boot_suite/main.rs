@@ -13,5 +13,6 @@ mod journals_restart_survival;
 mod junction_survives_reboot_repro;
 mod marks_lengthening_batch_no_quarantine;
 mod mcp_mirrored_entity_write_authority;
+mod pairing_deferred_reimport_boots;
 mod phantom_loro_exists_repro;
 mod wiki_link_ingest_marks_junction;

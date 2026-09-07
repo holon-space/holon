@@ -1622,6 +1622,7 @@ impl Render for HolonApp {
                 wh,
                 async_cx,
                 pending_store,
+                self.bounds_registry.clone(),
                 overlay_theme,
             );
             for ov in overlays {

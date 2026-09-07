@@ -217,8 +217,20 @@ pub struct ShareUiState {
     pub show_accept_modal: bool,
     pub toasts: Vec<DegradedToast>,
     pub quarantines: Vec<QuarantineEvent>,
+    /// The blocks a pair could not re-import, if any are still owed. Its own
+    /// field rather than a toast, because the banner it draws carries the
+    /// action that lifts it and must not be dismissable.
+    pub deferred_reimport: Option<DeferredReimport>,
     pub share_error: Option<String>,
     pub accept_error: Option<String>,
+}
+
+/// Blocks written on this device before it was paired that are in the archive
+/// and not in the store, because nothing in the store can parent them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeferredReimport {
+    pub orphans: usize,
+    pub archive: String,
 }
 
 impl ShareUiState {
@@ -228,6 +240,7 @@ impl ShareUiState {
             show_accept_modal: false,
             toasts: Vec::new(),
             quarantines: Vec::new(),
+            deferred_reimport: None,
             share_error: None,
             accept_error: None,
         }
@@ -381,6 +394,12 @@ impl ShareUiState {
                     format: None,
                 });
             }
+            // Not a toast: a toast has a ✕, and this condition names content
+            // that is not in the store and that only the retry beside it can
+            // bring in.
+            ShareDegradedReason::PairingReimportDeferred { orphans, archive } => {
+                self.deferred_reimport = Some(DeferredReimport { orphans, archive });
+            }
             ShareDegradedReason::SharedSubtreeNotMaterialized { file } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::SharedSubtreeNotMaterialized,
@@ -472,6 +491,9 @@ impl ShareUiState {
     /// Drop the toast for a condition the bus reports as no longer in effect.
     pub fn apply_degraded_cleared(&mut self, key: &DegradedConditionKey) {
         self.toasts.retain(|t| t.condition.as_ref() != Some(key));
+        if key.kind == ShareDegradedReason::PAIRING_REIMPORT_DEFERRED {
+            self.deferred_reimport = None;
+        }
     }
 
     pub fn push_toast(&mut self, toast: DegradedToast) {
@@ -1130,6 +1152,7 @@ pub fn render_overlays(
     window_handle: AnyWindowHandle,
     async_cx: AsyncApp,
     pending_store: Option<Arc<PendingWriteStore>>,
+    bounds: crate::geometry::BoundsRegistry,
     theme: OverlayTheme,
 ) -> Vec<AnyElement> {
     let mut overlays: Vec<AnyElement> = Vec::new();
@@ -1182,11 +1205,11 @@ pub fn render_overlays(
         overlays.push(render_accept_modal(
             state.accept_error.as_deref(),
             share_state.clone(),
-            session,
+            session.clone(),
             engine,
-            rt_handle,
+            rt_handle.clone(),
             window_handle,
-            async_cx,
+            async_cx.clone(),
             theme,
         ));
     }
@@ -1195,8 +1218,26 @@ pub fn render_overlays(
         overlays.push(render_quarantine_modal(idx, q, share_state.clone(), theme));
     }
 
+    if let Some(deferred) = &state.deferred_reimport {
+        overlays.push(render_deferred_reimport_banner(
+            deferred,
+            session.clone(),
+            rt_handle.clone(),
+            share_state.clone(),
+            window_handle,
+            &async_cx,
+            bounds.clone(),
+            theme,
+        ));
+    }
+
     if !state.toasts.is_empty() {
-        overlays.push(render_toast_stack(&state.toasts, share_state, theme));
+        overlays.push(render_toast_stack(
+            &state.toasts,
+            share_state,
+            bounds.clone(),
+            theme,
+        ));
     }
 
     if let Some(panel) = pending_panel {
@@ -1204,6 +1245,175 @@ pub fn render_overlays(
     }
 
     overlays
+}
+
+/// The sticky banner for blocks a pair could not re-import (D94.a).
+///
+/// Top-centre and without a dismiss control: the archive is the only copy of
+/// what it names, and the button beside it is the only thing that brings that
+/// content into the store.
+#[allow(clippy::too_many_arguments)]
+fn render_deferred_reimport_banner(
+    deferred: &DeferredReimport,
+    session: Arc<FrontendSession>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+    bounds: crate::geometry::BoundsRegistry,
+    theme: OverlayTheme,
+) -> AnyElement {
+    let async_cx = async_cx.clone();
+    let headline = deferred_reimport_headline(deferred);
+    let where_they_are = deferred_reimport_location(deferred);
+    let banner = div()
+        .id("deferred-reimport-banner")
+        .absolute()
+        .top(px(16.0))
+        .left(px(16.0))
+        .right(px(16.0))
+        .px_3()
+        .py_2()
+        .rounded(px(6.0))
+        .bg(theme.bg)
+        .border_l_4()
+        .border_1()
+        .border_color(gpui::rgba(0xef4444ff))
+        .text_color(theme.fg)
+        .text_size(px(12.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(gpui::rgba(0xef4444ff))
+                        .child(headline.clone()),
+                )
+                .child(
+                    div()
+                        .text_color(theme.muted_fg)
+                        .child(where_they_are.clone()),
+                ),
+        )
+        .child(
+            crate::geometry::TransparentTracker::new(
+                DEFERRED_REIMPORT_RETRY.to_string(),
+                "deferred_reimport_retry",
+                bounds.clone(),
+                div()
+                    .id("deferred-reimport-retry")
+                    .ml_3()
+                    .px_3()
+                    .py_1()
+                    .rounded(px(6.0))
+                    .bg(gpui::rgba(0x22c55eff))
+                    .text_color(gpui::rgba(0x000000cc))
+                    .cursor_pointer()
+                    .child(RETRY_LABEL)
+                    .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                        dispatch_retry_reimport(
+                            session.clone(),
+                            rt_handle.clone(),
+                            share_state.clone(),
+                            window_handle,
+                            &async_cx,
+                        );
+                    })
+                    .into_any_element(),
+            )
+            .with_displayed_text(RETRY_LABEL),
+        )
+        .into_any_element();
+
+    crate::geometry::TransparentTracker::new(
+        DEFERRED_REIMPORT_BANNER.to_string(),
+        "deferred_reimport_banner",
+        bounds,
+        banner,
+    )
+    .with_displayed_text(format!("{headline} {where_they_are}"))
+    .into_any_element()
+}
+
+/// Bounds-tracked ids. The banner has no command and no keybinding, so these
+/// are the only handles a window test has on it and on the one action that
+/// lifts it.
+pub const DEFERRED_REIMPORT_BANNER: &str = "deferred-reimport-banner";
+pub const DEFERRED_REIMPORT_RETRY: &str = "deferred-reimport-retry";
+
+/// The words on the button, shared with the tracker so the painted text and
+/// the rendered label cannot drift apart.
+const RETRY_LABEL: &str = "Retry re-import";
+
+/// What the banner says is wrong. Split out so the text a window test reads
+/// back is the text the user sees.
+fn deferred_reimport_headline(deferred: &DeferredReimport) -> String {
+    format!(
+        "{} block(s) from this device are not in the paired store",
+        deferred.orphans
+    )
+}
+
+/// Where the blocks the headline counts actually are.
+fn deferred_reimport_location(deferred: &DeferredReimport) -> String {
+    format!(
+        "Nothing in the store can parent them. They are kept in {}",
+        deferred.archive
+    )
+}
+
+/// Re-run the re-import a boot deferred. The banner clears itself only through
+/// the bus (the op clears the condition on success), so a retry that refuses
+/// again leaves it standing and adds a toast saying why.
+pub fn dispatch_retry_reimport(
+    session: Arc<FrontendSession>,
+    rt_handle: tokio::runtime::Handle,
+    share_state: Entity<ShareUiState>,
+    window_handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
+) {
+    let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    rt_handle.spawn(async move {
+        let result = session
+            .execute_operation(
+                &EntityName::new("device"),
+                "pair_retry_reimport",
+                std::collections::HashMap::new(),
+            )
+            .await;
+        let _ = tx.send(result.map(|_| ()).map_err(|e| format!("{e:#}")));
+    });
+
+    async_cx
+        .spawn(async move |cx| {
+            let outcome = rx.await;
+            let detail = match outcome {
+                Ok(Ok(())) => return,
+                Ok(Err(e)) => e,
+                Err(_cancelled) => "pair_retry_reimport task dropped before responding".to_string(),
+            };
+            let _ = cx.update_window(window_handle, |_, _window, cx| {
+                share_state.update(cx, |s, cx| {
+                    s.push_toast(DegradedToast {
+                        kind: DegradedKind::CommandFailed,
+                        shared_tree_id: "device".into(),
+                        detail,
+                        condition: None,
+                        format: None,
+                    });
+                    cx.emit(NotifyShareUi);
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
 }
 
 /// Render the pending connector-write approval panel (leases/read-write ruling,
@@ -1868,11 +2078,18 @@ fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
     }
 }
 
+/// Every toast the stack is showing, in order. The tracked text is what the
+/// user reads, so a window test asserts on the message rather than on a
+/// test-only label.
+pub const DEGRADED_TOAST_STACK: &str = "degraded-toast-stack";
+
 fn render_toast_stack(
     toasts: &[DegradedToast],
     share_state: Entity<ShareUiState>,
+    bounds: crate::geometry::BoundsRegistry,
     theme: OverlayTheme,
 ) -> AnyElement {
+    let messages: Vec<String> = toasts.iter().map(toast_message).collect();
     let mut stack = div()
         .absolute()
         .bottom(px(16.0))
@@ -1926,7 +2143,14 @@ fn render_toast_stack(
         );
     }
 
-    stack.into_any_element()
+    crate::geometry::TransparentTracker::new(
+        DEGRADED_TOAST_STACK.to_string(),
+        "degraded_toast_stack",
+        bounds,
+        stack.into_any_element(),
+    )
+    .with_displayed_text(messages.join(" · "))
+    .into_any_element()
 }
 
 fn render_error_modal(

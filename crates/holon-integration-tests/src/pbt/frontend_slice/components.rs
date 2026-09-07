@@ -1047,7 +1047,7 @@ impl HeadlessFrontendComponent {
     /// The clone shares the underlying
     /// `Arc<RwLock<Option<Arc<LoroDocument>>>>`, so it observes the SAME live
     /// doc.
-    pub(crate) fn loro_doc_store(&self) -> Option<holon_loro::LoroDocumentStore> {
+    pub fn loro_doc_store(&self) -> Option<holon_loro::LoroDocumentStore> {
         self.injector
             .try_resolve::<holon_loro::LoroDocumentStore>()
             .ok() // ALLOW(ok): optional DI service — absent when Loro is disabled
@@ -1069,6 +1069,25 @@ impl HeadlessFrontendComponent {
     /// must poll until the boot settle completes (see the A0 readiness
     /// probe). `None` when Loro/sync is disabled OR the spawned start task
     /// has not yet resolved the handle.
+    /// The bus this session's production writers raise degraded conditions on.
+    /// A windowed harness launches its window with THIS bus, or the overlay it
+    /// paints is fed by a bus nothing production writes to.
+    pub fn degraded_bus(&self) -> Option<Arc<holon_loro::DegradedSignalBus>> {
+        self.injector
+            .try_resolve::<Arc<holon_loro::DegradedSignalBus>>()
+            .ok() // ALLOW(ok): optional DI service — absent when Loro is disabled
+            .map(|bus| (*bus).clone())
+    }
+
+    /// The `DevicePairing` the `device.*` operations dispatch to, over this
+    /// session's own store — the instance a window's retry button reaches.
+    pub fn device_pairing(&self) -> Option<Arc<holon_loro::device_pairing_op::DevicePairing>> {
+        self.injector
+            .try_resolve::<Arc<holon_loro::device_pairing_op::DevicePairing>>()
+            .ok() // ALLOW(ok): optional DI service — absent when Loro is disabled
+            .map(|pairing| (*pairing).clone())
+    }
+
     pub(crate) fn loro_sync_handle(&self) -> Option<Arc<holon_loro::LoroSyncControllerHandle>> {
         self.injector
             .try_resolve::<holon_loro::LoroSyncControllerHandle>()

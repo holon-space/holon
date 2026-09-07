@@ -190,6 +190,19 @@ pub enum ShareDegradedReason {
         conflict_copies: usize,
         archive: String,
     },
+    /// `orphans` block(s) this device wrote before it was paired are NOT in the
+    /// store it now shows: their parent is in neither the owner's store nor the
+    /// archive, so the re-import has nowhere to put them. The app boots without
+    /// them rather than not at all — retrying that re-import at every boot
+    /// would refuse identically until the parent appears.
+    ///
+    /// `archive` is where those blocks still are, and is the only copy. The
+    /// pairing marker is kept beside it, so the next boot and the
+    /// `device.pair_retry_reimport` action both re-attempt the same work.
+    ///
+    /// All-clear: a re-import that completes, which is the moment the archive's
+    /// content reaches the store.
+    PairingReimportDeferred { orphans: usize, archive: String },
 }
 
 impl ShareDegradedReason {
@@ -202,6 +215,7 @@ impl ShareDegradedReason {
     pub const INTEGRATION_SIDECAR_NOT_BUNDLED: &'static str = "integration-sidecar-not-bundled";
     pub const INTEGRATION_SIDECAR_SUPERSEDED: &'static str = "integration-sidecar-superseded";
     pub const PAIRING_REIMPORTED_LOCAL_CONTENT: &'static str = "pairing-reimported-local-content";
+    pub const PAIRING_REIMPORT_DEFERRED: &'static str = "pairing-reimport-deferred";
     pub const REHYDRATION_FAILED: &'static str = "rehydration-failed";
     pub const SHARED_SUBTREE_NOT_MATERIALIZED: &'static str = "shared-subtree-not-materialized";
     pub const SNAPSHOT_LOAD_FAILED: &'static str = "snapshot-load-failed";
@@ -232,6 +246,7 @@ impl ShareDegradedReason {
             Self::SharedSubtreeNotMaterialized { .. } => Self::SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::WritebackDegraded(_) => Self::WRITEBACK_DEGRADED,
             Self::PairingReimportedLocalContent { .. } => Self::PAIRING_REIMPORTED_LOCAL_CONTENT,
+            Self::PairingReimportDeferred { .. } => Self::PAIRING_REIMPORT_DEFERRED,
             Self::EditRefusedReadOnlyFormat { .. } => Self::EDIT_REFUSED_READ_ONLY_FORMAT,
         }
     }
