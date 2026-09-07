@@ -21,6 +21,7 @@ use holon_api::entity::FieldSchema;
 use holon_core::SyncTokenStore;
 use holon_mcp_client::mcp_sidecar::EntityConfig;
 use holon_mcp_client::mcp_sidecar::McpSidecar;
+use holon_mcp_client::mcp_sidecar::MirrorSchema;
 use holon_mcp_client::mcp_sidecar::SyncConfig;
 use holon_mcp_client::mcp_sync_engine::McpSyncEngine;
 use rmcp::RoleClient;
@@ -215,19 +216,23 @@ impl PbtMcpIntegration {
                 short_name: None,
                 source_name: None,
                 id_column: Some("id".to_string()),
-                schema: vec![
-                    FieldSchema {
-                        name: "id".to_string(),
-                        sql_type: "TEXT".to_string(),
-                        primary_key: true,
-                        ..Default::default()
-                    },
-                    FieldSchema {
-                        name: "data".to_string(),
-                        sql_type: "TEXT".to_string(),
-                        ..Default::default()
-                    },
-                ],
+                schema: MirrorSchema::parse(
+                    &format!("pbt sidecar entity '{ENTITY_NAME}'"),
+                    vec![
+                        FieldSchema {
+                            name: "id".to_string(),
+                            sql_type: "TEXT".to_string(),
+                            primary_key: true,
+                            ..Default::default()
+                        },
+                        FieldSchema {
+                            name: "data".to_string(),
+                            sql_type: "TEXT".to_string(),
+                            ..Default::default()
+                        },
+                    ],
+                )
+                .expect("the pbt schema names no engine overflow column"),
                 sync: Some(SyncConfig {
                     project: Default::default(),
                     list_tool: None,

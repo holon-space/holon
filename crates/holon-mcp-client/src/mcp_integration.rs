@@ -28,10 +28,12 @@ use crate::mcp_provider::McpRunningService;
 use crate::mcp_provider::connect_mcp_child_with_handler;
 use crate::mcp_provider::connect_mcp_oauth_with_handler;
 use crate::mcp_provider::connect_mcp_with_handler;
+use crate::mcp_resource_discovery::ResourceEntityMeta;
 use crate::mcp_resource_discovery::is_concrete_uri;
 use crate::mcp_resource_discovery::parse_resource_template_meta;
 use crate::mcp_sidecar::EntityConfig;
 use crate::mcp_sidecar::McpSidecar;
+use crate::mcp_sidecar::MirrorSchema;
 use crate::mcp_sidecar::SyncConfig;
 use crate::mcp_sidecar::SyncInterval;
 use crate::mcp_sync_engine::McpSyncEngine;
@@ -596,6 +598,99 @@ fn build_entity_strategies(entities: &HashMap<String, EntityConfig>) -> EntitySt
     (strategies, failures)
 }
 
+/// Register one auto-discovered entity, or merge its columns into the sidecar
+/// entity that already declares it.
+///
+/// The server is untrusted input, so its advertised columns are parsed before
+/// anything is written: a refused template costs that one entity and the
+/// integration connects without it (the disclosed-degradation contract).
+fn absorb_discovered_entity(
+    sidecar: &mut McpSidecar,
+    provider_name: &str,
+    meta: ResourceEntityMeta,
+) -> anyhow::Result<()> {
+    let id_column = meta.primary_keys.first().cloned().unwrap_or("id".into());
+    let schema = MirrorSchema::parse(
+        &format!(
+            "provider '{provider_name}': entity '{}', auto-discovered from resource template \
+             '{}',",
+            meta.entity_name, meta.uri_template
+        ),
+        meta.fields,
+    )?;
+
+    // Match by direct key name first, then by source_name mapping
+    let yaml_key = if sidecar.entities.contains_key(&meta.entity_name) {
+        Some(meta.entity_name.clone())
+    } else {
+        sidecar
+            .find_key_by_source_name(&meta.entity_name)
+            .map(|k| k.to_string())
+    };
+
+    if let Some(yaml_key) = yaml_key {
+        let existing = sidecar.entities.get_mut(&yaml_key).unwrap();
+        if existing.schema.is_empty() {
+            info!(
+                "[finish_integration] Merging auto-discovered schema into sidecar entity '{}' \
+                 (source: '{}')",
+                yaml_key, meta.entity_name
+            );
+            existing.schema = schema;
+        }
+        if existing.id_column.is_none() {
+            existing.id_column = Some(id_column);
+        }
+        return Ok(());
+    }
+
+    let short_name = meta.entity_name.clone();
+
+    // Only concrete templates back a standalone list sync. A parameterized
+    // template (e.g. `.../{project_id}/plan`) has no parent value here, so it
+    // is registered as a schema-only entity (cache table, reachable via parent
+    // fan-out) rather than given an unbuildable `list_resource` strategy —
+    // which previously aborted the WHOLE integration at `into_strategy`
+    // (BugFunnel row 27).
+    let sync = if is_concrete_uri(&meta.uri_template) {
+        info!(
+            "[finish_integration] Auto-discovered entity '{}' from resource template '{}'",
+            meta.entity_name, meta.uri_template
+        );
+        Some(SyncConfig {
+            list_tool: None,
+            extract_path: None,
+            list_params: HashMap::new(),
+            cursor: None,
+            list_resource: Some(meta.uri_template),
+            uri_params: HashMap::new(),
+            interval: None,
+            project: HashMap::new(),
+        })
+    } else {
+        info!(
+            "[finish_integration] Auto-discovered entity '{}' from PARAMETERIZED template '{}' — \
+             registered schema-only (no standalone list sync; needs a parent key)",
+            meta.entity_name, meta.uri_template
+        );
+        None
+    };
+
+    sidecar.entities.insert(
+        meta.entity_name.clone(),
+        EntityConfig {
+            short_name: Some(short_name),
+            source_name: None,
+            id_column: Some(id_column),
+            schema,
+            sync,
+            vtable: None,
+            profile_variants: Vec::new(),
+        },
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)] // each arg is a distinct subsystem
 async fn finish_integration(
     peer: rmcp::service::Peer<rmcp::RoleClient>,
@@ -618,77 +713,13 @@ async fn finish_integration(
         });
 
     for template in &templates {
-        if let Some(meta) = parse_resource_template_meta(template) {
-            let id_column = meta.primary_keys.first().cloned().unwrap_or("id".into());
-
-            // Match by direct key name first, then by source_name mapping
-            let yaml_key = if sidecar.entities.contains_key(&meta.entity_name) {
-                Some(meta.entity_name.clone())
-            } else {
-                sidecar
-                    .find_key_by_source_name(&meta.entity_name)
-                    .map(|k| k.to_string())
-            };
-
-            if let Some(yaml_key) = yaml_key {
-                let existing = sidecar.entities.get_mut(&yaml_key).unwrap();
-                if existing.schema.is_empty() {
-                    info!(
-                        "[finish_integration] Merging auto-discovered schema into sidecar entity \
-                         '{}' (source: '{}')",
-                        yaml_key, meta.entity_name
-                    );
-                    existing.schema = meta.fields;
-                }
-                if existing.id_column.is_none() {
-                    existing.id_column = Some(id_column);
-                }
-                continue;
-            }
-
-            let short_name = meta.entity_name.clone();
-
-            // Only concrete templates back a standalone list sync. A
-            // parameterized template (e.g. `.../{project_id}/plan`) has no
-            // parent value here, so it is registered as a schema-only entity
-            // (cache table, reachable via parent fan-out) rather than given an
-            // unbuildable `list_resource` strategy — which previously aborted
-            // the WHOLE integration at `into_strategy` (BugFunnel row 27).
-            let sync = if is_concrete_uri(&meta.uri_template) {
-                info!(
-                    "[finish_integration] Auto-discovered entity '{}' from resource template '{}'",
-                    meta.entity_name, meta.uri_template
-                );
-                Some(SyncConfig {
-                    list_tool: None,
-                    extract_path: None,
-                    list_params: HashMap::new(),
-                    cursor: None,
-                    list_resource: Some(meta.uri_template),
-                    uri_params: HashMap::new(),
-                    interval: None,
-                    project: HashMap::new(),
-                })
-            } else {
-                info!(
-                    "[finish_integration] Auto-discovered entity '{}' from PARAMETERIZED template \
-                     '{}' — registered schema-only (no standalone list sync; needs a parent key)",
-                    meta.entity_name, meta.uri_template
-                );
-                None
-            };
-
-            sidecar.entities.insert(
-                meta.entity_name.clone(),
-                EntityConfig {
-                    short_name: Some(short_name),
-                    source_name: None,
-                    id_column: Some(id_column),
-                    schema: meta.fields,
-                    sync,
-                    vtable: None,
-                    profile_variants: Vec::new(),
-                },
+        let Some(meta) = parse_resource_template_meta(template) else {
+            continue;
+        };
+        if let Err(err) = absorb_discovered_entity(&mut sidecar, &provider_name, meta) {
+            error!(
+                "[finish_integration] {err:#} — the entity is not registered and does not sync; \
+                 the rest of the integration continues"
             );
         }
     }
@@ -1697,7 +1728,7 @@ mod integration_resilience_tests {
             short_name: None,
             source_name: None,
             id_column: Some("id".into()),
-            schema: Vec::new(),
+            schema: MirrorSchema::default(),
             sync,
             vtable: None,
             profile_variants: Vec::new(),
@@ -1969,5 +2000,147 @@ mod sync_loop_gate_debounce_tests {
 
         drop(tx);
         let _ = handle.await;
+    }
+}
+
+#[cfg(test)]
+mod discovered_schema_tests {
+    use holon_api::entity::ColumnValueKind;
+    use rmcp::model::RawResourceTemplate;
+    use rmcp::model::ResourceTemplate;
+
+    use super::*;
+    use crate::mcp_sidecar::WriteOwnership;
+
+    const PROVIDER: &str = "rogue-connector";
+
+    fn discovered(uri_template: &str, description: &str) -> ResourceEntityMeta {
+        let template = ResourceTemplate {
+            raw: RawResourceTemplate {
+                uri_template: uri_template.to_string(),
+                name: "test".to_string(),
+                title: None,
+                description: Some(description.to_string()),
+                mime_type: None,
+            },
+            annotations: None,
+        };
+        parse_resource_template_meta(&template).expect("the template advertises an entity")
+    }
+
+    fn refusal_names_the_source(err: &anyhow::Error, uri_template: &str, column: &str) {
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(PROVIDER)
+                && msg.contains(uri_template)
+                && msg.contains(column)
+                && msg.contains("overflow"),
+            "the refusal must name the server, the resource template and the column, got: {msg}"
+        );
+    }
+
+    /// A column of the server's advertised schema named like the engine's
+    /// overflow bag would reach the type registry as an ordinary column, and
+    /// the boot-time write-authority derivation panics on a type whose
+    /// `_provenance` stamp has no home: a connected peer crashing the app.
+    #[test]
+    fn a_discovered_schema_naming_the_overflow_bag_is_refused() {
+        let uri = "rogue://things";
+        let mut sidecar = McpSidecar::from_yaml("entities:\n  thing:\n    id_column: id\n")
+            .expect("sidecar yaml parses");
+        let meta = discovered(
+            uri,
+            "Things\n---\nentity: thing\nprimary_keys: [id]\nschema:\n  type: object\n  \
+             properties:\n    id:\n      type: string\n    properties:\n      type: string\n",
+        );
+
+        let err = absorb_discovered_entity(&mut sidecar, PROVIDER, meta)
+            .expect_err("a remote column named `properties` must not reach the type registry");
+        refusal_names_the_source(&err, uri, "properties");
+        assert!(
+            sidecar.entities["thing"].schema.is_empty(),
+            "a refused template leaves the entity as the sidecar declared it"
+        );
+    }
+
+    #[test]
+    fn a_discovered_schema_naming_the_kind_map_is_refused() {
+        let uri = "rogue://gadgets";
+        let mut sidecar = McpSidecar::from_yaml("entities: {}\n").expect("sidecar yaml parses");
+        let meta = discovered(
+            uri,
+            "Gadgets\n---\nentity: gadget\nprimary_keys: [id]\nschema:\n  id: string\n  \
+             property_kinds: string\n",
+        );
+
+        let err = absorb_discovered_entity(&mut sidecar, PROVIDER, meta)
+            .expect_err("a remote column named `property_kinds` must not reach the type registry");
+        refusal_names_the_source(&err, uri, "property_kinds");
+        assert!(
+            !sidecar.entities.contains_key("gadget"),
+            "a refused template registers no entity"
+        );
+    }
+
+    /// Auto-discovery builds every field as an ordinary declared column, so a
+    /// remote schema naming both halves of the pair owns neither.
+    #[test]
+    fn a_discovered_schema_naming_both_overflow_columns_is_refused() {
+        let uri = "rogue://widgets";
+        let mut sidecar = McpSidecar::from_yaml("entities: {}\n").expect("sidecar yaml parses");
+        let meta = discovered(
+            uri,
+            "Widgets\n---\nentity: widget\nprimary_keys: [id]\nschema:\n  type: object\n  \
+             properties:\n    id:\n      type: string\n    properties:\n      type: string\n    \
+             property_kinds:\n      type: string\n",
+        );
+
+        let err = absorb_discovered_entity(&mut sidecar, PROVIDER, meta)
+            .expect_err("a remote pair the connector fills must not reach the type registry");
+        refusal_names_the_source(&err, uri, "properties");
+        assert!(
+            !sidecar.entities.contains_key("widget"),
+            "a refused template registers no entity"
+        );
+    }
+
+    /// The overflow pair the engine's stamp lands in survives the remote
+    /// overwrite, on both the merge-into-declared and the register-new path.
+    #[test]
+    fn an_absorbed_schema_carries_the_overflow_pair() {
+        let mut sidecar = McpSidecar::from_yaml("entities:\n  thing:\n    id_column: id\n")
+            .expect("sidecar yaml parses");
+        for (entity, uri) in [("thing", "rogue://things"), ("gadget", "rogue://gadgets")] {
+            let meta = discovered(
+                uri,
+                &format!(
+                    "Rows\n---\nentity: {entity}\nprimary_keys: [id]\nschema:\n  id: string\n  \
+                     title: string\n"
+                ),
+            );
+            absorb_discovered_entity(&mut sidecar, PROVIDER, meta).expect("an ordinary schema");
+
+            let td = sidecar.entities[entity]
+                .to_type_definition(entity, PROVIDER, WriteOwnership::LocalMirror)
+                .expect("a discovered schema produces a type definition");
+            let kind = |name: &str| {
+                td.fields
+                    .iter()
+                    .find(|f| f.name == name)
+                    .unwrap_or_else(|| panic!("entity '{entity}' has no column '{name}'"))
+                    .value_kind
+            };
+            assert_eq!(kind("properties"), ColumnValueKind::OverflowProperties);
+            assert_eq!(
+                kind("property_kinds"),
+                ColumnValueKind::OverflowPropertyKinds
+            );
+
+            let mut names: Vec<&str> = td.fields.iter().map(|f| f.name.as_str()).collect();
+            let total = names.len();
+            names.sort_unstable();
+            names.dedup();
+            assert_eq!(names.len(), total, "a repeated column name is invalid DDL");
+        }
     }
 }

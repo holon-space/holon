@@ -27,6 +27,7 @@ use holon_core::SyncTokenStore;
 use holon_core::SyncableProvider;
 use holon_mcp_client::mcp_sidecar::EntityConfig;
 use holon_mcp_client::mcp_sidecar::McpSidecar;
+use holon_mcp_client::mcp_sidecar::MirrorSchema;
 use holon_mcp_client::mcp_sidecar::SyncConfig;
 use holon_mcp_client::mcp_sidecar::ToolConfig;
 use holon_mcp_client::mcp_sidecar::ToolEffect;
@@ -223,6 +224,26 @@ impl OperationProvider for FakeMcpHandle {
     }
 }
 
+fn id_and_data_schema(entity: &str) -> MirrorSchema {
+    MirrorSchema::parse(
+        &format!("fake sidecar entity '{entity}'"),
+        vec![
+            FieldSchema {
+                name: "id".to_string(),
+                sql_type: "TEXT".to_string(),
+                primary_key: true,
+                ..Default::default()
+            },
+            FieldSchema {
+                name: "data".to_string(),
+                sql_type: "TEXT".to_string(),
+                ..Default::default()
+            },
+        ],
+    )
+    .expect("the fake schema names no engine overflow column")
+}
+
 async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
     let server_items: Arc<RwLock<Vec<serde_json::Value>>> = Arc::new(RwLock::new(Vec::new()));
 
@@ -268,19 +289,7 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
             short_name: None,
             source_name: None,
             id_column: Some("id".to_string()),
-            schema: vec![
-                FieldSchema {
-                    name: "id".to_string(),
-                    sql_type: "TEXT".to_string(),
-                    primary_key: true,
-                    ..Default::default()
-                },
-                FieldSchema {
-                    name: "data".to_string(),
-                    sql_type: "TEXT".to_string(),
-                    ..Default::default()
-                },
-            ],
+            schema: id_and_data_schema(ENTITY_NAME),
             sync: Some(SyncConfig {
                 project: Default::default(),
                 list_tool: None,
@@ -306,19 +315,7 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
                 short_name: None,
                 source_name: None,
                 id_column: Some("id".to_string()),
-                schema: vec![
-                    FieldSchema {
-                        name: "id".to_string(),
-                        sql_type: "TEXT".to_string(),
-                        primary_key: true,
-                        ..Default::default()
-                    },
-                    FieldSchema {
-                        name: "data".to_string(),
-                        sql_type: "TEXT".to_string(),
-                        ..Default::default()
-                    },
-                ],
+                schema: id_and_data_schema(entity),
                 sync: None,
                 vtable: None,
                 profile_variants: vec![],

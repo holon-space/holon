@@ -261,7 +261,7 @@ impl WriteSchema {
     /// `pub(crate)` because the engine's reserved-key refusal must know which
     /// param carries a whole property BAG, and deriving that from the schema is
     /// what keeps the refusal from being a hand-list of operation names.
-    pub(crate) const OVERFLOW_COLUMN: &'static str = "properties";
+    pub(crate) const OVERFLOW_COLUMN: &'static str = holon_api::FieldSchema::OVERFLOW_PROPERTIES;
 
     fn new(columns: impl IntoIterator<Item = String>) -> Self {
         Self {

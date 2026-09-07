@@ -507,17 +507,23 @@ impl FieldSchema {
         self
     }
 
+    /// The names of the overflow pair. Anything that recognises the pair in a
+    /// declaration it did not build — a sidecar's `schema:`, a type yaml —
+    /// matches on these rather than on its own spelling of them.
+    pub const OVERFLOW_PROPERTIES: &'static str = "properties";
+    pub const OVERFLOW_PROPERTY_KINDS: &'static str = "property_kinds";
+
     /// The overflow pair, as ONE unit: the bag the engine's `_provenance` stamp
     /// lands in and the companion kind map that keeps the bag's values readable
     /// at their stored kind. Neither column means anything without the other,
     /// so nothing declares one of them.
     pub fn overflow_pair() -> [Self; 2] {
         [
-            Self::new("properties", "TEXT")
+            Self::new(Self::OVERFLOW_PROPERTIES, "TEXT")
                 .nullable()
                 .jsonb()
                 .value_kind(ColumnValueKind::OverflowProperties),
-            Self::new("property_kinds", "TEXT")
+            Self::new(Self::OVERFLOW_PROPERTY_KINDS, "TEXT")
                 .nullable()
                 .value_kind(ColumnValueKind::OverflowPropertyKinds),
         ]

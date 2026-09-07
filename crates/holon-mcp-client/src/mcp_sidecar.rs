@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use holon_api::entity::ColumnValueKind;
 use holon_api::entity::FieldSchema;
 use holon_api::entity::TypeDefinition;
 use serde::Deserialize;
@@ -61,6 +62,78 @@ pub struct ViewConfig {
     pub sql: String,
 }
 
+/// The columns one entity mirrors.
+///
+/// [`MirrorSchema::parse`] is the only producer, so every schema that reaches a
+/// [`TypeDefinition`] has a home for the engine's `_provenance` stamp — the
+/// write-authority derivation panics at boot on a type that has none.
+///
+/// Deserialization is the wire form: [`McpSidecar::from_yaml`] parses every
+/// entity it read.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct MirrorSchema(Vec<FieldSchema>);
+
+impl std::ops::Deref for MirrorSchema {
+    type Target = [FieldSchema];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl MirrorSchema {
+    /// Parse `fields` as the mirror columns of `owner`, which names the
+    /// declaration a refusal sends the reader to: a sidecar entity for an
+    /// authored schema, a server and resource template for a discovered one.
+    pub fn parse(owner: &str, fields: Vec<FieldSchema>) -> anyhow::Result<Self> {
+        let bag = FieldSchema::OVERFLOW_PROPERTIES;
+        let kinds = FieldSchema::OVERFLOW_PROPERTY_KINDS;
+        let declared = |name: &str| fields.iter().find(|f| f.name == name);
+        for (name, required) in [
+            (bag, ColumnValueKind::OverflowProperties),
+            (kinds, ColumnValueKind::OverflowPropertyKinds),
+        ] {
+            let Some(field) = declared(name) else {
+                continue;
+            };
+            if field.value_kind != required {
+                let spelling = serde_yaml::to_string(&required)?;
+                anyhow::bail!(
+                    "{owner} declares a column `{name}`, which is the engine's own overflow \
+                     column — every cell of it carries the `_provenance` stamp the engine writes. \
+                     Declare it `value_kind: {}` or give the column a different name.",
+                    spelling.trim()
+                );
+            }
+        }
+        if declared(bag).is_some() != declared(kinds).is_some() {
+            anyhow::bail!(
+                "{owner} declares one of `{bag}` and `{kinds}` without the other. They are one \
+                 unit — the bag holds the values, the kind map keeps them readable at the kind \
+                 they were stored at — so declare both or neither."
+            );
+        }
+        Ok(Self(fields))
+    }
+
+    /// The columns as declared, completed with whichever of the overflow pair
+    /// the declaration left out.
+    ///
+    /// Appending only the absent names is what keeps it total: every field it
+    /// returns becomes a column of the mirror table's `CREATE TABLE`, and a
+    /// name appearing twice makes that DDL invalid.
+    fn overflow_completed(&self) -> Vec<FieldSchema> {
+        let mut fields = self.0.clone();
+        fields.extend(
+            FieldSchema::overflow_pair()
+                .into_iter()
+                .filter(|pair| !self.0.iter().any(|f| f.name == pair.name)),
+        );
+        fields
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EntityConfig {
     /// Short display name. Defaults to the entity key name if omitted.
@@ -78,7 +151,7 @@ pub struct EntityConfig {
     /// Schema fields for cache table DDL generation. If present, the entity
     /// can use `QueryableCache::<DynamicEntity>` with a runtime schema.
     #[serde(default)]
-    pub schema: Vec<FieldSchema>,
+    pub schema: MirrorSchema,
     /// Sync configuration for pulling data from the MCP server (cache table
     /// mode).
     pub sync: Option<SyncConfig>,
@@ -577,6 +650,10 @@ impl EntityConfig {
     /// local write machinery over a remotely-owned mirror (colliding with the
     /// connector's authority) or withholds it from a read-only mirror that has
     /// no other writer.
+    ///
+    /// The returned type declares the overflow pair whether or not the sidecar
+    /// spelled it out, because a mirror row with nowhere to put the engine's
+    /// `_provenance` stamp is refused at the write boundary.
     pub fn to_type_definition(
         &self,
         table_name: &str,
@@ -586,7 +663,7 @@ impl EntityConfig {
         if self.schema.is_empty() {
             return None;
         }
-        let mut td = TypeDefinition::new(table_name, self.schema.clone());
+        let mut td = TypeDefinition::new(table_name, self.schema.overflow_completed());
         td.graph_label = Some(pascal_case(table_name));
         td.primary_key = self.id_column_or_default();
         td.profile_variants = self.profile_variants.clone();
@@ -694,9 +771,20 @@ impl McpSidecar {
     }
 
     pub fn from_yaml(yaml: &str) -> anyhow::Result<Self> {
-        let sidecar: McpSidecar = serde_yaml::from_str(yaml)?;
+        let mut sidecar: McpSidecar = serde_yaml::from_str(yaml)?;
         sidecar.validate_write_policy()?;
+        sidecar.parse_entity_schemas()?;
         Ok(sidecar)
+    }
+
+    /// Parse what deserialization read, entity by entity, so a refusal names
+    /// the entity key the file spelled the offending column under.
+    fn parse_entity_schemas(&mut self) -> anyhow::Result<()> {
+        for (entity, config) in &mut self.entities {
+            let fields = std::mem::take(&mut config.schema).0;
+            config.schema = MirrorSchema::parse(&format!("sidecar entity '{entity}'"), fields)?;
+        }
+        Ok(())
     }
 
     /// Fail loud at load if the write policy is under-specified — the same
@@ -1202,9 +1290,15 @@ entities:
         assert_eq!(td.name, "email");
         assert_eq!(td.primary_key, "msg_id");
         assert_eq!(td.graph_label.as_deref(), Some("Email"));
-        assert_eq!(td.fields.len(), 3);
-
-        // Verify fields carry through correctly
+        assert_eq!(
+            td.fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            ["msg_id", "subject", "read", "properties", "property_kinds"],
+            "the authored columns keep their order, and the engine's `_provenance` stamp gains a \
+             home the sidecar never has to spell"
+        );
         assert_eq!(td.fields[0].name, "msg_id");
         assert!(!td.fields[0].nullable);
         assert!(td.fields[2].nullable);
@@ -1213,6 +1307,120 @@ entities:
         // type's writes are theirs to serve from this, and a type that lost the
         // name reads as locally owned.
         assert_eq!(td.owning_integration(), Some("test-provider"));
+    }
+
+    /// The overflow pair is one unit, so half of it is a config error rather
+    /// than something to complete: the missing half would be appended beside
+    /// the declared one and the table would carry two columns of one name.
+    #[test]
+    fn a_schema_declaring_half_the_overflow_pair_is_refused_at_load() {
+        let yaml = r#"
+entities:
+  thing:
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: property_kinds
+        sql_type: TEXT
+        value_kind: overflow_property_kinds
+"#;
+        let err =
+            McpSidecar::from_yaml(yaml).expect_err("half an overflow pair must not load silently");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("thing") && msg.contains("properties") && msg.contains("property_kinds"),
+            "the refusal must name the entity and both columns of the pair, got: {msg}"
+        );
+    }
+
+    /// A column named like the overflow bag must BE the overflow bag. Left
+    /// alone it parses as an ordinary column, which the engine's stamp then has
+    /// to share, and the boot-time write-authority derivation refuses the type
+    /// by panicking — a whole-app crash for a sidecar author who never touched
+    /// Holon internals.
+    #[test]
+    fn a_plain_column_named_like_the_overflow_bag_is_refused_at_load() {
+        let yaml = r#"
+entities:
+  thing:
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: properties
+        sql_type: TEXT
+"#;
+        let err = McpSidecar::from_yaml(yaml)
+            .expect_err("a plain column named `properties` must not load silently");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("thing")
+                && msg.contains("properties")
+                && msg.contains("overflow_properties"),
+            "the refusal must name the entity, the column and the kind it must declare, got: \
+             {msg}"
+        );
+    }
+
+    /// A sidecar that spells the pair out itself keeps exactly what it
+    /// authored.
+    #[test]
+    fn a_sidecar_declared_overflow_pair_is_left_as_authored() {
+        let yaml = r#"
+entities:
+  thing:
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: properties
+        sql_type: TEXT
+        value_kind: overflow_properties
+      - name: property_kinds
+        sql_type: TEXT
+        value_kind: overflow_property_kinds
+"#;
+        let sidecar = McpSidecar::from_yaml(yaml).expect("a fully declared pair loads");
+        let td = sidecar.entities["thing"]
+            .to_type_definition("thing", "test-provider", WriteOwnership::Connector)
+            .expect("should produce TypeDefinition");
+        assert_eq!(
+            td.fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            ["id", "properties", "property_kinds"],
+            "an authored pair is neither duplicated nor reordered"
+        );
+    }
+
+    /// `to_type_definition` is total: whatever an `EntityConfig` reaches it
+    /// with, the fields it returns name distinct columns, because each one
+    /// becomes a column of the mirror table's `CREATE TABLE`.
+    #[test]
+    fn to_type_definition_never_repeats_a_column_name() {
+        let config: EntityConfig = serde_yaml::from_str(
+            "schema:\n  - name: id\n    sql_type: TEXT\n    primary_key: true\n  - name: \
+             property_kinds\n    sql_type: TEXT\n    value_kind: overflow_property_kinds\n",
+        )
+        .expect("an entity config parses on its own");
+        let td = config
+            .to_type_definition("thing", "test-provider", WriteOwnership::Connector)
+            .expect("should produce TypeDefinition");
+        let mut names: Vec<&str> = td.fields.iter().map(|f| f.name.as_str()).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            total,
+            "a repeated column name makes the mirror table's CREATE TABLE invalid; got {:?}",
+            td.fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 
     /// The classification decides who holds the entity's write authority, so an
