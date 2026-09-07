@@ -745,6 +745,32 @@ pub async fn boot_two_instances_with_an_empty_receiver_on(
     (owner_caps, handle, scaffold)
 }
 
+/// The receiver's vault holds ONE block the owner also holds under the same id
+/// with different text — the divergence a device used solo brings to a pair,
+/// and the only thing pairing can turn into a conflict copy here. The page
+/// around it is the OWNER's page (`structural-page`, same file name, same
+/// `#+ID:`), so nothing else differs and the disclosed count is exactly one.
+pub const DIVERGING_RECEIVER_SEED_ORG: &str =
+    "#+ID: structural-page\n* the words this device wrote\n:PROPERTIES:\n:ID: parent\n:END:\n";
+
+/// Boot both instances on a NAMED wire with a receiver seeded from
+/// [`DIVERGING_RECEIVER_SEED_ORG`], so a pair has a conflict copy to write and
+/// to disclose.
+pub async fn boot_two_instances_with_a_diverging_receiver_on(
+    resolver: &IdResolver,
+    ref_state: &ReferenceState,
+    transport: TransportChoice,
+) -> (CapMap, Arc<TwoInstanceHandle>, BTreeSet<EntityUri>) {
+    let (owner_caps, _receiver_caps, handle, scaffold) = boot_two_instances_seeded_on(
+        resolver,
+        ref_state,
+        transport,
+        &[("structural-page.org", DIVERGING_RECEIVER_SEED_ORG)],
+    )
+    .await;
+    (owner_caps, handle, scaffold)
+}
+
 /// Boot both instances, on a NAMED wire, and hand back BOTH cap maps. The
 /// core the other three `boot_two_instances*` entry points delegate to.
 async fn boot_two_instances_with_receiver_caps_on(

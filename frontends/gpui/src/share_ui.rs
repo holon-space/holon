@@ -126,6 +126,11 @@ pub enum DegradedKind {
     /// Yellow — a shared doc edit failed to project into SQL; the UI (which
     /// reads SQL) is stale until the next successful projection.
     SqlProjectionFailed,
+    /// Blue — this device was paired with an owner's store and the content it
+    /// wrote before the pair was carried across. Its own kind because it is
+    /// the one toast that also discloses a query the user must copy VERBATIM:
+    /// see [`toast_lines`].
+    PairingReimported,
     /// Red — a shared doc tried to shadow a LOCAL block id; the projection was
     /// refused to protect the recipient's own content.
     ForeignIdCollision,
@@ -361,12 +366,16 @@ impl ShareUiState {
                 archive,
             } => {
                 self.push_toast(DegradedToast {
-                    kind: DegradedKind::Info,
+                    kind: DegradedKind::PairingReimported,
                     shared_tree_id: event.shared_tree_id,
+                    // The query is NOT here: `detail` is capped, and this
+                    // detail carries an absolute archive path, so appending
+                    // the query hands the user a fragment that does not run.
+                    // `toast_lines` paints it as its own uncapped line.
                     detail: format!(
                         "{blocks} block(s) written on this device were added to the paired store, \
                          {conflict_copies} of them kept as a copy under the owner's block of the \
-                         same id; the pre-pair document is in {archive}"
+                         same id; the pre-pair document is in {archive}."
                     ),
                     condition: Some(condition.clone()),
                     format: None,
@@ -1748,6 +1757,23 @@ fn toast_message(toast: &DegradedToast) -> String {
     format!("{icon}  {label} — {detail}")
 }
 
+/// Every line a toast paints, in order: its capped message, then any line that
+/// must reach the user CHARACTER-EXACT.
+///
+/// A cap and a copyable disclosure cannot share one string: a query cut in half
+/// still reads as a query and does not run. So the verbatim line is its own
+/// element and the cap never sees it.
+fn toast_lines(toast: &DegradedToast) -> Vec<String> {
+    let mut lines = vec![toast_message(toast)];
+    if toast.kind == DegradedKind::PairingReimported {
+        lines.push(format!(
+            "Find the copies with: {}",
+            holon_loro::device_pairing_op::conflict_copies_query()
+        ));
+    }
+    lines
+}
+
 /// Background, icon and headline for a toast kind. Split from the render so
 /// [`toast_message`] — the string the user actually reads — is testable.
 fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
@@ -1835,6 +1861,9 @@ fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
             "⚠",
             "Integration file for a provider this build does not ship",
         ),
+        DegradedKind::PairingReimported => {
+            (gpui::rgba(0x60a5faff), "i", "Content kept from this device")
+        }
         DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
     }
 }
@@ -1854,7 +1883,7 @@ fn render_toast_stack(
 
     for (idx, toast) in toasts.iter().enumerate() {
         let (bg_color, _, _) = toast_style(toast.kind);
-        let msg = toast_message(toast);
+        let lines = toast_lines(toast);
         let close_state = share_state.clone();
         stack = stack.child(
             div()
@@ -1873,7 +1902,13 @@ fn render_toast_stack(
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .child(div().child(msg))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(lines.into_iter().map(|l| div().child(l))),
+                )
                 .child(
                     div()
                         .id(SharedString::from(format!("toast-close-{idx}")))
@@ -2359,6 +2394,37 @@ mod tests {
         assert!(
             rendered.contains("/Users/martin/.config/holon/integrations/gcal.state.toml"),
             "the rendered toast must name the file to write: {rendered}"
+        );
+    }
+
+    /// The pairing disclosure names an absolute archive path, so a query
+    /// carried inside the capped detail is cut mid-`json_extract` on any real
+    /// store directory — and a fragment that reads as a query but does not run
+    /// is worse than no query at all.
+    #[test]
+    fn the_rendered_pairing_toast_carries_the_whole_query() {
+        let archive =
+            "/Users/martin/Library/Application Support/holon/loro-store/archive/20260908-011500";
+        assert_eq!(archive.chars().count(), 82, "the pinned path length");
+        let mut s = ShareUiState::new();
+        s.apply_degraded(ShareDegraded {
+            shared_tree_id: "device".into(),
+            reason: ShareDegradedReason::PairingReimportedLocalContent {
+                blocks: 4,
+                conflict_copies: 1,
+                archive: archive.into(),
+            },
+        });
+        let lines = toast_lines(&s.toasts[0]);
+        let query = holon_loro::device_pairing_op::conflict_copies_query();
+        assert!(
+            lines.iter().any(|l| l.contains(&query)),
+            "the toast must paint the whole query: {lines:?}"
+        );
+        assert!(
+            lines[0].contains(archive),
+            "the message must still name the archive: {:?}",
+            lines[0]
         );
     }
 

@@ -249,6 +249,17 @@ fn preview(ids: &[String]) -> String {
 /// from. Not `_`-prefixed: keys that are are erased on org write-back.
 pub const CONFLICT_OF_PROPERTY: &str = "pairing_conflict_of";
 
+/// The query that lists this store's conflict copies, so a disclosure can hand
+/// the user a way to reach the blocks it counted. Selects on the property, not
+/// on the derived id, so it keeps finding them if `conflict_copy_id` changes.
+pub fn conflict_copies_query() -> String {
+    let key = CONFLICT_OF_PROPERTY;
+    format!(
+        "SELECT id, content FROM block \
+         WHERE json_extract(properties, '$.{key}') IS NOT NULL"
+    )
+}
+
 /// Where the pre-pair content of a diverged id is kept. Derived from the id, so
 /// re-running the re-import after an interrupted pair finds its own copy
 /// already there instead of minting a second one.
@@ -1094,6 +1105,7 @@ impl DevicePairingOperations<()> for DevicePairing {
                 "containers": invite.containers.len(),
                 "reimported_blocks": reimported.blocks,
                 "conflict_copies": reimported.divergent.len(),
+                "conflict_query": conflict_copies_query(),
             })
             .to_string(),
         )))

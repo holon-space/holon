@@ -137,6 +137,24 @@ variants:
         if_col("source_language", "action", error("legacy 'action' language - rename source block to holon_rule"), spacer(0)),
         text("last fired: -", #{color: "muted"}),
         text(col("content")))
+  # What a pair kept from this device when the owner held the same id with
+  # different content (`pairing_conflict_of`, D93.a). The property is the only
+  # mark the copy carries — a marked TITLE would be written back into the org
+  # file — so it is what this variant keys on. `!is_focused` so editing the
+  # copy still reaches `editing`. Guarded by `is_def_var` because rows without
+  # the property never bind it.
+  #
+  # Priority 3 — above EVERY other variant, because the disclosure outranks the
+  # presentation: a conflict copy of a rule head or of a `Page`-tagged block
+  # would otherwise render as its card or its embedded page with no mark at
+  # all, which is the silent merge this variant exists to prevent. A variant's
+  # render expression is the whole row, so the card cannot also draw; the copy
+  # reads as an ordinary row until the user resolves it.
+  - name: pairing_conflict
+    priority: 3
+    condition: 'is_def_var("pairing_conflict_of") && pairing_conflict_of != () && !is_focused'
+    render: >-
+      column(row(#{gap: 2, align: "start"}, selectable(draggable(icon(col("bullet_shape"), #{size: 12, color: "primary", mt: 12})), #{shift_action: focus_pin(#{region: "right_sidebar", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states"), mt: 10}), rendered_text(col("content")), badge("kept from this device before pairing", #{block_id: col("id")})), drop_zone())
   - name: source_editing
     priority: -1
     condition: 'is_source && is_focused'

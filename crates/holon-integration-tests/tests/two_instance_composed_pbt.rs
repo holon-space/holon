@@ -1479,15 +1479,39 @@ async fn consume_pairing_invite(
     >,
     invite: &str,
 ) -> Result<(), String> {
+    pairing_response(handle, invite).await.map(|_| ())
+}
+
+/// The accept leg's response payload — the JSON the pairing disclosure is
+/// composed from.
+async fn pairing_response(
+    handle: &std::sync::Arc<
+        holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    >,
+    invite: &str,
+) -> Result<serde_json::Value, String> {
     let mut params = holon_api::StorageEntity::new();
     params.insert(
         "invite".into(),
         holon_api::Value::String(invite.to_string()),
     );
-    dispatch_pairing_op(handle.receiver(), "receiver", PAIR_ACCEPT_OP, params)
+    let outcome = dispatch_pairing_op(handle.receiver(), "receiver", PAIR_ACCEPT_OP, params)
         .await
-        .map(|_| ())
-        .map_err(|e| format!("`{PAIR_ACCEPT_OP}` failed: {e:#}"))
+        .map_err(|e| format!("`{PAIR_ACCEPT_OP}` failed: {e:#}"))?;
+    let text = outcome
+        .response
+        .as_ref()
+        .and_then(holon_api::Value::as_string)
+        .ok_or_else(|| {
+            format!(
+                "`{PAIR_ACCEPT_OP}` returned no string response: {:?}",
+                outcome.response
+            )
+        })?
+        .to_string();
+    serde_json::from_str(&text).map_err(|e| {
+        format!("`{PAIR_ACCEPT_OP}` returned a response that is not JSON ({e}): {text}")
+    })
 }
 
 /// **D68.b + D71.b.** The production pairing operation replicates the WHOLE
@@ -1550,6 +1574,48 @@ fn production_pairing_replicates_over(transport: TransportChoice) {
             missing.len(),
             owner.len(),
             describe_offer(&invite),
+        );
+    });
+}
+
+/// **D93.a.** The pairing disclosure hands the user both halves: how many of
+/// this device's blocks kept a conflict copy, and a query that finds them. A
+/// count with no way to reach the blocks is a number nobody can act on.
+#[test]
+fn production_pairing_discloses_conflict_copies_and_how_to_find_them() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (_caps, handle, _) =
+            holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_a_diverging_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
+
+        let invite = mint_pairing_invite(&handle, "write")
+            .await
+            .expect("a write pair offer must be mintable");
+        let payload = pairing_response(&handle, &invite)
+            .await
+            .unwrap_or_else(|e| panic!("the pair must be accepted before it can disclose: {e}"));
+
+        assert_eq!(
+            payload.get("conflict_copies").and_then(|v| v.as_u64()),
+            Some(1),
+            "the receiver diverged on exactly one id, so the pair must write and count exactly \
+             one conflict copy — a count that cannot move names nothing; got {payload}"
+        );
+        let query = payload
+            .get("conflict_query")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| {
+                panic!(
+                    "the pairing response must carry a query that finds the conflict copies — \
+                     without it the count names blocks the user cannot reach; got {payload}"
+                )
+            });
+        assert!(
+            query.contains(holon_loro::device_pairing_op::CONFLICT_OF_PROPERTY),
+            "the disclosed query must select on the property the copies actually carry, so it \
+             keeps finding them when the id derivation changes; got {query:?}"
         );
     });
 }
