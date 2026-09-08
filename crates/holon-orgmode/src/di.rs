@@ -811,27 +811,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                     // presence-check that would short-circuit a
                                     // move.
                                     snapshot_pending.remove(&key);
-                                    // A departure carries no block value, so the
-                                    // proposal predicates have nothing to read:
-                                    // retracting a proposal still arms the bulk
-                                    // pass. Unchanged here deliberately.
-                                    match (doc, EntityUri::parse(&key)) {
-                                        (DocHome::Resolved(doc), Ok(id)) => {
-                                            Some(OrgRerender::Block {
-                                                doc,
-                                                delta: Box::new(BlockDelta::Remove(id)),
-                                            })
-                                        }
-                                        (DocHome::Unresolved, _) => Some(OrgRerender::All),
-                                        (DocHome::Resolved(_), Err(e)) => {
-                                            tracing::error!(
-                                                "[OrgMode] block feed Remove key {key:?} is not a \
-                                                 valid EntityUri: {e} — falling back to full \
-                                                 re-render"
-                                            );
-                                            Some(OrgRerender::All)
-                                        }
-                                    }
+                                    route_remove(&doc, &key)
                                 }
                             };
                             if let Some(rerender) = msg {
@@ -975,11 +955,10 @@ pub enum BlockRoute {
 /// and its own fields.
 ///
 /// `Recover` is the designed recovery for vault content whose document cannot
-/// be resolved, and it costs a re-render of EVERY tracked file. Proposal blocks
-/// would take it on every write: the trust gate mints them under a parentless,
-/// non-page place, so they home `Unresolved` by construction rather than by
-/// fault. They are not vault content and route nowhere; every other block keeps
-/// the recovery behaviour unchanged.
+/// be resolved, and it costs a re-render of EVERY tracked file — so only the
+/// home that says a routing is MISSING may take it. A block the authority homed
+/// `Untracked` appears in no tracked file at all: re-rendering the vault cannot
+/// change anything about it.
 pub fn route_homed_block(
     home: &DocHome,
     id: &EntityUri,
@@ -991,7 +970,18 @@ pub fn route_homed_block(
     }
     match home {
         DocHome::Resolved(doc) => BlockRoute::Document(doc.clone()),
-        DocHome::Unresolved => BlockRoute::Recover,
+        DocHome::Untracked => BlockRoute::Drop,
+        DocHome::Unresolvable(why) => {
+            // ALLOW(fallback): the bulk recovery pass, disclosed here rather
+            // than fired silently — an unannounced one is indistinguishable
+            // from working routing. The break is named because the three
+            // breaks ask for three different repairs.
+            tracing::warn!(
+                "[OrgMode] no document could be resolved for {id} (parent {parent_id}): {why} — \
+                 converging through a re-render of every tracked file"
+            );
+            BlockRoute::Recover
+        }
     }
 }
 
@@ -1020,16 +1010,50 @@ pub fn route_upsert(
                 OrgRerender::Block { doc, delta }
             })
         }
-        // Not vault content: no document renders and no recovery pass arms.
+        // Nothing owns this block: no document renders and no recovery arms.
         (BlockRoute::Drop, _) => None,
-        // No `Page` ancestor, or the authority faulted: the block belongs to no
-        // document we can write, so recover through the authoritative bulk pass.
+        // A document should own it but the walk could not name one, so recover
+        // through the authoritative bulk pass.
         (BlockRoute::Recover, _) => Some(OrgRerender::All),
         (BlockRoute::Document(doc), Err(e)) => {
             tracing::error!(
                 "[OrgMode] home_by homed block {} to {doc} with an unparseable \
                  previous sibling: {e} — falling back to full re-render",
                 block.id
+            );
+            Some(OrgRerender::All)
+        }
+    }
+}
+
+/// The re-render request one homed `Remove` — a DEPARTURE — becomes, or `None`
+/// when the document it left renders nothing.
+///
+/// A departure carries no block value, so the proposal predicates have nothing
+/// to read; the home alone decides. Leaving an `Untracked` home means leaving
+/// no document, which no file records — the vault-wide pass would re-render
+/// every file to remove a block none of them contains.
+pub fn route_remove(home: &DocHome, key: &str) -> Option<OrgRerender> {
+    match (home, EntityUri::parse(key)) {
+        (DocHome::Resolved(doc), Ok(id)) => Some(OrgRerender::Block {
+            doc: doc.clone(),
+            delta: Box::new(BlockDelta::Remove(id)),
+        }),
+        (DocHome::Untracked, _) => None,
+        (DocHome::Unresolvable(why), _) => {
+            // ALLOW(fallback): same vault-wide pass, same disclosure duty as
+            // [`route_homed_block`] — a departure reaches this arm without
+            // passing through it.
+            tracing::warn!(
+                "[OrgMode] no document could be resolved for the departing block {key}: {why} — \
+                 converging through a re-render of every tracked file"
+            );
+            Some(OrgRerender::All)
+        }
+        (DocHome::Resolved(doc), Err(e)) => {
+            tracing::error!(
+                "[OrgMode] block feed Remove key {key:?} homed to {doc} is not a valid \
+                 EntityUri: {e} — converging through a re-render of every tracked file"
             );
             Some(OrgRerender::All)
         }

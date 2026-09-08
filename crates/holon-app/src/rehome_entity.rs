@@ -137,7 +137,9 @@ impl RehomeEntityProvider {
         let format = match placement.doc {
             // A resolved document is an org file: that is Holon's only file leg.
             DocHome::Resolved(_) => Some(DurableFormat::Org),
-            DocHome::Unresolved => None,
+            // Neither absence names a file: one has no owner, the other has an
+            // owner nothing can currently name.
+            DocHome::Untracked | DocHome::Unresolvable(_) => None,
         };
         Ok((format, placement.parent.is_none()))
     }

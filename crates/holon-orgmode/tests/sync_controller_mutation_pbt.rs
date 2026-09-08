@@ -3898,6 +3898,7 @@ mod intermediate_ancestor_writeback_hole {
             }
             fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
             fn ingest_recovered(&self, _: &std::path::Path) {}
+            fn vault_file_emptied(&self, _: &std::path::Path) {}
         }
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3968,6 +3969,7 @@ mod intermediate_ancestor_writeback_hole {
             }
             fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
             fn ingest_recovered(&self, _: &std::path::Path) {}
+            fn vault_file_emptied(&self, _: &std::path::Path) {}
         }
 
         let temp_dir = tempfile::tempdir().unwrap();

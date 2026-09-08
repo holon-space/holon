@@ -505,11 +505,23 @@ pub trait WritebackDisclosure: Send + Sync {
     /// Lifted by [`ingest_recovered`](Self::ingest_recovered).
     fn ingest_refused(&self, path: &Path, format: &str, reason: &str);
 
-    /// All-clear for [`ingest_refused`](Self::ingest_refused): this file's next
-    /// ingest fully succeeded, so the condition it raised no longer holds.
+    /// All-clear for [`ingest_refused`](Self::ingest_refused) and
+    /// [`vault_file_emptied`](Self::vault_file_emptied): this file's next
+    /// ingest fully succeeded, so the conditions they raised no longer hold.
     /// Called on every successful ingest, whether or not one was raised — a
     /// clear for an unraised condition broadcasts nothing.
     fn ingest_recovered(&self, path: &Path);
+
+    /// Signal that `path` is STILL 0 bytes long after the grace period that
+    /// covers an atomic save's zero-length intermediate — so this is a file a
+    /// user really emptied, not a save in flight. The document previously
+    /// ingested from it is KEPT (an empty file cannot identify the document at
+    /// its path, so nothing may be deleted on its word), which means the store
+    /// and the disk disagree until the file has content again.
+    ///
+    /// Sticky, keyed by `path`, and raised at most once per emptiness episode.
+    /// Lifted by [`ingest_recovered`](Self::ingest_recovered).
+    fn vault_file_emptied(&self, path: &Path);
 }
 
 /// Authoritative "is this block id a registered shared-subtree mount?" seam.
@@ -963,9 +975,67 @@ fn poison_row(row: Option<Block>) -> Option<Block> {
     })
 }
 
+/// Why the walk named no owning `Page`.
+///
+/// A caller that only asks "which page owns this?" collapses these through
+/// [`PageAncestor::into_page`]; a caller that must decide whether a MISSING
+/// routing is a fault distinguishes them, which is the whole reason they are
+/// separate values rather than one `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PageWalkBreak {
+    /// A row on the chain is not in the store.
+    ChainLeftTheStore,
+    /// Two blocks on the chain are each other's ancestor.
+    ParentCycle,
+    /// The chain is longer than [`MAX_PAGE_WALK`].
+    DepthBound,
+}
+
+impl std::fmt::Display for PageWalkBreak {
+    /// The repair each break asks for, because that is what a reader of a
+    /// vault-wide-recovery disclosure has to decide.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match self {
+            PageWalkBreak::ChainLeftTheStore => "a row on its parent chain is not in the store",
+            PageWalkBreak::ParentCycle => "its parent chain is cyclic",
+            PageWalkBreak::DepthBound => "its parent chain is longer than the walk's depth bound",
+        };
+        f.write_str(what)
+    }
+}
+
+/// The outcome of the walk to a block's owning `Page`.
+///
+/// `NoOwner` and `Broken` are both "no page", and conflating them is what made
+/// an ordinary top-level block indistinguishable from corrupt parentage: the
+/// former owns nothing anywhere and needs no repair, the latter may well be
+/// owned by a document the walk simply could not reach.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PageAncestor {
+    /// The nearest `Page` at or above the block.
+    Page(Block),
+    /// The chain reached the root sentinel with no `Page` above it.
+    NoOwner,
+    /// The chain could not be followed to an answer.
+    Broken(PageWalkBreak),
+}
+
+impl PageAncestor {
+    /// The owning page, for a caller to whom every "no page" answer means the
+    /// same thing. Deliberately explicit: it is the one place the distinction
+    /// is dropped.
+    pub fn into_page(self) -> Option<Block> {
+        match self {
+            PageAncestor::Page(page) => Some(page),
+            PageAncestor::NoOwner | PageAncestor::Broken(_) => None,
+        }
+    }
+}
+
 /// Walk `start`'s parent chain upward to the nearest `Page` — the block that
-/// owns it — returning `None` when the chain reaches the root without finding
-/// one, leaves the store, or is cyclic.
+/// owns it — reporting whether the chain named no page
+/// ([`PageAncestor::NoOwner`]) or could not be followed at all
+/// ([`PageAncestor::Broken`]).
 ///
 /// # Why this is one function and not three walks
 ///
@@ -980,7 +1050,7 @@ fn poison_row(row: Option<Block>) -> Option<Block> {
 /// walk reads, so sibling walks that share an ancestor suffix pay for it once.
 /// `reads`, when given, is incremented once per point read actually issued.
 ///
-/// A cycle is disclosed loudly and answered `None` rather than `Err`: the
+/// A cycle is disclosed loudly and answered `Broken` rather than `Err`: the
 /// `home_by` combinator treats an authority error as stream-fatal, and killing
 /// write-back for the whole vault is worse than homing one corrupt chain
 /// nowhere — which is also what the depth bound silently returned before.
@@ -989,28 +1059,41 @@ pub async fn nearest_page_ancestor(
     start: &EntityUri,
     rows: &mut BlockRowMemo,
     reads: Option<&std::sync::atomic::AtomicU64>,
-) -> Result<Option<Block>> {
+) -> Result<PageAncestor> {
     let root = EntityUri::no_parent();
     let mut cur = start.clone();
     let mut seen: std::collections::BTreeSet<EntityUri> = std::collections::BTreeSet::new();
     for _ in 0..MAX_PAGE_WALK {
         if cur == root {
-            return Ok(None);
+            return Ok(PageAncestor::NoOwner);
         }
         if !seen.insert(cur.clone()) {
             tracing::error!(
                 "[nearest_page_ancestor] parent cycle reached from {start} at {cur} — this chain \
                  has no owning page; its blocks will not sync until the parentage is repaired"
             );
-            return Ok(None);
+            return Ok(PageAncestor::Broken(PageWalkBreak::ParentCycle));
         }
         let Some(block) = rows.get(reader, &cur, reads).await? else {
-            return Ok(None);
+            // WARN, not ERROR: unlike a cycle or the depth bound this is often
+            // a race — a parent row that has not landed yet — but it still
+            // arms the vault-wide recovery re-render, and an undisclosed
+            // vault-wide pass is indistinguishable from working routing.
+            tracing::warn!(
+                "[nearest_page_ancestor] the chain from {start} leaves the store at {cur} — no \
+                 owning page can be named while that row is missing; routing falls back to a \
+                 re-render of every tracked file"
+            );
+            return Ok(PageAncestor::Broken(PageWalkBreak::ChainLeftTheStore));
         };
         if block.is_page() {
-            return Ok(Some(block));
+            return Ok(PageAncestor::Page(block));
         }
         cur = block.parent_id;
     }
-    Ok(None)
+    tracing::error!(
+        "[nearest_page_ancestor] the chain from {start} is longer than {MAX_PAGE_WALK} blocks — \
+         this walk cannot name its owning page"
+    );
+    Ok(PageAncestor::Broken(PageWalkBreak::DepthBound))
 }

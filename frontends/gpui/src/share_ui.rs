@@ -139,6 +139,10 @@ pub enum DegradedKind {
     /// instead of silently killing file sync. The headline names the refusing
     /// FORMAT, which only the toast's detail knows — see [`toast_message`].
     VaultIngestFailed,
+    /// Yellow — a vault file is empty on disk and stayed empty, so the
+    /// document Holon still shows no longer exists in the file. Kept rather
+    /// than deleted, which is why the user has to be told.
+    VaultFileEmptied,
     /// Red — an undo/redo request reached the engine but failed (e.g. no
     /// operation engine wired, or the underlying apply errored). Fail-loud:
     /// undo/redo must never look like a silent no-op when it actually blew
@@ -345,6 +349,19 @@ impl ShareUiState {
                     shared_tree_id: event.shared_tree_id,
                     condition: Some(condition.clone()),
                     format: Some(format),
+                });
+            }
+            ShareDegradedReason::VaultFileEmptied => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::VaultFileEmptied,
+                    detail: format!(
+                        "{} is empty on disk — Holon kept the document it last read from it, so \
+                         what you see is no longer in the file",
+                        event.shared_tree_id
+                    ),
+                    shared_tree_id: event.shared_tree_id,
+                    condition: Some(condition.clone()),
+                    format: None,
                 });
             }
             ShareDegradedReason::EditRefusedReadOnlyFormat { format } => {
@@ -1991,6 +2008,11 @@ fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
             // `toast_message` replaces this with a format-naming headline
             // whenever the toast carries a `format`.
             "File sync degraded (bad vault file)",
+        ),
+        DegradedKind::VaultFileEmptied => (
+            gpui::rgba(0xfbbf24ff),
+            "⚠",
+            "Vault file is empty — the document shown is stale",
         ),
         DegradedKind::EditRefusedReadOnlyFormat => (
             gpui::rgba(0xef4444ff),

@@ -6,7 +6,7 @@
 //!
 //! The routing decision that matters is the one `di.rs` makes per feed item:
 //! a block homes to a document via `nearest_page_ancestor`, and a block with
-//! NO `Page` ancestor yields `DocHome::Unresolved`, which routes to
+//! NO `Page` ancestor yields an absent `DocHome`, which routes to
 //! `OrgRerender::All` — the debounced `re_render_all_tracked` over every
 //! tracked file. The proposal place root is created parentless and is not a
 //! page, so every proposal block takes exactly that arm.
@@ -34,6 +34,7 @@ use holon_filesystem::BlockRowMemo;
 use holon_filesystem::DocumentManager;
 use holon_filesystem::FileSystem;
 use holon_filesystem::InMemoryFileSystem;
+use holon_filesystem::PageAncestor;
 use holon_filesystem::nearest_page_ancestor;
 use holon_orgmode::di::BlockRoute;
 use holon_orgmode::di::OrgRerender;
@@ -41,6 +42,7 @@ use holon_orgmode::di::route_homed_block;
 use holon_orgmode::di::route_upsert;
 use holon_orgmode::file_sync_controller::new_org_sync_controller;
 use holon_orgmode::home_authority::DocHome;
+use holon_orgmode::home_authority::UnresolvedHome;
 
 const ROOT: &str = "/holon-virtual/proposal-amp";
 
@@ -242,6 +244,14 @@ impl BlockOrdering for StoreOrdering {
 /// The proposal block the trust gate emits, shaped exactly as
 /// `OperationEngine::coerce_to_proposal` shapes it: parented at the
 /// (parentless, non-page) proposal place root and carrying `_proposal`.
+/// The home that RECOVERS, so only the proposal predicates can produce a Drop
+/// beside it.
+fn unresolvable() -> DocHome {
+    DocHome::Unresolvable(UnresolvedHome::Walk(
+        holon_filesystem::PageWalkBreak::ChainLeftTheStore,
+    ))
+}
+
 fn proposal_fixture() -> (Block, Block) {
     let root = Block::new_text(
         EntityUri::block(holon_api::PROPOSALS_ROOT_ID),
@@ -362,7 +372,7 @@ async fn build_harness() -> Harness {
 
 /// THE ROUTING FACT the amplification rests on: a proposal block has no `Page`
 /// ancestor, so `home_by` cannot home it to a document. In `di.rs` that is
-/// `DocHome::Unresolved`, which sends `OrgRerender::All`.
+/// `DocHome::Untracked`, which routes nowhere.
 #[tokio::test]
 async fn a_proposal_block_homes_to_no_document() {
     let h = build_harness().await;
@@ -377,9 +387,10 @@ async fn a_proposal_block_homes_to_no_document() {
     .await
     .unwrap();
 
-    assert!(
-        home.is_none(),
-        "a proposal block resolved to page {home:?}; the amplification path in this \
+    assert_eq!(
+        home,
+        PageAncestor::NoOwner,
+        "a proposal block resolved to {home:?}; the amplification path in this \
          test file assumes the proposal place has no Page ancestor"
     );
 }
@@ -399,13 +410,11 @@ async fn vault_bytes(fs: &InMemoryFileSystem) -> String {
 /// The document a block homes to, exactly as `BlockHomeAuthority::walk_doc`
 /// derives it.
 async fn home_of(reader: &StoreReader, id: &EntityUri) -> DocHome {
-    match nearest_page_ancestor(reader, id, &mut BlockRowMemo::new(), None)
-        .await
-        .unwrap()
-    {
-        Some(page) => DocHome::Resolved(page.id),
-        None => DocHome::Unresolved,
-    }
+    DocHome::from_walk(
+        nearest_page_ancestor(reader, id, &mut BlockRowMemo::new(), None)
+            .await
+            .unwrap(),
+    )
 }
 
 /// Act on one feed message exactly as the `di.rs` loop does: `Block` renders
@@ -498,7 +507,7 @@ async fn ordinary_blocks_keep_their_routing() {
     );
     assert_eq!(
         route_homed_block(
-            &DocHome::Unresolved,
+            &unresolvable(),
             &orphan.id,
             &orphan.parent_id,
             &orphan.properties,
@@ -531,7 +540,9 @@ async fn the_proposals_root_itself_routes_nowhere() {
     let (root, _) = proposal_fixture();
     assert_eq!(
         route_homed_block(
-            &DocHome::Unresolved,
+            // The home that would otherwise RECOVER, so only the id predicate
+            // can produce the Drop this asserts.
+            &unresolvable(),
             &root.id,
             &root.parent_id,
             &root.properties,

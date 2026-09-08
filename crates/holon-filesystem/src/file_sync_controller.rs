@@ -312,6 +312,12 @@ pub enum IngestOutcome {
     /// stays refused for the rest of the session. See bugfunnel
     /// `2026-09-01-duplicate-id-refusal-outlives-the-claimant-releasing-the-id`.
     RefusedWhileClaimed(EntityUri),
+    /// The file is 0 bytes. Every atomic save (write a temp file, rename it
+    /// over the target) makes the target observable at zero length first, so
+    /// this is the normal first half of a save and NOT a document that lost its
+    /// content. The poller re-attempts as soon as the file's size or mtime
+    /// changes, which is what the arriving bytes do.
+    RefusedEmptyFile,
 }
 
 /// Why `poll_new_files` is skipping a file it rediscovered, and what ends the
@@ -329,6 +335,22 @@ struct IngestSkip {
     /// file, and it changes nothing about this file for a signature to catch.
     claimed_id: Option<EntityUri>,
 }
+
+/// One file's run of zero-length observations, held until it has content
+/// again. See [`empty_since`](FileSyncController::empty_since).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EmptyFileWatch {
+    /// Clock reading at the first 0-byte observation of this run.
+    first_seen_millis: i64,
+    /// The degraded condition has been raised for this run. Sticky conditions
+    /// are idempotent, but re-raising would also re-log every discovery tick.
+    disclosed: bool,
+}
+
+/// How long a file may be 0 bytes before Holon stops calling it a save in
+/// flight. Atomic saves are zero-length for milliseconds; the margin is for a
+/// loaded machine, and it is only ever spent on a file nothing can ingest.
+const EMPTY_FILE_GRACE_MILLIS: i64 = 5_000;
 
 /// Why a caller is resolving an id to a page-file path.
 ///
@@ -894,6 +916,12 @@ pub struct FileSyncController {
     /// leaves disk. This is the disk->DB (ingest-side) counterpart
     /// of the DB->disk write-back [`quarantined`](Self::quarantined) set.
     ingest_quarantine: HashMap<CanonicalPath, IngestSkip>,
+    /// Files observed at 0 bytes and not yet seen with content again, with the
+    /// instant of the FIRST such observation and whether their emptiness has
+    /// been disclosed. An atomic save is zero-length for milliseconds; a file a
+    /// user emptied stays that way, and nothing else in the controller can tell
+    /// those apart, because both arrive as one identical refusal.
+    empty_since: HashMap<CanonicalPath, EmptyFileWatch>,
     /// Files already reported once for an identity problem, keyed by
     /// `(path, condition)`. By path, not by id: two strays can collide with the
     /// same owner, and each is its own thing for the user to fix. By condition
@@ -965,6 +993,7 @@ impl FileSyncController {
             seed_pristine: HashMap::new(),
             writeback_readonly: HashSet::new(),
             ingest_quarantine: HashMap::new(),
+            empty_since: HashMap::new(),
             duplicate_id_disclosed: HashSet::new(),
         }
     }
@@ -2076,6 +2105,7 @@ impl FileSyncController {
         // A deleted file must not leave a stale ingest-quarantine entry: if the
         // same path reappears it starts un-quarantined (fresh discovery).
         self.ingest_quarantine.remove(canonical);
+        self.empty_since.remove(canonical);
         self.duplicate_id_disclosed.retain(|(p, _)| p != canonical);
     }
 
@@ -2111,6 +2141,9 @@ impl FileSyncController {
         }
         if let Some(v) = self.ingest_quarantine.remove(from) {
             self.ingest_quarantine.insert(to.clone(), v);
+        }
+        if let Some(v) = self.empty_since.remove(from) {
+            self.empty_since.insert(to.clone(), v);
         }
         let moved: Vec<&'static str> = self
             .duplicate_id_disclosed
@@ -2321,6 +2354,7 @@ impl FileSyncController {
                     // All-clear for a prior refusal of this file. Unconditional:
                     // clearing a condition that was never raised broadcasts
                     // nothing.
+                    self.empty_since.remove(&canonical);
                     if let Some(disclosure) = &self.writeback_disclosure {
                         disclosure.ingest_recovered(path);
                     }
@@ -2649,6 +2683,7 @@ impl FileSyncController {
             None,
         )
         .await?
+        .into_page()
         .map(|page| page.id))
     }
 
@@ -2785,6 +2820,26 @@ impl FileSyncController {
                 });
             }
         };
+
+        // A 0-byte file is never a document: it carries no `#+ID:` and no
+        // title, so nothing in it can identify the document that lives at this
+        // path. Parsing it anyway yields zero blocks, and the ingest diff turns
+        // that into a delete of every block the document had — for a file whose
+        // real bytes are still being written. Refuse it and wait for them.
+        if disk_content.is_empty() {
+            self.empty_since
+                .entry(canonical.clone())
+                .or_insert(EmptyFileWatch {
+                    first_seen_millis: self.clock.now_millis(),
+                    disclosed: false,
+                });
+            info!(
+                "[FileSyncController] {} is 0 bytes — skipping ingest until it has content (a \
+                 save in flight, or an empty file); the document at this path is untouched",
+                path.display()
+            );
+            return Ok(IngestOutcome::RefusedEmptyFile);
+        }
 
         tracing::debug!(
             "[ORGSYNC_ENTER] {} disk_len={} last_len={} has_key={} equal={}",
@@ -5372,6 +5427,69 @@ impl FileSyncController {
         Ok(ingested)
     }
 
+    /// Raise the degraded condition for a file that is STILL 0 bytes after the
+    /// grace period — the ending in which a user really emptied it, as opposed
+    /// to the save-in-flight ending the refusal was written for.
+    ///
+    /// The previously ingested document is deliberately KEPT: an empty file
+    /// names no document, so nothing in it can authorize deleting one. That
+    /// leaves the store showing content the file no longer has, which is
+    /// exactly the divergence this discloses.
+    async fn disclose_persistent_emptiness(
+        &mut self,
+        path: &Path,
+        canonical: &CanonicalPath,
+    ) -> Result<()> {
+        let Some(watch) = self.empty_since.get(canonical).copied() else {
+            return Ok(());
+        };
+        if watch.disclosed
+            || self.clock.now_millis() - watch.first_seen_millis < EMPTY_FILE_GRACE_MILLIS
+        {
+            return Ok(());
+        }
+        let len = match self.fs.metadata(path).await {
+            Ok(m) => m.len,
+            // Gone: an emptied file that was then deleted is a deletion, which
+            // the watcher and `forget_file_state` own.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.empty_since.remove(canonical);
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "[disclose_persistent_emptiness] Cannot stat {}",
+                        path.display()
+                    )
+                });
+            }
+        };
+        if len != 0 {
+            // The save's bytes landed; the ingest of them clears the rest.
+            self.empty_since.remove(canonical);
+            return Ok(());
+        }
+        self.empty_since.insert(
+            canonical.clone(),
+            EmptyFileWatch {
+                disclosed: true,
+                ..watch
+            },
+        );
+        tracing::warn!(
+            path = %path.display(),
+            "[FileSyncController] this file has been 0 bytes for longer than a save takes, so \
+             it was emptied rather than being written — nothing of it can be ingested, and the \
+             document Holon last read from it is KEPT, so what the app shows is no longer what \
+             the file holds",
+        );
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.vault_file_emptied(path);
+        }
+        Ok(())
+    }
+
     /// Phase B: walk the tree and discover NEW files (paths not yet in
     /// `last_projection`). Backstops `notify`'s recursive watcher during its
     /// unarmed window on macOS (`notify::watch(dir, Recursive)` can take 9+s
@@ -5393,6 +5511,11 @@ impl FileSyncController {
         scanned.files.retain(|p| self.formats.handles(p));
         for path in scanned.files {
             let canonical = CanonicalPath::new(&path);
+            // Before the tracked-file skip: an emptied file a user is waiting
+            // on is USUALLY tracked (its document is the one being kept), and
+            // this walk is the only periodic re-look at it.
+            self.disclose_persistent_emptiness(&path, &canonical)
+                .await?;
             if self.last_projection.contains_key(&canonical) {
                 continue;
             }
@@ -5477,6 +5600,18 @@ impl FileSyncController {
                         IngestSkip {
                             sig,
                             claimed_id: Some(claimed_id),
+                        },
+                    );
+                }
+                // Same reason as a refusal: the file stays untracked, so
+                // without an entry the walk re-reads it every tick. The bytes
+                // of the save in flight change the signature, which lifts it.
+                Ok(IngestOutcome::RefusedEmptyFile) => {
+                    self.ingest_quarantine.insert(
+                        canonical.clone(),
+                        IngestSkip {
+                            sig,
+                            claimed_id: None,
                         },
                     );
                 }
@@ -6493,7 +6628,7 @@ impl FileSyncController {
             None,
         )
         .await?
-        else {
+        .into_page() else {
             return Ok(None);
         };
         Ok(self

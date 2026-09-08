@@ -79,16 +79,60 @@ fn agree<T: PartialEq + std::fmt::Debug>(
     Ok(())
 }
 
-/// The document a block belongs to, or the absence of one.
+/// The document a block belongs to, or which kind of absence stands in its
+/// place.
 ///
-/// `Unresolved` mirrors the write-back resolver's non-fatal fallbacks — a block
-/// with no `Page` ancestor, or one the authority no longer holds. It is a key
-/// like any other, so such blocks group together and retract correctly instead
-/// of vanishing.
+/// The two absences are NOT interchangeable, and one value for both is what let
+/// an ordinary top-level block trigger the same vault-wide recovery as a
+/// corrupt parent chain. Both remain keys like any other, so blocks sharing an
+/// absence group together and retract correctly instead of vanishing.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DocHome {
     Resolved(EntityUri),
-    Unresolved,
+    /// No document owns the block: its chain reaches the root sentinel with no
+    /// `Page` above it. It appears in no file, so no routing applies to it.
+    Untracked,
+    /// A document may own the block, but the walk could not reach one. The
+    /// routing is MISSING, which is what the bulk recovery pass converges — and
+    /// that pass costs a re-render of every tracked file, so the payload
+    /// carries WHY all the way to the disclosure. Without it the log names a
+    /// symptom every break shares and none of the three repairs they need.
+    Unresolvable(UnresolvedHome),
+}
+
+/// Why no document could be named for a block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnresolvedHome {
+    /// The parent-chain walk broke.
+    Walk(holon_filesystem::PageWalkBreak),
+    /// [`BlockHomeAuthority::locate_batch`]'s own top-down pass named no home
+    /// for a block it resolved the parentage of — a defect in that pass, not in
+    /// the block's parentage.
+    BatchPassGap,
+}
+
+impl std::fmt::Display for UnresolvedHome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnresolvedHome::Walk(break_) => write!(f, "{break_}"),
+            UnresolvedHome::BatchPassGap => {
+                f.write_str("the batch home pass covered no home for it")
+            }
+        }
+    }
+}
+
+impl DocHome {
+    /// The home the walk's answer names.
+    pub fn from_walk(ancestor: holon_filesystem::PageAncestor) -> Self {
+        match ancestor {
+            holon_filesystem::PageAncestor::Page(page) => DocHome::Resolved(page.id),
+            holon_filesystem::PageAncestor::NoOwner => DocHome::Untracked,
+            holon_filesystem::PageAncestor::Broken(why) => {
+                DocHome::Unresolvable(UnresolvedHome::Walk(why))
+            }
+        }
+    }
 }
 
 pub struct BlockHomeAuthority {
@@ -193,12 +237,9 @@ impl BlockHomeAuthority {
         rows: &mut BlockRowMemo,
         reads: Option<&AtomicU64>,
     ) -> Result<DocHome> {
-        Ok(
-            match nearest_page_ancestor(self.reader.as_ref(), id, rows, reads).await? {
-                Some(page) => DocHome::Resolved(page.id),
-                None => DocHome::Unresolved,
-            },
-        )
+        Ok(DocHome::from_walk(
+            nearest_page_ancestor(self.reader.as_ref(), id, rows, reads).await?,
+        ))
     }
 
     /// The ordering seam's own answer. No longer on the serving path — it is
@@ -412,8 +453,10 @@ impl HomeAuthority<DocHome> for BlockHomeAuthority {
                     // Chain left the snapshot — pay one authoritative walk.
                     break self.resolve_doc(&EntityUri::parse(&cur)?, memo).await?;
                 };
+                // The root sentinel, with no `Page` seen on the way up: the
+                // chain is intact and names no owner.
                 let Some(parent) = parent.clone() else {
-                    break DocHome::Unresolved;
+                    break DocHome::Untracked;
                 };
                 chain.push(cur);
                 cur = parent;
@@ -432,7 +475,17 @@ impl HomeAuthority<DocHome> for BlockHomeAuthority {
 
         let mut out = BTreeMap::new();
         for (id, parent) in parent_of {
-            let doc = doc_of.get(&id).cloned().unwrap_or(DocHome::Unresolved);
+            // The pass above resolves every key of `parent_of`, so a miss is a
+            // defect in that pass, never a block with no home. Answering
+            // "unresolvable" recovers through the bulk pass instead of quietly
+            // homing the block nowhere.
+            let doc = doc_of.get(&id).cloned().unwrap_or_else(|| {
+                tracing::error!(
+                    "[OrgMode] locate_batch resolved no home for {id}, which its own top-down \
+                     pass should have covered — recovering through the bulk pass"
+                );
+                DocHome::Unresolvable(UnresolvedHome::BatchPassGap)
+            });
             out.insert(id, Placement { doc, parent });
         }
         Ok(out)

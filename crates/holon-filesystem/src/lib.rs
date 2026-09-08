@@ -88,6 +88,8 @@ pub use sync_ports::MatchBasis;
 pub use sync_ports::MatchVerdict;
 pub use sync_ports::MemoSeam;
 pub use sync_ports::MountRegistry;
+pub use sync_ports::PageAncestor;
+pub use sync_ports::PageWalkBreak;
 pub use sync_ports::ShareWritebackDisclosure;
 pub use sync_ports::ThreeWayTextMerge;
 pub use sync_ports::WritebackDisclosure;

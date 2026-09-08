@@ -50,6 +50,7 @@ impl ReadOnlyFormatGate {
         Ok(nearest_page_ancestor(reader.as_ref(), id, &mut rows, None)
             .await
             .map_err(|e| format!("write-tier gate: locating the document owning `{id}`: {e}"))?
+            .into_page()
             .map(|page| page.id))
     }
 }

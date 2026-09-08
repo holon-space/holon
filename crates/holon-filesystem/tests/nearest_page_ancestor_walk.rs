@@ -20,6 +20,8 @@ use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_filesystem::BlockReader;
 use holon_filesystem::BlockRowMemo;
+use holon_filesystem::PageAncestor;
+use holon_filesystem::PageWalkBreak;
 use holon_filesystem::nearest_page_ancestor;
 
 /// A store shaped like `block_raw`: it holds the self-parented root sentinel,
@@ -110,9 +112,11 @@ async fn a_chain_reaching_the_root_sentinel_stops_there() {
     .await
     .unwrap();
 
-    assert!(
-        found.is_none(),
-        "no Page above a root-level block, so there is no owning page"
+    assert_eq!(
+        found,
+        PageAncestor::NoOwner,
+        "no Page above a root-level block, so there is no owning page — and the chain is \
+         intact, which is what separates this from a broken walk"
     );
     assert!(
         no_id_read_twice(&reader.reads()),
@@ -134,8 +138,9 @@ async fn a_cycle_answers_none_loudly_instead_of_spinning() {
     .await
     .unwrap();
 
-    assert!(
-        found.is_none(),
+    assert_eq!(
+        found,
+        PageAncestor::Broken(PageWalkBreak::ParentCycle),
         "a cyclic chain owns no page — and must not be an Err, which `home_by` would treat as \
          stream-fatal and use to kill write-back for the whole vault"
     );
@@ -162,6 +167,7 @@ async fn the_nearest_page_wins_and_each_step_is_read_once() {
     )
     .await
     .unwrap()
+    .into_page()
     .expect("leaf is inside a page");
 
     assert_eq!(
@@ -196,6 +202,7 @@ async fn a_prefetched_first_row_is_not_read_again() {
     )
     .await
     .unwrap()
+    .into_page()
     .expect("leaf is inside a page");
 
     assert_eq!(found.id, EntityUri::block("page"));
@@ -220,6 +227,7 @@ async fn a_page_is_its_own_owner() {
     )
     .await
     .unwrap()
+    .into_page()
     .expect("a page owns itself");
 
     assert_eq!(found.id, EntityUri::block("page"));

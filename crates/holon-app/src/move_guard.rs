@@ -178,7 +178,9 @@ impl MoveGuard {
             })?;
         Ok(match placement.doc {
             DocHome::Resolved(_) => Some(DurableFormat::Org),
-            DocHome::Unresolved => None,
+            // Neither absence names a file: one has no owner, the other has an
+            // owner nothing can currently name.
+            DocHome::Untracked | DocHome::Unresolvable(_) => None,
         })
     }
 

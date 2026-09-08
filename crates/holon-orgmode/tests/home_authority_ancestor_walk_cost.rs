@@ -236,9 +236,9 @@ async fn the_resolved_home_is_unchanged_by_how_few_reads_it_took() {
         .unwrap();
     assert_eq!(
         placement.doc,
-        DocHome::Unresolved,
+        DocHome::Untracked,
         "a block with no Page ancestor has no document — reaching the root sentinel is the \
-         definitive answer, not a reason to keep walking"
+         definitive answer, not a reason to keep walking, and not the broken-chain answer"
     );
     assert_eq!(
         placement.parent, None,
@@ -336,7 +336,9 @@ async fn without_the_dual_read_a_poisoned_memo_silently_rehomes_the_block() {
         "a poisoned row must actually change the fold's input, or the disclosure test above \
          proves nothing"
     );
-    assert_eq!(poisoned.doc, DocHome::Unresolved);
+    // The poison reparents the row to the root, so the walk terminates cleanly
+    // above a block that in truth sits inside a page.
+    assert_eq!(poisoned.doc, DocHome::Untracked);
 }
 
 // ─── What the derived home-profile lookup costs ──────────────────────────

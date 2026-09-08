@@ -790,6 +790,13 @@ impl holon_filesystem::WritebackDisclosure for DisclosureLog {
             .unwrap()
             .push(format!("recovered {}", path.display()));
     }
+
+    fn vault_file_emptied(&self, path: &Path) {
+        self.entries
+            .lock()
+            .unwrap()
+            .push(format!("emptied {}", path.display()));
+    }
 }
 
 /// Entry `the-degraded-toast-is-stale-and-calls-cook-files-org`: the refusal

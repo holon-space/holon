@@ -77,6 +77,19 @@ pub enum ShareDegradedReason {
     /// All-clear: the next fully-successful ingest of that same file, emitted
     /// by `FileSyncController` through its `WritebackDisclosure` seam.
     VaultIngestFailed { format: String, reason: String },
+    /// One vault file is 0 bytes and stayed that way past the grace period that
+    /// covers an atomic save's zero-length intermediate — a file someone really
+    /// emptied. Nothing of it is ingested, because an empty file cannot
+    /// identify the document that lives at its path, so the document Holon
+    /// already holds is KEPT: the store shows content the file no longer has.
+    /// Disclosed rather than converged either way — deleting on an empty file's
+    /// word loses content, and writing the document back would undo the user's
+    /// own edit. `shared_tree_id` is the file.
+    ///
+    /// All-clear: the next successful ingest of that same file, i.e. the moment
+    /// it has content again (or is deleted, which the watcher handles as a
+    /// deletion).
+    VaultFileEmptied,
     /// A block inside a shared subtree was edited, but its content could NOT be
     /// materialized to a dedicated on-disk org file (the mount is not yet a
     /// page-file, so the write-back layer cannot resolve a path). The edit is
@@ -222,6 +235,7 @@ impl ShareDegradedReason {
     pub const SNAPSHOT_SAVE_FAILED: &'static str = "snapshot-save-failed";
     pub const SQL_PROJECTION_FAILED: &'static str = "sql-projection-failed";
     pub const VAULT_INGEST_FAILED: &'static str = "vault-ingest-failed";
+    pub const VAULT_FILE_EMPTIED: &'static str = "vault-file-emptied";
     pub const WRITEBACK_DEGRADED: &'static str = "writeback-degraded";
     pub const EDIT_REFUSED_READ_ONLY_FORMAT: &'static str = "edit-refused-read-only-format";
 
@@ -243,6 +257,7 @@ impl ShareDegradedReason {
             Self::SqlProjectionFailed(_) => Self::SQL_PROJECTION_FAILED,
             Self::ForeignIdCollision(_) => Self::FOREIGN_ID_COLLISION,
             Self::VaultIngestFailed { .. } => Self::VAULT_INGEST_FAILED,
+            Self::VaultFileEmptied => Self::VAULT_FILE_EMPTIED,
             Self::SharedSubtreeNotMaterialized { .. } => Self::SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::WritebackDegraded(_) => Self::WRITEBACK_DEGRADED,
             Self::PairingReimportedLocalContent { .. } => Self::PAIRING_REIMPORTED_LOCAL_CONTENT,

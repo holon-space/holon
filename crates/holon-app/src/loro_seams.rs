@@ -667,9 +667,21 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
     }
 
     fn ingest_recovered(&self, path: &Path) {
-        self.bus.clear(&holon_loro::DegradedConditionKey {
-            subject: ingest_subject(path),
-            kind: holon_loro::ShareDegradedReason::VAULT_INGEST_FAILED,
+        for kind in [
+            holon_loro::ShareDegradedReason::VAULT_INGEST_FAILED,
+            holon_loro::ShareDegradedReason::VAULT_FILE_EMPTIED,
+        ] {
+            self.bus.clear(&holon_loro::DegradedConditionKey {
+                subject: ingest_subject(path),
+                kind,
+            });
+        }
+    }
+
+    fn vault_file_emptied(&self, path: &Path) {
+        self.bus.emit(holon_loro::ShareDegraded {
+            shared_tree_id: ingest_subject(path),
+            reason: holon_loro::ShareDegradedReason::VaultFileEmptied,
         });
     }
 }
