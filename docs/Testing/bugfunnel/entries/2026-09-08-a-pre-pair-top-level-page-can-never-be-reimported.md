@@ -3,7 +3,7 @@ id: 2026-09-08-a-pre-pair-top-level-page-can-never-be-reimported
 date: 2026-09-08
 gap: COVERAGE
 secondary: ENVIRONMENT
-status: OPEN
+status: FIXED
 summary: >-
   Every top-level page this device wrote before pairing is deferred as an orphan
   because its parent is the root sentinel, which the re-import plan does not
@@ -72,7 +72,17 @@ cannot reach it either: `pair_with_owner` requires an empty receiver.
 
 ## Remedy
 
-Open. Treat the root sentinel as always-placed when seeding `placed` in
-`plan_reimport`, and pin it with a case in `pairing_boot_degraded.rs` whose
-archive holds a top-level page — red first (the page is deferred), green after
-(the page and its subtree are re-imported and the marker is removed).
+Fixed in chain commit `f2fa918a` ("fix(pairing): a top-level page written before
+a pair is re-imported, and the degraded bar no longer covers the chrome").
+`plan_reimport` reads the parent through `EntityUri::is_no_parent()`, so the
+root sentinel is a home like any other and a top-level page written before the
+pair is re-imported as a top-level page of the paired store. An archive whose
+orphans are genuinely parentless still defers.
+
+Covered by `a_pre_pair_top_level_page_is_reimported_and_only_the_parentless_defer`
+(`crates/holon-loro/tests/pairing_boot_degraded.rs:304`), with the
+still-deferring case pinned by
+`a_mixed_archive_reimports_what_has_a_home_and_defers_only_the_orphans`
+(same file, line 244) and the production boot path by
+`a_pair_whose_reimport_has_no_home_boots_and_raises_the_banner`
+(`crates/holon-integration-tests/tests/boot_suite/pairing_deferred_reimport_boots.rs:110`).

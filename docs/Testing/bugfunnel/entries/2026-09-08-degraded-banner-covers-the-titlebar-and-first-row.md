@@ -3,7 +3,7 @@ id: 2026-09-08-degraded-banner-covers-the-titlebar-and-first-row
 date: 2026-09-08
 gap: PERCEPTION
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   The deferred-reimport banner is an absolute overlay at the top of the window,
   so it hides the titlebar, the toolbar buttons and the top of the first content
@@ -53,7 +53,15 @@ bounds of the content or the chrome beneath it, so nothing could have gone red.
 
 ## Remedy
 
-Open. Either inset the window's content by the banner's height while it stands
-(a sticky bar, not an overlay), or place it below the titlebar and reserve its
-band. Pin it with a windowed assertion that the first content row's painted
-bounds do not intersect the banner's.
+Fixed in chain commit `f2fa918a` ("fix(pairing): a top-level page written before
+a pair is re-imported, and the degraded bar no longer covers the chrome"). The
+bar left the overlay stack: `share_ui::render_deferred_reimport_bar` takes a
+reserved band in the page's flow directly under the title row, still
+undismissable and still lifted only by the bus.
+
+Covered by the bar-geometry assertions in
+`the_window_paints_the_deferred_reimport_banner_and_its_retry_completes_the_pair`
+(`frontends/gpui/tests/pairing_deferred_reimport_windowed.rs:222`), which
+compare the bar's painted bounds against the tracked `TITLE_ROW_ID` row
+(line 329) and against every content row (`content_rows`), failing by name on
+any vertical overlap.

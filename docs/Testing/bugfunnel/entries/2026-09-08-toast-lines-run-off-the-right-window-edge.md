@@ -3,7 +3,7 @@ id: 2026-09-08-toast-lines-run-off-the-right-window-edge
 date: 2026-09-08
 gap: PERCEPTION
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   Toast lines do not wrap and are cut off flush at the right window edge, so the
   pairing disclosure's conflict-copies query and the retry refusal's block list
@@ -60,8 +60,12 @@ assertion anywhere relates a toast's rendered width to the window's.
 
 ## Remedy
 
-Open. Bound the toast's width against the window and wrap (or ellipsize with a
-copy action for the query), then pin it with a windowed assertion that a toast's
-painted bounds lie inside the window for a maximal-length line. The conflict
-query in particular wants a copy affordance rather than text the user must
-retype.
+Fixed in chain commit `7bc0b16c` ("fix(frontend): keep the conflict badge and
+the toast lines on screen"). Toast lines are bounded against the window, so the
+uncapped conflict-copies query and the retry refusal stay readable.
+
+Covered by `every_pairing_toast_line_is_inside_the_window`
+(`frontends/gpui/tests/pairing_toast_fits_the_window_windowed.rs:55`): it emits
+the production disclosure over the session's own degraded bus, with an absolute
+Application Support archive path, and asserts every painted toast line lies
+inside the window less `STACK_INSET`.

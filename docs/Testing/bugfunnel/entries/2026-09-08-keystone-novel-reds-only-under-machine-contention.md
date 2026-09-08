@@ -72,3 +72,14 @@ contended run is self-identifying, and decide whether `inv-sql-budget` and the
 org-render read need a contention-aware tolerance or a hard refusal to run above
 a load threshold. Until then, treat a novel signature seen only on a saturated
 machine as unconfirmed and re-run the A/B population before filing a regression.
+
+## 2026-09-08 — a second shape in the same conditions
+
+`holon-app::integration_toggle_round_trip
+a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection`
+(a 5 s poll, `crates/holon-app/tests/integration_toggle_round_trip.rs:83`)
+failed twice in full-crate gate runs while the machine was under load, and
+passed 3 of 3 when replayed in isolation. Observed in gate runs on 2026-09-08;
+evidence is the orchestrator's session log. Same signature as the shapes above:
+a wall-clock wait sized for an idle machine, reported in the words of a product
+regression. Still OPEN.

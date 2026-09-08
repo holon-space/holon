@@ -3,7 +3,7 @@ id: 2026-09-08-long-conflict-copy-paints-no-badge-at-all
 date: 2026-09-08
 gap: COVERAGE
 secondary: PERCEPTION
-status: OPEN
+status: FIXED
 summary: >-
   A pairing conflict copy whose content fills the row width paints no badge at
   all — the "kept from this device before pairing" mark disappears exactly for
@@ -65,11 +65,11 @@ one: the windowed test has fixed seeds and the headless tier has no pixels.
 
 ## Remedy
 
-Open. Two parts:
+Fixed in chain commit `7bc0b16c` ("fix(frontend): keep the conflict badge and
+the toast lines on screen"). The badge keeps a non-shrinking slot, so content
+length no longer decides whether the merge is disclosed.
 
-1. Give the badge a non-shrinking slot (or let the row wrap) so the mark
-   survives any content length.
-2. Add a long-content conflict copy to
-   `pairing_conflict_badge_windowed.rs` — the same assertion, a content string
-   wide enough to fill the row — as the red-for-the-right-reason proof before
-   the fix.
+Covered by `a_long_conflict_copy_still_paints_a_visible_badge`
+(`frontends/gpui/tests/pairing_conflict_badge_windowed.rs:352`): it paints a
+row-filling copy and a wrapping copy, asserts both wear `BADGE_LABEL` attributed
+to their own block id, and runs them through `assert_badges_are_on_screen`.
