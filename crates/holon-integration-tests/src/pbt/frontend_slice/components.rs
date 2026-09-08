@@ -163,29 +163,63 @@ pub fn keystone_boot_journal_id() -> EntityUri {
         .into_entity_uri()
 }
 
-/// A composition component wrapping a real headless frontend stack. Owns the
-/// `TempDir`, `FrontendSession`, and `ReactiveEngine` so background tasks and
-/// the on-disk (in-memory FS) org root stay alive for the component's lifetime.
-pub struct HeadlessFrontendComponent {
+/// The on-disk vault a boot runs over: the Turso file (`<temp>/test.db`), the
+/// org root, and the in-memory FS holding the org files. Outlives any single
+/// boot, so a reboot re-opens the SAME store rather than a fresh one — that
+/// difference is the whole point of `SutAppLifecycle::reboot`.
+pub struct HeadlessStore {
+    temp: TempDir,
+    org_fs: Arc<holon_filesystem::InMemoryFileSystem>,
+    org_root: PathBuf,
+    /// Tracked user-doc org files. `soak-*` load files are deliberately absent
+    /// (see `new_impl`).
+    org_paths: Vec<PathBuf>,
+}
+
+impl HeadlessStore {
+    pub(crate) fn org_root(&self) -> &PathBuf {
+        &self.org_root
+    }
+
+    pub(crate) fn db_path(&self) -> PathBuf {
+        self.temp.path().join("test.db")
+    }
+}
+
+/// Everything one boot owns. A reboot drops this whole value and builds a
+/// replacement over the same [`HeadlessStore`]; nothing here may be cached by a
+/// cap across that swap, which is why the composed harness rebuilds its
+/// `CapMap` instead of holding these `Arc`s (see `composed::harness::apply`).
+struct BootedSession {
     engine: Arc<BackendEngine>,
     reactive: Arc<ReactiveEngine>,
-    /// The production headless `UserDriver` over `reactive` — the SAME
-    /// `ReactiveEngineDriver` the GPUI/TUI/CLI frontends install. Hosts the
-    /// production `HeadlessEditorMirror`, so `apply_focus_editable_text` (open
-    /// an editor = `click_entity`) and the keystroke-driven
-    /// `SutEditorMirrorWrite` caps (`apply_type_chars`/
-    /// `apply_delete_backward`/`apply_move_cursor` → `send_raw_keystroke`)
-    /// drive the EXACT production headless editor pipeline —
-    /// no `InMemEditorComponent` stand-in, no GPUI window/geometry. Caret reads
-    /// (`SutEditorMirrorRead::editor_caret_byte`) come from this driver's
-    /// mirror.
     driver: Arc<ReactiveEngineDriver>,
-    /// The production `FrontendSession` — drives navigation through the same
-    /// `execute_operation("navigation", "focus", …)` op path the GPUI/CLI
-    /// frontends use (`SutFocusWrite`). Retained (no longer `_`-prefixed) so
-    /// the focus write cap can dispatch through it.
     session: Arc<FrontendSession>,
-    _temp: TempDir,
+    injector: fluxdi::Injector,
+}
+
+/// The boot inputs a reboot must reproduce exactly. Held so the second boot
+/// differs from the first ONLY in the store already being populated.
+#[derive(Clone)]
+struct BootParams {
+    settle: Duration,
+    loro_enabled: bool,
+    clock: Option<Arc<holon_api::TestClock>>,
+    peer_id: Option<u64>,
+    sidecar_yaml: Option<String>,
+}
+
+/// A composition component wrapping a real headless frontend stack. Owns the
+/// `HeadlessStore` and the current `BootedSession` so background tasks and
+/// the on-disk (in-memory FS) org root stay alive for the component's lifetime.
+pub struct HeadlessFrontendComponent {
+    /// The current boot. Swapped wholesale by [`Self::reboot`]; every read goes
+    /// through an accessor so no call site can hold a handle across a reboot.
+    boot: std::sync::RwLock<Arc<BootedSession>>,
+    /// The vault both boots run over.
+    store: Arc<HeadlessStore>,
+    /// Replayed verbatim by [`Self::reboot`].
+    boot_params: BootParams,
     /// `query_id → query:<hash>` registry-key mapping for the watches this
     /// component has registered (E1: `SutWatch` over the PRODUCTION reactive
     /// watch surface). Production keys query watches by content hash, so the
@@ -194,14 +228,6 @@ pub struct HeadlessFrontendComponent {
     /// `WatchGuard` that keeps the query watcher alive (dropping the entry
     /// releases it).
     watches: Mutex<Vec<(String, EntityUri, holon_frontend::WatchGuard)>>,
-    /// The in-memory org FS, its root, and the tracked org file paths —
-    /// retained so the component can provide `SutOrgRead` by parsing the
-    /// on-disk org files back into blocks (E1: org block-equivalence over
-    /// the PRODUCTION `holon_orgmode::parser::parse_org_file`, no
-    /// `FileSyncController` needed).
-    org_fs: Arc<holon_filesystem::InMemoryFileSystem>,
-    org_root: PathBuf,
-    org_paths: Vec<PathBuf>,
     /// `(resolved doc-block id, file path)` per tracked org file, cached from a
     /// clean boot parse — the disk-independent doc mapping `SutOrgRender`
     /// renders by. Tracked user-doc org files (doc page id → path).
@@ -209,12 +235,6 @@ pub struct HeadlessFrontendComponent {
     /// so a mid-run `CreateDocument` doc becomes a valid target for
     /// `BulkExternalAdd`/External `ApplyMutation` (which look up the file).
     documents: Mutex<Vec<(EntityUri, PathBuf)>>,
-    /// The captured DI injector — `SutOrgRender` resolves the
-    /// `QueryableCache<Block>` from it to build the production
-    /// `CacheBlockReader` (the doc-scoped recursive CTE ordered by
-    /// `sort_key, id`, so descendants render in the exact order the
-    /// `FileSyncController` writes them).
-    injector: fluxdi::Injector,
     /// The active view/mode name (`SutViewControl::switch_view` writes it,
     /// `SutViewSelection::current_view` reads it). Honest tracked state
     /// replacing the former hardcoded `"all"` stub — a faithful port of
@@ -232,13 +252,6 @@ pub struct HeadlessFrontendComponent {
     /// Unset (`OnceLock` empty) ⇒ identity resolution (the fixed-id slices,
     /// where oracle id == store id).
     resolver: std::sync::OnceLock<crate::pbt::op_write_cap::IdResolver>,
-    /// The controllable clock this boot injected into the engine's DI (as
-    /// `InjectedClock`), so the `ClockScheduler` ticks on it instead of the OS
-    /// clock. `Some` only when the caller asked for an injected clock (the
-    /// `AdvanceDay` keystone driver); `None` for the ordinary SystemClock boot.
-    /// `SutClockAdvance` advances THIS clock and re-runs the scheduler's own
-    /// `reconcile_clock`, so a day-rollover CDC re-fires the journal rule.
-    clock: Option<Arc<holon_api::TestClock>>,
     /// Per-tick memo of the headless `widget_tree_snapshot` (the expensive
     /// recursive `interpret_pure` + resample pass). ~12 ViewModel/render
     /// invariants read the SAME root tree each check tick; without sharing,
@@ -424,7 +437,7 @@ impl HeadlessFrontendComponent {
     /// than assume it.
     pub async fn disk_org_files(&self) -> Vec<(PathBuf, Option<String>)> {
         use holon_filesystem::FileSystem;
-        let scanned = FileSystem::scan_directory(self.org_fs.as_ref(), &self.org_root)
+        let scanned = FileSystem::scan_directory(self.org_fs().as_ref(), self.org_root())
             .await
             .expect("Fork B disk_org_files: scan_directory failed");
         let mut out = Vec::new();
@@ -432,7 +445,7 @@ impl HeadlessFrontendComponent {
             if path.extension().and_then(|e| e.to_str()) != Some("org") {
                 continue;
             }
-            let content = FileSystem::read_to_string(self.org_fs.as_ref(), &path)
+            let content = FileSystem::read_to_string(self.org_fs().as_ref(), &path)
                 .await
                 .expect("Fork B disk_org_files: read org file");
             let id = content
@@ -448,7 +461,7 @@ impl HeadlessFrontendComponent {
     /// text is gone from the user's vault, whatever the store still holds.
     pub async fn disk_org_contents(&self) -> Vec<(PathBuf, String)> {
         use holon_filesystem::FileSystem;
-        let scanned = FileSystem::scan_directory(self.org_fs.as_ref(), &self.org_root)
+        let scanned = FileSystem::scan_directory(self.org_fs().as_ref(), self.org_root())
             .await
             .expect("disk_org_contents: scan_directory failed");
         let mut out = Vec::new();
@@ -456,7 +469,7 @@ impl HeadlessFrontendComponent {
             if path.extension().and_then(|e| e.to_str()) != Some("org") {
                 continue;
             }
-            let content = FileSystem::read_to_string(self.org_fs.as_ref(), &path)
+            let content = FileSystem::read_to_string(self.org_fs().as_ref(), &path)
                 .await
                 .expect("disk_org_contents: read org file");
             out.push((path, content));
@@ -530,18 +543,20 @@ impl HeadlessFrontendComponent {
     /// suppresses the echo — no re-mint, no re-write).
     pub async fn pump_watcher_over_disk_path(&self, path: &Path) {
         use holon_filesystem::FileSystem;
-        let content = FileSystem::read_to_string(self.org_fs.as_ref(), path)
+        let content = FileSystem::read_to_string(self.org_fs().as_ref(), path)
             .await
             .unwrap_or_else(|e| {
                 panic!("[pump_watcher_over_disk_path] read {path:?} failed: {e:#}")
             });
-        FileSystem::write(self.org_fs.as_ref(), path, format!("{content} ").as_bytes())
-            .await
-            .unwrap_or_else(|e| {
-                panic!("[pump_watcher_over_disk_path] touch {path:?} failed: {e:#}")
-            });
+        FileSystem::write(
+            self.org_fs().as_ref(),
+            path,
+            format!("{content} ").as_bytes(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("[pump_watcher_over_disk_path] touch {path:?} failed: {e:#}"));
         tokio::time::sleep(Duration::from_millis(50)).await;
-        FileSystem::write(self.org_fs.as_ref(), path, content.as_bytes())
+        FileSystem::write(self.org_fs().as_ref(), path, content.as_bytes())
             .await
             .unwrap_or_else(|e| {
                 panic!("[pump_watcher_over_disk_path] restore {path:?} failed: {e:#}")
@@ -636,11 +651,11 @@ impl HeadlessFrontendComponent {
         let debug = Arc::new(holon_mcp::server::DebugServices::default());
         debug
             .org_fs
-            .set(self.org_fs.clone() as Arc<dyn holon_filesystem::FileSystem>)
+            .set(self.org_fs().clone() as Arc<dyn holon_filesystem::FileSystem>)
             .ok();
-        debug.orgmode_root.set(self.org_root.clone()).ok();
+        debug.orgmode_root.set(self.org_root().clone()).ok();
         if let Ok(ops) = self
-            .injector
+            .injector()
             .try_resolve::<holon_loro::LoroBlockOperations>()
         {
             debug.loro_doc_store.set(ops.shared_doc_store()).ok();
@@ -650,7 +665,7 @@ impl HeadlessFrontendComponent {
             .write()
             .expect("live_debug cell poisoned")
             .writeback_renderer = Some(
-            self.injector
+            self.injector()
                 .resolve_async::<holon_filesystem::WritebackRenderer>()
                 .await,
         );
@@ -661,7 +676,7 @@ impl HeadlessFrontendComponent {
     /// reads, so registering an entity here flips its `[[scheme:id]]` links to
     /// resolved exactly as installing an integration does at runtime.
     pub async fn type_registry(&self) -> Arc<holon_profiles::TypeRegistry> {
-        self.injector
+        self.injector()
             .resolve_async::<holon_profiles::TypeRegistry>()
             .await
     }
@@ -690,9 +705,6 @@ impl HeadlessFrontendComponent {
         peer_id: Option<u64>,
         sidecar_yaml: Option<&str>,
     ) -> Self {
-        use holon_frontend::HolonConfig;
-        use holon_frontend::SessionConfig;
-
         let temp = TempDir::new().expect("temp dir");
         let org_root = std::fs::canonicalize(temp.path()).expect("canonicalize temp dir");
         let org_fs = Arc::new(holon_filesystem::InMemoryFileSystem::new());
@@ -724,10 +736,54 @@ impl HeadlessFrontendComponent {
             }
         }
 
+        let store = Arc::new(HeadlessStore {
+            temp,
+            org_fs,
+            org_root,
+            org_paths,
+        });
+        let boot_params = BootParams {
+            settle,
+            loro_enabled,
+            clock,
+            peer_id,
+            sidecar_yaml: sidecar_yaml.map(str::to_string),
+        };
+        let booted = Self::boot_session(&store, &boot_params).await;
+        let documents = Self::cache_doc_ids(&store).await;
+
+        Self {
+            boot: std::sync::RwLock::new(Arc::new(booted)),
+            store,
+            boot_params,
+            watches: Mutex::new(Vec::new()),
+            documents: Mutex::new(documents),
+            current_view: Mutex::new("all".to_string()),
+            resolver: std::sync::OnceLock::new(),
+            render_snapshot_cache: Mutex::new(None),
+            render_cache_enabled: std::sync::atomic::AtomicBool::new(false),
+            read_only_ingest: Mutex::new(None),
+            read_only_attempts: Mutex::new((0, 0)),
+        }
+    }
+
+    /// Boot a frontend stack over `store`. Called once by `new_impl` and again
+    /// by [`Self::reboot`] — the second call finds the Turso file and the org
+    /// files already populated, which is exactly the production cold-boot shape
+    /// (persisted matview/DBSP state, `:ID:` drawers already on disk).
+    async fn boot_session(store: &HeadlessStore, params: &BootParams) -> BootedSession {
+        use holon_frontend::HolonConfig;
+        use holon_frontend::SessionConfig;
+
+        let temp_path = store.temp.path();
+        let org_fs = &store.org_fs;
+        let loro_enabled = params.loro_enabled;
+        let settle = params.settle;
+
         let holon_config = HolonConfig {
-            db_path: Some(temp.path().join("test.db")),
+            db_path: Some(temp_path.join("test.db")),
             vault: holon_frontend::config::VaultConfig {
-                root: Some(temp.path().to_path_buf()),
+                root: Some(temp_path.to_path_buf()),
             },
             crdt: holon_frontend::config::CrdtPreferences {
                 enabled: Some(loro_enabled),
@@ -735,9 +791,9 @@ impl HeadlessFrontendComponent {
             },
             ..Default::default()
         };
-        let config_dir = temp.path().to_path_buf();
+        let config_dir = temp_path.to_path_buf();
         let mut session_config = SessionConfig::new(holon_api::UiInfo::permissive()).without_wait();
-        session_config.loro_peer_id = peer_id;
+        session_config.loro_peer_id = params.peer_id;
         let org_fs_for_di = org_fs.clone();
         // Capture the DI injector (for `SutOrgRender`'s `QueryableCache<Block>` →
         // `CacheBlockReader`, the production ordered doc-scoped read).
@@ -749,8 +805,8 @@ impl HeadlessFrontendComponent {
         // `ClockScheduler` (spawned in `create_initialized_engine`) ticks on it
         // instead of the OS `SystemClock`. `None` → the factory falls back to
         // `SystemClock`, unchanged.
-        let clock_for_di = clock.clone();
-        let sidecar_for_di = sidecar_yaml.map(str::to_string);
+        let clock_for_di = params.clock.clone();
+        let sidecar_for_di = params.sidecar_yaml.clone();
 
         let (session, engine, reactive) = holon_app::new_from_config_with_di(
             holon_config,
@@ -885,21 +941,37 @@ impl HeadlessFrontendComponent {
             .await;
         }
 
-        // Cache each tracked file's resolved doc-block id from a CLEAN parse at boot
-        // (disk now carries the session-persisted `:ID:` drawer == the block_raw doc
-        // row). `SutOrgRender` uses this disk-INDEPENDENT mapping so a later disk
-        // divergence is detected, not silently skipped (deriving the doc id from a
-        // corrupted disk would miss the block_raw row and vacuously pass).
+        let driver = Arc::new(ReactiveEngineDriver::new(reactive.clone()));
+
+        BootedSession {
+            engine,
+            reactive,
+            driver,
+            session,
+            injector: injector_slot
+                .get()
+                .expect("DI injector captured during build")
+                .clone(),
+        }
+    }
+
+    /// Cache each tracked file's resolved doc-block id from a CLEAN parse at
+    /// boot (disk now carries the session-persisted `:ID:` drawer == the
+    /// block_raw doc row). `SutOrgRender` uses this disk-INDEPENDENT
+    /// mapping so a later disk divergence is detected, not silently skipped
+    /// (deriving the doc id from a corrupted disk would miss the block_raw
+    /// row and vacuously pass).
+    async fn cache_doc_ids(store: &HeadlessStore) -> Vec<(EntityUri, PathBuf)> {
         let mut documents: Vec<(EntityUri, PathBuf)> = Vec::new();
-        for path in &org_paths {
-            let raw = holon_filesystem::FileSystem::read_to_string(org_fs.as_ref(), path)
+        for path in &store.org_paths {
+            let raw = holon_filesystem::FileSystem::read_to_string(store.org_fs.as_ref(), path)
                 .await
                 .expect("cache doc ids: read org file");
             let parsed = holon_orgmode::parser::parse_org_file(
                 path,
                 &raw,
                 &EntityUri::no_parent(),
-                &org_root,
+                &store.org_root,
             )
             .expect("cache doc ids: parse org file");
             // Register the file's tracked doc id. A file WITH headline blocks
@@ -920,32 +992,54 @@ impl HeadlessFrontendComponent {
                 .unwrap_or_else(|| parsed.document.id.clone());
             documents.push((doc_id, path.clone()));
         }
+        documents
+    }
 
-        let driver = Arc::new(ReactiveEngineDriver::new(reactive.clone()));
+    /// Shut this boot down and start a new one over the SAME store — the
+    /// composed keystone's only true `persist → drop the engine → boot again`
+    /// step (`SimulateRestart` merely touches files; see its type doc).
+    ///
+    /// Two things make it a reboot rather than a re-ingest: the session is torn
+    /// down through the PRODUCTION `holon_app::shutdown_session`, so the second
+    /// boot re-opens `test.db` and re-runs `ensure_schema` over PERSISTED
+    /// matview/DBSP state; and every boot-scoped handle is replaced, so a stale
+    /// `ReactiveEngine`/editor mirror cannot serve post-reboot reads. The store
+    /// — org files included — is untouched, so no content is re-seeded and the
+    /// block set must survive unchanged.
+    pub(crate) async fn reboot(&self) {
+        let before = self.store_block_ids().await;
 
-        Self {
-            engine,
-            reactive,
-            driver,
-            session,
-            _temp: temp,
-            watches: Mutex::new(Vec::new()),
-            documents: Mutex::new(documents),
-            org_fs,
-            org_root,
-            org_paths,
-            injector: injector_slot
-                .get()
-                .expect("DI injector captured during build")
-                .clone(),
-            current_view: Mutex::new("all".to_string()),
-            resolver: std::sync::OnceLock::new(),
-            clock,
-            render_snapshot_cache: Mutex::new(None),
-            render_cache_enabled: std::sync::atomic::AtomicBool::new(false),
-            read_only_ingest: Mutex::new(None),
-            read_only_attempts: Mutex::new((0, 0)),
-        }
+        // Drop CDC consumers before the actor goes away (mirrors
+        // `TestEnvironment::stop_app`, which this is the composed analogue of).
+        self.watches.lock().expect("watches lock").clear();
+        self.invalidate_render_cache();
+
+        let old = self.booted();
+        // The production teardown: the session's watchers stop, THEN the store
+        // closes. Calling it here is what makes this transition a reboot rather
+        // than a store yanked out from under a live session.
+        holon_app::shutdown_session(&old.injector)
+            .await
+            .unwrap_or_else(|e| panic!("[reboot] session shutdown failed: {e:#}"));
+        drop(old);
+
+        let booted = Self::boot_session(&self.store, &self.boot_params).await;
+        *self.boot.write().expect("boot cell poisoned") = Arc::new(booted);
+
+        // A reboot must RE-OPEN the store, never re-seed it. If the second boot
+        // re-ingested the seed tree or re-minted pages, the block set would grow
+        // and every post-reboot oracle would be comparing against a doubled
+        // vault while still passing its own shape checks. Assert the identity
+        // here, where the two sets are both in hand.
+        let after = self.store_block_ids().await;
+        assert_eq!(
+            before,
+            after,
+            "[reboot] the block set changed across a reboot — a reboot re-opens the store, it \
+             does not re-seed it. Gained {:?}, lost {:?}",
+            after.difference(&before).collect::<Vec<_>>(),
+            before.difference(&after).collect::<Vec<_>>()
+        );
     }
 
     /// The production `BackendEngine` backing this session — shared (`Arc`) so
@@ -954,7 +1048,36 @@ impl HeadlessFrontendComponent {
     /// working tree via the production create op
     /// (`crate::pbt::sql_slice::SqlProjectionComponent`).
     pub(crate) fn engine(&self) -> Arc<BackendEngine> {
-        self.engine.clone()
+        self.booted().engine.clone()
+    }
+
+    /// The live boot. Every handle read goes through here, so a `reboot` swap
+    /// is observed by the next call rather than by whoever happened to
+    /// clone first.
+    fn booted(&self) -> Arc<BootedSession> {
+        self.boot.read().expect("boot cell poisoned").clone()
+    }
+
+    /// The vault this component boots over — shared with the composed builder
+    /// so a rebuild after [`Self::reboot`] targets the SAME store.
+    pub(crate) fn store(&self) -> Arc<HeadlessStore> {
+        self.store.clone()
+    }
+
+    pub(crate) fn org_fs(&self) -> &Arc<holon_filesystem::InMemoryFileSystem> {
+        &self.store.org_fs
+    }
+
+    pub(crate) fn org_root(&self) -> &PathBuf {
+        &self.store.org_root
+    }
+
+    pub(crate) fn org_paths(&self) -> &[PathBuf] {
+        &self.store.org_paths
+    }
+
+    pub(crate) fn injector(&self) -> fluxdi::Injector {
+        self.booted().injector.clone()
     }
 
     /// The production windowless `FrontendSession` this component booted.
@@ -963,7 +1086,7 @@ impl HeadlessFrontendComponent {
     /// caps read — the windowed repoint reuses this headless boot and
     /// attaches the window as a pure renderer (§ Round 5).
     pub(crate) fn session(&self) -> Arc<FrontendSession> {
-        self.session.clone()
+        self.booted().session.clone()
     }
 
     /// Drop the per-tick `widget_tree_snapshot` memo. Invoked before every SUT
@@ -999,7 +1122,7 @@ impl HeadlessFrontendComponent {
     /// `dispatch_intent_sync` and the new/ merged block becomes the focused
     /// block (the frontend split focus-handoff).
     pub(crate) fn reactive(&self) -> Arc<ReactiveEngine> {
-        self.reactive.clone()
+        self.booted().reactive.clone()
     }
 
     /// Converge the focused editor's cell-free VM buffer against the settled
@@ -1009,7 +1132,8 @@ impl HeadlessFrontendComponent {
     /// concrete driver. Called from the composed settle
     /// (`converge_projections`) after the projection fixed point.
     pub(crate) async fn converge_active_editors(&self) {
-        self.driver
+        self.booted()
+            .driver
             .converge_editors()
             .await
             .expect("[converge_active_editors] editor data-sync converge failed");
@@ -1026,7 +1150,15 @@ impl HeadlessFrontendComponent {
     /// fresh `ReactiveEngineDriver::new` — a second one would carry a separate
     /// editor mirror and desync caret/text from the editor-write caps.
     pub(crate) fn driver(&self) -> Arc<dyn UserDriver> {
-        self.driver.clone()
+        self.booted().driver.clone()
+    }
+
+    /// The same live driver as [`Self::driver`], but CONCRETE — for the entries
+    /// inherent to `ReactiveEngineDriver` (`seed_focused_editor`,
+    /// `editor_live_text`, `slash_menu_labels`, `click_entity_with_modifiers`,
+    /// `converge_editors`) that the `dyn UserDriver` view does not carry.
+    pub(crate) fn driver_concrete(&self) -> Arc<ReactiveEngineDriver> {
+        self.booted().driver.clone()
     }
 
     /// Build a `KeystrokeBlockTreeWriter` backed by `driver` (§8.12 C-3
@@ -1050,7 +1182,7 @@ impl HeadlessFrontendComponent {
             .get()
             .expect("keystroke_writer_with: resolver must be set by the composed builder")
             .clone();
-        KeystrokeBlockTreeWriter::new(driver, self.reactive.clone(), resolver)
+        KeystrokeBlockTreeWriter::new(driver, self.reactive(), resolver)
     }
 
     /// The frontend's `LoroDocumentStore` — the authority store the production
@@ -1064,7 +1196,7 @@ impl HeadlessFrontendComponent {
     /// `Arc<RwLock<Option<Arc<LoroDocument>>>>`, so it observes the SAME live
     /// doc.
     pub fn loro_doc_store(&self) -> Option<holon_loro::LoroDocumentStore> {
-        self.injector
+        self.injector()
             .try_resolve::<holon_loro::LoroDocumentStore>()
             .ok() // ALLOW(ok): optional DI service — absent when Loro is disabled
             .map(|store| (*store).clone())
@@ -1089,7 +1221,7 @@ impl HeadlessFrontendComponent {
     /// A windowed harness launches its window with THIS bus, or the overlay it
     /// paints is fed by a bus nothing production writes to.
     pub fn degraded_bus(&self) -> Option<Arc<holon_loro::DegradedSignalBus>> {
-        self.injector
+        self.injector()
             .try_resolve::<Arc<holon_loro::DegradedSignalBus>>()
             .ok() // ALLOW(ok): optional DI service — absent when Loro is disabled
             .map(|bus| (*bus).clone())
@@ -1098,14 +1230,14 @@ impl HeadlessFrontendComponent {
     /// The `DevicePairing` the `device.*` operations dispatch to, over this
     /// session's own store — the instance a window's retry button reaches.
     pub fn device_pairing(&self) -> Option<Arc<holon_loro::device_pairing_op::DevicePairing>> {
-        self.injector
+        self.injector()
             .try_resolve::<Arc<holon_loro::device_pairing_op::DevicePairing>>()
             .ok() // ALLOW(ok): optional DI service — absent when Loro is disabled
             .map(|pairing| (*pairing).clone())
     }
 
     pub(crate) fn loro_sync_handle(&self) -> Option<Arc<holon_loro::LoroSyncControllerHandle>> {
-        self.injector
+        self.injector()
             .try_resolve::<holon_loro::LoroSyncControllerHandle>()
             .ok() // ALLOW(ok): optional DI service — absent when Loro/sync is disabled
     }
@@ -1119,7 +1251,7 @@ impl HeadlessFrontendComponent {
     /// the resolved signal by then. Mirrors `TestEnvironment`'s
     /// `org_sync_idle` latch.
     pub(crate) fn org_idle_signal(&self) -> Option<Arc<holon_orgmode::OrgSyncIdleSignal>> {
-        self.injector
+        self.injector()
             .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
             .ok() // ALLOW(ok): optional DI service — absent when org file-sync is disabled
     }
@@ -1134,7 +1266,7 @@ impl HeadlessFrontendComponent {
     pub(crate) fn block_feed(
         &self,
     ) -> Option<Arc<holon_api::live_data::LiveData<holon_api::Block>>> {
-        self.injector
+        self.injector()
             .try_resolve::<holon_api::live_data::BlockFeed>()
             .ok() // ALLOW(ok): optional DI service — absent without a block matview
             .map(|bf| bf.0.clone())
@@ -1186,7 +1318,7 @@ impl HeadlessFrontendComponent {
     /// (the decomposed `SetupWatch` drive path — INC 3), which receives the
     /// query pre-compiled at the transition boundary.
     fn register_watch_compiled(&self, query_id: &str, source: String, lang: QueryLanguage) {
-        let services: Arc<dyn BuilderServices> = self.reactive.clone();
+        let services: Arc<dyn BuilderServices> = self.reactive();
         // A `table` with no `item_template`: this seat keeps the watch guard and
         // drops the tree, and the invariants over these watches read ROWS from
         // the registry. Declaring `render_entity()` here would bind every
@@ -1198,7 +1330,7 @@ impl HeadlessFrontendComponent {
             args: Vec::new(),
         };
         let (key, mut live) = self
-            .reactive
+            .reactive()
             .watch_query_live(source, lang, data_watch, None, services);
         let guard = live
             .watch_guard
@@ -1217,7 +1349,7 @@ impl HeadlessFrontendComponent {
     async fn resolve_watch(&self, uri: &EntityUri) -> Option<Arc<ReactiveRenderedRows>> {
         let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         loop {
-            let rqr = self.reactive.ensure_watching(uri);
+            let rqr = self.reactive().ensure_watching(uri);
             if !rqr.is_loading() {
                 return Some(rqr);
             }
@@ -1229,7 +1361,7 @@ impl HeadlessFrontendComponent {
     }
 
     fn services(&self) -> Arc<dyn BuilderServices> {
-        Arc::new(HeadlessBuilderServices::new(self.engine.clone()))
+        Arc::new(HeadlessBuilderServices::new(self.engine()))
     }
 
     /// The memo-free recompute behind `widget_tree_snapshot` /
@@ -1258,7 +1390,7 @@ impl HeadlessFrontendComponent {
             return empty();
         }
         let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(5));
-        let mut snap = view_model_to_snapshot(&self.reactive.snapshot(&root_uri));
+        let mut snap = view_model_to_snapshot(&self.reactive().snapshot(&root_uri));
         let mut last = (usize::MAX, usize::MAX);
         let mut stable = 0u32;
         loop {
@@ -1295,7 +1427,7 @@ impl HeadlessFrontendComponent {
             // quiet-floor settle (p50 5 ms → 70 ms) — the early exit above is
             // the win, not a tighter poll.
             tokio::time::sleep(Duration::from_millis(120)).await;
-            snap = view_model_to_snapshot(&self.reactive.snapshot(&root_uri));
+            snap = view_model_to_snapshot(&self.reactive().snapshot(&root_uri));
         }
     }
 
@@ -1320,7 +1452,7 @@ impl HeadlessFrontendComponent {
         );
         params.insert("content".into(), Value::String(content.to_string()));
         params.insert("content_type".into(), ContentType::Text.into());
-        self.engine
+        self.engine()
             .execute_operation(
                 &EntityName::new("block"),
                 "create",
@@ -1357,7 +1489,7 @@ impl HeadlessFrontendComponent {
             "tags".into(),
             Value::Array(vec![Value::String(holon_api::PAGE_TAG.to_string())]),
         );
-        self.engine
+        self.engine()
             .execute_operation(
                 &EntityName::new("block"),
                 "create",
@@ -1370,7 +1502,7 @@ impl HeadlessFrontendComponent {
 
     async fn all_blocks(&self) -> Vec<Block> {
         let rows = self
-            .engine
+            .engine()
             .db_handle()
             .query(BLOCK_RAW_SNAPSHOT_SQL, std::collections::HashMap::new())
             .await
@@ -1412,7 +1544,7 @@ impl HeadlessFrontendComponent {
     /// raw rows (the `SutSqlProjection` read surface — mirrors the sql_slice's
     /// `query`). Fail-loud on error.
     pub(crate) async fn sql_query(&self, sql: &str) -> Vec<holon_api::StorageEntity> {
-        self.engine
+        self.engine()
             .db_handle()
             .query(sql, std::collections::HashMap::new())
             .await
@@ -1561,7 +1693,7 @@ impl HeadlessFrontendComponent {
         let started = tokio::time::Instant::now();
         let deadline = started + soak_deadline(LAYOUT_BOOT_BUDGET);
         loop {
-            let resolved = self.reactive.snapshot_resolved(&root_uri);
+            let resolved = self.reactive().snapshot_resolved(&root_uri);
             let panel_up = holon_frontend::focus_path::region_panel_present(&resolved, region);
             // The panel node appears as soon as the ROOT slot query delivers,
             // but the sidebar's own SQL and its first CDC batch are the slow
@@ -1570,7 +1702,7 @@ impl HeadlessFrontendComponent {
             // set is sound because this barrier only ever runs when the caller
             // is about to click a sidebar row, so at least one must exist.
             let rows_up = !self
-                .reactive
+                .reactive()
                 .ensure_watching(&sidebar)
                 .snapshot()
                 .1
@@ -1600,7 +1732,7 @@ impl HeadlessFrontendComponent {
     async fn sidebar_row_ids_debug(&self) -> String {
         let sidebar = EntityUri::parse("block:default-left-sidebar")
             .expect("static sidebar key is a valid EntityUri");
-        let (_, rows) = self.reactive.ensure_watching(&sidebar).snapshot();
+        let (_, rows) = self.reactive().ensure_watching(&sidebar).snapshot();
         let mut watched: Vec<String> = rows
             .iter()
             .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
@@ -1634,7 +1766,7 @@ impl HeadlessFrontendComponent {
         modifiers: holon_api::ClickModifiers,
     ) -> String {
         let resolved = self
-            .reactive
+            .reactive()
             .snapshot_resolved(&holon_api::root_layout_block_uri());
         format!(
             "{}\n  {}",
@@ -1658,7 +1790,7 @@ impl HeadlessFrontendComponent {
         let modifiers = holon_api::ClickModifiers::shift();
         let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(10));
         loop {
-            let resolved = self.reactive.snapshot_resolved(&root_uri);
+            let resolved = self.reactive().snapshot_resolved(&root_uri);
             if holon_frontend::focus_path::find_click_intent_in_region(
                 &resolved, id, "main", modifiers,
             )
@@ -1689,7 +1821,7 @@ impl HeadlessFrontendComponent {
         let root_uri = holon_api::root_layout_block_uri();
         let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(5));
         loop {
-            let resolved = self.reactive.snapshot_resolved(&root_uri);
+            let resolved = self.reactive().snapshot_resolved(&root_uri);
             if holon_frontend::focus_path::find_click_intent_in_region(
                 &resolved,
                 id,
@@ -1861,7 +1993,7 @@ impl HeadlessFrontendComponent {
         if let Some(history_id) = history_id {
             params.insert("history_id".to_string(), Value::Integer(history_id));
         }
-        self.session
+        self.session()
             .execute_operation(&EntityName::new("navigation"), op, params)
             .await
             .unwrap_or_else(|e| {
@@ -2016,7 +2148,7 @@ impl SutRenderer for HeadlessFrontendComponent {
         &self,
         block_id: &EntityUri,
     ) -> Option<std::collections::BTreeSet<EntityUri>> {
-        self.reactive.registry_row_ids(block_id)
+        self.reactive().registry_row_ids(block_id)
     }
 
     async fn root_data_row_ids(&self) -> std::collections::BTreeSet<EntityUri> {
@@ -2204,7 +2336,7 @@ impl SutBackend for HeadlessFrontendComponent {
         // would parse junction-only edge fields (e.g. a CreateDocument `Page` tag) as
         // empty and falsely diverge from the reference.
         let rows = self
-            .engine
+            .engine()
             .db_handle()
             .query(BLOCK_MATVIEW_SNAPSHOT_SQL, std::collections::HashMap::new())
             .await
@@ -2229,7 +2361,7 @@ impl SutBackend for HeadlessFrontendComponent {
 #[async_trait::async_trait(?Send)]
 impl crate::pbt::net_cap::SutDerivedNet for HeadlessFrontendComponent {
     async fn derived_net(&self) -> holon_net::CompiledNet {
-        crate::pbt::net_cap::derived_net_of(&self.engine)
+        crate::pbt::net_cap::derived_net_of(&self.engine())
     }
 
     async fn fired_operations(&self) -> std::collections::BTreeSet<(String, String)> {
@@ -2244,7 +2376,7 @@ impl SutOrderKeys for HeadlessFrontendComponent {
     /// the position of exactly the rows an observer sees.
     async fn live_block_order_keys(&self) -> Vec<(EntityUri, String)> {
         let rows = self
-            .engine
+            .engine()
             .db_handle()
             .query(
                 "SELECT id, sort_key FROM block",
@@ -2274,7 +2406,7 @@ impl SutViewSelection for HeadlessFrontendComponent {
     /// watchable / still loading / a placeholder / interpretation panics.
     async fn headless_error_node_count(&self) -> Option<usize> {
         let root_id = holon_api::root_layout_block_uri();
-        let results = self.reactive.ensure_watching(&root_id);
+        let results = self.reactive().ensure_watching(&root_id);
         if results.is_loading() {
             return None;
         }
@@ -2344,7 +2476,7 @@ impl SutWatch for HeadlessFrontendComponent {
         // empty. Poll the snapshot to a fixed point instead (count unchanged for a
         // few reads) — converges fast for an empty watch (0,0,0) and a populated one
         // (…,N,N,N alike).
-        let rqr = self.reactive.ensure_watching(&key);
+        let rqr = self.reactive().ensure_watching(&key);
         let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         let mut last = usize::MAX;
         let mut stable = 0u32;
@@ -2376,7 +2508,7 @@ impl SutWatch for HeadlessFrontendComponent {
 
     async fn block_raw_query_ids(&self, sql: &str) -> BTreeSet<EntityUri> {
         let rows = self
-            .engine
+            .engine()
             .db_handle()
             .query(sql, std::collections::HashMap::new())
             .await
@@ -2412,7 +2544,7 @@ impl SutOrgRead for HeadlessFrontendComponent {
         // them in `documents` but not the boot-fixed `org_paths`); without the union a
         // `CreateDocument`+`BulkExternalAdd` doc's on-disk blocks are never read and
         // `/org` false-diverges (oracle has them, SUT-org misses them).
-        let mut paths: Vec<PathBuf> = self.org_paths.clone();
+        let mut paths: Vec<PathBuf> = self.org_paths().to_vec();
         for (_, p) in self.documents.lock().expect("documents lock").iter() {
             if !paths.contains(p) {
                 paths.push(p.clone());
@@ -2433,10 +2565,10 @@ impl SutOrgRead for HeadlessFrontendComponent {
         }
         let mut all_blocks = Vec::new();
         for path in &paths {
-            let raw = FileSystem::read_to_string(self.org_fs.as_ref(), path)
+            let raw = FileSystem::read_to_string(self.org_fs().as_ref(), path)
                 .await
                 .expect("SutOrgRead: read org file");
-            let result = parse_org_file(path, &raw, &EntityUri::no_parent(), &self.org_root)
+            let result = parse_org_file(path, &raw, &EntityUri::no_parent(), self.org_root())
                 .expect("SutOrgRead: parse org file");
             all_blocks.extend(result.blocks);
         }
@@ -2459,8 +2591,8 @@ impl SutOrgRead for HeadlessFrontendComponent {
 impl SutFsWrites for HeadlessFrontendComponent {
     async fn vault_write_targets(&self) -> (String, Vec<String>) {
         (
-            self.org_root.to_string_lossy().to_string(),
-            self.org_fs
+            self.org_root().to_string_lossy().to_string(),
+            self.org_fs()
                 .write_targets()
                 .iter()
                 .map(|p| p.to_string_lossy().to_string())
@@ -2484,7 +2616,7 @@ impl SutHomeProfile for HeadlessFrontendComponent {
         use holon_filesystem::BlockReader;
 
         let block_cache = self
-            .injector
+            .injector()
             .resolve_async::<holon::core::queryable_cache::QueryableCache<Block>>()
             .await;
         let reader = CacheBlockReader::new(block_cache);
@@ -2512,7 +2644,7 @@ impl SutHomeProfile for HeadlessFrontendComponent {
         }
 
         let rows = self
-            .engine
+            .engine()
             .db_handle()
             .query("SELECT id FROM block_raw", std::collections::HashMap::new())
             .await
@@ -2552,7 +2684,7 @@ impl SutOrgRender for HeadlessFrontendComponent {
         use holon_orgmode::org_renderer::OrgRenderer;
 
         let block_cache = self
-            .injector
+            .injector()
             .resolve_async::<holon::core::queryable_cache::QueryableCache<Block>>()
             .await;
         let reader = CacheBlockReader::new(block_cache);
@@ -2568,7 +2700,7 @@ impl SutOrgRender for HeadlessFrontendComponent {
              json_group_array(target_id) FROM block_contributes_to WHERE block_id = b.id), '[]') \
              AS contributes_to FROM block_raw b";
         let rows = self
-            .engine
+            .engine()
             .db_handle()
             .query(header_sql, std::collections::HashMap::new())
             .await
@@ -2595,7 +2727,7 @@ impl SutOrgRender for HeadlessFrontendComponent {
                 .expect("SutOrgRender: get_blocks failed");
             let rendered =
                 OrgRenderer::render_document(doc_block, &descendants, path, &doc_block.id);
-            let disk = FileSystem::read_to_string(self.org_fs.as_ref(), path)
+            let disk = FileSystem::read_to_string(self.org_fs().as_ref(), path)
                 .await
                 .expect("SutOrgRender: read org file");
             emitted_paths.insert(path.clone());
@@ -2622,7 +2754,7 @@ impl SutOrgRender for HeadlessFrontendComponent {
                 .expect("SutOrgRender: get_blocks (materialized page) failed");
             let rendered =
                 OrgRenderer::render_document(doc_block, &descendants, &path, &doc_block.id);
-            let disk = FileSystem::read_to_string(self.org_fs.as_ref(), &path)
+            let disk = FileSystem::read_to_string(self.org_fs().as_ref(), &path)
                 .await
                 .expect("SutOrgRender: read materialized org file");
             out.push((path.to_string_lossy().to_string(), disk, rendered));
@@ -2701,9 +2833,9 @@ impl HeadlessFrontendComponent {
         // the first keystroke, and a focused-but-untyped editor falls back to
         // the cell read — the VM read+converge path would be type-only. Seeds
         // via the SAME concrete headless driver whose mirror `SutEditorMirrorRead`
-        // reads (self.driver), not the passed `driver` (which may be a window
+        // reads (self.driver()), not the passed `driver` (which may be a window
         // driver in the windowed overlay, where the editor lives elsewhere).
-        self.driver.seed_focused_editor(id).await.unwrap_or_else(|e| {
+        self.driver_concrete().seed_focused_editor(id).await.unwrap_or_else(|e| {
             panic!("[SutFocusWrite::apply_focus_editable_text] seed editor VM for {id} failed: {e:#}")
         });
     }
@@ -2736,7 +2868,7 @@ impl HeadlessFrontendComponent {
                 });
             crate::pbt::composed::schedule_point::schedule_point().await;
         }
-        if let Some(block) = self.reactive.focused_block() {
+        if let Some(block) = self.reactive().focused_block() {
             self.settle_block_content(&block).await;
         }
     }
@@ -2753,7 +2885,7 @@ impl HeadlessFrontendComponent {
                 });
             crate::pbt::composed::schedule_point::schedule_point().await;
         }
-        if let Some(block) = self.reactive.focused_block() {
+        if let Some(block) = self.reactive().focused_block() {
             self.settle_block_content(&block).await;
         }
     }
@@ -2770,20 +2902,24 @@ impl HeadlessFrontendComponent {
         byte_position: usize,
     ) {
         let block = self
-            .reactive
+            .reactive()
             .focused_block()
             .expect("[apply_move_cursor] no focused block — FocusEditableText must run first");
         // Same precedence `HeadlessEditorMirror::handle_keystroke` walks: the
         // block's editor VM buffer is the authority, and it is the ONLY source in
         // SqlOnly mode (no Loro cell, so `editable_text` is `Err` there and a
         // blanket `unwrap_or_default` would convert every position against `""`).
-        let text = self.driver.editor_live_text(&block).unwrap_or_else(|| {
-            let services: &dyn BuilderServices = self.reactive.as_ref();
-            services
-                .editable_text(&block, "content")
-                .map(|c| c.current())
-                .unwrap_or_default()
-        });
+        let text = self
+            .driver_concrete()
+            .editor_live_text(&block)
+            .unwrap_or_else(|| {
+                let reactive = self.reactive();
+                let services: &dyn BuilderServices = reactive.as_ref();
+                services
+                    .editable_text(&block, "content")
+                    .map(|c| c.current())
+                    .unwrap_or_default()
+            });
         assert!(
             text.is_char_boundary(byte_position),
             "[apply_move_cursor] byte_position {byte_position} not a char boundary of {text:?}"
@@ -2807,7 +2943,7 @@ impl HeadlessFrontendComponent {
 /// (the pre-commit value, same source `E2ESut::editor_live_text` reads).
 impl SutEditorMirrorRead for HeadlessFrontendComponent {
     fn editor_caret_byte(&self, block_id: &EntityUri) -> Result<Option<usize>, String> {
-        self.driver.editor_cursor_byte(block_id)
+        self.driver().editor_cursor_byte(block_id)
     }
 
     fn editor_live_text(&self, block_id: &EntityUri) -> Result<String, String> {
@@ -2816,10 +2952,11 @@ impl SutEditorMirrorRead for HeadlessFrontendComponent {
         // mutate, which after an own trailing-whitespace echo can legitimately
         // diverge from the SQL-trimmed `block.content`). Fall back to the Loro
         // MutableText for a focused-but-not-yet-opened editor (no VM yet).
-        if let Some(text) = self.driver.editor_live_text(block_id) {
+        if let Some(text) = self.driver_concrete().editor_live_text(block_id) {
             return Ok(text);
         }
-        let services: &dyn BuilderServices = self.reactive.as_ref();
+        let reactive = self.reactive();
+        let services: &dyn BuilderServices = reactive.as_ref();
         services
             .editable_text(block_id, "content")
             .map(|cell| cell.current())
@@ -2832,7 +2969,7 @@ impl SutEditorMirrorRead for HeadlessFrontendComponent {
         &self,
         block_id: &EntityUri,
     ) -> Result<Option<Vec<String>>, String> {
-        Ok(self.driver.slash_menu_labels(block_id))
+        Ok(self.driver_concrete().slash_menu_labels(block_id))
     }
 }
 
@@ -2854,7 +2991,7 @@ impl SutNavHistoryWrite for HeadlessFrontendComponent {
         };
         let mut params = std::collections::HashMap::new();
         params.insert("region".to_string(), Value::String(region_str.to_string()));
-        self.session
+        self.session()
             .execute_operation(&EntityName::new("navigation"), "go_home", params)
             .await
             .unwrap_or_else(|e| {
@@ -3292,12 +3429,13 @@ impl SutEntityTypeRegister for HeadlessFrontendComponent {
 impl SutClockAdvance for HeadlessFrontendComponent {
     async fn advance_clock_days(&self, days: i64) -> String {
         let clock = self
+            .boot_params
             .clock
             .as_ref()
             .expect("SutClockAdvance requires an injected TestClock (new_with_clock boot)");
         const MS_PER_DAY: i64 = 86_400_000;
         clock.advance(days * MS_PER_DAY);
-        holon::sync::clock_scheduler::reconcile_clock(self.engine.db_handle(), clock.as_ref())
+        holon::sync::clock_scheduler::reconcile_clock(self.engine().db_handle(), clock.as_ref())
             .await
             .expect("reconcile_clock after advancing the injected clock");
         // The journal auto-create action fires REACTIVELY off the clock-relation
@@ -3352,7 +3490,7 @@ impl SutHistory for HeadlessFrontendComponent {
 impl SutHistoryWrite for HeadlessFrontendComponent {
     async fn undo_last_mutation(&self) {
         tracing::trace!("[apply] UndoLastMutation");
-        let result = self.engine.undo().await;
+        let result = self.engine().undo().await;
         assert!(result.is_ok(), "undo failed: {:?}", result.err());
         assert!(
             result.unwrap().applied(),
@@ -3362,7 +3500,7 @@ impl SutHistoryWrite for HeadlessFrontendComponent {
 
     async fn redo(&self) {
         tracing::trace!("[apply] Redo");
-        let result = self.engine.redo().await;
+        let result = self.engine().redo().await;
         assert!(result.is_ok(), "redo failed: {:?}", result.err());
         assert!(
             result.unwrap().applied(),
@@ -3419,7 +3557,7 @@ impl SutNavHistoryDrive for HeadlessFrontendComponent {
         // id would pin a GHOST (the matview's `focus_roots` would then hold
         // the synthetic while the resolved oracle holds the real id → divergence).
         let resolved = self.resolve_id(block_id);
-        self.driver
+        self.driver_concrete()
             .click_entity_with_modifiers(
                 &resolved,
                 holon_api::Region::Main.as_str(),
@@ -3463,7 +3601,7 @@ impl SutNavHistoryDrive for HeadlessFrontendComponent {
         };
         let resolved = self.resolve_id(block_id);
         self.await_sidebar_intent(&resolved, modifiers).await;
-        self.driver
+        self.driver_concrete()
             .click_entity_with_modifiers(
                 &resolved,
                 holon_api::Region::LeftSidebar.as_str(),
@@ -3801,7 +3939,7 @@ impl SutSeamMutate for HeadlessFrontendComponent {
             };
             let doc_block = current.iter().find(|b| b.id == *doc_uri && b.is_page());
             let org = crate::serialize_blocks_to_org_with_doc(&doc_blocks, doc_uri, doc_block);
-            FileSystem::write(self.org_fs.as_ref(), file_path, org.as_bytes())
+            FileSystem::write(self.org_fs().as_ref(), file_path, org.as_bytes())
                 .await
                 .unwrap_or_else(|e| {
                     panic!("[apply_mutation/External] write {file_path:?} failed: {e:#}")
@@ -3839,7 +3977,7 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         let doc_blocks: Vec<&Block> = doc_blocks_of(&grouped, &resolved_doc, "bulk_external_add");
         let doc_block = current.iter().find(|b| b.id == resolved_doc && b.is_page());
         let org = crate::serialize_blocks_to_org_with_doc(&doc_blocks, &resolved_doc, doc_block);
-        FileSystem::write(self.org_fs.as_ref(), &file_path, org.as_bytes())
+        FileSystem::write(self.org_fs().as_ref(), &file_path, org.as_bytes())
             .await
             .unwrap_or_else(|e| panic!("[bulk_external_add] write {file_path:?} failed: {e:#}"));
         // Every bulk block is written WITH its oracle id in the `:ID:` drawer, so
@@ -3871,7 +4009,7 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         let doc_block = current.iter().find(|b| b.id == resolved_doc && b.is_page());
         let org = crate::serialize_blocks_to_org_with_doc(&doc_blocks, &resolved_doc, doc_block);
         let stale = strip_org_block_ids(&org);
-        FileSystem::write(self.org_fs.as_ref(), &file_path, stale.as_bytes())
+        FileSystem::write(self.org_fs().as_ref(), &file_path, stale.as_bytes())
             .await
             .unwrap_or_else(|e| {
                 panic!("[stale_external_rewrite] write {file_path:?} failed: {e:#}")
@@ -3996,7 +4134,7 @@ impl SutBlockCreate for HeadlessFrontendComponent {
                      synthetic doc id whose real SUT id was never reconciled; refusing to \
                      dispatch block.create under a non-existent parent"
                 );
-                self.driver
+                self.driver_concrete()
                     .create_block_with_id(&parent, content, uri)
                     .await
                     .unwrap_or_else(|e| panic!("[SutBlockCreate::apply_create_under_focus] {e:#}"))
@@ -4005,7 +4143,7 @@ impl SutBlockCreate for HeadlessFrontendComponent {
             // it re-resolves the parent from its own live rendered rowset (WP-E
             // focus-root cross-check preserved) and mints via `block.create`.
             None => self
-                .driver
+                .driver_concrete()
                 .commit_creation_slot(content)
                 .await
                 .map(|_| ())
@@ -4040,6 +4178,10 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
         );
     }
 
+    async fn reboot(&self) {
+        HeadlessFrontendComponent::reboot(self).await;
+    }
+
     async fn simulate_restart(&self) {
         use holon_filesystem::FileSystem;
         // Faithful to `E2ESut`/`TestEnvironment::simulate_restart` (which is itself a
@@ -4052,15 +4194,19 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
         // settle (E2ESut's `wait_for_blocks_synced`, relocated to the seam)
         // lives HERE in the cap since the composed harness has no seam: poll
         // `block_raw` to a stable id-set.
-        for path in &self.org_paths {
-            let content = FileSystem::read_to_string(self.org_fs.as_ref(), path)
+        for path in self.org_paths() {
+            let content = FileSystem::read_to_string(self.org_fs().as_ref(), path)
                 .await
                 .unwrap_or_else(|e| panic!("[simulate_restart] read {path:?} failed: {e:#}"));
-            FileSystem::write(self.org_fs.as_ref(), path, format!("{content} ").as_bytes())
-                .await
-                .unwrap_or_else(|e| panic!("[simulate_restart] touch {path:?} failed: {e:#}"));
+            FileSystem::write(
+                self.org_fs().as_ref(),
+                path,
+                format!("{content} ").as_bytes(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("[simulate_restart] touch {path:?} failed: {e:#}"));
             tokio::time::sleep(Duration::from_millis(50)).await;
-            FileSystem::write(self.org_fs.as_ref(), path, content.as_bytes())
+            FileSystem::write(self.org_fs().as_ref(), path, content.as_bytes())
                 .await
                 .unwrap_or_else(|e| panic!("[simulate_restart] restore {path:?} failed: {e:#}"));
         }
@@ -4093,8 +4239,8 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
 
     async fn create_document(&self, file_name: &str) {
         use holon_filesystem::FileSystem;
-        let file_path = self.org_root.join(file_name);
-        FileSystem::write(self.org_fs.as_ref(), &file_path, b"")
+        let file_path = self.org_root().join(file_name);
+        FileSystem::write(self.org_fs().as_ref(), &file_path, b"")
             .await
             .unwrap_or_else(|e| {
                 panic!("[SutAppLifecycle::create_document] write {file_name} failed: {e:#}")
@@ -4149,8 +4295,8 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
 
     async fn delete_document(&self, file_name: &str) {
         use holon_filesystem::FileSystem;
-        let file_path = self.org_root.join(file_name);
-        FileSystem::remove(self.org_fs.as_ref(), &file_path)
+        let file_path = self.org_root().join(file_name);
+        FileSystem::remove(self.org_fs().as_ref(), &file_path)
             .await
             .unwrap_or_else(|e| {
                 panic!("[SutAppLifecycle::delete_document] remove {file_name} failed: {e:#}")
@@ -4210,12 +4356,12 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
         // `on_file_deleted` cascade-over-delete never triggers and the doc is
         // never double-homed — the atomic path both the reference and the SUT
         // now share, which un-parks the `doc-file-rename` keystone case.
-        let old_path = self.org_root.join(old_file_name);
-        let new_path = self.org_root.join(new_file_name);
+        let old_path = self.org_root().join(old_file_name);
+        let new_path = self.org_root().join(new_file_name);
         if let Some(parent) = new_path.parent() {
-            self.org_fs.mkdir_all(parent);
+            self.org_fs().mkdir_all(parent);
         }
-        FileSystem::rename(self.org_fs.as_ref(), &old_path, &new_path)
+        FileSystem::rename(self.org_fs().as_ref(), &old_path, &new_path)
             .await
             .unwrap_or_else(|e| {
                 panic!(
@@ -4289,7 +4435,7 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
         // its `.holon/consolidator` marker really exists. Loro-on iff a doc store
         // was resolved. See `run_epoch_flip_rejection_check` for the rejection logic.
         crate::test_environment::run_epoch_flip_rejection_check(
-            self._temp.path(),
+            self.store.temp.path(),
             self.loro_doc_store().is_some(),
         )
         .await;
@@ -4311,11 +4457,11 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
 impl holon_pbt_core::capabilities::SutFixtureFs for HeadlessFrontendComponent {
     async fn write_org_file(&self, filename: &str, content: &str) {
         use holon_filesystem::FileSystem;
-        let file_path = self.org_root.join(filename);
+        let file_path = self.org_root().join(filename);
         if let Some(parent) = file_path.parent() {
-            self.org_fs.mkdir_all(parent);
+            self.org_fs().mkdir_all(parent);
         }
-        FileSystem::write(self.org_fs.as_ref(), &file_path, content.as_bytes())
+        FileSystem::write(self.org_fs().as_ref(), &file_path, content.as_bytes())
             .await
             .unwrap_or_else(|e| {
                 panic!("[SutFixtureFs::write_org_file] write {filename} failed: {e:#}")
@@ -4399,7 +4545,7 @@ impl SutErrorLog for HeadlessFrontendComponent {
     /// the SAME production `FrontendSession` publish-error tracker `E2ESut`
     /// read.
     async fn app_error_count(&self) -> usize {
-        self.session.startup_error_count()
+        self.session().startup_error_count()
     }
 
     /// The documents resolved at boot — context for the failure message.
@@ -4425,12 +4571,12 @@ impl SutErrorLog for HeadlessFrontendComponent {
 impl SutFocusWrite for HeadlessFrontendComponent {
     // ALLOW(unused_param): region is fixed to main by the click-driven focus path
     async fn apply_navigate_focus(&self, _region: CapRegion, id: &EntityUri) {
-        self.apply_navigate_focus_via(self.driver.as_ref(), id)
+        self.apply_navigate_focus_via(self.driver().as_ref(), id)
             .await;
     }
 
     async fn apply_focus_editable_text(&self, id: &EntityUri) {
-        self.apply_focus_editable_text_via(self.driver.as_ref(), id)
+        self.apply_focus_editable_text_via(self.driver().as_ref(), id)
             .await;
     }
 }
@@ -4438,16 +4584,17 @@ impl SutFocusWrite for HeadlessFrontendComponent {
 #[async_trait::async_trait(?Send)]
 impl SutEditorMirrorWrite for HeadlessFrontendComponent {
     async fn apply_type_chars(&self, text: &str) {
-        self.apply_type_chars_via(self.driver.as_ref(), text).await;
+        self.apply_type_chars_via(self.driver().as_ref(), text)
+            .await;
     }
 
     async fn apply_delete_backward(&self, count: usize) {
-        self.apply_delete_backward_via(self.driver.as_ref(), count)
+        self.apply_delete_backward_via(self.driver().as_ref(), count)
             .await;
     }
 
     async fn apply_move_cursor(&self, byte_position: usize) {
-        self.apply_move_cursor_via(self.driver.as_ref(), byte_position)
+        self.apply_move_cursor_via(self.driver().as_ref(), byte_position)
             .await;
     }
 }
@@ -4597,7 +4744,7 @@ impl HeadlessFrontendComponent {
                 self.reactive(),
                 resolver.clone(),
             )),
-            None => Arc::new(OpDispatchWriter::new(self.engine.clone())),
+            None => Arc::new(OpDispatchWriter::new(self.engine())),
         };
         caps.insert(block_tree);
         // `SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`: the driver-bound shim
@@ -4787,7 +4934,7 @@ mod tests {
         // `name` property), so it renders as a non-empty row and org-round-trips
         // to a `* <date>` headline (Bug-3 ORACLE fix). Read `content` here.
         let rows = comp
-            .engine
+            .engine()
             .db_handle()
             .query(
                 "SELECT id, content FROM block_raw WHERE parent_id = 'block:journals'",
@@ -4862,7 +5009,7 @@ mod tests {
         // storage shape directly, then assert the production org render.
         let boot_id = boot_days[0].0.clone();
         let shape = comp
-            .engine
+            .engine()
             .db_handle()
             .query(
                 &format!(
@@ -4903,7 +5050,7 @@ mod tests {
         {
             use holon_pbt_core::capabilities::SutOrgRender;
             let tag_rows = comp
-                .engine
+                .engine()
                 .db_handle()
                 .query(
                     &format!(
@@ -4962,7 +5109,7 @@ mod tests {
         // exclude those fixed ids; anything ELSE source-typed under journals is a
         // rule output gone wrong.
         let program_rows = comp
-            .engine
+            .engine()
             .db_handle()
             .query(
                 &format!(
@@ -5079,7 +5226,7 @@ mod tests {
 
         let read_title = || async {
             let rows = comp
-                .engine
+                .engine()
                 .db_handle()
                 .query(
                     &format!(
@@ -5096,7 +5243,7 @@ mod tests {
         };
         let read_page_tag = || async {
             let rows = comp
-                .engine
+                .engine()
                 .db_handle()
                 .query(
                     &format!(
@@ -5117,7 +5264,7 @@ mod tests {
         params.insert("id".into(), Value::String(journal_id.clone()));
         params.insert("field".into(), Value::String("content".to_string()));
         params.insert("value".into(), Value::String("Renamed".to_string()));
-        comp.engine
+        comp.engine()
             .execute_operation(
                 &EntityName::new("block"),
                 "set_field",
@@ -5225,7 +5372,7 @@ mod tests {
 
         let read_title = || async {
             let rows = comp
-                .engine
+                .engine()
                 .db_handle()
                 .query(
                     &format!(
@@ -5242,7 +5389,7 @@ mod tests {
         };
         let read_page_tag = || async {
             let rows = comp
-                .engine
+                .engine()
                 .db_handle()
                 .query(
                     &format!(
@@ -5264,7 +5411,7 @@ mod tests {
         params.insert("id".into(), Value::String(journal_id.clone()));
         params.insert("field".into(), Value::String("content".to_string()));
         params.insert("value".into(), Value::String("Renamed".to_string()));
-        comp.engine
+        comp.engine()
             .execute_operation(
                 &EntityName::new("block"),
                 "set_field",
@@ -5528,7 +5675,7 @@ mod tests {
         // is the block that would wrongly resolve a display query if the program
         // machinery leaked onto the display path.
         let trigger_rows = comp
-            .engine
+            .engine()
             .db_handle()
             .query(
                 "SELECT id, parent_id FROM block_raw WHERE source_language = 'holon_rule'",
@@ -5554,7 +5701,7 @@ mod tests {
         // is the evaluator); its heading renders normally, the `holon_rule` source
         // child excluded from the display collection like any source block.
         let result = comp
-            .engine
+            .engine()
             .blocks()
             .render_entity(&heading_uri, &None)
             .await;
@@ -5592,7 +5739,7 @@ mod tests {
         // Discover the actual doc-block id for doc1 from `block_raw` (robust to the
         // scheme the parser assigns) — this is the id we navigate focus to.
         let rows = comp
-            .engine
+            .engine()
             .db_handle()
             .query("SELECT id FROM block_raw", std::collections::HashMap::new())
             .await
@@ -5619,7 +5766,7 @@ mod tests {
         params.insert("region".to_string(), Value::String("main".to_string()));
         params.insert("block_id".to_string(), Value::String(target.clone()));
         let result = comp
-            .session
+            .session()
             .execute_operation(&EntityName::new("navigation"), "focus", params)
             .await;
         assert!(
@@ -5633,7 +5780,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         let focus_rows = comp
-            .engine
+            .engine()
             .db_handle()
             .query(
                 "SELECT region, block_id FROM current_focus WHERE region = 'main'",
@@ -5655,7 +5802,7 @@ mod tests {
         );
 
         let root_rows = comp
-            .engine
+            .engine()
             .db_handle()
             .query(
                 "SELECT region, root_id FROM focus_roots WHERE region = 'main'",
@@ -5721,7 +5868,7 @@ mod tests {
         // Open an editor on c1 (production click → focus), then type one char.
         comp.apply_focus_editable_text(&c1).await;
         assert_eq!(
-            comp.reactive.focused_block().as_ref(),
+            comp.reactive().focused_block().as_ref(),
             Some(&c1),
             "[editor-probe] apply_focus_editable_text must focus c1"
         );
@@ -5772,7 +5919,7 @@ mod tests {
         // 1) Canonical occurrence (None): open the editor and type 'A' → "c1A".
         comp.apply_focus_editable_text(&c1).await;
         assert_eq!(
-            comp.reactive.focused_occurrence(),
+            comp.reactive().focused_occurrence(),
             None,
             "[spike-1b] focus starts at the canonical occurrence"
         );
@@ -5781,15 +5928,15 @@ mod tests {
         // 2) Switch focus to a DISPLAY occurrence and re-open the editor there.
         //    `set_focus_occurrence` is additive — it does NOT touch `focused_block`,
         //    and the production focus path leaves it intact.
-        comp.reactive.set_focus_occurrence(Some(1));
+        comp.reactive().set_focus_occurrence(Some(1));
         comp.apply_focus_editable_text(&c1).await;
         assert_eq!(
-            comp.reactive.focused_block().as_ref(),
+            comp.reactive().focused_block().as_ref(),
             Some(&c1),
             "[spike-1b] block still focused"
         );
         assert_eq!(
-            comp.reactive.focused_occurrence(),
+            comp.reactive().focused_occurrence(),
             Some(1),
             "[spike-1b] occurrence persists across the production focus path"
         );
@@ -5895,7 +6042,7 @@ mod tests {
 
         // Dump block_raw with content_type + parent so we can see what is pinnable.
         let rows = comp
-            .engine
+            .engine()
             .db_handle()
             .query(
                 // Exclude the `sentinel:no_parent` FK-anchor row (CoreSchemaModule
@@ -5971,7 +6118,7 @@ mod tests {
         let mut params = std::collections::HashMap::new();
         params.insert("r".to_string(), Value::String("right_sidebar".to_string()));
         let fr = comp
-            .engine
+            .engine()
             .db_handle()
             .query(
                 "SELECT region, root_id FROM focus_roots WHERE region = $r",
@@ -6000,7 +6147,7 @@ mod tests {
     /// empty).
     async fn current_focus_main(comp: &HeadlessFrontendComponent) -> Option<String> {
         let rows = comp
-            .engine
+            .engine()
             .db_handle()
             .query(
                 "SELECT block_id FROM current_focus WHERE region = 'main'",
@@ -6099,7 +6246,7 @@ mod tests {
         // Dump navigation_history to find the pin row's `id` (the SUT-assigned
         // history_id).
         let rows = comp
-            .engine
+            .engine()
             .db_handle()
             .query(
                 "SELECT id, region, block_id FROM navigation_history",
@@ -6138,7 +6285,7 @@ mod tests {
         let mut params = std::collections::HashMap::new();
         params.insert("r".to_string(), Value::String("right_sidebar".to_string()));
         let fr = comp
-            .engine
+            .engine()
             .db_handle()
             .query(
                 "SELECT region, root_id FROM focus_roots WHERE region = $r",
@@ -6185,7 +6332,7 @@ mod tests {
         }
 
         let rows = comp
-            .engine
+            .engine()
             .db_handle()
             .query(
                 "SELECT id, region, block_id FROM navigation_history WHERE region = 'main'",
@@ -6244,7 +6391,7 @@ mod tests {
 
         async fn nav_rows(comp: &HeadlessFrontendComponent) -> Vec<(i64, String, String)> {
             let rows = comp
-                .engine
+                .engine()
                 .db_handle()
                 .query(
                     "SELECT id, region, block_id FROM navigation_history ORDER BY id",
@@ -6339,7 +6486,7 @@ mod tests {
 
         async fn dump(comp: &HeadlessFrontendComponent, tag: &str) {
             let rows = comp
-                .engine
+                .engine()
                 .db_handle()
                 .query(
                     "SELECT id, parent_id, content FROM block_raw ORDER BY id",
@@ -6372,7 +6519,7 @@ mod tests {
         // working tree) — these become the oracle's seed set so they filter out of
         // the SUT-side id comparison.
         let booted: BTreeSet<EntityUri> = comp
-            .engine
+            .engine()
             .db_handle()
             .query("SELECT id FROM block_raw", std::collections::HashMap::new())
             .await
@@ -6390,7 +6537,7 @@ mod tests {
         // Seed the fixed parent/c1/c2 tree via the production create op — EXACTLY
         // `spike::seed_sql` but over the headless component's real engine.
         let ids = fixed_ids();
-        let seeder = SqlProjectionComponent::new(comp.engine.clone());
+        let seeder = SqlProjectionComponent::new(comp.engine().clone());
         seeder
             .create_block(&ids.parent, &EntityUri::no_parent(), PARENT)
             .await;
@@ -6408,7 +6555,7 @@ mod tests {
         let mut caps = CapMap::new();
         caps.insert(comp.clone() as Arc<dyn SutBackend>);
         caps.insert(Arc::new(OpDispatchWriter::with_resolver(
-            comp.engine.clone(),
+            comp.engine().clone(),
             resolver.clone(),
         )) as Arc<dyn SutBlockTreeWrite>);
 
@@ -6600,7 +6747,7 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
                 ..Default::default()
             });
         }
-        let registry = self.injector.resolve::<holon_profiles::TypeRegistry>();
+        let registry = self.injector().resolve::<holon_profiles::TypeRegistry>();
         // Through the ADMISSION SEAT, not `declare_type` directly: production
         // declares types here, and a keystone that reached around the seat
         // would be a documented bypass of the CV-E check.
@@ -6609,9 +6756,9 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
         holon_app::type_admission::declare_type_admitted(
             &profiles,
             &type_def,
-            self.engine.db_handle(),
+            self.engine().db_handle(),
             &registry,
-            &self.engine.get_dispatcher(),
+            &self.engine().get_dispatcher(),
         )
         .await
         .unwrap_or_else(|e| {
@@ -6631,7 +6778,7 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
         for (col, val) in fields {
             params.insert(col.into(), holon_api::Value::String(val));
         }
-        self.engine
+        self.engine()
             .get_dispatcher()
             .execute_operation(&holon_api::EntityName::new(type_name), "create", params)
             .await
@@ -6671,7 +6818,7 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
 
 impl HeadlessFrontendComponent {
     async fn write_tier_authority(&self) -> Option<Arc<dyn holon_core::WriteTierAuthority>> {
-        self.injector
+        self.injector()
             .optional_resolve_async::<dyn holon_core::WriteTierAuthority>()
             .await
     }
@@ -6744,7 +6891,7 @@ impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponen
 
     async fn raised_degraded_conditions(&self) -> Vec<String> {
         let Some(bus) = self
-            .injector
+            .injector()
             .optional_resolve_async::<Arc<holon_loro::DegradedSignalBus>>()
             .await
         else {
@@ -6769,7 +6916,7 @@ impl holon_pbt_core::capabilities::SutReadOnlyEditAttempt for HeadlessFrontendCo
             holon_api::Value::String(content.to_string()),
         );
         let outcome = self
-            .engine
+            .engine()
             .execute_operation(
                 &holon_api::EntityName::from("block".to_string()),
                 "set_field",

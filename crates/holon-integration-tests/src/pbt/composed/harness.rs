@@ -247,6 +247,30 @@ pub trait ComposedSlice {
         ref_state: &ReferenceState,
     ) -> (CapMap, Self::Handle, BTreeSet<EntityUri>);
 
+    /// Whether this transition restarts the app. The harness must then REPLACE
+    /// the caps and the handle, which
+    /// [`apply_transition`](Self::apply_transition) cannot do — it only
+    /// borrows `&mut CapMap` and never sees the handle.
+    fn is_reboot(_: &Self::Transition) -> bool {
+        false
+    }
+
+    /// Restart the SUT over its RETAINED store and rebuild the cap map + handle
+    /// around the new boot. `None` (the default) means the slice has no reboot
+    /// seam, so it must narrow the reboot transition out of its alphabet; the
+    /// harness fails loud rather than applying one as a no-op.
+    ///
+    /// Rebuilding is the contract, not swapping handles: caps captured the
+    /// previous boot's engine/driver handles and `CapMap` is insert-only, so a
+    /// partial swap would leave a "reboot" no assertion can catch.
+    async fn reboot(
+        _: &Self::Handle,
+        _: &IdResolver,
+        _: &ReferenceState,
+    ) -> Option<(CapMap, Self::Handle)> {
+        None
+    }
+
     /// Dispatch one transition onto the SUT caps (the per-alphabet `match`).
     async fn apply_transition(
         transition: &Self::Transition,
@@ -673,6 +697,35 @@ pub(crate) struct EngageTally {
 }
 
 impl<S: ComposedSlice> ComposedSut<S> {
+    /// Restart the app and return the SUT rebuilt around the new boot, carrying
+    /// this case's harness-side accumulators across.
+    ///
+    /// What crosses the reboot is everything that describes the RUN rather than
+    /// the boot: the `IdResolver` and the burned pairs (the oracle's synthetic
+    /// ids still name the same persisted blocks), `foreign_ids`, the engagement
+    /// and telemetry ledgers, the tick counter, and the runtime. What does not
+    /// is the cap map and the slice handle — both are rebuilt, so no cap can
+    /// serve a read from the dead boot.
+    ///
+    /// `scaffold_ids` deliberately stay the BOOT's set. Re-snapshotting them
+    /// after a reboot would sweep every block the run has created into the
+    /// seed-excused set and silently disarm the `inv-blocks-match-ref` family
+    /// for the rest of the case.
+    fn rebooted(mut self, ref_state: &ReferenceState) -> Self {
+        let (caps, handle) = self
+            .rt
+            .block_on(S::reboot(&self.handle, &self.resolver, ref_state))
+            .expect(
+                "a reboot transition reached a slice with no reboot seam \
+                 (`ComposedSlice::reboot` returned None) — the slice must narrow the transition \
+                 out of its alphabet instead of applying it as a no-op",
+            );
+        self.caps = caps;
+        self.handle = handle;
+        self.tick.set(self.tick.get() + 1);
+        self
+    }
+
     /// Construct a `ComposedSut` around ALREADY-BOOTED caps instead of
     /// tokio-booting via [`ComposedSlice::build`] (the §Round-5 windowed
     /// repoint: the gpui-thread harness boots a `compose_sut` session,
@@ -877,6 +930,9 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     }
 
     fn apply(mut sut: Self, ref_state: &ReferenceState, transition: S::Transition) -> Self {
+        if S::is_reboot(&transition) {
+            return sut.rebooted(ref_state);
+        }
         let action = action_label(&transition);
         // Kept for the post-apply redo gate below (`action` itself is moved into
         // the timed async block's tracing field).

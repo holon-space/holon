@@ -3338,6 +3338,14 @@ pub trait SutAppLifecycle {
         enable_loro: bool,
     );
     async fn simulate_restart(&self);
+    /// A TRUE reboot: shut the storage engine down and boot again over the same
+    /// on-disk store. Distinct from [`Self::simulate_restart`], which only
+    /// touches org files so the running controller re-parses them — that keeps
+    /// the engine, so it can never observe what persisted state does across a
+    /// boot. The store is not re-seeded, so the persisted block set must
+    /// survive unchanged; only in-memory UI state (caret, editor buffers,
+    /// overlays) resets.
+    async fn reboot(&self);
     async fn create_document(&self, file_name: &str);
     async fn delete_document(&self, file_name: &str);
     /// `RenameDocument`: move the org file `old_file_name` -> `new_file_name`

@@ -53,6 +53,7 @@ use crate::pbt::composed::boundary::BoundaryOutcome;
 use crate::pbt::composed::boundary::BoundaryWindow;
 use crate::pbt::composed::boundary::settled_and_pending;
 use crate::pbt::composed::builder::compose_sut;
+use crate::pbt::composed::builder::compose_sut_over_existing;
 use crate::pbt::composed::builder::compose_sut_seeded;
 use crate::pbt::composed::builder::compose_sut_seeded_with_peer_id;
 use crate::pbt::composed::builder::compose_sut_windowed_base_seeded;
@@ -894,6 +895,72 @@ fn wide_seed_tree() -> Vec<NewBlock> {
     ]
 }
 
+/// The observability caps every composed wide SUT carries: the settle-latency
+/// recorder (`inv-settle-budget`) and, under `otel-testing`, the span-metrics,
+/// observed-error, declared-column-gap and reseed-attribution hosts. Shared by
+/// the boot and the REBOOT rebuild, so a post-reboot tick is judged by exactly
+/// the same invariants as every other tick. The per-case resets inside are
+/// process-global; a reboot re-runs them, which is the honest semantics (the
+/// pre-reboot process's attribution does not carry into the new one).
+fn install_observability_caps(caps: &mut CapMap) {
+    // `inv-settle-budget` coverage: the per-transition latency recorder the
+    // harness fills from its timed apply+settle window (the same window the
+    // `holon_latency` `stage=action_total` event reports). One `Arc`,
+    // registered as both the write (lifecycle) and read cap. NOT otel-gated —
+    // a wall clock needs no span collector.
+    {
+        use crate::pbt::composed::settle_latency::ComposedSettleLatency;
+        use crate::pbt::composed::settle_latency::SettleLatency;
+        use crate::pbt::composed::settle_latency::SettleLatencyLifecycle;
+        let s = std::sync::Arc::new(ComposedSettleLatency::new());
+        caps.insert(s.clone() as std::sync::Arc<dyn SettleLatency>);
+        caps.insert(s as std::sync::Arc<dyn SettleLatencyLifecycle>);
+    }
+
+    // `inv-sql-budget` coverage: a span-metrics provider hosting the SAME
+    // `MetricsSut` the native E2ESut uses, exposed through `ComposedBudget`
+    // (the read) + `SutMetricsLifecycle` (the `ComposedSut` harness drives
+    // reset-on-apply / freeze-on-check). One `Arc`, registered as both caps.
+    #[cfg(feature = "otel-testing")]
+    {
+        use crate::pbt::composed::complexity_trend::ComposedTrend;
+        use crate::pbt::composed::span_metrics::ComposedBudget;
+        use crate::pbt::composed::span_metrics::ComposedSpanMetrics;
+        use crate::pbt::composed::span_metrics::SutMetricsLifecycle;
+        let m = std::sync::Arc::new(ComposedSpanMetrics::new());
+        caps.insert(m.clone() as std::sync::Arc<dyn ComposedBudget>);
+        // Same host, third cap: `inv-complexity-class-trend` fits the counter
+        // series the budget's own freeze point already produces.
+        caps.insert(m.clone() as std::sync::Arc<dyn ComposedTrend>);
+        caps.insert(m as std::sync::Arc<dyn SutMetricsLifecycle>);
+
+        use crate::pbt::composed::observed_errors::ComposedObservedErrors;
+        use crate::pbt::composed::observed_errors::ObservedProblems;
+        caps.insert(std::sync::Arc::new(ComposedObservedErrors::new())
+            as std::sync::Arc<dyn ObservedProblems>);
+
+        // Declared-column-gap pin: the read cap plus a per-case reset of the
+        // process-global dedup behind `warn_missing_declared_column`, which
+        // warns once per (context, column) per PROCESS and would otherwise let
+        // the first case swallow every later case's signal.
+        use crate::pbt::composed::declared_column_gaps::ComposedDeclaredColumnGaps;
+        use crate::pbt::composed::declared_column_gaps::DeclaredColumnGaps;
+        holon_api::computed::reset_missing_declared_warnings();
+        caps.insert(std::sync::Arc::new(ComposedDeclaredColumnGaps::new())
+            as std::sync::Arc<dyn DeclaredColumnGaps>);
+
+        // Reseed-attribution pin (Inc 0): the read cap + a per-case reset of the
+        // process-global observer, so each case's full-reseed attribution starts
+        // clean (mirrors the `SpanCollector::reset` in the harness).
+        use crate::pbt::composed::reseed_observer::ComposedReseedObserver;
+        use crate::pbt::composed::reseed_observer::ReseedAttribution;
+        use crate::pbt::composed::reseed_observer::ReseedObserver;
+        ReseedObserver::global().reset();
+        caps.insert(std::sync::Arc::new(ComposedReseedObserver::new())
+            as std::sync::Arc<dyn ReseedAttribution>);
+    }
+}
+
 /// Boot the windowless production SUT for the oracle's wiring via the
 /// PRODUCTION builder (`compose_sut_seeded`) and seed the working tree, then
 /// (for a focus-capable config) drive the initial focus onto the page root
@@ -1130,62 +1197,7 @@ pub async fn boot_and_seed_wide_with_peer_id(
             as std::sync::Arc<dyn holon_pbt_core::capabilities::SutReadOnlyEditAttempt>);
     }
 
-    // `inv-settle-budget` coverage: the per-transition latency recorder the
-    // harness fills from its timed apply+settle window (the same window the
-    // `holon_latency` `stage=action_total` event reports). One `Arc`,
-    // registered as both the write (lifecycle) and read cap. NOT otel-gated —
-    // a wall clock needs no span collector.
-    {
-        use crate::pbt::composed::settle_latency::ComposedSettleLatency;
-        use crate::pbt::composed::settle_latency::SettleLatency;
-        use crate::pbt::composed::settle_latency::SettleLatencyLifecycle;
-        let s = std::sync::Arc::new(ComposedSettleLatency::new());
-        caps.insert(s.clone() as std::sync::Arc<dyn SettleLatency>);
-        caps.insert(s as std::sync::Arc<dyn SettleLatencyLifecycle>);
-    }
-
-    // `inv-sql-budget` coverage: a span-metrics provider hosting the SAME
-    // `MetricsSut` the native E2ESut uses, exposed through `ComposedBudget`
-    // (the read) + `SutMetricsLifecycle` (the `ComposedSut` harness drives
-    // reset-on-apply / freeze-on-check). One `Arc`, registered as both caps.
-    #[cfg(feature = "otel-testing")]
-    {
-        use crate::pbt::composed::complexity_trend::ComposedTrend;
-        use crate::pbt::composed::span_metrics::ComposedBudget;
-        use crate::pbt::composed::span_metrics::ComposedSpanMetrics;
-        use crate::pbt::composed::span_metrics::SutMetricsLifecycle;
-        let m = std::sync::Arc::new(ComposedSpanMetrics::new());
-        caps.insert(m.clone() as std::sync::Arc<dyn ComposedBudget>);
-        // Same host, third cap: `inv-complexity-class-trend` fits the counter
-        // series the budget's own freeze point already produces.
-        caps.insert(m.clone() as std::sync::Arc<dyn ComposedTrend>);
-        caps.insert(m as std::sync::Arc<dyn SutMetricsLifecycle>);
-
-        use crate::pbt::composed::observed_errors::ComposedObservedErrors;
-        use crate::pbt::composed::observed_errors::ObservedProblems;
-        caps.insert(std::sync::Arc::new(ComposedObservedErrors::new())
-            as std::sync::Arc<dyn ObservedProblems>);
-
-        // Declared-column-gap pin: the read cap plus a per-case reset of the
-        // process-global dedup behind `warn_missing_declared_column`, which
-        // warns once per (context, column) per PROCESS and would otherwise let
-        // the first case swallow every later case's signal.
-        use crate::pbt::composed::declared_column_gaps::ComposedDeclaredColumnGaps;
-        use crate::pbt::composed::declared_column_gaps::DeclaredColumnGaps;
-        holon_api::computed::reset_missing_declared_warnings();
-        caps.insert(std::sync::Arc::new(ComposedDeclaredColumnGaps::new())
-            as std::sync::Arc<dyn DeclaredColumnGaps>);
-
-        // Reseed-attribution pin (Inc 0): the read cap + a per-case reset of the
-        // process-global observer, so each case's full-reseed attribution starts
-        // clean (mirrors the `SpanCollector::reset` in the harness).
-        use crate::pbt::composed::reseed_observer::ComposedReseedObserver;
-        use crate::pbt::composed::reseed_observer::ReseedAttribution;
-        use crate::pbt::composed::reseed_observer::ReseedObserver;
-        ReseedObserver::global().reset();
-        caps.insert(std::sync::Arc::new(ComposedReseedObserver::new())
-            as std::sync::Arc<dyn ReseedAttribution>);
-    }
+    install_observability_caps(&mut caps);
 
     // Scaffold = everything the SUT booted OR the oracle models, EXCEPT the
     // non-seed working tree (parent/c1/c2) — and, for a frontend config, EXCEPT
@@ -1266,6 +1278,44 @@ pub async fn boot_and_seed_wide_with_peer_id(
     }
 
     (caps, handle, scaffold)
+}
+
+/// Restart the booted app over its RETAINED store and rebuild the SUT around
+/// the new boot — the composed keystone's real `persist → drop the engine →
+/// boot again` step (`SimulateRestart` only touches org files).
+///
+/// Rebuilt, not patched: the caps built at boot captured that boot's
+/// `BackendEngine` / `ReactiveEngine` / driver / Loro handles, and `CapMap` is
+/// insert-only, so the only way a post-reboot read cannot reach a dead boot is
+/// to derive every cap again ([`compose_sut_over_existing`]). The
+/// [`WideHandle`] is rebuilt for the same reason: its Turso engine drives the
+/// CDC-watermark settle, and a stale one would wait on a shut-down actor.
+///
+/// Nothing is re-seeded (the store keeps the run's blocks — asserted inside
+/// [`HeadlessFrontendComponent::reboot`]) and no focus is re-aligned: what
+/// navigation state survives a boot is exactly what the `Reboot` transition's
+/// reference model claims, so aligning it here would erase the observation.
+pub async fn reboot_wide(
+    handle: &WideHandle,
+    resolver: &IdResolver,
+    ref_state: &ReferenceState,
+) -> (CapMap, WideHandle) {
+    let frontend = handle
+        .frontend()
+        .expect(
+            "Reboot is hosted only where a frontend component was booted (SutAppLifecycle); a \
+             draw without one must narrow the transition out rather than reach here",
+        )
+        .clone();
+    frontend.reboot().await;
+
+    let set = set_for_wiring(&ref_state.harness.wiring);
+    let bundle = compose_sut_over_existing(&set, resolver, frontend).await;
+    let handle = WideHandle::from_bundle(&bundle);
+    let mut caps = bundle.caps;
+    install_observability_caps(&mut caps);
+    converge_projections(&handle, crate::pbt::composed::soak_seed::soak_settle()).await;
+    (caps, handle)
 }
 
 /// The §Round-5 windowed dual of [`boot_and_seed_wide`]: boot the SAME wide
@@ -1838,6 +1888,16 @@ impl ComposedSlice for WideE2E {
         ref_state: &ReferenceState,
     ) -> (CapMap, WideHandle, BTreeSet<EntityUri>) {
         boot_and_seed_wide(resolver, ref_state).await
+    }
+
+    /// The real restart: drop this boot's engine and boot again over the same
+    /// on-disk store, rebuilding the cap map around the new boot.
+    async fn reboot(
+        handle: &WideHandle,
+        resolver: &IdResolver,
+        ref_state: &ReferenceState,
+    ) -> Option<(CapMap, WideHandle)> {
+        Some(reboot_wide(handle, resolver, ref_state).await)
     }
 
     /// Replace the flat post-apply `sleep(SETTLE)` with the 3-projection

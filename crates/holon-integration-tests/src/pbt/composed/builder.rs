@@ -179,6 +179,7 @@ pub async fn compose_sut_windowed_base(set: &ComponentSet, resolver: &IdResolver
         &[],
         DriverPlacement::Deferred,
         None,
+        None,
     )
     .await
 }
@@ -200,6 +201,7 @@ pub async fn compose_sut_windowed_base_seeded(
         frontend_seed_org,
         seed_tree,
         DriverPlacement::Deferred,
+        None,
         None,
     )
     .await
@@ -240,6 +242,7 @@ pub async fn compose_sut_seeded(
         seed_tree,
         DriverPlacement::HeadlessReactive,
         None,
+        None,
     )
     .await
 }
@@ -262,6 +265,36 @@ pub async fn compose_sut_seeded_with_peer_id(
         seed_tree,
         DriverPlacement::HeadlessReactive,
         Some(peer_id),
+        None,
+    )
+    .await
+}
+
+/// Rebuild the composed `CapMap` over an ALREADY-BOOTED frontend component —
+/// the reboot seam. The caller (`wide_e2e::reboot_wide`) has just called
+/// [`HeadlessFrontendComponent::reboot`], so `frontend` holds a fresh
+/// `BootedSession` over the same on-disk store; this re-derives every cap from
+/// that new boot. Nothing is seeded: the store already holds the run's blocks,
+/// and re-seeding would double the vault (the identity assert inside `reboot`
+/// is the teeth for that).
+///
+/// Rebuilding — rather than swapping handles inside the existing caps — is what
+/// makes a stale handle unrepresentable: `CapMap` is insert-only, so a cap that
+/// captured the old `BackendEngine`/`ReactiveEngine`/driver could not be
+/// overridden and the "reboot" would be a lie no assertion catches.
+pub async fn compose_sut_over_existing(
+    set: &ComponentSet,
+    resolver: &IdResolver,
+    frontend: Arc<HeadlessFrontendComponent>,
+) -> ComposedSut {
+    compose_sut_seeded_impl(
+        set,
+        resolver,
+        &[],
+        &[],
+        DriverPlacement::HeadlessReactive,
+        None,
+        Some(frontend),
     )
     .await
 }
@@ -269,6 +302,10 @@ pub async fn compose_sut_seeded_with_peer_id(
 /// The workhorse behind [`compose_sut_seeded`] / [`compose_sut_windowed_base`].
 /// Identical for every config except the driver rung, chosen by
 /// `driver_placement` (see [`DriverPlacement`]).
+///
+/// `existing_frontend` is the reboot seam ([`compose_sut_over_existing`]): when
+/// present, the frontend arm adopts that component instead of booting a new
+/// one, and both seeds MUST be empty (the store is already populated).
 // The harness holds single-threaded SUT parts in `Arc` because the
 // production trait signatures it feeds require `Arc`, not `Rc`.
 #[allow(clippy::arc_with_non_send_sync)]
@@ -279,7 +316,18 @@ async fn compose_sut_seeded_impl(
     seed_tree: &[NewBlock],
     driver_placement: DriverPlacement,
     peer_id: Option<u64>,
+    existing_frontend: Option<Arc<HeadlessFrontendComponent>>,
 ) -> ComposedSut {
+    assert!(
+        existing_frontend.is_none() || (frontend_seed_org.is_empty() && seed_tree.is_empty()),
+        "compose_sut over an existing frontend must not seed: the retained store already holds \
+         the run's blocks, so a seed here would double the vault"
+    );
+    assert!(
+        existing_frontend.is_none() || set.has_projection(Projection::ViewModel),
+        "compose_sut over an existing frontend needs the ViewModel projection — only the frontend \
+         arm can adopt a booted component. got {set:?}"
+    );
     let has_turso = set.has_storage(StorageAdapter::Turso);
     let has_loro = set.has_storage(StorageAdapter::Loro);
     let has_frontend = set.has_projection(Projection::ViewModel);
@@ -356,27 +404,32 @@ async fn compose_sut_seeded_impl(
         // `SutClockAdvance` is registered below (after `register_non_gesture`)
         // ONLY under `HOLON_PBT_ADVANCE_DAY`; when off, `AdvanceDay` stays out
         // of the alphabet and the clock never advances past boot (default).
-        let comp = Arc::new(match peer_id {
-            Some(peer_id) => {
-                HeadlessFrontendComponent::new_with_clock_and_peer_id(
-                    frontend_seed_org,
-                    Duration::from_millis(300),
-                    has_editor,
-                    crate::pbt::frontend_slice::components::keystone_boot_clock(),
-                    peer_id,
-                )
-                .await
-            }
-            None => {
-                HeadlessFrontendComponent::new_with_clock(
-                    frontend_seed_org,
-                    Duration::from_millis(300),
-                    has_editor,
-                    crate::pbt::frontend_slice::components::keystone_boot_clock(),
-                )
-                .await
-            }
-        });
+        // The reboot seam: adopt the caller's already-rebooted component rather
+        // than booting a fresh store.
+        let comp = match existing_frontend {
+            Some(comp) => comp,
+            None => Arc::new(match peer_id {
+                Some(peer_id) => {
+                    HeadlessFrontendComponent::new_with_clock_and_peer_id(
+                        frontend_seed_org,
+                        Duration::from_millis(300),
+                        has_editor,
+                        crate::pbt::frontend_slice::components::keystone_boot_clock(),
+                        peer_id,
+                    )
+                    .await
+                }
+                None => {
+                    HeadlessFrontendComponent::new_with_clock(
+                        frontend_seed_org,
+                        Duration::from_millis(300),
+                        has_editor,
+                        crate::pbt::frontend_slice::components::keystone_boot_clock(),
+                    )
+                    .await
+                }
+            }),
+        };
         let eng = comp.engine();
         // Share the reconcile resolver so the component's id-taking nav/focus caps
         // (pin_block/navigate_focus/focus_editable_text) translate oracle synthetic
