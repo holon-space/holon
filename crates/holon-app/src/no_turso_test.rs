@@ -18,7 +18,11 @@ fn empty_source() -> Arc<dyn BlockQuerySource> {
 
 #[tokio::test]
 async fn from_block_query_source_has_no_engine_but_a_source() {
-    let session = from_block_query_source(empty_source(), None);
+    let session = from_block_query_source(
+        empty_source(),
+        None,
+        &holon_api::lifecycle::SessionShutdown::new(),
+    );
     // No Turso query engine wired on a no-Turso session.
     assert!(session.query_engine().is_none());
     // `block_query` is total (non-Option) — a snapshot is always reachable.

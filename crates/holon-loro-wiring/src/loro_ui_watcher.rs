@@ -64,6 +64,7 @@ use tokio::sync::mpsc;
 /// the (empty) profile source, and the entity refresh below spawns its own.
 pub fn build_turso_free_profile_resolver(
     source: Arc<dyn BlockQuerySource>,
+    shutdown: &holon_api::lifecycle::SessionShutdown,
 ) -> Arc<dyn ProfileResolving> {
     let type_registry = holon_profiles::create_default_registry().expect("default TypeRegistry");
     let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry);
@@ -81,7 +82,7 @@ pub fn build_turso_free_profile_resolver(
         HashMap::new(),
         type_profiles,
     ));
-    spawn_live_entity_refresh(source, Arc::downgrade(&resolver));
+    spawn_live_entity_refresh(source, Arc::downgrade(&resolver), shutdown);
     resolver
 }
 
@@ -95,8 +96,11 @@ pub fn build_turso_free_profile_resolver(
 fn spawn_live_entity_refresh(
     source: Arc<dyn BlockQuerySource>,
     resolver: std::sync::Weak<ProfileResolver>,
+    shutdown: &holon_api::lifecycle::SessionShutdown,
 ) {
-    tokio::spawn(async move {
+    let cancelled = shutdown.cancelled();
+    shutdown.spawn("loro-entity-refresh", async move {
+        tokio::pin!(cancelled);
         let mut previous: Option<SourceBlockKey> = None;
         let mut polled_version: Option<u64> = None;
         loop {
@@ -132,7 +136,13 @@ fn spawn_live_entity_refresh(
                 }
             }
             drop(resolver);
-            tokio::time::sleep(LORO_WATCH_POLL).await;
+            // `biased`: the poll reads the store, so a shutdown must win over
+            // the next tick rather than after it.
+            tokio::select! {
+                biased;
+                () = &mut cancelled => return,
+                () = tokio::time::sleep(LORO_WATCH_POLL) => {}
+            }
         }
     });
 }
@@ -795,7 +805,10 @@ mod tests {
                 Vec::new(),
             ))
         })) as Arc<dyn BlockQuerySource>;
-        let resolver = build_turso_free_profile_resolver(source);
+        let resolver = build_turso_free_profile_resolver(
+            source,
+            &holon_api::lifecycle::SessionShutdown::new(),
+        );
         let variants = resolver.resolve_collection_variants();
         assert!(
             !variants.is_empty(),

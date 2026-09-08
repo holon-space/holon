@@ -27,7 +27,6 @@ use anyhow::Result;
 use anyhow::anyhow;
 use holon_api::clock::Clock;
 use holon_api::clock::Grain;
-use holon_api::streaming::ActorAbortGuard;
 
 use crate::storage::turso::DbHandle;
 
@@ -77,11 +76,10 @@ impl GrainSubscriptions {
     }
 }
 
-/// Keeps the scheduler's ticking task alive and hands out fine-grain
-/// subscriptions. Dropping it aborts the task (mirrors
-/// `AdviceReconcilerHandle`).
+/// Hands out fine-grain subscriptions. The ticking task belongs to the
+/// session's `SessionShutdown`, which is what stops it — this handle no longer
+/// owns its lifetime.
 pub struct ClockSchedulerHandle {
-    _abort: ActorAbortGuard,
     subs: Arc<GrainSubscriptions>,
     db_handle: DbHandle,
     clock: Arc<dyn Clock>,
@@ -229,6 +227,7 @@ pub async fn spawn_clock_scheduler(
     db_handle: DbHandle,
     clock: Arc<dyn Clock>,
     interval: Duration,
+    shutdown: &holon_api::lifecycle::SessionShutdown,
 ) -> Result<ClockSchedulerHandle> {
     // Boot seed — must succeed so the boot guard finds a live, real day row.
     let first = reconcile_clock(&db_handle, clock.as_ref())
@@ -238,17 +237,27 @@ pub async fn spawn_clock_scheduler(
 
     let subs = Arc::new(GrainSubscriptions::default());
 
-    let mut aborts = ActorAbortGuard::new();
-    let task = {
+    // Registered with the session, not merely guarded by the handle: the handle
+    // lives on the `BackendEngine`, which is dropped AFTER the storage actor
+    // closes, so abort-on-drop is too late to keep the ticker off a dead store.
+    let cancelled = shutdown.cancelled();
+    {
         let db_handle = db_handle.clone();
         let clock = clock.clone();
         let subs = subs.clone();
-        tokio::spawn(async move {
+        shutdown.spawn("clock-scheduler", async move {
+            tokio::pin!(cancelled);
             let mut ticker = tokio::time::interval(interval);
             // The immediate first tick is redundant with the boot seed above; skip it.
             ticker.tick().await;
             loop {
-                ticker.tick().await;
+                // `biased`: a tick that fires alongside the shutdown must not
+                // start a reconcile against a store that is closing.
+                tokio::select! {
+                    biased;
+                    () = &mut cancelled => return,
+                    _ = ticker.tick() => {}
+                }
                 // Reconcile only the grains with a live reader (Day always). A
                 // fine grain with no subscriber is never touched — the C6
                 // write-amplification gate.
@@ -273,12 +282,10 @@ pub async fn spawn_clock_scheduler(
                     }
                 }
             }
-        })
-    };
-    aborts.push(task.abort_handle());
+        });
+    }
 
     Ok(ClockSchedulerHandle {
-        _abort: aborts,
         subs,
         db_handle,
         clock,
@@ -462,6 +469,7 @@ mod tests {
             // Long interval: the ticking task must not fire inside the test window,
             // so every observed write comes from subscribe/reconcile, not timing.
             Duration::from_secs(3600),
+            &holon_api::lifecycle::SessionShutdown::new(),
         )
         .await
         .unwrap();
@@ -508,6 +516,7 @@ mod tests {
             handle.clone(),
             Arc::new(clock.clone()) as Arc<dyn Clock>,
             Duration::from_secs(3600),
+            &holon_api::lifecycle::SessionShutdown::new(),
         )
         .await
         .unwrap();

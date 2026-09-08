@@ -2525,6 +2525,7 @@ mod tests {
                 move || stream_feed.home_by(stream_authority.clone()),
                 tx,
                 |_, _, _| panic!("must not give up on a single transient fault"),
+                tokio_util::sync::CancellationToken::new(),
             ));
 
             let mut folded: Folded = BTreeMap::new();
@@ -2606,6 +2607,7 @@ mod tests {
                         .unwrap()
                         .push((restarts, format!("{err:#}")));
                 },
+                tokio_util::sync::CancellationToken::new(),
             ));
 
             // Every boot fails from here on.
@@ -2661,6 +2663,7 @@ mod tests {
                 },
                 tx,
                 |_, _, _| {},
+                tokio_util::sync::CancellationToken::new(),
             ));
 
             authority.arm(0, i64::MAX);
@@ -2714,6 +2717,7 @@ mod tests {
                          after {restarts} restarts: {err:#}"
                     )
                 },
+                tokio_util::sync::CancellationToken::new(),
             ));
 
             let mut folded: Folded = BTreeMap::new();

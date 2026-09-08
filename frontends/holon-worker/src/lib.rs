@@ -152,7 +152,7 @@ mod backend {
 
     use holon::api::backend_engine::BackendEngine;
     use holon::api::holon_service::HolonService;
-    use holon::di::lifecycle::create_backend_engine;
+    use holon::di::lifecycle::create_backend_engine_with_extras;
     use holon_api::Change;
     use holon_api::EntityName;
     use holon_api::EntityUri;
@@ -343,55 +343,63 @@ mod backend {
         // indent / outdent / move_*). Native frontends get it via
         // holon-app's `add_frontend` wiring; without it the worker's
         // operation registry is EMPTY and every editor dispatch fails.
-        let engine = runtime
+        let (engine, shutdown) = runtime
             .block_on(async {
-                create_backend_engine(path, |injector| {
-                    use fluxdi::Module as _;
+                create_backend_engine_with_extras(
+                    path,
+                    |injector| {
+                        use fluxdi::Module as _;
 
-                    let clock = BrowserClock {
-                        utc_offset_seconds: *UTC_OFFSET_SECONDS
-                            .get()
-                            .expect("engine_init installs the utc offset before any engine build"),
-                    };
-                    let injected =
-                        holon_api::InjectedClock(Arc::new(clock) as Arc<dyn holon_api::Clock>);
-                    injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(
-                        move |_| injected.clone().into(),
-                    ));
+                        let clock = BrowserClock {
+                            utc_offset_seconds: *UTC_OFFSET_SECONDS.get().expect(
+                                "engine_init installs the utc offset before any engine build",
+                            ),
+                        };
+                        let injected =
+                            holon_api::InjectedClock(Arc::new(clock) as Arc<dyn holon_api::Clock>);
+                        injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(
+                            move |_| injected.clone().into(),
+                        ));
 
-                    holon_loro_wiring::EventInfraModule
-                        .configure(injector)
-                        .map_err(|e| anyhow::anyhow!("EventInfraModule: {e}"))?;
+                        holon_loro_wiring::EventInfraModule
+                            .configure(injector)
+                            .map_err(|e| anyhow::anyhow!("EventInfraModule: {e}"))?;
 
-                    // EventInfraModule's `SqlBlockOperations` only advertises
-                    // structural block ops (indent / split / move_*). CRUD ops
-                    // (set_field / create / delete) are advertised by a second
-                    // provider — native holon-app registers it in
-                    // `turso_seams.rs`, but the worker doesn't load that module,
-                    // so editor content writes and state_toggle dispatches died
-                    // as "No provider registered for entity: block". The worker
-                    // is always SqlOnly (no Loro), so a bare
-                    // `SqlOperationProvider` is the correct CRUD authority (in
-                    // Loro mode native routes CRUD through Loro instead — see the
-                    // drift note in turso_seams.rs). Structural ops still win on
-                    // `SqlBlockOperations` by registration order.
-                    injector.provide_into_set::<dyn holon_core::OperationProvider>(
-                        fluxdi::Provider::root(|resolver| {
-                            let db = resolver
-                                .resolve::<dyn holon::di::DbHandleProvider>()
-                                .handle();
-                            let provider = holon::core::SqlOperationProvider::new(
-                                db,
-                                holon::storage::BLOCK_WRITE_TABLE.to_string(),
-                                "block".to_string(),
-                                "block".to_string(),
-                            );
-                            std::sync::Arc::new(provider)
-                                as std::sync::Arc<dyn holon_core::OperationProvider>
-                        }),
-                    );
-                    Ok(())
-                })
+                        // EventInfraModule's `SqlBlockOperations` only advertises
+                        // structural block ops (indent / split / move_*). CRUD ops
+                        // (set_field / create / delete) are advertised by a second
+                        // provider — native holon-app registers it in
+                        // `turso_seams.rs`, but the worker doesn't load that module,
+                        // so editor content writes and state_toggle dispatches died
+                        // as "No provider registered for entity: block". The worker
+                        // is always SqlOnly (no Loro), so a bare
+                        // `SqlOperationProvider` is the correct CRUD authority (in
+                        // Loro mode native routes CRUD through Loro instead — see the
+                        // drift note in turso_seams.rs). Structural ops still win on
+                        // `SqlBlockOperations` by registration order.
+                        injector.provide_into_set::<dyn holon_core::OperationProvider>(
+                            fluxdi::Provider::root(|resolver| {
+                                let db = resolver
+                                    .resolve::<dyn holon::di::DbHandleProvider>()
+                                    .handle();
+                                let provider = holon::core::SqlOperationProvider::new(
+                                    db,
+                                    holon::storage::BLOCK_WRITE_TABLE.to_string(),
+                                    "block".to_string(),
+                                    "block".to_string(),
+                                );
+                                std::sync::Arc::new(provider)
+                                    as std::sync::Arc<dyn holon_core::OperationProvider>
+                            }),
+                        );
+                        Ok(())
+                    },
+                    |injector| async move {
+                        injector
+                            .resolve_async::<holon_api::lifecycle::SessionShutdown>()
+                            .await
+                    },
+                )
                 .await
             })
             .map_err(|e| super::nerr("create_backend_engine", e))?;
@@ -408,7 +416,8 @@ mod backend {
         // Must run after seed_default_layout so the rule blocks exist to discover.
         runtime
             .block_on(async {
-                holon::api::action_watcher::start_action_watchers(engine.clone()).await
+                holon::api::action_watcher::start_action_watchers(engine.clone(), shutdown.clone())
+                    .await
             })
             .map_err(|e| super::nerr("start_action_watchers", e))?;
         disclosure.performed(BootStep::StartActionWatchers);

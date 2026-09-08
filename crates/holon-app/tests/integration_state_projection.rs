@@ -874,7 +874,7 @@ fn an_in_flight_consent_flow_reaches_the_projected_row() {
             holon_mcp_client::CredentialRoot::new(store.dir()),
         ));
         Arc::new(IntegrationStateProjector::new(db.clone(), vm.clone()))
-            .start()
+            .start(&holon_api::lifecycle::SessionShutdown::new())
             .await
             .expect("the projector must start");
 

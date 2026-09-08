@@ -33,6 +33,7 @@ tracing.workspace = true
 tracing-opentelemetry.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tokio-stream.workspace = true
+tokio-util.workspace = true
 futures.workspace = true
 futures-signals.workspace = true
 uuid.workspace = true

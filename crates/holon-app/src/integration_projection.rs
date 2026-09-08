@@ -206,24 +206,33 @@ impl IntegrationStateProjector {
     /// The INITIAL projection propagates its error, because a mirror that was
     /// never built at all would leave the section silently empty, which is the
     /// escape this table replaces.
-    pub async fn start(self: Arc<Self>) -> anyhow::Result<()> {
+    pub async fn start(
+        self: Arc<Self>,
+        shutdown: &holon_api::lifecycle::SessionShutdown,
+    ) -> anyhow::Result<()> {
         self.project().await?;
 
         for (provider, signal) in self.vm.signals() {
-            self.clone().reproject_on(signal.signal_cloned());
-            self.clone()
-                .reproject_on(self.vm.configure_progress(provider).signal_cloned());
+            self.clone().reproject_on(signal.signal_cloned(), shutdown);
+            self.clone().reproject_on(
+                self.vm.configure_progress(provider).signal_cloned(),
+                shutdown,
+            );
         }
         Ok(())
     }
 
     /// Re-project whenever `signal` fires.
-    fn reproject_on<S>(self: Arc<Self>, signal: S)
+    ///
+    /// Session-scoped: a re-projection writes into the store, so it must not
+    /// outlive it.
+    fn reproject_on<S>(self: Arc<Self>, signal: S, shutdown: &holon_api::lifecycle::SessionShutdown)
     where
         S: futures_signals::signal::Signal + Send + 'static,
         S::Item: Send,
     {
-        tokio::spawn(signal.for_each(move |_| {
+        let cancelled = shutdown.cancelled();
+        let pump = signal.for_each(move |_| {
             let projector = self.clone();
             async move {
                 if let Err(e) = projector.project().await {
@@ -233,7 +242,14 @@ impl IntegrationStateProjector {
                     );
                 }
             }
-        }));
+        });
+        shutdown.spawn("integration-reprojector", async move {
+            tokio::select! {
+                biased;
+                () = cancelled => {}
+                () = pump => {}
+            }
+        });
     }
 }
 

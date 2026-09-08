@@ -75,6 +75,7 @@ pub use no_turso::register_block_query_frontend;
 pub use seed::seed_default_layout;
 pub use session::new_from_config;
 pub use session::new_from_config_with_di;
+pub use session::shutdown_session;
 pub use wiring::ConfigDir;
 pub use wiring::FrontendInjectorExt;
 pub use wiring::HolonFrontendModule;

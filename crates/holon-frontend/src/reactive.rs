@@ -35,6 +35,7 @@ use holon_api::EntityUri;
 use holon_api::NavigationOp;
 use holon_api::QueryLanguage;
 use holon_api::ReactiveRowProvider;
+use holon_api::lifecycle::SessionShutdown;
 use holon_api::ptr_identity;
 use holon_api::render_types::RenderExpr;
 use holon_api::streaming::UiEvent;
@@ -2472,6 +2473,33 @@ impl ReactiveEngine {
         };
         engine.register_memstats();
         engine
+    }
+
+    /// Register the session-scoped task that tears down every UI watch on
+    /// shutdown.
+    ///
+    /// The teardown lives here, not in `watch_ui`, because this map is the only
+    /// thing that can reach the watchers. `Weak`, so the registration cannot
+    /// keep the engine alive.
+    pub fn stop_watchers_on_shutdown(&self, shutdown: &SessionShutdown) {
+        let watchers = Arc::downgrade(&self.watchers);
+        let cancelled = shutdown.cancelled();
+        shutdown.spawn("ui-watchers", async move {
+            cancelled.await;
+            let Some(watchers) = watchers.upgrade() else {
+                return;
+            };
+            let states = std::mem::take(&mut *watchers.lock().expect("watchers mutex poisoned"));
+            for (block_id, state) in states {
+                // Joined, not merely aborted: an abort only schedules
+                // cancellation, and the store closes as soon as this task
+                // returns. The join is also what drops the task's `WatchHandle`,
+                // whose `ActorAbortGuard` stops the rest of the pipeline.
+                state.task.abort();
+                let _ = state.task.await;
+                tracing::debug!(%block_id, "session shutdown: UI watcher stopped");
+            }
+        });
     }
 
     /// Publish the frontend-side memory counters to the process sampler.

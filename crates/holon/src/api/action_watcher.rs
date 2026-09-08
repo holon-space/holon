@@ -32,6 +32,7 @@ use holon_api::effect_id::FiringKey;
 use holon_api::effect_id::OutputSlot;
 use holon_api::effect_id::RuleId;
 use holon_api::effect_id::deterministic_block_id;
+use holon_api::lifecycle::SessionShutdown;
 use holon_api::render_eval::CORE_VALUE_FN_LOOKUP;
 use holon_api::render_eval::eval_to_interp;
 use holon_api::streaming::Change;
@@ -46,21 +47,27 @@ use crate::api::rule_status::RuleStatusHandle;
 
 const DISCOVERY_SQL: &str = include_str!("../../../../assets/queries/action_discovery.sql");
 
-#[tracing::instrument(skip(engine), name = "action_watcher.start")]
-pub async fn start_action_watchers(engine: Arc<BackendEngine>) -> Result<()> {
+#[tracing::instrument(skip(engine, shutdown), name = "action_watcher.start")]
+pub async fn start_action_watchers(
+    engine: Arc<BackendEngine>,
+    shutdown: Arc<SessionShutdown>,
+) -> Result<()> {
     let discovery_stream = engine
         .query_and_watch(DISCOVERY_SQL.to_string(), HashMap::new(), None)
         .await
         .context("Failed to subscribe to action discovery matview")?;
 
     let status = engine.rule_status().clone();
-    crate::util::spawn_actor(run_discovery_loop(engine.clone(), status, discovery_stream));
+    shutdown.spawn(
+        "action-discovery",
+        run_discovery_loop(engine.clone(), status, discovery_stream, shutdown.clone()),
+    );
 
     // Single-block `holon_rule` rules (ADR 0024 §7.2): the unified surface where
     // one YAML block carries both guard and effect. Spawned alongside the legacy
     // query+action pair watcher; the two never fire the same block (a single-block
     // rule has no sibling trigger, which the pair discovery requires).
-    crate::api::holon_rule_watcher::start_holon_rule_watchers(engine)
+    crate::api::holon_rule_watcher::start_holon_rule_watchers(engine, shutdown)
         .await
         .context("Failed to start holon_rule watchers")?;
     Ok(())
@@ -70,10 +77,21 @@ async fn run_discovery_loop(
     engine: Arc<BackendEngine>,
     status: RuleStatusHandle,
     mut discovery_stream: crate::storage::turso::RowChangeStream,
+    shutdown: Arc<SessionShutdown>,
 ) {
     let mut active: HashMap<String, JoinHandle<()>> = HashMap::new();
 
-    while let Some(batch) = discovery_stream.next().await {
+    loop {
+        // `biased`: a shutdown must win over a discovery backlog, so the pair
+        // watchers this loop owns are aborted before the store they read closes.
+        let batch = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            batch = discovery_stream.next() => match batch {
+                Some(batch) => batch,
+                None => break,
+            },
+        };
         for item in batch.inner.items {
             match item.change {
                 Change::Created { data, .. } => {
@@ -92,6 +110,16 @@ async fn run_discovery_loop(
                 _ => {}
             }
         }
+    }
+
+    // The pair watchers are this loop's children — nothing else can reach them,
+    // so this loop is the only place that can stop them. Joining after the
+    // abort is what makes the stop observable: an abort alone merely schedules
+    // cancellation, and the caller closes the store the moment this task ends.
+    for (action_id, handle) in active.drain() {
+        handle.abort();
+        let _ = handle.await;
+        info!("[action_watcher] stopped watcher for {action_id} (discovery loop stopping)");
     }
 }
 

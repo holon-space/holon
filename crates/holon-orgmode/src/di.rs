@@ -616,6 +616,12 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
 
                 let idle_signal_weak = std::sync::Arc::downgrade(&idle_signal);
 
+                // Every task this provider spawns is session-scoped: it reads
+                // the store, so it must stop before the store closes.
+                let shutdown = resolver
+                    .resolve_async::<holon_api::lifecycle::SessionShutdown>()
+                    .await;
+
                 // Keep an authoritative-read handle for the feed resolver BEFORE
                 // the reader is moved into the controller: block routing must
                 // read the `Page` tag from the write authority (`block_raw`), not
@@ -752,9 +758,11 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                 ),
                             }
                         },
+                        &shutdown,
                     );
 
-                    tokio::spawn(async move {
+                    let writeback_cancel = shutdown.token();
+                    shutdown.spawn("org-writeback-consumer", async move {
                         use holon_api::live_data::home_by::HomedDiff;
                         use holon_api::live_data::supervision::Supervised;
 
@@ -769,7 +777,15 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                         let mut snapshot_pending: std::collections::HashSet<String> =
                             std::collections::HashSet::new();
 
-                        while let Some(item) = supervised.recv().await {
+                        // `biased`: shutdown wins over a backlog. Draining the
+                        // rest would render documents off a store that is about
+                        // to close, which is the failure this ordering exists to
+                        // prevent.
+                        while let Some(item) = tokio::select! {
+                            biased;
+                            () = writeback_cancel.cancelled() => None,
+                            item = supervised.recv() => item,
+                        } {
                             // The interaction that wrote this block, taken from
                             // the feed rather than from the ambient span: this
                             // task is spawned at container construction, so its
@@ -822,16 +838,20 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 }
                 drop(rerender_tx);
 
-                tokio::spawn(run_file_sync_controller(
-                    controller,
-                    config.root_directory.clone(),
-                    idle_signal_weak,
-                    rerender_rx,
-                    ready_sender,
-                    fs,
-                    change_source,
-                    formats_for_loop,
-                ));
+                shutdown.spawn(
+                    "file-sync-controller",
+                    run_file_sync_controller(
+                        controller,
+                        config.root_directory.clone(),
+                        idle_signal_weak,
+                        rerender_rx,
+                        ready_sender,
+                        fs,
+                        change_source,
+                        formats_for_loop,
+                        shutdown.clone(),
+                    ),
+                );
 
                 Shared::new(FileSyncStarted)
             }
@@ -1076,6 +1096,7 @@ pub async fn run_file_sync_controller(
     fs: Arc<dyn holon_filesystem::FileSystem>,
     change_source: Arc<dyn holon_filesystem::FileChangeSource>,
     formats: Arc<holon_core::FormatRegistry>,
+    shutdown: Arc<holon_api::lifecycle::SessionShutdown>,
 ) {
     use tracing::Instrument;
     use tracing::error;
@@ -1336,6 +1357,13 @@ pub async fn run_file_sync_controller(
             return;
         };
         tokio::select! {
+            // `biased`, first arm: the loop stops between operations rather
+            // than mid-write, and a busy vault cannot starve the shutdown.
+            biased;
+            () = shutdown.cancelled() => {
+                info!("[OrgMode] file-watcher loop exiting (session shutdown)");
+                return;
+            }
             Some((maybe_evt, change_seq)) = file_rx.recv() => {
                 let _pass = idle_signal_for_task.enter_pass();
                 match maybe_evt {

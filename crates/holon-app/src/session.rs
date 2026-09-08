@@ -101,3 +101,40 @@ where
 
     Ok((session, engine, extra))
 }
+
+/// Stop a session in the one order that works: the tasks its boot spawned stop
+/// first, then the storage actor closes.
+///
+/// A watcher still running when the actor closes reads a dead store for the
+/// rest of the process, and the org-writeback supervisor spends its restart
+/// budget and declares derived state permanently stale.
+///
+/// Every quit path goes through here, so the ordering has one definition. A
+/// watcher that does not stop within
+/// [`DEFAULT_SHUTDOWN_TIMEOUT`](holon_api::lifecycle::DEFAULT_SHUTDOWN_TIMEOUT)
+/// is an `Err` naming it — never a silent detach.
+pub async fn shutdown_session(injector: &fluxdi::Injector) -> Result<()> {
+    injector
+        .resolve::<holon_api::lifecycle::SessionShutdown>()
+        .shutdown(holon_api::lifecycle::DEFAULT_SHUTDOWN_TIMEOUT)
+        .await?;
+
+    // Which substrate this container holds is a registered value, so a Turso
+    // wiring whose engine will not resolve is a failure, not "no actor here".
+    match *injector.resolve::<holon::di::StorageSelector>() {
+        holon::di::StorageSelector::LoroMemory => Ok(()),
+        holon::di::StorageSelector::Turso => {
+            let engine = injector.try_resolve::<BackendEngine>().map_err(|e| {
+                anyhow::anyhow!(
+                    "shutdown: a Turso container must resolve its BackendEngine to close the \
+                     storage actor, but resolution failed: {e}"
+                )
+            })?;
+            engine
+                .db_handle()
+                .shutdown()
+                .await
+                .map_err(|e| anyhow::anyhow!("Turso actor shutdown failed: {e}"))
+        }
+    }
+}

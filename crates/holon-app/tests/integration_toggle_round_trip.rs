@@ -157,7 +157,7 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
                 ),
             ),
         ))
-        .start()
+        .start(&holon_api::lifecycle::SessionShutdown::new())
         .await
         .expect("the projector must build the mirror and start watching");
 

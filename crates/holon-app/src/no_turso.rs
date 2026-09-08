@@ -50,7 +50,12 @@ pub fn register_block_query_frontend(injector: &Injector) {
         let operation_engine = resolver
             .try_resolve::<dyn holon::api::OperationEngine>()
             .ok();
-        Shared::new(from_block_query_source(block_query, operation_engine))
+        let shutdown = resolver.resolve::<holon_api::lifecycle::SessionShutdown>();
+        Shared::new(from_block_query_source(
+            block_query,
+            operation_engine,
+            &shutdown,
+        ))
     }));
 
     // Render stack (slot + shared shadow interpreter + ReactiveEngine
@@ -71,12 +76,15 @@ pub fn register_block_query_frontend(injector: &Injector) {
 pub fn from_block_query_source(
     block_query: Arc<dyn BlockQuerySource>,
     operation_engine: Option<Arc<dyn holon::api::OperationEngine>>,
+    shutdown: &holon_api::lifecycle::SessionShutdown,
 ) -> FrontendSession {
     let ui_watcher = Arc::new(holon_loro_wiring::loro_ui_watcher::LoroUiWatcher::new(
         block_query.clone(),
     )) as Arc<dyn holon::api::UiWatcher>;
-    let profiles =
-        holon_loro_wiring::loro_ui_watcher::build_turso_free_profile_resolver(block_query.clone());
+    let profiles = holon_loro_wiring::loro_ui_watcher::build_turso_free_profile_resolver(
+        block_query.clone(),
+        shutdown,
+    );
     // Third boot path, and the least complete one: it assembles a session
     // directly, performing none of the steps the shared wiring runs except the
     // two `with_capabilities` supplies. Its ledger says exactly that, so

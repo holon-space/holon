@@ -658,7 +658,12 @@ impl FrontendInjectorExt for Injector {
                                 vm,
                             ),
                         )
-                        .start()
+                        .start(
+                            resolver
+                                .resolve_async::<holon_api::lifecycle::SessionShutdown>()
+                                .await
+                                .as_ref(),
+                        )
                         .await
                         .expect(
                             "boot [component=session stage=session-resolve]: \
@@ -676,7 +681,10 @@ impl FrontendInjectorExt for Injector {
                 // so the block table and seed data (block:journals) exist.
                 #[cfg(not(target_arch = "wasm32"))]
                 async {
-                    holon::api::action_watcher::start_action_watchers(engine.clone())
+                    let shutdown = resolver
+                        .resolve_async::<holon_api::lifecycle::SessionShutdown>()
+                        .await;
+                    holon::api::action_watcher::start_action_watchers(engine.clone(), shutdown)
                         .await
                         .expect(
                             "boot [component=session stage=session-resolve]: \
@@ -762,7 +770,12 @@ impl FrontendInjectorExt for Injector {
                     if wait_for_ready {
                         post_ready_work.await;
                     } else {
-                        tokio::spawn(post_ready_work);
+                        // Bounded, but it reads the store, so a shutdown during
+                        // boot must join it rather than race the actor close.
+                        resolver
+                            .resolve_async::<holon_api::lifecycle::SessionShutdown>()
+                            .await
+                            .spawn("boot-post-ready", post_ready_work);
                     }
                     disclosure.performed(BootStep::PostReady);
                 }

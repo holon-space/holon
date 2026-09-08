@@ -82,7 +82,13 @@ async fn main() -> CommonResult<()> {
     // `app_main::ensure_watch_task_started`.
     TerminalWindow::main_event_loop(tui_app, exit_keys, initial_state)?.await?;
 
-    // Graceful shutdown — fires TuiModule::on_stop (MCP server stop, etc.)
+    // Stop the session's watchers, then close the store — before the container
+    // teardown below, which drops the handles they read through.
+    if let Err(e) = holon_app::shutdown_session(&app.injector()).await {
+        tracing::error!("Session shutdown failed: {e:#}");
+    }
+
+    // Container teardown — fires TuiModule::on_stop (MCP server stop, etc.)
     let timeout = std::time::Duration::from_secs(10);
     match tokio::time::timeout(timeout, app.shutdown()).await {
         Ok(Ok(())) => tracing::info!("Shutdown complete"),

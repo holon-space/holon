@@ -440,7 +440,11 @@ impl Module for LoroModule {
             // a wiring bug and must not degrade into an ungated projector.
             let gate = resolver.resolve::<holon_core::SyncGate>();
 
-            match controller.start_gated(block_live, &gate).await {
+            let shutdown = resolver
+                .resolve_async::<holon_api::lifecycle::SessionShutdown>()
+                .await;
+
+            match controller.start_gated(block_live, &gate, shutdown).await {
                 Ok(handle) => Shared::new(handle),
                 Err(e) => {
                     error!("[LoroModule] Failed to start LoroSyncController: {}", e);

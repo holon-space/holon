@@ -63,7 +63,11 @@ fn source_child(id: &str, parent: &str, language: &str) -> Block {
 }
 
 fn boot(blocks: &Blocks) -> FrontendSession {
-    holon_app::from_block_query_source(source_over(Arc::clone(blocks)), None)
+    holon_app::from_block_query_source(
+        source_over(Arc::clone(blocks)),
+        None,
+        &holon_api::lifecycle::SessionShutdown::new(),
+    )
 }
 
 fn computed(session: &FrontendSession, block: &Block) -> Option<Value> {

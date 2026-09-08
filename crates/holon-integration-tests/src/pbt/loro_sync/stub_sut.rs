@@ -44,6 +44,9 @@ pub struct StubSut {
     storage_dir: PathBuf,
     doc_store: Arc<RwLock<LoroDocumentStore>>,
     controller_handle: Option<LoroSyncControllerHandle>,
+    /// The session the current controller's reconcile loop is registered under.
+    /// One per (re)start, so a `Restart` cannot cancel its successor's loop.
+    controller_shutdown: Option<Arc<holon_api::lifecycle::SessionShutdown>>,
     stub_ops: Arc<StubOperationProvider>,
 }
 
@@ -79,6 +82,7 @@ impl StubSut {
             storage_dir,
             doc_store,
             controller_handle: None,
+            controller_shutdown: None,
             stub_ops,
         };
         sut.start_controller().await?;
@@ -114,12 +118,15 @@ impl StubSut {
                     Err(anyhow::anyhow!("stub block feed is empty; parse_fn unused"))
                 },
             );
-        let handle = controller.start(block_live).await?;
+        let shutdown = Arc::new(holon_api::lifecycle::SessionShutdown::new());
+        let handle = controller.start(block_live, shutdown.clone()).await?;
         self.controller_handle = Some(handle);
+        self.controller_shutdown = Some(shutdown);
         Ok(())
     }
 
     async fn stop_controller(&mut self) {
+        self.controller_shutdown = None;
         // Dropping the handle stops the run loop's owner. The `subscribe_root`
         // callbacks are NOT cancelled — they belong to the `LoroProjection` and
         // live as long as it does — so facts keep queuing; nothing drains them

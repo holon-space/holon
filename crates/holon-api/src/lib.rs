@@ -43,6 +43,7 @@ pub mod input_types;
 pub mod interp_value;
 pub mod latency_e2e;
 pub mod latency_slo;
+pub mod lifecycle;
 pub mod link_candidate;
 pub mod link_parser;
 pub mod live_data;

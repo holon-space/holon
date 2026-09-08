@@ -1001,6 +1001,9 @@ impl TestEnvironment {
     /// explicit shutdown any surviving clone (background org-sync loop,
     /// reactive-engine Arc cycle) would keep the WAL writer alive and stall
     /// the next open against the 30s busy_timeout.
+    ///
+    /// Both halves run through the production `holon_app::shutdown_session`, so
+    /// the harness cannot drift from the ordering the frontends use.
     pub async fn stop_app(&mut self) -> Result<()> {
         assert!(self.session.get().is_some(), "stop_app: app not started");
         // Drop CDC consumers before the actor goes away.
@@ -1012,12 +1015,10 @@ impl TestEnvironment {
         *self.all_blocks.borrow_mut() = None;
         *self.all_blocks_stream.borrow_mut() = None;
         self.seed_count.set(None);
-        if let Some(ctx) = self.ctx.get() {
-            ctx.engine()
-                .db_handle()
-                .shutdown()
+        if let Some(injector) = self.injector.get() {
+            holon_app::shutdown_session(injector)
                 .await
-                .map_err(|e| anyhow::anyhow!("stop_app: Turso actor shutdown failed: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("stop_app: {e:#}"))?;
         }
         // `&mut self` here is what lets `OnceCell::take` reset these build-once
         // fields for the rare config-change restart (the `&self` `start_app`

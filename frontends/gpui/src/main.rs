@@ -326,7 +326,15 @@ fn main() -> Result<()> {
         tracing::debug!("Mobile builds use android_main/ios_main, not this binary.");
     }
 
-    // Graceful shutdown — fires GpuiModule::on_stop (MCP server stop, etc.)
+    // Stop the session's watchers, then close the store. One definition, in
+    // `holon_app`, shared with the TUI and the test harness.
+    runtime.block_on(async {
+        if let Err(e) = holon_app::shutdown_session(&injector).await {
+            tracing::error!("Session shutdown failed: {e:#}");
+        }
+    });
+
+    // Container teardown — fires GpuiModule::on_stop (MCP server stop, etc.)
     runtime.block_on(async {
         let timeout = std::time::Duration::from_secs(10);
         match tokio::time::timeout(timeout, app.shutdown()).await {

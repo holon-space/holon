@@ -160,6 +160,9 @@ fn build_graph_schema_registry(type_registry: &TypeRegistry) -> GraphSchemaRegis
 /// layer (called before BackendEngine resolution). The `DbReady<*>` markers
 /// are already cached by the time this factory runs.
 #[tracing::instrument(skip_all, name = "di.create_initialized_engine")]
+// The boot spine: every argument is a distinct capability the engine is
+// assembled from, and bundling them into a struct would only move the list.
+#[allow(clippy::too_many_arguments)]
 async fn create_initialized_engine(
     backend: Arc<RwLock<TursoBackend>>,
     dispatcher: Arc<OperationDispatcher>,
@@ -168,6 +171,7 @@ async fn create_initialized_engine(
     type_registry: &TypeRegistry,
     clock: Arc<dyn holon_api::Clock>,
     attribution: holon_core::integration_attribution::IntegrationAttribution,
+    shutdown: Arc<holon_api::lifecycle::SessionShutdown>,
 ) -> Result<BackendEngine> {
     let backend_guard = backend.read().await;
     let db_handle = backend_guard.handle().clone();
@@ -224,6 +228,7 @@ async fn create_initialized_engine(
         &matview_mgr,
         db_handle.clone(),
         advice_status.clone(),
+        &shutdown,
     )
     .await
     {
@@ -246,6 +251,7 @@ async fn create_initialized_engine(
         db_handle.clone(),
         clock,
         CLOCK_TICK_INTERVAL,
+        &shutdown,
     )
     .await
     .context("[DI] clock scheduler failed to seed the clock relation at boot")?;
@@ -652,6 +658,8 @@ pub fn register_core_services_with_backend(
                             .resolve::<holon_core::integration_attribution::IntegrationAttribution>(
                             ))
                         .clone(),
+                        inj.resolve_async::<holon_api::lifecycle::SessionShutdown>()
+                            .await,
                     )
                     .await
                     // fluxdi async providers return `T`, not `Result<T>`, and

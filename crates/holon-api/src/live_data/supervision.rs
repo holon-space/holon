@@ -39,6 +39,9 @@ use futures::stream::Stream;
 use futures::stream::StreamExt as _;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio_util::sync::CancellationToken;
+
+use crate::lifecycle::SessionShutdown;
 
 /// Restarts tolerated inside [`RESTART_WINDOW`] before escalating.
 pub const MAX_RESTARTS_IN_WINDOW: u32 = 3;
@@ -71,6 +74,7 @@ pub async fn run_supervised<D, S, F, G>(
     mut make_stream: F,
     tx: UnboundedSender<Supervised<D>>,
     on_gave_up: G,
+    cancel: CancellationToken,
 ) where
     F: FnMut() -> S,
     S: Stream<Item = anyhow::Result<D>>,
@@ -83,7 +87,18 @@ pub async fn run_supervised<D, S, F, G>(
         }
         let mut stream = std::pin::pin!(make_stream());
         let mut death: Option<Error> = None;
-        while let Some(item) = stream.next().await {
+        let mut stopped = false;
+        // `biased`: a shutdown must win over a stream that still has items,
+        // otherwise a busy feed keeps the supervisor alive past the store it
+        // reads and its restart budget burns on a closed actor.
+        while let Some(item) = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                stopped = true;
+                None
+            }
+            item = stream.next() => item,
+        } {
             match item {
                 Ok(diff) => {
                     if tx.send(Supervised::Diff(diff)).is_err() {
@@ -95,6 +110,10 @@ pub async fn run_supervised<D, S, F, G>(
                     break;
                 }
             }
+        }
+        if stopped {
+            tracing::info!("[supervisor:{component}] stopping — the session is shutting down");
+            return;
         }
         let Some(err) = death else {
             tracing::info!(
@@ -132,12 +151,17 @@ pub async fn run_supervised<D, S, F, G>(
     }
 }
 
-/// Spawn [`run_supervised`] on the current runtime, handing back the consumer
-/// end.
+/// Spawn [`run_supervised`] under the session's shutdown, handing back the
+/// consumer end.
+///
+/// Registered rather than detached because a supervisor that outlives its
+/// store spends its whole restart budget on a closed actor and then declares
+/// derived state permanently stale — for a process that is already leaving.
 pub fn spawn_supervised<D, S, F, G>(
     component: &'static str,
     make_stream: F,
     on_gave_up: G,
+    shutdown: &SessionShutdown,
 ) -> UnboundedReceiver<Supervised<D>>
 where
     D: Send + 'static,
@@ -146,8 +170,9 @@ where
     G: Fn(&'static str, u32, &Error) + Send + 'static,
 {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        run_supervised(component, make_stream, tx, on_gave_up).await;
+    let cancel = shutdown.token();
+    shutdown.spawn(format!("supervisor:{component}"), async move {
+        run_supervised(component, make_stream, tx, on_gave_up, cancel).await;
     });
     rx
 }

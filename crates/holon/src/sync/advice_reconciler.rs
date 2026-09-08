@@ -32,7 +32,6 @@ use holon_advice::StatusOutcome;
 use holon_advice::parse_advice_rule;
 use holon_advice::reconcile_advice_rule;
 use holon_api::StorageEntity;
-use holon_api::streaming::ActorAbortGuard;
 use holon_api::streaming::Change;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -40,12 +39,9 @@ use tokio_stream::StreamExt;
 use crate::storage::turso::DbHandle;
 use crate::sync::MatviewManager;
 
-/// Keeps the reconciler's two background tasks alive. Dropping it aborts them
-/// (mirrors the profile watcher staying alive by being
-/// held on the engine).
-pub struct AdviceReconcilerHandle {
-    _aborts: ActorAbortGuard,
-}
+/// Marker that the reconciler is running. Its two tasks belong to the session's
+/// `SessionShutdown`, which is what stops them — this handle owns no lifetime.
+pub struct AdviceReconcilerHandle;
 
 /// Distil a CDC `Change` over the `(id, content)` discovery view into a
 /// [`RuleEvent`].
@@ -142,23 +138,35 @@ pub async fn spawn_advice_reconciler(
     matview_manager: &MatviewManager,
     db_handle: DbHandle,
     status: AdviceRuleStatusHandle,
+    shutdown: &holon_api::lifecycle::SessionShutdown,
 ) -> anyhow::Result<AdviceReconcilerHandle> {
     let watch = matview_manager
         .watch(holon_advice::GET_ADVICE_RULES_SQL)
         .await?;
 
     let (event_tx, mut event_rx) = mpsc::channel::<RuleEvent>(64);
-    let mut aborts = ActorAbortGuard::new();
 
-    // Reconciler task: owns the DbHandle, runs DDL sequentially.
-    let reconciler = tokio::spawn(async move {
+    // Reconciler task: owns the DbHandle, runs DDL sequentially. Registered
+    // with the session because a DDL statement issued after the storage actor
+    // closes is exactly what an orderly shutdown exists to prevent.
+    let reconciler_cancel = shutdown.token();
+    shutdown.spawn("advice-reconciler", async move {
         let mut state = AdviceReconcilerState::new();
-        while let Some(event) = event_rx.recv().await {
+        loop {
+            // `biased`: a shutdown wins over a queued event, so no plan starts
+            // against a store that is closing.
+            let event = tokio::select! {
+                biased;
+                () = reconciler_cancel.cancelled() => return,
+                event = event_rx.recv() => match event {
+                    Some(event) => event,
+                    None => return,
+                },
+            };
             let plan = state.plan(event, parse_advice_rule);
             apply_plan(&db_handle, &status, plan).await;
         }
     });
-    aborts.push(reconciler.abort_handle());
 
     // Feed initial rows through the SAME channel first (ordering before the
     // stream).
@@ -166,14 +174,24 @@ pub async fn spawn_advice_reconciler(
         if let Some(event) = row_to_event(row)
             && event_tx.send(event).await.is_err()
         {
-            return Ok(AdviceReconcilerHandle { _aborts: aborts });
+            return Ok(AdviceReconcilerHandle);
         }
     }
 
-    // Drainer task: CDC stream → RuleEvent → channel. No DB work here.
+    // Drainer task: CDC stream → RuleEvent → channel. No DB work here, but it
+    // feeds the task above, so it stops with the session too.
     let mut stream = watch.stream;
-    let drainer = tokio::spawn(async move {
-        while let Some(batch) = stream.next().await {
+    let drainer_cancel = shutdown.token();
+    shutdown.spawn("advice-drainer", async move {
+        loop {
+            let batch = tokio::select! {
+                biased;
+                () = drainer_cancel.cancelled() => return,
+                batch = stream.next() => match batch {
+                    Some(batch) => batch,
+                    None => return,
+                },
+            };
             for row_change in batch.inner.items {
                 if let Some(event) = change_to_event(row_change.change)
                     && event_tx.send(event).await.is_err()
@@ -183,7 +201,6 @@ pub async fn spawn_advice_reconciler(
             }
         }
     });
-    aborts.push(drainer.abort_handle());
 
-    Ok(AdviceReconcilerHandle { _aborts: aborts })
+    Ok(AdviceReconcilerHandle)
 }

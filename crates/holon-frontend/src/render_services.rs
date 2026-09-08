@@ -55,13 +55,16 @@ pub fn register_render_services(injector: &Injector) {
         let interpret = resolver.resolve::<RenderInterpreterFn>();
         let interpreter = resolver.resolve::<RenderInterpreter<ReactiveViewModel>>();
         let services_slot = resolver.resolve::<BuilderServicesSlot>();
+        let shutdown = resolver.resolve::<holon_api::lifecycle::SessionShutdown>();
         let f = interpret.0.clone();
-        Shared::new(ReactiveEngine::new(
+        let engine = ReactiveEngine::new(
             session,
             tokio::runtime::Handle::current(),
             interpreter,
             move |expr, rows| f(expr, rows),
             services_slot.0.clone(),
-        ))
+        );
+        engine.stop_watchers_on_shutdown(&shutdown);
+        Shared::new(engine)
     }));
 }

@@ -48,6 +48,7 @@ use holon_api::effect_id::FiringKey;
 use holon_api::effect_id::OutputSlot;
 use holon_api::effect_id::RuleId;
 use holon_api::effect_id::deterministic_block_id;
+use holon_api::lifecycle::SessionShutdown;
 use holon_api::link_parser::PageId;
 use holon_api::pattern::Subject;
 use holon_api::streaming::Change;
@@ -71,15 +72,21 @@ const DISCOVERY_SQL: &str = include_str!("../../../../assets/queries/holon_rule_
 /// scheduler's day-rollover `UPDATE` re-fires it.
 const CLOCK_BINDING_SQL: &str = "SELECT today AS today FROM clock WHERE grain = 'day'";
 
-#[tracing::instrument(skip(engine), name = "holon_rule_watcher.start")]
-pub async fn start_holon_rule_watchers(engine: Arc<BackendEngine>) -> Result<()> {
+#[tracing::instrument(skip(engine, shutdown), name = "holon_rule_watcher.start")]
+pub async fn start_holon_rule_watchers(
+    engine: Arc<BackendEngine>,
+    shutdown: Arc<SessionShutdown>,
+) -> Result<()> {
     let discovery_stream = engine
         .query_and_watch(DISCOVERY_SQL.to_string(), HashMap::new(), None)
         .await
         .context("Failed to subscribe to holon_rule discovery matview")?;
 
     let status = engine.rule_status().clone();
-    crate::util::spawn_actor(run_discovery_loop(engine, status, discovery_stream));
+    shutdown.spawn(
+        "holon-rule-discovery",
+        run_discovery_loop(engine, status, discovery_stream, shutdown.clone()),
+    );
     Ok(())
 }
 
@@ -87,10 +94,23 @@ async fn run_discovery_loop(
     engine: Arc<BackendEngine>,
     status: RuleStatusHandle,
     mut discovery_stream: crate::storage::turso::RowChangeStream,
+    shutdown: Arc<SessionShutdown>,
 ) {
     let mut active: HashMap<String, JoinHandle<()>> = HashMap::new();
 
-    while let Some(batch) = discovery_stream.next().await {
+    loop {
+        // `biased`: a shutdown must win over a discovery backlog. `start_rule`
+        // reads the store (the pairing check), so a backlog drained past
+        // cancellation is exactly the "Actor channel closed" spam this ordering
+        // exists to prevent.
+        let batch = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            batch = discovery_stream.next() => match batch {
+                Some(batch) => batch,
+                None => break,
+            },
+        };
         for item in batch.inner.items {
             match item.change {
                 Change::Created { data, .. } | Change::Updated { data, .. } => {
@@ -107,6 +127,16 @@ async fn run_discovery_loop(
                 _ => {}
             }
         }
+    }
+
+    // The rule watchers are this loop's children — nothing else can reach them,
+    // so this loop is the only place that can stop them. Joining after the
+    // abort is what makes the stop observable: an abort alone merely schedules
+    // cancellation, and the caller closes the store the moment this task ends.
+    for (block_id, handle) in active.drain() {
+        handle.abort();
+        let _ = handle.await;
+        info!("[holon_rule_watcher] stopped watcher for {block_id} (discovery loop stopping)");
     }
 }
 

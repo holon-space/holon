@@ -72,6 +72,19 @@ pub fn open_and_register_core(
     db_path: PathBuf,
     storage: StorageSelector,
 ) -> Result<()> {
+    // Registered before the storage substrate so no wiring can spawn
+    // session-scoped work without a shutdown to register it against.
+    injector.provide::<holon_api::lifecycle::SessionShutdown>(fluxdi::Provider::root(|_| {
+        fluxdi::Shared::new(holon_api::lifecycle::SessionShutdown::new())
+    }));
+
+    // The substrate this container was built for, as a value. Teardown asks
+    // this rather than inferring "no Turso" from a failed engine resolution,
+    // which cannot tell an absent backend from a broken one.
+    injector.provide::<StorageSelector>(fluxdi::Provider::root(move |_| {
+        fluxdi::Shared::new(storage)
+    }));
+
     match storage {
         StorageSelector::Turso => {
             tracing::debug!("[DI] Opening database at {:?}...", db_path);

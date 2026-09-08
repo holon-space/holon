@@ -53,4 +53,5 @@ tempfile.workspace = true
 # hand-rolled local mock HTTP server, so no HTTP-server dependency is pulled in.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net"] }
 toml.workspace = true
+tracing-subscriber.workspace = true
 uuid.workspace = true

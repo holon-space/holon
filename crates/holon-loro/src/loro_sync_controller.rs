@@ -47,6 +47,7 @@ use anyhow::Result;
 use holon_api::EdgeField;
 use holon_api::Value;
 use holon_api::block::Block;
+use holon_api::lifecycle::SessionShutdown;
 use holon_api::types::ContentType;
 use holon_core::OriginTaggedWrites;
 use loro::Frontiers;
@@ -350,17 +351,11 @@ pub struct LoroSyncController {
     degraded: Arc<crate::degraded_signal_bus::DegradedSignalBus>,
 }
 
-/// Lifetime handle returned by `start()`. Dropping it cancels the background
-/// task. The doc subscriptions belong to the projection, which outlives this
-/// handle. Tests inspect the controller state through
-/// the accessors on the handle.
+/// Lifetime handle returned by `start()`. It owns no lifetime of its own: the
+/// doc subscriptions belong to the projection, and the reconcile loop to the
+/// session's `SessionShutdown`. Tests inspect the controller state through the
+/// accessors on the handle.
 pub struct LoroSyncControllerHandle {
-    /// Kept alive so the loop keeps running. The inner task takes ownership
-    /// of the controller; dropping the JoinHandle does not cancel the task,
-    /// so we rely on `wake.notify_one()` being the only input signal — when
-    /// this handle is dropped the task will eventually stall waiting on
-    /// `wake` and `event_rx` and can be reclaimed at process shutdown.
-    _task: tokio::task::JoinHandle<()>,
     /// The shared `block` matview feed (`LiveData`). Held only to keep its CDC
     /// subscribe actor alive for other consumers (the reactive cache) — the
     /// runtime SQL→Loro mirror that used to consume it is retired (Loro is the
@@ -432,8 +427,9 @@ impl LoroSyncController {
     pub async fn start(
         self,
         block_live: Arc<holon_api::live_data::LiveData<Block>>,
+        shutdown: Arc<SessionShutdown>,
     ) -> Result<LoroSyncControllerHandle> {
-        self.start_gated(block_live, &holon_core::SyncGate::opened())
+        self.start_gated(block_live, &holon_core::SyncGate::opened(), shutdown)
             .await
     }
 
@@ -458,6 +454,7 @@ impl LoroSyncController {
         self,
         block_live: Arc<holon_api::live_data::LiveData<Block>>,
         gate: &holon_core::SyncGate,
+        shutdown: Arc<SessionShutdown>,
     ) -> Result<LoroSyncControllerHandle> {
         // (1) Loro subscriptions — installed on the PROJECTION, which the org
         // initial scan already drives before this controller is resolved. This
@@ -488,14 +485,21 @@ impl LoroSyncController {
         // Receive-only: the task must NOT hold a gate sender, or
         // all-holders-dropped becomes unobservable and the degraded path dead.
         let watcher = gate.watcher();
-        let task = tokio::spawn(async move {
-            wait_for_boot_gate(watcher, BOOT_GATE_WARN_EVERY, BOOT_GATE_WATCHDOG).await;
+        let shutdown_for_task = shutdown.clone();
+        let cancelled_at_gate = shutdown.cancelled();
+        shutdown.spawn("loro-outbound-reconcile", async move {
+            // The boot gate can outlive the session (a scan that never
+            // completes), so cancellation has to reach the task here too.
+            tokio::select! {
+                biased;
+                () = cancelled_at_gate => return,
+                _outcome = wait_for_boot_gate(watcher, BOOT_GATE_WARN_EVERY, BOOT_GATE_WATCHDOG) => {}
+            }
             started_for_task.store(true, Ordering::SeqCst);
-            self.run_loop().await;
+            self.run_loop(shutdown_for_task).await;
         });
 
         Ok(LoroSyncControllerHandle {
-            _task: task,
             _block_live: block_live,
             last_synced,
             error_count,
@@ -504,7 +508,7 @@ impl LoroSyncController {
         })
     }
 
-    async fn run_loop(self) {
+    async fn run_loop(self, shutdown: Arc<SessionShutdown>) {
         info!("[LoroSyncController] Started outbound Loro→SQL reconcile loop");
         // The only input is `wake` — fired by the Loro `subscribe_root` callback
         // on every doc change (local writes, peer imports). Each wake drives one
@@ -517,7 +521,17 @@ impl LoroSyncController {
         // the user happens to edit again, and the UI shows stale rows with no
         // sign anything is wrong.
         loop {
-            self.wake.notified().await;
+            // `biased`: a shutdown must win over a pending wake. A reconcile
+            // started here projects into SQL, so it must not begin against a
+            // store that is closing.
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    info!("[LoroSyncController] outbound reconcile loop exiting (session shutdown)");
+                    return;
+                }
+                () = self.wake.notified() => {}
+            }
             drive_with_redrive(|| self.on_loro_changed(), &self.degraded, &self.error_count).await;
         }
     }
