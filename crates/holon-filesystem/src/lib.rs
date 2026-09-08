@@ -29,6 +29,8 @@ pub mod ingest_progress;
 pub mod sync_base_store;
 pub mod sync_conflict;
 pub mod sync_ports;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod vault_filter;
 pub mod vault_path;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod writeback_render;
@@ -52,6 +54,8 @@ pub use file::ChangesWithMetadata;
 pub use file::File;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::BlockDelta;
+#[cfg(not(target_arch = "wasm32"))]
+pub use file_sync_controller::ClaimedId;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::FileSyncController;
 #[cfg(not(target_arch = "wasm32"))]
@@ -94,6 +98,8 @@ pub use sync_ports::ShareWritebackDisclosure;
 pub use sync_ports::ThreeWayTextMerge;
 pub use sync_ports::WritebackDisclosure;
 pub use sync_ports::nearest_page_ancestor;
+#[cfg(not(target_arch = "wasm32"))]
+pub use vault_filter::VaultFilter;
 pub use vault_path::VaultPath;
 #[cfg(not(target_arch = "wasm32"))]
 pub use writeback_render::WritebackRenderer;

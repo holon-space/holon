@@ -21,7 +21,7 @@ use holon_filesystem::FileChangeKind;
 use holon_filesystem::FileChangeSource;
 use holon_filesystem::FileSystem;
 pub use holon_filesystem::ScannedEntries;
-use ignore::gitignore::Gitignore;
+use holon_filesystem::vault_filter::VaultFilter;
 use tokio::sync::mpsc;
 use tracing::debug;
 use tracing::warn;
@@ -41,29 +41,16 @@ pub async fn scan_directory(
     Ok(scanned)
 }
 
-#[tracing::instrument(name = "build_gitignore", fields(root = %root.display()))]
-fn build_gitignore(root: &Path) -> Gitignore {
-    let (gitignore, errors) = Gitignore::new(root.join(".gitignore"));
-    if let Some(err) = errors {
-        warn!("Error parsing .gitignore: {}", err);
-    }
-    gitignore
-}
-
-fn is_ignored(path: &Path, gitignore: &Gitignore) -> bool {
-    // Always skip VCS internals
-    for component in path.components() {
-        let s = component.as_os_str().to_str().unwrap_or("");
-        if s == ".git" || s == ".jj" {
-            return true;
-        }
-    }
-    let is_dir = path.is_dir();
-    // `matched` alone never consults parent dirs, so a `vendor/` pattern
-    // would not ignore `vendor/dep.org`.
-    gitignore
-        .matched_path_or_any_parents(path, is_dir)
-        .is_ignore()
+fn is_ignored(path: &Path, filter: &VaultFilter) -> bool {
+    let Some(refusal) = filter.refusal(path) else {
+        return false;
+    };
+    debug!(
+        path = %path.display(),
+        reason = %refusal,
+        "[VaultFileWatcher] outside the vault — not ingested, matching the boot walk"
+    );
+    true
 }
 
 /// An org-relevant file event the sync loop must act on.
@@ -83,20 +70,20 @@ pub enum FileEvent {
 
 /// Whether `path` is a vault file the sync loop should track (an extension a
 /// registered format claims, not gitignored / VCS-internal).
-fn is_vault_relevant(path: &Path, formats: &FormatRegistry, gitignore: &Gitignore) -> bool {
-    formats.handles(path) && !is_ignored(path, gitignore)
+fn is_vault_relevant(path: &Path, formats: &FormatRegistry, filter: &VaultFilter) -> bool {
+    formats.handles(path) && !is_ignored(path, filter)
 }
 
 /// Map one raw [`FileChange`] to the org-relevant [`FileEvent`] the sync loop
 /// acts on, or `None` when it is filtered (non-`.org`, gitignored). This is the
 /// single source of truth for the bridge's kind→event routing — exposed so a
 /// test can drive SYNTHETIC notify-shaped changes through the SAME routing the
-/// production bridge uses (the ENVIRONMENT-parity rung for the pairing
-/// fallback, see docs/Testing/BugFunnel.md 2026-07-27).
+/// production bridge uses (the ENVIRONMENT-parity rung for pairing's degraded
+/// path, see docs/Testing/BugFunnel.md 2026-07-27).
 ///
 /// `is_relevant` decides whether a path is one the vault side tracks; the
-/// bridge passes a gitignore-aware, registry-backed predicate, a focused test
-/// may pass an extension check.
+/// bridge passes a [`VaultFilter`]-backed predicate, a focused test may pass an
+/// extension check.
 pub fn classify_change_to_event(
     change: FileChange,
     is_relevant: &dyn Fn(&Path) -> bool,
@@ -160,8 +147,12 @@ impl VaultFileWatcher {
         watch_dir: &Path,
         formats: Arc<FormatRegistry>,
     ) -> Self {
-        let gitignore = tracing::info_span!("VaultFileWatcher.build_gitignore")
-            .in_scope(|| build_gitignore(&CanonicalPath::new(watch_dir).into_path_buf()));
+        // The fs event backends report canonical paths (macOS: `/var` →
+        // `/private/var`), so both the gitignore root and the hidden-segment
+        // root must be canonical or neither matches what arrives.
+        let root = CanonicalPath::new(watch_dir).into_path_buf();
+        let filter = tracing::info_span!("VaultFileWatcher.build_vault_filter")
+            .in_scope(|| VaultFilter::for_root(&root));
         let (change_tx, change_rx) = mpsc::unbounded_channel();
         let mut source_rx = source.subscribe();
 
@@ -171,7 +162,7 @@ impl VaultFileWatcher {
                     Ok(change) => {
                         let seq = change.seq;
                         let msg = classify_change_to_event(change, &|p| {
-                            is_vault_relevant(p, &formats, &gitignore)
+                            is_vault_relevant(p, &formats, &filter)
                         });
                         if change_tx.send((msg, seq)).is_err() {
                             // Receiver dropped — sync loop is gone.
@@ -204,6 +195,7 @@ impl VaultFileWatcher {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use holon_filesystem::NotifyWatcher;
@@ -272,19 +264,203 @@ mod tests {
         }
     }
 
+    /// The live vault keeps agent jj-workspaces under `.claude/worktrees/`,
+    /// each a full copy of the vault whose `Projects/Holon/Now.org` declares
+    /// the same `#+ID:` and headline slugs as the live file. Those workspaces
+    /// are written constantly, so every touch used to deliver an event the
+    /// watcher forwarded into ingest.
+    #[tokio::test]
+    async fn a_hidden_nested_vault_copy_is_never_ingested() {
+        let temp_dir = TempDir::new().unwrap();
+        let copy = temp_dir
+            .path()
+            .join(".claude/worktrees/agent-x/Projects/Holon");
+        std::fs::create_dir_all(&copy).unwrap();
+
+        let mut watcher = armed_watcher(temp_dir.path());
+        sleep(Duration::from_millis(100)).await;
+
+        tokio::fs::write(copy.join("Now.org"), "* Stale copy")
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(500)).await;
+
+        while let Ok((msg, _seq)) = watcher.receiver().try_recv() {
+            assert!(
+                msg.is_none(),
+                "a stale vault copy under .claude/worktrees/ reached ingest: {msg:?}"
+            );
+        }
+    }
+
+    /// The boot scan and the live watcher answer the same question — "may this
+    /// path be ingested?" — through different code, so nothing but this test
+    /// keeps them from drifting. They drifted: the scan delegated to `ignore`'s
+    /// `hidden(true)` while the watcher matched `.git`/`.jj` by hand, and the
+    /// live vault's 12 stale copies of itself under `.claude/worktrees/` were
+    /// invisible at boot yet ingested on every touch (bugfunnel
+    /// `2026-09-09-hidden-dir-vault-copy-invisible-at-boot-ingested-by-the-watcher`).
+    /// What each leg answers for `corpus`, in the order walk / watcher /
+    /// harness scan. Disk setup is the caller's — the harness leg populates its
+    /// own in-memory vault from the same corpus.
+    async fn every_legs_verdict(root: &Path, corpus: &[&str]) -> [BTreeSet<PathBuf>; 3] {
+        let formats = crate::file_sync_controller::org_only_format_registry();
+        let filter = VaultFilter::for_root(root);
+
+        let walked = holon_filesystem::fs_port::walk_directory(root)
+            .files
+            .into_iter()
+            .filter(|p| formats.handles(p))
+            .collect();
+
+        let watched = corpus
+            .iter()
+            .map(|rel| root.join(rel))
+            .filter(|p| is_vault_relevant(p, &formats, &filter))
+            .collect();
+
+        let memory = holon_filesystem::InMemoryFileSystem::new();
+        memory.mkdir_all(root);
+        for rel in corpus {
+            let path = root.join(rel);
+            memory.mkdir_all(path.parent().unwrap());
+            holon_filesystem::FileSystem::write(&memory, &path, b"* H")
+                .await
+                .unwrap();
+        }
+        let scanned = scan_directory(&memory, root, &formats)
+            .await
+            .unwrap()
+            .files
+            .into_iter()
+            .collect();
+
+        [walked, watched, scanned]
+    }
+
+    fn assert_legs_agree(legs: [BTreeSet<PathBuf>; 3]) {
+        let [walked, watched, scanned] = legs;
+        assert_eq!(
+            watched,
+            walked,
+            "the watcher forwards paths the boot walk skips — those files are \
+             ingested only once they change, so the store holds documents no \
+             boot would ever have loaded; watcher-only: {:?}",
+            watched.difference(&walked).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            scanned,
+            walked,
+            "the harness's vault holds files production's walk never sees, so no \
+             test can reproduce what production ingests; harness-only: {:?}",
+            scanned.difference(&walked).collect::<Vec<_>>()
+        );
+    }
+
+    fn seed(root: &Path, relative_paths: &[&str], contents: &str) {
+        for rel in relative_paths {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, contents).unwrap();
+        }
+    }
+
+    /// A vault root that is a git repository — gitignore rules only bind inside
+    /// one (`ignore`'s `require_git` default), so a fixture without `.git`
+    /// measures the wrong walk.
+    fn vault_repo() -> (TempDir, PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        (temp, root)
+    }
+
+    #[tokio::test]
+    async fn every_leg_agrees_on_every_dot_directory() {
+        let (_temp, root) = vault_repo();
+        let corpus = [
+            "A.org",
+            "Projects/Holon/Now.org",
+            ".claude/worktrees/agent-x/Projects/Holon/Now.org",
+            ".obsidian/A.org",
+            ".logseq/A.org",
+            ".git/A.org",
+            ".jj/A.org",
+        ];
+        seed(&root, &corpus, "* H");
+
+        assert_legs_agree(every_legs_verdict(&root, &corpus).await);
+    }
+
+    /// The same drift one axis over: the walk reads every `.gitignore` on the
+    /// way down, the watcher read only the root's, so a file a NESTED
+    /// `.gitignore` excludes was invisible at boot and ingested on every touch.
+    #[tokio::test]
+    async fn every_leg_agrees_on_a_nested_gitignore() {
+        let (_temp, root) = vault_repo();
+        seed(&root, &[".gitignore"], "vendor/\n");
+        seed(&root, &["sub/.gitignore"], "scratch.org\n");
+        let corpus = [
+            "A.org",
+            "sub/Keep.org",
+            "sub/scratch.org",
+            "vendor/dep.org",
+            "sub/deeper/scratch.org",
+        ];
+        seed(&root, &corpus, "* H");
+
+        let legs = every_legs_verdict(&root, &corpus).await;
+        assert!(
+            !legs[0].contains(&root.join("sub/scratch.org")),
+            "fixture is wrong: the boot walk must skip the nested-gitignored file"
+        );
+        assert_legs_agree(legs);
+    }
+
+    /// The walk does not follow links. Everything BENEATH a symlinked directory
+    /// is therefore outside the vault — including a link that points into a
+    /// hidden directory, the shape an agent workspace mirror takes. A link to a
+    /// plain sibling file is a different case: the walk yields it as a file, so
+    /// the vault contains it.
+    #[tokio::test]
+    async fn every_leg_agrees_across_symlinks() {
+        let (_temp, root) = vault_repo();
+        seed(
+            &root,
+            &["A.org", ".claude/worktrees/agent-x/Mirrored.org"],
+            "* H",
+        );
+        std::os::unix::fs::symlink(root.join(".claude/worktrees/agent-x"), root.join("mirror"))
+            .unwrap();
+        std::os::unix::fs::symlink(root.join("A.org"), root.join("Alias.org")).unwrap();
+
+        let corpus = ["A.org", "Alias.org", "mirror/Mirrored.org"];
+        let legs = every_legs_verdict(&root, &corpus).await;
+        assert!(
+            legs[0].contains(&root.join("Alias.org")),
+            "fixture is wrong: the boot walk yields a symlink to a plain file"
+        );
+        assert!(
+            !legs[0].contains(&root.join("mirror/Mirrored.org")),
+            "fixture is wrong: the boot walk must not descend through a symlink"
+        );
+        assert_legs_agree(legs);
+    }
+
     #[tokio::test]
     async fn test_file_watcher_respects_gitignore() {
-        let temp_dir = TempDir::new().unwrap();
+        let (_temp, root) = vault_repo();
+        let temp_dir = root;
 
         // Create .gitignore that ignores "vendor/" directory
-        tokio::fs::write(temp_dir.path().join(".gitignore"), "vendor/\n")
+        tokio::fs::write(temp_dir.join(".gitignore"), "vendor/\n")
             .await
             .unwrap();
 
-        let vendor_dir = temp_dir.path().join("vendor");
+        let vendor_dir = temp_dir.join("vendor");
         std::fs::create_dir_all(&vendor_dir).unwrap();
 
-        let mut watcher = armed_watcher(temp_dir.path());
+        let mut watcher = armed_watcher(&temp_dir);
         sleep(Duration::from_millis(100)).await;
 
         // Write to ignored path

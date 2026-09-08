@@ -302,11 +302,17 @@ impl FileSystem for InMemoryFileSystem {
         if !st.dirs.contains(&root) {
             return Ok(ScannedEntries::default());
         }
+        // The harness answers vault membership through the SAME filter the live
+        // watcher asks and the real walk implements. Returning what the walk
+        // drops would give the harness a vault production never sees, which is
+        // how a stale copy under `.claude/worktrees/` stayed invisible to the
+        // fleet.
+        let filter = crate::vault_filter::VaultFilter::for_root(&root);
         Ok(ScannedEntries {
             files: st
                 .files
                 .keys()
-                .filter(|f| f.starts_with(&root))
+                .filter(|f| f.starts_with(&root) && filter.admits(f))
                 .cloned()
                 .collect(),
         })
@@ -437,5 +443,23 @@ mod tests {
 
         fs.remove_file(Path::new("/r/a.org")).unwrap();
         assert!(!fs.exists(Path::new("/r/a.org")));
+    }
+
+    /// The real adapter's walk never yields a hidden entry, so a harness that
+    /// yields them tests a vault production cannot have — and the stale vault
+    /// copies under `.claude/worktrees/` are exactly that shape.
+    #[tokio::test]
+    async fn scan_skips_hidden_entries_like_the_real_walk() {
+        let fs = InMemoryFileSystem::new();
+        fs.create_dir_all(Path::new("/r/.claude/worktrees/x"))
+            .await
+            .unwrap();
+        fs.write(Path::new("/r/a.org"), b"a").await.unwrap();
+        fs.write(Path::new("/r/.claude/worktrees/x/a.org"), b"stale")
+            .await
+            .unwrap();
+
+        let scanned = fs.scan_directory(Path::new("/r")).await.unwrap();
+        assert_eq!(scanned.files, vec![PathBuf::from("/r/a.org")]);
     }
 }

@@ -88,6 +88,32 @@ impl VaultPath {
     }
 }
 
+/// The dot-prefixed segment BELOW `root` that puts `path` out of the vault's
+/// reach, or `None` when the path is ingestable.
+///
+/// Two legs decide what the vault contains — the boot walk and the live file
+/// watcher — and a path only one of them accepts is a path whose document
+/// exists in some boots and not others. The walk delegates the question to
+/// `ignore`'s `hidden(true)`; the watcher, which has no such builder, asks
+/// here, so this function is the walk's rule restated once rather than retyped
+/// per call site.
+///
+/// Only segments below `root` are judged: a vault that itself lives under
+/// `~/.pkm` is still a vault.
+pub fn hidden_vault_segment(root: &Path, path: &Path) -> Option<String> {
+    // A path we cannot relate to `root` is judged whole. It is outside the
+    // vault and uningestable either way, and judging it whole keeps the
+    // pre-root VCS-internal segments visible to the caller.
+    let below = path.strip_prefix(root).unwrap_or(path);
+    below.components().find_map(|component| {
+        let Component::Normal(segment) = component else {
+            return None;
+        };
+        let text = segment.to_string_lossy();
+        text.starts_with('.').then(|| text.into_owned())
+    })
+}
+
 /// Resolve `.` and `..` textually — the target need not exist on disk, so
 /// `canonicalize` is not available. A `..` that would climb past the start
 /// simply shortens the path, which the descendant check then rejects.
@@ -231,5 +257,63 @@ mod tests {
     fn sibling_with_a_shared_name_prefix_is_refused() {
         VaultPath::inside(Path::new("/vault"), PathBuf::from("/vault-backup/page.org"))
             .expect_err("a sibling sharing a name prefix is not inside the root");
+    }
+
+    #[test]
+    fn an_ordinary_page_has_no_hidden_segment() {
+        assert_eq!(
+            hidden_vault_segment(Path::new("/vault"), Path::new("/vault/Projects/Now.org")),
+            None
+        );
+    }
+
+    /// The shape that reached ingest: a full vault copy inside an agent's
+    /// jj-workspace.
+    #[test]
+    fn a_nested_worktree_copy_names_the_segment_that_excludes_it() {
+        assert_eq!(
+            hidden_vault_segment(
+                Path::new("/vault"),
+                Path::new("/vault/.claude/worktrees/agent-x/Projects/Now.org")
+            ),
+            Some(".claude".to_string())
+        );
+    }
+
+    /// Every dot-directory counts, not a hand-listed few — `.obsidian` and
+    /// `.logseq` carry a companion editor's own copies of the same notes.
+    #[test]
+    fn any_dot_directory_excludes_not_just_vcs_internals() {
+        for hidden in [".obsidian", ".logseq", ".git", ".jj"] {
+            assert_eq!(
+                hidden_vault_segment(
+                    Path::new("/vault"),
+                    &Path::new("/vault").join(hidden).join("A.org")
+                ),
+                Some(hidden.to_string())
+            );
+        }
+    }
+
+    /// Judging the whole path would make a vault under `~/.pkm` ingest
+    /// nothing at all — only segments BELOW the root are the vault's own.
+    #[test]
+    fn a_root_that_is_itself_hidden_still_holds_ingestable_pages() {
+        assert_eq!(
+            hidden_vault_segment(
+                Path::new("/Users/m/.pkm/vault"),
+                Path::new("/Users/m/.pkm/vault/Projects/Now.org")
+            ),
+            None
+        );
+    }
+
+    /// A dotfile is as invisible to the boot walk as a dot-directory.
+    #[test]
+    fn a_hidden_leaf_file_is_excluded_too() {
+        assert_eq!(
+            hidden_vault_segment(Path::new("/vault"), Path::new("/vault/.draft.org")),
+            Some(".draft.org".to_string())
+        );
     }
 }

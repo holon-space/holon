@@ -286,6 +286,29 @@ const IMAGE_PATH_SITE: &str = "image-file-path-derivation";
 /// the other for the same file.
 const DUPLICATE_ID_SITE: &str = "duplicate-doc-id";
 const UNSETTLED_IDENTITY_SITE: &str = "unsettled-doc-identity";
+const DUPLICATE_BLOCK_SLUG_SITE: &str = "duplicate-block-slug";
+
+/// The identity another file already claims, and therefore the reason a file
+/// is refused.
+///
+/// The two claims end differently, so the poller cannot re-check them with one
+/// rule: a document id is released when its home leaves disk, a block slug when
+/// the claiming file stops declaring it (which it can do while staying put).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimedId {
+    /// The file's `#+ID:` names a document another file on disk homes.
+    Document(EntityUri),
+    /// A headline `:ID:` in the file is declared by another file on disk.
+    BlockSlug(EntityUri),
+}
+
+impl ClaimedId {
+    pub fn id(&self) -> &EntityUri {
+        match self {
+            Self::Document(id) | Self::BlockSlug(id) => id,
+        }
+    }
+}
 
 /// What an ingest attempt leaves behind for the NEXT attempt at the same file.
 ///
@@ -311,7 +334,7 @@ pub enum IngestOutcome {
     /// only stat'ed, never re-read for the id it still carries. Such a file
     /// stays refused for the rest of the session. See bugfunnel
     /// `2026-09-01-duplicate-id-refusal-outlives-the-claimant-releasing-the-id`.
-    RefusedWhileClaimed(EntityUri),
+    RefusedWhileClaimed(ClaimedId),
     /// The file is 0 bytes. Every atomic save (write a temp file, rename it
     /// over the target) makes the target observable at zero length first, so
     /// this is the normal first half of a save and NOT a document that lost its
@@ -333,7 +356,7 @@ struct IngestSkip {
     /// poller re-checks that the claimant is still on disk before honoring the
     /// skip — deleting or moving the winner is how a user hands the id to this
     /// file, and it changes nothing about this file for a signature to catch.
-    claimed_id: Option<EntityUri>,
+    claimed_id: Option<ClaimedId>,
 }
 
 /// One file's run of zero-length observations, held until it has content
@@ -929,6 +952,17 @@ pub struct FileSyncController {
     /// report for the same file, which is a different fault with a different
     /// remedy.
     duplicate_id_disclosed: HashSet<(CanonicalPath, &'static str)>,
+
+    /// Which file declares each block `:ID:` slug, for the block-level twin of
+    /// the duplicate-`#+ID:` refusal (D102.a).
+    ///
+    /// A slug is a document-scoped name that two files can both author — a
+    /// stale copy, a hand-pasted subtree — and the id-keyed diff then merges
+    /// the two files' headlines into ONE document. Refusing the second file
+    /// needs to know which file claimed each slug first, which is exactly this
+    /// map. Replaced wholesale per file on every ingest, so a block that moved
+    /// out of a file stops being claimed by it.
+    block_home: HashMap<EntityUri, CanonicalPath>,
 }
 
 impl FileSyncController {
@@ -995,6 +1029,7 @@ impl FileSyncController {
             ingest_quarantine: HashMap::new(),
             empty_since: HashMap::new(),
             duplicate_id_disclosed: HashSet::new(),
+            block_home: HashMap::new(),
         }
     }
 
@@ -1968,16 +2003,105 @@ impl FileSyncController {
     /// the next tick asks again.
     async fn claimant_still_holds(
         &mut self,
-        doc_id: &EntityUri,
+        claimed: &ClaimedId,
         path: &Path,
         candidate: &CanonicalPath,
     ) -> bool {
-        match self.live_claimant_of(doc_id, candidate).await {
+        let found = match claimed {
+            ClaimedId::Document(doc_id) => self.live_claimant_of(doc_id, candidate).await,
+            ClaimedId::BlockSlug(slug) => self.live_block_claimant_of(slug, candidate).await,
+        };
+        match found {
             Ok(claimant) => claimant.is_some(),
             Err(e) => {
-                self.disclose_unsettled_identity(doc_id, path, candidate, &e);
+                self.disclose_unsettled_identity(claimed.id(), path, candidate, &e);
                 true
             }
+        }
+    }
+
+    /// The file that already declares block slug `slug`, when it is a DIFFERENT
+    /// file from `candidate` and still declares it.
+    ///
+    /// Unlike a document id, a slug's claim is released without the claimant
+    /// leaving disk — Holon's own write-back moves a headline from one file to
+    /// another — so a stat is not enough: the recorded home is re-read and
+    /// re-parsed. That costs one read, and only when a slug actually collides.
+    async fn live_block_claimant_of(
+        &self,
+        slug: &EntityUri,
+        candidate: &CanonicalPath,
+    ) -> Result<Option<PathBuf>> {
+        let Some(home) = self.block_home.get(slug) else {
+            return Ok(None);
+        };
+        if home == candidate {
+            return Ok(None);
+        }
+        let home_path = home.as_path_buf().clone();
+        let content = match self.fs.read_to_string(&home_path).await {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "read the current claimant of block slug {slug} at {} while ingesting \
+                         another file declaring the same slug",
+                        home_path.display()
+                    )
+                });
+            }
+        };
+        let parse = self
+            .adapter(&home_path)?
+            .parse(
+                &home_path,
+                &content,
+                &EntityUri::no_parent(),
+                &self.root_dir,
+            )
+            .with_context(|| {
+                format!(
+                    "re-parse the current claimant of block slug {slug} at {} — until it can be \
+                     read, the claim it holds cannot be released",
+                    home_path.display()
+                )
+            })?;
+        Ok(parse
+            .blocks
+            .iter()
+            .any(|block| &block.id == slug)
+            .then_some(home_path))
+    }
+
+    /// The first parsed block slug another file already declares.
+    ///
+    /// The document's own root is excluded: its identity is the `#+ID:`, which
+    /// the duplicate-document refusal upstream already settled.
+    async fn colliding_block_slug(
+        &self,
+        blocks: &[Block],
+        doc_root: &EntityUri,
+        candidate: &CanonicalPath,
+    ) -> Result<Option<(EntityUri, PathBuf)>> {
+        for block in blocks {
+            if &block.id == doc_root {
+                continue;
+            }
+            if let Some(claimant) = self.live_block_claimant_of(&block.id, candidate).await? {
+                return Ok(Some((block.id.clone(), claimant)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Record which block slugs this file declares, dropping the ones it no
+    /// longer does — a headline that moved to another file must stop being
+    /// claimed by the file it left, or the file it moved to is refused.
+    fn note_block_homes(&mut self, blocks: &[Block], canonical: &CanonicalPath) {
+        self.block_home.retain(|_, home| home != canonical);
+        for block in blocks {
+            self.block_home.insert(block.id.clone(), canonical.clone());
         }
     }
 
@@ -2056,6 +2180,58 @@ impl FileSyncController {
         }
     }
 
+    /// Disclose a refused duplicate block-`:ID:` file: ERROR + a sticky
+    /// degraded banner the first time this path collides, DEBUG on every
+    /// repeat. The banner names BOTH files and the slug — the three things a
+    /// user needs to decide which copy to keep.
+    fn disclose_duplicate_block_slug(
+        &mut self,
+        slug: &EntityUri,
+        claimed_by: &Path,
+        refused: &Path,
+        canonical: &CanonicalPath,
+    ) {
+        if !self
+            .duplicate_id_disclosed
+            .insert((canonical.clone(), DUPLICATE_BLOCK_SLUG_SITE))
+        {
+            tracing::debug!(
+                slug = %slug,
+                claimed_by = %claimed_by.display(),
+                refused = %refused.display(),
+                "[FileSyncController] duplicate block `:ID:` still refused (already disclosed \
+                 once at ERROR)",
+            );
+            return;
+        }
+        let detail = format!(
+            "DUPLICATE BLOCK ID: '{slug}' is declared by BOTH {} and {}, so {} is NOT ingested — \
+             its headlines would merge into the other file's document and write-back would \
+             rewrite one file with the other's content. Give the duplicated headline a fresh \
+             `:ID:` in one of the two files, or delete the stray copy. The claimant is whichever \
+             file was ingested FIRST, and the vault walk order is arbitrary, so which of the two \
+             wins can differ between runs.",
+            claimed_by.display(),
+            refused.display(),
+            refused.display(),
+        );
+        tracing::error!(
+            slug = %slug,
+            claimed_by = %claimed_by.display(),
+            refused = %refused.display(),
+            "[FileSyncController] {detail} Repeats for this path log at DEBUG.",
+        );
+        let format = self
+            .formats
+            .require(refused)
+            .expect("the ingest that reached the slug check resolved an adapter for this file")
+            .format_name()
+            .to_string();
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.ingest_refused(refused, &format, &detail);
+        }
+    }
+
     /// Record that `path` now holds `doc_id`'s file.
     ///
     /// Called from every site that establishes a document's home — our own
@@ -2098,6 +2274,7 @@ impl FileSyncController {
             }
         }
         self.doc_home.retain(|_, home| home != canonical);
+        self.block_home.retain(|_, home| home != canonical);
         self.last_projection.remove(canonical);
         self.last_projection_hash.remove(canonical);
         self.disk_signatures.remove(canonical);
@@ -2126,6 +2303,11 @@ impl FileSyncController {
         }
         for doc_id in &moved {
             self.publish_write_tier(doc_id, to.as_path_buf());
+        }
+        for home in self.block_home.values_mut() {
+            if home == from {
+                *home = to.clone();
+            }
         }
         if let Some(v) = self.last_projection.remove(from) {
             self.last_projection.insert(to.clone(), v);
@@ -2939,7 +3121,9 @@ impl FileSyncController {
             match self.live_claimant_of(root, &canonical).await {
                 Ok(Some(claimant)) => {
                     self.disclose_duplicate_doc_id(root, &claimant, path, &canonical);
-                    return Ok(IngestOutcome::RefusedWhileClaimed(root.clone()));
+                    return Ok(IngestOutcome::RefusedWhileClaimed(ClaimedId::Document(
+                        root.clone(),
+                    )));
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -3037,6 +3221,23 @@ impl FileSyncController {
                 )
             })?;
         let bare_id_in_file = ingest_adapter.doc_id_from_content(&disk_content);
+
+        // D102.a — the block-level twin of the duplicate-`#+ID:` refusal, and
+        // it sits at the same place in the pipeline: after the parse (which
+        // writes nothing) and before the document is resolved or minted, so a
+        // refused file leaves not one block behind. Refusing the WHOLE file is
+        // the only choice that keeps a document whole; dropping just the
+        // colliding subtree would ingest a file the user never wrote.
+        if let Some((slug, claimant)) = self
+            .colliding_block_slug(&new_parse.blocks, &new_parse.document.id, &canonical)
+            .await?
+        {
+            self.disclose_duplicate_block_slug(&slug, &claimant, path, &canonical);
+            return Ok(IngestOutcome::RefusedWhileClaimed(ClaimedId::BlockSlug(
+                slug,
+            )));
+        }
+
         let segments = path_to_name_chain(rel_path);
         let segment_refs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
         // Filename-derived page title: the last path segment with the extension
@@ -3152,6 +3353,7 @@ impl FileSyncController {
         // disclosure in case the same path collides again later.
         self.duplicate_id_disclosed.retain(|(p, _)| p != &canonical);
         self.note_doc_home(&document_uri, path);
+        self.note_block_homes(&new_parse.blocks, &canonical);
         if let Some(ref registrar) = self.alias_registrar {
             registrar.register_alias(&document_uri, path).await;
         }

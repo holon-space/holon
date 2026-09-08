@@ -4172,3 +4172,156 @@ mod intermediate_ancestor_writeback_hole {
         );
     }
 }
+
+/// D102.a — two vault files that both declare the same block `:ID:`.
+///
+/// A slug is a document-scoped name, so nothing stops a stale copy or a
+/// hand-pasted subtree from carrying one another file already owns. The
+/// id-keyed diff then merged the two files' headlines into ONE document and
+/// write-back rewrote one file with the other's content. The ruling: refuse the
+/// WHOLE second file (walk order decides which is second), disclose it loudly
+/// naming both paths and the slug, and ingest nothing of it until a human
+/// resolves the collision.
+mod duplicate_block_slug_tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use holon_filesystem::ClaimedId;
+    use holon_filesystem::IngestOutcome;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RefusalLog(Mutex<Vec<String>>);
+
+    impl holon_filesystem::WritebackDisclosure for RefusalLog {
+        fn writeback_degraded(&self, _: &str) {}
+        fn ingest_refused(&self, path: &std::path::Path, _: &str, reason: &str) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("{}|{reason}", path.display()));
+        }
+        fn ingest_recovered(&self, _: &std::path::Path) {}
+        fn vault_file_emptied(&self, _: &std::path::Path) {}
+    }
+
+    const FIRST: &str = "\
+#+ID: 0f4a1c22-1111-4c19-9d84-2ac6b0e51137
+* TODO Shared headline
+:PROPERTIES:
+:ID: dupblk-shared
+:END:
+* TODO Only the first file has this
+:PROPERTIES:
+:ID: dupblk-first-only
+:END:
+";
+
+    const SECOND: &str = "\
+#+ID: 0f4a1c22-2222-4c19-9d84-2ac6b0e51137
+* TODO Shared headline
+:PROPERTIES:
+:ID: dupblk-shared
+:END:
+* DONE Only the second file has this
+:PROPERTIES:
+:ID: dupblk-second-only
+:END:
+";
+
+    #[tokio::test]
+    async fn a_second_file_claiming_a_blocks_slug_is_refused_whole_and_disclosed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new_with(temp_dir.path(), vec!["First".to_string()], false);
+        let log = Arc::new(RefusalLog::default());
+        fixture.controller = fixture.controller.with_writeback_disclosure(log.clone());
+        fixture.controller.initialize().await.expect("initialize");
+
+        let first = fixture.root_dir.join("First.org");
+        let second = fixture.root_dir.join("Second.org");
+        tokio::fs::write(&first, FIRST).await.unwrap();
+        tokio::fs::write(&second, SECOND).await.unwrap();
+
+        assert_eq!(
+            fixture.controller.on_file_changed(&first).await.unwrap(),
+            IngestOutcome::Ingested,
+            "the first file to claim a slug must ingest normally"
+        );
+        let outcome = fixture.controller.on_file_changed(&second).await.unwrap();
+
+        assert_eq!(
+            outcome,
+            IngestOutcome::RefusedWhileClaimed(ClaimedId::BlockSlug(EntityUri::block(
+                "dupblk-shared"
+            ))),
+            "a file declaring a slug another file already owns must be REFUSED, naming the slug \
+             that beat it — anything else merges two vault files into one document"
+        );
+
+        for slug in ["dupblk-second-only", "dupblk-shared"] {
+            let stored = fixture
+                .store
+                .get_block_authoritative(&EntityUri::block(slug))
+                .await
+                .unwrap();
+            let from_second = slug == "dupblk-second-only";
+            assert_eq!(
+                stored.is_none(),
+                from_second,
+                "refusing the file must leave NOTHING of it in the store while leaving the \
+                 claimant's own blocks untouched; slug {slug} was {stored:?}"
+            );
+        }
+
+        assert_eq!(
+            tokio::fs::read_to_string(&first).await.unwrap(),
+            FIRST,
+            "the claimant's bytes must be untouched — the merge's observable damage was \
+             write-back rewriting one file with the other's headlines"
+        );
+
+        let raised = log.0.lock().unwrap().clone();
+        assert_eq!(
+            raised.len(),
+            1,
+            "the refusal must raise EXACTLY one degraded condition, keyed by the refused file. \
+             Raised: {raised:?}"
+        );
+        for needle in ["First.org", "Second.org", "dupblk-shared"] {
+            assert!(
+                raised[0].contains(needle),
+                "the banner must name both files and the slug so a user can decide which copy to \
+                 keep; '{needle}' is missing from: {}",
+                raised[0]
+            );
+        }
+    }
+
+    /// The claimant releasing the slug — by an edit, not by leaving disk — must
+    /// let the refused file in. A refusal that outlives its cause is a file the
+    /// user has already fixed and Holon still ignores.
+    #[tokio::test]
+    async fn the_refusal_lifts_once_the_claimant_drops_the_slug() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new_with(temp_dir.path(), vec!["First".to_string()], false);
+        fixture.controller.initialize().await.expect("initialize");
+
+        let first = fixture.root_dir.join("First.org");
+        let second = fixture.root_dir.join("Second.org");
+        tokio::fs::write(&first, FIRST).await.unwrap();
+        tokio::fs::write(&second, SECOND).await.unwrap();
+        fixture.controller.on_file_changed(&first).await.unwrap();
+        fixture.controller.on_file_changed(&second).await.unwrap();
+
+        let renamed = FIRST.replace("dupblk-shared", "dupblk-first-renamed");
+        tokio::fs::write(&first, &renamed).await.unwrap();
+
+        assert_eq!(
+            fixture.controller.on_file_changed(&second).await.unwrap(),
+            IngestOutcome::Ingested,
+            "the claimant no longer declares the slug, so the refusal has nothing left to stand \
+             on and the file must ingest"
+        );
+    }
+}
