@@ -45,6 +45,28 @@ fn pump_cycle(app: &HeadlessAppContext, bounds: &BoundsRegistry) {
     bounds.flush();
 }
 
+/// How many [`pump_cycle`]s a bounds lookup waits for a frame that paints the
+/// entity before failing loud.
+///
+/// Counted in CYCLES, not wall time, because `pump_cycle` advances the app's
+/// FAKE CLOCK 500ms per iteration: a wall-clock deadline is a clock-injection
+/// rate, so raising it changes what the tests under it simulate rather than
+/// just how long they wait.
+///
+/// Eight is the settle chain, not a tuning knob. A re-created shell paints its
+/// rows on the next signal tick — two frames — and a gesture that also mutates
+/// has to clear CDC → Loro → projection first, which the harness elsewhere
+/// budgets at a handful of cycles. Eight leaves ~4x headroom over the observed
+/// need while keeping the miss cost bounded and deterministic.
+const BOUNDS_WAIT_PUMP_CYCLES: usize = 8;
+
+/// How many times [`SimUserDriver::send_key_chord`] re-clicks when the click
+/// lands but focus does not move. Counted in ATTEMPTS because each attempt now
+/// costs up to `BOUNDS_WAIT_PUMP_CYCLES` + the landing poll; the wall-clock
+/// budget this replaced was written when the click point resolved instantly and
+/// had silently narrowed to a single attempt.
+const CHORD_FOCUS_CLICK_ATTEMPTS: usize = 3;
+
 // ---------------------------------------------------------------------------
 // SimUserDriver — UserDriver over direct TestPlatform dispatch
 // ---------------------------------------------------------------------------
@@ -167,12 +189,95 @@ impl SimUserDriver {
             })
     }
 
-    fn mouse_point(&self, entity_id: &EntityUri) -> Option<Point<Pixels>> {
-        let (cx, cy) = self.bounds_center_f32(entity_id)?;
-        Some(Point {
-            x: Pixels::from(cx),
-            y: Pixels::from(cy),
-        })
+    /// What the window painted, from the entity's point of view — the census a
+    /// "not in bounds" failure needs to be actionable. Distinguishes the three
+    /// ways the lookup can come up empty: the entity is painted but clipped to
+    /// zero visible area, it is painted with no text element (so a
+    /// caret-seating click has nothing to aim at), or the projection never
+    /// mounted it at all.
+    fn miss_census(&self, entity_id: &EntityUri) -> String {
+        let eid = entity_id.as_str();
+        let elements = self.bounds.all_elements();
+        let mine: Vec<String> = elements
+            .iter()
+            .filter(|(_, i)| i.entity_id.as_deref() == Some(eid))
+            .map(|(id, i)| {
+                format!(
+                    "{id}[{}] {}x{} @{},{}{}",
+                    i.widget_type,
+                    i.width,
+                    i.height,
+                    i.x,
+                    i.y,
+                    if i.has_visible_area() { "" } else { " CLIPPED" }
+                )
+            })
+            .collect();
+        let mut painted_entities: Vec<&str> = elements
+            .iter()
+            .filter_map(|(_, i)| i.entity_id.as_deref())
+            .collect();
+        painted_entities.sort_unstable();
+        painted_entities.dedup();
+        let mut full: Vec<String> = elements
+            .iter()
+            .map(|(id, i)| {
+                format!(
+                    "{id}|{}|ent={:?}|parent={:?}|txt={:?}|{}x{}@{},{}",
+                    i.widget_type,
+                    i.entity_id.as_deref(),
+                    i.parent_id.as_deref(),
+                    i.displayed_text.as_deref(),
+                    i.width,
+                    i.height,
+                    i.x,
+                    i.y
+                )
+            })
+            .collect();
+        full.sort();
+        format!(
+            "elements={}, engine_focus={:?}, entities painted={:?}, elements bound to \
+             {eid}={:?}\nFULL:\n{}",
+            elements.len(),
+            self.engine.focused_block(),
+            painted_entities,
+            mine,
+            full.join("\n")
+        )
+    }
+
+    /// The click point for `entity_id`, WAITING for a frame that actually
+    /// paints it. Fails loud at [`BOUNDS_WAIT_PUMP_CYCLES`] with
+    /// [`Self::miss_census`].
+    ///
+    /// The main panel's virtualized `ReactiveShell` is re-created with an EMPTY
+    /// item vec on every projection rebuild and fills only on its next signal
+    /// tick, so a one-shot read lands on a blank panel whenever it falls in
+    /// that window and the gesture fails on a row that is on screen a frame
+    /// later. Every bounds-taking verb on this driver routes through here.
+    fn click_point_when_painted(
+        &self,
+        entity_id: &EntityUri,
+        prefer_text: bool,
+    ) -> Result<(f32, f32), anyhow::Error> {
+        let app = unsafe { &*self.app_ptr };
+        for _ in 0..BOUNDS_WAIT_PUMP_CYCLES {
+            let center = if prefer_text {
+                self.text_center(entity_id)
+            } else {
+                None
+            }
+            .or_else(|| self.bounds_center_f32(entity_id));
+            if let Some(center) = center {
+                return Ok(center);
+            }
+            pump_cycle(app, &self.bounds);
+        }
+        anyhow::bail!(
+            "entity {entity_id} not in bounds after {BOUNDS_WAIT_PUMP_CYCLES} pump cycles ({})",
+            self.miss_census(entity_id)
+        )
     }
 
     /// Dispatch one keystroke; returns gpui's `handled` flag.
@@ -311,7 +416,7 @@ impl UserDriver for SimUserDriver {
         // Click-to-focus with re-click until focused_block lands on the
         // target — a single click can land on a neighbor row when an async
         // commit shifts bounds mid-click.
-        let overall_deadline = std::time::Instant::now() + Duration::from_secs(4);
+        let mut attempts_left = CHORD_FOCUS_CLICK_ATTEMPTS;
         loop {
             let already_focused = self
                 .engine
@@ -324,12 +429,13 @@ impl UserDriver for SimUserDriver {
             if already_focused {
                 break;
             }
-            let Some(pos) = self.mouse_point(entity_id) else {
-                anyhow::bail!(
-                    "send_key_chord: entity {entity_id} not in bounds for click-to-focus"
-                );
-            };
-            self.raw_click(pos);
+            let (cx, cy) = self
+                .click_point_when_painted(entity_id, false)
+                .map_err(|e| anyhow::anyhow!("send_key_chord click-to-focus: {e:#}"))?;
+            self.raw_click(Point {
+                x: Pixels::from(cx),
+                y: Pixels::from(cy),
+            });
             let attempt_deadline = std::time::Instant::now() + Duration::from_secs(1);
             let landed = loop {
                 let focused = self
@@ -352,11 +458,12 @@ impl UserDriver for SimUserDriver {
             if landed {
                 break;
             }
-            if std::time::Instant::now() >= overall_deadline {
+            attempts_left -= 1;
+            if attempts_left == 0 {
                 anyhow::bail!(
-                    "send_key_chord: click on {entity_id} never moved focused_block to it within \
-                     4s (incl. re-click attempts) — refusing to press {chord:?} into the wrong \
-                     editor"
+                    "send_key_chord: click on {entity_id} never moved focused_block to it in \
+                     {CHORD_FOCUS_CLICK_ATTEMPTS} attempts — refusing to press {chord:?} into the \
+                     wrong editor"
                 );
             }
             eprintln!(
@@ -442,15 +549,7 @@ impl UserDriver for SimUserDriver {
             // scoping" case `GpuiUserDriver::require_click_center` treats as main.
             .map(|r| r == Region::Main)
             .unwrap_or(true);
-        let center = if is_main {
-            self.text_center(entity_id)
-        } else {
-            None
-        }
-        .or_else(|| self.bounds_center_f32(entity_id));
-        let Some((cx, cy)) = center else {
-            anyhow::bail!("entity {entity_id} not in bounds");
-        };
+        let (cx, cy) = self.click_point_when_painted(entity_id, is_main)?;
         self.raw_click(Point {
             x: Pixels::from(cx),
             y: Pixels::from(cy),
@@ -468,10 +567,26 @@ impl UserDriver for SimUserDriver {
         let target_str = target.as_str();
         let bare = target_str.strip_prefix("block:").unwrap_or(target_str);
         let element_id = holon_frontend::expand_toggle_id_for(bare);
-        self.pump();
-        let info = self.bounds.element_info(&element_id).ok_or_else(|| {
-            anyhow::anyhow!("set_block_expanded: chevron {element_id} not in bounds")
-        })?;
+        // Same frame-wait contract as `click_point_when_painted`: the chevron
+        // lives on a main-panel row, so it is absent from any frame the
+        // virtualized shell rebuilt empty.
+        let app = unsafe { &*self.app_ptr };
+        let mut found = None;
+        for _ in 0..BOUNDS_WAIT_PUMP_CYCLES {
+            self.pump();
+            if let Some(info) = self.bounds.element_info(&element_id) {
+                found = Some(info);
+                break;
+            }
+            pump_cycle(app, &self.bounds);
+        }
+        let Some(info) = found else {
+            anyhow::bail!(
+                "set_block_expanded: chevron {element_id} not in bounds after \
+                 {BOUNDS_WAIT_PUMP_CYCLES} pump cycles ({})",
+                self.miss_census(target)
+            );
+        };
         let (cx, cy) = info.center();
         self.raw_click(Point {
             x: Pixels::from(cx),
@@ -645,9 +760,13 @@ impl UserDriver for SimUserDriver {
         dx: f32,
         dy: f32,
     ) -> Result<(), anyhow::Error> {
-        let Some((cx, cy)) = self.bounds_center_f32(entity_id) else {
-            return Ok(());
-        };
+        // Same frame-wait as every other bounds-taking verb, and a MISS IS AN
+        // ERROR: this used to return `Ok(())`, so a scroll aimed at a frame the
+        // shell had rebuilt empty became a silent no-op and the caller went on
+        // believing it had scrolled.
+        let (cx, cy) = self
+            .click_point_when_painted(entity_id, false)
+            .map_err(|e| anyhow::anyhow!("scroll_entity: {e:#}"))?;
         self.scroll_at(cx, cy, dx, dy).await
     }
 
@@ -657,12 +776,20 @@ impl UserDriver for SimUserDriver {
         source_id: &EntityUri,
         target_id: &EntityUri,
     ) -> Result<bool, anyhow::Error> {
-        let Some(src) = self.mouse_point(source_id) else {
-            anyhow::bail!("source {source_id} not in bounds");
-        };
-        let Some(dst) = self.mouse_point(target_id) else {
-            anyhow::bail!("target {target_id} not in bounds");
-        };
+        let src = self
+            .click_point_when_painted(source_id, false)
+            .map(|(x, y)| Point {
+                x: Pixels::from(x),
+                y: Pixels::from(y),
+            })
+            .map_err(|e| anyhow::anyhow!("drop_entity source: {e:#}"))?;
+        let dst = self
+            .click_point_when_painted(target_id, false)
+            .map(|(x, y)| Point {
+                x: Pixels::from(x),
+                y: Pixels::from(y),
+            })
+            .map_err(|e| anyhow::anyhow!("drop_entity target: {e:#}"))?;
         self.update_and_settle(|cx| {
             self.window
                 .update(cx, |_, window, cx| {

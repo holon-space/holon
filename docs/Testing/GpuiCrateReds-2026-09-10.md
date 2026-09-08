@@ -18,6 +18,12 @@ cargo nextest run --no-fail-fast -p holon-gpui --features holon-gpui/pbt
 No fix is attempted here. This document classifies; the deterministic families
 are separate lanes.
 
+**Updated 2026-09-09** by the `gpui-driver` lane, the first of those lanes to
+report back: Family A resolved (rows 2, 5, 6, 16 CLOSED; rows 1, 3, 4 open on a
+different cause), Family E's hypothesis refuted, deterministic tier 16 → 12.
+Edits are confined to `Status` cells, the tier-1 allowlist, and the resolution
+notes under each family; the 2026-09-08 measurement itself is not rewritten.
+
 ## Method — every number below comes from one file
 
 `lane-logs/gpui-reds-rates.txt` in the lane workspace, produced by
@@ -51,8 +57,14 @@ tree produced 16, 58 and 19 failures.
 |---|---|
 | Tests in the suite | 390 |
 | Never red in any of the four runs | 332 |
-| `deterministic` | **16** |
+| `deterministic` (as measured 2026-09-08) | **16** |
+| `deterministic` (open, after the `gpui-driver` lane) | **12** |
 | `load-sensitive` | **42** |
+
+Rows 2, 5, 6 and 16 were closed by the `gpui-driver` lane on 2026-09-09 — one
+cause, one fix, four rows (see Family A below). The deterministic tier is
+therefore **12** open rows. `16` is kept as the measurement this document
+reports; the second line is what a gate would find today.
 
 The `main`-run log from the wave-11 attribution lane
 (`main-gpui-full.log`, 41 failures at `830d794f878f`) is the first-seen
@@ -60,36 +72,91 @@ evidence. 40 of the 58 names appear in it; the other 18 are all
 `load-sensitive` or flaky rows whose absence from a single `main` run proves
 nothing about their age.
 
-## The deterministic register (16 rows)
+## The deterministic register (16 rows — 4 CLOSED, 12 open)
 
 `first-seen` is `830d794f878f` where that rev's log carries the name, else
 `91b1501d4016` — the rev this lane measured. Neither is a claim that the red
 *started* there; no gate ever ran this crate, so the true origin is unmeasured
 for every row.
 
-| # | Binary | Test | Loaded | Serial | First-seen | Failure text (excerpt) |
-|---|---|---|---|---|---|---|
-| 1 | `gpui_compose_sut_windowed` | `windowed_split_then_clickblock_resolves_minted_id` | 3/3 | FAIL | `830d794f878f` | `op_write_cap.rs:289` `[SplitBlock/keystroke] focus block:c1 failed: entity block:c1 not in bounds` |
-| 2 | `gpui_composed_windowed_loop` | `benchmark_windowed_per_case_boot_cost` | 3/3 | FAIL | `830d794f878f` | `driver_input.rs:418` `[ClickBlock] click_entity failed for block:c1: entity block:c1 not in bounds` |
-| 3 | `gpui_composed_windowed_loop` | `general_e2e_composed_pbt_windowed` | 3/3 (TIMEOUT under load) | FAIL 89s | `830d794f878f` | `[4b-loop] windowed PBT failed (shrunk): SUT apply panicked: [SplitBlock/keystroke] focus block:c1 failed: entity block:c1 not in bounds` |
-| 4 | `gpui_sim_replay_capture` | `gpui_sim_replay_capture` | 3/3 | FAIL | `830d794f878f` | replaying `presskey_loro_split_backspace`; `op_write_cap.rs:289` `focus block:c1 failed: entity block:c1 not in bounds` |
-| 5 | `gpui_compose_sut_windowed` | `windowed_composed_sut_drives_a_click_gesture_sequence_green` | 2/3 | FAIL | `91b1501d4016` | `driver_input.rs:418` `[ClickBlock] click_entity failed for block:c1: entity block:c1 not in bounds` |
-| 6 | `gpui_compose_sut_windowed` | `windowed_composed_sut_replays_a_fixture_via_replay_steps_green` | 1/3 | FAIL | `830d794f878f` | `driver_input.rs:418` `[ClickBlock] click_entity failed for block:c2: entity block:c2 not in bounds` |
-| 7 | `layout_editor` | `windowed_caret::clicking_an_entity_link_still_navigates` | 3/3 | FAIL 0.10s | `830d794f878f` | `layout_editor.rs:446` `a registered entity link should dispatch exactly one navigation intent; left: 0, right: 1` |
-| 8 | `layout_editor` | `windowed_caret::clicking_an_external_link_opens_the_url_instead_of_navigating` | 3/3 | FAIL 0.03s | `830d794f878f` | `layout_editor.rs:413` `clicking an external link should hand the URL to the platform opener; left: None, right: Some("https://example.com")` |
-| 9 | `layout_smoke` | `snapshot_captures_each_widget` | 3/3 | FAIL 0.03s | `830d794f878f` | `layout_smoke.rs:199` `expected 1 badge, got 2` |
-| 10 | `nested_page_chevron_gate` | `an_opened_nested_page_paints_its_children` | 3/3 | FAIL | `830d794f878f` | `nested_page_chevron_gate.rs:753` `"buy milk" is not among the painted text of the window … painted = ["▼", "A Nested Page"]` |
-| 11 | `settings_integrations_setfield_popup_windowed` | `clicking_multi_param_set_field_opens_param_popup_then_dispatches` | 3/3 | FAIL | `830d794f878f` | `…setfield_popup_windowed.rs:288` `the popup's value step must offer "op-param-item-value-true". op-param ids painted now: []` |
-| 12 | `structural_chord_stale_flush_windowed` | `structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_loro` | 3/3 | FAIL | `830d794f878f` | `…rs:351` `vacuity guard: the Tab chord changed no parentage, so no structural op was dispatched` |
-| 13 | `structural_chord_stale_flush_windowed` | `structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_sqlonly` | 3/3 | FAIL | `830d794f878f` | as row 12 |
-| 14 | `task_keyword_blur_windowed` | `promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly` | 3/3 | FAIL | `830d794f878f` | `…rs:357` `vacuity guard: the blur dispatched NO operation (6 history rows before and after)` |
-| 15 | `windowed_log_capture` | `every_windowed_target_declares_test_init` | 3/3 | FAIL 0.03s | `830d794f878f` | `windowed_log_capture.rs:162` `these windowed test targets install no tracing subscriber — add \`mod test_init;\`` (10 files) |
-| 16 | `block_focus_keeps_outline_windowed` | `a_short_window_still_paints_the_outline` | 1/3 | FAIL | `830d794f878f` | `…rs:457` `the main panel has a 438.0px box and three one-line rows to draw, and painted 0 of them: {}; left: 0, right: 3` |
+`Status` is as of 2026-09-09. `Loaded`, `Serial` and `Failure text` stay as
+MEASURED on 2026-09-08 — this register reports one measurement and does not
+rewrite it; where a row's failure has since changed, the `Status` cell says so.
+
+| # | Binary | Test | Status | Loaded | Serial | First-seen | Failure text (excerpt) |
+|---|---|---|---|---|---|---|---|
+| 1 | `gpui_compose_sut_windowed` | `windowed_split_then_clickblock_resolves_minted_id` | **OPEN — cause replaced** | 3/3 | FAIL | `830d794f878f` | `op_write_cap.rs:289` `[SplitBlock/keystroke] focus block:c1 failed: entity block:c1 not in bounds` |
+| 2 | `gpui_composed_windowed_loop` | `benchmark_windowed_per_case_boot_cost` | **CLOSED** (`gpui-driver`) | 3/3 | FAIL | `830d794f878f` | `driver_input.rs:418` `[ClickBlock] click_entity failed for block:c1: entity block:c1 not in bounds` |
+| 3 | `gpui_composed_windowed_loop` | `general_e2e_composed_pbt_windowed` | **OPEN — cause replaced; BORDERLINE on budget** | 3/3 (TIMEOUT under load) | FAIL 89s | `830d794f878f` | `[4b-loop] windowed PBT failed (shrunk): SUT apply panicked: [SplitBlock/keystroke] focus block:c1 failed: entity block:c1 not in bounds` |
+| 4 | `gpui_sim_replay_capture` | `gpui_sim_replay_capture` | **OPEN — cause replaced** | 3/3 | FAIL | `830d794f878f` | replaying `presskey_loro_split_backspace`; `op_write_cap.rs:289` `focus block:c1 failed: entity block:c1 not in bounds` |
+| 5 | `gpui_compose_sut_windowed` | `windowed_composed_sut_drives_a_click_gesture_sequence_green` | **CLOSED** (`gpui-driver`) | 2/3 | FAIL | `91b1501d4016` | `driver_input.rs:418` `[ClickBlock] click_entity failed for block:c1: entity block:c1 not in bounds` |
+| 6 | `gpui_compose_sut_windowed` | `windowed_composed_sut_replays_a_fixture_via_replay_steps_green` | **CLOSED** (`gpui-driver`) | 1/3 | FAIL | `830d794f878f` | `driver_input.rs:418` `[ClickBlock] click_entity failed for block:c2: entity block:c2 not in bounds` |
+| 7 | `layout_editor` | `windowed_caret::clicking_an_entity_link_still_navigates` | OPEN | 3/3 | FAIL 0.10s | `830d794f878f` | `layout_editor.rs:446` `a registered entity link should dispatch exactly one navigation intent; left: 0, right: 1` |
+| 8 | `layout_editor` | `windowed_caret::clicking_an_external_link_opens_the_url_instead_of_navigating` | OPEN | 3/3 | FAIL 0.03s | `830d794f878f` | `layout_editor.rs:413` `clicking an external link should hand the URL to the platform opener; left: None, right: Some("https://example.com")` |
+| 9 | `layout_smoke` | `snapshot_captures_each_widget` | OPEN | 3/3 | FAIL 0.03s | `830d794f878f` | `layout_smoke.rs:199` `expected 1 badge, got 2` |
+| 10 | `nested_page_chevron_gate` | `an_opened_nested_page_paints_its_children` | OPEN | 3/3 | FAIL | `830d794f878f` | `nested_page_chevron_gate.rs:753` `"buy milk" is not among the painted text of the window … painted = ["▼", "A Nested Page"]` |
+| 11 | `settings_integrations_setfield_popup_windowed` | `clicking_multi_param_set_field_opens_param_popup_then_dispatches` | OPEN | 3/3 | FAIL | `830d794f878f` | `…setfield_popup_windowed.rs:288` `the popup's value step must offer "op-param-item-value-true". op-param ids painted now: []` |
+| 12 | `structural_chord_stale_flush_windowed` | `structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_loro` | OPEN — unchanged by `gpui-driver` | 3/3 | FAIL | `830d794f878f` | `…rs:351` `vacuity guard: the Tab chord changed no parentage, so no structural op was dispatched` |
+| 13 | `structural_chord_stale_flush_windowed` | `structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_sqlonly` | OPEN — unchanged by `gpui-driver` | 3/3 | FAIL | `830d794f878f` | as row 12 |
+| 14 | `task_keyword_blur_windowed` | `promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly` | OPEN — unchanged by `gpui-driver` | 3/3 | FAIL | `830d794f878f` | `…rs:357` `vacuity guard: the blur dispatched NO operation (6 history rows before and after)` |
+| 15 | `windowed_log_capture` | `every_windowed_target_declares_test_init` | OPEN | 3/3 | FAIL 0.03s | `830d794f878f` | `windowed_log_capture.rs:162` `these windowed test targets install no tracing subscriber — add \`mod test_init;\`` (10 files) |
+| 16 | `block_focus_keeps_outline_windowed` | `a_short_window_still_paints_the_outline` | **CLOSED** (`gpui-driver`) — see caveat | 1/3 | FAIL | `830d794f878f` | `…rs:457` `the main panel has a 438.0px box and three one-line rows to draw, and painted 0 of them: {}; left: 0, right: 3` |
 
 Rows 5, 6 and 16 fail serially but pass in some loaded runs. That is the
 signature of a red with a *nondeterministic* trigger, not of a load flake —
 they stay in the deterministic tier, because a test that fails when nothing
 else competes with it is not excused by load.
+
+### Rows 2, 5, 6, 16 — CLOSED 2026-09-09 by the `gpui-driver` lane
+
+One cause, one fix, four rows. The harness change is
+`SimUserDriver::click_point_when_painted` in
+`frontends/gpui/tests/pbt_harness/sim_windowed_replay.rs`: every bounds-taking
+verb now pumps until a frame actually paints the entity (bounded by
+`BOUNDS_WAIT_PUMP_CYCLES`) and fails loud with a painted-window census, instead
+of resolving the click point from one committed frame. Recorded as
+`docs/Testing/bugfunnel/entries/2026-09-09-windowed-driver-reads-one-frame-for-entity-bounds.md`.
+
+Green serially, `--test-threads=1` (`gpui-driver` lane-logs
+`gate-nine-11537.log`, `gate-full-serial-53638.log`, `rev2-tests-76186.log`;
+independently reproduced by the verifier):
+
+| Row | Result |
+|---|---|
+| 2 | `PASS [41.909s]` |
+| 5 | `PASS [16.970s]` |
+| 6 | `PASS [16.766s]` |
+| 16 | `PASS [11.950s]` |
+
+**Row 16 caveat.** It was recorded 1/3 loaded + FAIL serial, i.e. a
+nondeterministic trigger. Three green serial runs (lane ×2, verifier ×1) make it
+*likely* fixed, not proven. Treat a future red there as a re-open, not a new row.
+
+### Rows 1, 3, 4 — still OPEN, but the cause is no longer this family
+
+They now fail PAST the bounds gate, at
+`crates/holon-integration-tests/src/pbt/op_write_cap.rs:381`:
+
+```
+[SplitBlock/keystroke] cannot place the caret for content byte 0 on block:c1:
+editable surface not projected by this driver
+```
+
+That string is the `UserDriver::surface_chars_before_content` trait DEFAULT
+(`crates/holon-frontend/src/user_driver.rs:299`). Only the headless
+`ReactiveEngineDriver` implements it, via
+`HeadlessEditorMirror::content_offset_to_surface`; neither `SimUserDriver` nor
+the production `GpuiUserDriver` does — so windowed `SplitBlock` caret placement
+has never worked. Feature-sized, queued as the `windowed-split-caret` lane.
+
+**Row 3 is BORDERLINE against its 120s nextest budget.** After the fix it gets
+further into the generated sequence before failing, so each case does more work:
+observed once as `FAIL 87.8s` and twice as `TIMEOUT 120s` (including in
+isolation), always at the same panic site. That is base-like, not worse — the
+row was already `3/3 (TIMEOUT under load)` before any of this — but it now sits
+close enough to the budget that a TIMEOUT here should be read as *this* row, not
+as a new load flake. The `windowed-split-caret` lane should expect to raise the
+budget or shrink the case count.
 
 ## Root-cause hypotheses and their discriminating checks
 
@@ -115,6 +182,34 @@ window is supposed to be painting.
   contains the block's text but the bounds map does not ⇒ a
   registration/flush-ordering defect in the windowed driver. Census also lacks
   it ⇒ a real render gap, and the family belongs with rows 10/16.
+
+**RESOLVED 2026-09-09 (`gpui-driver`). The check returned the SECOND branch: the
+census also lacks it — a render gap, not a registration race.** The hypothesis
+above is refuted; the family is one cause, and it is two facts:
+
+1. The main panel's collection `ReactiveShell` is **re-created with an EMPTY item
+   vec on every projection rebuild** and refills only on its next
+   `signal_vec_cloned()` tick. Probes show the shell holding
+   `items=5 visible=5` including `block:c1` with all five `gpui::list` row
+   callbacks firing, while a *different*, freshly-constructed shell instance
+   renders last and is the frame that gets committed — a full-height
+   `reactive_shell` with no descendants at all. The window is not lost: engine
+   focus and the panel's `view_mode_switcher` both name the right page.
+2. The driver **sampled one frame**. `click_entity` resolved the click point with
+   a single bounds read and bailed, while every other verb on the same driver
+   already retried across frames.
+
+Attribution proof: adding a bare `eprintln!` inside the list row callback — pure
+timing, no logic — moved row 1 off the bounds bail onto its next precondition.
+
+Fixing (2) closed rows 2, 5, 6, 16. Fact (1) is a PRODUCTION defect and stays
+open in the bug funnel:
+`2026-09-09-main-panel-collection-shell-is-rebuilt-empty-each-projection` plus
+the oracle exemption that hid it,
+`2026-09-09-content-fidelity-exempts-a-shell-with-no-descendants`. Note that the
+driver's new frame-wait makes a *transient* blank panel unobservable to every
+windowed oracle — the fix lane cannot use this suite as its red. The
+*persistent* variant is row 10 (Family D), still open.
 
 ### Family B — link marks do not dispatch (rows 7, 8)
 
@@ -170,6 +265,13 @@ refuses to pass on an interaction that never happened.
 - **Discriminating check:** log the focused block id immediately before the
   chord/blur. No focused block ⇒ Family A is the single upstream cause for
   rows 1–6 and 12–14, and one fix closes nine rows.
+
+**REFUTED 2026-09-09 (`gpui-driver`). Family E is NOT downstream of Family A.**
+All three rows run on the same `SimUserDriver`, and all three fail **unchanged**
+— same vacuity-guard text, same line — with Family A's frame-wait in place and
+Family A's own rows green. So one fix closes **four** rows, not nine, and this
+family needs its own root-cause pass: the caret/focus precondition is not what
+is missing here.
 
 ### Family F — `every_windowed_target_declares_test_init` (row 15)
 
@@ -246,10 +348,14 @@ with two preconditions, because without them the gate reports noise:
    only**: a Tier-2 name that fails in a *serial* rerun is a regression, not a
    flake. **Any name outside both tiers blocks the land.**
 
-### Tier 1 — known deterministic (16), regex over test function names
+### Tier 1 — known deterministic (12), regex over test function names
+
+Rows 2, 5, 6 and 16 are **removed** from this allowlist: they are fixed, so a
+future red there is a REGRESSION the gate must catch, not a known red it should
+excuse.
 
 ```
-^(a_short_window_still_paints_the_outline|windowed_composed_sut_drives_a_click_gesture_sequence_green|windowed_composed_sut_replays_a_fixture_via_replay_steps_green|windowed_split_then_clickblock_resolves_minted_id|benchmark_windowed_per_case_boot_cost|general_e2e_composed_pbt_windowed|gpui_sim_replay_capture|windowed_caret::clicking_an_entity_link_still_navigates|windowed_caret::clicking_an_external_link_opens_the_url_instead_of_navigating|snapshot_captures_each_widget|an_opened_nested_page_paints_its_children|clicking_multi_param_set_field_opens_param_popup_then_dispatches|structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_loro|structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_sqlonly|promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly|every_windowed_target_declares_test_init)$
+^(windowed_split_then_clickblock_resolves_minted_id|general_e2e_composed_pbt_windowed|gpui_sim_replay_capture|windowed_caret::clicking_an_entity_link_still_navigates|windowed_caret::clicking_an_external_link_opens_the_url_instead_of_navigating|snapshot_captures_each_widget|an_opened_nested_page_paints_its_children|clicking_multi_param_set_field_opens_param_popup_then_dispatches|structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_loro|structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_sqlonly|promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly|every_windowed_target_declares_test_init)$
 ```
 
 ### Tier 2 — known load-sensitive (42), regex over test function names
@@ -272,3 +378,13 @@ Establishing a true origin needs the same extraction replayed at earlier revs.
 
 `docs/Testing/bugfunnel/entries/2026-09-10-holon-gpui-suite-red-at-main-and-ungated.md`
 (gap `ENVIRONMENT`, secondary `COVERAGE`, status `OPEN`).
+
+From the `gpui-driver` lane (2026-09-09), for Family A:
+
+- `2026-09-09-windowed-driver-reads-one-frame-for-entity-bounds.md`
+  (`ENVIRONMENT`/`ORACLE`, **FIXED**) — the harness cause of rows 2, 5, 6, 16.
+- `2026-09-09-main-panel-collection-shell-is-rebuilt-empty-each-projection.md`
+  (`PERCEPTION`/`ORACLE`, **OPEN**) — the production defect underneath, for the
+  queued `panel-blank-frame` lane.
+- `2026-09-09-content-fidelity-exempts-a-shell-with-no-descendants.md`
+  (`ORACLE`, **OPEN**) — the exemption that let it live.
