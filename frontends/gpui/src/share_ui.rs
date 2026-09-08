@@ -2083,6 +2083,12 @@ fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
 /// test-only label.
 pub const DEGRADED_TOAST_STACK: &str = "degraded-toast-stack";
 
+/// Element-id prefix of one painted toast line — `{TOAST_LINE}-{toast}-{line}`.
+/// A toast line carries text the user has to read in full (an archive path, the
+/// query that finds the conflict copies), so its rect is what a windowed test
+/// judges, not the string it was built from.
+pub const TOAST_LINE: &str = "toast-line";
+
 fn render_toast_stack(
     toasts: &[DegradedToast],
     share_state: Entity<ShareUiState>,
@@ -2124,7 +2130,22 @@ fn render_toast_stack(
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .children(lines.into_iter().map(|l| div().child(l))),
+                        // A flex item's automatic minimum is its min-content
+                        // width, so without this a line as long as the conflict
+                        // query keeps its full length and leaves the toast's
+                        // `max_w` — and the window — on the right.
+                        .min_w(px(0.0))
+                        .children(lines.into_iter().enumerate().map(|(line_idx, l)| {
+                            crate::geometry::tracked(
+                                format!("{TOAST_LINE}-{idx}-{line_idx}"),
+                                div().min_w(px(0.0)).child(l.clone()).into_any_element(),
+                                &bounds,
+                                "toast_line",
+                                None,
+                                true,
+                                Some(std::sync::Arc::from(l)),
+                            )
+                        })),
                 )
                 .child(
                     div()

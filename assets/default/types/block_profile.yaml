@@ -144,6 +144,11 @@ variants:
   # copy still reaches `editing`. Guarded by `is_def_var` because rows without
   # the property never bind it.
   #
+  # The badge sits on its own row under the text, not beside it: `rendered_text`
+  # takes the whole width of the row it is in, so a copy whose content fills the
+  # row leaves the badge nothing and the mark disappears for exactly the long
+  # blocks (bugfunnel 2026-09-08-long-conflict-copy-paints-no-badge-at-all).
+  #
   # Priority 3 — above EVERY other variant, because the disclosure outranks the
   # presentation: a conflict copy of a rule head or of a `Page`-tagged block
   # would otherwise render as its card or its embedded page with no mark at
@@ -154,7 +159,7 @@ variants:
     priority: 3
     condition: 'is_def_var("pairing_conflict_of") && pairing_conflict_of != () && !is_focused'
     render: >-
-      column(row(#{gap: 2, align: "start"}, selectable(draggable(icon(col("bullet_shape"), #{size: 12, color: "primary", mt: 12})), #{shift_action: focus_pin(#{region: "right_sidebar", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states"), mt: 10}), rendered_text(col("content")), badge("kept from this device before pairing", #{block_id: col("id")})), drop_zone())
+      column(row(#{gap: 2, align: "start"}, selectable(draggable(icon(col("bullet_shape"), #{size: 12, color: "primary", mt: 12})), #{shift_action: focus_pin(#{region: "right_sidebar", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states"), mt: 10}), rendered_text(col("content"))), row(badge("kept from this device before pairing", #{block_id: col("id")})), drop_zone())
   - name: source_editing
     priority: -1
     condition: 'is_source && is_focused'

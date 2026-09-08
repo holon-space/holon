@@ -28,6 +28,7 @@ use std::time::Duration;
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
 use holon_api::EntityUri;
+use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
@@ -75,6 +76,47 @@ const HOST_ORG: &str = concat!(
     ":END:\n",
 );
 
+const LONG_HOST_PAGE: &str = "pair-conflict-long-page";
+const LONG_COPY: &str = "pcl-owner-before-pairing";
+const WRAPPED_COPY: &str = "pcw-owner-before-pairing";
+
+/// A copy whose content fills the row, and one whose content fills several
+/// rows. The badge shares one flex row with the text, so a copy the user is
+/// most likely to have written by hand is exactly the one whose mark the text
+/// can push off screen.
+const LONG_COPY_TEXT: &str = concat!(
+    "the words this device wrote before it was paired, typed out at the ",
+    "length of a real note so the row runs out of room for anything else",
+);
+const WRAPPED_COPY_TEXT: &str = concat!(
+    "a second copy whose content is long enough to wrap onto several ",
+    "lines of the same row, because a note this device wrote before the ",
+    "pair is a paragraph and not a title, and the mark has to survive ",
+    "every one of those lines just as it survives a short one",
+);
+
+const LONG_VARIANT_ORG: &str = concat!(
+    "#+ID: pair-conflict-long-page\n",
+    "* the owners words\n",
+    ":PROPERTIES:\n",
+    ":ID: pcl-owner\n",
+    ":END:\n",
+    "** the words this device wrote before it was paired, typed out at the ",
+    "length of a real note so the row runs out of room for anything else\n",
+    ":PROPERTIES:\n",
+    ":ID: pcl-owner-before-pairing\n",
+    ":pairing_conflict_of: block:pcl-owner\n",
+    ":END:\n",
+    "** a second copy whose content is long enough to wrap onto several ",
+    "lines of the same row, because a note this device wrote before the ",
+    "pair is a paragraph and not a title, and the mark has to survive ",
+    "every one of those lines just as it survives a short one\n",
+    ":PROPERTIES:\n",
+    ":ID: pcw-owner-before-pairing\n",
+    ":pairing_conflict_of: block:pcl-owner\n",
+    ":END:\n",
+);
+
 const PAGE_HOST_PAGE: &str = "pair-conflict-variant-page";
 const PAGE_CONFLICT_COPY: &str = "pcv-owner-before-pairing";
 const PAGE_COPY_TEXT: &str = "a page shaped copy";
@@ -96,15 +138,40 @@ const PAGE_VARIANT_ORG: &str = concat!(
     ":END:\n",
 );
 
+/// The window every test in this file opens. A badge that fits only because
+/// the window is unusually wide is not a badge the user sees.
+const WINDOW: &str = "1512x900";
+const WINDOW_W: f32 = 1512.0;
+const WINDOW_H: f32 = 900.0;
+
 /// What one window painted: every text on screen, a widget census for failure
-/// messages, and each badge as `(entity id, label)`.
+/// messages, each badge as `(entity id, label)`, and each badge's rect.
 struct Painted {
     texts: Vec<String>,
     census: String,
     badges: BTreeSet<(String, String)>,
+    badge_boxes: Vec<(String, ElementInfo)>,
+    all: Vec<(String, ElementInfo)>,
+}
+
+impl Painted {
+    /// Every rect recorded for one block, so a badge failure names what took
+    /// the room.
+    fn row_rects(&self, entity: &str) -> String {
+        self.all
+            .iter()
+            .filter(|(_, i)| i.entity_id.as_deref() == Some(entity))
+            .map(|(id, i)| format!("{id} x={} w={} h={}", i.x, i.width, i.height))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn paint(page_id: &str, file: &str, org: &str, window_title: &'static str) -> Painted {
+    // Read by `launch_holon_window_impl`; must be set before the window opens.
+    // SAFETY: single-threaded test setup, before any window or runtime thread
+    // reads the environment.
+    unsafe { std::env::set_var("HOLON_INITIAL_WINDOW_SIZE", WINDOW) };
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
     let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
@@ -175,6 +242,14 @@ fn paint(page_id: &str, file: &str, org: &str, window_title: &'static str) -> Pa
             ))
         })
         .collect();
+    let badge_boxes: Vec<(String, ElementInfo)> = bounds
+        .all_elements()
+        .into_iter()
+        .filter(|(_, info)| info.widget_type.as_ref() == "badge")
+        .filter(|(_, info)| info.displayed_text.is_some())
+        .map(|(id, info)| (id, info))
+        .collect();
+    let all: Vec<(String, ElementInfo)> = bounds.all_elements().into_iter().collect();
 
     // Teardown BEFORE the assertions so a red does not also trip the gpui leak
     // detector, which would bury the real failure.
@@ -188,6 +263,30 @@ fn paint(page_id: &str, file: &str, org: &str, window_title: &'static str) -> Pa
         texts,
         census,
         badges,
+        badge_boxes,
+        all,
+    }
+}
+
+/// Recorded rects are clipped to the content mask, so a badge squeezed out of
+/// its row registers with no area or lands outside the window.
+fn assert_badges_are_on_screen(painted: &Painted) {
+    for (id, info) in &painted.badge_boxes {
+        assert!(
+            info.has_visible_area()
+                && info.x >= 0.0
+                && info.y >= 0.0
+                && info.x + info.width <= WINDOW_W
+                && info.y + info.height <= WINDOW_H,
+            "the badge {id} on {:?} must be painted inside the {WINDOW} window; it sits at \
+             x={} y={} w={} h={}. Its row: {}",
+            info.entity_id,
+            info.x,
+            info.y,
+            info.width,
+            info.height,
+            painted.row_rects(info.entity_id.as_deref().unwrap_or_default())
+        );
     }
 }
 
@@ -243,6 +342,39 @@ fn a_pairing_conflict_copy_paints_its_badge() {
          the owner node, not the {PLAIN_TEXT:?} sibling. Painted widgets: {}",
         painted.census
     );
+    assert_badges_are_on_screen(&painted);
+}
+
+/// Content length must not decide whether the merge is disclosed. A copy whose
+/// text fills the row, and one whose text fills several, wear the same mark as
+/// a short one — and wear it where the user can read it.
+#[test]
+fn a_long_conflict_copy_still_paints_a_visible_badge() {
+    let painted = paint(
+        LONG_HOST_PAGE,
+        "pair-conflict-long-page.org",
+        LONG_VARIANT_ORG,
+        "Holon-PairingConflictLong-Windowed",
+    );
+
+    for text in [LONG_COPY_TEXT, WRAPPED_COPY_TEXT] {
+        assert!(
+            painted.texts.iter().any(|t| t.contains(text)),
+            "precondition: the copy's own content must be on screen. painted: {:?}",
+            painted.texts
+        );
+    }
+    let expected: BTreeSet<(String, String)> = [LONG_COPY, WRAPPED_COPY]
+        .into_iter()
+        .map(|id| (EntityUri::block(id).to_string(), BADGE_LABEL.to_string()))
+        .collect();
+    assert_eq!(
+        painted.badges, expected,
+        "a conflict copy whose content fills the row must still wear its badge. Painted \
+         widgets: {}",
+        painted.census
+    );
+    assert_badges_are_on_screen(&painted);
 }
 
 /// The disclosure outranks the presentation. A conflict copy that also matches
@@ -274,6 +406,7 @@ fn a_conflict_copy_that_is_also_a_page_still_wears_its_badge() {
          `pairing_conflict` hides the copy behind an ordinary page. Painted widgets: {}",
         painted.census
     );
+    assert_badges_are_on_screen(&painted);
 }
 
 // Installs the windowed capturing tracing subscriber before this binary's
