@@ -193,9 +193,12 @@ impl SearchUiState {
     /// `open`.
     ///
     /// The hand-back is a no-op on the navigating paths (Enter / result
-    /// click): the destination becomes the main region's focus root, which
+    /// click): the destination becomes the main region's navigation root and
     /// renders through the editor-less `page_title` variant, so the recorded
-    /// handle points at a widget that just unmounted. Bugfunnel
+    /// handle points at a widget that just unmounted. The keyboard survives
+    /// anyway because the navigation SEATS a caret inside the destination
+    /// (D97.a, `ReactiveEngine::spawn_caret_seat`) and the editor mounted
+    /// there grabs window focus. Bugfunnel
     /// `2026-09-08-quick-open-enter-navigation-leaves-no-editable-focus`.
     pub fn close(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
         self.open = false;

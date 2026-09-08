@@ -637,7 +637,7 @@ impl EditorViewModel {
             self.buffer = new_text.to_string();
             return Ok(None);
         }
-        let id = self.handler.context_id().map(str::to_string);
+        let id = self.handler.edit_target_id();
         self.buffer = new_text.to_string();
         let Some(id) = id else {
             return Ok(None);
@@ -1298,17 +1298,17 @@ pub fn structural_block_action(
     target_id: &str,
     caret: StructuralCaret,
 ) -> Option<OperationIntent> {
-    // A creation affordance is a rendered row, not a block: it mounts no editor
-    // and focus on it is intercepted into a birth, so no keystroke can be aimed
-    // at one. An affordance id reaching this table therefore means the birth
-    // interception was bypassed — a frontend routing bug, which must panic here
-    // rather than travel one layer down and surface as a backend "Block not
-    // found" against an id that never existed.
+    // A creation affordance is a rendered row, not a block. The caret may sit
+    // on one, but every edit path resolves it into a real newborn through
+    // `BuilderServices::caret_block_for_edit` first, so an affordance id
+    // arriving here means a call site skipped that chokepoint — a frontend
+    // routing bug, which must panic rather than travel one layer down and
+    // surface as a backend "Block not found" against an id that never existed.
     assert!(
         !crate::row_origin::RowOrigin::from_id(target_id).is_creation_placeholder(),
         "structural {key:?} dispatched against creation-affordance id {target_id:?} — an \
-         affordance is not a block; focus on it must be intercepted into a birth \
-         (`ReactiveEngine::birth_creation_affordance`) before any structural op can be aimed at it"
+         affordance is not a block; the call site must resolve the caret through \
+         `BuilderServices::caret_block_for_edit` before aiming a structural op at it"
     );
     let intent = |op: &str, position: Option<i64>| {
         let mut params = HashMap::new();

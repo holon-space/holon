@@ -54,6 +54,44 @@ pub enum RowOrigin {
     },
 }
 
+/// The focus authority's value, parsed.
+///
+/// A navigation into an empty destination seats the caret on that
+/// destination's creation affordance, so the caret can name a rendered row
+/// that is not yet a block. Readers that can only act on a real block match on
+/// this instead of re-sniffing the id; [`Caret::from_focus`] is the only place
+/// that asks [`RowOrigin::is_creation_placeholder`] about a caret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Caret {
+    Unfocused,
+    /// The creation affordance holds the caret. The payload is the affordance
+    /// id, not a block id — nothing exists under it until the first edit.
+    Slot(EntityUri),
+    Block(EntityUri),
+}
+
+impl Caret {
+    pub fn from_focus(focus: Option<&EntityUri>) -> Self {
+        match focus {
+            None => Caret::Unfocused,
+            Some(id) if RowOrigin::from_id(id.as_str()).is_creation_placeholder() => {
+                Caret::Slot(id.clone())
+            }
+            Some(id) => Caret::Block(id.clone()),
+        }
+    }
+
+    /// The real block the caret sits in, if any. `None` for both the unfocused
+    /// caret and a slot caret — a caller that needs the slot to become a block
+    /// must birth it (`ReactiveEngine::caret_block_for_edit`).
+    pub fn block(&self) -> Option<&EntityUri> {
+        match self {
+            Caret::Block(id) => Some(id),
+            Caret::Unfocused | Caret::Slot(_) => None,
+        }
+    }
+}
+
 impl RowOrigin {
     /// Parse the origin of a row from its `id` field (the render-pipeline wire
     /// format). Increment A distinguishes only `Canonical` vs

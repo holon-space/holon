@@ -158,6 +158,28 @@ impl QueryEngine for BackendEngine {
         })
     }
 
+    /// Deliberately structural. Which variant that first child renders through
+    /// is `block_profile.yaml`'s decision, and re-deciding it here in SQL
+    /// would put the variant precedence in two languages.
+    async fn first_caret_target(&self, root: &EntityUri) -> Result<Option<EntityUri>> {
+        let sql = "SELECT id FROM block WHERE parent_id = :parent ORDER BY sort_key LIMIT 1";
+        let params = HashMap::from([(
+            "parent".to_string(),
+            holon_api::Value::String(root.as_str().to_string()),
+        )]);
+        let rows = BackendEngine::execute_query(self, sql.to_string(), params, None).await?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let raw = row
+            .get("id")
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| anyhow::anyhow!("first_caret_target: block.id is not a string"))?;
+        EntityUri::parse(raw).map(Some).map_err(|e| {
+            anyhow::anyhow!("first_caret_target: child id {raw:?} is not a block URI: {e}")
+        })
+    }
+
     async fn region_open_tabs(&self, region: holon_api::Region) -> Result<holon_api::RegionTabs> {
         // Open `navigation_history` rows, NOT `focus_roots`: that matview drops
         // NULL-block rows, which is exactly what a blank tab is. LEFT JOIN

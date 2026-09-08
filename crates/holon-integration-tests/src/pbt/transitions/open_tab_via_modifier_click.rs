@@ -36,6 +36,8 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 #[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::CARET_SEAT_READS;
+#[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::JOURNAL_READS;
@@ -45,7 +47,6 @@ use crate::pbt::transition_budgets::NAV_DML_READS;
 use crate::pbt::transition_budgets::OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::OPEN_TAB_INSERT_CLICK_RESOLVE_READS;
-#[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 
 /// Open a sidebar page as an additional Main tab via cmd- or ctrl-click.
@@ -157,7 +158,9 @@ crate::cap_transition! {
             OPEN_TAB_INSERT_CLICK_RESOLVE_READS
         };
         ExpectedSql {
-            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + click_resolve,
+            // `+ CARET_SEAT_READS`: open_tab carries a target into main, so it
+            // seats a caret there like `navigation.focus` (D97.a).
+            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + click_resolve + CARET_SEAT_READS,
             writes: 0,
             ddl: 0,
             tolerance: 0,

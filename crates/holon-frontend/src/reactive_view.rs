@@ -621,6 +621,23 @@ pub(crate) fn creation_affordance_template() -> holon_api::render_types::RenderE
     }
 }
 
+/// Whether the caret is seated on this creation-slot row.
+///
+/// A slot the caret holds renders through the collection's item template —
+/// the same path a real block row takes — so `block_profile`'s `is_focused`
+/// `editing` variant wins and mounts an `editable_text`; the first keystroke
+/// then births the block through the existing creation chokepoint. Without
+/// the caret the slot stays the read-only affordance above.
+pub(crate) fn caret_is_on_row(
+    row: &holon_api::widget_spec::DataRow,
+    services: &dyn crate::reactive::BuilderServices,
+) -> bool {
+    match services.focused_block() {
+        Some(caret) => holon_api::data_row_entity_uri(row).is_some_and(|uri| uri == caret),
+        None => false,
+    }
+}
+
 /// Configuration for creating a collection ReactiveView.
 pub struct CollectionConfig {
     pub layout: CollectionVariant,
@@ -1337,13 +1354,18 @@ impl ReactiveView {
                     // the dismiss/click template, never the collection's editable
                     // `item_template` — and skips rules (like the virtual slot).
                     let is_advice = occurrence != holon_api::Occurrence::Canonical;
+                    let slot_is_editing = is_virtual && caret_is_on_row(&row, svc.as_ref());
                     let template = if is_advice {
                         &advice_tmpl
-                    } else if is_virtual {
+                    } else if is_virtual && !slot_is_editing {
                         &slot_tmpl
                     } else {
                         &tmpl
                     };
+                    // The slot skips rules even while it holds the caret: the
+                    // positional level-0 rule would hand it `role:
+                    // "page_title"`, whose variant outranks `editing` and has
+                    // no editor.
                     let active_rules: &[holon_api::render_types::RuleSpec] =
                         if is_virtual || is_advice { &[] } else { &rules };
                     let is_context_root = context_root.as_deref().is_some_and(|cid| {

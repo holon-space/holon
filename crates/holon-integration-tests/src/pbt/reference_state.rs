@@ -1981,6 +1981,25 @@ impl ReferenceState {
         new_id
     }
 
+    /// Where a `navigation.focus`/`open_tab` into main leaves the caret
+    /// (D97.a): the destination's first child, or — when the destination has
+    /// none — its `:__virtual:` creation affordance. Never the destination
+    /// itself, which renders through the editor-less `page_title` variant.
+    ///
+    /// Nothing is minted here. The affordance is not a block; the first
+    /// keystroke into it is what births one (`birth_block_under_slot`), so a
+    /// navigation the user never types into leaves the store untouched.
+    pub fn caret_seat_for_navigation(&self, destination: &EntityUri) -> EntityUri {
+        match self.sorted_children_of(destination).first() {
+            Some(first) => first.id.clone(),
+            // ALLOW(entity_uri_from_raw): the destination's creation-affordance
+            // id, built by the same production helper the engine seats.
+            None => EntityUri::from_raw(
+                &holon_frontend::row_origin::RowOrigin::creation_placeholder_id(destination),
+            ),
+        }
+    }
+
     /// Create a new text block under `parent` as its LAST child — the oracle
     /// prediction for the creation-slot "type here to create" gesture
     /// (`CreateBlockUnderFocus`). Prod's `block.create` from the

@@ -105,9 +105,21 @@ pub const OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS: usize = 10;
 /// falsifiable — mis-assigning the branch flag reds both deterministic cases.
 /// A tolerance of even 1 would destroy that: the branch delta IS 1, so the
 /// activate ceiling would reach the insert cost and a backwards flag would sail
-/// through. Anything this transition measures other than exactly 22 (activate)
-/// or exactly 23 (insert) is DATA — report and model it, never pad it away.
+/// through. Anything this transition measures other than exactly 25 (activate)
+/// or exactly 26 (insert) — each including `CARET_SEAT_READS` — is DATA:
+/// report and model it, never pad it away.
 pub const OPEN_TAB_INSERT_CLICK_RESOLVE_READS: usize = 11;
+
+/// What seating the caret in the destination costs (D97.a): a navigation into
+/// region `main` that names a target resolves the destination's first editable
+/// row and renders it as the caret row.
+///
+/// It applies to `navigation.focus` and `open_tab` alike — the two ops that
+/// carry a `block_id` into main — and to NEITHER `PinBlock` nor any other
+/// region, which seat no caret at all. Like the branch pins around it, this is
+/// a MEASURED constant with no pad: a different delta is data to model, never
+/// to widen.
+pub const CARET_SEAT_READS: usize = 3;
 
 /// `PinBlock`'s one-read pad for the reactive render's nondeterministic
 /// coalescing. `PinBlock` is its only user.

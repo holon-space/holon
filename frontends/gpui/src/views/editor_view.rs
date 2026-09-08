@@ -411,7 +411,10 @@ impl EditorView {
                         //     VM's `last_local_seq`, and returns the `set_field("content")` intent
                         //     the adapter dispatches (its sole commit funnel) so the typed text
                         //     lands before the next transition;
-                        //   - creation placeholder / unchanged: returns `None`.
+                        //   - unchanged: returns `None`.
+                        // A caret on a creation affordance births its block
+                        // first (`ViewEventHandler::edit_target_id`), so the
+                        // intent names the newborn, never the affordance.
                         // The write_seq stamp happens INSIDE `apply_local_edit`
                         // before this dispatch, so a fast CDC echo cannot race a
                         // not-yet-recorded seq.
@@ -1165,6 +1168,30 @@ fn caret_probe() -> bool {
 /// position 8 exceeds content length 3", 2026-06-11). When Loro's
 /// per-keystroke writer is active or the text is unchanged the commit is
 /// `None` and this degenerates to a plain dispatch.
+/// The block a structural key acts on for the editor mounted on `row_id`.
+///
+/// When this row IS the caret, resolve through the birth chokepoint: the caret
+/// may sit on a creation affordance, which has to become a real block before a
+/// structural op can name it. Otherwise the capture fired on an editor that
+/// does not hold the caret, and the row is its own target.
+///
+/// `None` means the caret could not be resolved — the caller must not dispatch.
+fn structural_target(services: &Arc<dyn BuilderServices>, row_id: &str) -> Option<String> {
+    if services
+        .focused_block()
+        .is_none_or(|caret| caret.as_str() != row_id)
+    {
+        return Some(row_id.to_string());
+    }
+    match services.caret_block_for_edit() {
+        Ok(caret) => Some(caret.map_or_else(|| row_id.to_string(), |u| u.as_str().to_string())),
+        Err(e) => {
+            tracing::error!(error = %e, row = %row_id, "structural key: cannot resolve the caret");
+            None
+        }
+    }
+}
+
 fn dispatch_structural_as_commit_point(
     ctrl: &Arc<Mutex<EditorViewModel>>,
     services: &Arc<dyn BuilderServices>,
@@ -1386,10 +1413,18 @@ impl Render for EditorView {
                     if !input.read(cx).focus_handle(cx).is_focused(window) {
                         return;
                     }
-                    let target_id = services
-                        .focused_block()
-                        .map(|u| u.as_str().to_string())
-                        .unwrap_or_else(|| row_id.clone());
+                    // Births the caret's creation affordance if that is where
+                    // the caret sits, so Enter in an empty destination splits a
+                    // real block instead of an id nothing answers to.
+                    let target_id = match services.caret_block_for_edit() {
+                        Ok(caret) => caret
+                            .map(|u| u.as_str().to_string())
+                            .unwrap_or_else(|| row_id.clone()),
+                        Err(e) => {
+                            tracing::error!(error = %e, "Enter: cannot resolve the caret's block");
+                            return;
+                        }
+                    };
                     // Cmd+Enter → cycle_task_state. `enter`, `shift-enter` and
                     // `secondary-enter` all resolve to this one action, so the
                     // chord is discriminated by the action's own `secondary`
@@ -1560,9 +1595,13 @@ impl Render for EditorView {
                     }
                     // Backspace-at-0 → join. Decision shared with the headless
                     // mirror via `structural_block_action`.
+                    let Some(target_id) = structural_target(&services, &row_id) else {
+                        cx.stop_propagation();
+                        return;
+                    };
                     if let Some(intent) = structural_block_action(
                         EditorKey::Backspace,
-                        &row_id,
+                        &target_id,
                         StructuralCaret::on_plain_text(0),
                     ) {
                         let live_text = input.read(cx).value().to_string();
@@ -1580,9 +1619,13 @@ impl Render for EditorView {
                 let input = self.input.clone();
                 let ctrl = self.controller.clone();
                 move |_: &IndentInline, _window, cx: &mut App| {
+                    let Some(target_id) = structural_target(&services, &row_id) else {
+                        cx.stop_propagation();
+                        return;
+                    };
                     if let Some(intent) = structural_block_action(
                         EditorKey::Tab,
-                        &row_id,
+                        &target_id,
                         StructuralCaret::on_plain_text(0),
                     ) {
                         let live_text = input.read(cx).value().to_string();
@@ -1597,9 +1640,13 @@ impl Render for EditorView {
                 let input = self.input.clone();
                 let ctrl = self.controller.clone();
                 move |_: &OutdentInline, _window, cx: &mut App| {
+                    let Some(target_id) = structural_target(&services, &row_id) else {
+                        cx.stop_propagation();
+                        return;
+                    };
                     if let Some(intent) = structural_block_action(
                         EditorKey::BackTab,
-                        &row_id,
+                        &target_id,
                         StructuralCaret::on_plain_text(0),
                     ) {
                         let live_text = input.read(cx).value().to_string();

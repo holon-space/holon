@@ -238,6 +238,34 @@ Refusal code sites: `DocumentManager::name_chain` and
   scroll, hover). Two same-id rows in different panes need independent state —
   never collapse these into a `(uri, field)` registry (FU-1 lesson).
 
+## Navigation root vs caret (D97.a)
+
+Two notions, deliberately separate:
+
+- The **navigation root** is what a region shows. It lives in SQL
+  (`navigation_history` → the `focus_roots` matview, read back through
+  `QueryEngine::region_view_root`), survives a restart, and is what the
+  breadcrumb, the focus chain and the positional `eq("level", 0)` →
+  `page_title` render rule all read.
+- The **caret** is `UiState::focused_block` — in-memory, per-window, the row
+  that gets `is_focused = true` and therefore mounts the editor.
+
+Every `navigation.focus`/`open_tab` into region `main` SEATS the caret inside
+the new root — its first child by `sort_key`, or, for a childless root, that
+root's `block:__virtual:<id>` creation affordance, which the first keystroke
+births. It is never seated on the root itself, which renders through the
+editor-less `page_title` variant and would leave the keyboard dead. Seating
+applies to EVERY such navigation, not only the quick-open path; `go_home` /
+`new_tab` clear the caret (blank view), the cursor-only ops
+(`back`/`forward`/`activate`/`close`/`focus_pin`) seat nothing, and a non-`main`
+region seats nothing — a right-sidebar pin must not steal the caret out of the
+page the user is typing in.
+
+Because the caret is pre-seated, "the focused id changed" is no longer a proxy
+for "the user moved the caret": clicking the row the seat already chose changes
+nothing. Readers that need the user's own intent take
+[`CaretPlacement::UserPlacement`] and its counter instead.
+
 ## Offline (future) — where it plugs in
 
 Command sourcing is *intentional early design*, not dead code. When offline

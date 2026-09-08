@@ -253,8 +253,7 @@ impl RefNavHistoryMut for ReferenceState {
 
         self.ui.tab.focused_entity_id.remove(&region);
         self.ui.tab.focused_cursor.remove(&region);
-        // Mirror `UiState::set_focus`: the nav target becomes the global focus.
-        self.ui.tab.focused_block = Some(block_id.clone());
+        self.seat_caret_after_navigation(region, block_id);
         self.blur_active_editor();
     }
 
@@ -302,8 +301,25 @@ impl RefNavHistoryMut for ReferenceState {
 
         self.ui.tab.focused_entity_id.remove(&region);
         self.ui.tab.focused_cursor.remove(&region);
-        self.ui.tab.focused_block = Some(block_id.clone());
+        self.seat_caret_after_navigation(region, block_id);
         self.blur_active_editor();
+    }
+}
+
+impl ReferenceState {
+    /// Mirror `ReactiveEngine::spawn_caret_seat` (D97.a): a navigation that
+    /// carries a target INTO MAIN seats the caret inside the destination, not
+    /// on the destination. `open_tab` seats identically — it is a page
+    /// navigation that differs from `focus` only in the SQL layer.
+    ///
+    /// Only region `main` seats: a right-sidebar pin must not steal the caret
+    /// out of the page the user is typing in (`seat_caret_for_navigation`
+    /// returns `None` for every other region).
+    fn seat_caret_after_navigation(&mut self, region: Region, destination: &EntityUri) {
+        if region != Region::Main {
+            return;
+        }
+        self.ui.tab.focused_block = Some(self.caret_seat_for_navigation(destination));
     }
 }
 

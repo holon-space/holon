@@ -353,6 +353,25 @@ pub trait RefBlockTreeMut: RefBlockTree {
     /// no-op for slices that don't model a redo stack.
     fn redo_last_and_reset_cursors(&mut self) {}
 
+    /// The creation-slot GESTURE, which is two operations rather than one:
+    /// the caret reaching the affordance births an EMPTY block under `parent`
+    /// as a non-user (undo-invisible) op, and the text the user types is a
+    /// separate undo-visible content write — so an undo after this gesture
+    /// reverts the text and leaves the empty block. Driven by
+    /// `CreateBlockUnderFocus{id: None}` (the user clicks the slot) and by
+    /// `TypeChars` (D97.a seated the caret on the slot of an empty page).
+    /// See `ReferenceState::birth_block_under_slot` for the spec citation.
+    ///
+    /// A reference that models no creation affordance never reaches this: its
+    /// caret cannot be on one. Panicking rather than defaulting keeps a slice
+    /// that grows a slot caret from silently predicting no block at all.
+    fn birth_block_via_creation_slot(&mut self, _: &EntityUri, _: &str) {
+        unimplemented!(
+            "birth_block_via_creation_slot: this reference models no creation affordance, so \
+             nothing should have seated a caret on one"
+        )
+    }
+
     /// Re-mint a block: swap its identity for a FRESH synthetic id (keeping
     /// content, parent, and position) and re-parent its children onto the new
     /// id. Returns the new synthetic id. Models the reference side of the R2
@@ -1983,6 +2002,33 @@ pub trait SutSearch {
     /// Both quick-open sections, flattened and tagged. Fails loud: a query
     /// error is returned (rendered) instead of reading as "no matches".
     async fn quick_open_search(&self, query: &str) -> Result<Vec<SearchHit>, String>;
+
+    /// Type `query` into quick-open and press Enter on `hit`: run the same
+    /// search, assert the overlay really offered that row, then dispatch the
+    /// ONE navigation chokepoint the overlay dispatches
+    /// (`navigation.focus{region:"main", block_id}`, `search_ui::navigate_to`)
+    /// and let the region's root settle.
+    ///
+    /// `expected_first_child` is the destination's first child as the
+    /// REFERENCE orders them, or `None` when the reference says the
+    /// destination is childless; the implementation resolves it and asserts
+    /// the PRODUCTION caret landed there (on that child, or on the
+    /// destination's `:__virtual:` affordance). That assertion is the only
+    /// place a headless slice observes the seat at all —
+    /// `inv-focus-matches-ref` needs `SutDriver` and deselects here.
+    ///
+    /// One method rather than a search and a caret read the caller stitches
+    /// together: `hit` and `expected_first_child` are REFERENCE ids and
+    /// everything the engine reports is a SUT id, so they can only be compared
+    /// where the id resolver lives. Separate from the sidebar-click
+    /// `SutFocusWrite::apply_navigate_focus` because a quick-open hit need not
+    /// be a sidebar-listed page.
+    async fn jump_to_search_hit(
+        &self,
+        query: &str,
+        hit: &EntityUri,
+        expected_first_child: Option<&EntityUri>,
+    );
 }
 
 // ─── Phase 6d — Layout/Bounds cluster ────────────────────────────────
@@ -2811,14 +2857,6 @@ pub trait RefLayoutMutate {
     /// SUT dispatches the same id, so both sides born-equal — no
     /// synthetic→real reconcile.
     fn create_block_under_with_id(&mut self, parent: &EntityUri, content: &str, id: EntityUri);
-
-    /// `CreateBlockUnderFocus{id: None}`: the creation-slot GESTURE, which is
-    /// two operations rather than one. Focus reaching the affordance births an
-    /// EMPTY block under `parent` as a non-user (undo-invisible) op, and the
-    /// text the user types is a separate undo-visible content write — so an
-    /// undo after this gesture reverts the text and leaves the empty block.
-    /// See `ReferenceState::birth_block_under_slot` for the spec citation.
-    fn birth_block_via_creation_slot(&mut self, parent: &EntityUri, content: &str);
 
     /// `InstantiateTemplate`: seed one template-DEFINITION block, mirroring the
     /// driver's idempotent `block.create`. `parent` is the block's REAL parent

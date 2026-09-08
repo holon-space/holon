@@ -148,6 +148,19 @@ pub trait QueryEngine: Send + Sync {
         anyhow::bail!("QueryEngine::region_view_root not implemented by this impl")
     }
 
+    /// Where a navigation into `root` seats the caret: `root`'s first child in
+    /// sort order, or `None` when `root` has none — the caller then seats the
+    /// caret on `root`'s creation affordance, the only row an empty
+    /// destination renders.
+    ///
+    /// Fails loud (default impl bails) rather than answering `None`: an engine
+    /// that cannot resolve the child would otherwise look like an empty
+    /// destination and birth a block under a page that already has children.
+    async fn first_caret_target(&self, root: &EntityUri) -> Result<Option<EntityUri>> {
+        let _ = root;
+        anyhow::bail!("QueryEngine::first_caret_target not implemented by this impl")
+    }
+
     /// Every open tab in `region` (insertion order) plus its active tab — what
     /// the chrome's tab count and tab list are a view of.
     ///

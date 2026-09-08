@@ -262,6 +262,13 @@ impl HeadlessEditorMirror {
             let vm = eds
                 .get_mut(block_id)
                 .expect("ensure_editor just guaranteed a VM for this block");
+            // The services the commit funnel resolves its edit target through
+            // (`ViewEventHandler::edit_target_id`) — GPUI hands them to the VM
+            // at mount (`editor_view.rs`, `set_async_context`); here the engine
+            // only reaches this sink, so the VM is armed on the way in. Without
+            // it a caret seated on a creation affordance has no chokepoint to
+            // birth through and the funnel is fail-loud.
+            vm.set_async_context(engine.clone());
             vm.apply_local_edit(new_text)?
         };
         if let Some(intent) = intent {

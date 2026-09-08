@@ -39,6 +39,21 @@ use pbt_harness::sim_windowed_replay::SimUserDriver;
 const ZOOM_ROW: &str = "parent";
 /// The row the test taps, so the focused-block leg is a plain caret gesture.
 const TAPPED_ROW: &str = "c1";
+/// Its sibling. A click INSIDE the already-seated editor reaches no engine
+/// seam, so it is not a caret movement and the bar keeps showing the root
+/// (D97.a). Whenever the navigation already seated the caret on
+/// [`TAPPED_ROW`], the caret gesture must land here instead.
+const SIBLING_ROW: &str = "c2";
+
+/// The row to tap so the gesture really moves the caret.
+fn tap_target(seated: Option<EntityUri>) -> EntityUri {
+    let tapped = EntityUri::block(TAPPED_ROW);
+    if seated.as_ref() == Some(&tapped) {
+        EntityUri::block(SIBLING_ROW)
+    } else {
+        tapped
+    }
+}
 
 /// An OPEN main row the cursor is NOT sitting on: closing it moves no view.
 const BACKGROUND_TAB_SQL: &str = "SELECT nh.id AS id FROM navigation_history nh WHERE nh.region = \
@@ -281,7 +296,16 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
     });
     eprintln!(
         "[breadcrumb-view-root/zoomed] root={zoomed_root} bar_block={block:?} \
-         segments={segments:?}"
+         segments={segments:?} focus={:?}",
+        engine.ui_state().focused_block(),
+    );
+    // The navigation SEATED the caret in the destination (D97.a) — so the bar
+    // cannot be deciding by "did the focused id change": it did. What makes
+    // the root win is that the user has not taken the caret themselves.
+    assert_eq!(
+        engine.ui_state().focused_block(),
+        Some(EntityUri::block(TAPPED_ROW)),
+        "the jump must seat the caret on {zoom}'s first child, else the claim below is vacuous",
     );
     assert_eq!(
         block.as_ref(),
@@ -295,8 +319,9 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
          {segments:?} segments",
     );
 
-    // Focusing a block hands the bar back to that block: the behaviour the bar
-    // already had, unchanged.
+    // Focusing a block hands the bar back to that block. The jump above already
+    // seated the caret on TAPPED_ROW, and re-clicking the row the caret holds
+    // is not a movement, so this leg taps its sibling.
     let interaction_tx = debug_services
         .interaction_tx
         .get()
@@ -311,7 +336,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
         runtime.handle().clone(),
         interaction_tx,
     );
-    let tapped = EntityUri::block(TAPPED_ROW);
+    let tapped = tap_target(engine.ui_state().focused_block());
     runtime
         .block_on(async { driver.click_entity(&tapped, "main").await })
         .expect("tap the outline row to put the caret in it");
@@ -320,7 +345,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
     assert_eq!(
         engine.ui_state().focused_block().as_ref(),
         Some(&tapped),
-        "the tap must actually move the focus, else the claim below is vacuous",
+        "the tap must leave the caret on {tapped}, else the claim below is vacuous",
     );
     let block = app.update(|cx| rebind.breadcrumb_block(cx));
     eprintln!("[breadcrumb-view-root/focused] tapped={tapped} bar_block={block:?}");
@@ -427,7 +452,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
     // A BACKGROUND tab closing moves no view and no caret, so the bar must not
     // move either. `navigation.close` carries no region, so the mirror bumps the
     // view generation for it regardless — the bar must survive that.
-    let recaret = EntityUri::block(TAPPED_ROW);
+    let recaret = tap_target(engine.ui_state().focused_block());
     runtime
         .block_on(async { driver.click_entity(&recaret, "main").await })
         .expect("put the caret back in an outline row");

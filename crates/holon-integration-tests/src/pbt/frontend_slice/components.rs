@@ -1757,6 +1757,46 @@ impl HeadlessFrontendComponent {
         }
     }
 
+    /// Assert the PRODUCTION caret landed inside `root` after a navigation
+    /// into main (D97.a): on `expected_first_child` when the reference says
+    /// the root has one, else on the root's `:__virtual:` creation affordance.
+    ///
+    /// This is the headless slice's ONLY observation of the seat.
+    /// `inv-focus-matches-ref` — the invariant that otherwise compares these
+    /// two carets — needs `SutDriver` and deselects here, so without this
+    /// assertion a jump that left the caret on the root would pass.
+    ///
+    /// Polled, because `spawn_caret_seat` resolves the first child through a
+    /// query on the runtime: the caret is one round trip behind the dispatch.
+    async fn assert_caret_seated_in(
+        &self,
+        root: &EntityUri,
+        expected_first_child: Option<&EntityUri>,
+    ) {
+        let expected = match expected_first_child {
+            Some(child) => self.resolve_id(child),
+            // ALLOW(entity_uri_from_raw): the root's creation-affordance id,
+            // built by the same production helper the engine seats.
+            None => EntityUri::from_raw(
+                &holon_frontend::row_origin::RowOrigin::creation_placeholder_id(root),
+            ),
+        };
+        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
+        loop {
+            let caret = self.reactive.focused_block();
+            if caret.as_ref() == Some(&expected) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[JumpToSearchHit] after navigating main to {root}, the engine caret is {caret:?} \
+                 but must be {expected} — the destination itself renders through the editor-less \
+                 page_title variant, so a caret left on it is the dead keyboard D97.a fixed."
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// Settle `block_id`'s `block_raw.content` to a fixed point after a
     /// keystroke edit. A char insert mutates the editor's `MutableText`
     /// (Loro) cell; the per-keystroke pipeline then syncs that through to
@@ -2110,6 +2150,48 @@ impl holon_pbt_core::capabilities::SutSearch for HeadlessFrontendComponent {
             .map(|c| hit(c, true))
             .chain(results.content.into_iter().map(|c| hit(c, false)))
             .collect())
+    }
+
+    async fn jump_to_search_hit(
+        &self,
+        query: &str,
+        hit: &holon_api::EntityUri,
+        expected_first_child: Option<&holon_api::EntityUri>,
+    ) {
+        let id = self.resolve_id(hit);
+        let hits = self
+            .quick_open_search(query)
+            .await
+            .unwrap_or_else(|e| panic!("quick_open_search({query:?}) must not error: {e:#}"));
+        // The user can only press Enter on a row the overlay actually showed.
+        // A search that stopped offering the destination reds HERE, before the
+        // navigation, naming the search rather than the caret as the culprit.
+        assert!(
+            hits.iter().any(|h| h.id == id),
+            "quick_open_search({query:?}) did not offer {id}, so no Enter could land on it; it \
+             returned {:?}",
+            hits.iter().map(|h| &h.id).collect::<Vec<_>>()
+        );
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "region".to_string(),
+            holon_api::Value::String("main".to_string()),
+        );
+        params.insert(
+            "block_id".to_string(),
+            holon_api::Value::String(id.to_string()),
+        );
+        // `synthetic_dispatch` is `engine.dispatch_intent_sync` — the same door
+        // the overlay's Enter goes through, so the caret seat rides along.
+        self.driver
+            .synthetic_dispatch("navigation", "focus", params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("[JumpToSearchHit] navigation.focus({id}) from the overlay failed: {e:#}")
+            });
+        self.settle_focus_matviews().await;
+        self.assert_navigate_focus_landed(&id).await;
+        self.assert_caret_seated_in(&id, expected_first_child).await;
     }
 }
 

@@ -687,19 +687,21 @@ impl ReactiveEngineDriver {
         };
 
         // Build the affordance id exactly as the render keys it, then drive the
-        // PRODUCTION focus path: focus reaching an affordance is what births a
-        // real empty block (`ReactiveEngine::birth_creation_affordance`). The
-        // newborn's id is the focus authority's value straight afterwards — the
-        // birth seats it synchronously.
+        // PRODUCTION gesture in its two steps: focus SEATS the caret on the
+        // affordance and creates nothing, and the first keystroke births the
+        // real block through `caret_block_for_edit` — the same chokepoint every
+        // editor's commit funnel resolves its target through.
         let slot_id = RowOrigin::creation_placeholder_id(&parent);
         let slot_uri = EntityUri::parse(&slot_id)
             .with_context(|| format!("creation-slot id {slot_id:?} is not a valid EntityUri"))?;
         crate::reactive::BuilderServices::set_focus(&*self.engine, Some(slot_uri));
-        let born = self.engine.focused_block().with_context(|| {
-            format!(
-                "focusing creation affordance {slot_id} seated no focus — the birth did not run"
-            )
-        })?;
+        let born = crate::reactive::BuilderServices::caret_block_for_edit(&*self.engine)
+            .with_context(|| format!("birthing creation affordance {slot_id}"))?
+            .with_context(|| {
+                format!(
+                    "the caret did not land on creation affordance {slot_id} — nothing to birth"
+                )
+            })?;
 
         // Wait for the newborn to exist before writing into it. This is not a
         // test-only nicety: in the real UI the newborn's editor mounts only

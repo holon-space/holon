@@ -122,6 +122,7 @@ pub mod indent;
 mod instantiate_template;
 mod jj_git_init;
 pub mod join_block;
+mod jump_to_search_hit;
 pub mod move_cursor;
 pub mod move_down;
 pub mod move_up;
@@ -207,6 +208,7 @@ pub use indent::Indent;
 pub use instantiate_template::InstantiateTemplate;
 pub use jj_git_init::JjGitInit;
 pub use join_block::JoinBlock;
+pub use jump_to_search_hit::JumpToSearchHit;
 pub use move_cursor::MoveCursor;
 pub use move_down::MoveDown;
 pub use move_up::MoveUp;
@@ -325,6 +327,7 @@ crate::declare_e2e_transitions! {
         ToggleCollapse(ToggleCollapse),
         DeliverBlockContent(DeliverBlockContent),
         Search(Search),
+        JumpToSearchHit(JumpToSearchHit),
         // True sharing (two-instance slice only — cap-gated on `SutTwoInstance`,
         // which no single-instance slice provides).
         ShareContainer(ShareContainer),
@@ -589,6 +592,7 @@ mod required_caps_guard {
         one!(SwitchView, c::SutViewControl);
         one!(EmitMcpData, c::SutMcpEmit);
         one!(Search, c::SutSearch);
+        one!(JumpToSearchHit, c::SutSearch);
         one!(Redo, c::SutHistoryWrite);
         one!(UndoLastMutation, c::SutHistoryWrite);
         // BlockInteract

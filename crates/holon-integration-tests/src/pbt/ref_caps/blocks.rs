@@ -242,6 +242,10 @@ impl RefBlockTree for ReferenceState {
 // ─── RefBlockTreeMut ──────────────────────────────────────────────────
 
 impl RefBlockTreeMut for ReferenceState {
+    fn birth_block_via_creation_slot(&mut self, parent: &EntityUri, content: &str) {
+        ReferenceState::birth_block_under_slot(self, parent, content);
+    }
+
     fn push_undo_snapshot(&mut self) {
         ReferenceState::push_undo_snapshot(self);
     }

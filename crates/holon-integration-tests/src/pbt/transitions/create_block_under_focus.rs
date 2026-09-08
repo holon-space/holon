@@ -37,6 +37,7 @@ use holon_api::EntityUri;
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::RefBlockTreeMut;
 use holon_pbt_core::capabilities::RefFocusRoots;
 use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::RefLayoutInteract;
@@ -99,8 +100,14 @@ fn create_under_focus_parent<R: RefLayout + RefFocusRoots + RefLayoutInteract>(
     Some(root)
 }
 
-impl<R: RefLifecycle + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayoutMutate>
-    TransitionFactory<R> for CreateBlockUnderFocus
+impl<
+    R: RefLifecycle
+        + RefLayout
+        + RefFocusRoots
+        + RefLayoutInteract
+        + RefLayoutMutate
+        + RefBlockTreeMut,
+> TransitionFactory<R> for CreateBlockUnderFocus
 {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         Self::declared_caps()
@@ -139,8 +146,14 @@ impl<R: RefLifecycle + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayout
     }
 }
 
-impl<R: RefLifecycle + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayoutMutate>
-    TransitionRef<R> for CreateBlockUnderFocus
+impl<
+    R: RefLifecycle
+        + RefLayout
+        + RefFocusRoots
+        + RefLayoutInteract
+        + RefLayoutMutate
+        + RefBlockTreeMut,
+> TransitionRef<R> for CreateBlockUnderFocus
 {
     type Reason = Reason;
 
@@ -181,7 +194,7 @@ impl<R: RefLifecycle + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayout
 
 crate::cap_transition! {
     CreateBlockUnderFocus: holon_pbt_core::capabilities::SutBlockCreate,
-    where R: [ RefLifecycle + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayoutMutate ],
+    where R: [ RefLifecycle + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayoutMutate + RefBlockTreeMut ],
     |me, state, sut| {
         // Resolve the creation-slot focus-root parent from the SAME ref predicate
         // the precondition/generator gate on. The headless UI driver honors the

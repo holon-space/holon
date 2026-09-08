@@ -64,6 +64,11 @@ const ROW_CONTROL: &str = "block:c1";
 const ACTIVE_MAIN_ROOT_SQL: &str = "SELECT fr.root_id FROM focus_roots fr JOIN navigation_cursor \
                                     nc ON nc.history_id = fr.history_id WHERE fr.region = 'main' \
                                     AND nc.region = 'main'";
+/// The same, for the `right` region — the pin's observable, now that a
+/// non-main navigation deliberately leaves the caret alone (D97.a).
+const ACTIVE_RIGHT_ROOT_SQL: &str = "SELECT fr.root_id FROM focus_roots fr JOIN navigation_cursor \
+                                     nc ON nc.history_id = fr.history_id WHERE fr.region = \
+                                     'right_sidebar' AND nc.region = 'right_sidebar'";
 /// An OPEN main row the cursor is NOT sitting on: closing it moves no view.
 const BACKGROUND_TAB_SQL: &str = "SELECT nh.id AS id FROM navigation_history nh WHERE nh.region = \
                                   'main' AND nh.closed_at IS NULL AND nh.id <> (SELECT \
@@ -311,6 +316,16 @@ impl Harness {
             .map(|raw| EntityUri::parse(raw).expect("focus_roots.root_id is a block URI"))
     }
 
+    fn right_root(&self) -> Option<EntityUri> {
+        self.runtime
+            .block_on(self.env.query_sql(ACTIVE_RIGHT_ROOT_SQL))
+            .expect("read the active Right root")
+            .first()
+            .and_then(|row| row.get("root_id"))
+            .and_then(|v| v.as_string())
+            .map(|raw| EntityUri::parse(raw).expect("focus_roots.root_id is a block URI"))
+    }
+
     fn background_tab_id(&self) -> i64 {
         self.runtime
             .block_on(self.env.query_sql(BACKGROUND_TAB_SQL))
@@ -416,8 +431,10 @@ fn an_overlay_sidebar_dismisses_on_a_page_tap_and_on_a_tap_beside_it() {
 
     let target = EntityUri::block(NAV_TARGET);
     h.navigate_to(&target);
+    // The navigation's observable is the region's ROOT: the caret it seats
+    // lands on the destination's first child, not on the destination (D97.a).
     assert_eq!(
-        h.engine.ui_state().focused_block().as_ref(),
+        h.main_root().as_ref(),
         Some(&target),
         "the page tap must actually navigate, else the claim below is vacuous",
     );
@@ -574,7 +591,12 @@ fn a_sidebar_beside_an_overlay_drawer_keeps_its_own_clicks() {
         "navigation".into(),
         "focus".into(),
         [
-            ("region".to_string(), Value::String("right".to_string())),
+            // Exactly `Region::RightSidebar::as_str()`: the dispatcher matches
+            // the region string, so any other spelling navigates no region.
+            (
+                "region".to_string(),
+                Value::String("right_sidebar".to_string()),
+            ),
             (
                 "block_id".to_string(),
                 Value::String(ROW_UNDER_SCRIM.to_string()),
@@ -593,14 +615,24 @@ fn a_sidebar_beside_an_overlay_drawer_keeps_its_own_clicks() {
         h.engine.ui_state().focused_block(),
         h.is_open(RIGHT_SIDEBAR, DrawerMode::Overlay),
     );
-    assert_ne!(
+    // The pin moves the RIGHT region's root. It deliberately leaves the main
+    // caret where the user put it (D97.a: only a main-region navigation seats
+    // a caret), so both halves are asserted — the pin landed, and it stole
+    // nothing.
+    assert_eq!(
+        h.right_root().as_ref(),
+        Some(&row_uri(ROW_UNDER_SCRIM)),
+        "the pin must actually open the right region on {ROW_UNDER_SCRIM}, else the claim below \
+         is vacuous",
+    );
+    assert_eq!(
         h.engine.ui_state().focused_block(),
         focus_after_caret,
-        "the pin must actually move the focus, else the claim below is vacuous",
+        "a right-region pin must not steal the caret out of the page the user is typing in",
     );
     assert!(
         h.is_open(RIGHT_SIDEBAR, DrawerMode::Overlay),
-        "the focus moved without the main region navigating anywhere — an open sidebar must \
+        "a region navigated without the main region moving anywhere — an open sidebar must \
          survive that, or it closes on every caret move and keystroke",
     );
 
@@ -746,8 +778,9 @@ fn a_desktop_sidebar_survives_the_same_two_gestures() {
 
     let target = EntityUri::block(NAV_TARGET);
     h.navigate_to(&target);
+    // See the note on the phone leg: the root is the navigation's observable.
     assert_eq!(
-        h.engine.ui_state().focused_block().as_ref(),
+        h.main_root().as_ref(),
         Some(&target),
         "the navigation must land, else the claim below is vacuous",
     );

@@ -11,6 +11,8 @@
 //! `sut.rs:4409-4418` (SUT apply), and
 //! `transition_budgets.rs:368-377` (expected SQL).
 
+use holon_api::EntityUri;
+use holon_frontend::row_origin::RowOrigin;
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::CapRegion;
@@ -18,6 +20,7 @@ use holon_pbt_core::capabilities::RefBlockTreeMut;
 use holon_pbt_core::capabilities::RefEditorMirror;
 use holon_pbt_core::capabilities::RefEditorMirrorMut;
 use holon_pbt_core::capabilities::RefFocus;
+use holon_pbt_core::capabilities::RefGlobalFocus;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutEditorMirrorWrite;
 use holon_pbt_core::capabilities::commit_active_editor_if_changed;
@@ -49,8 +52,21 @@ pub struct TypeChars {
 // These are the canonical logic; the `TransitionImpl` below just delegates.
 // The pure slice can call these directly without `TransitionImpl`.
 
+/// The creation affordance the caret is seated on, if it is on one.
+///
+/// A navigation into an EMPTY page seats the caret on that page's
+/// `:__virtual:` affordance (D97.a), which is not a block and mounts no ref
+/// editor — but prod DOES mount an editable_text over it, so a keystroke is
+/// legal there and births a block under the returned parent.
+pub fn caret_creation_slot_parent<R: RefGlobalFocus>(state: &R) -> Option<EntityUri> {
+    match RowOrigin::from_id(state.global_focused_block()?.as_str()) {
+        RowOrigin::CreationPlaceholder { parent, .. } => Some(parent),
+        _ => None,
+    }
+}
+
 /// Preconditions for `TypeChars`, bound only on the capability traits it reads.
-pub fn type_chars_preconditions<R: RefEditorMirror + RefFocus + RefLifecycle>(
+pub fn type_chars_preconditions<R: RefEditorMirror + RefFocus + RefLifecycle + RefGlobalFocus>(
     state: &R,
 ) -> Validated<(), Reason> {
     let checks: Vec<Validated<(), Reason>> = vec![
@@ -62,7 +78,7 @@ pub fn type_chars_preconditions<R: RefEditorMirror + RefFocus + RefLifecycle>(
             Reason::NoFocusInMain,
         ),
         check(
-            state.active_editor_block().is_some(),
+            state.active_editor_block().is_some() || caret_creation_slot_parent(state).is_some(),
             Reason::NoActiveEditor,
         ),
     ];
@@ -73,7 +89,9 @@ pub fn type_chars_preconditions<R: RefEditorMirror + RefFocus + RefLifecycle>(
 }
 
 /// Weighted generator for `TypeChars`, capability-bound.
-pub fn type_chars_weighted_generator<R: RefEditorMirror + RefFocus + RefLifecycle>(
+pub fn type_chars_weighted_generator<
+    R: RefEditorMirror + RefFocus + RefLifecycle + RefGlobalFocus,
+>(
     state: &R,
 ) -> Validated<(u32, BoxedStrategy<TypeChars>), Reason> {
     type_chars_preconditions(state).map(|_| {
@@ -99,8 +117,18 @@ pub fn type_chars_weighted_generator<R: RefEditorMirror + RefFocus + RefLifecycl
 /// one edit would judge a state prod never held.
 pub fn type_chars_apply_to_ref<R>(text: &str, state: &mut R)
 where
-    R: RefEditorMirrorMut + RefBlockTreeMut + RefFocus + RefLifecycle,
+    R: RefEditorMirrorMut + RefBlockTreeMut + RefFocus + RefLifecycle + RefGlobalFocus,
 {
+    // Typing into a seated creation affordance is the SLOT GESTURE, not an
+    // editor edit: the first keystroke births an empty block under the
+    // affordance's parent and the text lands in it as one undo-visible write
+    // (`birth_block_under_slot`, the same two-op shape `CreateBlockUnderFocus`
+    // predicts). Prod reaches it through `edit_target_id`, which resolves the
+    // caret through the birth chokepoint before naming an edit target.
+    if let Some(parent) = caret_creation_slot_parent(state) {
+        state.birth_block_via_creation_slot(&parent, text);
+        return;
+    }
     for ch in text.chars() {
         type_one_char_to_ref(&ch.to_string(), state);
     }
@@ -123,7 +151,9 @@ where
 
 // ── E2E trait impls (wide PBT entry point; delegate to _cap fns) ──
 
-impl<R: RefEditorMirror + RefFocus + RefLifecycle> TransitionFactory<R> for TypeChars {
+impl<R: RefEditorMirror + RefFocus + RefLifecycle + RefGlobalFocus> TransitionFactory<R>
+    for TypeChars
+{
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         Self::declared_caps()
     }
@@ -146,8 +176,14 @@ impl<R: RefEditorMirror + RefFocus + RefLifecycle> TransitionFactory<R> for Type
     }
 }
 
-impl<R: RefEditorMirror + RefEditorMirrorMut + RefBlockTreeMut + RefFocus + RefLifecycle>
-    TransitionRef<R> for TypeChars
+impl<
+    R: RefEditorMirror
+        + RefEditorMirrorMut
+        + RefBlockTreeMut
+        + RefFocus
+        + RefLifecycle
+        + RefGlobalFocus,
+> TransitionRef<R> for TypeChars
 {
     type Reason = Reason;
 
@@ -162,7 +198,7 @@ impl<R: RefEditorMirror + RefEditorMirrorMut + RefBlockTreeMut + RefFocus + RefL
 
 crate::cap_transition! {
     TypeChars: SutEditorMirrorWrite,
-    where R: [ RefEditorMirror + RefFocus + RefLifecycle ],
+    where R: [ RefEditorMirror + RefFocus + RefLifecycle + RefGlobalFocus ],
     |me, _state, sut| {
         sut.apply_type_chars(&me.text).await;
     }

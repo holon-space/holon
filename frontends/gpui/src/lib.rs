@@ -806,7 +806,10 @@ pub struct HolonApp {
     /// same state as `Some((None, _))` — resolved while nothing was focused.
     /// Collapsing the two makes the first frame (no focus yet, latch empty)
     /// compare equal, so the bar never resolves at all.
-    last_breadcrumb_key: Option<(Option<holon_api::EntityUri>, u64)>,
+    /// The third element is the user-placement counter, which is what tells a
+    /// click on the already-seated row (same id, same view) from the seating
+    /// that put the caret there.
+    last_breadcrumb_key: Option<(Option<holon_api::EntityUri>, u64, u64)>,
     /// Open tabs for the MAIN region: the title row's count button and the
     /// list it opens.
     pub tab_strip: Entity<tab_strip::TabStripState>,
@@ -897,13 +900,19 @@ impl Render for HolonApp {
         // looking at, not only of a block they have the caret in.
         {
             let ui = self.app_model.read(cx).engine.ui_state();
-            let key = (ui.focused_block(), ui.main_view_generation());
+            let key = (
+                ui.focused_block(),
+                ui.main_view_generation(),
+                ui.user_caret_generation(),
+            );
             if self.last_breadcrumb_key.as_ref() != Some(&key) {
-                // A caret that moved owns the bar. When only the view moved,
-                // the resolver decides: it steals from a live caret only if the
-                // view root really changed (`resolve_trail`).
+                // A caret the USER moved owns the bar. Navigation seats the
+                // caret on the destination's first row without the user asking,
+                // so a bare id diff would hand the bar to that row the moment
+                // you arrive; the user-placement counter is what separates the
+                // two (and it ticks even for a click on the seated row).
                 let (caret_moved, view_moved) = match &self.last_breadcrumb_key {
-                    Some((last_focus, last_gen)) => (last_focus != &key.0, last_gen != &key.1),
+                    Some((_, last_view, last_caret)) => (last_caret != &key.2, last_view != &key.1),
                     None => (key.0.is_some(), true),
                 };
                 let last_view_root = self.breadcrumb.read(cx).view_root.clone();

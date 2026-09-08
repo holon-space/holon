@@ -422,6 +422,26 @@ pub trait BuilderServices: Send + Sync {
         None
     }
 
+    /// The real block an edit applies to, birthing the creation affordance the
+    /// caret sits on when that is what it names. `None` only when nothing is
+    /// focused.
+    ///
+    /// The ONE place a slot becomes a block. Every edit path resolves through
+    /// it — the text sink and the structural-key table alike — so a keystroke
+    /// can never reach the backend aimed at an id no block answers to.
+    ///
+    /// The default cannot birth: services with no creation-slot wiring fail
+    /// loud rather than hand back an affordance id the backend would reject.
+    fn caret_block_for_edit(&self) -> Result<Option<EntityUri>> {
+        match crate::row_origin::Caret::from_focus(self.focused_block().as_ref()) {
+            crate::row_origin::Caret::Unfocused => Ok(None),
+            crate::row_origin::Caret::Block(id) => Ok(Some(id)),
+            crate::row_origin::Caret::Slot(id) => anyhow::bail!(
+                "caret sits on creation affordance {id}, which these BuilderServices cannot birth"
+            ),
+        }
+    }
+
     /// Cloned handle to the focused-block `Mutable`, when this services
     /// instance is backed by a `UiState`. Used by reactive row providers
     /// like `focus_chain` that need a long-lived signal source rather than
@@ -1884,10 +1904,43 @@ impl ReseedGesture {
     }
 }
 
+/// How the caret came to sit where it does.
+///
+/// The two are not distinguishable from `focused_block` alone: seating can
+/// land on the very row the user then clicks, and a click on the row the caret
+/// already holds moves no id. Chrome that must tell the two apart (the
+/// breadcrumb, which yields the bar to the navigation root until the user
+/// takes the caret themselves) reads
+/// [`UiState::user_caret_generation`] instead of diffing the id.
+///
+/// One case stays invisible on purpose: a click INSIDE the editor the caret
+/// already holds fires no engine seam at all, so it is no placement — the
+/// breadcrumb keeps showing the navigation root until the caret really moves
+/// (arrow-nav, a click on another row, Enter).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CaretPlacement {
+    /// An explicit user caret action — a click, arrow-nav, Enter on a row.
+    UserPlacement,
+    /// The engine placed the caret on the user's behalf — navigation seating,
+    /// a birth follow-up, focus cleanup after a delete.
+    Seating,
+}
+
 pub struct UiState {
     /// Currently focused block (receives `is_focused = true` in predicate
     /// context).
+    ///
+    /// This is the CARET. The `main` region's navigation ROOT is a different
+    /// notion and lives in SQL (`navigation_history` → the `focus_roots`
+    /// matview, read back through `QueryEngine::region_view_root`); the two
+    /// differ after every navigation into `main`, which seats this on the
+    /// destination's first editable row rather than on the destination.
     focused_block: Mutable<Option<EntityUri>>,
+    /// Monotonic count of [`CaretPlacement::UserPlacement`] caret moves.
+    /// Bumped even when the placement lands on the row the caret already
+    /// holds, and never by seating — this is the only signal that separates
+    /// the two.
+    user_caret_generation: Mutable<u64>,
     /// Monotonically increasing counter, bumped when the viewport changes.
     /// Included in `ReactiveRenderedRows::reactive_signal` so that viewport
     /// changes trigger re-interpretation of affected blocks (breakpoint
@@ -1986,6 +2039,7 @@ impl UiState {
     fn new() -> Self {
         Self {
             focused_block: Mutable::new(None),
+            user_caret_generation: Mutable::new(0),
             viewport_generation: Mutable::new(0),
             viewport: Mutable::new(None),
             pending_caret_seed: Mutable::new(None),
@@ -2152,11 +2206,24 @@ impl UiState {
     /// cursors. Mutate the focused-block signal directly. Crate-private:
     /// external callers (test code, frontend impls) MUST go through the
     /// `navigation.focus` / `navigation.editor_focus` / `navigation.go_home`
-    /// intent so that `maybe_mirror_navigation_focus` keeps the SQL
+    /// intent so that `seat_caret_for_navigation` keeps the SQL
     /// nav-history table in sync. Test-side direct calls were removed
     /// in `frontends/tui/TODO.md` items A2–A5; this visibility change
     /// (item B1) closes the door so it can't be reopened by accident.
     pub(crate) fn set_focus(&self, block_id: Option<EntityUri>) {
+        self.set_focus_placed(block_id, CaretPlacement::Seating);
+    }
+
+    /// [`Self::set_focus`], saying whether this is the user taking the caret or
+    /// the engine placing it for them. The user half bumps
+    /// [`Self::user_caret_generation`] BEFORE the no-op guard, so re-placing
+    /// the caret on the row it already holds still registers as the user
+    /// taking it.
+    pub(crate) fn set_focus_placed(&self, block_id: Option<EntityUri>, placement: CaretPlacement) {
+        if placement == CaretPlacement::UserPlacement {
+            self.user_caret_generation
+                .set(self.user_caret_generation.get() + 1);
+        }
         // Drop a stale caret seed unless it targets the block we're focusing
         // (so a plain click defaults that block's caret to end-of-text, while
         // a `set_focus_with_caret` that pre-armed the seed for this same block
@@ -2181,8 +2248,31 @@ impl UiState {
     /// both the synchronous first-mount grab and the focus subscription can
     /// apply it idempotently).
     pub(crate) fn set_focus_with_caret(&self, block: EntityUri, offset: usize) {
+        self.set_focus_with_caret_placed(block, offset, CaretPlacement::Seating);
+    }
+
+    /// [`Self::set_focus_with_caret`], saying who moved the caret; see
+    /// [`Self::set_focus_placed`].
+    pub(crate) fn set_focus_with_caret_placed(
+        &self,
+        block: EntityUri,
+        offset: usize,
+        placement: CaretPlacement,
+    ) {
         self.pending_caret_seed.set(Some((block.clone(), offset)));
-        self.set_focus(Some(block)); // keeps the seed (same block)
+        self.set_focus_placed(Some(block), placement); // keeps the seed (same block)
+    }
+
+    /// Monotonic count of explicit user caret placements; see
+    /// [`CaretPlacement`].
+    pub fn user_caret_generation(&self) -> u64 {
+        self.user_caret_generation.get()
+    }
+
+    /// Cloned handle to the user-placement counter, for the spawned caret seat
+    /// (which cannot borrow `&self`). `Mutable` clones share state.
+    fn user_caret_generation_handle(&self) -> Mutable<u64> {
+        self.user_caret_generation.clone()
     }
 
     /// Cloned `Mutable` handles for the focus signal + pending caret seed.
@@ -2257,8 +2347,23 @@ impl UiState {
     }
 
     /// Get the currently focused block ID.
+    ///
+    /// This is the CARET, not the navigation root: the root of the main
+    /// region lives in SQL (`navigation_history` → the `focus_roots` matview,
+    /// read back through `QueryEngine::region_view_root`). The two differ
+    /// after any navigation into `main`, which seats the caret on the
+    /// destination's first editable row rather than on the destination itself.
+    ///
+    /// The value can name a creation affordance rather than a block; use
+    /// [`Self::caret`] rather than re-sniffing the id.
     pub fn focused_block(&self) -> Option<EntityUri> {
         self.focused_block.get_cloned()
+    }
+
+    /// The caret, parsed. The single place the focus authority's raw value is
+    /// classified as block-or-affordance.
+    pub fn caret(&self) -> crate::row_origin::Caret {
+        crate::row_origin::Caret::from_focus(self.focused_block.get_cloned().as_ref())
     }
 
     /// Cloned handle to the focused-block `Mutable`. Used by reactive
@@ -2945,6 +3050,72 @@ impl ReactiveEngine {
             }
         });
         Ok(id)
+    }
+
+    /// Seat the caret in `destination`'s first editable row.
+    ///
+    /// Spawned, because that row is a query away: the destination itself
+    /// renders through the editor-less `page_title` variant, so seating the
+    /// caret on it would leave the keyboard dead — the whole point of D97.a.
+    /// An empty destination renders only its creation affordance, which takes
+    /// the caret without being born (`caret_block_for_edit` births on the
+    /// first keystroke).
+    ///
+    /// Two last-writer guards: a newer navigation wins (main-nav generation),
+    /// and so does the user taking the caret themselves while the query ran
+    /// ([`CaretPlacement::UserPlacement`]).
+    fn spawn_caret_seat(&self, destination: EntityUri) {
+        let session = self.session.clone();
+        let nav = self.ui_state.nav_focus_handles();
+        let (focused_block, caret_seed) = self.ui_state.focus_handles();
+        let sink = self.ui_state.op_failure_sink_handle();
+        let generation_at_dispatch = nav.main_nav.get();
+        let user_caret_at_dispatch = self.ui_state.user_caret_generation();
+        let user_caret = self.ui_state.user_caret_generation_handle();
+        self.runtime_handle.spawn(async move {
+            let Some(qe) = session.query_engine() else {
+                tracing::debug!("no query backend in this session; navigation seats no caret");
+                return;
+            };
+            let first_child = match qe.first_caret_target(&destination).await {
+                Ok(child) => child,
+                Err(e) => {
+                    surface_op_failure(session.error_tracker(), &sink, "navigation", "focus", &e);
+                    return;
+                }
+            };
+            if nav.main_nav.get() != generation_at_dispatch {
+                tracing::info!(
+                    %destination,
+                    "caret seating superseded by a newer navigation"
+                );
+                return;
+            }
+            // A click bumps no NAV generation, so the guard above cannot see
+            // it. Seat only while the user has not taken the caret themselves:
+            // their placement is the more specific intent than "put the caret
+            // somewhere in the new root".
+            if user_caret.get() != user_caret_at_dispatch {
+                tracing::info!(
+                    %destination,
+                    "caret seating superseded: the caret moved while the first child was resolving"
+                );
+                return;
+            }
+            let target = match first_child {
+                Some(child) => child,
+                // ALLOW(entity_uri_from_raw): the destination's creation
+                // affordance id, whose `:__virtual:` infix is what makes the
+                // first keystroke birth a block under `destination`.
+                None => EntityUri::from_raw(
+                    &crate::row_origin::RowOrigin::creation_placeholder_id(&destination),
+                ),
+            };
+            // ALLOW(direct_focus_mutation): this IS the navigation caret seat;
+            // it runs in a spawned task that cannot borrow `&UiState`.
+            caret_seed.set(Some((target.clone(), 0)));
+            focused_block.set(Some(target));
+        });
     }
 
     /// Delete every ephemeral newborn focus has genuinely left. `keep` is the
@@ -3788,12 +3959,12 @@ impl BuilderServices for ReactiveEngine {
             return;
         }
 
-        // Mirror `navigation.focus` into `UiState.focused_block` so
-        // value-fn row providers (`focus_chain()`) see focus changes
-        // without having to re-derive them from `navigation_cursor`.
-        // The backend still writes the SQL tables; this just keeps the
-        // frontend-side signal graph in sync.
-        maybe_mirror_navigation_focus(&self.ui_state, &intent);
+        // A `main` navigation must leave the keyboard live: seat the caret in
+        // the destination's first editable row (D97.a). The root itself
+        // renders through the editor-less `page_title` variant.
+        if let Some(destination) = seat_caret_for_navigation(&self.ui_state, &intent) {
+            self.spawn_caret_seat(destination);
+        }
         // Focus is cleared only AFTER a delete SUCCEEDS (see the Ok arm below):
         // a bare `delete` is fail-closed on a non-leaf, so an optimistic pre-op
         // clear would orphan the caret on a block that stays.
@@ -3933,7 +4104,9 @@ impl BuilderServices for ReactiveEngine {
             return Box::pin(std::future::ready(Ok(())));
         }
 
-        maybe_mirror_navigation_focus(&self.ui_state, &intent);
+        if let Some(destination) = seat_caret_for_navigation(&self.ui_state, &intent) {
+            self.spawn_caret_seat(destination);
+        }
         // Deferred to op success (the `?` below returns early on failure, so a
         // refused delete never clears focus).
         let clear_focus_target = focus_clear_on_delete_target(&self.ui_state, &intent);
@@ -4026,7 +4199,9 @@ impl BuilderServices for ReactiveEngine {
     > {
         let journal = self.ui_state.dispatch_journal.clone();
         let journal_seq = journal.record(&intent);
-        maybe_mirror_navigation_focus(&self.ui_state, &intent);
+        if let Some(destination) = seat_caret_for_navigation(&self.ui_state, &intent) {
+            self.spawn_caret_seat(destination);
+        }
         // Deferred to op success (the Err arm returns without clearing, so a
         // refused delete keeps focus).
         let clear_focus_target = focus_clear_on_delete_target(&self.ui_state, &intent);
@@ -4098,7 +4273,9 @@ impl BuilderServices for ReactiveEngine {
     > {
         let journal = self.ui_state.dispatch_journal.clone();
         let journal_seq = journal.record(&intent);
-        maybe_mirror_navigation_focus(&self.ui_state, &intent);
+        if let Some(destination) = seat_caret_for_navigation(&self.ui_state, &intent) {
+            self.spawn_caret_seat(destination);
+        }
         let session = self.session.clone();
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
         let entity_name = intent.entity_name.clone();
@@ -4215,13 +4392,26 @@ impl BuilderServices for ReactiveEngine {
         self.ui_state.focused_block()
     }
 
+    /// The engine is the impl that CAN birth, so a slot caret resolves to a
+    /// real newborn here rather than failing the trait default's way.
+    fn caret_block_for_edit(&self) -> Result<Option<EntityUri>> {
+        match self.ui_state.caret() {
+            crate::row_origin::Caret::Unfocused => Ok(None),
+            crate::row_origin::Caret::Block(id) => Ok(Some(id)),
+            crate::row_origin::Caret::Slot(affordance) => self
+                .birth_creation_affordance(affordance.as_str())
+                .map(Some),
+        }
+    }
+
     fn focused_block_mutable(&self) -> Option<Mutable<Option<EntityUri>>> {
         Some(self.ui_state.focused_block_mutable())
     }
 
     fn set_focus_with_caret(&self, block: EntityUri, offset: usize) {
         self.reap_untouched_newborns(Some(&block));
-        self.ui_state.set_focus_with_caret(block, offset);
+        self.ui_state
+            .set_focus_with_caret_placed(block, offset, CaretPlacement::UserPlacement);
     }
 
     fn peek_caret_seed(&self, block: &EntityUri) -> Option<usize> {
@@ -4249,27 +4439,21 @@ impl BuilderServices for ReactiveEngine {
     }
 
     fn set_focus(&self, block_id: Option<EntityUri>) {
-        // Focus reaching a creation affordance means: be born (see
-        // `birth_creation_affordance`). The affordance id never becomes the
-        // focus authority's value — the newborn does.
-        if let Some(id) = block_id.as_ref() {
-            if crate::row_origin::RowOrigin::from_id(id.as_str()).is_creation_placeholder() {
-                if let Err(e) = self.birth_creation_affordance(id.as_str()) {
-                    surface_op_failure(
-                        self.session.error_tracker(),
-                        &self.ui_state.op_failure_sink_handle(),
-                        "block",
-                        "create",
-                        &e,
-                    );
-                }
-                return;
-            }
-        }
+        // A creation affordance may hold the caret: focus alone creates
+        // nothing, and the first edit births through
+        // `caret_block_for_edit` → `birth_creation_affordance`. Seating the
+        // caret here is what makes the affordance render its editor, so the
+        // keyboard is live in an empty destination.
+        //
+        // This trait method is the frontends' user-gesture door — every click,
+        // arrow-nav and Enter-on-a-row lands here — so it is where the caret
+        // counts as USER-placed; the engine's own seating goes to
+        // `UiState::set_focus` directly and stays `Seating`.
         self.reap_untouched_newborns(block_id.as_ref());
         // ALLOW(direct_focus_mutation): this IS the legitimate
         // BuilderServices::set_focus setter.
-        self.ui_state.set_focus(block_id);
+        self.ui_state
+            .set_focus_placed(block_id, CaretPlacement::UserPlacement);
     }
 
     fn await_ready(
@@ -4659,27 +4843,31 @@ impl RenderInterpreterInjectorExt for Injector {
     }
 }
 
-/// Mirror a `navigation.focus` intent into `UiState.focused_block`.
+/// Apply a navigation intent's synchronous UI effects and report where the
+/// caret must land.
 ///
-/// The backend `NavigationProvider::focus` op writes `navigation_cursor`
-/// + `navigation_history` in SQL, but there is no CDC path back into the
-///   frontend's `UiState` — so value-fn providers like `focus_chain()` would
-///   stay empty even after navigation. This side-channel keeps them in sync.
-///   Called from both `dispatch_intent` and `dispatch_intent_sync`.
-fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations::OperationIntent) {
+/// The scroll/generation bookkeeping happens here; seating the caret does not,
+/// because the destination's first row is a query away. The returned
+/// destination is the main region's new root, for which the caller resolves
+/// [`QueryEngine::first_caret_target`] and seats the caret — a `main`
+/// navigation must leave the keyboard live, and the root itself renders
+/// through the editor-less `page_title` variant.
+///
+/// Returns `None` for every intent that seats no caret: non-navigation ops,
+/// other regions, and `go_home`/`new_tab` (which land on a blank view).
+fn seat_caret_for_navigation(
+    ui_state: &UiState,
+    intent: &crate::operations::OperationIntent,
+) -> Option<EntityUri> {
     if intent.entity_name != "navigation" {
-        return;
+        return None;
     }
     match NavigationOp::from_str(&intent.op_name) {
-        // `navigation.focus` (sidebar / page navigation) has no CDC path back
-        // into `UiState`, so mirror it here. (Editor focus is no longer a
-        // dispatched op — clicks call `set_focus` directly and split/join set
-        // it from their op result; see ADR 0010.)
         // `open_tab` (modifier-click) is a page navigation like `focus` — it
         // shows a new page (new content → scroll reset is correct) and carries
-        // the target `block_id` — so it mirrors identically. It differs from
-        // `focus` only in the SQL layer (it does NOT close the region's other
-        // open rows); the UiState value-fn mirror is the same.
+        // the target `block_id` — so it seats a caret identically. It differs
+        // from `focus` only in the SQL layer (it does NOT close the region's
+        // other open rows).
         Ok(NavigationOp::Focus | NavigationOp::OpenTab) => {
             let block_id = intent.params.get("block_id").and_then(|v| v.as_string());
             // End-to-end latency: navigation is a first-class interaction.
@@ -4698,9 +4886,6 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
             // ALLOW(entity_uri_from_raw): block_id from intent.params Value map
             // (operation-intent ingest)
             let block_id = block_id.map(EntityUri::from_raw);
-            // ALLOW(direct_focus_mutation): mirror of navigation.focus into UiState for
-            // value-fn graph; intentional, see surrounding comment.
-            ui_state.set_focus(block_id);
             // A page navigation into the main region resets main-panel scroll
             // (LogSeq parity). Region-scoped so a right-sidebar pin (region=right)
             // leaves the main scroll alone. An absent region defaults to main
@@ -4710,9 +4895,11 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
                 .get("region")
                 .and_then(|v| v.as_string())
                 .unwrap_or("main");
-            if region == "main" {
-                ui_state.bump_main_nav();
+            if region != "main" {
+                return None;
             }
+            ui_state.bump_main_nav();
+            block_id
         }
         // Both land the region on its blank home view, so neither carries a
         // target to mirror, and the panel shows new content — scroll resets.
@@ -4726,11 +4913,12 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
                 .and_then(|v| v.as_string())
                 .unwrap_or("main");
             if region == "main" {
-                // ALLOW(direct_focus_mutation): mirror of navigation.go_home into UiState
-                // for value-fn graph.
+                // ALLOW(direct_focus_mutation): the blank home view has no row
+                // to hold a caret.
                 ui_state.set_focus(None);
                 ui_state.bump_main_nav();
             }
+            None
         }
         // These move the region's cursor within the existing open set without
         // naming a target, so `focused_block` cannot be mirrored here (knowing
@@ -4757,9 +4945,10 @@ fn maybe_mirror_navigation_focus(ui_state: &UiState, intent: &crate::operations:
             if region == "main" {
                 ui_state.bump_main_view();
             }
+            None
         }
         // A non-navigation op; the `entity_name` guard above keeps it out here.
-        Err(_) => {}
+        Err(_) => None,
     }
 }
 
@@ -4917,9 +5106,9 @@ fn apply_structural_focus(
 /// response→nav-target decision is unit-testable via
 /// [`dangling_link_nav_target`].
 ///
-/// Navigation is mirrored into `UiState` (so value-fn providers like
-/// `focus_chain` observe it) and then persisted through the backend
-/// `navigation.focus` op, exactly as `maybe_mirror_navigation_focus` +
+/// Navigation seats the caret in `UiState` (so value-fn providers like
+/// `focus_chain` observe it) and is then persisted through the backend
+/// `navigation.focus` op, exactly as `seat_caret_for_navigation` +
 /// `NavigationProvider` do for an ordinary click on a resolved link.
 /// The `UiState` mirrors a spawned navigation writes to.
 struct NavFocusHandles {
@@ -5935,7 +6124,7 @@ mod tests {
 
     /// The real navigation wiring must start the end-to-end latency clock:
     /// driving a `navigation.focus` intent through
-    /// `maybe_mirror_navigation_focus` (the path both `dispatch_intent` and
+    /// `seat_caret_for_navigation` (the path both `dispatch_intent` and
     /// `dispatch_intent_sync` take) must enroll a `navigate` interaction
     /// for the focused `block_id` in the process-global `latency_e2e`
     /// registry. A unique target keeps this hermetic under the parallel
@@ -5945,7 +6134,7 @@ mod tests {
     fn navigation_focus_starts_latency_clock() {
         let ui = UiState::new();
         let target = "block:nav-latency-clock-probe";
-        maybe_mirror_navigation_focus(&ui, &nav_focus_intent("main", target));
+        let _ = seat_caret_for_navigation(&ui, &nav_focus_intent("main", target));
         assert!(
             holon_api::latency_e2e::pending_targets()
                 .iter()
@@ -5964,16 +6153,31 @@ mod tests {
         assert_eq!(ui.main_nav_generation(), 0);
 
         // Navigating a page into the main region bumps the counter.
-        maybe_mirror_navigation_focus(&ui, &nav_focus_intent("main", "block:page-a"));
+        let dest = seat_caret_for_navigation(&ui, &nav_focus_intent("main", "block:page-a"));
         assert_eq!(ui.main_nav_generation(), 1);
+        assert_eq!(
+            dest.as_ref().map(EntityUri::as_str),
+            Some("block:page-a"),
+            "a main navigation reports its destination so the caller can seat the caret in it"
+        );
+        assert_eq!(
+            ui.focused_block(),
+            None,
+            "the destination is the navigation root, never the caret: seating it here would \
+             park the caret on the editor-less `page_title` row (D97.a)"
+        );
 
         // Every subsequent main navigation advances it.
-        maybe_mirror_navigation_focus(&ui, &nav_focus_intent("main", "block:page-b"));
+        let _ = seat_caret_for_navigation(&ui, &nav_focus_intent("main", "block:page-b"));
         assert_eq!(ui.main_nav_generation(), 2);
 
         // A right-sidebar pin must NOT reset the main panel's scroll.
-        maybe_mirror_navigation_focus(&ui, &nav_focus_intent("right", "block:page-c"));
+        let pinned = seat_caret_for_navigation(&ui, &nav_focus_intent("right", "block:page-c"));
         assert_eq!(ui.main_nav_generation(), 2);
+        assert_eq!(
+            pinned, None,
+            "a right-sidebar pin must not steal the caret from the main region"
+        );
 
         // go_home returns to the main region's home page → bump.
         let go_home = crate::operations::OperationIntent::new(
@@ -5981,7 +6185,7 @@ mod tests {
             "go_home".to_string(),
             HashMap::new(),
         );
-        maybe_mirror_navigation_focus(&ui, &go_home);
+        let _ = seat_caret_for_navigation(&ui, &go_home);
         assert_eq!(ui.main_nav_generation(), 3);
     }
 
@@ -6006,7 +6210,7 @@ mod tests {
             "open_tab".to_string(),
             params,
         );
-        maybe_mirror_navigation_focus(&ui, &open_tab);
+        let _ = seat_caret_for_navigation(&ui, &open_tab);
         assert_eq!(
             ui.main_nav_generation(),
             1,
@@ -6023,7 +6227,7 @@ mod tests {
             "activate".to_string(),
             params,
         );
-        maybe_mirror_navigation_focus(&ui, &activate);
+        let _ = seat_caret_for_navigation(&ui, &activate);
         assert_eq!(
             ui.main_nav_generation(),
             1,

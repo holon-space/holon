@@ -57,8 +57,12 @@ impl FocusChainProvider {
     }
 }
 
+/// The chain is empty unless the caret sits in a real block. A caret on a
+/// creation affordance names a row that is not yet a block, and this chain
+/// feeds the action bar's `ops_of(col("uri"))` — there are no operations to
+/// offer for something that does not exist yet.
 fn build_chain(focused: &Option<EntityUri>) -> Vec<Arc<DataRow>> {
-    match focused {
+    match crate::row_origin::Caret::from_focus(focused.as_ref()).block() {
         None => Vec::new(),
         Some(uri) => vec![Arc::new(focus_row(uri, 0))],
     }

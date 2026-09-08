@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use holon_api::EntityName;
+use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::render_types::OperationWiring;
 
@@ -117,6 +118,33 @@ impl ViewEventHandler {
         self.context_params.get("id").and_then(|v| v.as_string())
     }
 
+    /// The id an edit made in this editor must name — the ONE resolution every
+    /// commit funnel shares.
+    ///
+    /// A caret seated in an empty destination edits that destination's
+    /// creation affordance, a rendered row the backend has no block for. That
+    /// id is birthed through the chokepoint here (idempotently), so no funnel
+    /// can dispatch an op against an affordance.
+    pub fn edit_target_id(&self) -> Option<String> {
+        let row_id = self.context_id()?;
+        // ALLOW(entity_uri_from_raw): the row id as the render spec's
+        // `context_params` delivered it.
+        let row_uri = EntityUri::from_raw(row_id);
+        match crate::row_origin::Caret::from_focus(Some(&row_uri)) {
+            crate::row_origin::Caret::Slot(_) => Some(
+                self.services
+                    .as_ref()
+                    .expect("a creation affordance can only be edited through BuilderServices")
+                    .caret_block_for_edit()
+                    .expect("birthing the caret's creation affordance")
+                    .expect("a caret sitting on an affordance resolves to a newborn")
+                    .as_str()
+                    .to_string(),
+            ),
+            _ => Some(row_id.to_string()),
+        }
+    }
+
     /// Process a ViewEvent from the frontend's trigger check.
     /// Returns a PopupResult telling the frontend what to do.
     pub fn handle(&mut self, event: ViewEvent) -> HandleResult {
@@ -217,11 +245,8 @@ impl ViewEventHandler {
         self.original_value = new_value.clone();
 
         let id = self
-            .context_params
-            .get("id")
-            .and_then(|v| v.as_string())
-            .expect("ViewEventHandler context_params missing 'id'")
-            .to_string();
+            .edit_target_id()
+            .expect("ViewEventHandler context_params missing 'id'");
 
         if self.field == "content" && self.loro_content_writer {
             return PopupResult::NotActive;

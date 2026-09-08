@@ -276,6 +276,24 @@ impl Fixture {
             .collect()
     }
 
+    /// `(entity, widget_type, focused)` for every painted element that names an
+    /// entity — the diagnostic a focus assertion needs to say WHY it failed.
+    fn painted_entities(&self) -> Vec<(String, String, Option<bool>)> {
+        self.bounds
+            .all_elements()
+            .into_iter()
+            .filter_map(|(_, info)| {
+                info.entity_id.as_deref().map(|e| {
+                    (
+                        e.to_string(),
+                        info.widget_type.as_ref().to_string(),
+                        info.focused,
+                    )
+                })
+            })
+            .collect()
+    }
+
     fn modal_open(&mut self) -> bool {
         let rebind = &self.rebind;
         self.app.update(|cx| rebind.search_modal_open(cx))
@@ -330,6 +348,33 @@ impl Fixture {
                     .send_raw_keystroke_until_handled(key, &[], timeout),
             )
             .is_ok()
+    }
+
+    /// `(id, content)` of every child row of `parent`, in `sort_key` order.
+    /// The birth oracle: navigation must add none, the first keystroke
+    /// exactly one.
+    fn children_of(&self, parent: &str) -> Vec<(String, String)> {
+        let sql = format!(
+            "SELECT id, content FROM block_raw WHERE parent_id = '{parent}' ORDER BY sort_key"
+        );
+        self.runtime
+            .block_on(self._env.query_sql(&sql))
+            .expect("read the destination's children")
+            .iter()
+            .map(|row| {
+                let id = row
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .expect("block_raw.id is text")
+                    .to_string();
+                let content = row
+                    .get("content")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default()
+                    .to_string();
+                (id, content)
+            })
+            .collect()
     }
 
     fn shutdown(mut self) {
@@ -415,25 +460,29 @@ fn clicking_away_from_quick_open_hands_keyboard_focus_back() {
     f.shutdown();
 }
 
-/// Enter on a hit navigates, so the row that held the caret UNMOUNTS: the
-/// destination becomes the main region's focus root and the `page_title`
-/// variant (`block_profile.yaml`, priority 2) renders it as static `text` with
-/// no editor at all. There is therefore nothing for `close` to hand focus to.
+/// The destination's creation slot, which is the only editable row an EMPTY
+/// destination has. `chord-target` is grafted childless on purpose.
+fn destination_slot() -> String {
+    // ALLOW(entity_uri_from_raw): the seed grafts this bare id; schemed here.
+    holon_frontend::row_origin::RowOrigin::creation_placeholder_id(&EntityUri::from_raw(
+        CHORD_TARGET_ID,
+    ))
+}
+
+/// Enter on a hit navigates, so the row that held the caret UNMOUNTS and the
+/// destination becomes the main region's view root. The destination itself
+/// renders through the editor-less `page_title` variant, so seating the caret
+/// on it would leave the keyboard dead — D97.a seats it on the destination's
+/// first editable row instead.
 ///
-/// What this rung pins is that the navigating path leaves NO zombie: no stale
-/// editor holds window focus and can eat keystrokes aimed at the destination.
-/// The oracle's `Skipped` is the load-bearing assertion — it names the exact
-/// state ("engine focus … has no mounted editable_text"), so the day the
-/// product seats a caret in the destination this test goes red and must be
-/// updated rather than silently keeping a weaker promise.
-///
-/// Placing that caret is an open product question (see the bugfunnel entry
-/// `2026-09-08-quick-open-enter-navigation-leaves-no-editable-focus`): the
-/// destination page here is empty, so its only editable row is the creation
-/// slot, and seating focus there means `focused_block` would no longer equal
-/// the navigated root that the whole focus-chain reads.
+/// This destination is empty, so that row is its creation SLOT: it takes the
+/// caret without being born, and the first keystroke births through
+/// `caret_block_for_edit`. Both halves are measured here — the seat (engine
+/// focus, window focus, the oracle reaching `Ok`) and the birth (exactly one
+/// real child, carrying the typed character) — because a seat that mounts no
+/// live editor is indistinguishable from the bug it replaces.
 #[test]
-fn enter_navigating_out_of_quick_open_leaves_no_zombie_focus() {
+fn enter_navigating_out_of_quick_open_seats_a_caret() {
     let mut f = Fixture::boot("Holon-TestPlatform-QuickOpenEnter");
     f.focus_target_row();
     f.open_quick_open_from_row();
@@ -453,27 +502,101 @@ fn enter_navigating_out_of_quick_open_leaves_no_zombie_focus() {
         !f.modal_open(),
         "enter on a hit must close the quick-open modal"
     );
+    let slot = destination_slot();
     assert_eq!(
-        f.engine.focused_block(),
-        Some(f.target.clone()),
-        "enter must navigate the main region to the selected hit"
+        f.engine.focused_block().map(|u| u.to_string()),
+        Some(slot.clone()),
+        "enter must seat the caret on the empty destination's creation slot, not on the \
+         destination itself (which renders no editor)"
     );
-    assert!(
-        f.window_focused().is_empty(),
-        "no editor may hold window focus after the caret row unmounted: {:?}",
-        f.window_focused()
+    assert_eq!(
+        f.window_focused(),
+        vec![slot.clone()],
+        "the seated row's editor must hold WINDOW focus too, else the keyboard is dead \
+         despite the engine reporting a caret. Painted: {:?}",
+        f.painted_entities()
     );
     let outcome = f.focus_invariant("after enter navigated out of quick-open");
-    let InvariantResult::Skipped(reason) = &outcome else {
-        panic!(
-            "the navigated destination has no editor, so {FOCUS_INVARIANT} must skip \
-             with that reason; got {outcome:?} — if the product now seats a caret in \
-             the destination, tighten this rung to Ok"
-        );
-    };
     assert!(
-        reason.contains("has no mounted editable_text"),
-        "the skip must name the missing destination editor, got {reason:?}"
+        matches!(outcome, InvariantResult::Ok),
+        "the destination now has a mounted editor, so {FOCUS_INVARIANT} must MEASURE and \
+         pass rather than skip; got {outcome:?}"
+    );
+    assert_eq!(
+        f.children_of(&f.target.to_string()),
+        Vec::<(String, String)>::new(),
+        "navigation alone must create nothing"
+    );
+
+    assert!(
+        f.keystroke_lands("v", Duration::from_secs(5)),
+        "a character typed straight after the jump must land in the seated editor"
+    );
+    f.settle();
+    let born = f.children_of(&f.target.to_string());
+    assert_eq!(
+        born.len(),
+        1,
+        "the first keystroke must birth EXACTLY one block under the destination, got {born:?}"
+    );
+    assert_eq!(
+        born[0].1, "v",
+        "the newborn must carry the typed character, got {born:?}"
+    );
+    f.shutdown();
+}
+
+/// The slot caret must not leak a blank block: jumping into an empty page and
+/// then navigating away again — without typing — leaves the store exactly as
+/// it was. This is the half a "birth on focus" implementation gets wrong, and
+/// a blank newborn survives into the org write-back as an empty headline.
+#[test]
+fn a_jump_into_an_empty_page_left_again_births_nothing() {
+    let mut f = Fixture::boot("Holon-TestPlatform-QuickOpenNoBirth");
+    f.focus_target_row();
+    f.open_quick_open_from_row();
+
+    for ch in "chord".chars() {
+        f.runtime
+            .block_on(f.driver.send_raw_keystroke(&ch.to_string(), &[]))
+            .expect("query characters must reach the overlay's input");
+    }
+    f.settle();
+    f.runtime
+        .block_on(f.driver.send_raw_keystroke("enter", &[]))
+        .expect("enter must be consumed by the overlay's key handler");
+    f.settle();
+    assert_eq!(
+        f.engine.focused_block().map(|u| u.to_string()),
+        Some(destination_slot()),
+        "the jump must seat the slot caret, else this rung proves nothing"
+    );
+
+    let before = f.runtime.block_on(f._env.non_page_block_rows()).len();
+
+    f.runtime
+        .block_on(async {
+            f.engine
+                .dispatch_intent_sync(holon_frontend::operations::OperationIntent::new(
+                    "navigation".into(),
+                    "go_home".to_string(),
+                    [(
+                        "region".to_string(),
+                        holon_api::Value::String("main".into()),
+                    )]
+                    .into_iter()
+                    .collect(),
+                ))
+                .await
+        })
+        .expect("navigate the main region away from the empty destination");
+    f.settle();
+
+    let after = f.runtime.block_on(f._env.non_page_block_rows()).len();
+    assert_eq!(
+        before, after,
+        "leaving an empty destination the user never typed into must leave the block count \
+         alone; a blank newborn here becomes an empty org headline on write-back"
     );
     f.shutdown();
 }

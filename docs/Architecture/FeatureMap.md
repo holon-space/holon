@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 75 transitions; the repo declares 76 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 76 transitions; the repo declares 76 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -243,6 +243,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `ApplyMutation` — org vs Loro ingress the shrinker can localize
 - `AttemptReadOnlyEdit` — the write the dispatcher must refuse, without which `inv-read-only-home-refuses-writes` can only prove that nothing tried
 - `CreateBlockUnderFocus` — creation-slot gesture mint under focus root
+- `JumpToSearchHit` — after a jump the caret is live INSIDE the new root: on the destination's first child, or on the destination's creation affordance when it has no children. Never on the destination itself, which renders through the editor-less `page_title` variant and leaves the keyboard dead (docs/Testing/bugfunnel/entries/ 2026-09-08-quick-open-enter-navigation-leaves-no-editable-focus.md).
 - `Nothing` — no-op interleaving for schedule diversity
 - `PressKey` — raw key chord -> bubble_input resolution
 - `ReceiverCreateBlock` — a peer-authored block under an owner-authored parent, and its arrival on the owner after a reverse round.
