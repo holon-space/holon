@@ -22,6 +22,7 @@ use std::sync::atomic::Ordering::SeqCst;
 use anyhow::Result;
 use async_trait::async_trait;
 use holon_app::shopping_rest::RestShoppingPeer;
+use holon_kitchen::shopping::DEFAULT_TOMBSTONE_WINDOW_DAYS;
 use holon_kitchen::shopping::ItemKey;
 use holon_kitchen::shopping::ListVersion;
 use holon_kitchen::shopping::LocalIntent;
@@ -529,7 +530,14 @@ async fn a_local_deletion_reaches_the_peer_as_a_del_command() {
     let peer = peer_for(&mock.base_url);
 
     let mut gone = local("Bread", "B", None);
-    gone.deleted_at = Some("2026-09-01T09:00:00Z".into());
+    // The peer stamps the snapshot with the wall clock, and the reconciler
+    // measures the tombstone against THAT — so "still live" has to be written
+    // relative to now, or the fixture ages out of the window on a calendar date
+    // and the test stops exercising the push leg.
+    gone.deleted_at = Some(
+        (chrono::Utc::now() - chrono::Duration::days(DEFAULT_TOMBSTONE_WINDOW_DAYS / 2))
+            .to_rfc3339(),
+    );
 
     let outcome = sync_once(
         &peer,
