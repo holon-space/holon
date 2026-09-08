@@ -65,3 +65,21 @@ passed (6 slow), 7 failed, 5 skipped`).
 Still OPEN: the gating decision itself (add `-p holon` to the D43.a parallel
 nextest, ~250s wall clock, vs. a nightly tier) — see
 `docs/Testing/HolonCrateReds-2026-09-01.md`.
+
+## Dogfood/gate re-run 2026-09-08
+
+`test_turso_backend_state_machine` is live and passing, not the dead red the
+census recorded. The version API it was said to drive is absent from the tree
+*and* unnamed by the test, so that attribution was never available. Isolated at
+`34fca6bf` (`lane-logs/run-sm.log`):
+
+```
+Summary [   4.687s] 2 tests run: 2 passed, 0 skipped
+```
+
+Both tests in the `turso_storage_pbt` binary pass — the state machine and
+`test_view_change_stream_receives_events_from_backend_operations`. Row 20 of
+`docs/Testing/HolonCrateReds-2026-09-01.md` and the binary's nextest cap are
+corrected accordingly. The gating decision above stays OPEN; a failure of this
+test inside a loaded run is unexplained by the version API and needs a captured
+contended run before it is attributed.

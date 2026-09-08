@@ -53,11 +53,11 @@ slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
 filter = "package(holon-logseq-db) & (test(bisect_the_pushed_edits_prefix_by_prefix) + test(bisect_the_partition_divergence))"
 slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
 
-# test_turso_backend_state_machine takes ~30 min when green (measured
-# 1771s on 2026-06-12); 20 min always killed it mid-run.
+# The binary's two tests run in 4.7s isolated (measured 2026-09-08); the cap is
+# headroom for suite contention, not for the work itself.
 [[profile.default.overrides]]
 filter = "binary(turso_storage_pbt)"
-slow-timeout = { period = "60s", terminate-after = 40 }  # 40 min hard cap
+slow-timeout = { period = "60s", terminate-after = 5 }  # 5 min hard cap
 
 # The vault-scale main-panel guard asserts a 5s wall-clock budget on a cold
 # matview create + first read (~70 pages). It measures the machine as much as

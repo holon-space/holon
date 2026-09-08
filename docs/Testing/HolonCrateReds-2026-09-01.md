@@ -56,7 +56,7 @@ deleted with the adapter and the suite is no longer run with `-p holon-kitchen
 | 17 | E | `json_aggregation_e2e_test test_printf_sql_issue` | STALE-ORACLE | pinned an engine bug that is fixed | FIXED (assert success) |
 | 18 | E | `json_aggregation_e2e_test test_union_query_with_json_object_via_backend_engine` | STALE-ORACLE | fixture tables lacked `_change_origin` | FIXED (fixture) |
 | 19 | (repro) | `turso_storage_repros …cursor_filtered_main_panel_delivers_at_vault_scale` | ENVIRONMENT | load-sensitive budget: 853ms isolated vs 7.5s contended | PINNED to a single-thread nextest test-group (D64.a); budget unchanged |
-| 20 | C | `turso_storage_pbt …test_turso_backend_state_machine` | DEAD-SUITE | `_version` column exists in no schema | DELETED — the version API and its transitions are gone (D65.a) |
+| 20 | C | `turso_storage_pbt …test_turso_backend_state_machine` | NOT A RED | exercises no version API; passes in isolation in 4.686s | LIVE — kept; row corrected 2026-09-08 (see below) |
 | 21 | D | `create_page_from_link recreating_a_renamed_pages_old_name_yields_a_distinct_page` | pending-feature | pins an unimplemented end state | `#[ignore]`d with the ADR 0029 D1b reason (D66.a) |
 | 22-26 | F | `e2e_backend_engine_test` ×5 | KNOWN RED | "cannot modify materialized view block" | **STILL RED** — registered, base-attributed |
 
@@ -113,7 +113,7 @@ schema-driven lookup would make the fixture gap unrepresentable.
 
 ## Rows 20 and 21 — resolved
 
-### Row 20 (group C) — the version API is DELETED
+### Row 20 (group C) — the version API is deleted, the test is not
 
 `StorageBackend` no longer declares `get_version` / `set_version`, `TursoBackend`
 no longer implements them, and the `turso_storage_pbt` state machine no longer
@@ -123,6 +123,24 @@ carries a `SetVersion` transition, a `versions` reference map, or the
 Nothing read that API outside the PBT, and `TypeDefinition::to_create_table_sql`
 (`crates/holon-api/src/entity.rs:640`) emits only the declared fields — so no
 schema the system can build has a `_version` column for it to query.
+
+`test_turso_backend_state_machine` survives that deletion and is live. It names
+none of `get_version` / `set_version` / `SetVersion` / `_version`, so the
+version API cannot be what fails it. Measured in isolation at `34fca6bf`
+(`lane-logs/run-sm.log`):
+
+```
+Summary [   4.687s] 2 tests run: 2 passed, 0 skipped
+```
+
+Its binary carries a second test, `test_view_change_stream_receives_events_from_
+backend_operations`, covering CDC delivery through `TursoBackend`; both pass.
+Deleting the suite would drop that coverage.
+
+Any firing inside a full loaded run is therefore not the version API and is
+load-sensitive by elimination — the isolated wall time is 4.686s against a
+40 min cap. That contended behaviour is **not measured here**: attribute it
+only after a loaded run is captured.
 
 ### Row 21 (group D) — pending feature, ignored with its reason
 

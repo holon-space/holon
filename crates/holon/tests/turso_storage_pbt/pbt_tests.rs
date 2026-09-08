@@ -113,7 +113,6 @@ SELECT * FROM paths
 pub struct ReferenceState {
     /// Entity name -> (id -> Entity) mapping
     pub entities: HashMap<String, HashMap<String, StorageEntity>>,
-    /// Entity name -> (id -> version) mapping
     /// View name -> (entity_id -> rowid) mapping for materialized view tracking
     /// Each view has its own ROWID space, starting from 1
     pub view_rowids: HashMap<String, HashMap<String, i64>>,
