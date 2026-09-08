@@ -395,7 +395,7 @@ mod tests {
         );
 
         v = base.clone();
-        v.set_priority(Some(Priority::from_int(1).unwrap()));
+        v.set_priority(Some(Priority::from_rank(1).unwrap()));
         assert!(
             adapter.content_differs(&base, &v),
             "priority change undetected"

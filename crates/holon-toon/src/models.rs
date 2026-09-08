@@ -53,30 +53,27 @@ pub enum ContentType {
     Image,
 }
 
-/// Org headline priority (`[#A]`/`[#B]`/`[#C]`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Priority {
-    A,
-    B,
-    C,
-}
+/// Org headline priority — the letter the author wrote, `[#A]` … `[#Z]`.
+///
+/// Same accepted set as `holon_api::Priority`, and for the same reason: org's
+/// range is configurable (`org-highest-priority` / `org-lowest-priority`), so
+/// every uppercase letter is data and anything else is refused at the parse
+/// boundary. This crate keeps its own copy because it is a dependency-free
+/// codec; the two definitions must accept the same letters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Priority(u8);
 
 impl Priority {
+    pub const A: Priority = Priority(b'A');
+    pub const B: Priority = Priority(b'B');
+    pub const C: Priority = Priority(b'C');
+
     pub fn letter(self) -> char {
-        match self {
-            Priority::A => 'A',
-            Priority::B => 'B',
-            Priority::C => 'C',
-        }
+        self.0 as char
     }
 
     pub fn from_letter(c: char) -> Option<Self> {
-        match c {
-            'A' => Some(Priority::A),
-            'B' => Some(Priority::B),
-            'C' => Some(Priority::C),
-            _ => None,
-        }
+        c.is_ascii_uppercase().then_some(Priority(c as u8))
     }
 }
 

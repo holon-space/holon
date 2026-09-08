@@ -112,9 +112,16 @@ pub fn build_block_params(
             Value::String(task_state.category.as_str().to_string()),
         );
     }
-    if let Some(priority) = block.priority() {
-        params.insert("priority".into(), Value::Integer(priority.to_int() as i64));
-    }
+    // Always emit, like `collapsed` below: an ingest that finds NO priority
+    // carrier means the file no longer has one, and a stored rank that nothing
+    // clears outlives the authored value forever.
+    params.insert(
+        "priority".into(),
+        match block.priority() {
+            Some(p) => Value::Integer(p.rank() as i64),
+            None => Value::Null,
+        },
+    );
     // Tags are already serialized into the `tags` JSON-array param above
     // (lines 53-57); the legacy CSV-via-properties shape is gone. Skip the
     // OrgBlockExt::tags() shim here so we don't overwrite the JSON list with
@@ -168,6 +175,11 @@ pub fn build_block_params(
     if let Some(order) = block.get_property(crate::models::org_props::DRAWER_ORDER) {
         params.insert(crate::models::org_props::DRAWER_ORDER.into(), order);
     }
+    // Same carrier discipline: `_`-prefixed, so `drawer_properties()` hides it
+    // from the drawer and only this explicit forward gets it to the store.
+    if let Some(flag) = block.get_property(crate::models::org_props::PRIORITY_DRAWER_ONLY) {
+        params.insert(crate::models::org_props::PRIORITY_DRAWER_ONLY.into(), flag);
+    }
 
     // The file is authoritative for its own drawer: a key it USED to declare
     // and no longer does must be cleared from the store, not merged forward.
@@ -220,7 +232,11 @@ fn is_edge_drawer_key(key: &str) -> bool {
 /// case-insensitive match against the schema: matching case-insensitively would
 /// over-refuse an ordinary user property such as `:Sort_Key:`.
 fn is_typed_field_drawer_key(key: &str) -> bool {
+    // `priority` joins the list case-INSENSITIVELY, unlike the two uppercase
+    // spellings Holon itself serializes: the vault authors it lowercase, and
+    // either casing is reconstructed from the typed `Priority` on write-back.
     matches!(key, "COLLAPSED" | "WIDGET_ONLY")
+        || key.eq_ignore_ascii_case(crate::models::org_props::PRIORITY)
 }
 
 /// The `block_raw` storage columns, as one set built once.

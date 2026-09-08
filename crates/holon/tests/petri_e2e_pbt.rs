@@ -128,7 +128,7 @@ impl PetriRefState {
                 is_question: false,
                 wiki_links: vec![],
                 task_state: "TODO".to_string(),
-                priority: Some(Priority::High),
+                priority: Some(Priority::A),
                 deadline: None,
                 duration_minutes: Some(60),
                 depends_on: DependsOn::default(),
@@ -185,7 +185,7 @@ impl PetriRefState {
 // ---------------------------------------------------------------------------
 
 const TASK_STATES: &[&str] = &["TODO", "DOING", "DONE", "CANCELLED"];
-const PRIORITIES: &[Priority] = &[Priority::Low, Priority::Medium, Priority::High];
+const PRIORITIES: &[Priority] = &[Priority::C, Priority::B, Priority::A];
 const DEADLINES: &[&str] = &[
     "<2026-02-01 Sun>",
     "<2026-02-20 Fri>",
@@ -1194,8 +1194,8 @@ fn check_ranking_reflects_priority(
             if let (Some(a), Some(b)) = (block_a, block_b) {
                 // Only compare when neither has a deadline (deadlines affect urgency)
                 if a.deadline.is_none() && b.deadline.is_none() {
-                    let pa = a.priority.map(|p| p.to_int()).unwrap_or(0);
-                    let pb = b.priority.map(|p| p.to_int()).unwrap_or(0);
+                    let pa = a.priority.map(|p| p.rank()).unwrap_or(0);
+                    let pb = b.priority.map(|p| p.rank()).unwrap_or(0);
                     if pb > pa {
                         // b has higher priority but ranks lower — that's wrong
                         assert!(
@@ -1336,7 +1336,7 @@ impl PetriSUT {
                 );
                 block.set_property("task_state", HValue::String(rb.task_state.clone()));
                 if let Some(p) = rb.priority {
-                    block.set_property("priority", HValue::Integer(p.to_int() as i64));
+                    block.set_property("priority", HValue::Integer(p.rank() as i64));
                 }
                 if let Some(ref d) = rb.deadline {
                     block.set_property("deadline", HValue::String(d.clone()));

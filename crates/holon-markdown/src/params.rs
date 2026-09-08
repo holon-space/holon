@@ -72,7 +72,7 @@ pub fn build_block_params(
         );
     }
     if let Some(priority) = block.priority() {
-        params.insert("priority".into(), Value::Integer(priority.to_int() as i64));
+        params.insert("priority".into(), Value::Integer(priority.rank() as i64));
     }
     if let Some(scheduled) = block.scheduled() {
         params.insert("scheduled".into(), Value::String(scheduled.to_string()));

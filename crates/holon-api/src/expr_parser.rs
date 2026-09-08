@@ -742,7 +742,7 @@ mod tests {
 
     #[test]
     fn parses_switch_to_case() {
-        let c = parse("switch priority { 3.0 => 100.0, 2.0 => 40.0, _ => 1.0 }").unwrap();
+        let c = parse("switch priority { 1.0 => 100.0, 2.0 => 40.0, _ => 1.0 }").unwrap();
         match c {
             Computation::Case {
                 scrutinee,

@@ -15,6 +15,12 @@ serde_json = { workspace = true, optional = true }
 [dev-dependencies]
 proptest = { workspace = true }
 serde_json = { workspace = true }
+# Test-only BY DESIGN — the library keeps zero runtime deps. `org_reader` is a
+# SECOND org reader, so the one thing that must be pinned about it is that it
+# gives the same answers as the production one: see
+# tests/org_reader_agrees_with_org_format.rs.
+holon-api = { workspace = true }
+holon-org-format = { workspace = true }
 
 # Only pulled in for the token-measurement example; the library and its
 # round-trip PBT never touch the tokenizer.

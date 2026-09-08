@@ -1381,7 +1381,7 @@ mod tests {
         // Mirrors the default `priority_weight` prototype expression.
         let expr = CompiledExpr::compile(
             &engine(),
-            "switch priority { 3.0 => 100.0, 2.0 => 40.0, 1.0 => 15.0, _ => 1.0 }",
+            "switch priority { 1.0 => 100.0, 2.0 => 40.0, 3.0 => 15.0, _ => 1.0 }",
         )
         .unwrap();
         let c = ctx(&[("priority", Value::Float(2.0))]);
@@ -1472,7 +1472,7 @@ mod tests {
                 Computation::Script(
                     CompiledExpr::compile(
                         &eng,
-                        "switch priority { 3.0 => 100.0, 2.0 => 40.0, _ => 1.0 }",
+                        "switch priority { 1.0 => 100.0, 2.0 => 40.0, _ => 1.0 }",
                     )
                     .unwrap(),
                 ),
@@ -1507,7 +1507,7 @@ mod tests {
         // Incremental change: bump ONLY `priority`. `priority_weight` and its
         // dependent `task_weight` recompute; `position_weight` is untouched.
         let mut changed = inputs.clone();
-        changed.insert("priority".into(), Value::Float(3.0));
+        changed.insert("priority".into(), Value::Float(1.0));
         let after = recompute_fields(&changed, &fields);
 
         assert_eq!(after["priority_weight"], Value::Float(100.0)); // changed
@@ -1563,7 +1563,7 @@ mod tests {
         let script_field = DerivedField::new(
             fid("priority_weight"),
             Computation::Script(
-                CompiledExpr::compile(&engine(), "switch priority { 3.0 => 100.0, _ => 1.0 }")
+                CompiledExpr::compile(&engine(), "switch priority { 1.0 => 100.0, _ => 1.0 }")
                     .unwrap(),
             ),
         );
@@ -1595,7 +1595,7 @@ mod tests {
             Computation::Script(
                 CompiledExpr::compile(
                     &engine(),
-                    "switch priority { 3.0 => 100.0, 2.0 => 40.0, _ => 1.0 }",
+                    "switch priority { 1.0 => 100.0, 2.0 => 40.0, _ => 1.0 }",
                 )
                 .unwrap(),
             ),
@@ -1609,7 +1609,7 @@ mod tests {
 
         // Input changes: same map re-evaluated. The derived value is replaced,
         // and there is exactly one entry for the field (no stacking).
-        c.insert("priority".into(), Value::Float(3.0));
+        c.insert("priority".into(), Value::Float(1.0));
         plan.evaluate_stage(&mut c).unwrap();
         assert_eq!(c["priority_weight"], Value::Float(100.0));
         assert_eq!(
@@ -1658,11 +1658,11 @@ mod tests {
 
     #[test]
     fn case_switch_eval_matches_first_equal_branch() {
-        // switch priority { 3.0 => 100.0, 2.0 => 40.0, _ => 1.0 }
+        // switch priority { 1.0 => 100.0, 2.0 => 40.0, _ => 1.0 }
         let case = Computation::Case {
             scrutinee: f("priority"),
             branches: vec![
-                (Computation::Lit(Value::Float(3.0)), *lit(100.0)),
+                (Computation::Lit(Value::Float(1.0)), *lit(100.0)),
                 (Computation::Lit(Value::Float(2.0)), *lit(40.0)),
             ],
             else_: lit(1.0),
@@ -1683,7 +1683,7 @@ mod tests {
         let case = Computation::Case {
             scrutinee: f("priority"),
             branches: vec![
-                (Computation::Lit(Value::Float(3.0)), *lit(100.0)),
+                (Computation::Lit(Value::Float(1.0)), *lit(100.0)),
                 (Computation::Lit(Value::Float(2.0)), *lit(40.0)),
             ],
             else_: lit(1.0),
@@ -1691,7 +1691,7 @@ mod tests {
         let sql = case.compile_sql().unwrap().inline_sql().unwrap();
         assert_eq!(
             sql,
-            "iif(priority = 3.0, 100.0, iif(priority = 2.0, 40.0, 1.0))"
+            "iif(priority = 1.0, 100.0, iif(priority = 2.0, 40.0, 1.0))"
         );
         assert!(!sql.contains("CASE"), "must NOT emit SQL CASE");
     }

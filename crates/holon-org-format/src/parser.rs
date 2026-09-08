@@ -810,13 +810,17 @@ fn process_headlines(
         // read of the file.
         let title = headline.title_raw().trim().to_string();
 
-        // Extract priority (Token contains just the letter like "A")
-        let priority = headline.priority().map(|t| {
-            let letter = t.to_string();
-            holon_api::Priority::from_letter(&letter).unwrap_or_else(|e| {
-                panic!("org headline has invalid priority letter {letter:?}: {e}")
-            })
-        });
+        // The priority COOKIE (`[#A]`); the token carries just the letter. A
+        // letter outside the A/B/C default is data — org's accepted range is
+        // configurable — but a non-letter cookie has no rank and refuses the
+        // parse rather than taking the app down, as this once did.
+        let cookie_priority =
+            match headline.priority() {
+                Some(t) => Some(t.to_string().parse::<holon_api::Priority>().with_context(
+                    || format!("org headline {id:?} has an unusable priority cookie"),
+                )?),
+                None => None,
+            };
 
         // Extract tags
         let tags = holon_api::Tags::from_tag_iter(
@@ -878,6 +882,50 @@ fn process_headlines(
         let scope = template_scope(&string_properties, template, id.as_str())?;
         let scope = scope.as_deref();
 
+        // `:priority: A` is the DRAWER spelling of the same cookie. Org drawer
+        // keys are case-insensitive, so `:PRIORITY:` is that same carrier and
+        // normalises onto the canonical lowercase key rather than becoming a
+        // second one. The key collides with the internal `priority` property,
+        // so it is resolved here into the typed field — letting the generic
+        // drawer loop below reach it would overwrite the typed value with the
+        // raw letter, which is how 41 vault blocks came to store a string
+        // SQLite sorts last.
+        let mut drawer_priority: Option<(&str, holon_api::Priority)> = None;
+        for (k, v) in string_properties
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case(crate::models::org_props::PRIORITY))
+        {
+            let parsed = v
+                .parse::<holon_api::Priority>()
+                .with_context(|| format!("block {id}: drawer key {k:?} is not an org priority"))?;
+            if let Some((seen_key, seen)) = drawer_priority {
+                if seen != parsed {
+                    anyhow::bail!(
+                        "block {id}: the drawer keys `:{seen_key}: {}` and `:{k}: {}` disagree — \
+                         author the priority once",
+                        seen.letter(),
+                        parsed.letter()
+                    );
+                }
+            }
+            drawer_priority = Some((k.as_str(), parsed));
+        }
+        let drawer_priority = drawer_priority.map(|(_, p)| p);
+
+        // Two carriers that disagree is an authoring mistake with no correct
+        // answer; picking one would make the file mean what nobody wrote.
+        let priority = match (cookie_priority, drawer_priority) {
+            (Some(cookie), Some(drawer)) if cookie != drawer => anyhow::bail!(
+                "block {id}: the priority cookie `[#{}]` and the drawer key `:priority: {}` \
+                 disagree — author the priority once",
+                cookie.letter(),
+                drawer.letter()
+            ),
+            (Some(p), _) | (None, Some(p)) => Some(p),
+            (None, None) => None,
+        };
+        let priority_drawer_only = cookie_priority.is_none() && drawer_priority.is_some();
+
         // Create Block entity - content is title + body combined
         let raw_content = if let Some(ref b) = body {
             format!("{}\n{}", title, b)
@@ -919,6 +967,12 @@ fn process_headlines(
         block.set_sequence(sequence);
         block.set_task_state(task_state);
         block.set_priority(priority);
+        if priority_drawer_only {
+            block.set_property(
+                crate::models::org_props::PRIORITY_DRAWER_ONLY,
+                holon_api::Value::String("t".to_string()),
+            );
+        }
         block.set_tags(tags);
         block.set_scheduled(scheduled);
         block.set_deadline(deadline);
@@ -959,6 +1013,10 @@ fn process_headlines(
         for (key, value) in string_properties.iter() {
             if is_dependency_key(key) {
                 // Resolved as a group above (canonical `REQUIRES`).
+                continue;
+            } else if key.eq_ignore_ascii_case(crate::models::org_props::PRIORITY) {
+                // Already parsed into the typed field; the renderer rebuilds
+                // this drawer line from it.
                 continue;
             } else if key.eq_ignore_ascii_case("contributes-to") {
                 // `:contributes-to:` is the Compass CONTRIBUTION edge — same
@@ -1687,6 +1745,155 @@ mod tests {
         assert_eq!(result.blocks[2].org_title(), "Second headline");
     }
 
+    /// The drawer spelling `:priority: A` and the headline cookie `[#A]` name
+    /// the SAME thing, so both must land as the same typed priority. The drawer
+    /// key collides with the internal property key of the same name, and the
+    /// generic drawer loop used to overwrite the parsed integer with the raw
+    /// letter — destroying the typed value rather than merely shadowing it.
+    #[test]
+    fn the_drawer_spelling_parses_to_the_same_typed_priority_as_the_cookie() {
+        for (name, content) in [
+            ("cookie", "* TODO [#A] t\n:PROPERTIES:\n:ID: p0\n:END:\n"),
+            (
+                "drawer",
+                "* TODO t\n:PROPERTIES:\n:ID: p0\n:priority: A\n:END:\n",
+            ),
+            (
+                "both",
+                "* TODO [#A] t\n:PROPERTIES:\n:ID: p0\n:priority: A\n:END:\n",
+            ),
+        ] {
+            let result = parse_test_org(content);
+            let h = &result.blocks[0];
+            assert_eq!(
+                h.priority(),
+                Some(holon_api::Priority::A),
+                "[{name}] the authored priority must reach the typed field"
+            );
+            assert!(
+                !matches!(
+                    h.properties_map().get("priority"),
+                    Some(holon_api::Value::String(_))
+                ),
+                "[{name}] no raw letter may be stored under the `priority` key — SQLite sorts \
+                 strings after every integer"
+            );
+        }
+    }
+
+    /// The stored value is a RANK that ascends with importance, so an ascending
+    /// sort is a sort by importance.
+    #[test]
+    fn the_stored_priority_rank_ascends_with_importance() {
+        let a = parse_test_org("* [#A] t").blocks[0].priority().unwrap();
+        let b = parse_test_org("* [#B] t").blocks[0].priority().unwrap();
+        assert_eq!(
+            a.rank(),
+            1,
+            "`[#A]` is the most important, so it ranks first"
+        );
+        assert!(
+            a.rank() < b.rank(),
+            "A must sort before B under ORDER BY ASC"
+        );
+    }
+
+    /// A priority letter outside the A/B/C default range PANICKED, taking the
+    /// whole app down at parse time over one headline. The org priority range
+    /// is configurable (`org-highest-priority` / `org-lowest-priority`), so
+    /// a letter is data, not a defect — and whatever the verdict, a panic
+    /// is never the right rung.
+    #[test]
+    fn a_priority_letter_beyond_the_default_range_is_data_not_a_panic() {
+        let d = parse_test_org("* [#D] t").blocks[0]
+            .priority()
+            .expect("`[#D]` is a letter priority, not a parse failure");
+        assert_eq!(
+            d.rank(),
+            4,
+            "rank follows the letter's position in the alphabet"
+        );
+    }
+
+    /// A drawer priority that is not a letter at all cannot be ranked. It is
+    /// refused LOUDLY — never defaulted, never carried as a string.
+    #[test]
+    fn a_non_letter_drawer_priority_is_refused_loudly() {
+        let err = parse_org_file(
+            &PathBuf::from("/test/file.org"),
+            "* t\n:PROPERTIES:\n:ID: p0\n:priority: 1\n:END:\n",
+            &EntityUri::no_parent(),
+            &PathBuf::from("/test"),
+        )
+        .err()
+        .expect("a non-letter priority must refuse the parse");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("priority"),
+            "the refusal must name the offending key, got {msg:?}"
+        );
+    }
+
+    /// Two carriers that disagree is an authoring mistake with no correct
+    /// answer — picking one silently would make the file mean something the
+    /// author never wrote.
+    #[test]
+    fn a_cookie_and_drawer_that_disagree_refuse_the_parse() {
+        let err = parse_org_file(
+            &PathBuf::from("/test/file.org"),
+            "* [#A] t\n:PROPERTIES:\n:ID: p0\n:priority: B\n:END:\n",
+            &EntityUri::no_parent(),
+            &PathBuf::from("/test"),
+        )
+        .err()
+        .expect("disagreeing priority carriers must refuse the parse");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("priority"),
+            "the refusal must name the conflict, got {msg:?}"
+        );
+    }
+
+    /// Org drawer keys are case-insensitive, so `:PRIORITY:` is the SAME
+    /// carrier as `:priority:` and must normalise onto the one canonical
+    /// lowercase key — not survive as a second spelling that only some readers
+    /// look under.
+    #[test]
+    fn the_uppercase_drawer_spelling_normalises_onto_the_canonical_key() {
+        let content = "* t\n:PROPERTIES:\n:ID: p0\n:PRIORITY: A\n:END:\n";
+        let h = &parse_test_org(content).blocks[0];
+        assert_eq!(
+            h.priority(),
+            Some(holon_api::Priority::A),
+            "the uppercase drawer spelling must reach the typed field"
+        );
+        assert_eq!(
+            h.properties_map().get("PRIORITY"),
+            None,
+            "no second uppercase key may survive beside the canonical one"
+        );
+    }
+
+    /// Disagreement is checked across EVERY carrier, not just the first drawer
+    /// key the scan happens to hit — two drawer spellings in one headline is
+    /// the same authoring mistake as cookie-vs-drawer.
+    #[test]
+    fn two_drawer_spellings_that_disagree_refuse_the_parse() {
+        let err = parse_org_file(
+            &PathBuf::from("/test/file.org"),
+            "* t\n:PROPERTIES:\n:ID: p0\n:priority: A\n:PRIORITY: B\n:END:\n",
+            &EntityUri::no_parent(),
+            &PathBuf::from("/test"),
+        )
+        .err()
+        .expect("disagreeing drawer spellings must refuse the parse");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("disagree"),
+            "the refusal must name the conflict, got {msg:?}"
+        );
+    }
+
     #[test]
     fn test_parse_todo_and_priority() {
         let content = "* TODO [#A] Important task :work:urgent:";
@@ -1695,7 +1902,7 @@ mod tests {
         assert_eq!(result.blocks.len(), 1);
         let h = &result.blocks[0];
         assert_eq!(h.task_state(), Some(TaskState::active("TODO")));
-        assert_eq!(h.priority(), Some(holon_api::Priority::High));
+        assert_eq!(h.priority(), Some(holon_api::Priority::A));
         assert_eq!(h.tags(), holon_api::Tags::from_csv("work,urgent"));
     }
 

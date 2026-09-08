@@ -58,7 +58,7 @@ Prototype blocks replace the old `MaterializeConfig`. A block with `prototype_fo
 * DEFAULT_TASK_PROTOTYPE
   :PROPERTIES:
   :prototype_for: task
-  :priority_weight: =switch priority { 3.0 => 10.0, 2.0 => 5.0, 1.0 => 2.0, _ => 1.0 }
+  :priority_weight: =switch priority { 1.0 => 10.0, 2.0 => 5.0, 3.0 => 2.0, _ => 1.0 }
   :urgency_weight: =1.0
   :position_weight: =1.0 / (position + 1.0)
   :task_weight: =priority_weight * urgency_weight * position_weight

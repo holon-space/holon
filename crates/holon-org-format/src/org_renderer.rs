@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use holon_api::EntityUri;
-use holon_api::Value;
 use holon_api::block::Block;
 
 use crate::models::OrgBlockExt;
@@ -15,24 +14,6 @@ use crate::models::OrgDocumentExt;
 use crate::models::ToOrg;
 use crate::models::render_document_header;
 use crate::task_keyword::TaskKeywordVocabulary;
-
-/// The `:PROPERTIES:` drawer keys in the order the author wrote them, as
-/// recorded by the parser. Empty for blocks that never came from a file.
-fn authored_drawer_order(block: &Block) -> Vec<String> {
-    let Some(json) = block
-        .get_property(crate::models::org_props::DRAWER_ORDER)
-        .and_then(|v| v.as_string().map(|s| s.to_string()))
-    else {
-        return Vec::new();
-    };
-    serde_json::from_str(&json).unwrap_or_else(|e| {
-        panic!(
-            "malformed {} {json:?}: {e} — we wrote it, so a parse failure means the drawer-order \
-             carrier was corrupted in transit",
-            crate::models::org_props::DRAWER_ORDER
-        )
-    })
-}
 
 /// Render a Loro document (represented as blocks) to org-mode format.
 ///
@@ -340,18 +321,21 @@ impl OrgRenderer {
         }
         Self::refuse_undeclared_task_state(block, vocabulary);
 
-        // Transfer PRIORITY to priority if not already set
+        // Lift a legacy uppercase `PRIORITY` property into the typed field. The
+        // org parser resolves both spellings itself, so this only ever sees
+        // blocks built elsewhere; an unusable value is disclosed, never dropped
+        // in silence.
         if block.priority().is_none() {
             if let Some(priority_val) = properties.get("PRIORITY") {
-                let priority = match priority_val {
-                    // ALLOW(ok): boundary parse — None valid for missing priority
-                    Value::String(s) => holon_api::Priority::from_letter(s).ok(),
-                    Value::Integer(n) => holon_api::Priority::from_int(*n as i32).ok(), /* ALLOW(ok): boundary parse */
-                    Value::Float(f) => holon_api::Priority::from_int(*f as i32).ok(), /* ALLOW(ok): boundary parse */
-                    _ => None,
-                };
-                if let Some(p) = priority {
-                    block.set_priority(Some(p));
+                match holon_api::Priority::try_from(priority_val.clone()) {
+                    Ok(p) => block.set_priority(Some(p)),
+                    Err(e) => tracing::warn!(
+                        block = %block.id,
+                        value = ?priority_val,
+                        error = %e,
+                        "stored PRIORITY property is not an org priority — the block is rendered \
+                         without one"
+                    ),
                 }
             }
         }
@@ -405,7 +389,7 @@ impl OrgRenderer {
             // Exact spelling wins, so `:Effort:` and `:effort:` keep their own
             // slots; the case-insensitive probe then catches the lifted keys the
             // renderer re-spells (`:collapsed:` authored, `COLLAPSED` emitted).
-            let authored = authored_drawer_order(block);
+            let authored = block.authored_drawer_order();
             let rank = |key: &str| {
                 authored
                     .iter()
@@ -431,6 +415,7 @@ impl OrgRenderer {
 #[cfg(test)]
 mod tests {
     use holon_api::EntityUri;
+    use holon_api::Value;
     use holon_api::types::ContentType;
     use holon_api::types::SourceLanguage;
 

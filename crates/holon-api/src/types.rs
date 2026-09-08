@@ -661,56 +661,54 @@ impl TryFrom<Value> for TaskState {
 // Priority
 // =============================================================================
 
-/// Task priority — decoupled from org's A/B/C letter convention.
+/// An org priority cookie — the letter the author wrote, as authored.
 ///
-/// Stored as integer in SQL (High=3, Medium=2, Low=1).
-/// Org serialization uses letters (A, B, C).
+/// Stored as a RANK: `A` = 1, `B` = 2, … `Z` = 26, so `ORDER BY priority ASC`
+/// sorts by importance and needs no `CASE` expression (ruling D101.a).
+///
+/// Every letter is data, not a defect: org's accepted range is configurable
+/// (`org-highest-priority` / `org-lowest-priority`) and a vault may
+/// legitimately use more than A/B/C. Anything that is not a letter has no rank
+/// at all and is refused at the parse boundary.
 ///
 /// flutter_rust_bridge:non_opaque
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum Priority {
-    Low = 1,
-    Medium = 2,
-    High = 3,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Priority(u8);
 
 impl Priority {
-    pub fn to_int(self) -> i32 {
-        self as i32
+    pub const A: Priority = Priority(b'A');
+    pub const B: Priority = Priority(b'B');
+    pub const C: Priority = Priority(b'C');
+
+    /// 1 for `A`, 26 for `Z`. This is the stored form.
+    pub fn rank(self) -> i32 {
+        (self.0 - b'A') as i32 + 1
     }
 
-    pub fn from_int(n: i32) -> anyhow::Result<Self> {
-        match n {
-            3 => Ok(Priority::High),
-            2 => Ok(Priority::Medium),
-            1 => Ok(Priority::Low),
-            other => anyhow::bail!("Invalid priority integer: {other} (expected 1, 2, or 3)"),
+    pub fn from_rank(n: i32) -> anyhow::Result<Self> {
+        if !(1..=26).contains(&n) {
+            anyhow::bail!("invalid priority rank: {n} (expected 1..=26, where 1 is `A`)");
         }
+        Ok(Priority(b'A' + (n - 1) as u8))
     }
 
-    pub fn to_letter(self) -> &'static str {
-        match self {
-            Priority::High => "A",
-            Priority::Medium => "B",
-            Priority::Low => "C",
-        }
+    pub fn letter(self) -> char {
+        self.0 as char
     }
 
-    pub fn from_letter(s: &str) -> anyhow::Result<Self> {
-        match s.trim() {
-            "A" => Ok(Priority::High),
-            "B" => Ok(Priority::Medium),
-            "C" => Ok(Priority::Low),
-            other => anyhow::bail!(
-                "Invalid priority letter: {other:?} (expected \"A\", \"B\", or \"C\")"
-            ),
+    pub fn from_letter(c: char) -> anyhow::Result<Self> {
+        if !c.is_ascii_uppercase() {
+            anyhow::bail!(
+                "invalid priority {c:?}: an org priority is a single uppercase letter A-Z"
+            );
         }
+        Ok(Priority(c as u8))
     }
 }
 
 impl fmt::Display for Priority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_letter())
+        write!(f, "{}", self.letter())
     }
 }
 
@@ -718,13 +716,35 @@ impl FromStr for Priority {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Priority::from_letter(s)
+        let trimmed = s.trim();
+        let mut chars = trimmed.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => Priority::from_letter(c),
+            _ => anyhow::bail!(
+                "invalid priority {trimmed:?}: an org priority is a single uppercase letter A-Z"
+            ),
+        }
+    }
+}
+
+/// Serialized as the authored LETTER, so a serialized priority stays readable
+/// and stays valid across any future change to the rank arithmetic.
+impl Serialize for Priority {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.letter().to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Priority {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }
 
 impl From<Priority> for Value {
     fn from(p: Priority) -> Self {
-        Value::Integer(p.to_int() as i64)
+        Value::Integer(p.rank() as i64)
     }
 }
 
@@ -733,11 +753,14 @@ impl TryFrom<Value> for Priority {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Integer(i) => Priority::from_int(i as i32)
+            Value::Integer(i) => Priority::from_rank(i as i32)
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() }),
-            Value::String(s) => Priority::from_letter(&s)
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() }),
-            _ => Err("Priority requires an integer or string Value".into()),
+            Value::String(s) => s.parse().map_err(
+                |e: anyhow::Error| -> Box<dyn std::error::Error + Send + Sync> {
+                    e.to_string().into()
+                },
+            ),
+            _ => Err("Priority requires an integer rank or a letter string".into()),
         }
     }
 }
@@ -1362,52 +1385,58 @@ mod tests {
 
     #[test]
     fn priority_letter_round_trip() {
-        assert_eq!(Priority::from_letter("A").unwrap(), Priority::High);
-        assert_eq!(Priority::from_letter("B").unwrap(), Priority::Medium);
-        assert_eq!(Priority::from_letter("C").unwrap(), Priority::Low);
-        assert_eq!(Priority::High.to_letter(), "A");
-        assert_eq!(Priority::Medium.to_letter(), "B");
-        assert_eq!(Priority::Low.to_letter(), "C");
+        assert_eq!("A".parse::<Priority>().unwrap(), Priority::A);
+        assert_eq!(Priority::from_letter('B').unwrap(), Priority::B);
+        assert_eq!(Priority::A.letter(), 'A');
+        assert_eq!(Priority::C.letter(), 'C');
+    }
+
+    /// The whole point of the rank: 1 is the most important, so an ASCENDING
+    /// sort on the stored value is a sort by importance.
+    #[test]
+    fn priority_rank_ascends_with_importance() {
+        assert_eq!(Priority::A.rank(), 1);
+        assert_eq!(Priority::B.rank(), 2);
+        assert_eq!(Priority::C.rank(), 3);
+        assert_eq!(Priority::from_rank(1).unwrap(), Priority::A);
+        assert_eq!(Priority::from_letter('Z').unwrap().rank(), 26);
+    }
+
+    /// Letters beyond the A/B/C default are DATA — org's range is configurable
+    /// — but a non-letter has no rank and must refuse.
+    #[test]
+    fn priority_accepts_every_letter_and_refuses_non_letters() {
+        assert_eq!(Priority::from_letter('D').unwrap().rank(), 4);
+        assert!(Priority::from_letter('1').is_err());
+        assert!(Priority::from_letter('a').is_err());
+        assert!("".parse::<Priority>().is_err());
+        assert!("AB".parse::<Priority>().is_err());
     }
 
     #[test]
-    fn priority_int_round_trip() {
-        assert_eq!(Priority::from_int(3).unwrap(), Priority::High);
-        assert_eq!(Priority::from_int(2).unwrap(), Priority::Medium);
-        assert_eq!(Priority::from_int(1).unwrap(), Priority::Low);
-        assert_eq!(Priority::High.to_int(), 3);
-        assert_eq!(Priority::Medium.to_int(), 2);
-        assert_eq!(Priority::Low.to_int(), 1);
-    }
-
-    #[test]
-    fn priority_rejects_invalid_letter() {
-        assert!(Priority::from_letter("D").is_err());
-        assert!(Priority::from_letter("").is_err());
-    }
-
-    #[test]
-    fn priority_rejects_invalid_int() {
-        assert!(Priority::from_int(0).is_err());
-        assert!(Priority::from_int(4).is_err());
+    fn priority_rejects_invalid_rank() {
+        assert!(Priority::from_rank(0).is_err());
+        assert!(Priority::from_rank(27).is_err());
     }
 
     #[test]
     fn priority_value_round_trip() {
-        let v: Value = Priority::High.into();
-        assert_eq!(v, Value::Integer(3));
+        let v: Value = Priority::A.into();
+        assert_eq!(v, Value::Integer(1));
         let p: Priority = v.try_into().unwrap();
-        assert_eq!(p, Priority::High);
+        assert_eq!(p, Priority::A);
 
         let v: Value = Value::String("B".into());
         let p: Priority = v.try_into().unwrap();
-        assert_eq!(p, Priority::Medium);
+        assert_eq!(p, Priority::B);
     }
 
+    /// `Ord` IS the rank order, so sorting a `Vec<Priority>` and sorting by the
+    /// stored integer can never disagree.
     #[test]
-    fn priority_ordering() {
-        assert!(Priority::High > Priority::Medium);
-        assert!(Priority::Medium > Priority::Low);
+    fn priority_ordering_matches_the_stored_rank() {
+        assert!(Priority::A < Priority::B);
+        assert!(Priority::B < Priority::C);
     }
 
     #[test]

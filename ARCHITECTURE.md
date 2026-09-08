@@ -2097,7 +2097,7 @@ Computed fields in type definitions subsume the current **prototype block** mech
 ```yaml
 # Before: prototype block with =expressions
 # properties:
-#   priority_weight: "=switch priority { 3.0 => 100.0, ... }"
+#   priority_weight: "=switch priority { 1.0 => 100.0, ... }"
 #   task_weight: "=priority_weight * (1.0 + urgency_weight)"
 
 # After: computed fields in type definition
@@ -2108,7 +2108,7 @@ fields:
   priority_weight:
     type: real
     lifetime: computed
-    expr: "switch priority { 3.0 => 100.0, 2.0 => 40.0, 1.0 => 15.0, _ => 1.0 }"
+    expr: "switch priority { 1.0 => 100.0, 2.0 => 40.0, 3.0 => 15.0, _ => 1.0 }"
   task_weight:
     type: real
     lifetime: computed

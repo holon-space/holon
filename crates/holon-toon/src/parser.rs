@@ -123,7 +123,7 @@ fn apply_props(block: &mut ToonBlock, cell: &str, row: usize) -> Result<()> {
                         row,
                         key,
                         value: value.clone(),
-                        reason: "expected a single priority letter A/B/C".into(),
+                        reason: "expected a single priority letter A-Z".into(),
                     }
                 })?;
                 block.priority = Some(p);

@@ -491,3 +491,178 @@ async fn inline_marks_around_a_link_survive_both_write_legs() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Org priority (D101.a)
+// ---------------------------------------------------------------------------
+
+/// The three ways a vault authors a priority. All three name the SAME priority,
+/// so all three must reach the store as the same canonical rank AND come back
+/// out spelled the way they went in — the cookie stays a cookie, the drawer key
+/// stays a drawer key, and a headline carrying both keeps both.
+const PRIORITY_COOKIE: &str = "#+ID: prio-page\n* TODO [#A] Cookie carries it\n:PROPERTIES:\n:ID: \
+                               prio-cookie\n:END:\n";
+const PRIORITY_DRAWER: &str = "#+ID: prio-page\n* TODO Drawer carries it\n:PROPERTIES:\n:ID: \
+                               prio-drawer\n:priority: A\n:END:\n";
+const PRIORITY_BOTH: &str = "#+ID: prio-page\n* TODO [#A] Both carry it\n:PROPERTIES:\n:ID: \
+                             prio-both\n:priority: A\n:END:\n";
+
+/// Write-back data loss: with the drawer spelling in play the typed priority is
+/// destroyed at parse, so the renderer emits NEITHER the cookie NOR the drawer
+/// line and the authored priority leaves the file altogether.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_authored_priority_carrier_survives_the_store_byte_identical() {
+    for (name, source) in [
+        ("cookie", PRIORITY_COOKIE),
+        ("drawer", PRIORITY_DRAWER),
+        ("both", PRIORITY_BOTH),
+    ] {
+        for leg in [WriteLeg::Loro, WriteLeg::OrgIngest] {
+            let (from_parser, after_store) = render_both_ways(source, leg).await;
+            assert_eq!(
+                from_parser,
+                source,
+                "[{name}/{}] control: the format-only leg must already reproduce the authored \
+                 bytes",
+                leg.name()
+            );
+            assert_eq!(
+                after_store,
+                source,
+                "[{name}/{}] the authored priority carrier must survive org → store → org \
+                 byte-identical",
+                leg.name()
+            );
+        }
+    }
+}
+
+/// Same page, same block id, no priority carrier at all — the shape a block has
+/// after the erasure bug stripped its authored priority from disk.
+const PRIORITY_NONE: &str = "#+ID: prio-page\n* TODO Drawer carries it\n:PROPERTIES:\n:ID: \
+                             prio-drawer\n:END:\n";
+
+/// The migration hinges on this: `RENDERER_VERSION` forces a re-ingest, but a
+/// re-ingest only repairs a stale stored rank if an ingest that finds NO
+/// priority carrier CLEARS the column. Without the clear, a block the erasure
+/// bug already stripped on disk keeps its legacy (inverted, or raw-string) rank
+/// forever, and nothing in the pipeline can ever notice.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_lost_its_priority_clears_the_stored_rank_on_re_ingest() {
+    use holon_org_format::models::OrgBlockExt;
+
+    let parse = |source: &str| {
+        parse_org_file(
+            Path::new(FILE),
+            source,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .expect("the fixture must parse")
+    };
+    let with_priority = parse(PRIORITY_DRAWER);
+    let without = parse(PRIORITY_NONE);
+    assert_eq!(
+        with_priority.blocks[0].priority(),
+        Some(holon_api::Priority::A),
+        "control: the first ingest must actually carry a priority"
+    );
+
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("turso must start in memory");
+    setup_production_schema(&handle).await;
+    let provider = Arc::new(SqlOperationProvider::with_edge_fields(
+        handle.clone(),
+        BLOCK_WRITE_TABLE.to_string(),
+        "block".to_string(),
+        "block".to_string(),
+        BlockSchemaModule.edge_fields(),
+    ));
+    let entity: EntityName = "block".to_string().into();
+
+    let ingest = |parsed: &holon_org_format::ParseResult, op: &'static str| {
+        let doc = parsed.document.clone();
+        let blocks = parsed.blocks.clone();
+        let provider = provider.clone();
+        let entity = entity.clone();
+        async move {
+            for (i, block) in std::iter::once(&doc).chain(blocks.iter()).enumerate() {
+                let mut params =
+                    holon_orgmode::build_block_params(block, &block.parent_id, &doc.id, None);
+                params.insert(
+                    "sort_key".into(),
+                    holon_api::Value::String(format!("{i:010}")),
+                );
+                provider
+                    .execute_operation(&entity, op, params)
+                    .await
+                    .unwrap_or_else(|e| panic!("{op} {}: {e}", block.id));
+            }
+        }
+    };
+    ingest(&with_priority, "create").await;
+    ingest(&without, "update").await;
+
+    let cache: Arc<QueryableCache<Block>> = Arc::new(
+        QueryableCache::<Block>::new(handle.clone(), Block::type_definition())
+            .await
+            .expect("block cache"),
+    );
+    let reader: Arc<dyn BlockReader> = Arc::new(CacheBlockReader::new(cache));
+    let restored = reader
+        .get_blocks(&without.document.id)
+        .await
+        .expect("get_blocks must read the document back");
+    let headline = restored
+        .iter()
+        .find(|b| b.level() == 1)
+        .expect("the fixture has one headline");
+
+    assert_eq!(
+        headline.priority(),
+        None,
+        "a file with no priority carrier must clear the stored rank, not leave the legacy one"
+    );
+}
+
+/// The sort contract behind the vault's `Now.org` query: the stored value is a
+/// RANK that ascends with importance, so `ORDER BY priority ASC` puts A first
+/// with no `CASE` expression. Asserted on the value that actually lands in the
+/// store, for every authored carrier, because the carrier is exactly what used
+/// to change the stored shape.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_authored_carrier_stores_the_same_canonical_rank() {
+    use holon_api::Value;
+    use holon_org_format::models::OrgBlockExt;
+
+    for (name, source) in [
+        ("cookie", PRIORITY_COOKIE),
+        ("drawer", PRIORITY_DRAWER),
+        ("both", PRIORITY_BOTH),
+    ] {
+        for leg in [WriteLeg::Loro, WriteLeg::OrgIngest] {
+            let parsed = parse_org_file(
+                Path::new(FILE),
+                source,
+                &EntityUri::no_parent(),
+                Path::new(ROOT),
+            )
+            .expect("the fixture must parse");
+            let restored = through_the_store(&parsed.document, &parsed.blocks, leg).await;
+            let headline = restored
+                .iter()
+                .find(|b| b.level() == 1)
+                .expect("the fixture has one headline");
+
+            assert_eq!(
+                headline.properties_map().get("priority"),
+                Some(&Value::Integer(1)),
+                "[{name}/{}] `[#A]` must store as rank 1 — an integer, never the letter (SQLite \
+                 sorts every string after every integer, which is how 41 vault blocks fell to the \
+                 bottom of `Now.org`)",
+                leg.name()
+            );
+        }
+    }
+}

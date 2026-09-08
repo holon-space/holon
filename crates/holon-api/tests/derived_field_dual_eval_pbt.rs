@@ -798,7 +798,7 @@ fn directed_integer_semantics_regressions() {
 const DEFAULT_PETRI_PROPS: &[(&str, &str)] = &[
     (
         "priority_weight",
-        "switch priority { 3.0 => 100.0, 2.0 => 40.0, 1.0 => 15.0, _ => 1.0 }",
+        "switch priority { 1.0 => 100.0, 2.0 => 40.0, 3.0 => 15.0, _ => 1.0 }",
     ),
     (
         "urgency_weight",
@@ -848,7 +848,7 @@ fn flagship_switch_and_if_defaults_match_rhai() {
     let engine = bounded_engine();
     let cases: &[(&str, HashMap<String, Value>)] = &[
         (
-            "switch priority { 3.0 => 100.0, 2.0 => 40.0, 1.0 => 15.0, _ => 1.0 }",
+            "switch priority { 1.0 => 100.0, 2.0 => 40.0, 3.0 => 15.0, _ => 1.0 }",
             HashMap::from([("priority".to_string(), Value::Float(2.0))]),
         ),
         (

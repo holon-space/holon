@@ -402,7 +402,7 @@ fn default_computed_props(engine: &RhaiEngine) -> Vec<(&'static str, PrototypeVa
     vec![
         (
             "priority_weight",
-            prop("=switch priority { 3.0 => 100.0, 2.0 => 40.0, 1.0 => 15.0, _ => 1.0 }"),
+            prop("=switch priority { 1.0 => 100.0, 2.0 => 40.0, 3.0 => 15.0, _ => 1.0 }"),
         ),
         (
             "urgency_weight",
@@ -567,7 +567,7 @@ fn build_context_props(
 ) -> BTreeMap<String, f64> {
     let mut ctx = BTreeMap::new();
 
-    let priority = task.priority.map(|p| p.to_int() as f64).unwrap_or(0.0);
+    let priority = task.priority.map(|p| p.rank() as f64).unwrap_or(0.0);
     ctx.insert("priority".to_string(), priority);
 
     ctx.insert("position".to_string(), task.position as f64);
@@ -867,7 +867,7 @@ impl TaskInfo {
             Some(v) => {
                 let i = integer_prop(&block.id, "priority", v)?;
                 Some(
-                    Priority::from_int(i as i32).map_err(|e| PetriError::InvalidPriority {
+                    Priority::from_rank(i as i32).map_err(|e| PetriError::InvalidPriority {
                         block_id: block.id.to_string(),
                         value: i,
                         detail: e.to_string(),
@@ -1081,7 +1081,7 @@ fn task_to_instance_props_from_info(task: &TaskInfo) -> BTreeMap<String, Prototy
     if let Some(p) = task.priority {
         props.insert(
             "priority".to_string(),
-            PrototypeValue::Literal(p.to_int() as f64),
+            PrototypeValue::Literal(p.rank() as f64),
         );
     }
     if let Some(dur) = task.duration_minutes {
@@ -1537,12 +1537,12 @@ mod tests {
         let mut prototype: BTreeMap<String, PrototypeValue> = BTreeMap::new();
         prototype.insert(
             "priority_weight".to_string(),
-            computed("switch priority { 3.0 => 100.0, 2.0 => 40.0, _ => 1.0 }"),
+            computed("switch priority { 1.0 => 100.0, 2.0 => 40.0, _ => 1.0 }"),
         );
         prototype.insert("task_weight".to_string(), computed("priority_weight * 2.0"));
 
         let mut context: BTreeMap<String, f64> = BTreeMap::new();
-        context.insert("priority".to_string(), 3.0);
+        context.insert("priority".to_string(), 1.0);
 
         let resolved = resolve_prototype(&prototype, &BTreeMap::new(), &context)
             .expect("resolve_prototype must succeed");
@@ -1622,9 +1622,9 @@ mod tests {
         let low = EntityUri::block_random();
 
         let mut hb = task_block(&high, "High priority task", "TODO");
-        hb.set_property("priority", holon_api::Value::Integer(3));
+        hb.set_property("priority", holon_api::Value::Integer(1));
         let mut lb = task_block(&low, "Low priority task", "TODO");
-        lb.set_property("priority", holon_api::Value::Integer(1));
+        lb.set_property("priority", holon_api::Value::Integer(3));
 
         let result = rank_tasks(&[hb, lb]).expect("rank_tasks must succeed");
 
@@ -1632,12 +1632,12 @@ mod tests {
         assert_eq!(
             result.ranked[0].block_id,
             high.to_string(),
-            "priority 3 must rank first"
+            "priority 1 (`[#A]`) must rank first"
         );
         assert_eq!(
             result.ranked[1].block_id,
             low.to_string(),
-            "priority 1 must rank second"
+            "priority 3 (`[#C]`) must rank second"
         );
 
         // max_position = 2 active tasks; positions are block indices 0 and 1.

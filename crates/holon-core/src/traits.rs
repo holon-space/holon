@@ -2799,21 +2799,21 @@ impl TaskEntity for holon_api::block::Block {
 
     fn priority(&self) -> Option<i64> {
         let props = self.properties_map();
-        if let Some(priority_val) = props.get("PRIORITY") {
-            if let Some(i) = priority_val.as_i64() {
-                return Some(i);
-            }
-            if let Some(s) = priority_val.as_string() {
-                return Some(
-                    holon_api::Priority::from_letter(s)
-                        .unwrap_or_else(|e| {
-                            panic!("stored PRIORITY property {s:?} is not a valid priority: {e}")
-                        })
-                        .to_int() as i64,
+        // The canonical stored key is lowercase `priority` — the one the org
+        // parser writes and `OrgBlockExt::set_priority` maintains. Reading an
+        // uppercase spelling here answered `None` for every org-written block.
+        let priority_val = props.get("priority")?;
+        match holon_api::Priority::try_from(priority_val.clone()) {
+            Ok(p) => Some(p.rank() as i64),
+            Err(e) => {
+                tracing::warn!(
+                    value = ?priority_val,
+                    error = %e,
+                    "stored priority property is not an org priority — reporting no priority"
                 );
+                None
             }
         }
-        None
     }
 
     fn due_date(&self) -> Option<DateTime<Utc>> {
@@ -3264,6 +3264,28 @@ mod trait_unit_tests {
         assert_eq!(BlockEntity::parent_id(&doc_child), None);
     }
 
+    /// The org parser stores the rank under the canonical lowercase key. This
+    /// view read an uppercase spelling, so it answered `None` for every block
+    /// that came from a file — one key, one place.
+    #[test]
+    fn task_priority_reads_the_canonical_lowercase_key() {
+        let mut from_org = test_block();
+        from_org.set_property("priority", 1i64);
+        assert_eq!(
+            TaskEntity::priority(&from_org),
+            Some(1),
+            "the key the org parser writes must be the key this view reads"
+        );
+
+        let mut uppercase = test_block();
+        uppercase.set_property("PRIORITY", 1i64);
+        assert_eq!(
+            TaskEntity::priority(&uppercase),
+            None,
+            "an uppercase spelling is not a second storage key"
+        );
+    }
+
     #[test]
     fn task_entity_view_maps_state_priority_due_date() {
         let mut done = test_block();
@@ -3276,7 +3298,7 @@ mod trait_unit_tests {
         assert!(!TaskEntity::completed(&test_block()));
 
         let mut prioritized = test_block();
-        prioritized.set_property("PRIORITY", 2i64);
+        prioritized.set_property("priority", 2i64);
         assert_eq!(TaskEntity::priority(&prioritized), Some(2));
         assert_eq!(TaskEntity::priority(&test_block()), None);
 

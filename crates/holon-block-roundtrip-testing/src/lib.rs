@@ -805,9 +805,9 @@ pub fn headline_spec_strategy(
             Just(TaskState::done("CLOSED")),
         ]),
         prop::option::of(prop_oneof![
-            Just(Priority::Low),
-            Just(Priority::Medium),
-            Just(Priority::High),
+            Just(Priority::C),
+            Just(Priority::B),
+            Just(Priority::A),
         ]),
         valid_title(),
         prop::option::of(prop::collection::vec(valid_tag(), 1..=3)),

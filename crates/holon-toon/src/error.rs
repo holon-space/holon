@@ -84,6 +84,22 @@ pub enum ToonError {
         slug: String,
     },
 
+    #[error(
+        "headline {headline:?}: the priority cookie [#{cookie}] is not an org priority — org's \
+         range is configurable, so any single uppercase letter A-Z is accepted and nothing else is"
+    )]
+    BadOrgPriority { headline: String, cookie: String },
+
+    #[error(
+        "headline {headline:?}: the priority carriers {first} and {second} disagree — author the \
+         priority once"
+    )]
+    DisagreeingOrgPriority {
+        headline: String,
+        first: String,
+        second: String,
+    },
+
     // --- generic tabular codec (`table.rs`) ---
     #[error(
         "table name {name:?} is not representable as a TOON array key (no whitespace, and none of \

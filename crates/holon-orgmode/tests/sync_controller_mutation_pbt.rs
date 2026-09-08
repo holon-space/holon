@@ -372,7 +372,7 @@ fn block_from_params(params: &holon_api::StorageEntity) -> Block {
         block.set_task_state(Some(TaskState::from_keyword(ts)));
     }
     if let Some(p) = params.get("priority").and_then(|v| v.as_i64()) {
-        if let Ok(priority) = Priority::from_int(p as i32) {
+        if let Ok(priority) = Priority::from_rank(p as i32) {
             block.set_priority(Some(priority));
         }
     }
@@ -1018,9 +1018,9 @@ fn block_mutation_strategy() -> impl Strategy<Value = BlockMutation> {
         ])
         .prop_map(BlockMutation::SetTaskState),
         prop::option::of(prop_oneof![
-            Just(Priority::Low),
-            Just(Priority::Medium),
-            Just(Priority::High),
+            Just(Priority::C),
+            Just(Priority::B),
+            Just(Priority::A),
         ])
         .prop_map(BlockMutation::SetPriority),
         prop::collection::vec(valid_tag(), 0..=3)
@@ -1455,7 +1455,7 @@ fn generate_baseline_blocks(doc_id: &EntityUri, variant: u8) -> Vec<Block> {
             bc2.set_level(2);
             bc2.set_sequence(2);
             bc2.set_task_state(Some(TaskState::active("TODO")));
-            bc2.set_priority(Some(Priority::High));
+            bc2.set_priority(Some(Priority::A));
             bc2.set_tags(Tags::from(vec!["work".to_string()]));
             bc2.set_property("ID", Value::String(c2.id().to_string()));
 

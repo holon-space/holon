@@ -956,7 +956,7 @@ Block:
     default_duration_minutes: 60.0          # literal
     deadline_buffer_days: 3.0               # literal
     deadline_penalty: 200.0                 # literal
-    priority_weight: "=switch priority { 3 => 100.0, 2 => 40.0, 1 => 15.0, _ => 1.0 }"
+    priority_weight: "=switch priority { 1 => 100.0, 2 => 40.0, 3 => 15.0, _ => 1.0 }"
     urgency_weight: "=if days_to_deadline > deadline_buffer_days { 0.0 }
         else if days_to_deadline <= 0.0 { deadline_penalty }
         else { deadline_penalty * (1.0 - days_to_deadline / deadline_buffer_days) }"

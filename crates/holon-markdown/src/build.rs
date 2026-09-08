@@ -99,7 +99,7 @@ fn split_priority(raw: &str) -> (String, Option<Priority>) {
     let t = raw.trim_start();
     if let Some(rest) = t.strip_prefix("[#") {
         if rest.len() >= 2 && rest.as_bytes()[1] == b']' {
-            let letter = &rest[..1];
+            let letter = rest.as_bytes()[0] as char;
             if let Ok(p) = Priority::from_letter(letter) {
                 return (rest[2..].trim_start().to_string(), Some(p));
             }

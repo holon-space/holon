@@ -68,10 +68,19 @@ use crate::sync_ports::WritebackDisclosure;
 use crate::vault_path::VaultPath;
 
 /// Bump when the org renderer changes in a way that alters the canonical
-/// projection bytes (formatting, property ordering, directive layout, …).
+/// projection bytes (formatting, property ordering, directive layout, …), OR
+/// when a parse-boundary fix must re-derive stored fields from the files.
 /// Mismatch on next boot forces a one-shot re-ingest per file so the stored
 /// `file.content_hash` snaps to the new canonical form.
-pub const RENDERER_VERSION: &str = "1";
+///
+/// `2` re-derives every org priority (ruling D101.a). The stored value became a
+/// rank that ascends with importance, and the legacy inverted ints are NOT
+/// distinguishable from canonical ones by value — both occupy 1..3 — so the
+/// migration re-parses rather than inspects. Idempotent by construction: the
+/// re-ingest re-stamps each hash under the new version, so only the first boot
+/// after the bump pays for it, and paired devices converge because each
+/// re-derives from the same authored letters.
+pub const RENDERER_VERSION: &str = "2";
 
 /// One block's membership change in a document, as the `home_by` combinator
 /// derived it from the CDC block feed.

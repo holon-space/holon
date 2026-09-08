@@ -40,7 +40,7 @@ fn apply_org_properties(block: &mut Block, fields: &HashMap<String, Value>, is_c
         .and_then(|v| v.as_i64())
     {
         block.set_priority(Some(
-            holon_api::Priority::from_int(priority as i32)
+            holon_api::Priority::from_rank(priority as i32)
                 .unwrap_or_else(|e| panic!("stored priority {priority} is invalid: {e}")),
         ));
     }

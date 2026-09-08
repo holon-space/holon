@@ -50,6 +50,11 @@ struct Building {
     body: Vec<String>,
     props: BTreeMap<String, String>,
     id: Option<String>,
+    /// Every place this headline named a priority — the `[#A]` cookie and each
+    /// drawer spelling — as `(carrier, priority)`. Collected rather than
+    /// overwritten so disagreement between ANY two is caught, which is the rule
+    /// `holon_org_format::parser` applies.
+    priority_carriers: Vec<(String, Priority)>,
 }
 
 pub fn parse_org(input: &str) -> Result<Forest> {
@@ -59,10 +64,9 @@ pub fn parse_org(input: &str) -> Result<Forest> {
     for line in input.lines() {
         if let Some((level, rest)) = headline_prefix(line) {
             in_drawer = false;
-            let (state, priority, title, tags) = parse_headline_rest(rest);
+            let (state, priority, title, tags) = parse_headline_rest(rest)?;
             let mut block = ToonBlock::text(BlockId::new("PENDING").unwrap(), title);
             block.state = state;
-            block.priority = priority;
             block.tags = tags;
             flat.push(Building {
                 level,
@@ -70,6 +74,10 @@ pub fn parse_org(input: &str) -> Result<Forest> {
                 body: Vec::new(),
                 props: BTreeMap::new(),
                 id: None,
+                priority_carriers: priority
+                    .map(|p| (format!("the cookie `[#{}]`", p.letter()), p))
+                    .into_iter()
+                    .collect(),
             });
             continue;
         }
@@ -87,6 +95,19 @@ pub fn parse_org(input: &str) -> Result<Forest> {
                     let owner = cur.id.clone().unwrap_or_else(|| cur.block.title.clone());
                     if k.eq_ignore_ascii_case("ID") {
                         cur.id = Some(v);
+                    } else if k.eq_ignore_ascii_case(PRIORITY) {
+                        // `:priority: A` is the DRAWER spelling of the cookie,
+                        // case-insensitive as org drawer keys are. It resolves
+                        // into the typed field here; leaving it in `props`
+                        // would make this reader answer "no priority" for the
+                        // spelling the vault actually uses.
+                        let p = single_letter(&v)
+                            .and_then(Priority::from_letter)
+                            .ok_or_else(|| ToonError::BadOrgPriority {
+                                headline: cur.block.title.clone(),
+                                cookie: v.clone(),
+                            })?;
+                        cur.priority_carriers.push((format!("`:{k}: {v}`"), p));
                     } else if is_dependency_key(&k) {
                         cur.block.requires = edge_targets(&v, &k, &owner)?;
                     } else if k.eq_ignore_ascii_case(CONTRIBUTES_TO) {
@@ -116,6 +137,7 @@ pub fn parse_org(input: &str) -> Result<Forest> {
         // the measurement fixture (prefixed `no-id-`); not a silent default.
         let id = b.id.take().unwrap_or_else(|| format!("no-id-{}", i));
         b.block.id = BlockId::new(id).expect("synthetic/real ids are whitespace-free");
+        b.block.priority = reconcile_priority(&b.priority_carriers, &b.block.title)?;
         b.block.properties = b.props;
         // Trim trailing blank body lines; empty body -> None.
         while b.body.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
@@ -132,6 +154,39 @@ pub fn parse_org(input: &str) -> Result<Forest> {
     Ok(build_forest(finalized))
 }
 
+/// The drawer spelling of the priority cookie. Case-insensitive, like every
+/// org drawer key.
+const PRIORITY: &str = "priority";
+
+/// `Some(c)` when `s` is exactly one character, so a multi-character drawer
+/// value is refused rather than read from its first byte.
+fn single_letter(s: &str) -> Option<char> {
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Some(c),
+        _ => None,
+    }
+}
+
+/// Every carrier must name the same priority. Two that disagree is an authoring
+/// mistake with no correct answer, so it refuses the parse rather than letting
+/// scan order decide what the file means.
+fn reconcile_priority(carriers: &[(String, Priority)], headline: &str) -> Result<Option<Priority>> {
+    let Some((first_name, first)) = carriers.first() else {
+        return Ok(None);
+    };
+    for (name, p) in &carriers[1..] {
+        if p != first {
+            return Err(ToonError::DisagreeingOrgPriority {
+                headline: headline.to_string(),
+                first: first_name.clone(),
+                second: name.clone(),
+            });
+        }
+    }
+    Ok(Some(*first))
+}
+
 /// Number of leading `*` followed by a space, plus the remainder.
 fn headline_prefix(line: &str) -> Option<(u16, &str)> {
     let stars = line.chars().take_while(|&c| c == '*').count();
@@ -143,7 +198,9 @@ fn headline_prefix(line: &str) -> Option<(u16, &str)> {
     Some((stars as u16, rest))
 }
 
-fn parse_headline_rest(rest: &str) -> (Option<TaskState>, Option<Priority>, String, Vec<String>) {
+type HeadlineRest = (Option<TaskState>, Option<Priority>, String, Vec<String>);
+
+fn parse_headline_rest(rest: &str) -> Result<HeadlineRest> {
     let mut s = rest.trim_end();
 
     // State keyword.
@@ -158,13 +215,25 @@ fn parse_headline_rest(rest: &str) -> (Option<TaskState>, Option<Priority>, Stri
         }
     }
 
-    // Priority [#A].
+    // Priority [#A]. A one-character cookie that is not a letter has no
+    // priority at all and is refused loudly — the verdict
+    // `holon_org_format::parser` reaches, so the two readers cannot disagree
+    // about what a file means. Scanning to the closing bracket rather than
+    // indexing byte 1 is what lets a multi-byte `[#Ä]` reach that refusal
+    // instead of passing silently as title text.
     let mut priority = None;
     if let Some(after) = s.strip_prefix("[#") {
-        if after.len() >= 2 && after.as_bytes()[1] == b']' {
-            if let Some(p) = Priority::from_letter(after.as_bytes()[0] as char) {
-                priority = Some(p);
-                s = after[2..].trim_start();
+        if let Some(close) = after.find(']') {
+            let mut inner = after[..close].chars();
+            if let (Some(c), None) = (inner.next(), inner.next()) {
+                priority =
+                    Some(
+                        Priority::from_letter(c).ok_or_else(|| ToonError::BadOrgPriority {
+                            headline: rest.to_string(),
+                            cookie: c.to_string(),
+                        })?,
+                    );
+                s = after[close + 1..].trim_start();
             }
         }
     }
@@ -182,7 +251,7 @@ fn parse_headline_rest(rest: &str) -> (Option<TaskState>, Option<Priority>, Stri
         }
     }
 
-    (state, priority, s.to_string(), tags)
+    Ok((state, priority, s.to_string(), tags))
 }
 
 fn is_tag_token(tok: &str) -> bool {
@@ -381,6 +450,34 @@ mod tests {
         let forest = parse_org(input).expect("fixture parses");
         assert_eq!(forest.roots.len(), 1, "fixture must hold one headline");
         forest.roots[0].block.clone()
+    }
+
+    /// This reader carried its own A/B/C-only priority and simply left `[#D]`
+    /// sitting in the title — two org readers in one tree disagreeing about
+    /// what a file means. Org's range is configurable, so every letter is a
+    /// priority here exactly as it is in `holon_org_format::parser`.
+    #[test]
+    fn a_priority_letter_beyond_the_default_range_is_a_priority_here_too() {
+        let block = only_block("* TODO [#D] Ship it\n");
+        assert_eq!(
+            block.priority,
+            Priority::from_letter('D'),
+            "`[#D]` is a letter priority, not title text"
+        );
+        assert_eq!(block.title, "Ship it", "the cookie must leave the title");
+    }
+
+    /// A cookie that is not a letter has no priority at all. It is refused
+    /// loudly — the org parser's verdict, never a silent drop.
+    #[test]
+    fn a_non_letter_priority_cookie_is_refused_loudly() {
+        let err = parse_org("* TODO [#1] Ship it\n")
+            .err()
+            .expect("a non-letter priority cookie must refuse the parse");
+        assert!(
+            matches!(err, ToonError::BadOrgPriority { .. }),
+            "expected a priority refusal, got {err:?}"
+        );
     }
 
     fn ids(ids: &[BlockId]) -> Vec<&str> {

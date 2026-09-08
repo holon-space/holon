@@ -41,6 +41,12 @@ pub mod org_props {
     /// wrote them, recorded at parse and replayed by the renderer. Underscore
     /// prefix keeps it out of the drawer it describes.
     pub const DRAWER_ORDER: &str = "_drawer_order";
+    /// Set when the `:PROPERTIES:` drawer is the SOLE carrier of the block's
+    /// priority — the author wrote `:priority: A` and no `[#A]` cookie. The
+    /// cookie is the default carrier, so only this exceptional case needs
+    /// recording; without it write-back would invent a cookie the file never
+    /// had. Underscore prefix keeps it out of the drawer.
+    pub const PRIORITY_DRAWER_ONLY: &str = "_priority_drawer_only";
     /// A doc-root's FILE-LEVEL `:PROPERTIES:` drawer (org 9.0+, org-roam's
     /// identity carrier) as a JSON object in the order the author wrote it,
     /// `ID` included. Present only on a doc-root whose file had one, and its
@@ -600,7 +606,7 @@ pub fn render_document_header(doc_block: &Block) -> String {
 /// - level: Headline level (number of stars)
 /// - sequence: Ordering within file
 /// - task_state: TODO keyword
-/// - priority: A=3, B=2, C=1
+/// - priority: the rank A=1, B=2, C=3 (ascending sort = by importance)
 /// - tags: Comma-separated tag list
 /// - scheduled/deadline: Planning timestamps
 /// - source_blocks: Embedded source blocks
@@ -639,6 +645,10 @@ pub trait OrgBlockExt {
 
     /// Set the priority
     fn set_priority(&mut self, priority: Option<Priority>);
+
+    /// The `:PROPERTIES:` drawer keys in the order the author wrote them, as
+    /// recorded by the parser. Empty for blocks that never came from a file.
+    fn authored_drawer_order(&self) -> Vec<String>;
 
     /// Get the tags
     fn tags(&self) -> Tags;
@@ -770,7 +780,7 @@ impl OrgBlockExt for Block {
     fn priority(&self) -> Option<Priority> {
         self.get_property(org_props::PRIORITY)
             .and_then(|v| v.as_i64())
-            .and_then(|i| Priority::from_int(i as i32).ok()) // ALLOW(ok):
+            .and_then(|i| Priority::from_rank(i as i32).ok()) // ALLOW(ok):
         // boundary parse
     }
 
@@ -778,13 +788,29 @@ impl OrgBlockExt for Block {
         if let Some(p) = priority {
             self.set_property(
                 org_props::PRIORITY,
-                holon_api::Value::Integer(p.to_int() as i64),
+                holon_api::Value::Integer(p.rank() as i64),
             );
         } else {
             let mut props = self.properties_map();
             props.remove(org_props::PRIORITY);
             self.set_properties_map(props);
         }
+    }
+
+    fn authored_drawer_order(&self) -> Vec<String> {
+        let Some(json) = self
+            .get_property(org_props::DRAWER_ORDER)
+            .and_then(|v| v.as_string().map(|s| s.to_string()))
+        else {
+            return Vec::new();
+        };
+        serde_json::from_str(&json).unwrap_or_else(|e| {
+            panic!(
+                "malformed {} {json:?}: {e} — we wrote it, so a parse failure means the \
+                 drawer-order carrier was corrupted in transit",
+                org_props::DRAWER_ORDER
+            )
+        })
     }
 
     fn tags(&self) -> Tags {
@@ -913,6 +939,21 @@ impl OrgBlockExt for Block {
                 if let Some(s) = v.as_string() {
                     result.entry(k.clone()).or_insert_with(|| s.to_string());
                 }
+            }
+        }
+
+        // A priority the author spelled in the DRAWER is reconstructed from the
+        // typed field under the key they used — `priority` is an INTERNAL_KEY,
+        // so the flat loop above can never emit it, and without this the
+        // authored line would simply vanish on write-back. Presence in the
+        // authored order is what says the drawer carried it at all.
+        if let Some(priority) = self.priority() {
+            let authored_key = self
+                .authored_drawer_order()
+                .into_iter()
+                .find(|k| k.eq_ignore_ascii_case(org_props::PRIORITY));
+            if let Some(key) = authored_key {
+                result.insert(key, priority.letter().to_string());
             }
         }
 
@@ -1344,9 +1385,15 @@ pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -
         result.push(' ');
     }
 
-    // Priority
-    if let Some(priority) = block.priority() {
-        result.push_str(&format!("[#{}] ", priority.to_letter()));
+    // Priority. The drawer-only carrier suppresses the cookie so a file that
+    // spelled its priority in the drawer does not grow one on write-back.
+    if block
+        .get_property(org_props::PRIORITY_DRAWER_ONLY)
+        .is_none()
+    {
+        if let Some(priority) = block.priority() {
+            result.push_str(&format!("[#{}] ", priority.letter()));
+        }
     }
 
     // Title
@@ -1805,12 +1852,12 @@ mod tests {
             Block::new_text(EntityUri::block("id1"), EntityUri::block("parent1"), "Test");
         block.set_level(2);
         block.set_task_state(Some(TaskState::from_keyword("TODO")));
-        block.set_priority(Some(Priority::Medium));
+        block.set_priority(Some(Priority::B));
         block.set_tags(Tags::from_csv("work,urgent"));
 
         assert_eq!(block.level(), 2);
         assert_eq!(block.task_state(), Some(TaskState::from_keyword("TODO")));
-        assert_eq!(block.priority(), Some(Priority::Medium));
+        assert_eq!(block.priority(), Some(Priority::B));
         assert_eq!(block.tags(), Tags::from_csv("work,urgent"));
     }
 
@@ -1839,7 +1886,7 @@ mod tests {
         );
         block.set_level(2);
         block.set_task_state(Some(TaskState::from_keyword("TODO")));
-        block.set_priority(Some(Priority::High));
+        block.set_priority(Some(Priority::A));
         block.set_tags(Tags::from_csv("work,urgent"));
 
         let org = block.to_org();

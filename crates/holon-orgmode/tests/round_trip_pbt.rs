@@ -763,9 +763,9 @@ fn block_mutation_strategy() -> impl Strategy<Value = BlockMutation> {
         ])
         .prop_map(BlockMutation::SetTaskState),
         prop::option::of(prop_oneof![
-            Just(Priority::Low),
-            Just(Priority::Medium),
-            Just(Priority::High),
+            Just(Priority::C),
+            Just(Priority::B),
+            Just(Priority::A),
         ])
         .prop_map(BlockMutation::SetPriority),
         prop::collection::vec(valid_tag(), 0..=3)
@@ -1331,8 +1331,7 @@ fn apply_equivalent_block_mutation(
             let section = &sections[*section_idx];
             if let Some(id) = &section.id {
                 if let Some(block) = blocks.iter_mut().find(|b| b.id.id() == id) {
-                    let priority =
-                        Priority::from_letter(&letter.to_string()).expect("valid priority letter");
+                    let priority = Priority::from_letter(*letter).expect("valid priority letter");
                     block.set_priority(Some(priority));
                 }
             }

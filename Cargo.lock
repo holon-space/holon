@@ -6084,6 +6084,8 @@ dependencies = [
 name = "holon-toon"
 version = "0.1.0"
 dependencies = [
+ "holon-api",
+ "holon-org-format",
  "proptest 1.11.0",
  "serde_json",
  "thiserror 2.0.19",
