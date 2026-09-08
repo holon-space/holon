@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/_sw_integ/frontends",
+  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/docs-gate/frontends",
   "root": {
     "name": ".",
     "path": ".",
@@ -281,6 +281,12 @@
               },
               {
                 "name": "build-release-apk.sh"
+              },
+              {
+                "name": "check-natives.sh"
+              },
+              {
+                "name": "lib-release-so.sh"
               }
             ]
           },
@@ -486,6 +492,9 @@
                         "name": "switch_track.rs"
                       },
                       {
+                        "name": "table.rs"
+                      },
+                      {
                         "name": "table_row.rs"
                       },
                       {
@@ -584,6 +593,9 @@
                 "name": "share_ui.rs"
               },
               {
+                "name": "soft_keyboard.rs"
+              },
+              {
                 "name": "state.rs"
               },
               {
@@ -678,13 +690,37 @@
                 "name": "accordion_bounded_pbt.rs"
               },
               {
+                "name": "accordion_hides_when_empty_windowed.rs"
+              },
+              {
                 "name": "accordion_layout_spike.rs"
+              },
+              {
+                "name": "accordion_real_mount_windowed.rs"
+              },
+              {
+                "name": "accordion_sizes_to_content_windowed.rs"
+              },
+              {
+                "name": "action_bar_windowed.rs"
+              },
+              {
+                "name": "android_soft_return_contract.rs"
               },
               {
                 "name": "arrow_nav_windowed.rs"
               },
               {
                 "name": "arrow_nav_windowed_pbt.rs"
+              },
+              {
+                "name": "block_focus_keeps_outline_windowed.rs"
+              },
+              {
+                "name": "breadcrumb_resolves_from_view_root_windowed.rs"
+              },
+              {
+                "name": "chrome_one_row_windowed.rs"
               },
               {
                 "name": "cmd_enter_chord_dispatch.rs"
@@ -694,6 +730,9 @@
               },
               {
                 "name": "degraded_signal_bus_container.rs"
+              },
+              {
+                "name": "editor_ime_commit_sequence.rs"
               },
               {
                 "name": "editor_ime_deferred_replay.rs"
@@ -723,6 +762,9 @@
                 "name": "gpui_gherkin_replay.rs"
               },
               {
+                "name": "gpui_journals_logseq_look.rs"
+              },
+              {
                 "name": "gpui_journals_viewport.rs"
               },
               {
@@ -738,7 +780,16 @@
                 "name": "gpui_windowed_minimize.rs"
               },
               {
+                "name": "inert_integration_disclosure_windowed.rs"
+              },
+              {
                 "name": "input_box_windowed.rs"
+              },
+              {
+                "name": "integrations_row_narrow_window_windowed.rs"
+              },
+              {
+                "name": "integrations_sidebar_rows_windowed.rs"
               },
               {
                 "name": "layout_editor.rs"
@@ -780,6 +831,9 @@
                 "name": "mcp_scroll_wheel_eager_panel.rs"
               },
               {
+                "name": "mcp_write_repaints_windowed.rs"
+              },
+              {
                 "name": "nested_band_height_spike.rs"
               },
               {
@@ -789,6 +843,18 @@
                 "name": "nested_page_real_engine.rs"
               },
               {
+                "name": "overlay_sidebar_dismisses_windowed.rs"
+              },
+              {
+                "name": "pairing_conflict_badge_windowed.rs"
+              },
+              {
+                "name": "pairing_deferred_reimport_windowed.rs"
+              },
+              {
+                "name": "pairing_toast_fits_the_window_windowed.rs"
+              },
+              {
                 "name": "panel_scroll_spike.rs"
               },
               {
@@ -796,6 +862,9 @@
               },
               {
                 "name": "popup_row_click_windowed.rs"
+              },
+              {
+                "name": "quick_open_returns_focus_windowed.rs"
               },
               {
                 "name": "reactive_vm_realwindow_test.rs"
@@ -813,6 +882,15 @@
                 "name": "settings_integrations_ops_windowed.rs"
               },
               {
+                "name": "settings_integrations_row_op_alignment_windowed.rs"
+              },
+              {
+                "name": "settings_integrations_setfield_popup_windowed.rs"
+              },
+              {
+                "name": "settings_integrations_table_windowed.rs"
+              },
+              {
                 "name": "sidebar_disclosure_affordance.rs"
               },
               {
@@ -820,6 +898,9 @@
               },
               {
                 "name": "slash_command_text_hidden_windowed.rs"
+              },
+              {
+                "name": "soft_keyboard_survives_spurious_blur.rs"
               },
               {
                 "name": "state_toggle_switch_windowed.rs"
@@ -832,6 +913,9 @@
               },
               {
                 "name": "structural_chord_stale_flush_windowed.rs"
+              },
+              {
+                "name": "tab_strip_resolves_at_boot_windowed.rs"
               },
               {
                 "name": "task_keyword_blur_windowed.rs"
@@ -959,6 +1043,10 @@
                 "name": "turso_browser_shim.rs"
               }
             ]
+          },
+          {
+            "name": "test",
+            "path": "holon-worker/test"
           },
           {
             "name": "web",

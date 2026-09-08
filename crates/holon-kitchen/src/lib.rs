@@ -1,3 +1,11 @@
+//! @c4 component
+//! @c4 layer Adapters
+//! Pattern: Anti-Corruption Layer
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-profiles "entity profile resolution" "Rust"
+//! @c4 uses holon-rows "typed row JSON Lines" "Rust"
+//!
 //! Kitchen domain: recipes and the shopping list, and (later) pantry and
 //! nutrition.
 //!

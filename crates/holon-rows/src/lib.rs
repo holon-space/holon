@@ -1,3 +1,9 @@
+//! @c4 component
+//! @c4 layer Core
+//! Pattern: Data Transfer Object
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//!
 //! JSON Lines of typed rows — the neutral contract between whatever produced
 //! rows (a format plugin, a remote system's response) and the one sink that
 //! writes them ([`holon_core::file_format::TypedRowSink`]).

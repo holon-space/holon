@@ -1,3 +1,10 @@
+//! @c4 component
+//! @c4 layer Engine
+//! Pattern: Projection
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-pattern "guard AST & parser" "Rust"
+//! @c4 uses holon-rules "holon_rule YAML front-end" "Rust"
+//!
 //! The derived Petri-net projection (ADR 0032 §2): rule blocks and operation
 //! descriptors compiled into one read-only net, plus the conflict and cycle
 //! analyses that run over it.

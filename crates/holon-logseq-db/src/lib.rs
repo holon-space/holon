@@ -1,3 +1,9 @@
+//! @c4 component
+//! @c4 layer Adapters
+//! Pattern: Anti-Corruption Layer
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//!
 //! Reading a LogSeq DB-version graph into Holon, and pushing edits back.
 //!
 //! A LogSeq DB graph is a standard SQLite file whose `kvs` table holds a

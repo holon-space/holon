@@ -527,7 +527,7 @@ into hooks with `scripts/install-git-hooks.sh` (bypass a run with `--no-verify`)
 |------|---------|------|-----------|
 | 1 | `just precommit` | every commit | justfile pipefail guard · defensive-code ratchet · `just gate-compile` · `check-frontend-wasm` · out-of-workspace worker |
 | 2 | `just prepush` | every push | `just gate-arch` · `just check-frontend-wasm` · the full keystone (`PROPTEST_CASES=16`, incl. persisted regression seeds) |
-| L | `just landing-gate` | before reporting a lane done, and before weaving | fmt · `gate-compile` · `check-frontend-wasm` · `gate-arch` · `keystone-smoke` · `loro-suite` · `hand-authored` |
+| L | `just landing-gate` | before reporting a lane done, and before weaving | fmt · `gate-compile` · `check-frontend-wasm` · `gate-arch` · `arch-validate` · `featuremap.py check` · `analyze-arch` (archlint) · `keystone-smoke` · `loro-suite` · `hand-authored` |
 | L | `cargo nextest run --no-fail-fast -p holon -p holon-app` | per land, in parallel with `landing-gate` (D43.a form) | the `holon` and `holon-app` integration suites, classified against the known reds (D64.a) |
 | L | `cargo nextest run -p holon-integration-tests --features holon-integration-tests/pbt --test two_instance_composed_pbt --no-fail-fast` | per weave | the two-instance sharing slice — the only thing that runs the sharing transport end to end |
 

@@ -1,3 +1,10 @@
+//! @c4 component
+//! @c4 layer Adapters
+//! Pattern: Plugin Host
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-rows "typed row JSON Lines" "Rust"
+//!
 //! The generic wasm plugin host: a vault file format served by a `.wasm`
 //! guest and a yaml sidecar instead of by a Rust crate.
 //!

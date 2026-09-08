@@ -84,7 +84,14 @@ setup:
 archidoc_baseline := "docs/Architecture/baseline"
 
 # Compile crate + frontend architecture IR into _context/ (gitignored).
+# `archidoc ir compile` MERGES into an existing current.json rather than
+# replacing it, so a stale one from an earlier tree kills the run outright
+# ("conflicting C4 levels: existing 'unknown' vs new 'component'"). The output
+# is a pure function of the tree, so discard it first and always compile fresh.
 arch-compile:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -f _context/crates/current.json _context/frontends/current.json
     archidoc ir compile "{{justfile_directory()}}/crates"    --output-dir _context/crates
     archidoc ir compile "{{justfile_directory()}}/frontends" --output-dir _context/frontends
 
@@ -1185,29 +1192,36 @@ prepush:
 landing-gate:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== landing [1/12]: fmt =="
+    mkdir -p target/gate-logs
+    echo "== landing [1/15]: fmt =="
     cargo fmt --all -- --check
-    echo "== landing [2/12]: typecheck incl. every test target =="
+    echo "== landing [2/15]: typecheck incl. every test target =="
     just gate-compile
-    echo "== landing [3/12]: browser-target typecheck =="
+    echo "== landing [3/15]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== landing [4/12]: out-of-workspace browser frontend =="
+    echo "== landing [4/15]: out-of-workspace browser frontend =="
     just check-dioxus-web-wasm
-    echo "== landing [5/12]: out-of-workspace wasi worker =="
+    echo "== landing [5/15]: out-of-workspace wasi worker =="
     just check-worker-wasm
-    echo "== landing [6/12]: architecture rules =="
+    echo "== landing [6/15]: architecture rules =="
     just gate-arch
-    echo "== landing [7/12]: keystone smoke =="
+    echo "== landing [7/15]: @c4 structure matches the committed baseline =="
+    just arch-validate 2>&1 | tee target/gate-logs/landing-arch-validate.log
+    echo "== landing [8/15]: feature map matches the tree =="
+    /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
+    echo "== landing [9/15]: architecture lints (archlint) =="
+    just analyze-arch 2>&1 | tee target/gate-logs/landing-analyze-arch.log
+    echo "== landing [10/15]: keystone smoke =="
     just keystone-smoke
-    echo "== landing [8/12]: loro consolidator suite =="
+    echo "== landing [11/15]: loro consolidator suite =="
     just loro-suite
-    echo "== landing [9/12]: hand-authored regressions =="
+    echo "== landing [12/15]: hand-authored regressions =="
     just hand-authored
-    echo "== landing [10/12]: latency SLO (D50.a) =="
+    echo "== landing [13/15]: latency SLO (D50.a) =="
     just latency-slo-gate
-    echo "== landing [11/12]: guest wasm artifacts match their source =="
+    echo "== landing [14/15]: guest wasm artifacts match their source =="
     just guests-verify
-    echo "== landing [12/12]: target-gc (D85.c, this lane's own target/ only) =="
+    echo "== landing [15/15]: target-gc (D85.c, this lane's own target/ only) =="
     just target-gc || echo "target-gc: non-fatal (busy or nothing to reclaim), see above"
     echo "== landing gate PASS =="
 

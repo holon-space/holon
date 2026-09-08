@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 73 transitions; the repo declares 75 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 74 transitions; the repo declares 75 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -245,6 +245,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `Nothing` — no-op interleaving for schedule diversity
 - `PressKey` — raw key chord -> bubble_input resolution
 - `ReceiverCreateBlock` — a peer-authored block under an owner-authored parent, and its arrival on the owner after a reverse round.
+- `Search` — the hit set equals the reference model's literal substring match over block content and page titles, folded by Unicode simple case folding, with pattern metacharacters matching themselves and an empty query returning nothing.
 - `StartApp` — application startup + seeded sidebar watch
 
 ### Invariant ids
