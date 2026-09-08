@@ -212,14 +212,23 @@ impl Module for LoroModule {
                 let sink_reader: Arc<dyn holon_loro::SinkReader> =
                     Arc::new(holon::storage::TursoSinkReader::new(db_handle));
                 let doc_store_arc = Arc::new(RwLock::new((*doc_store).clone()));
-                Shared::new(
-                    holon_loro::loro_sync_controller::LoroProjection::from_storage(
-                        doc_store_arc,
-                        command_bus,
-                        sink_reader,
-                        &config.storage_dir,
-                    ),
-                )
+                let projection = holon_loro::loro_sync_controller::LoroProjection::from_storage(
+                    doc_store_arc,
+                    command_bus,
+                    sink_reader,
+                    &config.storage_dir,
+                );
+                // The incremental input leg must exist before the org initial
+                // scan starts flushing this projection: the scan resolves it as
+                // `dyn DownstreamProjection` and drives one flush per file,
+                // while the controller that used to register the subscriptions
+                // is gated until the scan finishes. Registering there left every
+                // scan flush on the full-document walk.
+                projection
+                    .install_doc_subscriptions()
+                    .await
+                    .expect("[LoroModule] install Loro doc subscriptions for the projection");
+                Shared::new(projection)
             },
         ));
 

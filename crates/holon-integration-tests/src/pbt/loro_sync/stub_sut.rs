@@ -123,9 +123,11 @@ impl StubSut {
     }
 
     async fn stop_controller(&mut self) {
-        // Dropping the handle dispatches its owned Subscription, which
-        // cancels the `subscribe_root` callback. The background task is
-        // detached but becomes idle once no more events or wakes arrive.
+        // Dropping the handle stops the run loop's owner. The `subscribe_root`
+        // callbacks are NOT cancelled — they belong to the `LoroProjection` and
+        // live as long as it does — so facts keep queuing; nothing drains them
+        // until a controller is started again. The background task is detached
+        // but becomes idle once no more events or wakes arrive.
         self.controller_handle = None;
     }
 

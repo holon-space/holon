@@ -83,9 +83,17 @@ pub mod projection_stats {
     static SNAPSHOT_MS: AtomicU64 = AtomicU64::new(0);
     static APPLY_MS: AtomicU64 = AtomicU64::new(0);
     static SINGLE_OP_PASSES: AtomicU64 = AtomicU64::new(0);
+    static FULL_PASSES: AtomicU64 = AtomicU64::new(0);
 
-    /// One projection pass that emitted `ops` op(s).
-    pub fn record(ops: usize, snapshot_ms: u128, apply_ms: u64) {
+    /// One projection pass that emitted `ops` op(s) — including a pass that
+    /// emitted none, which still walked. `full` distinguishes the
+    /// full-document reseed walk from the O(changed) incremental fast path —
+    /// the ratio, not the wall time, is what says whether a boot is paying its
+    /// quadratic. Counted here so a test can read it without a log parse.
+    pub fn record(ops: usize, snapshot_ms: u128, apply_ms: u64, full: bool) {
+        if full {
+            FULL_PASSES.fetch_add(1, Ordering::Relaxed);
+        }
         PASSES.fetch_add(1, Ordering::Relaxed);
         OPS.fetch_add(ops as u64, Ordering::Relaxed);
         SNAPSHOT_MS.fetch_add(snapshot_ms as u64, Ordering::Relaxed);
@@ -102,6 +110,9 @@ pub mod projection_stats {
         pub passes: u64,
         pub ops: u64,
         pub single_op_passes: u64,
+        /// Passes that took the full-document reseed walk. A cold boot needs
+        /// ONE; one per ingested file is the quadratic.
+        pub full_passes: u64,
         pub snapshot_ms: u64,
         pub apply_ms: u64,
     }
@@ -111,6 +122,7 @@ pub mod projection_stats {
             passes: PASSES.load(Ordering::Relaxed),
             ops: OPS.load(Ordering::Relaxed),
             single_op_passes: SINGLE_OP_PASSES.load(Ordering::Relaxed),
+            full_passes: FULL_PASSES.load(Ordering::Relaxed),
             snapshot_ms: SNAPSHOT_MS.load(Ordering::Relaxed),
             apply_ms: APPLY_MS.load(Ordering::Relaxed),
         }
@@ -204,9 +216,12 @@ const INCREMENTAL_BATCH_MAX: usize = 512;
 /// `orphan`, `oversized`) and the recovery path (`sink_fail`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FullReason {
-    /// Not seeded/armed at entry: cold-boot seed or unarmed bootstrap
-    /// reconcile.
+    /// Not seeded at entry: the cold-boot seed walk.
     ColdBoot,
+    /// Seeded but not yet armed, and the batch carried a DELETE. The unarmed
+    /// delete gate lives on the full walk, so the batch is routed there rather
+    /// than have the fast path grow a second copy of it.
+    UnarmedDelete,
     /// Seeded+armed, but the drained queue was empty while the oplog frontier
     /// moved (pre-subscription boot window, filtered Checkout, or reseed race).
     EmptyPendingMovedFrontier,
@@ -229,6 +244,7 @@ impl FullReason {
     fn as_str(self) -> &'static str {
         match self {
             FullReason::ColdBoot => "coldboot",
+            FullReason::UnarmedDelete => "unarmed_delete",
             FullReason::EmptyPendingMovedFrontier => "empty_pending_moved_frontier",
             FullReason::Unsettled => "unsettled",
             FullReason::Orphan => "orphan",
@@ -336,13 +352,10 @@ pub struct LoroSyncController {
 }
 
 /// Lifetime handle returned by `start()`. Dropping it cancels the background
-/// task and the Loro subscription. Tests inspect the controller state through
+/// task. The doc subscriptions belong to the projection, which outlives this
+/// handle. Tests inspect the controller state through
 /// the accessors on the handle.
 pub struct LoroSyncControllerHandle {
-    /// Kept alive so the Loro callback keeps firing.
-    _subscription: loro::Subscription,
-    /// The same, for the device-local layout doc.
-    _layout_subscription: loro::Subscription,
     /// Kept alive so the loop keeps running. The inner task takes ownership
     /// of the controller; dropping the JoinHandle does not cancel the task,
     /// so we rely on `wake.notify_one()` being the only input signal — when
@@ -398,11 +411,12 @@ impl LoroSyncController {
         degraded: Arc<crate::degraded_signal_bus::DegradedSignalBus>,
     ) -> Self {
         let last_synced = projection.last_synced();
+        let wake = projection.wake_handle();
         Self {
             doc_store,
             projection,
             last_synced,
-            wake: Arc::new(Notify::new()),
+            wake,
             error_count: Arc::new(AtomicUsize::new(0)),
             degraded,
         }
@@ -448,61 +462,12 @@ impl LoroSyncController {
         block_live: Arc<holon_api::live_data::LiveData<Block>>,
         gate: &holon_core::SyncGate,
     ) -> Result<LoroSyncControllerHandle> {
-        // (1) Loro subscription — synchronous, before spawn.
-        let wake_for_callback = self.wake.clone();
-        // Lock-exempt raw handle: used only to REGISTER the subscription below,
-        // never to read doc state. The callback runs on the committing thread
-        // while that thread holds the doc write guard, so it must stay a pure
-        // function of the event — it extracts facts from the event's own diff
-        // and queues them. Touching the doc from it would re-enter the guard.
-        let (doc_arc, layout_doc_arc) = {
-            let store = self.doc_store.read().await;
-            let collab = store
-                .get_doc(DocScope::Global)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to get global doc: {}", e))?;
-            let layout = store
-                .get_doc(DocScope::Layout)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to get layout doc: {}", e))?;
-            // ALLOW(loro_doc_escape): subscription registration; the handle
-            // never reads doc state.
-            (collab.doc(), layout.doc())
-        };
-        // Event-driven incremental input: extract each commit's dirty facts on
-        // the committing thread (a pure function of the event — no `doc` access,
-        // no checkout) and append them to the projection's shared queue. The run
-        // loop drains it. This replaces re-deriving the delta via
-        // `doc.diff(last, current)`, which checked the shared live doc out.
-        let pending_for_callback = self.projection.pending();
-        let subscription = {
-            let doc = &*doc_arc;
-            doc.subscribe_root(Arc::new(move |event| {
-                let mut facts = crate::loro_backend::extract_pending_changes(&event);
-                if !facts.is_empty() {
-                    pending_for_callback.lock().unwrap().append(&mut facts);
-                }
-                wake_for_callback.notify_one();
-            }))
-        };
-        // The same input leg for the device-local layout doc, into its own
-        // queue: the projection reads each fact's nodes out of the doc it came
-        // from, so the two must not be interleaved.
-        let layout_pending_for_callback = self.projection.layout_pending();
-        let wake_for_layout_callback = self.wake.clone();
-        let layout_subscription = {
-            let doc = &*layout_doc_arc;
-            doc.subscribe_root(Arc::new(move |event| {
-                let mut facts = crate::loro_backend::extract_pending_changes(&event);
-                if !facts.is_empty() {
-                    layout_pending_for_callback
-                        .lock()
-                        .unwrap()
-                        .append(&mut facts);
-                }
-                wake_for_layout_callback.notify_one();
-            }))
-        };
+        // (1) Loro subscriptions — installed on the PROJECTION, which the org
+        // initial scan already drives before this controller is resolved. This
+        // call is the no-op case for every production boot; it stays so a test
+        // that starts a controller over a bare projection still gets its input
+        // leg.
+        self.projection.install_doc_subscriptions().await?;
 
         // (3) Synthetic initial wake so the loop picks up startup drift.
         self.wake.notify_one();
@@ -533,8 +498,6 @@ impl LoroSyncController {
         });
 
         Ok(LoroSyncControllerHandle {
-            _subscription: subscription,
-            _layout_subscription: layout_subscription,
             _task: task,
             _block_live: block_live,
             last_synced,
@@ -710,6 +673,14 @@ pub struct LoroProjection {
     /// Taken (cleared) by that next full walk. The orphan reseed falls through
     /// in the SAME pass and sets its reason locally, so it does not use this.
     pending_reseed_reason: StdMutex<Option<FullReason>>,
+    /// Fired by the doc subscriptions on every commit; the controller's run
+    /// loop waits on it. Lives here because the subscriptions are installed
+    /// with the projection, before the controller exists.
+    wake: Arc<Notify>,
+    /// Keeps the `subscribe_root` registrations alive. Dropping a
+    /// `loro::Subscription` unsubscribes, so these are held for the
+    /// projection's lifetime.
+    subscriptions: StdMutex<Vec<loro::Subscription>>,
 }
 
 impl LoroProjection {
@@ -742,7 +713,61 @@ impl LoroProjection {
             layout_last_synced: StdMutex::new(Frontiers::default()),
             pending: Arc::new(StdMutex::new(Vec::new())),
             pending_reseed_reason: StdMutex::new(None),
+            wake: Arc::new(Notify::new()),
+            subscriptions: StdMutex::new(Vec::new()),
         }
+    }
+
+    /// The wake signal the doc subscriptions fire and the controller's run loop
+    /// waits on. Owned here rather than by the controller because the
+    /// subscriptions are installed with the projection, which outlives and
+    /// precedes it.
+    pub fn wake_handle(&self) -> Arc<Notify> {
+        self.wake.clone()
+    }
+
+    /// Register the `subscribe_root` callbacks that feed the incremental fast
+    /// path, on both projected docs. Idempotent.
+    ///
+    /// This MUST happen before the org initial scan: the scan drives the
+    /// projection directly through `DownstreamProjection::flush`, once per
+    /// file, and a flush that finds no pending facts cannot take the O(changed)
+    /// path and walks the whole accumulated tree instead. Registering it with
+    /// the controller (which is gated until the scan finishes) left every one
+    /// of the scan's flushes on the full walk — quadratic in vault size, and
+    /// the reason `boot_ingest_total` reached 110 s on a 120-file vault.
+    ///
+    /// The callbacks run on the committing thread while it holds the doc write
+    /// guard, so each is a pure function of its event: it extracts facts from
+    /// the event's own diff and queues them. Touching the doc from one would
+    /// re-enter the guard.
+    pub async fn install_doc_subscriptions(&self) -> Result<()> {
+        // Resolved BEFORE the lock: holding a `std` guard across an await makes
+        // the enclosing future `!Send`, and the DI provider that calls this is
+        // spawned.
+        let (collab, layout) = self.docs().await?;
+        let mut installed = self.subscriptions.lock().unwrap();
+        if !installed.is_empty() {
+            return Ok(());
+        }
+        // ALLOW(loro_doc_escape): subscription registration only; the handles
+        // never read doc state.
+        let (collab_doc, layout_doc) = (collab.doc(), layout.doc());
+
+        for (doc, queue) in [
+            (&*collab_doc, self.pending.clone()),
+            (&*layout_doc, self.layout_pending.clone()),
+        ] {
+            let wake = self.wake.clone();
+            installed.push(doc.subscribe_root(Arc::new(move |event| {
+                let mut facts = crate::loro_backend::extract_pending_changes(&event);
+                if !facts.is_empty() {
+                    queue.lock().unwrap().append(&mut facts);
+                }
+                wake.notify_one();
+            })));
+        }
+        Ok(())
     }
 
     /// The shared pending-facts queue. `LoroSyncController::start` hands this
@@ -859,7 +884,7 @@ impl LoroProjection {
         // Not seeded/armed → cold boot, unless a prior pass recorded `sink_fail`
         // when its incremental write failed and returned (taken here). `None`
         // reaching the full walk is a logic error (fails loud via `.expect`).
-        let mut full_reason: Option<FullReason> = if seeded && armed {
+        let mut full_reason: Option<FullReason> = if seeded {
             None
         } else {
             Some(
@@ -872,7 +897,7 @@ impl LoroProjection {
         };
 
         // ── Incremental fast path — O(changed), event-driven, no checkout ─────
-        // The SOLE steady-state projector. Once seeded+armed, drain the
+        // The SOLE steady-state projector. Once seeded, drain the
         // pending-facts queue (populated by the `subscribe_root` callback via
         // `extract_pending_changes`) and read only the named nodes from the
         // CURRENT tree. This replaces `doc.diff(last, current)`, which checked the
@@ -880,7 +905,16 @@ impl LoroProjection {
         // concurrent readers — the root cause of the flaky `SplitBlock … Block not
         // found`. The full walk below survives ONLY for cold-boot seeding,
         // reseed-on-unsettled, and the unarmed/oversized-batch bootstrap.
-        if seeded && armed {
+        // `armed` is deliberately NOT part of this gate. It gates DELETES (see
+        // the field's docs: "Creates/updates are never gated"), and the org
+        // initial scan runs entirely unarmed — `arm()` is called only after it
+        // finishes (crates/holon-orgmode/src/di.rs). Gating the fast path on it
+        // too made every one of the scan's per-file commits walk the whole
+        // accumulated tree, which is quadratic in vault size: measured 121 full
+        // `coldboot` walks for a 120-file boot, 110 s of `boot_ingest_total`.
+        // An unarmed batch that carries a delete still routes to the full walk
+        // below, so the delete gate itself is untouched.
+        if seeded {
             // Drain the WHOLE queue first — never early-return while facts are
             // pending (that would silently drop a committed change).
             let pending: Vec<crate::loro_backend::PendingChange> =
@@ -927,7 +961,7 @@ impl LoroProjection {
                     // write succeeds — a failed apply (e.g. an FK reject that rolls
                     // the whole batch back) must not advance the base, which would
                     // silently drop the change; instead we reseed and retry.
-                    let (ops, staging, before_len, after_len, has_orphan) = {
+                    let (ops, staging, before_len, after_len, has_orphan, has_unarmed_delete) = {
                         let live = self.live.lock().unwrap();
                         let before_len = live.len();
                         let mut ops: Vec<(String, holon_api::StorageEntity)> = Vec::new();
@@ -1005,9 +1039,23 @@ impl LoroProjection {
                                 }
                             })
                         };
-                        (ops, staging, before_len, after_len, has_orphan)
+                        (
+                            ops,
+                            staging,
+                            before_len,
+                            after_len,
+                            has_orphan,
+                            !armed && deletes > 0,
+                        )
                     };
-                    if has_orphan {
+                    if has_unarmed_delete {
+                        // The unarmed delete gate lives on the full walk, which
+                        // withholds deletes and reports the pass complete
+                        // anyway (`withheld_deletes_are_owed`). Routing here
+                        // keeps ONE implementation of that rule instead of a
+                        // second copy in the fast path.
+                        full_reason = Some(FullReason::UnarmedDelete);
+                    } else if has_orphan {
                         // Do not commit an FK-doomed partial batch. Force the base
                         // to be rebuilt from SINK TRUTH (`read_sql_snapshot`), not
                         // the in-memory `live` diff base: `live` may itself have
@@ -1296,7 +1344,20 @@ impl LoroProjection {
         // keystone deferred-FK RED. Ordering every batch parent-before-child here
         // makes both paths safe regardless of how the op vec was built.
         let ops = fk_order_creates_parent_first(ops);
-        if !ops.is_empty() {
+        if ops.is_empty() {
+            // A pass that emits nothing still WALKED — a full walk read both
+            // documents and the sink before finding no difference (or after
+            // withholding every op it found). `full_passes` counts walks, not
+            // ops, so skipping the record here would hide the exact regime the
+            // cold-boot walk budget exists to catch: the unarmed-delete route
+            // and a settled reseed both land on zero ops routinely.
+            projection_stats::record(
+                0,
+                snapshot_ms,
+                t0.elapsed().as_millis() as u64,
+                mode == "full",
+            );
+        } else {
             let op_summary: Vec<String> = ops
                 .iter()
                 .map(|(op_name, params)| {
@@ -1336,7 +1397,12 @@ impl LoroProjection {
             // cadence measurement that silently omits failing passes would
             // understate exactly the boots that are going wrong.
             let applied = self.consolidator.apply(ops, provenance).await;
-            projection_stats::record(op_count, snapshot_ms, t0.elapsed().as_millis() as u64);
+            projection_stats::record(
+                op_count,
+                snapshot_ms,
+                t0.elapsed().as_millis() as u64,
+                mode == "full",
+            );
             applied?;
             tracing::debug!(
                 "[LoroProjection] applied {} op(s) in {}ms (snapshot {}ms, after={} before={}) \

@@ -58,8 +58,29 @@ magnitude smaller.
 
 ## Remedy
 
-OPEN. Two separable pieces: find whether projection is O(vault) rather than
-O(delta) on this path, and give the funnel a standing large-vault latency
-measurement so the number is tracked rather than rediscovered. The second is
-the cheaper and more durable of the two, and should come first — without it the
-next measurement is another accident.
+OPEN. Both pieces named below were done; the entry stays open because the
+budget is still missed.
+
+The standing measurement exists:
+`crates/holon-integration-tests/tests/vault_scale_interaction_latency.rs` boots
+a synthesized 120-file / 2793-block vault through the real `add_frontend` path
+and reports `navigate` and `set_field` against the 200 ms SLO on every run. It
+takes `HOLON_LATENCY_VAULT_DIR` so a measurement can also be taken against a
+COPY of a real vault without that content entering the repo.
+
+The O(vault)-vs-O(delta) question is answered, and the answer splits:
+
+- At BOOT, projection was O(vault²) — one full-document walk per ingested file,
+  121 of them for a 120-file boot. Fixed:
+  [[2026-09-08-the-boot-scan-projects-every-file-with-a-full-document-walk]].
+- POST-BOOT, the projection was already O(delta) and still is. Measured across
+  a 9x change in vault size (309 → 2793 blocks), `set_field` p50 moved 61 →
+  106 ms — sub-linear, and under the 200 ms budget at 2793 blocks. The 295–335
+  ms figures in the table above are therefore not the projection walking the
+  vault; the residual cost is the SQL sink write (`consolidator.apply`), which
+  after the fix accounts for ~193 ms of a 201 ms projection pass whose Loro
+  snapshot leg is 8 ms.
+
+So the next move is the sink write, not the CRDT walk — and, separately, the
+~300 ms scale-independent navigate floor recorded in
+[[2026-09-03-navigate-latency-is-twenty-seconds-at-real-vault-scale]].

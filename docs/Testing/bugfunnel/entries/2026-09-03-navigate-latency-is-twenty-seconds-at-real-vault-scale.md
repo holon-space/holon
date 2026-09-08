@@ -61,5 +61,41 @@ and the budget invariants never engage against 2257 blocks.
 
 ## Remedy
 
-Open. Re-measure on an idle machine to get defensible numbers, then give the
-latency budget an oracle that runs at vault scale rather than fixture scale.
+OPEN. The oracle now exists —
+`crates/holon-integration-tests/tests/vault_scale_interaction_latency.rs` boots
+a synthesized vault of this shape (120 files / 2793 blocks) headlessly and
+measures both rungs — and the projection defect named above is fixed
+([[2026-09-08-the-boot-scan-projects-every-file-with-a-full-document-walk]]:
+121 full walks per boot became 1, snapshot p50 258 ms → 8 ms). The interaction
+SLO is still missed, so this entry stays open.
+
+What the re-measurement changed about the diagnosis (lane `nav-latency`,
+2026-09-08, headless, on a machine also running three other build lanes):
+
+The 10.7 s / 19.9 s figures came from two samples taken while four builds
+saturated the machine, as that disclosure said, and they do not reproduce. On a
+synthesized vault of this shape, navigate p50 measures 278-464 ms at 309-2793
+blocks, and on a COPY of Martin's own vault (121 files / 2599 blocks) 322.9 ms.
+So the miss is real and consistent — roughly 1.4x to 2.3x the budget — but it is
+hundreds of milliseconds, not twenty seconds.
+
+The growth law could not be pinned down, and saying so is the honest result.
+Six runs of the SAME tree at 2793 blocks produced navigate p50s of 301, 322,
+333, 401, 464 and 1407 ms, with boot times from 42 s to 151 s over the same
+runs. That 4.7x spread on unchanged code is larger than any difference between
+scale rungs, so this machine cannot separate "navigate is O(vault)" from
+"navigate has a fixed floor". A quiet-machine run of
+`vault_scale_interaction_latency` at three rungs would settle it, and is the
+cheapest next step.
+
+What IS settled:
+
+1. The projection is no longer the suspect. Its Loro-walk leg is now 8 ms of a
+   201 ms pass at 2793 blocks; the remaining ~193 ms is the SQL sink write
+   (`consolidator.apply`). That is where the next investigation goes.
+2. `set_field` is not the problem at this scale: p50 60-163 ms across rungs,
+   inside the budget. Only navigate misses it.
+
+Boot remains the other open thread: 9x blocks cost 15.6x time before the fix,
+and although the fix roughly halved it, ~50 s to first usable state on 2600
+blocks is still far from acceptable.

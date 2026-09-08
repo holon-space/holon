@@ -44,6 +44,10 @@ pub(crate) struct MemorySink {
     /// successful AND failed — so a test can prove an apply was ATTEMPTED
     /// on failure and re-ATTEMPTED on the following success.
     apply_calls: AtomicUsize,
+    /// Every `read_blocks` invocation increments this. Only the full reseed
+    /// walk reads the sink (`read_sql_snapshot`), so this is how a test tells
+    /// which of the two projection routes a pass took.
+    read_calls: AtomicUsize,
     /// stable-id → merged param map (the persisted block rows the projection
     /// diffs against via `read_blocks`).
     blocks: StdMutex<HashMap<String, StorageEntity>>,
@@ -54,6 +58,7 @@ impl MemorySink {
         Self {
             fail: AtomicBool::new(false),
             apply_calls: AtomicUsize::new(0),
+            read_calls: AtomicUsize::new(0),
             blocks: StdMutex::new(HashMap::new()),
         }
     }
@@ -66,6 +71,10 @@ impl MemorySink {
         self.apply_calls.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn read_calls(&self) -> usize {
+        self.read_calls.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn row_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.blocks.lock().unwrap().keys().cloned().collect();
         ids.sort();
@@ -76,6 +85,7 @@ impl MemorySink {
 #[async_trait]
 impl SinkReader for MemorySink {
     async fn read_blocks(&self) -> Result<HashMap<String, SnapshotBlock>> {
+        self.read_calls.fetch_add(1, Ordering::SeqCst);
         let blocks = self.blocks.lock().unwrap();
         let mut out = HashMap::with_capacity(blocks.len());
         for (id, params) in blocks.iter() {
@@ -183,7 +193,19 @@ pub(crate) async fn insert_root_block(
     stable_id: &str,
     content: &str,
 ) -> Result<TreeID> {
-    let collab = doc_store.read().await.get_doc(DocScope::Global).await?;
+    insert_root_block_in(doc_store, DocScope::Global, stable_id, content).await
+}
+
+/// [`insert_root_block`] against a chosen document. The two projected docs
+/// partition the block set, so a test that needs a LAYOUT block names the
+/// scope.
+pub(crate) async fn insert_root_block_in(
+    doc_store: &Arc<RwLock<LoroDocumentStore>>,
+    scope: DocScope,
+    stable_id: &str,
+    content: &str,
+) -> Result<TreeID> {
+    let collab = doc_store.read().await.get_doc(scope).await?;
     let doc = collab.doc();
     let tree = doc.get_tree(TREE_NAME);
     let node = tree.create(None)?; // root-level; fi auto-assigned by schema
@@ -194,4 +216,15 @@ pub(crate) async fn insert_root_block(
     text.insert(0, content)?;
     doc.commit();
     Ok(node)
+}
+
+/// Remove a node from the named document and commit — the delete the
+/// projection must turn into a sink DELETE, or withhold.
+pub(crate) async fn delete_block_in(
+    doc_store: &Arc<RwLock<LoroDocumentStore>>,
+    scope: DocScope,
+    node: TreeID,
+) -> Result<()> {
+    let collab = doc_store.read().await.get_doc(scope).await?;
+    collab.with_write(|txn| Ok(txn.get_tree(TREE_NAME).delete(node)?))
 }
