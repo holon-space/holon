@@ -107,16 +107,16 @@ fn settle(
     bounds.flush();
 }
 
-fn open_stack<'a>(
-    cx: &'a mut TestAppContext,
+fn open_stack(
+    cx: &mut TestAppContext,
     vm: Arc<ReactiveViewModel>,
     viewport: Size<gpui::Pixels>,
 ) -> (
     Entity<ReactiveFixtureView>,
-    &'a mut VisualTestContext,
+    &mut VisualTestContext,
     BoundsRegistry,
 ) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let bounds = BoundsRegistry::new();
     let (entity, vcx) = cx.add_window_view({
         let (v, b) = (vm.clone(), bounds.clone());

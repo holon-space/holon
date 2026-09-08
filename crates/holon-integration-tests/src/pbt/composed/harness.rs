@@ -109,7 +109,7 @@ use crate::pbt::reference_state::Resolved;
 /// control flow.
 fn action_label<T: std::fmt::Debug>(t: &T) -> String {
     let dbg = format!("{t:?}");
-    dbg.split(|c: char| c == ' ' || c == '(' || c == '{' || c == '\n')
+    dbg.split([' ', '(', '{', '\n'])
         .next()
         .unwrap_or("<transition>")
         .to_string()
@@ -314,8 +314,8 @@ pub trait ComposedSlice {
 
     /// Settle after a transition's write before reading the projections.
     /// Default: a flat `sleep(SETTLE)` (correct for a synchronous store,
-    /// ≈0). A slice whose SUT projects asynchronously (`WideE2E`: Turso CDC
-    /// + Loro + org) overrides this to a convergence wait over the slice's
+    /// ≈0). A slice whose SUT projects asynchronously (`WideE2E`: Turso CDC,
+    /// Loro and org) overrides this to a convergence wait over the slice's
     /// [`Handle`](Self::Handle) — bounded by `SETTLE`, so it returns
     /// fast when quiescent but never over-waits vs the flat sleep.
     async fn settle_after_apply(_: &Self::Handle, _: &CapMap) {
@@ -1410,14 +1410,14 @@ fn dump_matview_vs_base<S: ComposedSlice>(sut: &ComposedSut<S>) {
     let base_parent: BTreeMap<&EntityUri, &EntityUri> =
         base.iter().map(|b| (&b.id, &b.parent_id)).collect();
     for b in &matview {
-        if let Some(bp) = base_parent.get(&b.id) {
-            if *bp != &b.parent_id {
-                eprintln!(
-                    "[HOLON_PBT_DUMP_DB] PARENT-DIVERGE id={} matview_parent={} base_parent={} \
+        if let Some(bp) = base_parent.get(&b.id)
+            && *bp != &b.parent_id
+        {
+            eprintln!(
+                "[HOLON_PBT_DUMP_DB] PARENT-DIVERGE id={} matview_parent={} base_parent={} \
                      (projection mis-maintained the re-parent)",
-                    b.id, b.parent_id, bp
-                );
-            }
+                b.id, b.parent_id, bp
+            );
         }
     }
     for b in &base {

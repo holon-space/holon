@@ -161,7 +161,7 @@ pub fn expectation_for(
             .filter(|(cid, _)| !anchor.advice_suppressed.contains(cid))
             .map(|(cid, n)| (cid.as_str().to_string(), n))
             .collect();
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by_key(|e| std::cmp::Reverse(e.1));
     AdviceExpectation {
         scored,
         k: rule.k.get(),

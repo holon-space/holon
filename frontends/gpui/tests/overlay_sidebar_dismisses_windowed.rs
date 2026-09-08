@@ -26,7 +26,6 @@ use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::geometry::drawer_toggle_id_for;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
-use holon_frontend::user_driver::UserDriver;
 use holon_frontend::view_model::DrawerMode;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;

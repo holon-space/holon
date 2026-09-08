@@ -300,7 +300,7 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
         self.backend
             .update_block(
                 target.as_str(),
-                BlockContent::text(&format!("{}{}", target_content, block.content)),
+                BlockContent::text(format!("{}{}", target_content, block.content)),
             )
             .await
             .unwrap_or_else(|e| panic!("apply_join_block: update target failed: {e}"));

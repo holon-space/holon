@@ -145,6 +145,9 @@ async fn tag_page(handle: &holon::storage::turso::DbHandle, id: &str) {
 /// ```
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "release-only wall-clock measurement; run with --ignored"]
+// The build-mode guard below is deliberately constant: it must skip at RUNTIME,
+// where a `const` block would refuse to compile instead.
+#[allow(clippy::assertions_on_constants)]
 async fn the_derived_home_profile_lookup_fits_the_interaction_budget() {
     // Wall-clock is RELEASE-only here, as it is for the soak measurements: a
     // debug build's timings are several times production's, so publishing them

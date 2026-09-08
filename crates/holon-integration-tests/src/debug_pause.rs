@@ -14,6 +14,7 @@
 //!     propagates (so the MCP server stays alive)
 //!   * forces the embedded MCP server to start on [`MCP_PAUSE_PORT`] (8528)
 //!     regardless of `PBT_MCP_PORT`
+//!
 //!   When unset, both are no-ops.
 //! - `PBT_PAUSE_BEFORE_STEP=N` — sleep before applying transition N (1-based,
 //!   matches the `[pbt_step] Step N/M` log line).

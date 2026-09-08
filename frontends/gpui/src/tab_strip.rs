@@ -73,6 +73,7 @@ pub struct TabEntry {
 
 /// Open-tabs strip state. Its own `Entity` so async resolution can update it
 /// and trigger a re-render (same pattern as `BreadcrumbState`).
+#[derive(Default)]
 pub struct TabStripState {
     /// Open main tabs in stable insertion order (ORDER BY history_id, Q3 —
     /// never `added_ts`, never move-to-top).
@@ -119,22 +120,6 @@ impl TabStripState {
             && self
                 .oldest_write_started
                 .is_some_and(|t| t.elapsed() >= SLOW_WRITE_DISCLOSE_AFTER)
-    }
-}
-
-impl Default for TabStripState {
-    fn default() -> Self {
-        Self {
-            tabs: Vec::new(),
-            active_history_id: None,
-            error: None,
-            generation: 0,
-            list_open: false,
-            writes_in_flight: 0,
-            oldest_write_started: None,
-            needs_recheck: false,
-            reads_issued: 0,
-        }
     }
 }
 
@@ -371,7 +356,7 @@ fn dispatch_tab_op(
             cx.background_executor()
                 .timer(SLOW_WRITE_DISCLOSE_AFTER)
                 .await;
-            let _ = entity.update(cx, |s, cx| {
+            entity.update(cx, |s, cx| {
                 if s.writes_in_flight > 0 {
                     tracing::warn!(
                         op = %op,
@@ -389,7 +374,7 @@ fn dispatch_tab_op(
     let entity = entity.clone();
     cx.spawn(async move |cx| {
         let outcome = settled.await;
-        let _ = entity.update(cx, |s, cx| {
+        entity.update(cx, |s, cx| {
             s.writes_in_flight = s.writes_in_flight.saturating_sub(1);
             if s.writes_in_flight == 0 {
                 s.oldest_write_started = None;

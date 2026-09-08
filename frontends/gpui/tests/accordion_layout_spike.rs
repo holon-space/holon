@@ -160,7 +160,7 @@ fn visible_height(bounds: &BoundsRegistry, entity_id: &str) -> Option<f32> {
 
 #[gpui::test]
 fn cap_holds_with_many_rows(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let bounds = BoundsRegistry::new();
     let (_e, vcx) = cx.add_window_view({
         let bounds = bounds.clone();
@@ -187,7 +187,7 @@ fn cap_holds_with_many_rows(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn shrinks_to_content_with_few_rows(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let bounds = BoundsRegistry::new();
     let (_e, vcx) = cx.add_window_view({
         let bounds = bounds.clone();
@@ -213,7 +213,7 @@ fn shrinks_to_content_with_few_rows(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn wheel_reveals_below_cap_row(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let bounds = BoundsRegistry::new();
     let (_e, vcx) = cx.add_window_view({
         let bounds = bounds.clone();

@@ -40,7 +40,6 @@
 
 use std::collections::HashMap;
 
-use holon_pbt_core::capabilities::EntityUri;
 use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::SutOrgRender;
 use holon_pbt_core::invariant::Invariant;
@@ -118,6 +117,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use holon_pbt_core::capabilities::CapRegion;
+    use holon_pbt_core::capabilities::EntityUri;
 
     use super::*;
 

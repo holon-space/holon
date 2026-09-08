@@ -38,6 +38,9 @@ pub fn memory_wide_structural(
 /// components, one `.register` each — the payoff. Returns the editor `Arc` too,
 /// since the apply phase drives it through `&self` writes (§4.4) while it is
 /// also hosted as the read-only `SutEditorMirrorRead` cap.
+// The harness holds single-threaded SUT parts in `Arc` because the
+// production trait signatures it feeds require `Arc`, not `Rc`.
+#[allow(clippy::arc_with_non_send_sync)]
 pub fn memory_wide_with_editor(backend: MemoryBackend) -> (CapMap, Arc<InMemEditorComponent>) {
     // Share one backend `Arc` between the read/structural cap
     // (`MemoryBackendComponent`) and the editor's commit store, so an editor

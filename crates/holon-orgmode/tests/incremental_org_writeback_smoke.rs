@@ -84,9 +84,6 @@ impl CountingBlockReader {
     fn doc_block_topology_calls(&self) -> usize {
         self.doc_block_topology_calls.load(Ordering::SeqCst)
     }
-    fn point_read_calls(&self) -> usize {
-        self.point_read_calls.load(Ordering::SeqCst)
-    }
 }
 
 #[async_trait]

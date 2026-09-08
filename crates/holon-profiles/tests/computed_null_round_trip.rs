@@ -196,6 +196,9 @@ fn page_row_still_selects_embedded_page_after_a_round_trip() {
     assert_eq!(variant.as_deref(), Some("embedded_page"));
 }
 
+/// One enriched-row shape: its label, the columns it adds, the ones it removes.
+type RowShape = (&'static str, Vec<(&'static str, Value)>, Vec<&'static str>);
+
 /// The class sweep: EVERY shipped block variant condition, over every row shape
 /// the projection produces. The realistic shape that produced the reported
 /// sighting degraded THREE of them (`is_page_row && …` and both
@@ -206,8 +209,7 @@ fn page_row_still_selects_embedded_page_after_a_round_trip() {
 fn no_shipped_block_condition_degrades_on_any_enriched_row_shape() {
     let profile = block_profile();
 
-    // (label, columns to add, columns to remove)
-    let shapes: Vec<(&str, Vec<(&str, Value)>, Vec<&str>)> = vec![
+    let shapes: Vec<RowShape> = vec![
         ("plain", vec![], vec![]),
         (
             "page",

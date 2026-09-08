@@ -110,7 +110,7 @@ fn fold_wal_into_db(path: &std::path::Path) -> Vec<u8> {
         let off = 32 + i * frame;
         u32::from_be_bytes(wal[off + 4..off + 8].try_into().unwrap()) != 0
     };
-    let last_commit = (0..frames).filter(|&i| commit_of(i)).next_back();
+    let last_commit = (0..frames).rfind(|&i| commit_of(i));
     let Some(last_commit) = last_commit else {
         return db;
     };

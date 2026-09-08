@@ -9,6 +9,7 @@
 //!   2. `overlay_windowed_caps` (runtime-exercised) built a CapMap with
 //!      `SutLayout` (68 elems) + `SutBackend` (13 blocks) + the window's
 //!      `SutDriver`/`SutBlockInteract` over a live window.
+//!
 //! ⚠ MUST run with `--test-threads=1`: gpui `TestApp` is not parallel-safe
 //! (thread-local platform state); two windowed tests in one binary SIGABRT if
 //! run concurrently.

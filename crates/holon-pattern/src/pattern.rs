@@ -1692,8 +1692,9 @@ mod tests {
     #[test]
     fn parent_guard_reproduces_the_chokepoint_truth_table() {
         let g = Guard::parse(PAGE_UNDER_NON_PAGE).unwrap();
-        // (child tags, parent) → prohibited?
-        let cases: [(&[&str], Option<&[&str]>, bool); 6] = [
+        /// (child tags, parent tags — `None` for a root) → prohibited?
+        type Case<'a> = (&'a [&'a str], Option<&'a [&'a str]>, bool);
+        let cases: [Case<'_>; 6] = [
             (&["Page"], Some(&[]), true),        // page under non-page
             (&["Page"], Some(&["Page"]), false), // page under page
             (&[], Some(&[]), false),             // non-page under non-page

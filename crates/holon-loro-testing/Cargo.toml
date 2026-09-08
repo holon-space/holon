@@ -6,8 +6,10 @@ publish = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
+# `serde_json` is reached only through the `holon_macros::StepVocabulary`
+# derive expansion, which machete cannot see.
 [package.metadata.cargo-machete]
-ignored = ["workspace-hack"]
+ignored = ["workspace-hack", "serde_json"]
 
 [lib]
 name = "holon_loro_testing"

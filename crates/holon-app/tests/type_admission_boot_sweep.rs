@@ -71,7 +71,9 @@ fn boolean_computed_type(name: &str, home: &str) -> TypeDefinition {
     type_def.fields.push(FieldSchema {
         name: "flag".to_string(),
         sql_type: "BOOLEAN".to_string(),
-        lifetime: FieldLifetime::Computed { spec },
+        lifetime: FieldLifetime::Computed {
+            spec: Box::new(spec),
+        },
         ..Default::default()
     });
     type_def

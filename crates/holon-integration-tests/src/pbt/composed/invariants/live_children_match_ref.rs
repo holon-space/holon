@@ -1,6 +1,7 @@
 //! `inv-live-children-match-ref` — the live children projection (SQL + Loro)
-//! agrees with the reference's block tree. `Needs SutSqlProjection + SutLoroLog
-//! + RefBlockTree`. Selection ANDs the SUT and ref cap sets, so it fires where
+//! agrees with the reference's block tree.
+//! `Needs SutSqlProjection + SutLoroLog + RefBlockTree`.
+//! Selection ANDs the SUT and ref cap sets, so it fires where
 //! both the SQL and Loro read caps are present — the combined SQL+Loro /
 //! frontend slices.
 

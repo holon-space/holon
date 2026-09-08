@@ -27,6 +27,9 @@ use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantId;
 use holon_pbt_core::invariant::InvariantResult;
 
+/// The diverging view's name with its IVM rows and its recompute rows.
+type Divergence<'a> = (&'a str, &'a [Vec<String>], &'a [Vec<String>]);
+
 type Snapshot = Vec<(String, Vec<Vec<String>>, Vec<Vec<String>>)>;
 
 pub struct InvMatviewRecomputeMatches;
@@ -91,7 +94,7 @@ where
 
 impl InvMatviewRecomputeMatches {
     /// First view whose IVM-maintained rows differ from its recompute, if any.
-    fn first_divergence(snapshot: &Snapshot) -> Option<(&str, &[Vec<String>], &[Vec<String>])> {
+    fn first_divergence(snapshot: &Snapshot) -> Option<Divergence<'_>> {
         snapshot.iter().find_map(|(name, matview, recompute)| {
             (matview != recompute).then_some((
                 name.as_str(),

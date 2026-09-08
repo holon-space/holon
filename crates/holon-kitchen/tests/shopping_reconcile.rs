@@ -169,7 +169,7 @@ fn a_peer_side_check_reaches_a_row_we_already_hold() {
     let held = local("Bread", "B", None);
     let outcome = ShoppingReconciler::default()
         .reconcile(
-            &[held.clone()],
+            std::slice::from_ref(&held),
             &snapshot_with_picked(&[], &[("Bread", "B")]),
         )
         .expect("reconcile");
@@ -243,7 +243,7 @@ fn an_item_in_both_collections_counts_as_checked() {
 fn a_key_the_peer_dropped_is_deleted() {
     let held = local("Bread", "B", None);
     let outcome = ShoppingReconciler::default()
-        .reconcile(&[held.clone()], &snapshot(&[]))
+        .reconcile(std::slice::from_ref(&held), &snapshot(&[]))
         .expect("reconcile");
 
     assert_eq!(outcome.local, vec![LocalIntent::Delete { id: held.id }]);
@@ -357,7 +357,10 @@ fn the_fetched_count_wins_and_the_watermark_moves() {
     let held = local("Milk", "R", Some(1.0));
 
     let outcome = ShoppingReconciler::default()
-        .reconcile(&[held.clone()], &snapshot(&[("Milk", "R", Some(4.0))]))
+        .reconcile(
+            std::slice::from_ref(&held),
+            &snapshot(&[("Milk", "R", Some(4.0))]),
+        )
         .expect("reconcile");
 
     assert_eq!(
@@ -380,7 +383,10 @@ fn an_unchanged_item_only_moves_its_watermark() {
     let held = local("Milk", "R", Some(1.0));
 
     let outcome = ShoppingReconciler::default()
-        .reconcile(&[held.clone()], &snapshot(&[("Milk", "R", Some(1.0))]))
+        .reconcile(
+            std::slice::from_ref(&held),
+            &snapshot(&[("Milk", "R", Some(1.0))]),
+        )
         .expect("reconcile");
 
     assert_eq!(

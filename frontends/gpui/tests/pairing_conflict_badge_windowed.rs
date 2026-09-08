@@ -247,7 +247,6 @@ fn paint(page_id: &str, file: &str, org: &str, window_title: &'static str) -> Pa
         .into_iter()
         .filter(|(_, info)| info.widget_type.as_ref() == "badge")
         .filter(|(_, info)| info.displayed_text.is_some())
-        .map(|(id, info)| (id, info))
         .collect();
     let all: Vec<(String, ElementInfo)> = bounds.all_elements().into_iter().collect();
 

@@ -145,13 +145,13 @@ fn ternary(statement: &str) -> (String, String, String) {
 
     let mut colon = None;
     let mut arm_end = chars.len();
-    for i in question + 1..chars.len() {
+    for (i, c) in chars.iter().enumerate().skip(question + 1) {
         let d = depth_at(i);
         if d < level {
             arm_end = i;
             break;
         }
-        if chars[i] == ':' && d == level && colon.is_none() {
+        if *c == ':' && d == level && colon.is_none() {
             colon = Some(i);
         }
     }

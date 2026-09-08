@@ -399,9 +399,9 @@ pub async fn seed_default_org_assets(
 
 /// The container's registered file formats.
 ///
-/// A container that binds a [`FormatRegistry`] (the app wiring does, with org
-/// + cook) gets it verbatim. Otherwise the vault is single-format: a container
-/// may still override the ONE adapter, and failing that it is org.
+/// A container that binds a [`FormatRegistry`] (the app wiring does, with
+/// org + cook) gets it verbatim. Otherwise the vault is single-format: a
+/// container may still override the ONE adapter, and failing that it is org.
 async fn resolve_format_registry(resolver: &Injector) -> Arc<holon_core::FormatRegistry> {
     if let Some(registry) = resolver
         .optional_resolve_async::<holon_core::FormatRegistry>()
@@ -1064,6 +1064,9 @@ pub fn route_remove(home: &DocHome, key: &str) -> Option<OrgRerender> {
 /// run the initial scan, signal readiness, arm the watcher, and run the main
 /// `select!` loop. Shared by the Turso factory and the no-Turso bootstrap —
 /// neither path knows which storage backend the controller's adapters use.
+// Eight arguments because this is the bootstrap seam both factories call with
+// independently-built collaborators; grouping them is a wiring refactor.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_file_sync_controller(
     mut controller: FileSyncController,
     root_directory: PathBuf,

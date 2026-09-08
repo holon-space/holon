@@ -95,10 +95,9 @@ impl<'a> BlockDomain<'a> {
             return self.render_root_slot(block_id).await;
         }
 
-        let block_info = match self.load_block_with_query_source(block_id).await {
-            Ok(info) => Some(info),
-            Err(_) => None,
-        };
+        // ALLOW(ok): a block with no query source of its own is the ordinary
+        // case, handled as a bare leaf below — not a failure to report.
+        let block_info = self.load_block_with_query_source(block_id).await.ok();
         let Some(block_info) = block_info else {
             // A block with no query source of its own renders as a bare leaf,
             // except when a region has navigated to it: then it stands for its

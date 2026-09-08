@@ -118,8 +118,10 @@ impl Default for DynamicEntity {
 pub enum FieldLifetime {
     #[default]
     Persistent,
+    /// Boxed: `ComputedSpec` is ~224 bytes and the other three variants carry
+    /// no data, so inlining it would cost every `FieldLifetime` that size.
     Computed {
-        spec: ComputedSpec,
+        spec: Box<ComputedSpec>,
     },
     Transient,
     Historical,
@@ -834,7 +836,7 @@ impl TypeDefinition {
         self.fields
             .iter()
             .filter_map(|f| match &f.lifetime {
-                FieldLifetime::Computed { spec } => Some((f.name.as_str(), spec)),
+                FieldLifetime::Computed { spec } => Some((f.name.as_str(), &**spec)),
                 _ => None,
             })
             .collect()
@@ -1227,7 +1229,9 @@ mod mutation_gap_tests {
             vec![
                 FieldSchema::new("id", "TEXT").primary_key().indexed(),
                 FieldSchema::new("title", "TEXT").indexed(),
-                FieldSchema::new("score", "INTEGER").lifetime(FieldLifetime::Computed { spec }),
+                FieldSchema::new("score", "INTEGER").lifetime(FieldLifetime::Computed {
+                    spec: Box::new(spec),
+                }),
                 FieldSchema::new("cache", "TEXT")
                     .indexed()
                     .lifetime(FieldLifetime::Transient),

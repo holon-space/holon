@@ -471,7 +471,7 @@ async fn the_compose_id_is_not_sent_to_the_remote() {
     let key = provider.pending_writes()[0].intent_key.clone();
     let approved = provider.approve(&key).await.expect("approve fires");
 
-    let Some(Value::Object(echo)) = approved.response.as_ref().map(Value::clone) else {
+    let Some(Value::Object(echo)) = approved.response.clone() else {
         panic!("send response must be an object: {:?}", approved.response)
     };
     let args = echo

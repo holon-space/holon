@@ -1595,7 +1595,7 @@ mod tests {
     fn catalog_from(relations: &[(&str, &[&str])]) -> Arc<SchemaCatalog> {
         let catalog = SchemaCatalog::new();
         for (relation, columns) in relations {
-            catalog.set_columns(*relation, columns.iter().map(|c| c.to_string()));
+            catalog.set_columns(relation, columns.iter().map(|c| c.to_string()));
         }
         Arc::new(catalog)
     }

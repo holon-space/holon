@@ -561,7 +561,8 @@ async fn a_parsed_documents_title_and_properties_reach_the_document_block() {
         "Boil water\nStir\n",
     );
     let path = v.file.clone();
-    v.controller
+    let _ = v
+        .controller
         .on_file_changed(&path)
         .await
         .expect("the fixture file ingests");
@@ -602,9 +603,10 @@ async fn a_parsed_documents_title_and_properties_reach_the_document_block() {
 async fn re_ingest_keeps_the_documents_metadata_and_mints_no_second_page() {
     let mut v = vault(FixtureAdapter::parsing(WriteTier::ReadOnly), "Boil water\n");
     let path = v.file.clone();
-    v.controller.on_file_changed(&path).await.unwrap();
+    let _ = v.controller.on_file_changed(&path).await.unwrap();
     std::fs::write(&path, "Boil water\nStir\n").unwrap();
-    v.controller
+    let _ = v
+        .controller
         .on_file_changed(&path)
         .await
         .expect("the edited fixture file re-ingests");
@@ -644,11 +646,12 @@ async fn re_ingest_keeps_the_documents_metadata_and_mints_no_second_page() {
 async fn re_ingest_removes_metadata_the_file_no_longer_declares() {
     let mut v = vault(FixtureAdapter::parsing(WriteTier::ReadOnly), "Boil water\n");
     let path = v.file.clone();
-    v.controller.on_file_changed(&path).await.unwrap();
+    let _ = v.controller.on_file_changed(&path).await.unwrap();
 
     v.props.lock().unwrap().retain(|(k, _)| k != "source");
     std::fs::write(&path, "Boil water\nStir\n").unwrap();
-    v.controller
+    let _ = v
+        .controller
         .on_file_changed(&path)
         .await
         .expect("the edited fixture file re-ingests");
@@ -720,7 +723,7 @@ async fn a_refused_parse_leaves_no_document_block() {
 async fn a_read_only_document_is_not_a_re_render_candidate() {
     let mut v = vault(FixtureAdapter::parsing(WriteTier::ReadOnly), "Boil water\n");
     let path = v.file.clone();
-    v.controller.on_file_changed(&path).await.unwrap();
+    let _ = v.controller.on_file_changed(&path).await.unwrap();
 
     v.controller
         .re_render_all_tracked(&HashSet::new())
@@ -746,7 +749,7 @@ async fn a_writable_document_is_still_a_re_render_candidate() {
         "Boil water\n",
     );
     let path = v.file.clone();
-    v.controller.on_file_changed(&path).await.unwrap();
+    let _ = v.controller.on_file_changed(&path).await.unwrap();
 
     v.controller
         .re_render_all_tracked(&HashSet::new())
@@ -796,7 +799,7 @@ async fn a_reset_re_arms_the_read_only_skip_disclosure() {
 
     let mut v = vault(FixtureAdapter::parsing(WriteTier::ReadOnly), "Boil water\n");
     let path = v.file.clone();
-    v.controller.on_file_changed(&path).await.unwrap();
+    let _ = v.controller.on_file_changed(&path).await.unwrap();
 
     v.controller
         .re_render_all_tracked(&HashSet::new())
@@ -1038,7 +1041,7 @@ async fn a_refusal_names_its_format_and_is_retracted_when_the_file_ingests() {
     .with_downstream_projection(Arc::new(DirectProjection))
     .with_writeback_disclosure(log.clone());
 
-    controller
+    let _ = controller
         .on_file_changed(&file)
         .await
         .expect_err("the refusing adapter refuses");
@@ -1080,7 +1083,7 @@ async fn a_refusal_names_its_format_and_is_retracted_when_the_file_ingests() {
     .with_downstream_projection(Arc::new(DirectProjection))
     .with_writeback_disclosure(log.clone());
 
-    repaired
+    let _ = repaired
         .on_file_changed(&file)
         .await
         .expect("the repaired file ingests");
@@ -1130,11 +1133,11 @@ async fn a_refusal_is_keyed_by_the_file_not_by_its_format() {
     .with_downstream_projection(Arc::new(DirectProjection))
     .with_writeback_disclosure(log.clone());
 
-    controller
+    let _ = controller
         .on_file_changed(&good)
         .await
         .expect("the healthy sibling ingests");
-    controller
+    let _ = controller
         .on_file_changed(&bad)
         .await
         .expect_err("the adapter refuses the bad file");

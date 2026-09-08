@@ -195,36 +195,36 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
         // Classify the query/render source children into layout_blocks so PBT
         // mutation transitions leave them alone and the render tracks its expr,
         // mirroring the index.org layout handling below.
-        if block.content_type == ContentType::Source {
-            if let Some(sl) = block.source_language.as_ref() {
-                if sl.as_query().is_some() {
+        if block.content_type == ContentType::Source
+            && let Some(sl) = block.source_language.as_ref()
+        {
+            if sl.as_query().is_some() {
+                state
+                    .domain
+                    .layout_blocks
+                    .query_source_ids
+                    .insert(block_id.clone());
+                state
+                    .domain
+                    .layout_blocks
+                    .headline_ids
+                    .insert(block.parent_id.clone());
+            } else if matches!(sl, SourceLanguage::Render) {
+                state
+                    .domain
+                    .layout_blocks
+                    .render_source_ids
+                    .insert(block_id.clone());
+                state
+                    .domain
+                    .layout_blocks
+                    .headline_ids
+                    .insert(block.parent_id.clone());
+                if let Ok(expr) = state.harness.interpreter.parse_dsl(&block.content) {
                     state
                         .domain
-                        .layout_blocks
-                        .query_source_ids
-                        .insert(block_id.clone());
-                    state
-                        .domain
-                        .layout_blocks
-                        .headline_ids
-                        .insert(block.parent_id.clone());
-                } else if matches!(sl, SourceLanguage::Render) {
-                    state
-                        .domain
-                        .layout_blocks
-                        .render_source_ids
-                        .insert(block_id.clone());
-                    state
-                        .domain
-                        .layout_blocks
-                        .headline_ids
-                        .insert(block.parent_id.clone());
-                    if let Ok(expr) = state.harness.interpreter.parse_dsl(&block.content) {
-                        state
-                            .domain
-                            .render_expressions
-                            .insert(block_id.clone(), expr);
-                    }
+                        .render_expressions
+                        .insert(block_id.clone(), expr);
                 }
             }
         }

@@ -60,7 +60,7 @@ fn probe(key: &str, value: &str) -> (Verdict, String, bool) {
 
     let expected = format!(":{key}: {value}");
     let lines = drawer_lines(&out1);
-    let verdict = if lines.iter().any(|l| *l == expected) {
+    let verdict = if lines.contains(&expected) {
         Verdict::Survives
     } else if lines.is_empty() {
         Verdict::Dropped

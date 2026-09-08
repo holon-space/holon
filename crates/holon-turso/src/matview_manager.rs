@@ -195,6 +195,7 @@ pub const WATCH_VIEW_PREFIX: &str = "watch_view_";
 ///     `__temp_filter_expr` temp column, so CREATE SILENTLY SUCCEEDED with an
 ///     always-false compiled filter (0 rows) while a fresh recompute returns
 ///     the real set (bugfunnel 2026-08-19-ivm-antijoin-matview-silently-empty).
+///
 /// The silent case is the fail-loud violation. The turso engine fix (validate
 /// every substituted sub-expression through the conversion authority, no
 /// allowlist) makes unsupported shapes refuse LOUDLY in ALL combinations; this
@@ -243,14 +244,13 @@ fn statement_has_subquery_predicate(stmt: &sqlparser::ast::Statement) -> bool {
 
 fn query_has_subquery_predicate(q: &sqlparser::ast::Query) -> bool {
     use sqlparser::ast::SetExpr;
-    if let Some(with) = &q.with {
-        if with
+    if let Some(with) = &q.with
+        && with
             .cte_tables
             .iter()
             .any(|c| query_has_subquery_predicate(&c.query))
-        {
-            return true;
-        }
+    {
+        return true;
     }
     fn setexpr(body: &SetExpr) -> bool {
         match body {
@@ -579,9 +579,12 @@ struct SharedViewState {
 /// (every test binary). A process-wide cache would let a view created in one
 /// database suppress the `CREATE` in another, leaving a query reading a view
 /// that does not exist.
-static SHARED_VIEW_STATE: std::sync::Mutex<
-    Option<HashMap<usize, (std::sync::Weak<AtomicU64>, SharedViewState)>>,
-> = std::sync::Mutex::new(None);
+/// Per-database entry: the liveness token that decides when the state is
+/// dropped, plus the state itself.
+type SharedViewEntry = (std::sync::Weak<AtomicU64>, SharedViewState);
+
+static SHARED_VIEW_STATE: std::sync::Mutex<Option<HashMap<usize, SharedViewEntry>>> =
+    std::sync::Mutex::new(None);
 
 /// The state every `MatviewManager` on `db_handle`'s database must share,
 /// creating it on first use with `seed_mutex`.
@@ -1204,6 +1207,56 @@ impl MatviewManager {
     }
 }
 
+/// Refuse to build `view_name` over any base table whose stored DDL declares
+/// `ON CONFLICT REPLACE`.
+///
+/// The base set is taken by token-matching `select_sql` against the table names
+/// in `sqlite_master`, which over-approximates toward REFUSING — the safe
+/// direction for a guard whose job is keeping the pairing out of the tree.
+async fn reject_on_conflict_replace_bases(
+    db_handle: &DbHandle,
+    view_name: &str,
+    select_sql: &str,
+) -> Result<()> {
+    let rows = db_handle
+        .query(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table'",
+            HashMap::new(),
+        )
+        .await?;
+    let referenced = holon_turso_select_tokens(select_sql);
+    for row in &rows {
+        let (Some(Value::String(name)), Some(Value::String(ddl))) =
+            (row.get("name"), row.get("sql"))
+        else {
+            continue;
+        };
+        if !referenced.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        if crate::turso::declares_on_conflict_replace(ddl) {
+            return Err(anyhow::anyhow!(
+                "refusing to create materialized view `{view_name}` over base table `{name}`: \
+                 that table declares ON CONFLICT REPLACE, so every plain INSERT into it carries \
+                 REPLACE semantics — which on our Turso fork silently drops rows from every view \
+                 over it (see crates/holon-turso/tests/replace_into_matview_base.rs; engine fix: \
+                 fork bookmark `ivm-replace-double-old-row-capture`, PR #8463). Redeclare the \
+                 table without the clause, or do not build a view on it."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Identifier-ish tokens of a view's defining SELECT, for base-table matching.
+fn holon_turso_select_tokens(select_sql: &str) -> Vec<String> {
+    select_sql
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1530,54 +1583,4 @@ mod tests {
 
         handle.shutdown().await.expect("shutdown boot-2");
     }
-}
-
-/// Refuse to build `view_name` over any base table whose stored DDL declares
-/// `ON CONFLICT REPLACE`.
-///
-/// The base set is taken by token-matching `select_sql` against the table names
-/// in `sqlite_master`, which over-approximates toward REFUSING — the safe
-/// direction for a guard whose job is keeping the pairing out of the tree.
-async fn reject_on_conflict_replace_bases(
-    db_handle: &DbHandle,
-    view_name: &str,
-    select_sql: &str,
-) -> Result<()> {
-    let rows = db_handle
-        .query(
-            "SELECT name, sql FROM sqlite_master WHERE type = 'table'",
-            HashMap::new(),
-        )
-        .await?;
-    let referenced = holon_turso_select_tokens(select_sql);
-    for row in &rows {
-        let (Some(Value::String(name)), Some(Value::String(ddl))) =
-            (row.get("name"), row.get("sql"))
-        else {
-            continue;
-        };
-        if !referenced.iter().any(|t| t.eq_ignore_ascii_case(name)) {
-            continue;
-        }
-        if crate::turso::declares_on_conflict_replace(ddl) {
-            return Err(anyhow::anyhow!(
-                "refusing to create materialized view `{view_name}` over base table `{name}`: \
-                 that table declares ON CONFLICT REPLACE, so every plain INSERT into it carries \
-                 REPLACE semantics — which on our Turso fork silently drops rows from every view \
-                 over it (see crates/holon-turso/tests/replace_into_matview_base.rs; engine fix: \
-                 fork bookmark `ivm-replace-double-old-row-capture`, PR #8463). Redeclare the \
-                 table without the clause, or do not build a view on it."
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Identifier-ish tokens of a view's defining SELECT, for base-table matching.
-fn holon_turso_select_tokens(select_sql: &str) -> Vec<String> {
-    select_sql
-        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .filter(|t| !t.is_empty())
-        .map(|t| t.to_string())
-        .collect()
 }

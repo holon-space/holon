@@ -860,10 +860,7 @@ mod teeth {
         );
         // Non-vacuity: the sidebar page-tag oracle actually ran over the seeded page.
         assert!(
-            report
-                .ran_ids()
-                .iter()
-                .any(|id| *id == "inv-sidebar-page-tag-preserved"),
+            report.ran_ids().contains(&"inv-sidebar-page-tag-preserved"),
             "inv-sidebar-page-tag-preserved must select + run over the seeded page (ran: {:?})",
             report.ran_ids(),
         );
@@ -954,7 +951,7 @@ mod teeth {
             "inv-companion-has-no-child-page-headings",
         ] {
             assert!(
-                report.ran_ids().iter().any(|r| *r == id),
+                report.ran_ids().contains(&id),
                 "{id} must select + run over the seeded subdir journals topology (ran: {:?})",
                 report.ran_ids(),
             );
@@ -1056,8 +1053,7 @@ mod teeth {
         assert!(
             report
                 .ran_ids()
-                .iter()
-                .any(|id| *id == "inv-companion-has-no-child-page-headings"),
+                .contains(&"inv-companion-has-no-child-page-headings"),
             "companion oracle must select + run (ran: {:?})",
             report.ran_ids(),
         );
@@ -3903,9 +3899,7 @@ entities:
         let report_a = run_with_seeded_ref(&registry, &caps, resolved_a).await;
         let ran_a: Vec<_> = report_a.ran_ids().into_iter().collect();
         assert!(
-            ran_a
-                .iter()
-                .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
+            ran_a.contains(&"inv-embedded-page-collapsed-lazy"),
             "Phase A (collapsed): inv-embedded-page-collapsed-lazy must select + run (ran: \
              {ran_a:?})"
         );
@@ -3959,9 +3953,7 @@ entities:
         let report_b = run_with_seeded_ref(&registry, &caps, resolved_b).await;
         let ran_b: Vec<_> = report_b.ran_ids().into_iter().collect();
         assert!(
-            ran_b
-                .iter()
-                .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
+            ran_b.contains(&"inv-embedded-page-collapsed-lazy"),
             "Phase B (expanded): inv-embedded-page-collapsed-lazy must select + run (ran: \
              {ran_b:?})"
         );
@@ -4193,8 +4185,7 @@ entities:
         let report = run_with_seeded_ref(&registry, &caps, resolved).await;
         let ran: Vec<_> = report.ran_ids().into_iter().collect();
         assert!(
-            ran.iter()
-                .any(|id| *id == "inv-embedded-page-collapsed-lazy"),
+            ran.contains(&"inv-embedded-page-collapsed-lazy"),
             "inv-embedded-page-collapsed-lazy must select + run on the journals topology — a \
              SKIP here means the fixture stopped producing a non-seed page under the main focus \
              root, and the rung is vacuous (ran: {ran:?})"
@@ -4342,8 +4333,7 @@ entities:
         let report = run_with_seeded_ref(&registry, &caps, resolved).await;
         let ran: Vec<_> = report.ran_ids().into_iter().collect();
         assert!(
-            ran.iter()
-                .any(|id| *id == "inv-main-panel-rows-match-focus"),
+            ran.contains(&"inv-main-panel-rows-match-focus"),
             "inv-main-panel-rows-match-focus must select + run on the journals topology — a SKIP \
              here means the stray did not reach the SUT block tree and the rung is vacuous (ran: \
              {ran:?})"

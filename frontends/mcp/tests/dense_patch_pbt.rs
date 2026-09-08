@@ -634,7 +634,7 @@ proptest! {
         // (Delete/AddChild/Reorder). Retitle/SetState alone never move.
         let move_causing = edits.iter().filter(|e| matches!(e, Edit::Delete(_) | Edit::AddChild(_) | Edit::Reorder(_))).count();
         prop_assert!(
-            plan.move_count() <= move_causing.max(0) + aliases.len(),
+            plan.move_count() <= move_causing + aliases.len(),
             "unexpected move ops: {} for {} move-causing edits",
             plan.move_count(),
             move_causing

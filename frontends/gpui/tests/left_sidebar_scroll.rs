@@ -194,7 +194,7 @@ fn run_sidebar_wheel(cx: &mut TestAppContext, with_switcher: bool) -> (f32, f32)
 /// root is a `view_mode_switcher`.
 #[gpui::test]
 fn left_sidebar_with_view_mode_switcher_scrolls(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let (before, after) = run_sidebar_wheel(cx, true);
     assert!(
         before <= 0.0,
@@ -216,7 +216,7 @@ fn left_sidebar_with_view_mode_switcher_scrolls(cx: &mut TestAppContext) {
 /// against regressing the plain shape.
 #[gpui::test]
 fn left_sidebar_without_view_mode_switcher_scrolls(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let (before, after) = run_sidebar_wheel(cx, false);
     assert!(
         before <= 0.0,

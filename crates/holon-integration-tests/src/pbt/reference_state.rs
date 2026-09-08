@@ -21,7 +21,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use holon_api::ContentType;
@@ -1758,7 +1757,6 @@ impl ReferenceState {
         after_block_id: Option<&EntityUri>,
     ) {
         use holon_orgmode::models::OrgBlockExt;
-
         self.domain
             .block_state
             .blocks
@@ -2012,8 +2010,6 @@ impl ReferenceState {
         content: &str,
         new_id: EntityUri,
     ) {
-        use holon_orgmode::models::OrgBlockExt;
-
         // Undo-stack correspondence: CreateBlockUnderFocus dispatches a
         // User-origin `block.create`, and the engine records an undo entry for
         // every User-origin reversible op (operation_engine.rs — genuine insert
@@ -2194,6 +2190,9 @@ impl ReferenceState {
     /// deterministic instance ids the caller computed — born-equal with
     /// `plan_instantiation`'s `(template_id, context_key, node.id)`, so no
     /// synthetic→real reconcile.
+    // Arguments are the harness's independently-built collaborators; grouping
+    // them is a harness refactor, not a lint fix.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_instantiate_template(
         &mut self,
         target_parent: &EntityUri,
@@ -2730,12 +2729,10 @@ impl ReferenceState {
                 .map(|b| b.sequence())
                 .max()
                 .unwrap_or(0);
-            let mut next_seq = max_target_child_seq + 1;
-            for child_id in sorted_children {
+            for (next_seq, child_id) in (max_target_child_seq + 1..).zip(sorted_children) {
                 let child = self.domain.block_state.blocks.get_mut(&child_id).unwrap();
                 child.parent_id = target_id.clone();
                 child.set_sequence(next_seq);
-                next_seq += 1;
             }
         }
 
@@ -3378,8 +3375,6 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
 
 #[cfg(test)]
 mod main_panel_visibility_tests {
-    use holon_orgmode::models::OrgBlockExt;
-
     use super::*;
     use crate::pbt::composed::wide_e2e::wide_e2e_ref;
 

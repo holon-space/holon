@@ -257,7 +257,7 @@ fn tracked_wrapper_contributes_no_layout(cx: &mut TestAppContext) {
             let label = format!("w={width} icon={icon_size} content={content:?}");
             let vm = Arc::new(block_row_vm(row_id, &content, icon_size));
 
-            let snap = render_fixture_sized(&mut **cx.borrow_mut(), vm, size(px(width), px(600.0)));
+            let snap = render_fixture_sized(&mut cx.borrow_mut(), vm, size(px(width), px(600.0)));
 
             check_row(&snap, row_id, &label).map_err(TestCaseError::fail)
         })

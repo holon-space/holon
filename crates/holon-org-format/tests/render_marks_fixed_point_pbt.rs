@@ -467,9 +467,9 @@ proptest! {
     }
 }
 
-/// The class, not the instances. Any `(content, marks)` state ANY producer
-/// can mint must be render-safe — see `MarkedContent` for why generating marks
-/// by parsing org text cannot reach most of those states.
+// The class, not the instances. Any `(content, marks)` state ANY producer
+// can mint must be render-safe — see `MarkedContent` for why generating marks
+// by parsing org text cannot reach most of those states.
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 600,

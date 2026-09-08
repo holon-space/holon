@@ -277,7 +277,7 @@ async fn ingest_content(seeded: bool, content: &str) -> Ingested {
         Arc::new(ordering),
         Arc::new(RealFileSystem),
     );
-    controller
+    let _ = controller
         .on_file_changed(&path)
         .await
         .expect("ingest of a drawer-identified file must not error");

@@ -56,7 +56,7 @@ fn source_child(id: &str, parent: &str) -> Block {
     Block::new_source(
         EntityUri::block(id),
         EntityUri::block(parent),
-        &prql(),
+        prql(),
         "from block",
     )
 }

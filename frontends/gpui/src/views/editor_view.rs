@@ -124,6 +124,9 @@ pub struct EditorView {
 }
 
 impl EditorView {
+    // Renders from many independently-owned pieces of view state; grouping them
+    // is a view refactor, not a lint fix.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         _: String,
         content: String,
@@ -272,7 +275,7 @@ impl EditorView {
                     .lock()
                     .unwrap()
                     .set_task_vocabulary(vocabulary);
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     let Some(view) = this.upgrade() else {
                         return;
                     };
@@ -1074,7 +1077,7 @@ fn spawn_focus_binding(
             if this.upgrade().is_none() {
                 break;
             }
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(view) = this.upgrade() else {
                     return;
                 };
@@ -1342,7 +1345,7 @@ impl Render for EditorView {
             }
         };
 
-        let editor_entity = cx.entity();
+        let _editor_entity = cx.entity();
 
         div()
             .w_full()

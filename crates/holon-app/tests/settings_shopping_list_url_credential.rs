@@ -114,7 +114,7 @@ fn the_settings_preference_configures_the_connector_with_no_environment_variable
 #[test]
 fn an_exported_variable_outranks_the_settings_value() {
     let manual = manual_from(&preferences(&pref_url()), |name| {
-        (name == ENV_VAR).then(|| env_url())
+        (name == ENV_VAR).then(env_url)
     });
     assert_eq!(
         resolved_url(&manual),
@@ -134,7 +134,7 @@ fn the_shadowed_settings_field_is_read_only_rather_than_silently_ignored() {
         "with nothing exported the field is the user's to set"
     );
 
-    let shadowed = env_shadowed_keys(&defs, &|name| (name == ENV_VAR).then(|| env_url()));
+    let shadowed = env_shadowed_keys(&defs, &|name| (name == ENV_VAR).then(env_url));
     assert!(
         shadowed.contains(&PrefKey::new(PREF_KEY)),
         "an export outranks the field, so Settings must show it read-only — an editable field \

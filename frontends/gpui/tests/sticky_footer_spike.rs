@@ -215,7 +215,7 @@ impl gpui::Render for M1DecorView {
 
 #[gpui::test]
 fn m1_uniform_list_decoration_pins_at_top(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let bounds = BoundsRegistry::new();
     let handle = UniformListScrollHandle::new();
     let (entity, vcx) = cx.add_window_view({
@@ -425,7 +425,7 @@ fn open_m2(
     ScrollHandle,
     BoundsRegistry,
 ) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let bounds = BoundsRegistry::new();
     let scroll = ScrollHandle::new();
     let (entity, vcx) = cx.add_window_view({

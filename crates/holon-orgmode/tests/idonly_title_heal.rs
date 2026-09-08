@@ -184,7 +184,7 @@ async fn ingest_idonly_file(
         Arc::new(ordering),
         Arc::new(RealFileSystem),
     );
-    controller
+    let _ = controller
         .on_file_changed(&path)
         .await
         .expect("ingest of an ID-only file must not error");

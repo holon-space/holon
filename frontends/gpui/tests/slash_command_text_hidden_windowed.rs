@@ -112,7 +112,7 @@ struct Rig {
 }
 
 fn mount(cx: &mut TestAppContext) -> (Rig, &mut VisualTestContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let services =
         TestServices::with_registry_quiescent(Arc::new(support::BlockTreeRegistry::new()));
     let services_dyn: Arc<dyn BuilderServices> = services;

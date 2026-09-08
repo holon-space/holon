@@ -1005,7 +1005,7 @@ fn render_center_zone(
         .right(shore_w)
         .h_full()
         .bg(c(CENTER_BG))
-        .opacity(if focus { 1.0 } else { 1.0 })
+        .opacity(1.0)
         // Big serif display header, top-left of the center zone.
         .child(
             div()

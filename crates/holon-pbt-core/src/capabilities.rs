@@ -2845,6 +2845,9 @@ pub trait RefLayoutMutate {
     /// `child_marks` are the definition child's marks after `{{var}}`
     /// substitution has shifted them — an instance inherits the definition's
     /// rich text, it is not born plain.
+    // Eight arguments because the caller computes every id and content slice;
+    // grouping them is a capability-trait change across all impls, not a lint fix.
+    #[allow(clippy::too_many_arguments)]
     fn apply_instantiate_template(
         &mut self,
         target_parent: &EntityUri,

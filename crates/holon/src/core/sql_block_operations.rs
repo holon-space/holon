@@ -1124,7 +1124,6 @@ impl CrudOperations<Block> for SqlBlockOperations {
         // here too would mix `gen_key_between` values with Loro-fi values in
         // the same column — the exact keyspace-mixing bug class invariant 10
         // warns about.
-        let fields = fields;
         let position = if !fields.contains_key("sort_key")
             && matches!(self.consolidator(), Consolidator::Store)
             && let Some(parent_id) = fields
@@ -2211,8 +2210,7 @@ mod tests {
         let err = ops
             .create(fields)
             .await
-            .err()
-            .expect("the create must be refused: its id is held under another title");
+            .expect_err("the create must be refused: its id is held under another title");
         assert!(
             err.to_string().contains("block:held"),
             "the refusal must name the contested id, got: {err}"
@@ -2267,8 +2265,7 @@ mod tests {
             .sql_ops
             .create_row(fields, Some(position))
             .await
-            .err()
-            .expect("a typed re-key must not touch a block outside the placed block's parent");
+            .expect_err("a typed re-key must not touch a block outside the placed block's parent");
         let msg = err.to_string();
         assert!(
             msg.contains("block:victim") && msg.contains("sibling"),
@@ -2369,8 +2366,7 @@ mod tests {
             .sql_ops
             .place_row("block:mover", "block:pb", position)
             .await
-            .err()
-            .expect("a placement must not re-key a block outside its target sibling set");
+            .expect_err("a placement must not re-key a block outside its target sibling set");
         assert!(
             err.to_string().contains("block:victim"),
             "the refusal must name the offending target, got: {err}"
@@ -2427,8 +2423,7 @@ mod tests {
                 holon_core::EventOrigin::Org,
             )
             .await
-            .err()
-            .expect("an op naming no parent must not inherit root re-key rights");
+            .expect_err("an op naming no parent must not inherit root re-key rights");
         assert!(
             err.to_string().contains("names no parent"),
             "the refusal must explain that no parent was named, got: {err}"
@@ -2535,8 +2530,9 @@ mod tests {
             .sql_ops
             .create_row(fields, Some(position))
             .await
-            .err()
-            .expect("a re-key naming a non-existent target must be refused, not silently skipped");
+            .expect_err(
+                "a re-key naming a non-existent target must be refused, not silently skipped",
+            );
         assert!(
             err.to_string().contains("not a row in"),
             "the refusal must say the target is not a row, got: {err}"
@@ -2587,8 +2583,7 @@ mod tests {
         let sib = EntityUri::from_raw("block:sib");
         ops.place(&mover, &pb, Some(&sib))
             .await
-            .err()
-            .expect("the placement must be refused: its key write collides");
+            .expect_err("the placement must be refused: its key write collides");
 
         assert_eq!(
             read_parent(&handle, "block:mover").await,

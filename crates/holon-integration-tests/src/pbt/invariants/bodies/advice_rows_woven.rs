@@ -147,15 +147,15 @@ pub fn check_advice_relation(exp: &AdviceExpectation, observed: &[String]) -> Re
         .filter(|(id, _)| !observed.contains(id))
         .map(|(_, n)| *n)
         .max();
-    if let (Some(min_obs), Some(max_drop)) = (min_observed, max_dropped) {
-        if min_obs < max_drop {
-            return Err(format!(
-                "[inv-advice-rows-woven] top-K boundary violated: a dropped candidate scores \
+    if let (Some(min_obs), Some(max_drop)) = (min_observed, max_dropped)
+        && min_obs < max_drop
+    {
+        return Err(format!(
+            "[inv-advice-rows-woven] top-K boundary violated: a dropped candidate scores \
                  {max_drop} but a woven row scores only {min_obs} (observed={observed:?}, \
                  scored={:?})",
-                exp.scored,
-            ));
-        }
+            exp.scored,
+        ));
     }
 
     Ok(())

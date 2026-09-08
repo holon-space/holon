@@ -1086,10 +1086,7 @@ mod tests {
         let mut out = Vec::new();
         let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut cursor: Option<String> = None;
-        loop {
-            let Some(nexts) = succ.get(&cursor) else {
-                break;
-            };
+        while let Some(nexts) = succ.get(&cursor) {
             // A fork means two blocks claim the same predecessor; take the
             // lowest so the result is deterministic, and let the leftovers
             // surface as a mismatch.

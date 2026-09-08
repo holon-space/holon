@@ -254,11 +254,7 @@ pub fn source_projection(
     let Some(task_state) = task_state else {
         return SourceProjection::Text(content.to_string());
     };
-    if !vocabulary
-        .all_keywords()
-        .iter()
-        .any(|k| *k == task_state.keyword)
-    {
+    if !vocabulary.all_keywords().contains(&task_state.keyword) {
         return SourceProjection::Refused(ProjectionRefusal::KeywordNotDeclared {
             keyword: task_state.keyword.clone(),
             vocabulary: vocabulary.all_keywords(),

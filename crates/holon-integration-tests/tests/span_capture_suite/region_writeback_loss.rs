@@ -101,8 +101,7 @@ fn reachable_from_root(
     for id in parent_of.keys() {
         let mut cur = id.clone();
         let mut hops = 0;
-        loop {
-            let Some(p) = parent_of.get(&cur) else { break };
+        while let Some(p) = parent_of.get(&cur) {
             if p == root {
                 reachable.insert(id.clone());
                 break;

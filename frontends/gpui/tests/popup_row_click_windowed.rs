@@ -100,12 +100,15 @@ fn triggers() -> Vec<InputTrigger> {
 
 struct Rig {
     editor: gpui::Entity<EditorView>,
+    // Held to keep the services (and their runtime) alive for the rig's life,
+    // never read back.
+    #[allow(dead_code)]
     services: Arc<TestServices>,
     bounds: BoundsRegistry,
 }
 
 fn mount(cx: &mut TestAppContext) -> (Rig, &mut VisualTestContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let services =
         TestServices::with_registry_quiescent(Arc::new(support::BlockTreeRegistry::new()));
     let services_dyn: Arc<dyn BuilderServices> = services.clone();

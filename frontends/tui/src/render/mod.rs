@@ -9,7 +9,6 @@
 use std::sync::Arc;
 
 use holon_api::EntityUri;
-use holon_frontend::LayoutHint;
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::ReactiveEngine;
@@ -1438,13 +1437,11 @@ fn clip_to_width(line: &str, max_width: usize) -> String {
         return String::new();
     }
     let mut out = String::with_capacity(line.len());
-    let mut count = 0usize;
-    for g in line.graphemes(true) {
+    for (count, g) in line.graphemes(true).enumerate() {
         if count >= max_width {
             break;
         }
         out.push_str(g);
-        count += 1;
     }
     out
 }

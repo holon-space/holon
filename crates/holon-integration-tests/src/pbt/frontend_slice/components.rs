@@ -41,7 +41,6 @@ use holon_frontend::UserDriver;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::reactive::ReactiveRenderedRows;
-use holon_loro::DocScope;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::SutAdviceMatview;
 use holon_pbt_core::capabilities::SutAppLifecycle;
@@ -1652,6 +1651,8 @@ impl HeadlessFrontendComponent {
     /// bullets in asynchronously, so a shift+click issued straight after the
     /// focus finds no `shift_action`, degrades to a bare focus, and pins
     /// nothing. Callers that navigate before pinning wait here.
+    // Used only from `#[cfg(test)]` modules, so the plain lib build sees it dead.
+    #[allow(dead_code)]
     pub(crate) async fn await_main_pin_intent(&self, id: &EntityUri) {
         let root_uri = holon_api::root_layout_block_uri();
         let modifiers = holon_api::ClickModifiers::shift();
@@ -1928,15 +1929,14 @@ impl SutRenderer for HeadlessFrontendComponent {
         let armed = self
             .render_cache_enabled
             .load(std::sync::atomic::Ordering::Acquire);
-        if armed {
-            if let Some(cached) = self
+        if armed
+            && let Some(cached) = self
                 .render_snapshot_cache
                 .lock()
                 .expect("render cache lock")
                 .clone()
-            {
-                return cached;
-            }
+        {
+            return cached;
         }
         let out = self.recompute_widget_snapshot().await;
         if armed {
@@ -4606,6 +4606,7 @@ impl SutMutate for DriverBoundFrontendWrite {
 mod tests {
     use holon_api::EntityName;
     use holon_api::Value;
+    use holon_loro::DocScope;
 
     use super::*;
 
@@ -5375,7 +5376,7 @@ mod tests {
                 "prod",
                 holon_orgmode::org_renderer::OrgRenderer::render_document(
                     &page,
-                    &[child.clone()],
+                    std::slice::from_ref(&child),
                     &path,
                     &page_id,
                 ),
@@ -6511,7 +6512,9 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
             type_def.fields.push(holon_api::FieldSchema {
                 name,
                 sql_type: "TEXT".to_string(),
-                lifetime: holon_api::FieldLifetime::Computed { spec },
+                lifetime: holon_api::FieldLifetime::Computed {
+                    spec: Box::new(spec),
+                },
                 ..Default::default()
             });
         }

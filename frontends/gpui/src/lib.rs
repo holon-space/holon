@@ -1787,6 +1787,9 @@ pub fn launch_holon_window_with_engine_and_share(
 /// all watch_ui tasks and CDC subscriptions share the same tokio runtime.
 /// Launch a GPUI window with a custom title (used by PBT to avoid xcap
 /// capturing the real Holon window when both are open).
+// Renders from many independently-owned pieces of view state; grouping them
+// is a view refactor, not a lint fix.
+#[allow(clippy::too_many_arguments)]
 pub fn launch_holon_window_with_title(
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
@@ -2051,6 +2054,9 @@ impl RebindHandle {
 /// Like [`launch_holon_window_with_title`] but returns a [`RebindHandle`] so
 /// the caller can re-point the window at fresh SUTs over its lifetime. `None`
 /// if the window failed to open.
+// Renders from many independently-owned pieces of view state; grouping them
+// is a view refactor, not a lint fix.
+#[allow(clippy::too_many_arguments)]
 pub fn launch_holon_window_rebindable(
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
@@ -2273,6 +2279,16 @@ async fn main_view_root(
         .map_err(|_| anyhow::anyhow!("the Main view root task was dropped before it answered"))?
 }
 
+/// Everything `launch_holon_window_impl` hands back to its caller.
+type LaunchedWindow = (
+    AnyWindowHandle,
+    Entity<AppModel>,
+    entity_view_registry::EntityCache,
+    LiveEngine,
+    Option<Entity<search_ui::SearchUiState>>,
+    Option<Entity<HolonApp>>,
+);
+
 /// Shared implementation for launching a Holon window.
 ///
 /// If `existing_engine` is `Some`, reuses it (shared with MCP server).
@@ -2282,6 +2298,9 @@ async fn main_view_root(
 /// production entry point supplies the bus, so the bridge is wired in every
 /// consolidator mode. `None` only in PBT launchers with no container behind
 /// them.
+// Renders from many independently-owned pieces of view state; grouping them
+// is a view refactor, not a lint fix.
+#[allow(clippy::too_many_arguments)]
 fn launch_holon_window_impl(
     session: Arc<FrontendSession>,
     existing_engine: Option<Arc<ReactiveEngine>>,
@@ -2293,14 +2312,7 @@ fn launch_holon_window_impl(
     bounds_registry: BoundsRegistry,
     custom_title: Option<String>,
     cx: &mut App,
-) -> Option<(
-    AnyWindowHandle,
-    Entity<AppModel>,
-    entity_view_registry::EntityCache,
-    LiveEngine,
-    Option<Entity<search_ui::SearchUiState>>,
-    Option<Entity<HolonApp>>,
-)> {
+) -> Option<LaunchedWindow> {
     gpui_component::init(cx);
 
     let window_chords = window_key_bindings();

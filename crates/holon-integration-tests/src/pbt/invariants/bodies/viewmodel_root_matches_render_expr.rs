@@ -79,7 +79,7 @@ fn find_by_entity_id<'a>(root: &'a WidgetSnapshot, id: &str) -> Option<&'a Widge
 /// The content widget kind a panel subtree renders. The panel container node
 /// itself wraps the content; the engine may also insert a `view_mode_switcher`.
 /// Returns the kind one level into the content (skipping a switcher wrapper).
-fn panel_content_kind<'a>(panel: &'a WidgetSnapshot) -> Option<&'a str> {
+fn panel_content_kind(panel: &WidgetSnapshot) -> Option<&str> {
     let child = panel.children.first()?;
     if child.kind == "view_mode_switcher" {
         child.children.first().map(|c| c.kind.as_str())

@@ -254,7 +254,7 @@ async fn ingest(store: &FakeStore, root: &std::path::Path, source: &str) {
         Arc::new(store.clone()),
         Arc::new(RealFileSystem),
     );
-    controller
+    let _ = controller
         .on_file_changed(&path)
         .await
         .expect("ingest must succeed");

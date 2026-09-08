@@ -1,6 +1,7 @@
 //! `inv-viewmodel-state-toggle-correct` — the rendered StateToggle nodes
-//! reflect the reference's block task_state. `Needs SutRenderer + RefBlockTree
-//! + RefTaskState`. The ref side is the production `ReferenceState`; selection
+//! reflect the reference's block task_state.
+//! `Needs SutRenderer + RefBlockTree + RefTaskState`.
+//! The ref side is the production `ReferenceState`; selection
 //! ANDs the SUT and ref cap sets, so it only fires where a real renderer slice
 //! is wired (the frontend slice).
 

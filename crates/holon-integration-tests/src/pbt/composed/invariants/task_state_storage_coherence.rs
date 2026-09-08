@@ -166,8 +166,8 @@ mod real_sut_teeth {
     ///
     /// Structured as a plain `#[test]` building its own multi-thread runtime:
     /// the ref is computed **synchronously before** `block_on`, so
-    /// `wide_e2e_ref()`'s internal `full_headless_cap_set()` (which builds
-    /// + drives its own runtime to extract the cap set) runs outside any
+    /// `wide_e2e_ref()`'s internal `full_headless_cap_set()` (which builds and
+    /// drives its own runtime to extract the cap set) runs outside any
     /// runtime and memoizes its `OnceLock` — avoiding a "runtime within a
     /// runtime" panic that a `#[tokio::test]` would hit.
     #[test]

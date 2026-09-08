@@ -174,7 +174,9 @@ impl TypeRegistry {
                     anyhow::anyhow!("computed field '{name}' on entity '{entity_name}': {e}")
                 })?;
             if let Some(existing) = type_def.fields.iter_mut().find(|f| f.name == name) {
-                existing.lifetime = FieldLifetime::Computed { spec };
+                existing.lifetime = FieldLifetime::Computed {
+                    spec: Box::new(spec),
+                };
             } else {
                 // The column's SQL type comes from the computation's own result
                 // kind, never a fixed TEXT: the capability check asks what kind
@@ -186,7 +188,9 @@ impl TypeRegistry {
                 type_def.fields.push(holon_api::FieldSchema {
                     name,
                     sql_type,
-                    lifetime: FieldLifetime::Computed { spec },
+                    lifetime: FieldLifetime::Computed {
+                        spec: Box::new(spec),
+                    },
                     ..Default::default()
                 });
             }
@@ -605,7 +609,7 @@ mod tests {
                     name: "weight".to_string(),
                     sql_type: "REAL".to_string(),
                     lifetime: FieldLifetime::Computed {
-                        spec: live("priority_score * 2.0"),
+                        spec: Box::new(live("priority_score * 2.0")),
                     },
                     ..Default::default()
                 },
@@ -613,7 +617,7 @@ mod tests {
                     name: "priority_score".to_string(),
                     sql_type: "REAL".to_string(),
                     lifetime: FieldLifetime::Computed {
-                        spec: live("priority * 10.0"),
+                        spec: Box::new(live("priority * 10.0")),
                     },
                     ..Default::default()
                 },

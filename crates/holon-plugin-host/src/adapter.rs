@@ -425,7 +425,7 @@ impl PluginFormatAdapter {
         }
 
         for row in &set.rows {
-            for (column, _) in row {
+            for column in row.keys() {
                 if !declared.columns.contains(column.as_ref()) {
                     bail!(
                         "the {} plugin emitted column {column:?} on a {:?} row, which its sidecar \

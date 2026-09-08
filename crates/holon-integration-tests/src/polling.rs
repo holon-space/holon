@@ -114,13 +114,8 @@ pub async fn drain_stream(stream: &mut RowChangeStream) -> Vec<RowChange> {
     let mut changes = Vec::new();
     let drain_timeout = Duration::from_millis(10);
 
-    loop {
-        match tokio::time::timeout(drain_timeout, stream.next()).await {
-            Ok(Some(batch)) => {
-                changes.extend(batch.inner.items);
-            }
-            _ => break,
-        }
+    while let Ok(Some(batch)) = tokio::time::timeout(drain_timeout, stream.next()).await {
+        changes.extend(batch.inner.items);
     }
 
     changes

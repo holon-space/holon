@@ -78,6 +78,8 @@ pub(crate) fn wiring_for_subsystems(subsystems: &BTreeSet<Subsystem>) -> Wiring 
 /// `FixtureRef` had. This is the R3 keystone the static slices and catch tests
 /// use in place of `ref_map`. The wiring is empty (the block invariants read no
 /// wiring; the editor variant is [`seed_ref_with_editor`]).
+// Used only from `#[cfg(test)]` modules, so the plain lib build sees it dead.
+#[allow(dead_code)]
 pub(crate) fn seed_ref(blocks: Vec<Block>) -> ReferenceState {
     let mut state = started_reference_state(Wiring::custom([], [], []));
     let mut next_seq: std::collections::BTreeMap<EntityUri, i64> =
@@ -99,6 +101,8 @@ pub(crate) fn seed_ref(blocks: Vec<Block>) -> ReferenceState {
 /// via the [`RefEditorMirrorMut`] methods (`type_chars`/`delete_backward`/
 /// `move_cursor`) in lockstep with the SUT — replacing the retired
 /// `EditorModel`.
+// Used only from `#[cfg(test)]` modules, so the plain lib build sees it dead.
+#[allow(dead_code)]
 pub(crate) fn seed_ref_with_editor(
     blocks: Vec<Block>,
     editor_block: EntityUri,
@@ -112,6 +116,8 @@ pub(crate) fn seed_ref_with_editor(
 /// The non-seed block ids the ref currently exposes (the set the block
 /// invariants compare against the SUT store). Mirrors the `is_seed` predicate
 /// in [`RefBackend::non_seed_blocks`] / `all_non_seed_block_ids`.
+// Used only from `#[cfg(test)]` modules, so the plain lib build sees it dead.
+#[allow(dead_code)]
 pub(crate) fn ref_non_seed_ids(state: &ReferenceState) -> BTreeSet<EntityUri> {
     state
         .domain
@@ -137,6 +143,8 @@ pub(crate) fn ref_non_seed_ids(state: &ReferenceState) -> BTreeSet<EntityUri> {
 /// CLAUDE.md "silently degrades to look fine" trap. Pair with the invariants'
 /// own `ran_ids` checks (R4): together they prove the comparison ran AND had
 /// real data on both sides.
+// Used only from `#[cfg(test)]` modules, so the plain lib build sees it dead.
+#[allow(dead_code)]
 pub(crate) fn assert_ref_seeded(state: &ReferenceState, expected: &[EntityUri]) {
     let expected: BTreeSet<EntityUri> = expected.iter().cloned().collect();
     assert!(

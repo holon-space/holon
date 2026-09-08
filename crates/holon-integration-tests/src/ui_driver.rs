@@ -116,9 +116,7 @@ impl ScreenshotBackend for XcapBackend {
             if guard.is_none() {
                 *guard = self.find_window();
             }
-            let Some(window) = guard.as_ref() else {
-                return None;
-            };
+            let window = guard.as_ref()?;
             match window.capture_image() {
                 Ok(img) => {
                     let width = img.width();

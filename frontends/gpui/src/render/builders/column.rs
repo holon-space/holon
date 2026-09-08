@@ -75,89 +75,6 @@ pub(crate) fn is_main_panel_flow_column(node: &ReactiveViewModel) -> bool {
             .any(|c| is_pinned_to_end(c) || holds_collection(c))
 }
 
-#[cfg(test)]
-mod split_target_tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
-    use holon_frontend::LayoutHint;
-    use holon_frontend::ReactiveViewModel;
-    use holon_frontend::reactive_view_model::ReactiveSlot;
-
-    use super::has_pinned_child;
-    use super::slot_pinned_container;
-
-    fn node(widget: &str, children: Vec<ReactiveViewModel>) -> ReactiveViewModel {
-        ReactiveViewModel {
-            children: children.into_iter().map(Arc::new).collect(),
-            ..ReactiveViewModel::from_widget(widget, HashMap::new())
-        }
-    }
-
-    /// An accordion the shadow layer accepted: its container offered
-    /// `PinToEnd`, so it declares the pin.
-    fn pinned_accordion() -> ReactiveViewModel {
-        ReactiveViewModel {
-            layout_hint: LayoutHint::PinnedToEnd,
-            ..node("accordion", vec![])
-        }
-    }
-
-    /// An accordion whose container could NOT honour the pin — the shadow
-    /// builder returned the fail-loud placement error, which declares no pin.
-    fn misplaced_accordion() -> ReactiveViewModel {
-        node("error", vec![])
-    }
-
-    fn switcher_over(slot: ReactiveViewModel) -> ReactiveViewModel {
-        ReactiveViewModel {
-            slot: Some(ReactiveSlot::new(slot)),
-            ..ReactiveViewModel::from_widget("view_mode_switcher", HashMap::new())
-        }
-    }
-
-    #[test]
-    fn switcher_over_pinning_column_resolves_to_that_column() {
-        let tree = switcher_over(node("column", vec![pinned_accordion()]));
-        let column = slot_pinned_container(&tree).expect("the slot column must be found");
-        assert!(has_pinned_child(&column));
-    }
-
-    /// The sidebar firewall: both sidebars are switcher-wrapped columns today
-    /// and must keep taking the eager content-height path, never the split.
-    /// They hold no pin-declaring child, so there is nothing sidebar-specific
-    /// to exclude.
-    #[test]
-    fn switcher_over_plain_column_is_not_a_split_target() {
-        let tree = switcher_over(node("column", vec![node("list", vec![])]));
-        assert!(slot_pinned_container(&tree).is_none());
-    }
-
-    /// Mode switched to `source`: the slot holds the query editor, so the split
-    /// must stop firing until the switcher goes back to the result mode.
-    #[test]
-    fn switcher_over_non_container_is_not_a_split_target() {
-        let tree = switcher_over(node("source_editor", vec![]));
-        assert!(slot_pinned_container(&tree).is_none());
-    }
-
-    /// An accordion buried in a `row` never gets the pin offered, so the shadow
-    /// layer replaced it with the placement error — nothing declares a pin and
-    /// no split fires.
-    #[test]
-    fn switcher_over_row_wrapped_accordion_is_not_a_split_target() {
-        let tree = switcher_over(node("row", vec![misplaced_accordion()]));
-        assert!(slot_pinned_container(&tree).is_none());
-    }
-
-    #[test]
-    fn a_bare_column_is_not_a_slot_target() {
-        let tree = node("column", vec![pinned_accordion()]);
-        assert!(has_pinned_child(&tree));
-        assert!(slot_pinned_container(&tree).is_none());
-    }
-}
-
 /// Render a scrollable collection at CONTENT height (eager, non-virtualized).
 ///
 /// A `tree`/`list`/`live_query` stacked inside a `column` among fixed siblings
@@ -373,6 +290,7 @@ pub(crate) fn render_children_content_height(
 ///   - FOOTER(s) are the bounded accordion(s), `flex_shrink_0`, PINNED at the
 ///     panel bottom — they never scroll with the outline (Martin's ruling:
 ///     fixed sections pin, they do not scroll with the outline).
+///
 /// `pad` is `(horizontal, vertical)` padding for the drawer-branch main panel
 /// (`None` for the plain flow branch, which had no padding).
 pub(crate) fn render_accordion_split(
@@ -414,4 +332,87 @@ pub(crate) fn render_accordion_split(
         }
     }
     wrapper.into_any_element()
+}
+
+#[cfg(test)]
+mod split_target_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use holon_frontend::LayoutHint;
+    use holon_frontend::ReactiveViewModel;
+    use holon_frontend::reactive_view_model::ReactiveSlot;
+
+    use super::has_pinned_child;
+    use super::slot_pinned_container;
+
+    fn node(widget: &str, children: Vec<ReactiveViewModel>) -> ReactiveViewModel {
+        ReactiveViewModel {
+            children: children.into_iter().map(Arc::new).collect(),
+            ..ReactiveViewModel::from_widget(widget, HashMap::new())
+        }
+    }
+
+    /// An accordion the shadow layer accepted: its container offered
+    /// `PinToEnd`, so it declares the pin.
+    fn pinned_accordion() -> ReactiveViewModel {
+        ReactiveViewModel {
+            layout_hint: LayoutHint::PinnedToEnd,
+            ..node("accordion", vec![])
+        }
+    }
+
+    /// An accordion whose container could NOT honour the pin — the shadow
+    /// builder returned the fail-loud placement error, which declares no pin.
+    fn misplaced_accordion() -> ReactiveViewModel {
+        node("error", vec![])
+    }
+
+    fn switcher_over(slot: ReactiveViewModel) -> ReactiveViewModel {
+        ReactiveViewModel {
+            slot: Some(ReactiveSlot::new(slot)),
+            ..ReactiveViewModel::from_widget("view_mode_switcher", HashMap::new())
+        }
+    }
+
+    #[test]
+    fn switcher_over_pinning_column_resolves_to_that_column() {
+        let tree = switcher_over(node("column", vec![pinned_accordion()]));
+        let column = slot_pinned_container(&tree).expect("the slot column must be found");
+        assert!(has_pinned_child(&column));
+    }
+
+    /// The sidebar firewall: both sidebars are switcher-wrapped columns today
+    /// and must keep taking the eager content-height path, never the split.
+    /// They hold no pin-declaring child, so there is nothing sidebar-specific
+    /// to exclude.
+    #[test]
+    fn switcher_over_plain_column_is_not_a_split_target() {
+        let tree = switcher_over(node("column", vec![node("list", vec![])]));
+        assert!(slot_pinned_container(&tree).is_none());
+    }
+
+    /// Mode switched to `source`: the slot holds the query editor, so the split
+    /// must stop firing until the switcher goes back to the result mode.
+    #[test]
+    fn switcher_over_non_container_is_not_a_split_target() {
+        let tree = switcher_over(node("source_editor", vec![]));
+        assert!(slot_pinned_container(&tree).is_none());
+    }
+
+    /// An accordion buried in a `row` never gets the pin offered, so the shadow
+    /// layer replaced it with the placement error — nothing declares a pin and
+    /// no split fires.
+    #[test]
+    fn switcher_over_row_wrapped_accordion_is_not_a_split_target() {
+        let tree = switcher_over(node("row", vec![misplaced_accordion()]));
+        assert!(slot_pinned_container(&tree).is_none());
+    }
+
+    #[test]
+    fn a_bare_column_is_not_a_slot_target() {
+        let tree = node("column", vec![pinned_accordion()]);
+        assert!(has_pinned_child(&tree));
+        assert!(slot_pinned_container(&tree).is_none());
+    }
 }

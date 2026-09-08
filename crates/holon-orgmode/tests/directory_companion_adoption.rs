@@ -216,7 +216,7 @@ async fn ingest_in_order(dm: StoringDocManager, root: &std::path::Path, order: &
     );
     for rel in order {
         let path = root.join(rel);
-        controller
+        let _ = controller
             .on_file_changed(&path)
             .await
             .unwrap_or_else(|e| panic!("ingest of {rel} must not error: {e:#}"));

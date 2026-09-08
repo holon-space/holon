@@ -235,7 +235,9 @@ fn a_spec_whose_types_contradict_the_type_definition_is_refused() {
     type_def.fields.push(FieldSchema {
         name: "who".to_string(),
         sql_type: "TEXT".to_string(),
-        lifetime: FieldLifetime::Computed { spec },
+        lifetime: FieldLifetime::Computed {
+            spec: Box::new(spec),
+        },
         ..Default::default()
     });
 

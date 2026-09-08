@@ -41,6 +41,7 @@ use crate::search_ui::navigate_to;
 
 /// Current-view breadcrumb state. Its own `Entity` so async trail resolution
 /// can update it and trigger a re-render (same pattern as `SearchUiState`).
+#[derive(Default)]
 pub struct BreadcrumbState {
     /// The block whose trail is currently shown/being resolved.
     pub block_id: Option<EntityUri>,
@@ -53,18 +54,6 @@ pub struct BreadcrumbState {
     /// live caret requires this to have CHANGED — a bumped view generation on
     /// its own does not, since ops that cannot move the cursor still bump it.
     pub view_root: Option<EntityUri>,
-}
-
-impl Default for BreadcrumbState {
-    fn default() -> Self {
-        Self {
-            block_id: None,
-            segments: Vec::new(),
-            error: None,
-            generation: 0,
-            view_root: None,
-        }
-    }
 }
 
 pub struct NotifyBreadcrumb;
@@ -134,6 +123,9 @@ async fn resolve_trail(
 
 /// Resolve the bar and pump it back into `state`. `caret_moved` says whether
 /// the focus changed since the last resolution; see [`resolve_trail`].
+// Renders from many independently-owned pieces of view state; grouping them
+// is a view refactor, not a lint fix.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_breadcrumb(
     focused: Option<EntityUri>,
     caret_moved: bool,

@@ -1657,7 +1657,7 @@ impl SqlOperationProvider {
                         .filter(|(_, v)| !v.is_removed())
                         .map(|(k, v)| (k.as_str(), v)),
                 ),
-                extra_props.iter().map(|(k, _)| k.as_str()),
+                extra_props.keys().map(|k| k.as_str()),
             );
             update_pairs.push(("property_kinds".to_string(), kinds_sql(&merged_kinds)));
         }
@@ -3815,7 +3815,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     .and_then(|v| v.as_string())
                     .ok_or_else(|| "Missing 'id' parameter".to_string())?
                     .to_string();
-                let plan = self.delete_plan(&op_name)?;
+                let plan = self.delete_plan(op_name)?;
 
                 // Capture the FULL row + edges BEFORE writing so a LEAF delete
                 // is identity-invertible (inverse = `create` with the same id,

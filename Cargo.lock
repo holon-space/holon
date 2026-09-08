@@ -723,9 +723,9 @@ checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
 
 [[package]]
 name = "async-trait"
-version = "0.1.91"
+version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5370,7 +5370,6 @@ dependencies = [
  "holon-core",
  "holon-macros",
  "ignore",
- "indexmap 2.14.0",
  "notify 8.2.0",
  "percent-encoding",
  "serde",
@@ -5611,7 +5610,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tracing",
  "uuid",
  "workspace-hack 0.1.0",
 ]
@@ -5627,7 +5625,6 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "futures",
- "futures-signals",
  "getrandom 0.3.4",
  "hex",
  "holon-api",
@@ -5680,7 +5677,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "chrono",
  "fluxdi",
  "futures",
  "holon",
@@ -5692,11 +5688,8 @@ dependencies = [
  "holon-sharing",
  "holon-turso",
  "iroh",
- "loro",
  "proptest 1.11.0",
  "proptest-state-machine",
- "serde",
- "serde_json",
  "tempfile",
  "tokio",
  "tokio-stream",

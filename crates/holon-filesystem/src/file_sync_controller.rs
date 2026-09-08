@@ -2467,7 +2467,7 @@ impl FileSyncController {
                 from.display(),
                 to.display()
             );
-            self.on_file_changed(to).await?;
+            let _ = self.on_file_changed(to).await?;
             return Ok(());
         };
         let document_uri = document.id.clone();
@@ -2496,7 +2496,7 @@ impl FileSyncController {
         // stays alive throughout, never passing through a deleted state. Done
         // BEFORE the retitle so the retitle is the LAST write and always wins,
         // even when a rename coincides with a content edit that re-ingests.
-        self.on_file_changed(to).await?;
+        let _ = self.on_file_changed(to).await?;
 
         // File-move spec (D2): a document page's title FOLLOWS its file name.
         // Retitle the doc-root page to the new file stem through the SAME single
@@ -5309,7 +5309,7 @@ impl FileSyncController {
                 "[FileSyncController] Processing pending external change for {} before re-render",
                 path.display()
             );
-            self.on_file_changed(&path).await?;
+            let _ = self.on_file_changed(&path).await?;
             // The one write inside this fold, and so the memo's one
             // invalidation edge: rows read before it may name a parentage the
             // ingest has just replaced.
@@ -5824,7 +5824,7 @@ impl FileSyncController {
                      last_projection)",
                     path.display()
                 );
-                self.on_file_changed(&path).await?;
+                let _ = self.on_file_changed(&path).await?;
                 ingested += 1;
             }
         }
@@ -6093,7 +6093,7 @@ impl FileSyncController {
                      re-render",
                     path.display()
                 );
-                self.on_file_changed(&path).await?;
+                let _ = self.on_file_changed(&path).await?;
             }
 
             // A read-only-tier format is not a re-render candidate: its file is
@@ -8971,7 +8971,7 @@ mod downstream_flush_tests {
     }
 
     impl ScriptedProjection {
-        fn new(outcomes: Vec<ProjectionPass>) -> Arc<dyn DownstreamProjection> {
+        fn arc(outcomes: Vec<ProjectionPass>) -> Arc<dyn DownstreamProjection> {
             Arc::new(Self {
                 outcomes: Mutex::new(outcomes.into_iter()),
                 calls: std::sync::atomic::AtomicUsize::new(0),
@@ -8994,7 +8994,7 @@ mod downstream_flush_tests {
 
     #[tokio::test]
     async fn an_incomplete_flush_is_re_driven_until_it_converges() {
-        let projection = ScriptedProjection::new(vec![
+        let projection = ScriptedProjection::arc(vec![
             ProjectionPass::Incomplete { withheld: 2 },
             ProjectionPass::Converged,
         ]);
@@ -9005,7 +9005,7 @@ mod downstream_flush_tests {
 
     #[tokio::test]
     async fn a_flush_that_never_converges_fails_loud_naming_the_owed_ops() {
-        let projection = ScriptedProjection::new(
+        let projection = ScriptedProjection::arc(
             (0..DOWNSTREAM_FLUSH_ATTEMPTS)
                 .map(|_| ProjectionPass::Incomplete { withheld: 7 })
                 .collect(),
@@ -9020,7 +9020,7 @@ mod downstream_flush_tests {
 
     #[tokio::test]
     async fn a_converged_flush_costs_one_call() {
-        let projection = ScriptedProjection::new(vec![ProjectionPass::Converged]);
+        let projection = ScriptedProjection::arc(vec![ProjectionPass::Converged]);
         flush_downstream_with_redrive(Some(&projection), "test")
             .await
             .expect("converged");

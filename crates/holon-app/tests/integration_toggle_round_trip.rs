@@ -162,9 +162,8 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
         .expect("the projector must build the mirror and start watching");
 
         let sql = holon_app::integrations_section::SETTINGS_SQL;
-        assert_eq!(
-            section_switch(db, sql, "todoist").await,
-            false,
+        assert!(
+            !section_switch(db, sql, "todoist").await,
             "precondition: a clean vault shows todoist switched off"
         );
 

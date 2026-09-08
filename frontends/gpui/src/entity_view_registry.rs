@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn cache_counts_split_entries_by_variant() {
-        let keys = vec![
+        let keys = [
             CacheKey::ReactiveShell(1),
             CacheKey::ReactiveShell(2),
             CacheKey::LiveBlock("block:a".into()),

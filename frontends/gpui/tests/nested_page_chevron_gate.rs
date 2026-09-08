@@ -328,7 +328,7 @@ fn click_chevron(
     services: Arc<dyn BuilderServices>,
 ) -> Painted {
     let bounds = BoundsRegistry::new();
-    let (_view, mut vcx) = cx.add_window_view({
+    let (_view, vcx) = cx.add_window_view({
         let bounds = bounds.clone();
         move |_, _| {
             ReactiveFixtureView::with_services_and_bounds(
@@ -402,7 +402,7 @@ fn painted_glyph(
 /// the store, not about a missed hit-test.
 #[gpui::test]
 fn chevron_click_opens_the_live_row(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let services = ExpandStoreServices::new();
     let vm = build(&services);
     let before = click_chevron(cx, vm.clone(), services.clone());
@@ -423,7 +423,7 @@ fn chevron_click_opens_the_live_row(cx: &mut TestAppContext) {
 /// `block_expanded_view`.
 #[gpui::test]
 fn chevron_click_survives_the_structural_rebuild(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let services = ExpandStoreServices::new();
     click_chevron(cx, build(&services), services.clone());
 
@@ -683,7 +683,7 @@ fn painted_texts(bounds: &BoundsRegistry) -> Vec<String> {
 /// exactly what Martin saw.
 #[gpui::test]
 fn an_opened_nested_page_paints_its_children(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let services = ExpandStoreServices::live_windowed();
 
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
@@ -693,7 +693,7 @@ fn an_opened_nested_page_paints_its_children(cx: &mut TestAppContext) {
     let vm = Arc::new(services.interpret(&expr, &ctx));
 
     let bounds = BoundsRegistry::new();
-    let (_view, mut vcx) = cx.add_window_view({
+    let (_view, vcx) = cx.add_window_view({
         let bounds = bounds.clone();
         let vm = vm.clone();
         let services = services.clone() as Arc<dyn BuilderServices>;
@@ -836,7 +836,7 @@ fn probe_variant(cx: &mut TestAppContext, label: &str, dsl: &str) {
     let vm = Arc::new(services.interpret(&expr, &ctx));
 
     let bounds = BoundsRegistry::new();
-    let (_view, mut vcx) = cx.add_window_view({
+    let (_view, vcx) = cx.add_window_view({
         let bounds = bounds.clone();
         let vm = vm.clone();
         let services = services.clone() as Arc<dyn BuilderServices>;
@@ -911,7 +911,7 @@ fn probe_variant(cx: &mut TestAppContext, label: &str, dsl: &str) {
 /// regardless of what the shapes turn out to be.
 #[gpui::test]
 fn real_profile_embedded_page_probe(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
 
     let real = shipped_render_expr("embedded_page");
     assert!(

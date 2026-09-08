@@ -234,7 +234,7 @@ fn run_scroll_case(cx: &mut TestAppContext, with_sidebar: bool, use_vms: bool) -
 /// sibling. Guards that the fix does not regress the non-drawer branch.
 #[gpui::test]
 fn plain_path_non_drawer_scrolls(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let (before, after) = run_scroll_case(cx, false, false);
     assert!(
         before <= 0.0,
@@ -252,7 +252,7 @@ fn plain_path_non_drawer_scrolls(cx: &mut TestAppContext) {
 /// no-ops (his live outline of 56 rows was frozen).
 #[gpui::test]
 fn plain_path_drawer_branch_scrolls(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let (before, after) = run_scroll_case(cx, true, false);
     assert!(
         before <= 0.0,
@@ -272,7 +272,7 @@ fn plain_path_drawer_branch_scrolls(cx: &mut TestAppContext) {
 /// + drawer branch + greedy live_query — Martin's exact main panel.
 #[gpui::test]
 fn plain_path_vms_drawer_scrolls(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let (before, after) = run_scroll_case(cx, true, true);
     assert!(
         before <= 0.0,
@@ -288,7 +288,7 @@ fn plain_path_vms_drawer_scrolls(cx: &mut TestAppContext) {
 /// view_mode_switcher outline, non-drawer branch.
 #[gpui::test]
 fn plain_path_vms_non_drawer_scrolls(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let (before, after) = run_scroll_case(cx, false, true);
     assert!(
         before <= 0.0,
@@ -380,7 +380,7 @@ fn run_shell_case(
 /// is clipped to the viewport and the wheel no-ops — Martin's frozen outline.
 #[gpui::test]
 fn shell_wrapped_main_panel_scrolls(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let (before, after) =
         run_shell_case(cx, "block:default-main-panel", "default-main-panel", true);
     assert!(
@@ -401,7 +401,7 @@ fn shell_wrapped_main_panel_scrolls(cx: &mut TestAppContext) {
 /// the same reason (bare size_full clips the content-height sidebar tree).
 #[gpui::test]
 fn shell_wrapped_sidebar_scrolls(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let (before, after) = run_shell_case(
         cx,
         "block:default-left-sidebar",
@@ -430,7 +430,7 @@ fn shell_wrapped_sidebar_scrolls(cx: &mut TestAppContext) {
 /// is rendered, i.e. the block-shell arm) in the follow-up.
 #[gpui::test]
 fn accordion_through_shell_renders_bounded_not_error(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let registry = Arc::new(BlockTreeRegistry::new());
     let thunk: BlockTreeThunk = Arc::new(|| {
         let mut acc_props = HashMap::new();

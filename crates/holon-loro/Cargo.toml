@@ -27,7 +27,6 @@ chrono.workspace = true
 # rosters even on builds without the `iroh-sync` transport.
 ed25519-dalek = "=3.0.0-pre.1"
 futures.workspace = true
-futures-signals.workspace = true
 hex.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true

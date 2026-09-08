@@ -230,6 +230,9 @@ fn blend_pixel(img: &mut RgbaImage, x: u32, y: u32, color: Rgba<u8>, alpha: f32)
     dst.0[3] = 255;
 }
 
+// Arguments are the harness's independently-built collaborators; grouping
+// them is a harness refactor, not a lint fix.
+#[allow(clippy::too_many_arguments)]
 fn draw_text(
     img: &mut RgbaImage,
     font: &FontRef<'_>,

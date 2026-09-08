@@ -114,7 +114,7 @@ async fn stored_tags(env: &TestEnvironment) -> Vec<String> {
 fn tags_without_a_comma_all_land() {
     let rt = runtime();
     rt.clone().block_on(async move {
-        let mut env = TestEnvironment::new(rt).expect("TestEnvironment::new");
+        let env = TestEnvironment::new(rt).expect("TestEnvironment::new");
         assert!(env.loro_enabled(), "repro needs the composed Loro wiring");
         env.write_org_file("vault.org", VAULT_ORG)
             .await
@@ -146,7 +146,7 @@ fn tags_without_a_comma_all_land() {
 fn a_comma_carrying_tag_must_not_silently_drop_the_whole_set() {
     let rt = runtime();
     rt.clone().block_on(async move {
-        let mut env = TestEnvironment::new(rt).expect("TestEnvironment::new");
+        let env = TestEnvironment::new(rt).expect("TestEnvironment::new");
         assert!(env.loro_enabled(), "repro needs the composed Loro wiring");
         env.write_org_file("vault.org", VAULT_ORG)
             .await
@@ -212,7 +212,7 @@ fn a_comma_carrying_tag_must_not_silently_drop_the_whole_set() {
 fn creating_a_block_with_a_separator_carrying_tag_is_refused() {
     let rt = runtime();
     rt.clone().block_on(async move {
-        let mut env = TestEnvironment::new(rt).expect("TestEnvironment::new");
+        let env = TestEnvironment::new(rt).expect("TestEnvironment::new");
         assert!(env.loro_enabled(), "repro needs the composed Loro wiring");
         env.write_org_file("vault.org", VAULT_ORG)
             .await
@@ -221,12 +221,14 @@ fn creating_a_block_with_a_separator_carrying_tag_is_refused() {
         wait_for_seed(&env).await;
 
         let backend = edge_backend(&env).await;
-        let mut edges = holon_api::BlockEdges::default();
-        edges.tags = holon_api::types::Tags::from_tag_iter(vec![
-            "zzz".to_string(),
-            "a,b".to_string(),
-            "M".to_string(),
-        ]);
+        let edges = holon_api::BlockEdges {
+            tags: holon_api::types::Tags::from_tag_iter(vec![
+                "zzz".to_string(),
+                "a,b".to_string(),
+                "M".to_string(),
+            ]),
+            ..Default::default()
+        };
         let err = backend
             .create_block_with_properties(
                 holon_api::EntityUri::block("blk-a"),

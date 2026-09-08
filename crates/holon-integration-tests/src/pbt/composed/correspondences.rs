@@ -34,6 +34,9 @@ use holon_pbt_core::correspondence::Observable;
 use holon_pbt_core::correspondence::StoreProjection;
 use holon_pbt_core::invariant::InvariantResult;
 
+/// A correspondence body's boxed future, borrowed from the cap maps it reads.
+type CorrFuture<'a, T> = Pin<Box<dyn Future<Output = Extraction<T>> + 'a>>;
+
 // ─── Turso storage-pipeline arms co-located to `holon-turso-testing` (Phase 2)
 // ─
 //
@@ -100,7 +103,7 @@ fn ref_active_editor_text(refs: &CapMap) -> Extraction<(EntityUri, String)> {
 fn extract_editor_text_mirror<'a>(
     sut: &'a CapMap,
     refs: &'a CapMap,
-) -> Pin<Box<dyn Future<Output = Extraction<(EntityUri, String)>> + 'a>> {
+) -> CorrFuture<'a, (EntityUri, String)> {
     Box::pin(async move {
         // `ref_project` already proved the active block is `Some`; the registry
         // short-circuits to Skip otherwise, so `extract` never runs without it.
@@ -182,7 +185,7 @@ fn ref_active_editor_caret(refs: &CapMap) -> Extraction<(EntityUri, usize)> {
 fn extract_editor_caret_mirror<'a>(
     sut: &'a CapMap,
     refs: &'a CapMap,
-) -> Pin<Box<dyn Future<Output = Extraction<(EntityUri, usize)>> + 'a>> {
+) -> CorrFuture<'a, (EntityUri, usize)> {
     Box::pin(async move {
         let block = RefEditorMirror::active_editor_block(refs)
             .expect("registry: extract runs only after ref_project yielded a value");
@@ -282,6 +285,8 @@ fn extract_org_snapshot<'a>(
     })
 }
 
+// Signature fixed by the correspondence table's fn-pointer field type.
+#[allow(clippy::ptr_arg)]
 fn compare_org_blocks(sut: &Vec<Block>, ref_: &Vec<Block>) -> Result<(), String> {
     match compare_blocks("inv-blocks-match-ref/org", sut, ref_, true) {
         InvariantResult::Ok => Ok(()),

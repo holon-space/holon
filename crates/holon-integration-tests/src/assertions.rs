@@ -12,7 +12,6 @@ pub use holon_pbt_core::block_compare::normalize_block;
 /// Page URIs in parent_id are normalized to a canonical form so that
 /// file-based URIs (file:test.org) and UUID-based URIs (block:{uuid})
 /// for the same page compare equal.
-
 /// Assert that two Block slices are equivalent (using normalize_block)
 pub fn assert_blocks_equivalent(actual_blocks: &[Block], expected_blocks: &[Block], message: &str) {
     let mut actual_sorted: Vec<_> = actual_blocks.iter().map(normalize_block).collect();

@@ -98,7 +98,7 @@ pub fn styled_link_segments(content: &str, marks: &[MarkSpan]) -> Vec<StyledSegm
                 // `style_fingerprint` omits unstyled gaps by design, so "no
                 // covering run" means this stretch carries no marks.
                 flags: match styles.iter().find(|r| r.start <= start && end <= r.end) {
-                    Some(r) => r.flags.clone(),
+                    Some(r) => r.flags,
                     None => holon_api::StyleFlags::default(),
                 },
             }

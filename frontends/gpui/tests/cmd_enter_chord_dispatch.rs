@@ -14,6 +14,7 @@
 //! cannot pass by making Enter inert:
 //!   * `cmd+enter` must dispatch `cycle_task_state` and split nothing;
 //!   * plain `enter` must still dispatch `split_block`.
+//!
 //! The block count is read on either side of each press, so the user-visible
 //! junk-block symptom is asserted directly and neither count assertion is
 //! vacuous (the second press must move it).

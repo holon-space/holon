@@ -84,7 +84,7 @@ fn rows_with_entity_prefix<'a>(
 
 #[gpui::test]
 fn seeded_sidebar_live_query_paints_nonzero_height(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
 
     // 1. The REAL seeded expression, parsed by the production DSL parser.
     let src = extract_sidebar_render();

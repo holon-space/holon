@@ -172,6 +172,9 @@ impl ReactiveShell {
     /// `placement` is the layout slot the caller is putting this shell into —
     /// see [`ShellPlacement`]. Callers that render from a `GpuiRenderContext`
     /// pass `ctx.placement`; the root layout passes [`ShellPlacement::Panel`].
+    // Renders from many independently-owned pieces of view state; grouping them
+    // is a view refactor, not a lint fix.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_for_block(
         block_id: String,
         ctx: RenderContext,
@@ -478,7 +481,7 @@ impl ReactiveShell {
                 // Drop the row's watcher pair with it — a dead watcher
                 // task pins the removed row's signal (and its data Arc)
                 // until the next Replace otherwise.
-                self.props_watchers.remove(index);
+                drop(self.props_watchers.remove(index));
                 self.list_state.splice(index..index + 1, 0);
                 self.prune_render_entity_cache();
                 cx.notify();
@@ -727,7 +730,7 @@ impl Render for ReactiveShell {
             // virtualized fallthrough below (`builders::render`'s collection
             // arm → `ReactiveShell` + `gpui::list`), which only materializes
             // viewport-visible rows.
-            if let Some(ref view) = tree.collection.as_ref().filter(|_| eager_panel_render()) {
+            if let Some(view) = tree.collection.as_ref().filter(|_| eager_panel_render()) {
                 let items: Vec<Arc<ReactiveViewModel>> = view.children_snapshot();
                 if std::env::var_os("HOLON_GPUI_RENDER_PROBE").is_some()
                     && self.render_probe_last.get() != items.len()

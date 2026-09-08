@@ -17,7 +17,13 @@ pub mod capture;
 pub mod sim_windowed_replay;
 pub mod windowed_wide;
 
+// This module is compiled into every test binary that includes it by `#[path]`.
+// Some of them call this, some do not, so "unused" here is not evidence.
+#[allow(unused_imports)]
 pub use holon_integration_tests::libtest_list::handled_list_protocol;
+
+// Re-exported for the test binaries that include this module by `#[path]`; it
+// reads as unused in any single one of them.
 
 /// Extract the panic message from a caught payload (`panic!`/`format!` →
 /// `String`; `expect`/`&str` literals → `&str`).

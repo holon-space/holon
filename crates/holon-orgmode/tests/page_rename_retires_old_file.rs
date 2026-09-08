@@ -604,7 +604,7 @@ async fn retiring_a_stale_home_does_not_cascade_delete_a_fileless_namesake_page(
     );
 
     // The watcher delivers the delete event for the file Holon itself removed.
-    controller
+    let _ = controller
         .on_file_changed(&old_file)
         .await
         .expect("the retire's own delete event must not fail the sync loop");
@@ -634,7 +634,7 @@ async fn a_users_deletion_of_a_tracked_file_still_cascades() {
 
     let old_file = root.join(DIR_TITLE).join(format!("{OLD_TITLE}.org"));
     std::fs::remove_file(&old_file).expect("the user removes the page's file");
-    controller
+    let _ = controller
         .on_file_changed(&old_file)
         .await
         .expect("an external deletion must not fail the sync loop");
@@ -673,7 +673,7 @@ async fn a_page_renamed_after_a_cold_boot_fast_path_still_retires_its_old_file()
     // stamp.
     {
         let mut controller = build_controller(&f, &root, None);
-        controller
+        let _ = controller
             .on_file_changed(&old_file)
             .await
             .expect("ingesting the file must stamp its content hash");
@@ -686,7 +686,7 @@ async fn a_page_renamed_after_a_cold_boot_fast_path_still_retires_its_old_file()
     // Session 2 boots the same vault, unchanged.
     let mut controller = build_controller(&f, &root, None);
     controller.initialize().await.expect("cold boot");
-    controller
+    let _ = controller
         .on_file_changed(&old_file)
         .await
         .expect("the unchanged file must take the fast path, not error");
@@ -732,7 +732,7 @@ async fn a_cold_boot_fast_path_still_registers_the_docs_alias() {
     }
     {
         let mut controller = build_controller(&f, &root, None);
-        controller
+        let _ = controller
             .on_file_changed(&old_file)
             .await
             .expect("ingesting the file must stamp its content hash");
@@ -743,7 +743,7 @@ async fn a_cold_boot_fast_path_still_registers_the_docs_alias() {
     let registrar = Arc::new(MapAliasRegistrar::default());
     let mut controller = build_controller(&f, &root, Some(registrar.clone()));
     controller.initialize().await.expect("cold boot");
-    controller
+    let _ = controller
         .on_file_changed(&old_file)
         .await
         .expect("the unchanged file must take the fast path, not error");
@@ -785,7 +785,7 @@ async fn a_namesake_never_takes_the_owners_file(registrar: Option<Arc<MapAliasRe
     }
     {
         let mut controller = build_controller(&f, &root, None);
-        controller
+        let _ = controller
             .on_file_changed(&old_file)
             .await
             .expect("ingesting the file must stamp its content hash");
@@ -793,7 +793,7 @@ async fn a_namesake_never_takes_the_owners_file(registrar: Option<Arc<MapAliasRe
 
     let mut controller = build_controller(&f, &root, registrar);
     controller.initialize().await.expect("cold boot");
-    controller
+    let _ = controller
         .on_file_changed(&old_file)
         .await
         .expect("the unchanged file must take the fast path, not error");

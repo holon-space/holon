@@ -306,10 +306,8 @@ fn empty_content_siblings_are_render_fixed_point() {
 /// asymmetry alone sustains the echo.
 #[test]
 fn headline_title_with_internal_link_is_render_fixed_point() {
-    let org1 = format!(
-        "#+ID: page-root\n* [[block:378e8264-6d30-8df8-795d-c57851849f74][c1]]\n:PROPERTIES:\n:ID: \
-         c1\n:END:\n"
-    );
+    let org1 = "#+ID: page-root\n* [[block:378e8264-6d30-8df8-795d-c57851849f74][c1]]\n:PROPERTIES:\n:ID: \
+         c1\n:END:\n".to_string();
     let parsed = parse_org_file(
         Path::new(FILE),
         &org1,

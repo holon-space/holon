@@ -782,7 +782,7 @@ impl DevicePairing {
                 }
                 depth.push((d, node.id));
             }
-            depth.sort_by(|a, b| b.0.cmp(&a.0));
+            depth.sort_by_key(|a| std::cmp::Reverse(a.0));
             for (_, id) in depth {
                 tree.delete(id)
                     .with_context(|| format!("wiping pre-pair tree node {id:?}"))?;
@@ -1313,7 +1313,7 @@ mod tests {
             snap("block:journals", "block:root", "Journals"),
             snap("block:day", "block:journals", "Sunday"),
         ]);
-        let plan = plan_reimport(&[day.clone()], &owner);
+        let plan = plan_reimport(std::slice::from_ref(&day), &owner);
 
         assert_eq!(plan.divergent, vec!["block:day".to_string()]);
         let copy = plan

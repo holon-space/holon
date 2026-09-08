@@ -58,7 +58,7 @@ pub static COOKABLE_RECIPES_SQL: LazyLock<String> = LazyLock::new(|| {
                WHERE iu.recipe_id = r.id AND {}
            )
          ORDER BY r.title",
-        &*UNSATISFIED
+        *UNSATISFIED
     )
 });
 
@@ -93,7 +93,7 @@ pub static COOK_BLOCKERS_SQL: LazyLock<String> = LazyLock::new(|| {
         missing = CookBlockReason::Missing.as_str(),
         unconvertible = CookBlockReason::Unconvertible.as_str(),
         insufficient = CookBlockReason::Insufficient.as_str(),
-        unsatisfied = &*UNSATISFIED,
+        unsatisfied = *UNSATISFIED,
     )
 });
 

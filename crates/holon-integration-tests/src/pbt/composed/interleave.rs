@@ -351,7 +351,7 @@ mod tests {
             shape: Shape::Mixed,
         };
         let drawn = schedule_of(&plan_with(&arming, "TypeChars", 0).expect("masked"));
-        assert!(drawn.iter().any(|r| *r == Resume::Immediate), "{drawn:?}");
+        assert!(drawn.contains(&Resume::Immediate), "{drawn:?}");
         assert!(
             drawn.iter().any(|r| matches!(r, Resume::Wait(_))),
             "{drawn:?}"

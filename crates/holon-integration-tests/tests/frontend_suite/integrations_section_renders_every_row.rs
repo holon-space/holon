@@ -51,10 +51,10 @@ const MIN_ROWS_FOR_TEETH: usize = 4;
 /// not nodes.
 fn rendered_integration_rows(vm: &ViewModel) -> BTreeSet<String> {
     fn walk(vm: &ViewModel, out: &mut BTreeSet<String>) {
-        if let Some(id) = vm.row_id() {
-            if id.starts_with("integration:") {
-                out.insert(id);
-            }
+        if let Some(id) = vm.row_id()
+            && id.starts_with("integration:")
+        {
+            out.insert(id);
         }
         for child in vm.children() {
             walk(child, out);

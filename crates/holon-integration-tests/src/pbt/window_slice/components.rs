@@ -606,11 +606,10 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
         // content child so we compare like-for-like.
         let unwrap_tree_item =
             |vm: &Arc<holon_frontend::ReactiveViewModel>| -> Arc<holon_frontend::ReactiveViewModel> {
-                if vm.widget_name().as_deref() == Some("tree_item") {
-                    if let Some(child) = vm.children.first() {
+                if vm.widget_name().as_deref() == Some("tree_item")
+                    && let Some(child) = vm.children.first() {
                         return child.clone();
                     }
-                }
                 vm.clone()
             };
         for live in &live_items {

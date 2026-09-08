@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use holon_api::QueryLanguage;
 use holon_api::Value;
 use holon_integration_tests::TestEnvironmentBuilder;
 

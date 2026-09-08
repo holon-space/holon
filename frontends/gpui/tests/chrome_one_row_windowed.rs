@@ -61,16 +61,6 @@ const TAB_COUNT_ERROR_LABEL: &str = "▤ !";
 /// it holds predates that write.
 const TAB_COUNT_WAITING_LABEL: &str = "▤ …";
 
-/// Title-row affordances. Excluded when measuring where CONTENT starts, since
-/// they sit inside the chrome rather than below it.
-const CHROME_ELEMENT_IDS: &[&str] = &[
-    "settings-gear",
-    TAB_COUNT_BUTTON,
-    TAB_LIST_NEW,
-    "tab-strip",
-    "breadcrumb-bar",
-];
-
 /// The title row is 38px. Content may add its own padding under it, so the
 /// one-row claim allows a row plus 24px — still far under the ~96px three bars
 /// cost today.
@@ -789,7 +779,6 @@ fn the_count_button_shows_the_failure_not_a_plausible_zero() {
     // Waits on the STATE (a failed read clears the tabs), not on the button, so
     // the assertion below is a real claim about what the title row paints
     // rather than a restatement of the loop's own exit condition.
-    let mut after = count_button_text(&w.bounds);
     for _ in 0..25 {
         let rebind = &w.rebind;
         if w.app.update(|cx| rebind.drawn_tab_count(cx)) == Some(0) {
@@ -814,7 +803,7 @@ fn the_count_button_shows_the_failure_not_a_plausible_zero() {
         w.app.update(|cx| rebind.set_safe_area_bottom(0.0, cx));
         settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
     }
-    after = count_button_text(&w.bounds);
+    let after = count_button_text(&w.bounds);
     let rebind = &w.rebind;
     let state_tabs = w.app.update(|cx| rebind.drawn_tab_count(cx));
     eprintln!(

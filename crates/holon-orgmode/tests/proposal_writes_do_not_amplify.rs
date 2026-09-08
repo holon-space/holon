@@ -28,7 +28,6 @@ use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::traits::Result as OrderingResult;
-use holon_filesystem::BlockDelta;
 use holon_filesystem::BlockReader;
 use holon_filesystem::BlockRowMemo;
 use holon_filesystem::DocumentManager;
@@ -347,7 +346,7 @@ async fn build_harness() -> Harness {
 
     for (rel, _) in TRACKED {
         let path = std::path::Path::new(ROOT).join(rel);
-        controller.on_file_changed(&path).await.unwrap();
+        let _ = controller.on_file_changed(&path).await.unwrap();
     }
 
     // Seed the write-back holder the way boot does. Without it the holder's

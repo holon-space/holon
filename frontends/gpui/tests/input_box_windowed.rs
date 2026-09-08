@@ -279,7 +279,7 @@ fn mount_src<'a>(
     cx: &'a mut TestAppContext,
     src: &'static str,
 ) -> (Rig, &'a mut VisualTestContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let services = RecordingServices::new();
     let dyn_services: Arc<dyn BuilderServices> = services.clone();
 

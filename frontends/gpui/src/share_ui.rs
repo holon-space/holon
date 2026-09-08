@@ -588,7 +588,10 @@ impl EventEmitter<NotifyShareUi> for ShareUiState {}
 ///
 /// Set in `launch_holon_window_impl` after the share_backend is wired.
 #[derive(Clone)]
-pub struct ShareTrigger(Arc<dyn Fn(String, &mut gpui::App) + Send + Sync>);
+pub struct ShareTrigger(Arc<ShareTriggerFn>);
+
+/// Opens the share UI for the given entity id.
+type ShareTriggerFn = dyn Fn(String, &mut gpui::App) + Send + Sync;
 
 impl ShareTrigger {
     pub fn new(f: impl Fn(String, &mut gpui::App) + Send + Sync + 'static) -> Self {
@@ -613,7 +616,10 @@ impl gpui::Global for ShareTrigger {}
 /// the `ShareUiState` entity through every intermediate builder — mirrors
 /// [`ShareTrigger`]. Installed in `launch_holon_window_impl`.
 #[derive(Clone)]
-pub struct DegradedToastSink(Arc<dyn Fn(DegradedToast, &mut gpui::App) + Send + Sync>);
+pub struct DegradedToastSink(Arc<DegradedToastFn>);
+
+/// Shows one degraded-mode toast.
+type DegradedToastFn = dyn Fn(DegradedToast, &mut gpui::App) + Send + Sync;
 
 impl DegradedToastSink {
     pub fn new(f: impl Fn(DegradedToast, &mut gpui::App) + Send + Sync + 'static) -> Self {
@@ -1063,6 +1069,9 @@ fn undo_disclosure(
 /// a oneshot channel, and only a genuine `Err` produces a user-visible
 /// toast — `Applied` is silent (the projection update is the feedback) and
 /// `Empty` only logs at debug level.
+// Renders from many independently-owned pieces of view state; grouping them
+// is a view refactor, not a lint fix.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_undo_redo(
     is_redo: bool,
     session: Arc<FrontendSession>,
@@ -1756,6 +1765,9 @@ fn render_share_modal(
         .into_any_element()
 }
 
+// Renders from many independently-owned pieces of view state; grouping them
+// is a view refactor, not a lint fix.
+#[allow(clippy::too_many_arguments)]
 fn render_accept_modal(
     inline_error: Option<&str>,
     share_state: Entity<ShareUiState>,

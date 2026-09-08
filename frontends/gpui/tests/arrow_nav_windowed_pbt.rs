@@ -155,7 +155,7 @@ fn arrow_walk_keeps_focus_on_the_reference_outline_neighbour() {
     });
 
     let result = runner.run(&case_strategy(), |(start, steps)| {
-        drive_case(start, steps).map_err(|e| TestCaseError::fail(e))
+        drive_case(start, steps).map_err(TestCaseError::fail)
     });
 
     if let Err(e) = result {

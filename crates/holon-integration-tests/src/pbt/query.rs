@@ -63,10 +63,11 @@ pub const MAIN_PANEL_MAX_DEPTH: u32 = 20;
 /// `focus_root`-bound navigation-aware match. `evaluate`/`base_block_ids`
 /// reproduce each form against the reference block map so the reference's
 /// rendered set agrees with what the SUT's compiled query returns.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum QuerySource {
     /// Every block. PRQL `from block`, SQL `SELECT … FROM block`, GQL
     /// `MATCH (n:block) RETURN n`. The watched-query default.
+    #[default]
     AllBlocks,
     /// Direct non-source children of `context` — the PRQL stdlib `children`
     /// virtual table (`parent_id == $context_id | content_type != 'source'`).
@@ -111,12 +112,6 @@ pub enum QuerySource {
     /// != 'block:__default__'`. No PRQL/GQL surface (the sidebar is
     /// authored in holon_sql).
     PageBlocks,
-}
-
-impl Default for QuerySource {
-    fn default() -> Self {
-        QuerySource::AllBlocks
-    }
 }
 
 impl QuerySource {

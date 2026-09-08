@@ -41,6 +41,9 @@ pub struct InputBoxView {
 }
 
 impl InputBoxView {
+    // Renders from many independently-owned pieces of view state; grouping them
+    // is a view refactor, not a lint fix.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         bounds: crate::geometry::BoundsRegistry,
         placeholder: String,

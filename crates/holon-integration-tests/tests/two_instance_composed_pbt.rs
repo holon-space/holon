@@ -126,7 +126,7 @@ fn two_instances_boot_with_distinct_peer_ids_and_transport_nothing_unshared() {
     let ref_state = wide_e2e_ref();
     rt.block_on(async {
         let resolver = IdResolver::default();
-        let (caps, handle, _) = boot_two_instances(&resolver, &ref_state).await;
+        let (caps, _handle, _) = boot_two_instances(&resolver, &ref_state).await;
 
         let two = caps.expect::<dyn SutTwoInstance>();
         let (owner_peer, receiver_peer) = two.instance_peer_ids().await;
@@ -1074,7 +1074,7 @@ fn drive_two_writer_chain() -> (Sut, ReferenceState) {
     let mut ref_state = wide_e2e_ref();
     let mut sut = <Sut as StateMachineTest>::init_test(&ref_state);
 
-    let mut step = |sut: Sut, ref_state: &mut ReferenceState, t: E2ETransition| -> Sut {
+    let step = |sut: Sut, ref_state: &mut ReferenceState, t: E2ETransition| -> Sut {
         assert!(
             Machine::preconditions(ref_state, &t),
             "two-writer chain: {t:?} violates its precondition against the booted oracle — the \

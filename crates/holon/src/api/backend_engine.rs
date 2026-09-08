@@ -787,6 +787,7 @@ impl BackendEngine {
     ///     SELECT, `EXCEPT`/`INTERSECT`
     ///   * `no such column …`                       — derived-table `FROM
     ///     (SELECT…)` (the `_change_origin` transform)
+    ///
     /// Deliberately NOT matched (TRANSIENT — a dependency not built yet, which
     /// retrying resolves): `no such table`, `waiting for dependencies`,
     /// `database is locked`, `Database schema changed`. The classifier is
@@ -922,7 +923,7 @@ impl BackendEngine {
                     .collect();
 
                 let mut items: Vec<RowChange> = Vec::new();
-                for (key, _) in prev.iter() {
+                for key in prev.keys() {
                     if !next.contains_key(key) {
                         items.push(RowChange {
                             relation_name: relation.clone(),

@@ -78,7 +78,6 @@
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
-use holon_api::EntityRef;
 use holon_api::EntityUri;
 use holon_api::InlineMark;
 use holon_pbt_core::capabilities::RefUndoRedoBurned;

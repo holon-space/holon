@@ -42,8 +42,10 @@ impl DocLock {
     /// The lock for `doc`, creating it on first sight. Any two `LoroDocument`s
     /// wrapping the same `Arc<LoroDoc>` receive the same lock.
     pub(crate) fn for_doc(doc: &Arc<LoroDoc>) -> Self {
-        static REGISTRY: OnceLock<Mutex<HashMap<DocKey, (Weak<LoroDoc>, Arc<RwLock<()>>)>>> =
-            OnceLock::new();
+        /// The weak handle proves the entry's doc is still alive; the lock is
+        /// what callers share.
+        type Entry = (Weak<LoroDoc>, Arc<RwLock<()>>);
+        static REGISTRY: OnceLock<Mutex<HashMap<DocKey, Entry>>> = OnceLock::new();
         let key = Arc::as_ptr(doc) as DocKey;
         let mut map = REGISTRY
             .get_or_init(|| Mutex::new(HashMap::new()))
@@ -201,7 +203,12 @@ mod tests {
         let inner = DocLock::for_doc(&d);
         std::thread::scope(|s| {
             lock.write("t", || {
-                let h = s.spawn(move || inner.read("t", || Ok(tx.send(()).unwrap())));
+                let h = s.spawn(move || {
+                    inner.read("t", || {
+                        tx.send(()).unwrap();
+                        Ok(())
+                    })
+                });
                 assert!(
                     rx.recv_timeout(Duration::from_millis(250)).is_err(),
                     "the reader observed the doc while the write lock was held"

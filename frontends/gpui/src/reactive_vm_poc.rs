@@ -733,6 +733,10 @@ impl ReactiveCollection {
         self.items.lock_ref().len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn snapshot(&self, cx: &App) -> Vec<TreeSnapshot> {
         self.items
             .lock_ref()

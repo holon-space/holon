@@ -156,7 +156,7 @@ fn boot_and_snapshot(runtime: &Arc<tokio::runtime::Runtime>) -> Snap {
     let assets: Arc<dyn AssetSource> = Arc::new(());
     let mut app = TestApp::with_text_system_and_assets(text_system, assets);
 
-    let mut env = runtime
+    let env = runtime
         .block_on(async { TestEnvironment::new(runtime.clone()) })
         .expect("test environment");
     runtime.block_on(async { env.start_app(true).await.expect("start_app") });

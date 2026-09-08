@@ -169,7 +169,7 @@ fn prod_session_wires_undo_and_mcp_shares_the_same_stack() {
         // (3) Undo reverts the content.
         let outcome = session.undo().await.expect("undo dispatch");
         assert!(
-            matches!(outcome, UndoOutcome::Applied { .. }),
+            matches!(outcome, UndoOutcome::Applied),
             "expected UndoOutcome::Applied, got {outcome:?}"
         );
         let reverted = wait_until("content-reverted", Duration::from_secs(5), || {

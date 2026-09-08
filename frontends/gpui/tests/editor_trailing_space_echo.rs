@@ -61,7 +61,7 @@ fn mount_editor(
     cx: &mut TestAppContext,
     data: &Mutable<Arc<DataRow>>,
 ) -> (gpui::Entity<EditorView>, String) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let services: Arc<dyn BuilderServices> = TestServices::new();
     let data_handle = data.read_only();
     let row_id = "block:trailing-space-test".to_string();

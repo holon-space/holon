@@ -1680,7 +1680,7 @@ impl TestEnvironment {
 
     /// Reload an org file from disk (removes from store and re-loads).
     /// Only meaningful when Loro is enabled; no-op otherwise.
-    pub async fn reload_org_file(&self, file_path: &PathBuf) -> Result<()> {
+    pub async fn reload_org_file(&self, file_path: &std::path::Path) -> Result<()> {
         if let Some(doc_store) = self.doc_store() {
             let mut store = doc_store.write().await;
             store.remove(file_path).await;
@@ -1790,6 +1790,7 @@ impl TestEnvironment {
     /// `render_entity this`:
     /// - Takes a query source from a block
     /// - Executes it with the parent block's ID as context for `from children`
+    ///
     /// Uses FrontendSession directly to ensure identical code path with
     /// Flutter.
     ///
@@ -1971,14 +1972,9 @@ impl TestEnvironment {
             self.all_blocks_stream.borrow_mut().as_mut(),
             self.all_blocks.borrow_mut().as_mut(),
         ) {
-            loop {
-                match stream.next().now_or_never() {
-                    Some(Some(batch)) => {
-                        for change in batch.inner.items {
-                            acc.apply_change(rekey_change(change.change));
-                        }
-                    }
-                    _ => break,
+            while let Some(Some(batch)) = stream.next().now_or_never() {
+                for change in batch.inner.items {
+                    acc.apply_change(rekey_change(change.change));
                 }
             }
         }
@@ -1997,17 +1993,12 @@ impl TestEnvironment {
         let mut region_data = self.region_data.borrow_mut();
         for (region_id, stream) in region_streams.iter_mut() {
             let mut event_count = 0;
-            loop {
-                match stream.next().now_or_never() {
-                    Some(Some(batch)) => {
-                        event_count += batch.inner.items.len();
-                        if let Some(region_data) = region_data.get_mut(region_id) {
-                            for change in &batch.inner.items {
-                                region_data.apply_change(rekey_change(change.change.clone()));
-                            }
-                        }
+            while let Some(Some(batch)) = stream.next().now_or_never() {
+                event_count += batch.inner.items.len();
+                if let Some(region_data) = region_data.get_mut(region_id) {
+                    for change in &batch.inner.items {
+                        region_data.apply_change(rekey_change(change.change.clone()));
                     }
-                    _ => break,
                 }
             }
             if event_count > 0 {
@@ -2311,7 +2302,6 @@ impl TestEnvironment {
     // Navigation Operations
     // =========================================================================
 
-    /// Navigate to focus on a specific block in a region.
     // navigate_focus / navigate_back / navigate_forward / navigate_home
     // were API-level shortcuts that bypassed the keyboard pipeline:
     // each called `execute_op("navigation", ...)` directly and then

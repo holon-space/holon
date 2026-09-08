@@ -1,11 +1,6 @@
-use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::Result;
 use holon_loro::LoroDocument;
 use serial_test::serial;
-use tokio::time::sleep;
-use tokio::time::timeout;
 
 // Loro-only tests (no P2P adapter needed)
 

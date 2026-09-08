@@ -82,7 +82,7 @@ fn build_reference(forest: &[GenBlock]) -> BTreeMap<EntityUri, Block> {
         let block = if gb.is_source {
             Block::new_source(uri.clone(), parent, "holon_sql", "SELECT 1")
         } else {
-            Block::new_text(uri.clone(), parent, &format!("Block {i}"))
+            Block::new_text(uri.clone(), parent, format!("Block {i}"))
         };
         blocks.insert(uri, block);
     }

@@ -383,6 +383,7 @@ proptest! {
                 .expect("create block");
             // The editor IS the write target now (Stage-1b collapse): it commits into
             // the SAME shared store the `SutBackend` cap reads.
+            #[allow(clippy::arc_with_non_send_sync)] // harness plumbing; production traits want Arc
             let editor = Arc::new(InMemEditorComponent::new(
                 backend.clone() as Arc<dyn CoreOperations>
             ));

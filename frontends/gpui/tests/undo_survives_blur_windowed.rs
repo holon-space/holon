@@ -17,6 +17,7 @@
 //!     survives row-set rebuilds.
 //!   * SqlOnly (`crdt.enabled = false`): the per-row data subscription, which
 //!     any row-set rebuild orphans, plus the undo/redo `ReseedGesture`.
+//!
 //! The dogfood ran SqlOnly. `TestEnvironment` defaults to Loro, so
 //! a single-arm rung here would have exercised the immune mode and reported a
 //! green that means nothing about the finding — hence both arms, with the mode

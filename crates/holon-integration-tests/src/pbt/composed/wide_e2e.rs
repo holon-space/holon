@@ -57,7 +57,6 @@ use crate::pbt::composed::builder::compose_sut_seeded;
 use crate::pbt::composed::builder::compose_sut_seeded_with_peer_id;
 use crate::pbt::composed::builder::compose_sut_windowed_base_seeded;
 use crate::pbt::composed::composed_invariant_catalog;
-use crate::pbt::composed::harness::BurnedPairs;
 use crate::pbt::composed::harness::ComposedSlice;
 use crate::pbt::composed::harness::sut_ids;
 use crate::pbt::composed::seed_primitives::C1;
@@ -920,6 +919,9 @@ pub async fn boot_and_seed_wide(
 /// [`boot_and_seed_wide`] with this session's Loro peer id pinned — the
 /// two-instance slice's owner arm. `None` keeps the env/random default every
 /// single-instance caller relies on.
+// The harness holds single-threaded SUT parts in `Arc` because the
+// production trait signatures it feeds require `Arc`, not `Rc`.
+#[allow(clippy::arc_with_non_send_sync)]
 pub async fn boot_and_seed_wide_with_peer_id(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
@@ -2228,6 +2230,7 @@ mod tests {
     use holon_pbt_core::capabilities::PeerEditOp;
 
     use super::*;
+    use crate::pbt::composed::harness::BurnedPairs;
     use crate::pbt::transitions::AddPeer;
     use crate::pbt::transitions::CreateDocument;
     use crate::pbt::transitions::MergeFromPeer;

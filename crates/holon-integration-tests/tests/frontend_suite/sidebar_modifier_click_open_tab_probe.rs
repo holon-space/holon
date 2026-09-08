@@ -62,10 +62,10 @@ fn find_panel<'a>(node: &'a ViewModel, panel_id: &EntityUri) -> Option<&'a ViewM
 /// `navigation_history.id ASC` order".
 fn rendered_ids(node: &ViewModel) -> Vec<EntityUri> {
     fn walk(node: &ViewModel, out: &mut Vec<EntityUri>) {
-        if let Some(id) = node.entity_id() {
-            if !out.contains(&id) {
-                out.push(id);
-            }
+        if let Some(id) = node.entity_id()
+            && !out.contains(&id)
+        {
+            out.push(id);
         }
         for child in node.children() {
             walk(child, out);

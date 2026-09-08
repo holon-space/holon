@@ -26,7 +26,7 @@ use tokio::sync::broadcast;
 const ROOT_PARENT: &str = "sentinel:no_parent";
 
 async fn boot(dir: &TempDir) -> DbHandle {
-    let db = TursoBackend::open_database(&dir.path().join("guard.db")).expect("open db");
+    let db = TursoBackend::open_database(dir.path().join("guard.db")).expect("open db");
     let (cdc_tx, _rx) = broadcast::channel(1024);
     let (backend, handle) = TursoBackend::new(db, cdc_tx).expect("backend");
     std::mem::forget(backend);

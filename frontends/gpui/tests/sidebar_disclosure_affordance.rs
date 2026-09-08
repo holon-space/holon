@@ -298,7 +298,7 @@ fn sidebar_root() -> Arc<ReactiveViewModel> {
 }
 
 fn render_sidebar(cx: &mut TestAppContext, shape: IdShape) -> BoundsSnapshot {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let registry = Arc::new(BlockTreeRegistry::new());
     register_sidebar(&registry, shape);
     let services: Arc<dyn holon_frontend::reactive::BuilderServices> =
@@ -415,6 +415,9 @@ fn collapsed_halo_clears_the_contrast_floor_in_every_theme() {
 /// to read HEAVIER than a parent's chevron, inverting the hierarchy. Parents
 /// carry full disclosure weight; leaf bullets are demoted below it.
 #[test]
+// Both sides are consts by design; this test states the invariant at runtime
+// rather than refusing to compile, so the whole suite still reports.
+#[allow(clippy::assertions_on_constants)]
 fn parents_outweigh_leaves_in_the_scan() {
     assert!(
         holon_gpui::render::builders::LEAF_BULLET_WEIGHT

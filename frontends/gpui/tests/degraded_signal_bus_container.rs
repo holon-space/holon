@@ -55,7 +55,6 @@ fn shipped_module(dir: &std::path::Path, crdt_enabled: Option<bool>) -> GpuiModu
             // flag gates and it is orthogonal to the bus registration.
             mcp: McpConfig {
                 enabled: Some(false),
-                ..Default::default()
             },
             ..Default::default()
         },

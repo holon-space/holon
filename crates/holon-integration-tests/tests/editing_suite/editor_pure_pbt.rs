@@ -188,7 +188,7 @@ impl RefBlockTree for EditorPureRef {
         let mut out = Vec::new();
         let mut stack = vec![self.root_id.clone()];
         while let Some(id) = stack.pop() {
-            if self.blocks.get(&id).is_some() {
+            if self.blocks.contains_key(&id) {
                 let is_text = self.is_text_block(&id);
                 if is_text && id != self.root_id {
                     out.push(id.clone());

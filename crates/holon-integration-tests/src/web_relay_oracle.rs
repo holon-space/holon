@@ -98,7 +98,7 @@ impl WebRelayOracle {
     pub async fn await_ready(&self, timeout: Duration) -> Result<()> {
         let hub_url = &self.hub_url;
         let deadline = Instant::now() + timeout;
-        let mut last_err = "never attempted".to_string();
+        let mut last_err;
         loop {
             match self
                 .call("await_quiescence", serde_json::json!({"budget_ms": 5000}))

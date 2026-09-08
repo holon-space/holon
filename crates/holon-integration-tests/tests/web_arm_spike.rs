@@ -260,7 +260,7 @@ async fn web_arm_spike_drives_the_browser() -> Result<()> {
             driver.send_raw_keystroke("a", &[]).await
         })
         .await?;
-        if n % 5 == 0 {
+        if n.is_multiple_of(5) {
             lat.time(&driver, "click_entity(block text)", async {
                 driver.click_entity(&target_uri, "main").await
             })

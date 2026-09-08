@@ -71,7 +71,7 @@ fn mount_editor_with<'a>(
     &'a mut VisualTestContext,
     Arc<TestServices>,
 ) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let services: Arc<dyn BuilderServices> = services_concrete.clone();
     let data_handle = data.read_only();
 
@@ -358,7 +358,7 @@ fn mount_cell_editor<'a>(
     &'a mut VisualTestContext,
     Arc<TestServices>,
 ) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let services_concrete = TestServices::with_editable_cell(in_memory_cell(cell_seed));
     let services: Arc<dyn BuilderServices> = services_concrete.clone();
     let data_handle = data.read_only();

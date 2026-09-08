@@ -147,8 +147,11 @@ struct RecordingBrowser {
     opened: Mutex<Vec<String>>,
     /// Query string appended to the redirect_uri when driving the callback.
     /// `None` means: record the URL and drive nothing.
-    respond: Option<Box<dyn Fn(&str) -> String + Send + Sync>>,
+    respond: Option<Responder>,
 }
+
+/// Builds the callback query string from the authorization URL.
+type Responder = Box<dyn Fn(&str) -> String + Send + Sync>;
 
 impl RecordingBrowser {
     fn recording_only() -> Self {

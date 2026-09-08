@@ -3,9 +3,9 @@
 //! `Needs SutRenderer + RefAdvice`: the renderer supplies the widget tree;
 //! `RefAdvice` supplies the per-anchor expectation. Selected by any slice with
 //! a renderer + the advice ref cap (the frontend slice's headless
-//! `ReactiveEngine`
-//! + `ReferenceState`). EXPECTED RED between step 4 (generator mints rules) and
-//! step 6 (renderer weaves them) — see the body doc.
+//! `ReactiveEngine` plus `ReferenceState`). EXPECTED RED between step 4
+//! (generator mints rules) and step 6 (renderer weaves them) — see the body
+//! doc.
 
 use holon_pbt_core::RunMode;
 use holon_pbt_core::capabilities::RefAdvice;

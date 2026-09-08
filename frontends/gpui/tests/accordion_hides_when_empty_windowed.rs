@@ -247,7 +247,7 @@ fn render_seeded(
     hide_when_empty: bool,
     backlink_rows: usize,
 ) -> BoundsSnapshot {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
 
     let registry = Arc::new(support::BlockTreeRegistry::new());
     let services = support::TestServices::with_registry_quiescent(registry.clone());
@@ -375,7 +375,7 @@ fn static_content_panel() -> ReactiveViewModel {
 
 #[gpui::test]
 fn a_row_arriving_shows_the_section_and_its_removal_hides_it_again(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
 
     let registry = Arc::new(support::BlockTreeRegistry::new());
     let services = support::TestServices::with_registry_quiescent(registry.clone());
@@ -477,7 +477,7 @@ fn a_row_arriving_shows_the_section_and_its_removal_hides_it_again(cx: &mut Test
 /// error-coloured anonymous div would leave them blind to it.
 #[gpui::test]
 fn hide_when_empty_over_static_content_paints_a_named_error(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
 
     let registry = Arc::new(support::BlockTreeRegistry::new());
     let services = support::TestServices::with_registry_quiescent(registry.clone());

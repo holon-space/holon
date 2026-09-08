@@ -240,7 +240,7 @@ fn drawer_band(bounds: &BoundsRegistry) -> ElementInfo {
 /// band, so the assertion is about the scroll EXTENT, not one wheel's delta.
 #[gpui::test]
 fn left_sidebar_scrolls_to_its_last_row(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
 
     let registry = Arc::new(BlockTreeRegistry::new());
     let test_services = support::TestServices::with_registry_quiescent(registry.clone());

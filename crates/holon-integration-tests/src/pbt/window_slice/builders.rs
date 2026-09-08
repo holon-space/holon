@@ -207,6 +207,9 @@ impl SutInlineRowMount for MountConventionComponent {
     }
 }
 
+// The harness holds single-threaded SUT parts in `Arc` because the
+// production trait signatures it feeds require `Arc`, not `Rc`.
+#[allow(clippy::arc_with_non_send_sync)]
 pub fn overlay_windowed_caps(
     mut caps: CapMap,
     frontend: Arc<HeadlessFrontendComponent>,

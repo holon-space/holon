@@ -179,15 +179,15 @@ fn outline_content_ids(
         at_root: bool,
         out: &mut BTreeSet<String>,
     ) {
-        if !node.is_display_placed() {
-            if let Some(id) = &node.entity_id {
-                // Inside a surface, a rendered id is excused ONLY if that
-                // surface's collection actually delivered it. Anything else is
-                // a leftover the query never produced, and stays judged.
-                let excused = enclosing.is_some_and(|rows| rows.contains(id));
-                if !excused {
-                    out.insert(id.clone());
-                }
+        if !node.is_display_placed()
+            && let Some(id) = &node.entity_id
+        {
+            // Inside a surface, a rendered id is excused ONLY if that
+            // surface's collection actually delivered it. Anything else is
+            // a leftover the query never produced, and stays judged.
+            let excused = enclosing.is_some_and(|rows| rows.contains(id));
+            if !excused {
+                out.insert(id.clone());
             }
         }
         // An INLINE `live_query(…)` node carries no entity id, so its registry

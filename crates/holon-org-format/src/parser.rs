@@ -771,7 +771,11 @@ fn emit_section_children(
 }
 
 /// Recursively process headlines and their children
-#[allow(clippy::only_used_in_recursion)] // file_id threaded for future log/diagnostic plumbing
+#[allow(clippy::only_used_in_recursion)]
+// file_id threaded for future log/diagnostic plumbing
+// Nine arguments because six are threaded unchanged through the recursion;
+// folding them into a context struct is a parser refactor, not a lint fix.
+#[allow(clippy::too_many_arguments)]
 fn process_headlines(
     headlines: impl Iterator<Item = Headline>,
     parent_id: &str,

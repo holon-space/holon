@@ -258,7 +258,7 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
         )
     });
     let (gx, gy) = gear.center();
-    let center = Point {
+    let _center = Point {
         x: Pixels::from(gx),
         y: Pixels::from(gy),
     };

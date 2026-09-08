@@ -661,6 +661,7 @@ mod required_caps_guard {
 ///      its `register_live_caps` cap surface over the `full_headless` wiring it
 ///      mirrors. This keeps a live-MCP-only transition (`DenseProjectionEdit` /
 ///      `SutDenseTools`) counted as ALIVE by its CAP, not by a name allowlist.
+///
 /// A transition alive in NEITHER home (and not env-gated) fails the guard.
 #[cfg(test)]
 mod non_vacuity_guard {

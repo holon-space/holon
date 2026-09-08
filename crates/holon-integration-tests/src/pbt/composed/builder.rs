@@ -11,10 +11,9 @@
 //! cap-set the active subsystems realize — NOT the hand-tuned minimal subsets
 //! the slice builders carry (e.g. `sql_loro_wide` drops Loro's `SutLoroLog` to
 //! avoid selecting Loro block invariants its seed can't satisfy). Selection
-//! (`Needs::selected_against`)
-//! + the seed then decide what runs. So this is verified by **cap-set
-//!   membership +
-//! precedence-shadow reporting**, not byte-parity with the old builders.
+//! (`Needs::selected_against`) plus the seed then decide what runs. So this is
+//! verified by **cap-set membership and precedence-shadow reporting**, not
+//! byte-parity with the old builders.
 //! (Unifying the *seed* so every selected invariant passes is the next
 //! increment — the harness.)
 //!
@@ -270,6 +269,9 @@ pub async fn compose_sut_seeded_with_peer_id(
 /// The workhorse behind [`compose_sut_seeded`] / [`compose_sut_windowed_base`].
 /// Identical for every config except the driver rung, chosen by
 /// `driver_placement` (see [`DriverPlacement`]).
+// The harness holds single-threaded SUT parts in `Arc` because the
+// production trait signatures it feeds require `Arc`, not `Rc`.
+#[allow(clippy::arc_with_non_send_sync)]
 async fn compose_sut_seeded_impl(
     set: &ComponentSet,
     resolver: &IdResolver,
@@ -1345,6 +1347,7 @@ mod tests {
     /// - `BulkExternalAdd` is NOW cap-feasible too: `HeadlessFrontendComponent`
     ///   provides a real composed `SutSeamMutate` (org write via the live
     ///   FileSyncController), which is its gate.
+    ///
     /// (`E2ESut`'s own runs keep everything: concrete-SUT runs leave `cap_set =
     /// None`, so the gate admits all.)
     #[test]

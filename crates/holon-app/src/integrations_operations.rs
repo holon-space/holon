@@ -419,7 +419,7 @@ impl OperationProvider for IntegrationsOperationProvider {
         let raw_id = params
             .get("id")
             .and_then(|v| v.as_string())
-            .ok_or_else(|| "IntegrationsOperationProvider: missing required parameter 'id'")?;
+            .ok_or("IntegrationsOperationProvider: missing required parameter 'id'")?;
         let provider = self.provider_of(raw_id)?;
 
         if op_name == BEGIN_OAUTH {
@@ -443,7 +443,7 @@ impl OperationProvider for IntegrationsOperationProvider {
         let field = params
             .get("field")
             .and_then(|v| v.as_string())
-            .ok_or_else(|| "IntegrationsOperationProvider: missing required parameter 'field'")?;
+            .ok_or("IntegrationsOperationProvider: missing required parameter 'field'")?;
         if field != ENABLED_FIELD {
             return Err(format!(
                 "IntegrationsOperationProvider: only '{ENABLED_FIELD}' is writable on an \

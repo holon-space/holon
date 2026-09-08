@@ -184,10 +184,10 @@ async fn main_panel_ui(driver: &McpUserDriver) -> serde_json::Value {
 fn collect_entity_ids(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
     match v {
         serde_json::Value::Object(map) => {
-            if let Some(serde_json::Value::Object(entity)) = map.get("entity") {
-                if let Some(serde_json::Value::String(id)) = entity.get("id") {
-                    out.insert(id.clone());
-                }
+            if let Some(serde_json::Value::Object(entity)) = map.get("entity")
+                && let Some(serde_json::Value::String(id)) = entity.get("id")
+            {
+                out.insert(id.clone());
             }
             for val in map.values() {
                 collect_entity_ids(val, out);

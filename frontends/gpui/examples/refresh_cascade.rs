@@ -148,8 +148,10 @@ impl Render for AppView {
                 panel(
                     "F: cached View entity",
                     div().flex_1().size_full().flex_col().child({
-                        let mut s = StyleRefinement::default();
-                        s.flex_grow = Some(1.0);
+                        let mut s = StyleRefinement {
+                            flex_grow: Some(1.0),
+                            ..Default::default()
+                        };
                         s.size.width = Some(relative(1.0).into());
                         s.size.height = Some(relative(1.0).into());
                         AnyView::from(self.list_entity.clone()).cached(s)
@@ -241,8 +243,10 @@ impl Render for AppView {
                             .flex_col()
                             .child(div().child("Header"))
                             .child({
-                                let mut s = StyleRefinement::default();
-                                s.flex_grow = Some(1.0);
+                                let mut s = StyleRefinement {
+                                    flex_grow: Some(1.0),
+                                    ..Default::default()
+                                };
                                 s.size.width = Some(relative(1.0).into());
                                 s.min_size.height = Some(px(0.0).into());
                                 AnyView::from(self.list_entity.clone()).cached(s)
@@ -317,8 +321,10 @@ fn panel_holon_chain(list_entity: Entity<ListEntity>) -> AnyElement {
                         .child(div().flex().justify_end().child("icons"))
                         // CollectionView entity with cached style
                         .child({
-                            let mut s = StyleRefinement::default();
-                            s.flex_grow = Some(1.0);
+                            let mut s = StyleRefinement {
+                                flex_grow: Some(1.0),
+                                ..Default::default()
+                            };
                             s.size.width = Some(relative(1.0).into());
                             s.size.height = Some(relative(1.0).into());
                             AnyView::from(list_entity).cached(s)

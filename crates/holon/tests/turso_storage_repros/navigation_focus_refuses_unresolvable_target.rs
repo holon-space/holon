@@ -99,7 +99,7 @@ async fn open_focus_roots(handle: &DbHandle) -> Vec<String> {
 #[tokio::test]
 async fn focus_refuses_a_target_that_names_no_block() {
     let temp = TempDir::new().unwrap();
-    let db = TursoBackend::open_database(&temp.path().join("nav_refuse.db")).expect("open db");
+    let db = TursoBackend::open_database(temp.path().join("nav_refuse.db")).expect("open db");
     let (cdc_tx, _cdc_rx) = tokio::sync::broadcast::channel(1024);
     let (_backend, handle) = TursoBackend::new(db, cdc_tx).expect("create backend");
     setup(&handle).await;
@@ -150,7 +150,7 @@ async fn focus_refuses_a_target_that_names_no_block() {
 #[tokio::test]
 async fn focus_with_no_block_id_is_still_accepted() {
     let temp = TempDir::new().unwrap();
-    let db = TursoBackend::open_database(&temp.path().join("nav_home.db")).expect("open db");
+    let db = TursoBackend::open_database(temp.path().join("nav_home.db")).expect("open db");
     let (cdc_tx, _cdc_rx) = tokio::sync::broadcast::channel(1024);
     let (_backend, handle) = TursoBackend::new(db, cdc_tx).expect("create backend");
     setup(&handle).await;

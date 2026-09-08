@@ -216,8 +216,7 @@ fn an_unreadable_state_file_does_not_load_as_a_default() {
     std::fs::write(dir.path().join("todoist.state.toml"), "enabled = ").expect("write junk");
 
     let err = IntegrationConfigStore::load(dir.path())
-        .err()
-        .expect("a truncated state file must not load as a default");
+        .expect_err("a truncated state file must not load as a default");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("todoist") && msg.contains("todoist.state.toml"),
@@ -241,8 +240,7 @@ fn an_unreadable_state_file_fails_the_module_wiring_loud() {
     let injector = fluxdi::Injector::root();
     let err = holon_app::McpIntegrationsModule::from_dir(dir.path(), dir.path())
         .configure(&injector)
-        .err()
-        .expect("a corrupt state file must fail the module, not configure an empty container");
+        .expect_err("a corrupt state file must fail the module, not configure an empty container");
 
     let msg = format!("{err}");
     assert!(

@@ -29,7 +29,6 @@ use holon_api::FieldLifetime;
 use holon_api::FieldSchema;
 use holon_api::HomeProfileId;
 use holon_api::TypeDefinition;
-use holon_capability::ProfileRegistry;
 use holon_loro_wiring::EventInfraModule;
 use holon_profiles::TypeRegistry;
 
@@ -114,7 +113,9 @@ fn boolean_computed_type(name: &str, home: &str) -> TypeDefinition {
     type_def.fields.push(FieldSchema {
         name: "flag".to_string(),
         sql_type: "BOOLEAN".to_string(),
-        lifetime: FieldLifetime::Computed { spec },
+        lifetime: FieldLifetime::Computed {
+            spec: Box::new(spec),
+        },
         ..Default::default()
     });
     type_def

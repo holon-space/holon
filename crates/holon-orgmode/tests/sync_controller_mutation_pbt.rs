@@ -1638,7 +1638,7 @@ proptest! {
                 .await
                 .unwrap();
 
-            fixture
+            let _ = fixture
                 .controller
                 .on_file_changed(&fixture.file_path())
                 .await
@@ -1698,7 +1698,7 @@ proptest! {
                 .unwrap();
 
             // on_file_changed → store update (also re-renders + rewrites the file)
-            fixture
+            let _ = fixture
                 .controller
                 .on_file_changed(&fixture.file_path())
                 .await
@@ -1841,7 +1841,7 @@ proptest! {
             let org = format!("#+ID: {}\n{}\n", fixture.doc_id.id(), todo_line);
             tokio::fs::write(&fixture.file_path(), &org).await.unwrap();
 
-            fixture
+            let _ = fixture
                 .controller
                 .on_file_changed(&fixture.file_path())
                 .await
@@ -2169,7 +2169,7 @@ mod ordering_replay_tests {
             .unwrap();
         // Canonicalize after writing (macOS: /var → /private/var symlink).
         let canonical_path = file_path.canonicalize().expect("canonicalize file_path");
-        controller
+        let _ = controller
             .on_file_changed(&canonical_path)
             .await
             .expect("first on_file_changed");
@@ -2200,7 +2200,7 @@ mod ordering_replay_tests {
             .await
             .unwrap();
         let canonical_path2 = file_path2.canonicalize().expect("canonicalize file_path2");
-        controller2
+        let _ = controller2
             .on_file_changed(&canonical_path2)
             .await
             .expect("second on_file_changed");
@@ -2232,7 +2232,7 @@ mod ordering_replay_tests {
             .unwrap();
         // Canonicalize after writing (macOS: /var → /private/var symlink).
         let canonical_path = file_path.canonicalize().expect("canonicalize file_path");
-        controller
+        let _ = controller
             .on_file_changed(&canonical_path)
             .await
             .expect("on_file_changed");
@@ -2481,7 +2481,7 @@ mod fast_path_loro_presence_tests {
         let canonical = file_path.canonicalize().expect("canonicalize");
 
         controller.initialize().await.expect("initialize boot 1");
-        controller
+        let _ = controller
             .on_file_changed(&canonical)
             .await
             .expect("boot 1 on_file_changed");
@@ -2518,7 +2518,7 @@ mod fast_path_loro_presence_tests {
         );
 
         controller.initialize().await.expect("initialize boot 2");
-        controller
+        let _ = controller
             .on_file_changed(canonical)
             .await
             .expect("boot 2 on_file_changed");
@@ -2783,7 +2783,7 @@ mod initial_scan_batched_barrier_tests {
         controller.begin_initial_scan();
         assert!(controller.in_initial_scan(), "flag on during scan");
         for p in &paths {
-            controller
+            let _ = controller
                 .on_file_changed(p)
                 .await
                 .unwrap_or_else(|e| panic!("on_file_changed {}: {e:#}", p.display()));
@@ -2832,7 +2832,7 @@ mod initial_scan_batched_barrier_tests {
         let p = p.canonicalize().expect("canonicalize");
 
         controller.begin_initial_scan();
-        controller
+        let _ = controller
             .on_file_changed(&p)
             .await
             .expect("per-file ingest succeeds (block_raw synchronous)");
@@ -2920,7 +2920,7 @@ mod initial_scan_batched_barrier_tests {
         let p = p.canonicalize().expect("canonicalize");
 
         controller.begin_initial_scan();
-        controller
+        let _ = controller
             .on_file_changed(&p)
             .await
             .expect("companion ingest must succeed — the inlined foreign subtree is skipped");
@@ -2958,7 +2958,7 @@ mod initial_scan_batched_barrier_tests {
         assert_eq!(disk_after, companion, "companion file must be left as-is");
 
         // No quarantine: a subsequent external change ingests fine too.
-        controller
+        let _ = controller
             .on_file_changed(&p)
             .await
             .expect("re-ingest of the unchanged companion stays clean");
@@ -2994,7 +2994,7 @@ mod initial_scan_batched_barrier_tests {
 
         controller.begin_initial_scan();
         for p in &paths {
-            controller
+            let _ = controller
                 .on_file_changed(p)
                 .await
                 .unwrap_or_else(|e| panic!("on_file_changed {}: {e:#}", p.display()));
@@ -3048,7 +3048,8 @@ mod atomic_rename_tests {
         tokio::fs::write(&fx.file_path(), org.as_bytes())
             .await
             .expect("write test.org");
-        fx.controller
+        let _ = fx
+            .controller
             .on_file_changed(&fx.file_path())
             .await
             .expect("initial ingest of test.org");
@@ -3085,7 +3086,7 @@ mod atomic_rename_tests {
         tokio::fs::rename(&old, &moved).await.unwrap();
 
         // Create(B) half, then a poll tick discovers A gone → on_file_deleted(A).
-        fx.controller.on_file_changed(&moved).await.unwrap();
+        let _ = fx.controller.on_file_changed(&moved).await.unwrap();
         fx.controller.poll_tracked_files().await.unwrap();
 
         assert_eq!(
@@ -3182,8 +3183,8 @@ mod atomic_rename_tests {
         // its `#+ID` is now tracked at `moved`), THEN the stray `Remove` of the
         // old path arrives — the exact sequence a flush-then-create fallback
         // hands the controller.
-        fx.controller.on_file_changed(&moved).await.unwrap();
-        fx.controller.on_file_changed(&old).await.unwrap();
+        let _ = fx.controller.on_file_changed(&moved).await.unwrap();
+        let _ = fx.controller.on_file_changed(&old).await.unwrap();
 
         assert_eq!(
             fx.store.delete_count(),
@@ -3272,7 +3273,7 @@ mod atomic_rename_tests {
                     fx.controller.on_file_renamed(&from, &to).await.unwrap()
                 }
                 Some(FileEvent::Changed(p)) => {
-                    fx.controller.on_file_changed(&p).await.unwrap();
+                    let _ = fx.controller.on_file_changed(&p).await.unwrap();
                 }
                 None => {}
             }
@@ -3801,7 +3802,7 @@ mod intermediate_ancestor_writeback_hole {
         let mut fixture = TestFixture::new(temp_dir.path());
         let p_a = fixture.doc_id.clone();
         let only = text_block("la-only", &p_a, "la-only-child", 1, 0);
-        fixture.seed_blocks(&[only.clone()]);
+        fixture.seed_blocks(std::slice::from_ref(&only));
         fixture.controller.initialize().await.expect("initialize");
         write_back(&mut fixture, &p_a, &only)
             .await

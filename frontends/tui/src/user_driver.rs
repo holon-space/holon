@@ -117,6 +117,9 @@ pub struct TuiUserDriver {
 }
 
 impl TuiUserDriver {
+    // Arguments are the harness's independently-built collaborators; grouping
+    // them is a harness refactor, not a lint fix.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         engine: Arc<ReactiveEngine>,
         geometry: Arc<dyn GeometryProvider>,

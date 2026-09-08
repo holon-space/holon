@@ -473,17 +473,12 @@ pub(crate) fn trim_blank_lines(s: &str) -> &str {
             _ => break,
         }
     }
-    loop {
-        match s[start..end].rfind('\n') {
-            Some(i) => {
-                let nl = start + i;
-                if s[nl + 1..end].trim().is_empty() {
-                    end = nl;
-                } else {
-                    break;
-                }
-            }
-            None => break,
+    while let Some(i) = s[start..end].rfind('\n') {
+        let nl = start + i;
+        if s[nl + 1..end].trim().is_empty() {
+            end = nl;
+        } else {
+            break;
         }
     }
     if s[start..end].trim().is_empty() {
@@ -1191,10 +1186,9 @@ fn contract_only_emission(content: &str, marks: &[MarkSpan]) -> Option<String> {
         // flow, not a failure: the next rung is tried, and the reason is
         // reported by the caller that actually degrades.
         .find_map(|(retained, ..)| {
-            match crate::inline_marks::render_expecting(content, &retained, &contract) {
-                Ok(bytes) => Some(bytes),
-                Err(_) => None,
-            }
+            // ALLOW(ok): a rung that does not render is control flow, not a
+            // failure — the next rung is tried and the caller reports the reason.
+            crate::inline_marks::render_expecting(content, &retained, &contract).ok()
         })
         .or_else(|| {
             crate::inline_marks::render_candidates(content, marks)

@@ -153,7 +153,7 @@ fn measure(
 
 #[gpui::test]
 fn accordion_region_is_bounded(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
 
     // The plan's explicit generator space (§5), enumerated exhaustively.
     let outlines = [0usize, 3, 80];
@@ -199,7 +199,7 @@ fn accordion_region_is_bounded(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn wheel_over_accordion_body_reveals_backlink(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
 
     // fraction 1.0: the accordion body is (about) the full viewport; the last
     // backlink row starts far below the body fold. outline=0 so the body owns
@@ -241,7 +241,7 @@ fn wheel_over_accordion_body_reveals_backlink(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn wheel_over_main_region_reveals_outline(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
 
     // fraction 0.1: the accordion is a tiny pinned footer; the main region owns
     // (almost) the whole panel and must still scroll the outline independently.
@@ -312,7 +312,7 @@ fn header_center(bounds: &BoundsRegistry) -> gpui::Point<gpui::Pixels> {
 
 #[gpui::test]
 fn clicking_header_collapses_and_frees_height(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
 
     // fraction 1.0, outline 0: the accordion fills the panel and its body shows
     // the first backlink rows — so `backlink 0` is visible before collapse.
@@ -321,7 +321,7 @@ fn clicking_header_collapses_and_frees_height(cx: &mut TestAppContext) {
 
     let bounds = BoundsRegistry::new();
     let root = root(0, backlinks, 1.0);
-    let (_e, mut vcx) = cx.add_window_view({
+    let (_e, vcx) = cx.add_window_view({
         let bounds = bounds.clone();
         move |_, _| ReactiveFixtureView::with_bounds(root, vp, bounds)
     });
@@ -337,7 +337,7 @@ fn clicking_header_collapses_and_frees_height(cx: &mut TestAppContext) {
 
     // Click the header to collapse.
     let target = header_center(&bounds);
-    click_at(&mut vcx, target);
+    click_at(vcx, target);
     vcx.run_until_parked();
     bounds.flush();
 

@@ -1018,7 +1018,7 @@ fn resolve_parent_core(
                     ) {
                         continue;
                     }
-                    match classify(&tree, node.id) {
+                    match classify(tree, node.id) {
                         LiveNode::Settled(sid) if sid == parent_uri.id() => {
                             // Found it — also populate the cache for next time
                             id_cache
@@ -4522,7 +4522,7 @@ impl CoreOperations for LoroBackend {
             });
         }
         let parent_route = self
-            .resolve_write_target_for_parent(&new_parent, Some(&id))
+            .resolve_write_target_for_parent(&new_parent, Some(id))
             .await?;
         if source_target.doc_key() != parent_route.doc_key() {
             return Err(ApiError::InvalidOperation {

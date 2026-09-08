@@ -140,7 +140,7 @@ fn oracle_engine_tracks_source_block_mutations() {
         Block::new_source(
             child,
             parent,
-            &SourceLanguage::Query(QueryLanguage::HolonPrql).to_string(),
+            SourceLanguage::Query(QueryLanguage::HolonPrql).to_string(),
             "from block",
         ),
     );
@@ -162,7 +162,7 @@ fn oracle_computes_is_program_for_rule_trigger_sibling() {
     let trigger_block = Block::new_source(
         trigger.clone(),
         rule_head.parent_id.clone(),
-        &SourceLanguage::Query(QueryLanguage::HolonPrql).to_string(),
+        SourceLanguage::Query(QueryLanguage::HolonPrql).to_string(),
         "from block",
     );
     state

@@ -136,10 +136,12 @@ fn lengthening_content_with_tail_marks_ingests_whole() {
                 .find(MARKED_WORD)
                 .expect("the emphasised word is in the body");
 
-            let mut block = Block::default();
-            block.id = target.clone();
-            block.parent_id = parent.clone();
-            block.content = content.clone();
+            let mut block = Block {
+                id: target.clone(),
+                parent_id: parent.clone(),
+                content: content.clone(),
+                ..Default::default()
+            };
             block.marks = Some(vec![MarkSpan::new(
                 start,
                 start + MARKED_WORD.len(),
@@ -257,10 +259,12 @@ fn shortening_content_with_tail_marks_keeps_exact_spans() {
                 InlineMark::Bold,
             )];
 
-            let mut block = Block::default();
-            block.id = target.clone();
-            block.parent_id = parent.clone();
-            block.content = content.clone();
+            let mut block = Block {
+                id: target.clone(),
+                parent_id: parent.clone(),
+                content: content.clone(),
+                ..Default::default()
+            };
             block.marks = Some(declared.clone());
 
             let params = holon_orgmode::build_block_params(&block, &parent, &document, None);

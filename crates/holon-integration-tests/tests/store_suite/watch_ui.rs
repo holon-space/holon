@@ -220,14 +220,14 @@ fn watch_ui_error_recovery_on_nonexistent_block() {
                 .await
                 .expect("Should receive recovered Structure event");
 
-        match &recovered_render_expr {
-            holon_api::render_types::RenderExpr::FunctionCall { name, .. } => {
-                assert_ne!(
-                    name, "error",
-                    "After recovery, render_expr should not be an error"
-                );
-            }
-            _ => {} // Any non-error expression is fine
+        // Any non-error expression is fine.
+        if let holon_api::render_types::RenderExpr::FunctionCall { name, .. } =
+            &recovered_render_expr
+        {
+            assert_ne!(
+                name, "error",
+                "After recovery, render_expr should not be an error"
+            );
         }
     });
 }
@@ -290,14 +290,12 @@ fn watch_ui_structural_change_triggers_new_structure_event() {
                 .expect("Should receive new Structure event after query change");
 
         // The new render_expr should still be valid (not an error)
-        match &new_render_expr {
-            holon_api::render_types::RenderExpr::FunctionCall { name, .. } => {
-                assert_ne!(
-                    name, "error",
-                    "Updated query should produce valid render expression"
-                );
-            }
-            _ => {} // Any non-error is fine
+        // Any non-error expression is fine.
+        if let holon_api::render_types::RenderExpr::FunctionCall { name, .. } = &new_render_expr {
+            assert_ne!(
+                name, "error",
+                "Updated query should produce valid render expression"
+            );
         }
     });
 }

@@ -54,16 +54,12 @@ impl UtcpManual {
     /// a reader meets them. Non-empty is normal, not an error: it is what the
     /// forward-tolerance rule buys, and each one is disclosed at load.
     pub fn unmodelled_keys(&self) -> Vec<String> {
-        let mut found: Vec<String> = self
-            .extra
-            .iter()
-            .map(|(k, _)| format!("utcp.{k}"))
-            .collect();
+        let mut found: Vec<String> = self.extra.keys().map(|k| format!("utcp.{k}")).collect();
         for tool in &self.tools {
-            for (k, _) in &tool.extra {
+            for k in tool.extra.keys() {
                 found.push(format!("utcp.tools[{}].{k}", tool.name));
             }
-            for (k, _) in &tool.tool_call_template.extra {
+            for k in tool.tool_call_template.extra.keys() {
                 found.push(format!("utcp.tools[{}].tool_call_template.{k}", tool.name));
             }
         }

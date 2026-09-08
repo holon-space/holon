@@ -358,7 +358,7 @@ impl InvJournalFeedViewportLazy {
         let positions: Vec<usize> = feed_days
             .iter()
             .enumerate()
-            .filter(|(_, d)| onscreen.iter().any(|o| *o == *d))
+            .filter(|(_, d)| onscreen.contains(d))
             .map(|(i, _)| i)
             .collect();
         if let (Some(first), Some(last)) = (positions.first(), positions.last())
@@ -366,7 +366,7 @@ impl InvJournalFeedViewportLazy {
         {
             let missing: Vec<&str> = feed_days[*first..=*last]
                 .iter()
-                .filter(|d| !onscreen.iter().any(|o| *o == *d))
+                .filter(|d| !onscreen.contains(d))
                 .map(EntityUri::as_str)
                 .collect();
             return InvariantResult::Fail(format!(

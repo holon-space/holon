@@ -789,6 +789,9 @@ async fn boot_two_instances_with_receiver_caps_on(
 
 /// The boot core. `receiver_seed` is the receiver's own vault content — the
 /// disjoint seed for every convergence test, empty for a pairing receiver.
+// The harness holds single-threaded SUT parts in `Arc` because the
+// production trait signatures it feeds require `Arc`, not `Rc`.
+#[allow(clippy::arc_with_non_send_sync)]
 async fn boot_two_instances_seeded_on(
     resolver: &IdResolver,
     ref_state: &ReferenceState,

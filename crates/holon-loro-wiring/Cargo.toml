@@ -22,7 +22,6 @@ testing = ["dep:proptest", "dep:proptest-state-machine"]
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-chrono.workspace = true
 fluxdi.workspace = true
 futures.workspace = true
 holon.workspace = true
@@ -33,9 +32,6 @@ holon-loro.workspace = true
 holon-profiles.workspace = true
 holon-sharing.workspace = true
 holon-turso.workspace = true
-loro.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 # `loro_ui_watcher` and `memory_backend` call tokio::spawn / sync / time on
 # EVERY target, so tokio cannot live only in the non-wasm block below — the
 # wasi worker links this crate. Same wasm-safe set holon-loro declares; the

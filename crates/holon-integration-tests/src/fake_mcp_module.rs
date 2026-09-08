@@ -76,47 +76,43 @@ impl ServerHandler for FakeMcpServer {
         }
     }
 
-    fn list_resources(
+    async fn list_resources(
         &self,
         _: Option<PaginatedRequestParam>,
         _: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListResourcesResult, ErrorData>> + Send + '_ {
-        async {
-            Ok(ListResourcesResult {
-                meta: None,
-                next_cursor: None,
-                resources: vec![Annotated::new(
-                    RawResource {
-                        uri: RESOURCE_URI.to_string(),
-                        name: "Fake Probe Items".to_string(),
-                        title: None,
-                        description: Some("Fake external entities for test stress".to_string()),
-                        mime_type: Some("application/json".to_string()),
-                        size: None,
-                        icons: None,
-                        meta: None,
-                    },
-                    None,
-                )],
-            })
-        }
+    ) -> Result<ListResourcesResult, ErrorData> {
+        Ok(ListResourcesResult {
+            meta: None,
+            next_cursor: None,
+            resources: vec![Annotated::new(
+                RawResource {
+                    uri: RESOURCE_URI.to_string(),
+                    name: "Fake Probe Items".to_string(),
+                    title: None,
+                    description: Some("Fake external entities for test stress".to_string()),
+                    mime_type: Some("application/json".to_string()),
+                    size: None,
+                    icons: None,
+                    meta: None,
+                },
+                None,
+            )],
+        })
     }
 
-    fn read_resource(
+    async fn read_resource(
         &self,
         request: ReadResourceRequestParam,
         _: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ReadResourceResult, ErrorData>> + Send + '_ {
-        async move {
-            if request.uri != RESOURCE_URI {
-                return Err(ErrorData::resource_not_found("Unknown resource", None));
-            }
-            let items = self.items.read().await;
-            let json = serde_json::to_string(&*items).expect("serialize items");
-            Ok(ReadResourceResult {
-                contents: vec![ResourceContents::text(json, RESOURCE_URI)],
-            })
+    ) -> Result<ReadResourceResult, ErrorData> {
+        if request.uri != RESOURCE_URI {
+            return Err(ErrorData::resource_not_found("Unknown resource", None));
         }
+        let items = self.items.read().await;
+        let json = serde_json::to_string(&*items).expect("serialize items");
+        Ok(ReadResourceResult {
+            contents: vec![ResourceContents::text(json, RESOURCE_URI)],
+        })
     }
 
     fn subscribe(

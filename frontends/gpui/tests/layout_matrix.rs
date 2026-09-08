@@ -234,9 +234,12 @@ fn layout_ok_single_container_matrix(cx: &mut TestAppContext) {
 // icon + text + badge). A regression in any of them points directly at the
 // pattern that broke.
 
+/// A named tree case: its label and a builder that produces it fresh.
+type TreeCase = (&'static str, Box<dyn Fn() -> ReactiveViewModel>);
+
 #[gpui::test]
 fn layout_ok_realistic_trees(cx: &mut TestAppContext) {
-    let trees: Vec<(&str, Box<dyn Fn() -> ReactiveViewModel>)> = vec![
+    let trees: Vec<TreeCase> = vec![
         (
             "card_with_header_body",
             Box::new(|| {

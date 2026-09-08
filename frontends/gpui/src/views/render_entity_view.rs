@@ -50,6 +50,9 @@ pub struct RenderEntityView {
 }
 
 impl RenderEntityView {
+    // Renders from many independently-owned pieces of view state; grouping them
+    // is a view refactor, not a lint fix.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         current: Arc<ReactiveViewModel>,
         ctx: RenderContext,
@@ -150,29 +153,25 @@ impl Render for RenderEntityView {
                     // off macOS while the registry advertises Cmd.
                     if enter.secondary {
                         let input = WidgetInput::chord(&[Key::Cmd, Key::Enter]);
-                        if let Some(action) = nav.bubble_input(&entity_id, &input) {
-                            match action {
-                                holon_frontend::input::InputAction::ExecuteOperation {
-                                    entity_name,
-                                    operation,
-                                    entity_id,
-                                } => {
-                                    let mut params = std::collections::HashMap::new();
-                                    params.insert(
-                                        "id".into(),
-                                        holon_api::Value::String(entity_id.as_str().to_string()),
-                                    );
-                                    services.dispatch_intent(
-                                        holon_frontend::operations::OperationIntent::new(
-                                            EntityName::new(entity_name),
-                                            operation.name,
-                                            params,
-                                        ),
-                                    );
-                                    cx.stop_propagation();
-                                }
-                                _ => {}
-                            }
+                        if let Some(holon_frontend::input::InputAction::ExecuteOperation {
+                            entity_name,
+                            operation,
+                            entity_id,
+                        }) = nav.bubble_input(&entity_id, &input)
+                        {
+                            let mut params = std::collections::HashMap::new();
+                            params.insert(
+                                "id".into(),
+                                holon_api::Value::String(entity_id.as_str().to_string()),
+                            );
+                            services.dispatch_intent(
+                                holon_frontend::operations::OperationIntent::new(
+                                    EntityName::new(entity_name),
+                                    operation.name,
+                                    params,
+                                ),
+                            );
+                            cx.stop_propagation();
                         }
                     }
                 })

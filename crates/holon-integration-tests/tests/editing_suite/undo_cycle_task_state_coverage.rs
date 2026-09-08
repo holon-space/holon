@@ -182,7 +182,7 @@ fn cycle_task_state_undo_reverts_the_cycle_not_the_previous_op() {
         // ── UNDO ONCE. This must invert OP #2 (the cycle), NOT OP #1 (content).
         let outcome = session.undo().await.expect("undo dispatch");
         assert!(
-            matches!(outcome, UndoOutcome::Applied { .. }),
+            matches!(outcome, UndoOutcome::Applied),
             "expected UndoOutcome::Applied, got {outcome:?}"
         );
 
@@ -302,7 +302,7 @@ fn metamorphic_property_ops_round_trip_through_undo() {
 
             let outcome = session.undo().await.expect("undo dispatch");
             assert!(
-                matches!(outcome, UndoOutcome::Applied { .. }),
+                matches!(outcome, UndoOutcome::Applied),
                 "'{op_name}' undo expected Applied, got {outcome:?}"
             );
 

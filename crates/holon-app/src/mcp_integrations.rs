@@ -811,6 +811,73 @@ impl Module for McpIntegrationsModule {
     }
 }
 
+/// Proxy that delegates OperationProvider calls to an integration in the
+/// shared registry, looked up by provider name (never by position).
+struct RegistryOperationProxy {
+    registry: Arc<McpIntegrationRegistry>,
+    name: String,
+}
+
+impl RegistryOperationProxy {
+    fn integration(&self) -> &McpIntegration {
+        // The proxy is only constructed after a successful by_name lookup and
+        // the registry is immutable, so a miss is an impossible state.
+        self.registry.by_name(&self.name).unwrap_or_else(|| {
+            panic!(
+                "MCP integration '{}' vanished from the registry — proxy/registry invariant \
+                 violated",
+                self.name
+            )
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl OperationProvider for RegistryOperationProxy {
+    fn operations(&self) -> Vec<holon_api::OperationDescriptor> {
+        self.integration().operation_provider.operations()
+    }
+
+    async fn execute_operation(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: holon_core::storage::types::StorageEntity,
+    ) -> holon_core::traits::Result<holon_core::traits::OperationResult> {
+        self.integration()
+            .operation_provider
+            .execute_operation(entity_name, op_name, params)
+            .await
+    }
+}
+
+/// Inert provider registered when an integration is unavailable (not
+/// configured, OAuth pending, or failed to connect). Executing an operation
+/// names the integration so the failure is attributable, never misrouted.
+struct EmptyOperationProvider {
+    name: String,
+}
+
+#[async_trait::async_trait]
+impl OperationProvider for EmptyOperationProvider {
+    fn operations(&self) -> Vec<holon_api::OperationDescriptor> {
+        vec![]
+    }
+
+    async fn execute_operation(
+        &self,
+        _: &EntityName,
+        _: &str,
+        _: holon_core::storage::types::StorageEntity,
+    ) -> holon_core::traits::Result<holon_core::traits::OperationResult> {
+        Err(format!(
+            "MCP integration '{}' unavailable — not configured or failed to connect at startup",
+            self.name
+        )
+        .into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use holon_loro::DegradedSignalBus;
@@ -902,72 +969,5 @@ mod tests {
         };
         assert_eq!(integration, "linear");
         assert_eq!(auth_url, "https://linear.app/oauth/authorize");
-    }
-}
-
-/// Proxy that delegates OperationProvider calls to an integration in the
-/// shared registry, looked up by provider name (never by position).
-struct RegistryOperationProxy {
-    registry: Arc<McpIntegrationRegistry>,
-    name: String,
-}
-
-impl RegistryOperationProxy {
-    fn integration(&self) -> &McpIntegration {
-        // The proxy is only constructed after a successful by_name lookup and
-        // the registry is immutable, so a miss is an impossible state.
-        self.registry.by_name(&self.name).unwrap_or_else(|| {
-            panic!(
-                "MCP integration '{}' vanished from the registry — proxy/registry invariant \
-                 violated",
-                self.name
-            )
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl OperationProvider for RegistryOperationProxy {
-    fn operations(&self) -> Vec<holon_api::OperationDescriptor> {
-        self.integration().operation_provider.operations()
-    }
-
-    async fn execute_operation(
-        &self,
-        entity_name: &EntityName,
-        op_name: &str,
-        params: holon_core::storage::types::StorageEntity,
-    ) -> holon_core::traits::Result<holon_core::traits::OperationResult> {
-        self.integration()
-            .operation_provider
-            .execute_operation(entity_name, op_name, params)
-            .await
-    }
-}
-
-/// Inert provider registered when an integration is unavailable (not
-/// configured, OAuth pending, or failed to connect). Executing an operation
-/// names the integration so the failure is attributable, never misrouted.
-struct EmptyOperationProvider {
-    name: String,
-}
-
-#[async_trait::async_trait]
-impl OperationProvider for EmptyOperationProvider {
-    fn operations(&self) -> Vec<holon_api::OperationDescriptor> {
-        vec![]
-    }
-
-    async fn execute_operation(
-        &self,
-        _: &EntityName,
-        _: &str,
-        _: holon_core::storage::types::StorageEntity,
-    ) -> holon_core::traits::Result<holon_core::traits::OperationResult> {
-        Err(format!(
-            "MCP integration '{}' unavailable — not configured or failed to connect at startup",
-            self.name
-        )
-        .into())
     }
 }

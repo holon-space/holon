@@ -191,7 +191,7 @@ fn rows_with_entity_prefix<'a>(
 
 #[gpui::test]
 fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
 
     // 1. The REAL seeded expression, parsed by the production DSL parser, then
     //    wrapped by the REAL backend wrap (`block:default-main-panel` carries both

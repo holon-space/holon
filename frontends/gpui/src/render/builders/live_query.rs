@@ -177,8 +177,10 @@ fn render_placed(
             // uncached view, whose own content decides its height.
             return match placement {
                 crate::views::reactive_shell::ShellPlacement::Panel => {
-                    let mut s = StyleRefinement::default();
-                    s.flex_grow = Some(1.0);
+                    let mut s = StyleRefinement {
+                        flex_grow: Some(1.0),
+                        ..Default::default()
+                    };
                     s.size.width = Some(gpui::relative(1.0).into());
                     s.size.height = Some(gpui::relative(1.0).into());
                     AnyView::from(entity).cached(s).into_any_element()

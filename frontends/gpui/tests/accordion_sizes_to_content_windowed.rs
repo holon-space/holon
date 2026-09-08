@@ -194,7 +194,7 @@ fn accordion_of(panel_vm: &ReactiveViewModel) -> Arc<ReactiveViewModel> {
 /// Render the production-shaped main panel with `backlink_rows` query rows at
 /// `window`.
 fn render_panel(cx: &mut TestAppContext, backlink_rows: usize, window: Size<gpui::Pixels>) -> Rung {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
 
     let registry = Arc::new(support::BlockTreeRegistry::new());
     let services = support::TestServices::with_registry_quiescent(registry.clone());

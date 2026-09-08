@@ -670,6 +670,9 @@ fn sink() -> &'static CapturedErrors {
 }
 
 /// Run `f` with ERROR-level tracing captured.
+// The guard MUST span the await: serializing the capture across concurrent
+// tests is exactly what it is for.
+#[allow(clippy::await_holding_lock)]
 async fn capturing_errors<F, T>(f: F) -> (T, String)
 where
     F: std::future::Future<Output = T>,
@@ -695,7 +698,7 @@ async fn a_second_file_claiming_a_live_id_is_refused_not_merged() {
     std::fs::write(&second, stray_src(id)).unwrap();
 
     let mut controller = controller_over(&store, &root);
-    controller
+    let _ = controller
         .on_file_changed(&original)
         .await
         .expect("the first file to claim the id ingests normally");
@@ -705,7 +708,7 @@ async fn a_second_file_claiming_a_live_id_is_refused_not_merged() {
     );
 
     let (result, captured) = capturing_errors(controller.on_file_changed(&second)).await;
-    result.expect("a duplicate-id file must be SKIPPED, not fail the whole ingest loop");
+    let _ = result.expect("a duplicate-id file must be SKIPPED, not fail the whole ingest loop");
     let disclosed = lines_under(&captured, &root);
 
     assert!(
@@ -727,7 +730,7 @@ async fn a_second_file_claiming_a_live_id_is_refused_not_merged() {
 
     // The SAME file re-ingested is an ordinary re-ingest, never a collision.
     let (again, quiet) = capturing_errors(controller.on_file_changed(&original)).await;
-    again.expect("re-ingesting the file that owns the id must not be refused");
+    let _ = again.expect("re-ingesting the file that owns the id must not be refused");
     assert!(
         store.holds_block(&format!("{id}-original")),
         "the owner's blocks must survive its own re-ingest"
@@ -774,7 +777,8 @@ async fn a_cold_boot_fast_path_refuses_a_stray_and_keeps_the_claimant_writable()
     // content hash, from before any duplicate-id refusal existed.
     {
         let mut past = controller_over(&store, &root);
-        past.on_file_changed(&second)
+        let _ = past
+            .on_file_changed(&second)
             .await
             .expect("a past session ingests the stray it found");
     }
@@ -784,7 +788,8 @@ async fn a_cold_boot_fast_path_refuses_a_stray_and_keeps_the_claimant_writable()
     store.clear_rows();
     {
         let mut past = controller_over(&store, &root);
-        past.on_file_changed(&original)
+        let _ = past
+            .on_file_changed(&original)
             .await
             .expect("the claimant ingests");
     }
@@ -795,12 +800,13 @@ async fn a_cold_boot_fast_path_refuses_a_stray_and_keeps_the_claimant_writable()
 
     let mut boot = controller_over(&store, &root);
     boot.initialize().await.expect("cold boot");
-    boot.on_file_changed(&original)
+    let _ = boot
+        .on_file_changed(&original)
         .await
         .expect("the claimant ingests");
 
     let (refused, captured) = capturing_errors(boot.on_file_changed(&second)).await;
-    refused.expect("a stray must be skipped, not fail the boot scan");
+    let _ = refused.expect("a stray must be skipped, not fail the boot scan");
     let disclosed = lines_under(&captured, &root);
     for needle in [
         original.display().to_string(),
@@ -823,7 +829,8 @@ async fn a_cold_boot_fast_path_refuses_a_stray_and_keeps_the_claimant_writable()
         ),
     )
     .unwrap();
-    boot.on_file_changed(&original)
+    let _ = boot
+        .on_file_changed(&original)
         .await
         .expect("an edit to the id's own file must ingest");
     assert!(
@@ -848,7 +855,7 @@ async fn a_stray_does_not_retitle_the_claimants_document() {
     std::fs::write(&second, stray_src(id)).unwrap();
 
     let mut controller = controller_over(&store, &root);
-    controller
+    let _ = controller
         .on_file_changed(&original)
         .await
         .expect("the claimant ingests and takes the id");
@@ -857,7 +864,7 @@ async fn a_stray_does_not_retitle_the_claimants_document() {
     // the heal acts on.
     store.set_block_content(id, "");
 
-    controller
+    let _ = controller
         .on_file_changed(&second)
         .await
         .expect("a stray must be skipped, not fail the sync loop");

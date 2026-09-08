@@ -272,10 +272,10 @@ fn soak_reseed_reproduction() {
     let mut agg_steady_total = 0usize;
     let mut kind_counts: BTreeMap<String, usize> = BTreeMap::new();
 
-    for seed_ix in 0..SEEDS {
+    for (seed_ix, seed_edits) in SEED_EDITS.iter().enumerate().take(SEEDS) {
         // The full-headless oracle carries the peer-sync caps; a fresh one per
         // seed so each boot starts from the same soak-scale baseline.
-        let transitions = peer_lever_sequence(seed_ix, SEED_EDITS[seed_ix]);
+        let transitions = peer_lever_sequence(seed_ix, *seed_edits);
         eprintln!(
             "[soak-reseed] seed {seed_ix}: booting soak-scale SUT ({blocks} blocks), then \
              replaying {} transitions",
@@ -428,9 +428,9 @@ fn soak_reseed_reproduction() {
 /// wall-clock dispatch→settled per navigation as TWO steps:
 ///   1. `SutFocusWrite::apply_navigate_focus` — the sidebar click-to-focus path
 ///      (`click_entity(left_sidebar) -> navigation.focus intent -> nav SQL
-///      write
-///      + focus-matview settle`). This writes `focus_roots`/`current_focus` — a
-///      ~sub-second focus write, the "warm" baseline.
+///      write and focus-matview settle`). This writes
+///      `focus_roots`/`current_focus` — a ~sub-second focus write, the "warm"
+///      baseline.
 ///   2. `SutWatchRegister::register_watch` (the `SetupWatch` transition, driven
 ///      through the SAME production `ReactiveEngine::watch_query_live` path the
 ///      real UI's main panel uses) — registers the main-panel focus-descendant
@@ -455,7 +455,7 @@ fn soak_reseed_reproduction() {
 /// Gated on `HOLON_SOAK_NAV` (`reproduce` | `zero`) AND `HOLON_SOAK_SEED_BLOCKS
 /// > 0`: unset ⇒ this SKIPS cleanly (disclosed), so it is NEVER part of the
 /// default `cargo nextest` run. Hand-rolled (not `prop_state_machine!`) for a
-/// runtime skip + deterministic FIXED navigation plan.
+/// > runtime skip + deterministic FIXED navigation plan.
 ///
 /// **THE LEVER IS DEPTH, NOT COUNT.** RC5 is driven by the recursive-CTE cycle
 /// guard (`','||visited||',' NOT LIKE '%,'||id||',%'`) — an O(path-length)

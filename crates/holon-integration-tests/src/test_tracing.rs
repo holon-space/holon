@@ -897,7 +897,7 @@ impl SpanCollector {
             *component_counts.entry(component).or_default() += 1;
         }
         let mut render_by_component: Vec<_> = component_counts.into_iter().collect();
-        render_by_component.sort_by(|a, b| b.1.cmp(&a.1));
+        render_by_component.sort_by_key(|e| std::cmp::Reverse(e.1));
 
         // ── CDC metrics ──────────────────────────────────────────
         let cdc_ingest_count = spans
@@ -1032,6 +1032,7 @@ fn origin_chain(
 /// - `distinct_bindings > 1`: a parameterized statement fanned out over
 ///   different bindings (e.g. one render per sidebar) — possibly a real N+1,
 ///   possibly legitimate; judge by the count.
+///
 /// `max_repeat_per_binding` is the adjudicator `distinct_bindings` alone cannot
 /// be: it is the largest number of times any ONE binding-set re-ran. At 1 the
 /// fan is fully legitimate (every execution served a distinct consumer); above
@@ -1096,7 +1097,7 @@ fn find_duplicate_sql(all_spans: &[SpanData], names: &[&str]) -> Vec<DuplicateSq
             }
         })
         .collect();
-    duplicates.sort_by(|a, b| b.count.cmp(&a.count));
+    duplicates.sort_by_key(|d| std::cmp::Reverse(d.count));
     duplicates
 }
 

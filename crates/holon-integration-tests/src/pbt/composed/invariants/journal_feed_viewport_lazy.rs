@@ -1,6 +1,7 @@
 //! `inv-journal-feed-viewport-lazy` wired into the composed catalog.
-//! Needs `RefJournalFeed + RefLayout + RefViewSelection + RefFocus` (ref side)
-//! + `SutRenderer + SutLayout` (SUT). `SutLayout` is the windowed geometry cap,
+//! Needs `RefJournalFeed + RefLayout + RefViewSelection + RefFocus` (ref
+//! side) and `SutRenderer + SutLayout` (SUT). `SutLayout` is the windowed
+//! geometry cap,
 //! so headless slices deselect honestly rather than judging a viewport they
 //! cannot see.
 

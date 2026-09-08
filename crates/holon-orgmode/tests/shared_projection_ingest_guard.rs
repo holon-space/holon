@@ -463,7 +463,7 @@ async fn write_back_echo_does_not_re_run_the_guard() {
     let reg = StubMountRegistry::new(true);
     let mut vault = mount_vault(FakeStore::default(), Some(reg.clone()));
 
-    vault
+    let _ = vault
         .controller
         .on_file_changed(&vault.path)
         .await
@@ -475,7 +475,7 @@ async fn write_back_echo_does_not_re_run_the_guard() {
     );
 
     // Byte-identical re-notification: our own projection output coming back.
-    vault
+    let _ = vault
         .controller
         .on_file_changed(&vault.path)
         .await
@@ -490,7 +490,7 @@ async fn write_back_echo_does_not_re_run_the_guard() {
     // A genuine external edit is NOT an echo — the guard must decide again.
     let edited = format!("{}\n", std::fs::read_to_string(&vault.path).unwrap());
     std::fs::write(&vault.path, edited).unwrap();
-    vault
+    let _ = vault
         .controller
         .on_file_changed(&vault.path)
         .await

@@ -15,6 +15,7 @@
 //!   * `cmd+2`  → `jump_to_tab_2`  (the `on_jump!` macro),
 //!   * `cmd+k`  → `open_search`    (its own handler, and the only one of the
 //!     three that genuinely needs a `Window`).
+//!
 //! `cmd+k` additionally asserts the user-visible effect — the modal is open —
 //! so the journal cannot be satisfied by a handler that reports success while
 //! doing nothing.

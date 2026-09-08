@@ -14,6 +14,7 @@
 //! - Existing open pin for `(region, block_id)` → UPDATE timestamp
 //!   (move-to-top).
 //! - No existing open pin → INSERT new row.
+//!
 //! Cursor is untouched (pins are not part of back/forward navigation).
 //!
 //! Generator restricted to `Region::RightSidebar` — the only place the bullet's

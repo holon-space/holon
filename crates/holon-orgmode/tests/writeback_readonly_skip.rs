@@ -381,7 +381,7 @@ async fn readonly_writeback_resumes_after_reingest_clears_the_mark() {
 
     // (3) Re-ingest via on_file_changed — the SOLE resume trigger. Clears the
     //     mark (ingest_file) before any reconciliation/write-back.
-    controller
+    let _ = controller
         .on_file_changed(&path)
         .await
         .expect("re-ingest of a writable-backed file must not error");

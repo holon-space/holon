@@ -293,15 +293,15 @@ where
                 // marker so the shrinker's default signature recognizes it; the
                 // shrinker reduces the sequence down to this step. No effect unless
                 // the env var is set.
-                if let Ok(n) = std::env::var("HOLON_PBT_FORCE_FAIL_AT_STEP") {
-                    if n.parse::<usize>().ok() == Some(i + 1) {
-                        panic!(
-                            "HOLON_PBT_FORCE_FAIL_AT_STEP={n}: forced failure after step {} ({}) \
+                if let Ok(n) = std::env::var("HOLON_PBT_FORCE_FAIL_AT_STEP")
+                    && n.parse::<usize>().ok() == Some(i + 1)
+                {
+                    panic!(
+                        "HOLON_PBT_FORCE_FAIL_AT_STEP={n}: forced failure after step {} ({}) \
                              — trouble begins at: forced-fault",
-                            i + 1,
-                            t.variant_name()
-                        );
-                    }
+                        i + 1,
+                        t.variant_name()
+                    );
                 }
             }
             FixtureStep::Assert(assertion) => {

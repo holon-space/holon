@@ -70,10 +70,10 @@ fn shipped_render(entity: &str) -> String {
 fn find_live_query_sql(expr: &RenderExpr) -> Option<String> {
     match expr {
         RenderExpr::FunctionCall { name, args } => {
-            if name == "live_query" {
-                if let Some(sql) = args.iter().find_map(sql_arg) {
-                    return Some(sql);
-                }
+            if name == "live_query"
+                && let Some(sql) = args.iter().find_map(sql_arg)
+            {
+                return Some(sql);
             }
             args.iter().find_map(|a| find_live_query_sql(&a.value))
         }
@@ -87,13 +87,12 @@ fn find_live_query_sql(expr: &RenderExpr) -> Option<String> {
 /// flattened `sql:` named argument, and which one the parser produces is its
 /// business, not this test's.
 fn sql_arg(arg: &Arg) -> Option<String> {
-    if arg.name.as_deref() == Some("sql") {
-        if let RenderExpr::Literal {
+    if arg.name.as_deref() == Some("sql")
+        && let RenderExpr::Literal {
             value: Value::String(s),
         } = &arg.value
-        {
-            return Some(s.clone());
-        }
+    {
+        return Some(s.clone());
     }
     match &arg.value {
         RenderExpr::Object { fields } => match fields.get("sql") {

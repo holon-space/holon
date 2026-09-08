@@ -465,12 +465,6 @@ impl CertifiableFormat for OrgFormat {
                 };
                 return Ok(Some(self.survives_in_place(src, markers)?));
             }
-            // Heading / Image / PlanningTimestamp / TodoKeyword / Priority are
-            // headline-level, not body content: they need their own fixture
-            // shapes, which the headline pass covers. Reporting `None` is
-            // honest — the coverage law then requires the marker rather than
-            // letting a silent skip look like a pass.
-            _ => return Ok(None),
         };
         Ok(Some(self.body_survives(body, markers)?))
     }
@@ -848,8 +842,6 @@ impl CertifiableFormat for OrgFormat {
         };
         Ok(Some(found))
     }
-
-    /// Drives `identity.carrier_disagreement`: a file whose `#+ID:` keyword and
 
     /// Drives `ordering.sibling_order` — authored file order must come back.
     fn round_trip_sibling_order(&self, authored: &[&str]) -> anyhow::Result<Option<Vec<String>>> {

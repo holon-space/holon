@@ -155,7 +155,7 @@ fn one_interaction_produces_one_connected_trace() {
                         .iter()
                         .any(|kv| kv.key.as_str() == "source" && kv.value.as_str() == "block")
                 })
-                .map(|s| trace_id(s))
+                .map(trace_id)
                 .collect();
             if !attributed.is_empty()
                 && spans
