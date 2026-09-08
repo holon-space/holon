@@ -651,6 +651,10 @@ pub fn page_container() -> gpui::Div {
 /// and the tab list anchors just below it.
 pub const TITLE_ROW_HEIGHT: f32 = 38.0;
 
+/// Bounds-tracked id of that row, so a window test can assert what does and
+/// does not sit on top of it.
+pub const TITLE_ROW_ID: &str = "title-row";
+
 // ── Modal overlay helpers ──────────────────────────────────────────────────
 
 fn interpret_and_render(
@@ -1566,12 +1570,38 @@ impl Render for HolonApp {
             self.safe_area_top + TITLE_ROW_HEIGHT + 4.0,
         );
 
+        let overlay_theme = share_ui::OverlayTheme {
+            bg,
+            border: border_color,
+            fg: text,
+            muted_fg: theme.muted_foreground,
+        };
+
+        let deferred_reimport_bar = share_ui::render_deferred_reimport_bar(
+            self.share_ui.read(cx),
+            self.session.clone(),
+            self.rt_handle.clone(),
+            self.share_ui.clone(),
+            window.window_handle(),
+            &cx.to_async(),
+            self.bounds_registry.clone(),
+            overlay_theme,
+        );
+
         let mut page = page_container()
             .bg(page_background)
             .text_color(text)
             .pt(px(self.safe_area_top))
             .pb(px(self.safe_area_bottom))
-            .child(title_bar);
+            .child(crate::geometry::TransparentTracker::new(
+                TITLE_ROW_ID.to_string(),
+                "title_row",
+                self.bounds_registry.clone(),
+                title_bar.into_any_element(),
+            ));
+        if let Some(bar) = deferred_reimport_bar {
+            page = page.child(bar);
+        }
         page = page.child(content);
         if let Some(list) = tab_list {
             page = page.child(list);
@@ -1601,12 +1631,6 @@ impl Render for HolonApp {
         {
             let share_state_entity = self.share_ui.clone();
             let engine = self.app_model.read(cx).engine.clone();
-            let overlay_theme = share_ui::OverlayTheme {
-                bg,
-                border: border_color,
-                fg: text,
-                muted_fg: theme.muted_foreground,
-            };
             let async_cx = cx.to_async();
             let wh = window.window_handle();
             let pending_store = cx

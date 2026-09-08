@@ -42,6 +42,12 @@ const PHONE_NOTE: &str = "phone-note";
 /// has a home in the adopted store from the first boot.
 const PHONE_TODO: &str = "phone-todo";
 
+/// A page this device wrote before the pair, and a note under it. The page is
+/// top-level, so its stored parent is the root sentinel — the commonest thing
+/// a solo device writes.
+const PHONE_PAGE: &str = "phone-page";
+const PHONE_PAGE_NOTE: &str = "phone-page-note";
+
 fn new_block(parent: EntityUri, id: &str, content: &str) -> NewBlockWithProperties {
     NewBlockWithProperties {
         parent_id: parent,
@@ -287,6 +293,62 @@ async fn a_mixed_archive_reimports_what_has_a_home_and_defers_only_the_orphans()
     assert!(
         holon_loro::pairing_swap::read_marker(f.store.storage_dir())?.is_some(),
         "blocks are still owed, so the marker stays"
+    );
+    Ok(())
+}
+
+/// A top-level page's parent is the root sentinel, which every store has. The
+/// page and its subtree are therefore re-imported at the deferred boot, and
+/// only the blocks whose parent id exists nowhere stay owed.
+#[tokio::test]
+async fn a_pre_pair_top_level_page_is_reimported_and_only_the_parentless_defer() -> Result<()> {
+    let f = interrupted_pair(vec![
+        new_block(EntityUri::no_parent(), PHONE_PAGE, "Phone page"),
+        new_block(EntityUri::block(PHONE_PAGE), PHONE_PAGE_NOTE, "bought milk"),
+    ])
+    .await?;
+
+    let PairingCompletion::Deferred { orphans, .. } = f
+        .pairing
+        .complete_interrupted_pairing(&f.marker)
+        .await
+        .expect("an unplaceable subtree must not stop the app")
+    else {
+        panic!("the journals subtree still has no parent, so this is not a completion");
+    };
+
+    let ids = live_ids(&f.store).await?;
+    for arrived in [PHONE_PAGE, PHONE_PAGE_NOTE] {
+        assert!(
+            ids.iter().any(|id| id == &format!("block:{arrived}")),
+            "block:{arrived} hangs under the root sentinel, which the adopted store has, so the \
+             deferred boot must have re-imported it; the store holds: {ids:?}"
+        );
+    }
+
+    assert_eq!(
+        orphans.len(),
+        2,
+        "only block:{PHONE_DAY} and block:{PHONE_NOTE} have a parent id no store holds; deferred: \
+         {orphans:?}"
+    );
+    for owed in [PHONE_DAY, PHONE_NOTE] {
+        assert!(
+            orphans.iter().any(|o| o.contains(owed)),
+            "the deferred set names block:{owed}: {orphans:?}"
+        );
+    }
+
+    let raised = conditions(&f.bus);
+    assert!(
+        raised.iter().any(|c| matches!(
+            &c.reason,
+            holon_loro::degraded_signal_bus::ShareDegradedReason::PairingReimportDeferred {
+                orphans: count,
+                ..
+            } if *count == 2
+        )),
+        "the banner counts only the 2 genuinely parentless blocks; the bus holds: {raised:?}"
     );
     Ok(())
 }

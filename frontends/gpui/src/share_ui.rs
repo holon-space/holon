@@ -1218,19 +1218,6 @@ pub fn render_overlays(
         overlays.push(render_quarantine_modal(idx, q, share_state.clone(), theme));
     }
 
-    if let Some(deferred) = &state.deferred_reimport {
-        overlays.push(render_deferred_reimport_banner(
-            deferred,
-            session.clone(),
-            rt_handle.clone(),
-            share_state.clone(),
-            window_handle,
-            &async_cx,
-            bounds.clone(),
-            theme,
-        ));
-    }
-
     if !state.toasts.is_empty() {
         overlays.push(render_toast_stack(
             &state.toasts,
@@ -1247,14 +1234,16 @@ pub fn render_overlays(
     overlays
 }
 
-/// The sticky banner for blocks a pair could not re-import (D94.a).
+/// The sticky bar for blocks a pair could not re-import (D94.a), for the
+/// caller to place directly under the window's title row.
 ///
-/// Top-centre and without a dismiss control: the archive is the only copy of
-/// what it names, and the button beside it is the only thing that brings that
-/// content into the store.
+/// Without a dismiss control: the archive is the only copy of what it names,
+/// and the button beside it is the only thing that brings that content into the
+/// store. It therefore stands for as long as blocks are owed, which is why it
+/// takes a band of the page's flow instead of a place in the overlay stack.
 #[allow(clippy::too_many_arguments)]
-fn render_deferred_reimport_banner(
-    deferred: &DeferredReimport,
+pub fn render_deferred_reimport_bar(
+    state: &ShareUiState,
     session: Arc<FrontendSession>,
     rt_handle: tokio::runtime::Handle,
     share_state: Entity<ShareUiState>,
@@ -1262,22 +1251,20 @@ fn render_deferred_reimport_banner(
     async_cx: &AsyncApp,
     bounds: crate::geometry::BoundsRegistry,
     theme: OverlayTheme,
-) -> AnyElement {
+) -> Option<AnyElement> {
+    let deferred = state.deferred_reimport.as_ref()?;
     let async_cx = async_cx.clone();
     let headline = deferred_reimport_headline(deferred);
     let where_they_are = deferred_reimport_location(deferred);
     let banner = div()
         .id("deferred-reimport-banner")
-        .absolute()
-        .top(px(16.0))
-        .left(px(16.0))
-        .right(px(16.0))
+        .w_full()
+        .flex_shrink_0()
         .px_3()
         .py_2()
-        .rounded(px(6.0))
         .bg(theme.bg)
         .border_l_4()
-        .border_1()
+        .border_b_1()
         .border_color(gpui::rgba(0xef4444ff))
         .text_color(theme.fg)
         .text_size(px(12.0))
@@ -1332,14 +1319,16 @@ fn render_deferred_reimport_banner(
         )
         .into_any_element();
 
-    crate::geometry::TransparentTracker::new(
-        DEFERRED_REIMPORT_BANNER.to_string(),
-        "deferred_reimport_banner",
-        bounds,
-        banner,
+    Some(
+        crate::geometry::TransparentTracker::new(
+            DEFERRED_REIMPORT_BANNER.to_string(),
+            "deferred_reimport_banner",
+            bounds,
+            banner,
+        )
+        .with_displayed_text(format!("{headline} {where_they_are}"))
+        .into_any_element(),
     )
-    .with_displayed_text(format!("{headline} {where_they_are}"))
-    .into_any_element()
 }
 
 /// Bounds-tracked ids. The banner has no command and no keybinding, so these

@@ -28,8 +28,10 @@ use holon_loro::loro_backend::LoroBackend;
 use holon_loro::loro_backend::NewBlockWithProperties;
 use holon_loro::pairing_swap::PairingMarker;
 
-/// Top-level in the archive, so the adopted store has no node to hang it under.
+/// Archived under the bundled layout root, which the re-import never carries
+/// and this store does not hold, so neither the page nor the note has a home.
 const OWED_PAGE: &str = "pair-owed-page";
+const ABSENT_PARENT: &str = "root-layout";
 const OWED_NOTE: &str = "pair-owed-note";
 const OWED_BLOCKS: usize = 2;
 /// The one block the adopted store holds — reading it back proves the boot
@@ -87,7 +89,8 @@ async fn seed_interrupted_pair(store_dir: &std::path::Path) -> PairingMarker {
     seed_document(
         &archive,
         vec![
-            new_block(EntityUri::no_parent(), OWED_PAGE, "Phone page"),
+            new_block(EntityUri::no_parent(), ABSENT_PARENT, "Layout"),
+            new_block(EntityUri::block(ABSENT_PARENT), OWED_PAGE, "Phone page"),
             new_block(EntityUri::block(OWED_PAGE), OWED_NOTE, "bought milk"),
         ],
     )

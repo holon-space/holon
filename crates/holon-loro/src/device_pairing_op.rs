@@ -324,6 +324,10 @@ struct ReimportPlan {
 /// does not, and is re-created with its own id under `block:journals`. Nothing
 /// is date-parsed and nothing is special-cased.
 ///
+/// The root sentinel is a home like any block the adopted store holds: a
+/// top-level page carries it as its stored parent, so it is re-imported as a
+/// top-level page of the paired store.
+///
 /// A captured id whose parent is in neither place is reported as an orphan
 /// rather than failing the plan, so what does have a home is written now and
 /// only the rest waits in the archive (D94.a).
@@ -352,7 +356,9 @@ fn plan_reimport(
                 }
                 continue;
             }
-            if placed.contains(id) || !placed.contains(snap.block.parent_id.as_str()) {
+            let parent_placed = snap.block.parent_id.is_no_parent()
+                || placed.contains(snap.block.parent_id.as_str());
+            if placed.contains(id) || !parent_placed {
                 continue;
             }
             placed.insert(id.clone());
@@ -1397,6 +1403,41 @@ mod tests {
             plan.orphans,
             vec!["block:note (parent block:vanished)".to_string()]
         );
+    }
+
+    #[test]
+    fn a_top_level_page_hangs_under_the_root_sentinel_of_the_adopted_store() {
+        let own = [
+            snap("block:page", "sentinel:no_parent", "Phone page"),
+            snap("block:note", "block:page", "bought milk"),
+        ];
+        let plan = plan_reimport(&own, &store_of(&[]));
+        assert_eq!(
+            plan.requests
+                .iter()
+                .map(|r| r.id.to_string())
+                .collect::<Vec<_>>(),
+            vec!["block:page".to_string(), "block:note".to_string()],
+            "the root sentinel is a home, so a top-level page and its subtree \
+             are re-imported"
+        );
+        assert!(plan.orphans.is_empty(), "orphans: {:?}", plan.orphans);
+    }
+
+    #[test]
+    fn a_top_level_page_the_owner_also_holds_is_kept_as_a_conflict_copy() {
+        let page = snap("block:page", "sentinel:no_parent", "Phone page");
+        let owner = store_of(&[snap("block:page", "sentinel:no_parent", "Owner page")]);
+        let plan = plan_reimport(&[page], &owner);
+
+        assert_eq!(plan.divergent, vec!["block:page".to_string()]);
+        let copy = plan
+            .requests
+            .iter()
+            .find(|r| r.id.as_str() == "block:page-before-pairing")
+            .expect("the phone's version is kept as its own block");
+        assert_eq!(copy.parent_id.as_str(), "block:page");
+        assert!(plan.orphans.is_empty(), "orphans: {:?}", plan.orphans);
     }
 
     #[test]

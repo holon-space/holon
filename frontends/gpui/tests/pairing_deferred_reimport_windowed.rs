@@ -35,6 +35,7 @@ use holon_api::BlockContent;
 use holon_api::BlockEdges;
 use holon_api::EntityUri;
 use holon_frontend::geometry::GeometryProvider;
+use holon_gpui::TITLE_ROW_ID;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
@@ -54,9 +55,11 @@ use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 /// The archived content this device wrote before the pair: a page and a note
-/// under it. The page is top-level in the archive, so the adopted store has no
-/// node to hang it under and both blocks are owed until it gains one.
+/// under it. The page hangs under the bundled layout root, which the re-import
+/// never carries and this store does not hold, so both blocks are owed until
+/// the store gains a node for the page itself.
 const OWED_PAGE: &str = "pair-owed-page";
+const ABSENT_PARENT: &str = "root-layout";
 const OWED_NOTE: &str = "pair-owed-note";
 const OWED_BLOCKS: usize = 2;
 const OWED_PAGE_TEXT: &str = "Phone page";
@@ -103,7 +106,8 @@ async fn owe_a_reimport(store_dir: &std::path::Path) -> PairingMarker {
     write_into(
         &archived,
         vec![
-            new_block(EntityUri::no_parent(), OWED_PAGE, OWED_PAGE_TEXT),
+            new_block(EntityUri::no_parent(), ABSENT_PARENT, "Layout"),
+            new_block(EntityUri::block(ABSENT_PARENT), OWED_PAGE, OWED_PAGE_TEXT),
             new_block(EntityUri::block(OWED_PAGE), OWED_NOTE, "bought milk"),
         ],
     )
@@ -183,6 +187,29 @@ fn painted_texts(bounds: &BoundsRegistry) -> Vec<String> {
         .collect()
 }
 
+fn bottom_of(info: &holon_frontend::geometry::ElementInfo) -> f32 {
+    info.y + info.height
+}
+
+fn overlaps_vertically(
+    a: &holon_frontend::geometry::ElementInfo,
+    b: &holon_frontend::geometry::ElementInfo,
+) -> bool {
+    a.y < bottom_of(b) && b.y < bottom_of(a)
+}
+
+/// Every data-bound element the window painted, topmost first. Chrome carries
+/// no entity, so what is left is the content the bar must not sit on.
+fn content_rows(bounds: &BoundsRegistry) -> Vec<(String, holon_frontend::geometry::ElementInfo)> {
+    let mut rows: Vec<(String, holon_frontend::geometry::ElementInfo)> = bounds
+        .all_elements()
+        .into_iter()
+        .filter(|(_, info)| info.entity_id.is_some() && info.height > 0.0 && info.width > 0.0)
+        .collect();
+    rows.sort_by(|(_, a), (_, b)| a.y.total_cmp(&b.y));
+    rows
+}
+
 fn tracked_text(bounds: &BoundsRegistry, id: &str) -> String {
     bounds
         .element_info(id)
@@ -257,6 +284,14 @@ fn the_window_paints_the_deferred_reimport_banner_and_its_retry_completes_the_pa
         "precondition: nothing is owed yet, so the banner must not be painted"
     );
 
+    let live = runtime.block_on(async { live_ids(&store).await });
+    assert!(
+        !live
+            .iter()
+            .any(|id| id == &format!("block:{ABSENT_PARENT}")),
+        "precondition: the archived page must have nowhere to go; the store holds: {live:?}"
+    );
+
     let marker = runtime.block_on(async { owe_a_reimport(&store_dir).await });
 
     // The boot call. Its refusal is the one D94.a turns into a degraded boot.
@@ -292,6 +327,37 @@ fn the_window_paints_the_deferred_reimport_banner_and_its_retry_completes_the_pa
         "the banner must name the archive {archive} — it is the only handle on the missing \
          blocks; it painted: {painted:?}"
     );
+    let title_row = bounds
+        .element_info(TITLE_ROW_ID)
+        .unwrap_or_else(|| panic!("the window paints a title row; painted: {texts:?}"));
+    assert!(
+        !overlaps_vertically(&banner, &title_row),
+        "the bar must not cover the title row; the bar spans y {}..{} and the title row spans y \
+         {}..{}",
+        banner.y,
+        bottom_of(&banner),
+        title_row.y,
+        bottom_of(&title_row)
+    );
+
+    let rows = content_rows(&bounds);
+    assert!(
+        !rows.is_empty(),
+        "the window paints content to compare the bar against; painted: {texts:?}"
+    );
+    if let Some((id, row)) = rows
+        .iter()
+        .find(|(_, row)| overlaps_vertically(&banner, row))
+    {
+        panic!(
+            "the bar must not cover content; it spans y {}..{} and {id} spans y {}..{}",
+            banner.y,
+            bottom_of(&banner),
+            row.y,
+            bottom_of(row)
+        );
+    }
+
     let retry = bounds.element_info(DEFERRED_REIMPORT_RETRY).unwrap_or_else(|| {
         panic!(
             "the banner must paint {DEFERRED_REIMPORT_RETRY}: the re-import has no command and no \
