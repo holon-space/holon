@@ -60,6 +60,7 @@ pub mod render_requirements;
 pub mod render_types;
 pub mod repository;
 pub mod share_props;
+pub mod sharing;
 pub mod spawner;
 pub mod storage_error;
 pub mod streaming;

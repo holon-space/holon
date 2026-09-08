@@ -51,53 +51,12 @@ impl std::fmt::Display for Principal {
     }
 }
 
-/// One capability a membership confers. Declaration order is the canonical
-/// (`Ord`) order, so a `BTreeSet<Capability>` serializes deterministically for
-/// signing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Capability {
-    Read,
-    Write,
-    Share,
-}
-
-/// A deterministically-ordered capability set (canonical for signing).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Capabilities(pub BTreeSet<Capability>);
-
-impl Capabilities {
-    pub fn of(caps: impl IntoIterator<Item = Capability>) -> Self {
-        Self(caps.into_iter().collect())
-    }
-
-    pub fn read_only() -> Self {
-        Self::of([Capability::Read])
-    }
-
-    /// What an own-device peer holds: it both reads the vault and authors into
-    /// it. Distinct from [`Self::read_only`] because a third-party share must
-    /// never confer `Write` by default.
-    pub fn read_write() -> Self {
-        Self::of([Capability::Read, Capability::Write])
-    }
-
-    pub fn contains(&self, cap: Capability) -> bool {
-        self.0.contains(&cap)
-    }
-
-    /// The intersection — a delegate can never confer MORE than it itself
-    /// holds, so effective capabilities down a chain are the running
-    /// intersection.
-    pub fn intersect(&self, other: &Self) -> Self {
-        Self(self.0.intersection(&other.0).copied().collect())
-    }
-
-    /// True iff every capability in `self` is also in `other` (`self ⊆ other`).
-    pub fn is_subset_of(&self, other: &Self) -> bool {
-        self.0.is_subset(&other.0)
-    }
-}
+/// The capability vocabulary is shared with the iroh admission leg
+/// (`holon_loro::peer_import`), which cannot depend on this crate — so the type
+/// lives in the layer under both and is re-exported here for every existing
+/// `policy::Capabilit…` path.
+pub use holon_api::sharing::Capabilities;
+pub use holon_api::sharing::Capability;
 
 /// Verification counterpart of [`crate::types::SigningAuthority`] (OQ4). The
 /// REAL owner-identity key backing is built by the enrollment-ceremony lane;

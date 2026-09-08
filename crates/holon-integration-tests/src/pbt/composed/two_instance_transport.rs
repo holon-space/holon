@@ -464,7 +464,18 @@ impl TwoInstanceTransport for IrohTransport {
             self.dials.fetch_add(1, Ordering::SeqCst);
             let dial = tokio::time::timeout(
                 DIAL_BUDGET,
-                sync_doc_initiate_enrolled(&dialer, &doc, &alpn, addr.clone(), &presented, id),
+                sync_doc_initiate_enrolled(
+                    &dialer,
+                    &doc,
+                    &alpn,
+                    addr.clone(),
+                    &presented,
+                    id,
+                    // The two-instance slice pairs OWN devices, so each side
+                    // authors into the other (the property under test is
+                    // convergence under concurrent edits).
+                    holon_api::sharing::Capabilities::read_write(),
+                ),
             )
             .await
             .with_context(|| {

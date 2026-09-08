@@ -87,6 +87,13 @@ pub mod multi_peer;
 pub mod owner_identity;
 /// The on-disk half of whole-store pairing: staging, archive, and the swap.
 pub mod pairing_swap;
+/// The admission gate every remote peer's update passes to reach a replicated
+/// document over the iroh transport (D86.a).
+#[cfg(all(
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub mod peer_import;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))

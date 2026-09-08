@@ -13,6 +13,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use holon_api::sharing::Capabilities;
 /// The iroh transport handles this module's public API already speaks
 /// ([`IrohAdvertiser::endpoint_for`], [`IrohAdvertiser::start_share`]'s return,
 /// [`crate::ContainerRegistry::replicate_all`]'s). Re-exported so a caller can
@@ -31,11 +32,15 @@ use crate::iroh_sync_adapter::create_endpoint;
 use crate::iroh_sync_adapter::create_endpoint_with_key;
 use crate::iroh_sync_adapter::make_alpn;
 use crate::iroh_sync_adapter::sync_doc_handle_connection;
+use crate::peer_import::AdmittedPeer;
+use crate::peer_import::PeerReadAccess;
+use crate::peer_import::authorize_peer_read;
 use crate::share_enrollment::AcceptorRefused;
 use crate::share_enrollment::ENROLLMENT_FAILED_CODE;
 use crate::share_enrollment::ENROLLMENT_REFUSED_CODE;
 use crate::share_enrollment::ShareRoster;
 use crate::share_enrollment::acceptor_enroll;
+use crate::share_enrollment::peer_fingerprint;
 
 pub const ALPN_PREFIX: &str = "loro-sync";
 
@@ -45,12 +50,46 @@ pub const ALPN_PREFIX: &str = "loro-sync";
 /// the sync protocol runs — closing the bearer-`shared_tree_id` forgery hole.
 pub type SharedRoster = Arc<tokio::sync::Mutex<ShareRoster>>;
 
-/// Callback fired after a successful inbound sync handshake. The
-/// advertiser hands the dialer's `EndpointAddr` to the callback so
-/// `LoroShareBackend` can remember it for later `sync_with_peers`
-/// rounds — including after a restart, when the ticket author's addr
-/// is stale.
-pub type OnPeerConnected = Arc<dyn Fn(String, EndpointAddr) + Send + Sync>;
+/// How one advertised share decides who may sync it, and what a peer that
+/// passes may then do. Every share states one — there is no `None` that means
+/// "whatever happens", because that is what let the H5 gate stay un-wired on
+/// the path that ships.
+#[derive(Clone)]
+pub enum ShareAdmission {
+    /// Every inbound peer proves the share capability (or presents an
+    /// owner-signed device entry) against `roster` BEFORE any sync, and is
+    /// admitted with `capabilities`.
+    ///
+    /// The split is deliberate and mirrors `holon_sharing::policy::Policy`: the
+    /// roster answers *is this peer a member*, the share declares *what
+    /// membership confers here*.
+    Enrolled {
+        roster: SharedRoster,
+        capabilities: Capabilities,
+    },
+    /// DISCLOSED HOLE — no enrollment runs, so every peer that reaches the
+    /// endpoint is admitted with `capabilities`. The `shared_tree_id` sits in
+    /// the ALPN and in projected rows, so "reaches the endpoint" is everyone
+    /// who can route to us.
+    ///
+    /// Spelled per call site rather than implied by a `None`, so
+    /// `rg 'ShareAdmission::Ungated'` enumerates exactly the shares still to be
+    /// gated. See bugfunnel
+    /// `2026-09-08-the-subtree-share-hot-path-advertises-un-gated`.
+    Ungated { capabilities: Capabilities },
+}
+
+/// Callback fired for an inbound dialer the admission ACCEPTED, so
+/// `LoroShareBackend` can remember its `EndpointAddr` for later
+/// `sync_with_peers` rounds — including after a restart, when the ticket
+/// author's addr is stale.
+///
+/// It takes the read witness rather than a container name plus an addr,
+/// because remembering a peer is what makes this device dial it back with a
+/// grant of its own: a peer the admission refuses must never become a peer we
+/// dial. The witness is the only source of the container name here, so an
+/// unauthorized dialer cannot be handed to the callback at all.
+pub type OnPeerConnected = Arc<dyn Fn(&PeerReadAccess, EndpointAddr) + Send + Sync>;
 
 struct ShareHandle {
     endpoint: Endpoint,
@@ -89,25 +128,36 @@ impl IrohAdvertiser {
         }
     }
 
-    /// Start advertising `doc` on `loro-sync/{shared_tree_id}`.
-    /// Returns the `EndpointAddr` peers can dial (to put into the ticket).
-    pub async fn start_share(
+    /// Start advertising `doc` on `loro-sync/{shared_tree_id}` with NO
+    /// enrollment: every peer that reaches the endpoint is admitted with
+    /// `capabilities`. Naming the capabilities is the point — see
+    /// [`ShareAdmission::Ungated`].
+    pub async fn start_share_ungated(
         &self,
         shared_tree_id: String,
         doc: Arc<LoroDoc>,
+        capabilities: Capabilities,
     ) -> Result<EndpointAddr> {
-        self.start_share_with_callback(shared_tree_id, doc, None, None, None)
-            .await
+        self.start_share_with_callback(
+            shared_tree_id,
+            doc,
+            None,
+            None,
+            ShareAdmission::Ungated { capabilities },
+        )
+        .await
     }
 
     /// Start advertising WITH an enrollment roster: every inbound peer must
     /// prove the share capability (or present an owner-signed device entry)
-    /// before any sync. This is the enforced (H5) boundary.
+    /// before any sync, and is then admitted with `capabilities`. This is the
+    /// enforced (H5) boundary.
     pub async fn start_share_gated(
         &self,
         shared_tree_id: String,
         doc: Arc<LoroDoc>,
         roster: SharedRoster,
+        capabilities: Capabilities,
         on_peer_connected: Option<OnPeerConnected>,
         preferred_port: Option<u16>,
     ) -> Result<EndpointAddr> {
@@ -116,7 +166,10 @@ impl IrohAdvertiser {
             doc,
             on_peer_connected,
             preferred_port,
-            Some(roster),
+            ShareAdmission::Enrolled {
+                roster,
+                capabilities,
+            },
         )
         .await
     }
@@ -131,9 +184,11 @@ impl IrohAdvertiser {
             .and_then(|h| h.roster.clone())
     }
 
-    /// Variant of `start_share` that installs a callback fired after each
-    /// successful inbound sync handshake. Used by `LoroShareBackend` to
-    /// remember dialing peers' addresses for later bidirectional sync.
+    /// Variant of `start_share` that installs a callback fired for each
+    /// inbound dialer the admission accepted, BEFORE its sync round runs (the
+    /// dialer's addr is only readable while the connection is up). Used by
+    /// `LoroShareBackend` to remember those addresses for later bidirectional
+    /// sync.
     ///
     /// `preferred_port` rebinds the same UDP port across restarts (keyed
     /// endpoints only) so peers' persisted addrs for this share stay
@@ -144,8 +199,16 @@ impl IrohAdvertiser {
         doc: Arc<LoroDoc>,
         on_peer_connected: Option<OnPeerConnected>,
         preferred_port: Option<u16>,
-        roster: Option<SharedRoster>,
+        admission: ShareAdmission,
     ) -> Result<EndpointAddr> {
+        if let ShareAdmission::Ungated { capabilities } = &admission {
+            warn!(
+                shared_tree_id = %shared_tree_id,
+                granted = %capabilities,
+                "[advertiser] share advertised UN-GATED: no enrollment runs, so any peer that \
+                 reaches this endpoint is admitted with these capabilities"
+            );
+        }
         let mut guard = self.shares.write().await;
         if guard.contains_key(&shared_tree_id) {
             return Err(anyhow!(
@@ -167,13 +230,17 @@ impl IrohAdvertiser {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let addr = endpoint.addr();
 
+        let roster = match &admission {
+            ShareAdmission::Enrolled { roster, .. } => Some(roster.clone()),
+            ShareAdmission::Ungated { .. } => None,
+        };
         let accepter_ep = endpoint.clone();
         let task = tokio::spawn(accept_loop(
             accepter_ep,
             doc,
             shared_tree_id.clone(),
             on_peer_connected,
-            roster.clone(),
+            admission,
         ));
 
         guard.insert(
@@ -248,14 +315,14 @@ async fn accept_loop(
     doc: Arc<LoroDoc>,
     shared_tree_id: String,
     on_peer_connected: Option<OnPeerConnected>,
-    roster: Option<SharedRoster>,
+    admission: ShareAdmission,
 ) {
     debug!("[advertiser:{shared_tree_id}] accept loop started");
     while let Some(incoming) = endpoint.accept().await {
         let doc = doc.clone();
         let id = shared_tree_id.clone();
         let cb = on_peer_connected.clone();
-        let roster = roster.clone();
+        let admission = admission.clone();
         tokio::spawn(async move {
             let conn = match incoming.await {
                 Ok(c) => c,
@@ -285,34 +352,65 @@ async fn accept_loop(
             // so it can neither read nor write the shared doc. An UN-gated
             // share keeps the legacy behaviour (used by standalone transport
             // tests that construct the advertiser directly).
-            if let Some(roster) = roster.as_ref() {
-                let now = chrono::Utc::now().timestamp();
-                let mut guard = roster.lock().await;
-                match acceptor_enroll(&conn, &mut guard, now).await {
-                    Ok(authorized) => {
-                        debug!(
-                            "[advertiser:{id}] peer enrolled (newly={})",
-                            authorized.newly_enrolled()
-                        );
-                    }
-                    Err(e) => {
-                        // The close code is the ONE signal the dialer can read
-                        // to tell a refusal from an I/O failure, so it is set
-                        // by matching the typed error, never by phrasing.
-                        let refused = e.downcast_ref::<AcceptorRefused>().is_some();
-                        warn!(
-                            "[advertiser:{id}] enrollment gate closed the connection \
-                             (refused={refused}): {e:#}"
-                        );
-                        if refused {
-                            conn.close(ENROLLMENT_REFUSED_CODE.into(), b"enrollment refused");
-                        } else {
-                            conn.close(ENROLLMENT_FAILED_CODE.into(), b"enrollment failed");
+            //
+            // The decision's OUTCOME is what the sync leg then runs on: the
+            // `AdmittedPeer` below is the only thing that can carry a peer's
+            // delta into the doc (D86.a), so an enrollment that never happened
+            // cannot be silently followed by an import.
+            let admitted = match &admission {
+                ShareAdmission::Enrolled {
+                    roster,
+                    capabilities,
+                } => {
+                    let now = chrono::Utc::now().timestamp();
+                    let mut guard = roster.lock().await;
+                    match acceptor_enroll(&conn, &mut guard, now).await {
+                        Ok(authorized) => {
+                            debug!(
+                                "[advertiser:{id}] peer enrolled (newly={}, granted={})",
+                                authorized.newly_enrolled(),
+                                capabilities
+                            );
+                            AdmittedPeer::enrolled(&id, &authorized, capabilities.clone())
                         }
-                        return;
+                        Err(e) => {
+                            // The close code is the ONE signal the dialer can
+                            // read to tell a refusal from an I/O failure, so it
+                            // is set by matching the typed error, never by
+                            // phrasing.
+                            let refused = e.downcast_ref::<AcceptorRefused>().is_some();
+                            warn!(
+                                "[advertiser:{id}] enrollment gate closed the connection \
+                                 (refused={refused}): {e:#}"
+                            );
+                            if refused {
+                                conn.close(ENROLLMENT_REFUSED_CODE.into(), b"enrollment refused");
+                            } else {
+                                conn.close(ENROLLMENT_FAILED_CODE.into(), b"enrollment failed");
+                            }
+                            return;
+                        }
                     }
                 }
-            }
+                ShareAdmission::Ungated { capabilities } => {
+                    AdmittedPeer::ungated(&id, peer_fingerprint(&conn), capabilities.clone())
+                }
+            };
+            // The read gate runs HERE, not inside the sync leg, because the
+            // callback below makes this peer one we dial BACK (with a grant of
+            // our own): a refusal has to stop the addr from being remembered,
+            // not merely stop this round.
+            let access = match authorize_peer_read(&admitted) {
+                Ok(access) => access,
+                Err(e) => {
+                    warn!("[advertiser:{id}] refusing an admitted peer's read: {e:#}");
+                    // Same close code the enrollment refusal uses: from the
+                    // dialer's side both are "the acceptor decided against
+                    // you", and the code is the only signal it can read.
+                    conn.close(ENROLLMENT_REFUSED_CODE.into(), b"capability refused");
+                    return;
+                }
+            };
             // Capture dialer addr BEFORE running the sync protocol —
             // sync reads/writes framed bytes and may drop the
             // connection on errors, at which point `paths()` empties
@@ -320,9 +418,9 @@ async fn accept_loop(
             // something to persist even if the sync itself fails.
             let remote = connection_remote_addr(&conn);
             if let Some(ref cb) = cb {
-                cb(id.clone(), remote);
+                cb(&access, remote);
             }
-            if let Err(e) = sync_doc_handle_connection(conn, &doc).await {
+            if let Err(e) = sync_doc_handle_connection(conn, &doc, &access).await {
                 warn!("[advertiser:{id}] sync connection failed: {e:#}");
             }
         });
@@ -337,7 +435,31 @@ mod tests {
 
     use super::*;
     use crate::iroh_sync_adapter::sync_doc_initiate;
+    use crate::iroh_sync_adapter::sync_doc_initiate_enrolled;
     use crate::loro_backend::TREE_NAME;
+
+    /// Enrolled dial granting the peer a full writer — what every enrollment
+    /// test here is about, so the capability argument stays out of the way of
+    /// the property under test.
+    async fn sync_doc_initiate_enrolled_rw(
+        endpoint: &Endpoint,
+        doc: &Arc<LoroDoc>,
+        alpn: &[u8],
+        peer_addr: EndpointAddr,
+        capability: &crate::share_enrollment::CapabilitySecret,
+        shared_tree_id: &str,
+    ) -> Result<iroh::endpoint::Connection> {
+        sync_doc_initiate_enrolled(
+            endpoint,
+            doc,
+            alpn,
+            peer_addr,
+            capability,
+            shared_tree_id,
+            Capabilities::read_write(),
+        )
+        .await
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial_test::serial]
@@ -346,7 +468,9 @@ mod tests {
         let doc = Arc::new(LoroDoc::new());
         doc.set_peer_id(1)?;
 
-        let _addr = adv.start_share("t1".into(), doc.clone()).await?;
+        let _addr = adv
+            .start_share_ungated("t1".into(), doc.clone(), Capabilities::read_write())
+            .await?;
         assert!(adv.is_active("t1").await);
         adv.drop_share("t1").await?;
         assert!(!adv.is_active("t1").await);
@@ -372,18 +496,30 @@ mod tests {
         server_doc.commit();
 
         let addr = adv
-            .start_share("sharedA".into(), server_doc.clone())
+            .start_share_ungated(
+                "sharedA".into(),
+                server_doc.clone(),
+                Capabilities::read_write(),
+            )
             .await?;
 
         // Client pulls.
-        let client_doc = LoroDoc::new();
+        let client_doc = Arc::new(LoroDoc::new());
         client_doc.set_peer_id(22)?;
         let alpn = make_alpn(ALPN_PREFIX, "sharedA");
         let client_ep = create_endpoint(vec![alpn.clone()]).await?;
         // Iroh needs a beat for endpoints to be discoverable over the local
         // discovery services.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let _conn = sync_doc_initiate(&client_ep, &client_doc, &alpn, addr).await?;
+        let _conn = sync_doc_initiate(
+            &client_ep,
+            &client_doc,
+            &alpn,
+            addr,
+            "sharedA",
+            Capabilities::read_write(),
+        )
+        .await?;
 
         let snap = server_doc.export(ExportMode::Snapshot)?;
         let expected = {
@@ -394,6 +530,90 @@ mod tests {
         assert_eq!(client_doc.get_deep_value(), expected);
 
         adv.drop_share("sharedA").await?;
+        Ok(())
+    }
+
+    /// A peer the admission REFUSES must not be promoted to a peer this device
+    /// remembers — and therefore later DIALS.
+    ///
+    /// `LoroShareBackend` persists whatever the on-peer-connected callback
+    /// hands it into the known-peers sidecar, and `sync_with_peers` dials every
+    /// addr in that sidecar granting `Capabilities::read_write()`. So firing
+    /// the callback before the capability check makes the refusal one-round
+    /// only: refusing a peer's read still hands it a full-writer round next
+    /// time. The control case in the same test proves the callback is alive,
+    /// so an empty recording is the refusal and not a broken dial.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn a_peer_refused_for_read_is_never_remembered_as_a_known_peer() -> Result<()> {
+        async fn remembered_after_a_dial(id: &str, granted: Capabilities) -> Result<Vec<String>> {
+            let adv = IrohAdvertiser::new();
+            let server_doc = Arc::new(LoroDoc::new());
+            server_doc.set_peer_id(11)?;
+            server_doc.commit();
+
+            let recorded = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let sink = recorded.clone();
+            let cb: OnPeerConnected = Arc::new(move |access: &PeerReadAccess, _addr| {
+                sink.lock()
+                    .expect("remembered-peer sink")
+                    .push(access.container().to_string());
+            });
+
+            let addr = adv
+                .start_share_with_callback(
+                    id.to_string(),
+                    server_doc.clone(),
+                    Some(cb),
+                    None,
+                    ShareAdmission::Ungated {
+                        capabilities: granted,
+                    },
+                )
+                .await?;
+
+            let alpn = make_alpn(ALPN_PREFIX, id);
+            let client_doc = Arc::new(LoroDoc::new());
+            client_doc.set_peer_id(22)?;
+            let client_ep = create_endpoint(vec![alpn.clone()]).await?;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // The refused round fails on the dialer's side too (the acceptor
+            // closes on it); the assertion is about what the ACCEPTOR
+            // remembered, so the dial's own outcome is not the observable.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                sync_doc_initiate(
+                    &client_ep,
+                    &client_doc,
+                    &alpn,
+                    addr,
+                    id,
+                    Capabilities::read_write(),
+                ),
+            )
+            .await;
+            // The callback is fired from the accept task, which outlives the
+            // dial by a beat.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            adv.drop_share(id).await?;
+            let out = recorded.lock().expect("remembered-peer sink").clone();
+            Ok(out)
+        }
+
+        let refused = remembered_after_a_dial("refused-read", Capabilities::of([])).await?;
+        assert!(
+            refused.is_empty(),
+            "a peer admitted with NO capabilities was remembered for container(s) {refused:?} — \
+             `sync_with_peers` will dial it back granting read+write, so the refusal held for one \
+             round only"
+        );
+
+        let admitted = remembered_after_a_dial("admitted-read", Capabilities::read_write()).await?;
+        assert_eq!(
+            admitted,
+            vec!["admitted-read".to_string()],
+            "control: a peer the admission accepts must still be remembered"
+        );
         Ok(())
     }
 
@@ -419,7 +639,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn gated_share_rejects_forged_ticket_serves_enrolled_peer() -> Result<()> {
-        use crate::iroh_sync_adapter::sync_doc_initiate_enrolled;
         use crate::share_enrollment::CapabilitySecret;
         use crate::share_enrollment::ExpiryTime;
         use crate::share_enrollment::ShareRoster;
@@ -460,6 +679,7 @@ mod tests {
                 tree_id.into(),
                 server_doc.clone(),
                 roster.clone(),
+                Capabilities::read_write(),
                 None,
                 None,
             )
@@ -467,11 +687,19 @@ mod tests {
         let alpn = make_alpn(ALPN_PREFIX, tree_id);
 
         // --- Case 1: attacker knows the ALPN but does NOT enroll ---
-        let no_enroll_doc = LoroDoc::new();
+        let no_enroll_doc = Arc::new(LoroDoc::new());
         no_enroll_doc.set_peer_id(97)?;
         let ep1 = create_endpoint(vec![alpn.clone()]).await?;
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let res1 = sync_doc_initiate(&ep1, &no_enroll_doc, &alpn, addr.clone()).await;
+        let res1 = sync_doc_initiate(
+            &ep1,
+            &no_enroll_doc,
+            &alpn,
+            addr.clone(),
+            tree_id,
+            Capabilities::read_write(),
+        )
+        .await;
         // Whether the dial errors or completes, the attacker must not have
         // pulled the content.
         assert_ne!(
@@ -483,7 +711,7 @@ mod tests {
 
         // --- Case 2: attacker with a FORGED capability ---
         let forged_cap = CapabilitySecret::generate();
-        let forged_doc = LoroDoc::new();
+        let forged_doc = Arc::new(LoroDoc::new());
         forged_doc.set_peer_id(98)?;
         let ep2 = create_endpoint(vec![alpn.clone()]).await?;
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -494,6 +722,7 @@ mod tests {
             addr.clone(),
             &forged_cap,
             tree_id,
+            Capabilities::read_write(),
         )
         .await;
         assert!(
@@ -507,13 +736,21 @@ mod tests {
         );
 
         // --- Case 3: honest recipient with the REAL capability ---
-        let honest_doc = LoroDoc::new();
+        let honest_doc = Arc::new(LoroDoc::new());
         honest_doc.set_peer_id(22)?;
         let ep3 = create_endpoint(vec![alpn.clone()]).await?;
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        sync_doc_initiate_enrolled(&ep3, &honest_doc, &alpn, addr, &real_cap, tree_id)
-            .await
-            .context("honest recipient with the real capability must enroll and sync")?;
+        sync_doc_initiate_enrolled(
+            &ep3,
+            &honest_doc,
+            &alpn,
+            addr,
+            &real_cap,
+            tree_id,
+            Capabilities::read_write(),
+        )
+        .await
+        .context("honest recipient with the real capability must enroll and sync")?;
         assert_eq!(
             honest_doc.get_deep_value(),
             expected,
@@ -544,7 +781,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn only_a_roster_refusal_is_typed_as_an_enrollment_refusal() -> Result<()> {
-        use crate::iroh_sync_adapter::sync_doc_initiate_enrolled;
         use crate::share_enrollment::CapabilitySecret;
         use crate::share_enrollment::EnrollmentRefused;
         use crate::share_enrollment::ExpiryTime;
@@ -566,16 +802,31 @@ mod tests {
         )));
         let adv = IrohAdvertiser::new();
         let addr = adv
-            .start_share_gated(tree_id.into(), server_doc, roster, None, None)
+            .start_share_gated(
+                tree_id.into(),
+                server_doc,
+                roster,
+                Capabilities::read_write(),
+                None,
+                None,
+            )
             .await?;
         let alpn = make_alpn(ALPN_PREFIX, tree_id);
         let forged = CapabilitySecret::generate();
-        let doc1 = LoroDoc::new();
+        let doc1 = Arc::new(LoroDoc::new());
         doc1.set_peer_id(32)?;
         let ep1 = create_endpoint(vec![alpn.clone()]).await?;
-        let refusal = sync_doc_initiate_enrolled(&ep1, &doc1, &alpn, addr, &forged, tree_id)
-            .await
-            .expect_err("a forged capability must be refused");
+        let refusal = sync_doc_initiate_enrolled(
+            &ep1,
+            &doc1,
+            &alpn,
+            addr,
+            &forged,
+            tree_id,
+            Capabilities::read_write(),
+        )
+        .await
+        .expect_err("a forged capability must be refused");
         assert!(
             is_refusal(&refusal),
             "the roster's refusal was not typed as one: {refusal:#}"
@@ -598,11 +849,11 @@ mod tests {
                 conn.closed().await;
             }
         });
-        let doc2 = LoroDoc::new();
+        let doc2 = Arc::new(LoroDoc::new());
         doc2.set_peer_id(33)?;
         let ep2 = create_endpoint(vec![fail_alpn.clone()]).await?;
         let failure =
-            sync_doc_initiate_enrolled(&ep2, &doc2, &fail_alpn, fail_addr, &forged, fail_id)
+            sync_doc_initiate_enrolled_rw(&ep2, &doc2, &fail_alpn, fail_addr, &forged, fail_id)
                 .await
                 .expect_err("an acceptor that closes mid-enrollment must fail the dial");
         assert!(
@@ -622,11 +873,11 @@ mod tests {
                 drop(incoming.await);
             }
         });
-        let doc3 = LoroDoc::new();
+        let doc3 = Arc::new(LoroDoc::new());
         doc3.set_peer_id(34)?;
         let ep3 = create_endpoint(vec![drop_alpn.clone()]).await?;
         let dropped =
-            sync_doc_initiate_enrolled(&ep3, &doc3, &drop_alpn, drop_addr, &forged, drop_id)
+            sync_doc_initiate_enrolled_rw(&ep3, &doc3, &drop_alpn, drop_addr, &forged, drop_id)
                 .await
                 .expect_err("a dropped connection must fail the dial");
         assert!(
@@ -648,7 +899,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn gated_gate_rejects_expired_and_over_cap() -> Result<()> {
-        use crate::iroh_sync_adapter::sync_doc_initiate_enrolled;
         use crate::share_enrollment::CapabilitySecret;
         use crate::share_enrollment::ExpiryTime;
         use crate::share_enrollment::ShareRoster;
@@ -675,15 +925,23 @@ mod tests {
         )));
         let adv = IrohAdvertiser::new();
         let exp_addr = adv
-            .start_share_gated(exp_id.into(), exp_doc.clone(), exp_roster, None, None)
+            .start_share_gated(
+                exp_id.into(),
+                exp_doc.clone(),
+                exp_roster,
+                Capabilities::read_write(),
+                None,
+                None,
+            )
             .await?;
         let exp_alpn = make_alpn(ALPN_PREFIX, exp_id);
-        let late_doc = LoroDoc::new();
+        let late_doc = Arc::new(LoroDoc::new());
         late_doc.set_peer_id(32)?;
         let ep = create_endpoint(vec![exp_alpn.clone()]).await?;
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let res =
-            sync_doc_initiate_enrolled(&ep, &late_doc, &exp_alpn, exp_addr, &exp_cap, exp_id).await;
+            sync_doc_initiate_enrolled_rw(&ep, &late_doc, &exp_alpn, exp_addr, &exp_cap, exp_id)
+                .await;
         assert!(res.is_err(), "expired enrollment window must be rejected");
         adv.drop_share(exp_id).await?;
 
@@ -714,26 +972,27 @@ mod tests {
                 cap_id.into(),
                 cap_doc.clone(),
                 capped_roster.clone(),
+                Capabilities::read_write(),
                 None,
                 None,
             )
             .await?;
         let cap_alpn = make_alpn(ALPN_PREFIX, cap_id);
 
-        let first = LoroDoc::new();
+        let first = Arc::new(LoroDoc::new());
         first.set_peer_id(42)?;
         let ep_first = create_endpoint(vec![cap_alpn.clone()]).await?;
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        sync_doc_initiate_enrolled(&ep_first, &first, &cap_alpn, cap_addr.clone(), &cap, cap_id)
+        sync_doc_initiate_enrolled_rw(&ep_first, &first, &cap_alpn, cap_addr.clone(), &cap, cap_id)
             .await
             .context("first device fills the single roster slot")?;
 
-        let second = LoroDoc::new();
+        let second = Arc::new(LoroDoc::new());
         second.set_peer_id(43)?;
         let ep_second = create_endpoint(vec![cap_alpn.clone()]).await?;
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let over =
-            sync_doc_initiate_enrolled(&ep_second, &second, &cap_alpn, cap_addr, &cap, cap_id)
+            sync_doc_initiate_enrolled_rw(&ep_second, &second, &cap_alpn, cap_addr, &cap, cap_id)
                 .await;
         assert!(
             over.is_err(),

@@ -17,6 +17,7 @@ use holon_api::EntityUri;
 use holon_api::OperationDescriptor;
 use holon_api::StorageEntity;
 use holon_api::Value;
+use holon_api::sharing::Capabilities;
 use holon_core::DownstreamProjection;
 use holon_core::MaybeSendSync;
 use holon_core::OperationProvider;
@@ -46,6 +47,7 @@ use crate::degraded_signal_bus::ShareDegradedReason;
 use crate::iroh_advertiser::ALPN_PREFIX;
 use crate::iroh_advertiser::IrohAdvertiser;
 use crate::iroh_advertiser::OnPeerConnected;
+use crate::iroh_advertiser::ShareAdmission;
 use crate::iroh_sync_adapter::SharedTreeSyncManager;
 use crate::iroh_sync_adapter::create_endpoint;
 use crate::iroh_sync_adapter::make_alpn;
@@ -53,6 +55,7 @@ use crate::iroh_sync_adapter::sync_doc_initiate;
 use crate::loro_document_store::DocScope;
 use crate::loro_document_store::LoroDocumentStore;
 use crate::loro_sync_controller::project_shared_doc_to_ops;
+use crate::peer_import::PeerReadAccess;
 use crate::share_peer_id::stable_peer_id;
 use crate::shared_snapshot_store::SharedSnapshotStore;
 use crate::shared_tree::HistoryRetention;
@@ -975,6 +978,18 @@ impl LoroShareBackend {
             .map_err(|e| err(format!("get_doc(Global) failed: {e:#}")))
     }
 
+    /// Record an INBOUND dialer as a peer of `access`'s container. Takes the
+    /// read witness because `sync_with_peers` later dials everything this
+    /// writes, granting `Capabilities::read_write()` — so a peer the admission
+    /// refused must not be able to get in here.
+    async fn remember_admitted_peer(&self, access: &PeerReadAccess, addr: EndpointAddr) {
+        self.remember_peer(access.container(), addr).await;
+    }
+
+    /// The store mutation itself. Private, and reachable from exactly two
+    /// bases: an inbound dialer the admission accepted
+    /// ([`Self::remember_admitted_peer`]) and the ticket author's own addr,
+    /// which THIS device chose to accept a share from.
     async fn remember_peer(&self, shared_tree_id: &str, addr: EndpointAddr) {
         let persisted = {
             let mut guard = self.known_peers.write().await;
@@ -1019,16 +1034,17 @@ impl LoroShareBackend {
     }
 
     /// Build a peer-connected callback that remembers every inbound
-    /// dialer's address on this backend. Returns an `OnPeerConnected`
+    /// dialer the admission accepted. Returns an `OnPeerConnected`
     /// suitable for `IrohAdvertiser::start_share_with_callback`.
     fn peer_connected_callback(&self) -> OnPeerConnected {
         let weak = self.weak_self();
-        Arc::new(move |shared_tree_id: String, addr: EndpointAddr| {
+        Arc::new(move |access: &PeerReadAccess, addr: EndpointAddr| {
             let Some(strong) = weak.upgrade() else {
                 return;
             };
+            let access = access.clone();
             tokio::spawn(async move {
-                strong.remember_peer(&shared_tree_id, addr).await;
+                strong.remember_admitted_peer(&access, addr).await;
             });
         })
     }
@@ -1063,12 +1079,17 @@ impl LoroShareBackend {
                 doc,
                 Some(self.peer_connected_callback()),
                 preferred_port,
-                // Enrollment gate not yet flipped ON in the backend hot path
-                // (share_subtree/accept/resync/rehydrate must all enroll in
-                // lockstep first — the enrollment MECHANISM lands here and is
-                // proven at the transport layer; wiring the backend to pass a
-                // real roster is the remaining integration). Un-gated = legacy.
-                None,
+                // OPEN HOLE, stated rather than implied: the H5 enrollment gate
+                // is not yet wired into the backend hot path
+                // (share_subtree/accept/resync/rehydrate must adopt a roster in
+                // lockstep, and the capability secret must be persisted first),
+                // so every peer that reaches this endpoint is admitted as a
+                // full writer — which is what the ticket already grants in
+                // practice. Tracked as bugfunnel
+                // `2026-09-08-the-subtree-share-hot-path-advertises-un-gated`.
+                ShareAdmission::Ungated {
+                    capabilities: Capabilities::read_write(),
+                },
             )
             .await?;
         let bound_port = addr.addrs.iter().find_map(|t| match t {
@@ -1148,7 +1169,19 @@ impl LoroShareBackend {
                 dial_addr = ?addr,
                 "[share] dialing peer"
             );
-            let fut = sync_doc_initiate(&ep, &doc, &alpn_bytes, addr);
+            // The peers dialed here are the ones this device recorded for the
+            // share, and the share itself is advertised un-gated (see
+            // `start_advertising_stable`), so the round grants what the ticket
+            // already grants. Narrowing this needs the persisted capability
+            // secret the same bugfunnel entry tracks.
+            let fut = sync_doc_initiate(
+                &ep,
+                &doc,
+                &alpn_bytes,
+                addr,
+                shared_tree_id,
+                Capabilities::read_write(),
+            );
             match timeout(CONNECT_TIMEOUT, fut).await {
                 Ok(Ok(conn)) => {
                     // `sync_doc_initiate` now drains the recv stream
@@ -1770,7 +1803,16 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             .endpoint_for(&shared_tree_id)
             .await
             .ok_or_else(|| err("advertiser endpoint missing right after start_share"))?;
-        let initiate = sync_doc_initiate(&client_ep, &shared_arc, &alpn_bytes, t.addr.clone());
+        // The ticket author owns the subtree we just accepted, so it authors
+        // into our copy. Un-gated on both ends today — same open entry.
+        let initiate = sync_doc_initiate(
+            &client_ep,
+            &shared_arc,
+            &alpn_bytes,
+            t.addr.clone(),
+            &shared_tree_id,
+            Capabilities::read_write(),
+        );
         let _conn = timeout(CONNECT_TIMEOUT, initiate)
             .await
             .map_err(|_| err("initial sync timed out"))?
@@ -2887,6 +2929,8 @@ mod tests {
         content: &str,
     ) {
         let collab = backend.global_doc().await.unwrap();
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
+        // exists to observe.
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
@@ -2915,6 +2959,8 @@ mod tests {
     ) {
         seed_block(backend, stable_id, parent_stable_id, content).await;
         let collab = backend.global_doc().await.unwrap();
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
+        // exists to observe.
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
@@ -2929,6 +2975,8 @@ mod tests {
 
     async fn read_text(backend: &LoroShareBackend, stable_id: &str) -> Option<String> {
         let collab = backend.global_doc().await.unwrap();
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
+        // exists to observe.
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         let uri = EntityUri::block(stable_id);
@@ -3169,6 +3217,8 @@ mod tests {
         // through the unrouted global path would resolve nothing.
         let a_global = backend_a.global_doc().await.unwrap();
         assert!(
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer exists
+            // to observe.
             find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-child")).is_none(),
             "shared-child should be absent from A's global tree after the prune"
         );
@@ -3193,6 +3243,8 @@ mod tests {
         );
         // Global doc still holds no shared-child node (nothing was created there).
         assert!(
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer exists
+            // to observe.
             find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-child")).is_none(),
             "the routed write must NOT resurrect shared-child in the global tree"
         );
@@ -3390,6 +3442,8 @@ mod tests {
         // NOT in A's global tree.
         let a_global = backend_a.global_doc().await.unwrap();
         assert!(
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer exists
+            // to observe.
             find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-new-child"))
                 .is_none(),
             "shared child must not appear in the global tree"
@@ -3987,6 +4041,8 @@ mod tests {
         let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
         let backend_a = LoroShareBackend::new(store, snapshot_store, manager, advertiser, bus, key);
         let collab = backend_a.test_global_doc().await;
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
+        // exists to observe.
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         let n = rehydrate_shared_trees(&backend_a, doc).await.unwrap();
@@ -4145,6 +4201,8 @@ mod tests {
         let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
         let backend_a = LoroShareBackend::new(store, snapshot_store, manager, advertiser, bus, key);
         let collab = backend_a.test_global_doc().await;
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
+        // exists to observe.
         let doc_arc = collab.doc();
         let n = rehydrate_shared_trees(&backend_a, &doc_arc).await.unwrap();
         assert_eq!(n, 1, "A should rehydrate exactly 1 share");
@@ -4507,6 +4565,8 @@ mod tests {
             crate::loro_document::LoroDocument::new("collide-global".to_string()).unwrap(),
         );
         {
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
+            // exists to observe.
             let gdoc = global.doc();
             let tree = gdoc.get_tree(TREE_NAME);
             let node = tree.create(None::<TreeID>).unwrap();
@@ -5045,6 +5105,8 @@ mod tests {
         // Exactly ONE "Shared with me" node in B's global Loro tree.
         let loro_root_count = {
             let collab = backend_b.global_doc().await.unwrap();
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
+            // exists to observe.
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
             let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
@@ -5146,6 +5208,8 @@ mod tests {
         // Mount node removed from the global tree.
         {
             let collab = backend.global_doc().await.unwrap();
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
+            // exists to observe.
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
             let bare = mount_id.strip_prefix("block:").unwrap();
@@ -5202,6 +5266,8 @@ mod tests {
             .unwrap();
 
         let collab = backend.global_doc().await.unwrap();
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
+        // exists to observe.
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         let bytes = doc
@@ -5238,6 +5304,8 @@ mod tests {
 
         {
             let collab = backend.global_doc().await.unwrap();
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
+            // exists to observe.
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
             let bare = mount_id.strip_prefix("block:").unwrap();
@@ -5253,6 +5321,8 @@ mod tests {
         backend.unshare(&mount_id).await.unwrap();
 
         let collab = backend.global_doc().await.unwrap();
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
+        // exists to observe.
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         let bytes = doc

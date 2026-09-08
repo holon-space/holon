@@ -3,7 +3,7 @@ id: 2026-09-02-capability-write-is-enforced-nowhere
 date: 2026-09-02
 gap: ORACLE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   The sync acceptor gates admission on Capability::Read alone, so a peer holding
   a read-only certificate has its writes imported exactly like a read-write
@@ -67,17 +67,53 @@ been admitted.
 
 ## Remedy
 
-OPEN. Not fixed in this lane, which owns convergence, not authorization.
+FIXED, in two halves.
 
-The lane's report flags a program consequence: the plan's DC-3 decision card
-("is the phone a full writer from day one?") assumes read-only is an available
-setting. It is not — choosing a read-only phone requires building this
-enforcement first, so both branches of DC-3 cost the same enforcement work.
+**Relay leg — already landed before this lane** (present at `main`
+`830d794f878f`). `acceptor::admit` now derives the required capability from who
+the subject is relative to the admitter (`acceptor.rs:209`
+`required_capability`: subject == admitter is a READ, subject != admitter is
+that peer WRITING into my replica), and refuses with
+`AdmitDecision::RefuseCapability { principal, missing, held }`. `pull_once`
+importing on `Import { .. }` is correct as a result — the check happens inside
+`admit`, which is the sole admission decision, so there is nothing left for the
+caller to re-check. Covering tests in `holon-sharing/src/acceptor.rs`:
 
-Fix shape: `pull_once` must consult the `capabilities` that
-`AdmitDecision::Import` already hands it, and refuse an update-bearing envelope
-from a chain without `Capability::Write`. Add the missing refusal to the
-acceptor's unit tests as the red, and add a two-instance invariant that a
-read-only receiver's writes never reach the owner.
+- `a_read_only_peers_write_into_the_owners_store_is_refused`
+- `a_third_partys_read_only_chain_cannot_write_into_my_store`
+- `a_read_write_peers_write_into_the_owners_store_is_admitted` (the positive)
 
-Related in the same lane: `2026-09-02-reverse-sync-leg-reuses-the-receiver-audience`.
+**Iroh leg — this lane (2026-09-08).** The transport had no capability notion at
+all: the enrollment gate answered "is this peer a member" and its `AuthorizedPeer`
+witness was then discarded. A share now declares what membership confers
+(`iroh_advertiser::ShareAdmission`), the accept loop turns the enrollment result
+into a `peer_import::AdmittedPeer` carrying that `Capabilities` value, and both
+directions are gated by it: `import_peer_delta` requires `Capability::Write`,
+`authorize_peer_read` requires `Capability::Read`. A refusal is a typed loud
+`Err` (`PeerAccessRefused`) naming the peer, the container, the missing
+capability and what was attempted — never a silent drop (D72.a). Covering tests
+in `holon-loro/src/peer_import.rs`:
+
+- `a_read_only_peers_delta_is_refused_naming_the_missing_capability` (and it
+  asserts the replica is left untouched)
+- `an_admission_conferring_nothing_refuses_both_directions`
+- `a_write_only_admission_may_not_read`
+
+Both legs now speak ONE capability type, `holon_api::sharing::Capabilities`,
+moved down out of `holon-sharing::policy` (which re-exports it) because
+`holon-sharing` depends on `holon-loro` and neither could own it. The set travels
+from the decision to the enforcement point as a value; nothing re-parses a
+string.
+
+**What is still open, and why it is a different bug.** Enforcement is only as
+meaningful as the admission behind it, and the third-party subtree-share
+lifecycle still advertises with NO roster — every peer that reaches the endpoint
+is admitted as a full writer. That is an *admission* gap, not a capability-check
+gap, and it is filed as
+`2026-09-08-the-subtree-share-hot-path-advertises-un-gated`. This lane made it
+typed and greppable (`ShareAdmission::Ungated`, plus a `warn!` per un-gated
+share start) rather than an unmarked `None`.
+
+The program consequence the entry flagged is discharged: DC-3's read-only branch
+is now buildable — a read-only phone is `Capabilities::read_only()` on the
+share's admission, and its writes are refused loudly at the import.

@@ -40,6 +40,7 @@ use holon_api::EntityName;
 use holon_api::OperationDescriptor;
 use holon_api::StorageEntity;
 use holon_api::Value;
+use holon_api::sharing::Capabilities;
 use holon_core::MaybeSendSync;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
@@ -699,6 +700,10 @@ impl DevicePairing {
                     ticket.addr.clone(),
                     &ticket.capability,
                     &ticket.shared_tree_id,
+                    // Whole-store pairing adopts the OWNER's document, so the
+                    // owner authors into the staging doc we just built for it
+                    // (D72.a: an own device is a full writer).
+                    Capabilities::read_write(),
                 ),
             )
             .await
@@ -1065,6 +1070,8 @@ impl DevicePairingOperations<()> for DevicePairing {
                     // its own task — a long-lived transport site.
                     container.doc.doc(),
                     roster.clone(),
+                    // The invite admits the owner's OWN device (D68.b / D72.a).
+                    Capabilities::read_write(),
                     None,
                     None,
                 )

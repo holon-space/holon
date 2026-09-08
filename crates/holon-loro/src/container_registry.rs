@@ -212,6 +212,7 @@ impl SubtreeIndex {
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 mod replicate {
+    use holon_api::sharing::Capabilities;
     use iroh::EndpointAddr;
 
     use super::*;
@@ -244,9 +245,15 @@ mod replicate {
                     .start_share_gated(
                         container.id.clone(),
                         // ALLOW(loro_doc_escape): handed to the iroh advertiser
-                        // as a sync transport handle, not read here.
+                        // as a sync transport handle, not read here. The
+                        // advertiser's import leg re-wraps this same `Arc`, so
+                        // the doc-boundary lock still covers peer writes.
                         container.doc.doc(),
                         roster.clone(),
+                        // This is the OWN-DEVICE fast path: a device the owner
+                        // signed into the roster is a full writer (D69.a /
+                        // D72.a). A third-party share never reaches here.
+                        Capabilities::read_write(),
                         None,
                         None,
                     )
@@ -327,6 +334,8 @@ mod tests {
         // Build root -> child -> grandchild in the store's global doc.
         let store = tmp_store();
         let doc = store.get_doc(DocScope::Global).await?;
+        // ALLOW(loro_doc_escape): single-threaded fixture setup; no concurrent
+        // reader exists to observe a batch interior.
         let raw: Arc<LoroDoc> = doc.doc();
         let (root_uri, child_uri, gc_uri, sibling_uri);
         {

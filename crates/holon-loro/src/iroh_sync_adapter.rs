@@ -39,6 +39,7 @@ mod adapter {
 
     use anyhow::Context;
     use anyhow::Result;
+    use holon_api::sharing::Capabilities;
     use iroh::Endpoint;
     use iroh::EndpointAddr;
     use loro::ExportMode;
@@ -49,6 +50,11 @@ mod adapter {
     use tracing::info;
     use tracing::warn;
 
+    use crate::peer_import::AdmittedPeer;
+    use crate::peer_import::PeerReadAccess;
+    use crate::peer_import::authorize_peer_read;
+    use crate::peer_import::import_peer_delta;
+    use crate::share_enrollment::peer_fingerprint;
     use crate::shared_tree::SharedTreeStore;
 
     const MAX_MSG_SIZE: usize = 10 * 1024 * 1024;
@@ -227,18 +233,28 @@ mod adapter {
     /// Initiator side: connect to a peer and sync a LoroDoc.
     /// Returns the Connection so the caller can keep it alive until both sides
     /// are done.
+    ///
+    /// `grant` is what THIS device allows the peer it dials to do here — there
+    /// is no roster on the initiating side, so the caller states it and must be
+    /// able to say why. It gates both directions of the round
+    /// ([`crate::peer_import`]).
     pub async fn sync_doc_initiate(
         endpoint: &Endpoint,
-        doc: &LoroDoc,
+        doc: &Arc<LoroDoc>,
         alpn: &[u8],
         peer_addr: EndpointAddr,
+        container: &str,
+        grant: Capabilities,
     ) -> Result<iroh::endpoint::Connection> {
         debug!("[init] connecting...");
         let conn = endpoint
             .connect(peer_addr, alpn)
             .await
             .context("Failed to connect to peer")?;
-        sync_on_connection_initiator(conn, doc).await
+        // The peer identity comes off the QUIC-authenticated connection, never
+        // off the addr we aimed at, so the witness names who actually answered.
+        let admitted = AdmittedPeer::dialed(container, peer_fingerprint(&conn), grant);
+        sync_on_connection_initiator(conn, doc, &admitted).await
     }
 
     /// Initiator side WITH enrollment (ADR 0028 H5 acceptor gate): connect,
@@ -249,11 +265,12 @@ mod adapter {
     /// bearer-`shared_tree_id` forgery hole.
     pub async fn sync_doc_initiate_enrolled(
         endpoint: &Endpoint,
-        doc: &LoroDoc,
+        doc: &Arc<LoroDoc>,
         alpn: &[u8],
         peer_addr: EndpointAddr,
         capability: &crate::share_enrollment::CapabilitySecret,
         shared_tree_id: &str,
+        grant: Capabilities,
     ) -> Result<iroh::endpoint::Connection> {
         debug!("[init] connecting (enrolled)...");
         let conn = endpoint
@@ -273,15 +290,19 @@ mod adapter {
                     .context("[init] enrollment did not complete"),
             );
         }
-        sync_on_connection_initiator(conn, doc).await
+        let admitted = AdmittedPeer::dialed(shared_tree_id, peer_fingerprint(&conn), grant);
+        sync_on_connection_initiator(conn, doc, &admitted).await
     }
 
     /// Run the initiator side of the VV sync protocol on an already-connected
     /// (and, on the gated path, already-enrolled) connection.
     async fn sync_on_connection_initiator(
         conn: iroh::endpoint::Connection,
-        doc: &LoroDoc,
+        doc: &Arc<LoroDoc>,
+        admitted: &AdmittedPeer,
     ) -> Result<iroh::endpoint::Connection> {
+        // Our VV and delta go out on this stream, so the peer reads us here.
+        authorize_peer_read(admitted).context("[init] peer may not read this container")?;
         debug!("[init] connected, opening bi...");
         let (mut send, mut recv) = conn
             .open_bi()
@@ -309,7 +330,7 @@ mod adapter {
         );
 
         if !peer_delta.is_empty() {
-            doc.import(&peer_delta)
+            import_peer_delta(doc, admitted, &peer_delta)
                 .context("[init] Failed to import peer delta")?;
         }
 
@@ -340,8 +361,18 @@ mod adapter {
         Ok(conn)
     }
 
-    /// Acceptor side: handle an incoming sync connection for a LoroDoc.
-    pub async fn sync_doc_accept(endpoint: &Endpoint, doc: &LoroDoc) -> Result<()> {
+    /// Acceptor side: handle ONE incoming sync connection for a LoroDoc, with
+    /// no enrollment — whoever reaches the endpoint is admitted with `grant`.
+    /// The gated production accept loop is
+    /// [`crate::iroh_advertiser::IrohAdvertiser::start_share_gated`]; this
+    /// entry point exists for transport tests and for the `SyncBackend` PBT
+    /// harness, which have no roster.
+    pub async fn sync_doc_accept(
+        endpoint: &Endpoint,
+        doc: &Arc<LoroDoc>,
+        container: &str,
+        grant: Capabilities,
+    ) -> Result<()> {
         debug!("[accept] waiting for incoming...");
         let incoming = endpoint
             .accept()
@@ -353,7 +384,10 @@ mod adapter {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to accept connection: {e}"))?;
 
-        sync_doc_handle_connection(conn, doc).await
+        let admitted = AdmittedPeer::ungated(container, peer_fingerprint(&conn), grant);
+        let access =
+            authorize_peer_read(&admitted).context("[accept] peer may not read this container")?;
+        sync_doc_handle_connection(conn, doc, &access).await
     }
 
     /// Extract an addressable `EndpointAddr` for the peer of an active
@@ -387,10 +421,16 @@ mod adapter {
     /// Run the VV-based sync handshake against an already-accepted connection.
     /// Factored out of `sync_doc_accept` so the persistent advertiser loop can
     /// reuse it.
+    ///
+    /// Takes the read witness, not the raw admission: exporting our delta is
+    /// this peer reading here, so the caller has to have passed
+    /// [`authorize_peer_read`] to reach this function at all.
     pub async fn sync_doc_handle_connection(
         conn: iroh::endpoint::Connection,
-        doc: &LoroDoc,
+        doc: &Arc<LoroDoc>,
+        access: &PeerReadAccess,
     ) -> Result<()> {
+        let admitted = access.admitted();
         debug!("[accept] connected, accepting bi...");
         let (mut send, mut recv) = match timeout(ACCEPT_IO_TIMEOUT, conn.accept_bi()).await {
             Ok(r) => r.map_err(|e| anyhow::anyhow!("Failed to accept bi stream: {e}"))?,
@@ -423,8 +463,8 @@ mod adapter {
             .context("[accept] Failed to read peer delta")?;
         debug!("[accept] got peer delta ({} bytes)", peer_delta.len());
         if !peer_delta.is_empty() {
-            doc.import(&peer_delta)
-                .context("Failed to import peer delta")?;
+            import_peer_delta(doc, admitted, &peer_delta)
+                .context("[accept] Failed to import peer delta")?;
             debug!("Applied {} bytes from peer", peer_delta.len());
         }
 
@@ -511,12 +551,31 @@ mod adapter {
                 sleep(Duration::from_millis(200)).await;
                 let addr_b = ep_b.addr();
 
-                let doc_b_clone = doc_b.clone();
-                let handle =
-                    tokio::spawn(async move { sync_doc_accept(&ep_b, &doc_b_clone).await });
+                // A PBT pair is two halves of one convergence property, so each
+                // side grants the other a full writer.
+                let doc_a = Arc::new(doc_a.clone());
+                let doc_b_clone = Arc::new(doc_b.clone());
+                let accept_label = label.clone();
+                let handle = tokio::spawn(async move {
+                    sync_doc_accept(
+                        &ep_b,
+                        &doc_b_clone,
+                        &accept_label,
+                        Capabilities::read_write(),
+                    )
+                    .await
+                });
 
                 sleep(Duration::from_millis(300)).await;
-                let _conn = sync_doc_initiate(&ep_a, doc_a, &alpn, addr_b).await?;
+                let _conn = sync_doc_initiate(
+                    &ep_a,
+                    &doc_a,
+                    &alpn,
+                    addr_b,
+                    &label,
+                    Capabilities::read_write(),
+                )
+                .await?;
                 // _conn + ep_a kept alive until acceptor finishes
                 handle.await??;
                 Ok(())
@@ -609,7 +668,16 @@ mod adapter {
             }
         }
 
-        fn build_and_extract() -> (LoroDoc, LoroDoc, loro::TreeID, loro::TreeID) {
+        /// A fresh peer replica, already an `Arc` because that is what the
+        /// sync entry points take: the doc-boundary lock is keyed by the `Arc`
+        /// identity, so a peer must be ONE `Arc` for the seal to mean anything.
+        fn fresh_peer(peer_id: u64) -> Arc<LoroDoc> {
+            let doc = LoroDoc::new();
+            doc.set_peer_id(peer_id).unwrap();
+            Arc::new(doc)
+        }
+
+        fn build_and_extract() -> (LoroDoc, Arc<LoroDoc>, loro::TreeID, loro::TreeID) {
             let doc = LoroDoc::new();
             doc.set_peer_id(1).unwrap();
             let tree = doc.get_tree(TREE_NAME);
@@ -633,12 +701,12 @@ mod adapter {
 
             doc.commit();
             let extracted = extract_subtree(&doc, shared_root, HistoryRetention::Full).unwrap();
-            (doc, extracted.shared_doc, shared_root, block_b)
+            (doc, Arc::new(extracted.shared_doc), shared_root, block_b)
         }
 
         /// Helper: sync two LoroDoc instances via Iroh with the incremental
         /// protocol.
-        async fn sync_pair(doc1: &LoroDoc, doc2: &LoroDoc, tree_id: &str) -> Result<()> {
+        async fn sync_pair(doc1: &Arc<LoroDoc>, doc2: &Arc<LoroDoc>, tree_id: &str) -> Result<()> {
             let alpn = make_alpn("loro-sync", tree_id);
             let ep1 = create_endpoint(vec![alpn.clone()]).await?;
             let ep2 = create_endpoint(vec![alpn.clone()]).await?;
@@ -647,15 +715,154 @@ mod adapter {
             let addr2 = ep2.addr();
 
             let d2 = doc2.clone();
-            let handle = tokio::spawn(async move { sync_doc_accept(&ep2, &d2).await });
+            let accept_id = tree_id.to_string();
+            let handle = tokio::spawn(async move {
+                sync_doc_accept(&ep2, &d2, &accept_id, Capabilities::read_write()).await
+            });
 
             // Wait for acceptor to be ready
             sleep(Duration::from_millis(500)).await;
-            let _conn = sync_doc_initiate(&ep1, doc1, &alpn, addr2)
-                .await
-                .context("sync_doc_initiate failed")?;
+            let _conn = sync_doc_initiate(
+                &ep1,
+                doc1,
+                &alpn,
+                addr2,
+                tree_id,
+                Capabilities::read_write(),
+            )
+            .await
+            .context("sync_doc_initiate failed")?;
             // _conn + ep1 kept alive while acceptor finishes reading
             handle.await?.context("sync_doc_accept failed")?;
+            Ok(())
+        }
+
+        /// Both directions of the production iroh round must land the peer's
+        /// delta through the document's own write guard, tagged
+        /// `sync_import` — the origin the relay leg
+        /// (`holon_sharing::sync::pull_once`) already uses. Without it a
+        /// subscriber cannot tell a peer's write from a local one, and the
+        /// import races the interior of a concurrent local batch.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn both_iroh_legs_tag_a_peer_delta_sync_import() -> Result<()> {
+            let (_source, shared_doc, _shared_root, block_b) = build_and_extract();
+
+            let peer2_doc = fresh_peer(2);
+            peer2_doc.import(&shared_doc.export(ExportMode::Snapshot)?)?;
+
+            // One edit per side, so each side has a delta the other must import.
+            edit_text(&shared_doc.get_tree(TREE_NAME), block_b, " - by P1");
+            shared_doc.commit();
+            edit_text(&peer2_doc.get_tree(TREE_NAME), block_b, " - by P2");
+            peer2_doc.commit();
+
+            let origins = |doc: &LoroDoc| {
+                let seen = Arc::new(RwLock::new(Vec::<String>::new()));
+                let sink = seen.clone();
+                let sub = doc.subscribe_root(Arc::new(move |event| {
+                    sink.write()
+                        .expect("origin sink")
+                        .push(event.origin.to_string());
+                }));
+                (seen, sub)
+            };
+            let (init_origins, _init_sub) = origins(&shared_doc);
+            let (acc_origins, _acc_sub) = origins(&peer2_doc);
+
+            sync_pair(&shared_doc, &peer2_doc, "origin-tag-1").await?;
+
+            for (leg, seen) in [("initiator", &init_origins), ("acceptor", &acc_origins)] {
+                let seen = seen.read().expect("origin sink").clone();
+                assert!(
+                    seen.iter()
+                        .any(|o| o == crate::loro_document::SYNC_IMPORT_ORIGIN),
+                    "the {leg} leg imported a peer delta under origin(s) {seen:?}, none of them \
+                     `{}` — the import bypassed `LoroDocument`'s write guard",
+                    crate::loro_document::SYNC_IMPORT_ORIGIN
+                );
+            }
+            Ok(())
+        }
+
+        /// A Read-only peer's WRITE is refused over the LIVE iroh transport,
+        /// with the typed `PeerAccessRefused` naming `Write` as missing.
+        ///
+        /// The unit tests in `peer_import` pin the same rule over a bare
+        /// `Arc<LoroDoc>`; this one pins that a transport leg cannot hand the
+        /// import a stronger admission than the share granted. The read
+        /// direction is the control: the same round still delivers OUR delta to
+        /// the peer, so an unchanged acceptor replica is the capability
+        /// refusing the write and not a connection that never ran.
+        #[tokio::test]
+        #[serial_test::serial]
+        async fn a_read_only_peers_write_over_iroh_is_refused_as_peer_access_refused() -> Result<()>
+        {
+            let (_source, initiator_doc, _shared_root, block_b) = build_and_extract();
+            let acceptor_doc = fresh_peer(2);
+            acceptor_doc.import(&initiator_doc.export(ExportMode::Snapshot)?)?;
+
+            edit_text(&acceptor_doc.get_tree(TREE_NAME), block_b, " - by ACC");
+            acceptor_doc.commit();
+            edit_text(&initiator_doc.get_tree(TREE_NAME), block_b, " - by INIT");
+            initiator_doc.commit();
+
+            let tree_id = "read-only-write-refused";
+            let alpn = make_alpn("loro-sync", tree_id);
+            let ep1 = create_endpoint(vec![alpn.clone()]).await?;
+            let ep2 = create_endpoint(vec![alpn.clone()]).await?;
+            sleep(Duration::from_millis(500)).await;
+            let addr2 = ep2.addr();
+
+            let acc = acceptor_doc.clone();
+            let accept_id = tree_id.to_string();
+            let handle = tokio::spawn(async move {
+                sync_doc_accept(&ep2, &acc, &accept_id, Capabilities::read_only()).await
+            });
+            sleep(Duration::from_millis(500)).await;
+            // The initiator's own leg fails once the acceptor refuses and stops
+            // writing; the observables are the acceptor's error and the two
+            // replicas, so the dial's outcome is deliberately not asserted.
+            let _ = sync_doc_initiate(
+                &ep1,
+                &initiator_doc,
+                &alpn,
+                addr2,
+                tree_id,
+                Capabilities::read_write(),
+            )
+            .await;
+
+            let refusal = handle.await?.expect_err(
+                "a read-only peer's delta must not be imported over the live transport",
+            );
+            let typed = refusal
+                .chain()
+                .find_map(|e| e.downcast_ref::<crate::peer_import::PeerAccessRefused>())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the acceptor failed, but not with the typed `PeerAccessRefused` a \
+                         capability refusal must be distinguishable by: {refusal:#}"
+                    )
+                });
+            assert_eq!(
+                typed.missing,
+                holon_api::sharing::Capability::Write,
+                "the refusal names the wrong missing capability: {typed}"
+            );
+
+            let acceptor_text = read_text(&acceptor_doc.get_tree(TREE_NAME), block_b);
+            assert!(
+                !acceptor_text.contains("by INIT"),
+                "a read-only peer's edit landed in the acceptor's replica: {acceptor_text:?}"
+            );
+            let initiator_text = read_text(&initiator_doc.get_tree(TREE_NAME), block_b);
+            assert!(
+                initiator_text.contains("by ACC"),
+                "control: the READ direction must still have run, so that the untouched acceptor \
+                 replica is the write refusal and not a dead connection; initiator sees \
+                 {initiator_text:?}"
+            );
             Ok(())
         }
 
@@ -664,8 +871,7 @@ mod adapter {
         async fn incremental_sync_shared_tree() -> Result<()> {
             let (_source, shared_doc, _shared_root, block_b) = build_and_extract();
 
-            let peer2_doc = LoroDoc::new();
-            peer2_doc.set_peer_id(2).unwrap();
+            let peer2_doc = fresh_peer(2);
             peer2_doc.import(&shared_doc.export(ExportMode::Snapshot)?)?;
 
             // P1 makes an edit
@@ -686,8 +892,7 @@ mod adapter {
         async fn bidirectional_incremental_sync() -> Result<()> {
             let (_source, shared_doc, _shared_root, block_b) = build_and_extract();
 
-            let peer2_doc = LoroDoc::new();
-            peer2_doc.set_peer_id(2).unwrap();
+            let peer2_doc = fresh_peer(2);
             peer2_doc.import(&shared_doc.export(ExportMode::Snapshot)?)?;
 
             // Both peers edit concurrently
@@ -712,8 +917,7 @@ mod adapter {
         async fn sync_structural_move() -> Result<()> {
             let (_source, shared_doc, shared_root, block_b) = build_and_extract();
 
-            let peer2_doc = LoroDoc::new();
-            peer2_doc.set_peer_id(2).unwrap();
+            let peer2_doc = fresh_peer(2);
             peer2_doc.import(&shared_doc.export(ExportMode::Snapshot)?)?;
 
             // P1 creates a new parent and moves block_b there
@@ -742,11 +946,10 @@ mod adapter {
             let manager = SharedTreeSyncManager::new();
             let stid = "collab-mgr-test".to_string();
 
-            let peer2_doc = LoroDoc::new();
-            peer2_doc.set_peer_id(2).unwrap();
+            let peer2_doc = fresh_peer(2);
             peer2_doc.import(&shared_doc.export(ExportMode::Snapshot)?)?;
 
-            manager.register(stid.clone(), shared_doc);
+            manager.register_arc(stid.clone(), shared_doc);
 
             let doc_ref = manager.get_doc(&stid).unwrap();
             edit_text(&doc_ref.get_tree(TREE_NAME), block_b, " - via manager");
@@ -769,12 +972,10 @@ mod adapter {
             let (_, shared1, _, block_b1) = build_and_extract();
             let (_, shared2, _, block_b2) = build_and_extract();
 
-            let p2_doc1 = LoroDoc::new();
-            p2_doc1.set_peer_id(2).unwrap();
+            let p2_doc1 = fresh_peer(2);
             p2_doc1.import(&shared1.export(ExportMode::Snapshot)?)?;
 
-            let p2_doc2 = LoroDoc::new();
-            p2_doc2.set_peer_id(3).unwrap();
+            let p2_doc2 = fresh_peer(3);
             p2_doc2.import(&shared2.export(ExportMode::Snapshot)?)?;
 
             // Edit only shared1
@@ -861,9 +1062,10 @@ mod adapter {
             sleep(Duration::from_millis(500)).await;
             let addr2 = ep2.addr();
 
-            let doc = LoroDoc::new();
-            doc.set_peer_id(9).unwrap();
-            let handle = tokio::spawn(async move { sync_doc_accept(&ep2, &doc).await });
+            let doc = fresh_peer(9);
+            let handle = tokio::spawn(async move {
+                sync_doc_accept(&ep2, &doc, "stall-test", Capabilities::read_write()).await
+            });
 
             sleep(Duration::from_millis(500)).await;
 

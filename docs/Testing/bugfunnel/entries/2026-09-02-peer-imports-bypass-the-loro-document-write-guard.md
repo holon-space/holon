@@ -3,7 +3,7 @@ id: 2026-09-02-peer-imports-bypass-the-loro-document-write-guard
 date: 2026-09-02
 gap: ENVIRONMENT
 secondary: ORACLE
-status: OPEN
+status: FIXED
 summary: >-
   A peer import arriving over the production iroh transport writes into the
   global Loro doc without taking the doc-boundary write guard and without an
@@ -100,19 +100,38 @@ one instance, and there is no peer to import from. The two-instance binary now
 
 ## Remedy
 
-Open. Two candidate fixes, and the choice belongs to the sharing track:
+FIXED by the `sharing-admit` lane (2026-09-08), taking option **(a)** — the
+contract in `loro_document.rs` is meant, so the accept loop honours it.
 
-- **(a) Route the accept loop's import through `LoroDocument`.** The advertiser
-  would have to carry the wrapper rather than the raw `Arc<LoroDoc>`, which
-  cuts against `replicate_all`'s blind-relay guardrail ([SR]) that the
-  transport treats the payload as opaque. Passing the wrapper does not
-  actually break that — the transport still never reads the doc — but it does
-  widen what the advertiser holds.
-- **(b) Narrow the guard's stated contract** and say in
-  `loro_document.rs:174-190` that peer imports are deliberately outside it,
-  with the reason. Only honest if the interleaving is genuinely safe, which
-  nobody has established.
+Both iroh legs now import through `holon_loro::peer_import::import_peer_delta`,
+which re-wraps the transport's `Arc<LoroDoc>` and calls
+`apply_update_with_origin(SYNC_IMPORT_ORIGIN, …)`. The advertiser keeps handing
+the transport a raw `Arc` — the blind-relay guardrail [SR] is untouched — because
+re-wrapping resolves to the SAME lock: `DocLock::for_doc` keys the registry by
+`Arc::as_ptr` (`doc_lock.rs:44-67`), which `LoroDocument::doc`'s own doc comment
+already promised and `doc_lock::tests::two_wrappers_over_one_inner_doc_share_one_lock`
+already pinned. So the wrapper did not have to travel through the advertiser at
+all; only the import call site had to stop escaping.
 
-(a) is the fix if the contract as written is meant. Whichever is chosen, the
-ORACLE half should land with it, or the next transport will bypass the guard
-the same way.
+Both call sites changed: `iroh_sync_adapter.rs` initiator (was `:312`) and
+acceptor (was `:426`). The origin literal is now one constant,
+`holon_loro::loro_document::SYNC_IMPORT_ORIGIN`, shared with the relay leg
+(`holon-sharing/src/sync.rs`), so the two legs cannot drift.
+
+The ORACLE half landed with it, in the shape the entry asked for — an assertion
+on the observable rather than an attempt to schedule the race:
+
+- `holon-loro` `iroh_sync_adapter::adapter::tests::both_iroh_legs_tag_a_peer_delta_sync_import`
+  runs a real iroh round with an edit on each side and asserts BOTH legs saw a
+  `sync_import`-tagged commit. Red-for-the-right-reason before the fix:
+  `the initiator leg imported a peer delta under origin(s) [""], none of them
+  `sync_import` — the import bypassed `LoroDocument`'s write guard`.
+- `holon-loro` `peer_import::tests::a_read_write_peers_delta_lands_tagged_sync_import`
+  pins the same property at unit level, without a network.
+
+The deeper guard-witness the entry proposed (a counter of writes that bypassed
+the lock) was not needed: `import_peer_delta` is now the ONLY function in
+`holon-loro` that writes peer bytes into a doc, and it cannot be called without
+an `AdmittedPeer`, so a future transport cannot repeat the bypass without
+deleting a type. `archlint`'s `loro_doc_escape` rule already flags any new raw
+`.doc()` escape.

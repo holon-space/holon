@@ -68,6 +68,12 @@ fn resolve_peer_id(injected: Option<PeerID>) -> Result<PeerID> {
     }
 }
 
+/// The commit origin every REMOTE peer's update carries into a replicated
+/// document, on every transport. A subscriber keys on it to tell a peer's write
+/// from this device's own, so both legs must spell it the same way — hence one
+/// constant rather than a literal per call site.
+pub const SYNC_IMPORT_ORIGIN: &str = "sync_import";
+
 impl LoroDocument {
     pub fn new(doc_id: String) -> Result<Self> {
         Self::new_with_peer_id(doc_id, None)
@@ -425,6 +431,7 @@ mod tests {
         let origin_seen = Arc::new(std::sync::Mutex::new(None::<String>));
         let origin_seen_clone = origin_seen.clone();
 
+        // ALLOW(loro_doc_escape): subscription registration, a blessed use.
         let _sub = doc.doc().subscribe_root(Arc::new(move |event| {
             if let Ok(mut seen) = origin_seen_clone.lock()
                 && seen.is_none()
@@ -466,6 +473,7 @@ mod tests {
         let origin_seen = Arc::new(std::sync::Mutex::new(None::<String>));
         let origin_seen_clone = origin_seen.clone();
 
+        // ALLOW(loro_doc_escape): subscription registration, a blessed use.
         let _sub = doc2.doc().subscribe_root(Arc::new(move |event| {
             if let Ok(mut seen) = origin_seen_clone.lock()
                 && seen.is_none()
@@ -491,6 +499,7 @@ mod tests {
         let origin_seen = Arc::new(std::sync::Mutex::new(None::<String>));
         let origin_seen_clone = origin_seen.clone();
 
+        // ALLOW(loro_doc_escape): subscription registration, a blessed use.
         let _sub = doc.doc().subscribe_root(Arc::new(move |event| {
             if let Ok(mut seen) = origin_seen_clone.lock()
                 && seen.is_none()

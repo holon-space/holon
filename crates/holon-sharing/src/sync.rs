@@ -234,7 +234,10 @@ pub async fn pull_once(
                     let bytes = envelope.payload.len();
                     container
                         .doc
-                        .apply_update_with_origin("sync_import", &envelope.payload)
+                        .apply_update_with_origin(
+                            holon_loro::loro_document::SYNC_IMPORT_ORIGIN,
+                            &envelope.payload,
+                        )
                         .with_context(|| {
                             format!(
                                 "importing an ADMITTED {bytes}-byte blob (seq {:?}) into container \
