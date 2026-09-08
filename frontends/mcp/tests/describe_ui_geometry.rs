@@ -35,6 +35,8 @@ fn info(widget: &str, entity: &str, rect: (f32, f32, f32, f32)) -> ElementInfo {
         opacity: None,
         expected_size: Default::default(),
         vm_node: None,
+        painted_fg: None,
+        painted_bg: None,
     }
 }
 

@@ -42,6 +42,7 @@ use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::geometry::VmNode;
 use holon_frontend::size_expectation::SizeBounds;
+use holon_frontend::theme::Rgba8;
 
 /// Shared registry of element metadata, populated during GPUI render passes.
 ///
@@ -269,10 +270,41 @@ impl GeometryProvider for FlushOnReadGeometry {
 // always reflects the current render pass's path without any locking.
 thread_local! {
     static RENDER_PATH: std::cell::RefCell<Vec<Arc<str>>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Resolved (text colour, fill) of the enclosing tracked elements, so a
+    /// leaf that declares only one of them still records the pair. Same
+    /// single-threaded-by-construction argument as `RENDER_PATH`.
+    static PAINT_COLORS: std::cell::RefCell<Vec<PaintColors>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[derive(Clone, Copy, Default)]
+struct PaintColors {
+    fg: Option<Rgba8>,
+    bg: Option<Rgba8>,
 }
 
 fn current_parent() -> Option<Arc<str>> {
     RENDER_PATH.with(|p| p.borrow().last().cloned())
+}
+
+fn inherited_colors() -> PaintColors {
+    PAINT_COLORS.with(|c| c.borrow().last().copied().unwrap_or_default())
+}
+
+fn push_colors(colors: PaintColors) {
+    PAINT_COLORS.with(|c| c.borrow_mut().push(colors));
+}
+
+fn pop_colors() {
+    PAINT_COLORS.with(|c| {
+        c.borrow_mut().pop();
+    });
+}
+
+/// The theme channels behind an `Hsla`, as the layout record stores them.
+pub fn hsla_to_rgba8(color: gpui::Hsla) -> Rgba8 {
+    let rgba: gpui::Rgba = color.into();
+    let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [ch(rgba.r), ch(rgba.g), ch(rgba.b), ch(rgba.a)]
 }
 
 /// Clip a tracked element's layout bounds to the active content mask so the
@@ -327,6 +359,7 @@ pub fn tracked(
         styled_runs: None,
         opacity: None,
         vm_node: None,
+        colors: PaintColors::default(),
         child: Some(child),
     }
 }
@@ -371,6 +404,9 @@ pub struct TransparentTracker {
     /// The view-model node this tracker wraps — see [`VmNode`]. Set by the
     /// node-dispatch `tag_node()`, which is the only site that holds the node.
     vm_node: Option<VmNode>,
+    /// What this element declares for itself; anything it leaves `None` is
+    /// inherited from the enclosing tracked element at record time.
+    colors: PaintColors,
     child: Option<AnyElement>,
 }
 
@@ -393,6 +429,7 @@ impl TransparentTracker {
             displayed_text: None,
             opacity: None,
             vm_node: None,
+            colors: PaintColors::default(),
             child: Some(child),
         }
     }
@@ -441,6 +478,17 @@ impl TransparentTracker {
     /// to `block:default-left-sidebar`).
     pub fn with_entity_id(mut self, entity_id: impl Into<Arc<str>>) -> Self {
         self.entity_id = Some(entity_id.into());
+        self
+    }
+
+    /// Declare the text colour this element paints with and the fill it paints
+    /// on. Either may be `None` for "whatever the enclosing element sets" —
+    /// see [`ElementInfo::painted_fg`].
+    pub fn with_painted_colors(mut self, fg: Option<gpui::Hsla>, bg: Option<gpui::Hsla>) -> Self {
+        self.colors = PaintColors {
+            fg: fg.map(hsla_to_rgba8),
+            bg: bg.map(hsla_to_rgba8),
+        };
         self
     }
 
@@ -494,6 +542,11 @@ impl Element for TransparentTracker {
         cx: &mut App,
     ) {
         let parent_id = current_parent();
+        let inherited = inherited_colors();
+        let colors = PaintColors {
+            fg: self.colors.fg.or(inherited.fg),
+            bg: self.colors.bg.or(inherited.bg),
+        };
         let vis = visible_bounds(bounds, window);
         self.registry.record(
             self.el_id.to_string(),
@@ -512,10 +565,14 @@ impl Element for TransparentTracker {
                 opacity: self.opacity,
                 expected_size: self.expected_size.clone(),
                 vm_node: self.vm_node.clone(),
+                painted_fg: colors.fg,
+                painted_bg: colors.bg,
             },
         );
         push_parent(Arc::clone(&self.el_id));
+        push_colors(colors);
         self.child.as_mut().unwrap().prepaint(window, cx);
+        pop_colors();
         pop_parent();
     }
 
@@ -555,6 +612,8 @@ mod tests {
             opacity: None,
             expected_size: SizeBounds::default(),
             vm_node: None,
+            painted_fg: None,
+            painted_bg: None,
         }
     }
 

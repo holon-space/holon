@@ -39,6 +39,43 @@ pub fn collapsed_halo_glyph(c: &ThemeColors) -> Rgba8 {
     c.background
 }
 
+/// Contrast floor for body text on a fill — WCAG 2.x AA.
+pub const BODY_TEXT_CONTRAST_FLOOR: f32 = 4.5;
+
+/// Secondary text painted ON a selection fill: the block-id subtitle under a
+/// selected search hit, which is the only thing telling two hits with the same
+/// label apart.
+///
+/// It is body text, so it must clear [`BODY_TEXT_CONTRAST_FLOOR`] against the
+/// fill — but a selection fill is mid-luminance in most themes and leaves
+/// little room, so the token starts at whichever pole (black or white) has more
+/// contrast there and is mixed back toward the fill only as far as the floor
+/// allows, keeping it visibly secondary to the row title.
+pub fn muted_on_selection(fill: Rgba8) -> Rgba8 {
+    const WHITE: Rgba8 = [255, 255, 255, 255];
+    const BLACK: Rgba8 = [0, 0, 0, 255];
+    let pole = if contrast_ratio(WHITE, fill) >= contrast_ratio(BLACK, fill) {
+        WHITE
+    } else {
+        BLACK
+    };
+
+    let mut muted = pole;
+    for step in 1..=10 {
+        let candidate = mix(pole, fill, step as f32 * 0.05);
+        if contrast_ratio(candidate, fill) < BODY_TEXT_CONTRAST_FLOOR + 0.15 {
+            break;
+        }
+        muted = candidate;
+    }
+    muted
+}
+
+fn mix(a: Rgba8, b: Rgba8, t: f32) -> Rgba8 {
+    let ch = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    [ch(a[0], b[0]), ch(a[1], b[1]), ch(a[2], b[2]), a[3]]
+}
+
 /// WCAG 2.x relative-luminance contrast ratio between two colours,
 /// `1.0..=21.0`.
 ///
@@ -367,6 +404,41 @@ mod tests {
         assert!(registry.get("nordDark").is_some());
         let available = registry.available();
         assert!(available.len() >= 10);
+    }
+
+    /// Registry KEYS shipped in `assets/themes/*.yaml` — more than the 11
+    /// files, because a file may declare a light and a dark variant.
+    const BUILTIN_THEME_KEYS: usize = 18;
+
+    #[test]
+    fn selection_subtitle_clears_the_body_text_floor_in_every_theme() {
+        let registry = ThemeRegistry::load(None);
+        let mut checked = 0;
+
+        for (name, _) in registry.available() {
+            let fill = registry
+                .get(name)
+                .unwrap_or_else(|| panic!("theme {name} listed but not loadable"))
+                .colors
+                .primary;
+            let ratio = contrast_ratio(muted_on_selection(fill), fill);
+            assert!(
+                ratio >= BODY_TEXT_CONTRAST_FLOOR,
+                "theme {name}: the selected hit's subtitle is {ratio:.2}:1 against the selection \
+                 fill, below the {BODY_TEXT_CONTRAST_FLOOR}:1 floor for body text — the block id \
+                 that tells two same-label hits apart cannot be read"
+            );
+            checked += 1;
+        }
+
+        // Exact, not a lower bound: a theme added without clearing the floor
+        // must fail here, and so must a registry regression that silently drops
+        // themes. Bump this WITH the new theme's yaml.
+        assert_eq!(
+            checked, BUILTIN_THEME_KEYS,
+            "the builtin registry loaded {checked} themes, not {BUILTIN_THEME_KEYS} — a theme was \
+             added or dropped without revisiting the body-text contrast floor"
+        );
     }
 
     #[test]

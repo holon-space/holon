@@ -221,6 +221,31 @@ impl SimUserDriver {
         });
     }
 
+    /// Move the pointer over a window point and settle. This is the whole of a
+    /// hover gesture: gpui resolves hover from the window's tracked mouse
+    /// position, which only a `MouseMove` updates.
+    pub fn hover_point(&self, x: f32, y: f32) {
+        let pos = Point {
+            x: Pixels::from(x),
+            y: Pixels::from(y),
+        };
+        self.update_and_settle(|cx| {
+            self.window
+                .update(cx, |_, window, cx| {
+                    window.dispatch_event(
+                        gpui::MouseMoveEvent {
+                            position: pos,
+                            pressed_button: None,
+                            modifiers: Default::default(),
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
+                })
+                .unwrap();
+        });
+    }
+
     /// Raw click at `pos` (no settle decisions — callers pump).
     fn raw_click(&self, pos: Point<Pixels>) {
         self.update_and_settle(|cx| {

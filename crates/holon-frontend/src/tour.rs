@@ -369,6 +369,8 @@ mod tests {
             opacity: None,
             expected_size: Default::default(),
             vm_node: None,
+            painted_fg: None,
+            painted_bg: None,
         }
     }
 

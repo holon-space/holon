@@ -3,7 +3,7 @@ id: 2026-09-03-search-overlay-selected-row-subtitle-is-illegible
 date: 2026-09-03
 gap: PERCEPTION
 secondary: null
-status: OPEN
+status: PARTIAL
 summary: >-
   The selected search hit paints its id subtitle in the muted grey meant for the
   light row background, leaving it unreadable on the teal selection fill.
@@ -50,10 +50,37 @@ be pinned as a replayable scenario either.
 
 ## Remedy
 
-OPEN. Add a `selected_muted_fg` to `SearchTheme` and use it for the subtitle
-of the selected row; clip the results list at a row boundary, or give it a
-max-height with a scroll container so a partial row scrolls instead of being
-sliced.
+PARTIAL — the subtitle is fixed, the clipped last row is not.
+
+The pointer fills a row with the same accent the keyboard selection uses, so
+"carries the selection fill" is now ONE state: `SearchTheme::row_colors(filled)`
+derives the row background, the title colour and the subtitle colour from one
+bool, and hover is real state (`SearchUiState::hovered`) rather than a `hover`
+style closure that could only repaint the row's own background. Without that,
+hovering any unselected hit reproduced the same 1.11:1 ghost.
+
+The filled row's subtitle reads `SearchTheme::selected_muted_fg`, derived per
+theme by `holon_frontend::theme::muted_on_selection` (`theme.rs`): the
+black/white pole with more contrast against the selection fill, mixed back
+toward the fill only as far as the 4.5:1 body-text floor allows. Holon Light
+measures 4.85:1 and Holon Dark 4.93:1, against 1.11:1 before.
+
+Pinned by two tests, both of which fail on the old colour:
+
+* `frontends/gpui/tests/quick_open_selected_row_contrast_windowed.rs` —
+  windowed, opens quick-open, types a query and computes the ratio from the
+  layout record's `painted_fg`/`painted_bg` (new fields on `ElementInfo`, which
+  the GPUI tracker cascades so a text leaf reports the fill it inherits). Two
+  rungs: `selected_hit_subtitle_…` for the keyboard selection and
+  `hovered_hit_subtitle_…`, which drives a real `MouseMove` over an unselected
+  hit.
+* `theme::tests::selection_subtitle_clears_the_body_text_floor_in_every_theme`
+  — the floor over every builtin theme's fill, asserting the exact registry
+  count so a theme added without the floor cannot slip past.
+
+STILL OPEN: the overlay's last content row is cut mid-row. Clip the results
+list at a row boundary, or give it a max-height with a scroll container so a
+partial row scrolls instead of being sliced.
 
 Recording this flow at all needs an `open search` / `type into search` step
 pair in the Gherkin vocabulary — logged as the vocabulary gap of this session.

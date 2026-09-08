@@ -299,6 +299,22 @@ pub async fn graft_chord_target_row(env: &TestEnvironment) -> Result<()> {
     Ok(())
 }
 
+/// Block id [`graft_chord_decoy_row`] grafts.
+pub const CHORD_DECOY_ID: &str = "chord-decoy";
+/// Content of the grafted decoy row. Shares the "Chord" token with
+/// [`CHORD_TARGET_CONTENT`] so one query returns two hits.
+pub const CHORD_DECOY_CONTENT: &str = "Chord decoy row";
+
+/// Graft a second row matching the same search token as the chord target, so a
+/// quick-open query yields an unselected hit as well as the selected one.
+pub async fn graft_chord_decoy_row(env: &TestEnvironment) -> Result<()> {
+    let root = focused_graft_root(env).await?;
+    env.create_block(CHORD_DECOY_ID, &root, CHORD_DECOY_CONTENT)
+        .await
+        .context("graft the chord decoy row under Main focus root")?;
+    Ok(())
+}
+
 /// Block id [`graft_promotion_target_row`] grafts.
 pub const PROMOTION_TARGET_ID: &str = "promotion-target";
 /// Content of the grafted promotion target row. Non-empty so the row paints a

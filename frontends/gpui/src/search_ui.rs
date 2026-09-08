@@ -53,6 +53,39 @@ pub struct SearchTheme {
     pub muted_fg: Hsla,
     pub selected_bg: Hsla,
     pub selected_fg: Hsla,
+    /// Secondary text on the selection fill — `muted_fg` is mixed for the page
+    /// background and reads at ~1:1 on the accent. See
+    /// [`holon_frontend::theme::muted_on_selection`].
+    pub selected_muted_fg: Hsla,
+}
+
+/// The colours one hit row paints.
+pub struct RowColors {
+    pub bg: Hsla,
+    pub fg: Hsla,
+    pub subtitle_fg: Hsla,
+}
+
+impl SearchTheme {
+    /// A row carrying the selection fill is ONE state, whichever authority put
+    /// it there — the keyboard selection or the pointer. Deriving all three
+    /// colours from that single bool is what keeps the subtitle from staying at
+    /// the page's `muted_fg` (a ~1:1 ghost) on an accent-filled row.
+    pub fn row_colors(&self, filled: bool) -> RowColors {
+        if filled {
+            RowColors {
+                bg: self.selected_bg,
+                fg: self.selected_fg,
+                subtitle_fg: self.selected_muted_fg,
+            }
+        } else {
+            RowColors {
+                bg: self.bg,
+                fg: self.fg,
+                subtitle_fg: self.muted_fg,
+            }
+        }
+    }
 }
 
 /// Per-window search-modal state. Lives in its own `Entity` so async query
@@ -66,6 +99,12 @@ pub struct SearchUiState {
     pub error: Option<String>,
     /// Index into the flattened `pages ++ content` list.
     pub selected: usize,
+    /// Flattened index the pointer is over, if any. Hover carries the same
+    /// selection fill as the keyboard selection, so it must be real state the
+    /// row colours derive from — a `hover` style closure could only repaint the
+    /// row's own background and would leave its subtitle at the page's
+    /// `muted_fg` on the accent.
+    pub hovered: Option<usize>,
     pub query: String,
     /// Bumped on every keystroke; async responses carrying an older value are
     /// dropped so a slow query can't overwrite a newer one.
@@ -106,6 +145,7 @@ impl SearchUiState {
             content: Vec::new(),
             error: None,
             selected: 0,
+            hovered: None,
             query: String::new(),
             generation: 0,
             focus_gen: 0,
@@ -134,6 +174,7 @@ impl SearchUiState {
         self.content.clear();
         self.error = None;
         self.selected = 0;
+        self.hovered = None;
         self.generation = self.generation.wrapping_add(1);
         self.restore_focus = window.focused(cx);
         self.input.update(cx, |input, cx| {
@@ -247,6 +288,10 @@ pub fn run_search(
                                     .collect();
                                 s.error = None;
                                 s.selected = 0;
+                                // A new result list re-numbers the rows, so the
+                                // index the pointer was over names a different
+                                // hit now.
+                                s.hovered = None;
                             }
                             Ok(Err(e)) => {
                                 s.pages.clear();
@@ -288,6 +333,21 @@ pub fn navigate_to(services: &Arc<dyn BuilderServices>, target: &EntityUri) {
     ));
 }
 
+/// Element ids the layout record keys a hit row's parts under. `idx` is the
+/// flattened pages-then-content position, the same index the keyboard
+/// selection uses.
+pub fn hit_row_id(idx: usize) -> String {
+    format!("search-hit-{idx}")
+}
+
+pub fn hit_title_id(idx: usize) -> String {
+    format!("search-hit-{idx}-title")
+}
+
+pub fn hit_subtitle_id(idx: usize) -> String {
+    format!("search-hit-{idx}-subtitle")
+}
+
 fn truncate_label(label: &str) -> String {
     let first_line = label.lines().next().unwrap_or("").trim();
     const MAX: usize = 90;
@@ -309,6 +369,7 @@ pub fn render_search_overlay(
     state_read: &SearchUiState,
     state_entity: Entity<SearchUiState>,
     services: Arc<dyn BuilderServices>,
+    bounds: crate::geometry::BoundsRegistry,
     theme: SearchTheme,
 ) -> Option<gpui::Stateful<gpui::Div>> {
     if !state_read.open {
@@ -318,6 +379,7 @@ pub fn render_search_overlay(
     let overlay_bg = gpui::rgba(0x00000088);
     let input = state_read.input.clone();
     let selected = state_read.selected;
+    let hovered = state_read.hovered;
 
     // Rows, flattened pages-then-content, so a click maps to the same index the
     // keyboard selection uses.
@@ -347,44 +409,80 @@ pub fn render_search_overlay(
                 let services = services.clone();
                 let state_entity = state_entity.clone();
                 let target = hit.id.clone();
-                let row_bg = if is_selected {
-                    theme.selected_bg
-                } else {
-                    theme.bg
-                };
-                let row_fg = if is_selected {
-                    theme.selected_fg
-                } else {
-                    theme.fg
-                };
+                let RowColors {
+                    bg: row_bg,
+                    fg: row_fg,
+                    subtitle_fg,
+                } = theme.row_colors(is_selected || hovered == Some(idx));
+                let subtitle = target.to_string();
                 rows.push(
-                    div()
-                        .id(SharedString::from(format!("search-hit-{idx}")))
-                        .flex()
-                        .flex_col()
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .bg(row_bg)
-                        .text_color(row_fg)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.selected_bg))
-                        .child(div().text_size(px(14.0)).child(truncate_label(&hit.label)))
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(theme.muted_fg)
-                                .child(target.to_string()),
-                        )
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                            navigate_to(&services, &target);
-                            state_entity.update(cx, |s, cx| {
-                                s.close(window, cx);
-                                cx.emit(NotifySearchUi);
-                                cx.notify();
-                            });
-                        })
-                        .into_any_element(),
+                    crate::geometry::TransparentTracker::new(
+                        hit_row_id(idx),
+                        "search_hit_row",
+                        bounds.clone(),
+                        div()
+                            .id(SharedString::from(format!("search-hit-{idx}")))
+                            .flex()
+                            .flex_col()
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .rounded(px(6.0))
+                            .bg(row_bg)
+                            .text_color(row_fg)
+                            .cursor_pointer()
+                            .on_hover({
+                                let state_entity = state_entity.clone();
+                                move |hovering, _window, cx| {
+                                    state_entity.update(cx, |s, cx| {
+                                        let next = if *hovering { Some(idx) } else { None };
+                                        if !*hovering && s.hovered != Some(idx) {
+                                            return;
+                                        }
+                                        if s.hovered != next {
+                                            s.hovered = next;
+                                            cx.notify();
+                                        }
+                                    });
+                                }
+                            })
+                            .child(
+                                crate::geometry::TransparentTracker::new(
+                                    hit_title_id(idx),
+                                    "search_hit_title",
+                                    bounds.clone(),
+                                    div()
+                                        .text_size(px(14.0))
+                                        .child(truncate_label(&hit.label))
+                                        .into_any_element(),
+                                )
+                                .with_displayed_text(truncate_label(&hit.label)),
+                            )
+                            .child(
+                                crate::geometry::TransparentTracker::new(
+                                    hit_subtitle_id(idx),
+                                    "search_hit_subtitle",
+                                    bounds.clone(),
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(subtitle_fg)
+                                        .child(subtitle.clone())
+                                        .into_any_element(),
+                                )
+                                .with_painted_colors(Some(subtitle_fg), None)
+                                .with_displayed_text(subtitle),
+                            )
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                navigate_to(&services, &target);
+                                state_entity.update(cx, |s, cx| {
+                                    s.close(window, cx);
+                                    cx.emit(NotifySearchUi);
+                                    cx.notify();
+                                });
+                            })
+                            .into_any_element(),
+                    )
+                    .with_painted_colors(Some(row_fg), Some(row_bg))
+                    .into_any_element(),
                 );
             }
         };

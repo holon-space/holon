@@ -84,11 +84,28 @@ pub struct ElementInfo {
     /// whose renderer does not thread the node), and absence stays absence:
     /// consumers fall back to a coarser, disclosed join rather than guessing.
     pub vm_node: Option<VmNode>,
+    /// The colour this element painted its text in, and the surface that text
+    /// lands on. Both INHERITED down the tracked tree the way the frontends
+    /// cascade them, so a text leaf that declares only a colour still reports
+    /// the fill of the row it sits in — which is what makes
+    /// `crate::theme::contrast_ratio` computable from a layout record alone.
+    /// `None` where no tracked ancestor declared one.
+    pub painted_fg: Option<crate::theme::Rgba8>,
+    pub painted_bg: Option<crate::theme::Rgba8>,
 }
 
 impl ElementInfo {
     pub fn center(&self) -> (f32, f32) {
         (self.x + self.width / 2.0, self.y + self.height / 2.0)
+    }
+
+    /// WCAG contrast of the painted text against the surface it lands on.
+    /// `None` unless the render pass recorded both.
+    pub fn text_contrast(&self) -> Option<f32> {
+        Some(crate::theme::contrast_ratio(
+            self.painted_fg?,
+            self.painted_bg?,
+        ))
     }
 
     pub fn area(&self) -> f32 {

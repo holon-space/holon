@@ -1170,6 +1170,9 @@ impl Render for HolonApp {
             muted_fg: theme.muted_foreground,
             selected_bg: theme.accent,
             selected_fg: theme.accent_foreground,
+            selected_muted_fg: rgba8_to_hsla(holon_frontend::theme::muted_on_selection(
+                geometry::hsla_to_rgba8(theme.accent),
+            )),
         };
 
         // The trail IS the title: it names the page the user is on, which the
@@ -1619,6 +1622,7 @@ impl Render for HolonApp {
             self.search_ui.read(cx),
             self.search_ui.clone(),
             services.clone(),
+            self.bounds_registry.clone(),
             search_theme,
         ) {
             page = page.child(overlay);
