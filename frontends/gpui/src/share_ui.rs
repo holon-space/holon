@@ -203,6 +203,15 @@ pub enum DegradedKind {
     /// Yellow — a sidecar file names an integration this build does not ship.
     /// Nothing on disk can introduce one, so the file does nothing.
     IntegrationSidecarNotBundled,
+    /// Yellow — a peer joined a share by proving the ticket's BEARER secret
+    /// rather than as a paired device. The share works; what is disclosed is
+    /// that its trust rests on a secret that travelled (ADR 0028 R5 stopgap).
+    BearerTicketEnrollment,
+    /// Yellow — this device minted its owner identity key on the first share
+    /// and there was no surface to show the one-time recovery code, so it was
+    /// dropped. Sharing works; what is disclosed is that the keychain entry is
+    /// now the only copy.
+    OwnerRecoveryCodeNotShown,
     /// A plain info-style toast (used for "ticket copied").
     Info,
 }
@@ -483,6 +492,35 @@ impl ShareUiState {
                         "{integration}: run `{remedy}` to write {state_path} — until then \
                          {installed_path} runs nothing"
                     ),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ShareDegradedReason::BearerTicketEnrollment { peer } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::BearerTicketEnrollment,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: format!(
+                        "peer {peer} joined by presenting the share ticket. Anyone the ticket \
+                         was forwarded to could have joined instead — unshare, or revoke the \
+                         peer, if that was not intended"
+                    ),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ShareDegradedReason::OwnerRecoveryCodeNotShown => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::OwnerRecoveryCodeNotShown,
+                    shared_tree_id: event.shared_tree_id,
+                    // Says what is and is not at risk, because "no recovery
+                    // code" reads as "my data is one keychain away from gone"
+                    // and that is not what happened.
+                    detail: "this device made its sharing identity key on the first share, and \
+                             its one-time recovery code could not be shown. Shared content and \
+                             peer access are unaffected; if the keychain entry is lost, this \
+                             device's shares stop being advertised until it is shared again"
+                        .to_string(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -2085,6 +2123,16 @@ fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
         DegradedKind::PairingReimported => {
             (gpui::rgba(0x60a5faff), "i", "Content kept from this device")
         }
+        DegradedKind::BearerTicketEnrollment => (
+            gpui::rgba(0xfbbf24ff),
+            crate::icon("🎟"),
+            "Peer joined with a share ticket",
+        ),
+        DegradedKind::OwnerRecoveryCodeNotShown => (
+            gpui::rgba(0xfbbf24ff),
+            crate::icon("🔑"),
+            "Sharing key has no recovery code",
+        ),
         DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
     }
 }

@@ -3,7 +3,7 @@ id: 2026-09-08-the-subtree-share-hot-path-advertises-un-gated
 date: 2026-09-08
 gap: ENVIRONMENT
 secondary: ORACLE
-status: OPEN
+status: FIXED
 summary: >-
   `LoroShareBackend` advertises every third-party subtree share with no
   enrollment roster, so the H5 capability gate never runs on the path that
@@ -95,34 +95,70 @@ iroh and then dials the author from an un-enrolled stranger endpoint.
 
 ## Remedy
 
-OPEN. Out of scope for the `sharing-admit` lane, which owns the import-side
-admission (D86.a) rather than the share lifecycle.
+FIXED. The share LIFECYCLE now runs through the H5 gate end to end, and a
+production path can no longer even NAME the un-gated admission: the
+`ShareAdmission::Ungated` variant, `start_share_ungated`, `AdmittedPeer::ungated`
+and the roster-less `sync_doc_accept` are `#[cfg(test)]` / `#[cfg(any(test,
+feature = "test-helpers"))]` and `pub(crate)`. The check is `cargo check -p
+holon-loro --lib`, not a grep — a production call site fails with
+`error[E0599]: no variant named 'Ungated' found for enum 'ShareAdmission'`.
 
-What this lane DID do is make the hole typed and greppable instead of a `None`:
-the advertiser now takes a `ShareAdmission`
-(`crates/holon-loro/src/iroh_advertiser.rs:58`), and the un-gated callers must
-name themselves `ShareAdmission::Ungated { .. }` and say which capabilities they
-hand a stranger. Every un-gated share start also logs a warning naming the
-container. The hole is unchanged in effect — a stranger still gets read+write —
-but it can no longer be reached by accident and `rg 'ShareAdmission::Ungated'`
-lists every site that must be converted. (That grep is the worklist for the
-*share* side only; `AdmittedPeer::ungated`
-(`crates/holon-loro/src/peer_import.rs`) is also `pub`, so a future caller could
-mint an un-gated admission without writing `ShareAdmission::Ungated`. Today only
-tests and the PBT `SyncBackend` do.)
+The `sharing-admit` lane made that possible first: it replaced the advertiser's
+`Option<SharedRoster>` with a typed `ShareAdmission`, so every un-gated caller
+had to name itself and say which capabilities it handed a stranger. That turned
+the hole from a `None` into an enumerable worklist; this lane converted the
+worklist and then compiled the variant out.
 
-Fix shape, when the lifecycle lane takes it:
+Four steps, all in `crates/holon-loro`:
 
-1. `share_subtree` mints the `CapabilitySecret` BEFORE advertising and passes a
-   `ShareRoster` built from it (the mint already exists at `:1716`, just after
-   the advertise instead of before).
-2. `accept_shared_subtree` builds its roster from the ticket's capability, and
-   its dial switches from `sync_doc_initiate` to `sync_doc_initiate_enrolled`.
-3. The capability secret is persisted (keychain) so the restart rehydrate at
-   `:2344` can rebuild the roster — `roster_sidecar.rs` already has
-   `ShareRoster::rehydrate` for exactly this.
-4. `sync_with_peers` (`:1131`) enrolls on each dial with that persisted secret.
+1. `share_subtree` mints the `CapabilitySecret` BEFORE advertising, files it in
+   the keychain, builds a `ShareRoster` from it and advertises
+   `ShareAdmission::Enrolled` (`loro_share_backend.rs`, `install_roster`).
+2. `accept_shared_subtree` builds its own roster from the TICKET's capability,
+   advertises gated, and dials with `sync_doc_initiate_enrolled`. It pins the
+   author it dialed (`ShareRoster::pin_dialed`), so the author's later inbound
+   dials need no fresh enrollment even outside the ticket's window.
+3. The capability secret is persisted to the OS keychain (`share_credentials.rs`
+   — a new `ShareCredentials` over `holon_secrets::KeychainStore`), and the
+   pinned-peer set to the owner-signed `shares/<id>.roster.json` sidecar. The
+   restart rehydrate rebuilds the roster from the two and REFUSES to advertise a
+   share whose roster it cannot rebuild — degraded and disclosed
+   (`ShareDegraded::RehydrationFailed`), never silently un-gated.
+4. `sync_with_peers` dials with the persisted capability, and `unshare` drops it
+   (`forget_capability`), which makes every ticket ever issued for that share
+   inert. `revoke_share_peer` revokes ONE peer: it un-pins it, closes the
+   enrollment window so the capability it kept cannot re-admit it, and forgets
+   its dial addrs so this device's own pull cannot bring its ops in either.
+
+Covering tests (the first, third and fourth over the LIVE iroh transport):
+
+- `holon_loro::loro_share_backend::tests::a_stranger_holding_only_the_shared_tree_id_can_neither_read_nor_write_the_share`
+  — consequences 1 and 2, driven through `share_subtree` itself, which is the
+  wiring this entry says no test reached.
+- `holon_loro::iroh_advertiser::tests::a_read_only_gated_share_serves_an_enrolled_peer_but_refuses_its_delta`
+  — membership and capability are separate answers; the refusal is the typed
+  `PeerAccessRefused` naming the missing `Write`.
+- `holon_loro::loro_share_backend::tests::revoking_a_peer_stops_every_further_import_from_it`
+  — consequence 3.
+- `holon_loro::loro_share_backend::tests::a_restart_reloads_the_roster_so_an_enrolled_peer_need_not_re_enroll`
+  — the persistence that makes the gate survivable.
+- `holon_loro::share_credentials::tests::a_missing_capability_is_a_loud_err_not_an_absent_value`
+  and siblings — a missing secret fails closed instead of reporting "no secret".
+- `holon_loro::loro_share_backend::tests::a_share_whose_roster_cannot_be_rebuilt_is_not_advertised`
+  — the fail-closed direction itself: a lost keychain entry stops the share
+  being served rather than downgrading it, and the refusal is disclosed. Carries
+  its own control (the same restart WITH the keychain does advertise, gated).
+- `holon_loro::loro_share_backend::tests::a_revoked_peer_is_not_re_dialed_after_a_restart`
+  and `…::a_revocation_that_cannot_be_persisted_fails_loudly_naming_the_peer`
+  — the OUTBOUND half of revocation survives a relaunch, and a revocation whose
+  sidecar write fails is an `Err` rather than a warning the caller cannot see.
+
+Residual, stated rather than closed: the ticket remains a bearer credential for
+the length of its enrollment window, and admission still rests on iroh's
+QUIC/TLS peer authentication (`share_enrollment`'s own disclosure). What changed
+is that the disclosed `shared_tree_id` is no longer sufficient, and that the
+window, the peer cap and revocation now bound what a leaked ticket can do.
 
 Related: `2026-09-02-peer-imports-bypass-the-loro-document-write-guard` (the
-import-side half, fixed by this lane) and
-`2026-09-02-capability-write-is-enforced-nowhere`.
+import-side half), `2026-09-02-capability-write-is-enforced-nowhere` and
+`2026-09-09-a-refused-peer-is-still-remembered-and-later-dialed`.

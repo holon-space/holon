@@ -360,10 +360,10 @@ divergent edits.
   no banner — the exact failure class "fail loud, never fake" targets.
 - **`sync_with_peers` swallows every per-peer failure** (`warn!` then
   `Ok(synced)`); "all peers unreachable forever" is a debug non-event.
-- **Torn-snapshot race.** `flush_all` calls `snapshot_store.save` directly
-  while the debounced save worker for the same id can fire concurrently; both
-  write `<id>.loro.tmp` via separate truncating fds then rename — one can
-  promote a partial file, which the next startup quarantines as corrupt.
+- ~~**Torn-snapshot race.**~~ FIXED: every publish stages a private
+  `<name>.<pid>-<seq>.tmp` (`SharedSnapshotStore::stage_tmp`), so concurrent
+  writers of one file no longer share a truncating fd. Pinned by
+  `concurrent_snapshot_saves_publish_a_loadable_file`.
 - **Blocking fsync on the tokio runtime.** Snapshot/peer/port writes call
   `write_all` + `sync_all` directly (no `spawn_blocking`), including inside
   `share_subtree`'s critical section — an fsync stall freezes an executor
@@ -437,8 +437,9 @@ divergent edits.
 7. **Shares survive restart via `rehydrate_shared_trees`** (mount nodes are
    authoritative; snapshots + peer sidecars reload). The remaining gap: a
    changed advertiser port partitions peers until this device dials out first.
-   Sidecar hygiene is also incomplete (`.port.tmp` never swept; `.port` never
-   deleted by `gc_orphans`).
+   Sidecar hygiene is partly closed: `sweep_stale_tmps` now removes any `*.tmp`
+   under `shares/`, so `.port.tmp` and `.gen.tmp` orphans are swept at startup.
+   `.port` is still never deleted by `gc_orphans`.
 
 ## Validation status
 

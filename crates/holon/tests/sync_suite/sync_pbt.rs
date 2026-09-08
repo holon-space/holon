@@ -403,8 +403,21 @@ mod tests {
             // stranger and the known_peers dedup-by-id fails.
             let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
             // `LoroShareBackend::new` already returns `Arc<Self>`.
-            let be =
-                LoroShareBackend::new(store.clone(), snapshot_store, manager, advertiser, bus, key);
+            // Keyed by the storage dir so a restart of the same peer finds
+            // the capability secrets it filed before — what an OS keychain
+            // does, and what the rehydrated roster needs.
+            let credentials = Arc::new(holon_loro::share_credentials::ShareCredentials::in_memory(
+                &dir_path.to_string_lossy(),
+            ));
+            let be = LoroShareBackend::new(
+                store.clone(),
+                snapshot_store,
+                manager,
+                advertiser,
+                bus,
+                key,
+                credentials,
+            );
             Peer { be, store }
         }
 
@@ -692,7 +705,7 @@ mod tests {
                     Some(n) => n.to_string(),
                     None => continue,
                 };
-                if name.ends_with(".loro.tmp") {
+                if name.ends_with(".tmp") {
                     tmps.push(path.clone());
                 }
                 if name.ends_with(".loro")

@@ -8,8 +8,10 @@
 //! at share time — the per-share snapshot is **the only copy** of its
 //! content on this device. Two behaviours follow:
 //!
-//! - **Atomic save**: write to `<id>.loro.tmp`, `fsync`, rename to `<id>.loro`.
-//!   A torn write leaves the previous snapshot intact.
+//! - **Atomic save**: write to a private `<id>.loro.<pid>-<seq>.tmp`, `fsync`,
+//!   rename to `<id>.loro`. A torn write leaves the previous snapshot intact,
+//!   and the per-write nonce keeps concurrent publishers of the same file off
+//!   each other's tmp — see [`SharedSnapshotStore::stage_tmp`].
 //! - **Quarantine on corrupt**: if `LoroDoc::import` fails we move the file to
 //!   `<id>.loro.corrupt-<rfc3339-ts>` and emit
 //!   [`ShareDegraded::SnapshotLoadFailed`], rather than deleting. The
@@ -49,6 +51,12 @@ pub struct SharedSnapshotStore {
     /// in-flight save looks like from outside.
     #[cfg(test)]
     publish_stall: std::sync::Mutex<std::time::Duration>,
+    /// Test-only one-shot variant of `publish_stall` for the peers
+    /// sidecar: the FIRST `save_peers` takes it and stalls, every later
+    /// one runs at full speed. That asymmetry is what lets a test pin
+    /// the order of two concurrent peer writes.
+    #[cfg(test)]
+    peers_publish_stall_once: std::sync::Mutex<std::time::Duration>,
 }
 
 impl SharedSnapshotStore {
@@ -63,6 +71,8 @@ impl SharedSnapshotStore {
             write_counter: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             publish_stall: std::sync::Mutex::new(std::time::Duration::ZERO),
+            #[cfg(test)]
+            peers_publish_stall_once: std::sync::Mutex::new(std::time::Duration::ZERO),
         }
     }
 
@@ -73,16 +83,19 @@ impl SharedSnapshotStore {
         *self.publish_stall.lock().unwrap() = d;
     }
 
+    /// Hold the NEXT `save_peers` open for `d` between the tmp write and
+    /// the rename; later ones are unaffected.
+    #[cfg(test)]
+    pub(crate) fn stall_next_peers_publish(&self, d: std::time::Duration) {
+        *self.peers_publish_stall_once.lock().unwrap() = d;
+    }
+
     pub fn shares_dir(&self) -> &Path {
         &self.shares_dir
     }
 
     pub fn snapshot_path(&self, shared_tree_id: &str) -> PathBuf {
         self.shares_dir.join(format!("{shared_tree_id}.loro"))
-    }
-
-    fn tmp_path(&self, shared_tree_id: &str) -> PathBuf {
-        self.shares_dir.join(format!("{shared_tree_id}.loro.tmp"))
     }
 
     /// Sidecar path for persisted known-peer addresses. Sits next to
@@ -93,9 +106,48 @@ impl SharedSnapshotStore {
         self.shares_dir.join(format!("{shared_tree_id}.peers.json"))
     }
 
-    fn peers_tmp_path(&self, shared_tree_id: &str) -> PathBuf {
-        self.shares_dir
-            .join(format!("{shared_tree_id}.peers.json.tmp"))
+    /// Durably write `bytes` to a private tmp sibling of `final_path`,
+    /// returning that tmp path for [`Self::publish_tmp`] to rename into
+    /// place.
+    ///
+    /// The tmp name carries a per-write nonce: several tasks publish the
+    /// same sidecar concurrently (an admission callback widening the peer
+    /// set while a revocation narrows it), and a tmp path derived from the
+    /// share id alone makes them share one file — the faster writer renames
+    /// the slower writer's tmp away, and the slower one's rename then fails
+    /// with ENOENT while both have been writing over each other's bytes.
+    fn stage_tmp(&self, final_path: &Path, bytes: &[u8]) -> Result<PathBuf> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        std::fs::create_dir_all(&self.shares_dir)
+            .with_context(|| format!("create {}", self.shares_dir.display()))?;
+        let name = final_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow!("{} has no UTF-8 file name", final_path.display()))?;
+        let nonce = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp_path =
+            final_path.with_file_name(format!("{name}.{}-{nonce}.tmp", std::process::id()));
+
+        let mut f = std::fs::File::create(&tmp_path)
+            .with_context(|| format!("create tmp {}", tmp_path.display()))?;
+        f.write_all(bytes)
+            .with_context(|| format!("write tmp {}", tmp_path.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync tmp {}", tmp_path.display()))?;
+        Ok(tmp_path)
+    }
+
+    /// Rename a staged tmp into place and fsync the directory, so the
+    /// publish survives a crash. A failure here leaves the tmp behind for
+    /// `sweep_stale_tmps`; the previous content stays intact.
+    fn publish_tmp(&self, tmp_path: &Path, final_path: &Path) -> Result<()> {
+        std::fs::rename(tmp_path, final_path)
+            .with_context(|| format!("rename {} → {}", tmp_path.display(), final_path.display()))?;
+        if let Ok(dir) = std::fs::File::open(&self.shares_dir) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
     }
 
     /// Atomic write: tmp → fsync → rename. Overwrites any existing
@@ -105,19 +157,8 @@ impl SharedSnapshotStore {
             .export(ExportMode::Snapshot)
             .context("export shared doc snapshot")?;
         let final_path = self.snapshot_path(shared_tree_id);
-        let tmp_path = self.tmp_path(shared_tree_id);
+        let tmp_path = self.stage_tmp(&final_path, &bytes)?;
 
-        std::fs::create_dir_all(&self.shares_dir)
-            .with_context(|| format!("create {}", self.shares_dir.display()))?;
-
-        {
-            let mut f = std::fs::File::create(&tmp_path)
-                .with_context(|| format!("create tmp {}", tmp_path.display()))?;
-            f.write_all(&bytes)
-                .with_context(|| format!("write tmp {}", tmp_path.display()))?;
-            f.sync_all()
-                .with_context(|| format!("fsync tmp {}", tmp_path.display()))?;
-        }
         #[cfg(test)]
         {
             let stall = *self.publish_stall.lock().unwrap();
@@ -125,11 +166,7 @@ impl SharedSnapshotStore {
                 std::thread::sleep(stall);
             }
         }
-        std::fs::rename(&tmp_path, &final_path)
-            .with_context(|| format!("rename {} → {}", tmp_path.display(), final_path.display()))?;
-        if let Ok(dir) = std::fs::File::open(&self.shares_dir) {
-            let _ = dir.sync_all();
-        }
+        self.publish_tmp(&tmp_path, &final_path)?;
 
         #[cfg(test)]
         self.write_counter
@@ -143,28 +180,29 @@ impl SharedSnapshotStore {
     /// `Serialize`/`Deserialize` on both `EndpointAddr` and the
     /// underlying `TransportAddr` variants, so no manual schema needed.
     /// Overwrites any previous sidecar atomically.
+    ///
+    /// Every error names the share, because the caller that cares most is
+    /// revocation: a sidecar it could not rewrite is a revoked peer whose
+    /// dial addr comes back at the next launch.
     pub fn save_peers(&self, shared_tree_id: &str, peers: &[EndpointAddr]) -> Result<()> {
         let bytes = serde_json::to_vec(peers).context("serialize known peers as JSON")?;
         let final_path = self.peers_path(shared_tree_id);
-        let tmp_path = self.peers_tmp_path(shared_tree_id);
 
-        std::fs::create_dir_all(&self.shares_dir)
-            .with_context(|| format!("create {}", self.shares_dir.display()))?;
-
-        {
-            let mut f = std::fs::File::create(&tmp_path)
-                .with_context(|| format!("create tmp {}", tmp_path.display()))?;
-            f.write_all(&bytes)
-                .with_context(|| format!("write tmp {}", tmp_path.display()))?;
-            f.sync_all()
-                .with_context(|| format!("fsync tmp {}", tmp_path.display()))?;
-        }
-        std::fs::rename(&tmp_path, &final_path)
-            .with_context(|| format!("rename {} → {}", tmp_path.display(), final_path.display()))?;
-        if let Ok(dir) = std::fs::File::open(&self.shares_dir) {
-            let _ = dir.sync_all();
-        }
-        Ok(())
+        let publish = || -> Result<()> {
+            let tmp_path = self.stage_tmp(&final_path, &bytes)?;
+            #[cfg(test)]
+            {
+                let stall = std::mem::replace(
+                    &mut *self.peers_publish_stall_once.lock().unwrap(),
+                    std::time::Duration::ZERO,
+                );
+                if !stall.is_zero() {
+                    std::thread::sleep(stall);
+                }
+            }
+            self.publish_tmp(&tmp_path, &final_path)
+        };
+        publish().with_context(|| format!("write the peers sidecar for share {shared_tree_id}"))
     }
 
     /// Load the sidecar peer list. Missing file → empty vec (fresh
@@ -192,21 +230,9 @@ impl SharedSnapshotStore {
 
     /// Atomically persist the advertiser's bound port for this share.
     pub fn save_port(&self, shared_tree_id: &str, port: u16) -> Result<()> {
-        std::fs::create_dir_all(&self.shares_dir)
-            .with_context(|| format!("create {}", self.shares_dir.display()))?;
         let final_path = self.port_path(shared_tree_id);
-        let tmp_path = self.shares_dir.join(format!("{shared_tree_id}.port.tmp"));
-        {
-            let mut f = std::fs::File::create(&tmp_path)
-                .with_context(|| format!("create tmp {}", tmp_path.display()))?;
-            f.write_all(port.to_string().as_bytes())
-                .with_context(|| format!("write tmp {}", tmp_path.display()))?;
-            f.sync_all()
-                .with_context(|| format!("fsync tmp {}", tmp_path.display()))?;
-        }
-        std::fs::rename(&tmp_path, &final_path)
-            .with_context(|| format!("rename {} → {}", tmp_path.display(), final_path.display()))?;
-        Ok(())
+        let tmp_path = self.stage_tmp(&final_path, port.to_string().as_bytes())?;
+        self.publish_tmp(&tmp_path, &final_path)
     }
 
     /// Load the persisted advertiser port. Missing file → `None`
@@ -255,21 +281,9 @@ impl SharedSnapshotStore {
     /// Atomically persist the generation for this share (tmp → fsync →
     /// rename), mirroring [`Self::save_port`].
     pub fn save_generation(&self, shared_tree_id: &str, generation: u64) -> Result<()> {
-        std::fs::create_dir_all(&self.shares_dir)
-            .with_context(|| format!("create {}", self.shares_dir.display()))?;
         let final_path = self.gen_path(shared_tree_id);
-        let tmp_path = self.shares_dir.join(format!("{shared_tree_id}.gen.tmp"));
-        {
-            let mut f = std::fs::File::create(&tmp_path)
-                .with_context(|| format!("create tmp {}", tmp_path.display()))?;
-            f.write_all(generation.to_string().as_bytes())
-                .with_context(|| format!("write tmp {}", tmp_path.display()))?;
-            f.sync_all()
-                .with_context(|| format!("fsync tmp {}", tmp_path.display()))?;
-        }
-        std::fs::rename(&tmp_path, &final_path)
-            .with_context(|| format!("rename {} → {}", tmp_path.display(), final_path.display()))?;
-        Ok(())
+        let tmp_path = self.stage_tmp(&final_path, generation.to_string().as_bytes())?;
+        self.publish_tmp(&tmp_path, &final_path)
     }
 
     /// Monotonic bump: load the current generation (default 0), add 1,
@@ -336,7 +350,9 @@ impl SharedSnapshotStore {
         self.snapshot_path(shared_tree_id).is_file()
     }
 
-    /// Remove any `*.loro.tmp` files left by a crashed previous write.
+    /// Remove any `*.tmp` files left by a crashed or failed previous
+    /// write. Every name this directory holds is written by
+    /// [`Self::stage_tmp`], which is the only producer of the suffix.
     /// Returns the count of files removed. Called once at startup.
     pub fn sweep_stale_tmps(&self) -> Result<usize> {
         if !self.shares_dir.exists() {
@@ -351,12 +367,7 @@ impl SharedSnapshotStore {
             if path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| {
-                    n.ends_with(".loro.tmp")
-                        || n.ends_with(".peers.json.tmp")
-                        || n.ends_with(".gen.tmp")
-                        || n.ends_with(".port.tmp")
-                })
+                .map(|n| n.ends_with(".tmp"))
                 .unwrap_or(false)
             {
                 match std::fs::remove_file(&path) {
@@ -397,6 +408,7 @@ impl SharedSnapshotStore {
             };
             let matches = name == format!("{shared_tree_id}.loro")
                 || name == format!("{shared_tree_id}.peers.json")
+                || name == format!("{shared_tree_id}.roster.json")
                 || name == format!("{shared_tree_id}.gen")
                 || name == format!("{shared_tree_id}.port")
                 || name.starts_with(&prefix_corrupt);
@@ -493,6 +505,80 @@ mod tests {
             })
             .collect();
         assert!(tmps.is_empty(), "unexpected .tmp files: {tmps:?}");
+    }
+
+    /// Two `save_peers` for the same share overlap in production: an
+    /// inbound admission persists the widened peer set from a spawned
+    /// callback while a revocation persists the narrowed one. A tmp path
+    /// derived only from the share id makes them share one file, so the
+    /// faster writer renames the slower writer's tmp away and the slower
+    /// rename hits ENOENT — on the revocation leg that is a revocation
+    /// reporting failure while the peer stays dialable.
+    #[test]
+    fn a_concurrent_peer_save_does_not_steal_this_writers_tmp_file() {
+        let dir = TempDir::new().unwrap();
+        let (store, _bus) = store_in(dir.path());
+        let store = Arc::new(store);
+
+        let addr = EndpointAddr::new(iroh::SecretKey::generate(&mut rand::rng()).public());
+        store
+            .save_peers("share", std::slice::from_ref(&addr))
+            .unwrap();
+
+        store.stall_next_peers_publish(std::time::Duration::from_millis(500));
+        let slow = {
+            let store = Arc::clone(&store);
+            let addr = addr.clone();
+            std::thread::spawn(move || store.save_peers("share", std::slice::from_ref(&addr)))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        store.save_peers("share", &[]).unwrap();
+
+        slow.join()
+            .unwrap()
+            .expect("a concurrent save for the same share must not destroy this writer's tmp file");
+    }
+
+    /// The snapshot path has the same shape of race as the peers sidecar and
+    /// four unsynchronised callers (the save worker, `flush_all`,
+    /// `sync_with_peers`, `accept_shared_subtree`). With one tmp path per share
+    /// the second writer's `O_TRUNC` lands inside the first writer's stream, so
+    /// what gets fsynced and renamed is a torn file the next startup
+    /// quarantines as corrupt — a share whose only copy on this device is the
+    /// pruned subtree.
+    #[test]
+    fn concurrent_snapshot_saves_publish_a_loadable_file() {
+        let dir = TempDir::new().unwrap();
+        let (store, _bus) = store_in(dir.path());
+        let store = Arc::new(store);
+
+        let doc = LoroDoc::new();
+        let tree = doc.get_tree("tree");
+        for i in 0..2000 {
+            let node = tree.create(None::<loro::TreeID>).unwrap();
+            tree.get_meta(node)
+                .unwrap()
+                .insert("k", format!("value-{i}"))
+                .unwrap();
+        }
+        doc.commit();
+
+        store.set_publish_stall(std::time::Duration::from_millis(500));
+        let slow = {
+            let store = Arc::clone(&store);
+            let doc = doc.fork();
+            std::thread::spawn(move || store.save("x", &doc))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        store.set_publish_stall(std::time::Duration::ZERO);
+        store.save("x", &doc).unwrap();
+
+        slow.join()
+            .unwrap()
+            .expect("a concurrent snapshot save must not destroy this writer's tmp file");
+        store
+            .load("x")
+            .expect("the published snapshot must be a whole file from one writer, not a torn mix");
     }
 
     #[test]

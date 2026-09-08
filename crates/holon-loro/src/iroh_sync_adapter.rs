@@ -44,6 +44,7 @@ mod adapter {
     use iroh::EndpointAddr;
     use loro::ExportMode;
     use loro::LoroDoc;
+    #[cfg(any(test, feature = "test-helpers"))]
     use tokio::time::sleep;
     use tokio::time::timeout;
     use tracing::debug;
@@ -238,7 +239,14 @@ mod adapter {
     /// is no roster on the initiating side, so the caller states it and must be
     /// able to say why. It gates both directions of the round
     /// ([`crate::peer_import`]).
-    pub async fn sync_doc_initiate(
+    ///
+    /// Dials WITHOUT enrolling, so it can only ever complete a round against an
+    /// un-gated acceptor. Production dials go through
+    /// [`sync_doc_initiate_enrolled`]; this one is compiled out of a production
+    /// build and kept for the transport harness and for the tests that dial a
+    /// gated share AS a stranger.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) async fn sync_doc_initiate(
         endpoint: &Endpoint,
         doc: &Arc<LoroDoc>,
         alpn: &[u8],
@@ -363,11 +371,15 @@ mod adapter {
 
     /// Acceptor side: handle ONE incoming sync connection for a LoroDoc, with
     /// no enrollment — whoever reaches the endpoint is admitted with `grant`.
+    ///
     /// The gated production accept loop is
-    /// [`crate::iroh_advertiser::IrohAdvertiser::start_share_gated`]; this
-    /// entry point exists for transport tests and for the `SyncBackend` PBT
-    /// harness, which have no roster.
-    pub async fn sync_doc_accept(
+    /// [`crate::iroh_advertiser::IrohAdvertiser::start_share_gated`]. This
+    /// entry point is the ONE un-gated acceptor left in the crate, so it is
+    /// compiled out of a production build and is `pub(crate)`: transport
+    /// tests and the [`IrohSync`] PBT harness reach it, nothing that ships
+    /// does, and no other crate can.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) async fn sync_doc_accept(
         endpoint: &Endpoint,
         doc: &Arc<LoroDoc>,
         container: &str,
@@ -530,10 +542,17 @@ mod adapter {
 
     /// Iroh-backed sync — creates ephemeral endpoints per sync_pair call.
     /// Uses the real QUIC transport with VV-based incremental protocol.
+    ///
+    /// Accepts un-gated (see [`sync_doc_accept`]) on an endpoint it binds
+    /// itself under a random per-call label, so it is compiled out of a
+    /// production build: a PBT harness is the only thing that may accept a
+    /// connection with no admission behind it.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub struct IrohSync {
         rt: tokio::runtime::Runtime,
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     impl IrohSync {
         pub fn new() -> Result<Self> {
             let rt = tokio::runtime::Runtime::new()?;
@@ -541,6 +560,7 @@ mod adapter {
         }
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     impl SyncBackend for IrohSync {
         fn sync_pair(&self, doc_a: &LoroDoc, doc_b: &LoroDoc) -> Result<()> {
             self.rt.block_on(async {
@@ -1097,7 +1117,10 @@ mod adapter {
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use adapter::DirectSync;
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[cfg(all(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    any(test, feature = "test-helpers")
+))]
 pub use adapter::IrohSync;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use adapter::SharedTreeSyncManager;
@@ -1111,10 +1134,14 @@ pub use adapter::create_endpoint;
 pub use adapter::create_endpoint_with_key;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use adapter::make_alpn;
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub use adapter::sync_doc_accept;
+// `sync_doc_accept` — the one un-gated acceptor left — is deliberately NOT
+// re-exported: it is reachable only from inside the private `adapter` module,
+// and only in a build where `test` or `test-helpers` is on.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use adapter::sync_doc_handle_connection;
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub use adapter::sync_doc_initiate;
+// The un-enrolled dialer is reachable only under `cfg(test)`, and only from
+// inside this crate: the tests that dial a gated share AS a stranger name it
+// here, and nothing else can.
+#[cfg(all(not(all(target_arch = "wasm32", target_os = "unknown")), test))]
+pub(crate) use adapter::sync_doc_initiate;
 pub use adapter::sync_doc_initiate_enrolled;

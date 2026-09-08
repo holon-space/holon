@@ -378,6 +378,24 @@ impl std::error::Error for AuthzReject {}
 /// be constructed by [`ShareRoster::authorize`], so any code path that requires
 /// an `&AuthorizedPeer` before syncing cannot be reached with an un-vetted
 /// peer — the authorization is proven by the type, not by a convention.
+/// WHAT the admission rested on. Carried on [`AuthorizedPeer`] because the two
+/// bases are not equally strong and a caller has to be able to say which one it
+/// got: a bearer capability is a secret that TRAVELLED (whoever the ticket was
+/// forwarded to could present it), while an owner-signed entry binds a specific
+/// device key. ADR 0028 R5 accepts the bearer path meanwhile; the caller
+/// discloses it rather than treating the two alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmissionBasis {
+    /// Already pinned by an earlier admission — no fresh proof was asked for.
+    /// Its ORIGINAL basis is whatever admitted it then; this variant says only
+    /// that this connection re-used the pin.
+    AlreadyPinned,
+    /// Proved possession of the share's bearer capability secret.
+    BearerCapability,
+    /// Presented an owner-signed device entry (B1 self-device path).
+    OwnerSignedDevice,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizedPeer {
     peer: PeerFingerprint,
@@ -385,6 +403,7 @@ pub struct AuthorizedPeer {
     /// True on the connection that first admitted this peer; false on a
     /// subsequent reconnect of an already-enrolled peer.
     newly_enrolled: bool,
+    basis: AdmissionBasis,
 }
 
 impl AuthorizedPeer {
@@ -396,6 +415,10 @@ impl AuthorizedPeer {
     }
     pub fn newly_enrolled(&self) -> bool {
         self.newly_enrolled
+    }
+    /// What this connection's admission rested on. See [`AdmissionBasis`].
+    pub fn basis(&self) -> AdmissionBasis {
+        self.basis
     }
 }
 
@@ -562,6 +585,54 @@ impl ShareRoster {
         self.enrolled.contains(peer)
     }
 
+    /// Pin a peer THIS device dialed and proved its own membership to.
+    ///
+    /// The recipient of a ticket runs [`initiator_enroll`] against the share
+    /// author, so by the time this is called the author has already accepted
+    /// our capability proof and QUIC has authenticated `peer` as the node key
+    /// the ticket named. Pinning it here makes our own roster admit the author
+    /// symmetrically, instead of leaving that to a later inbound dial that must
+    /// land inside the enrollment window.
+    ///
+    /// This is not an authorization: it returns no [`AuthorizedPeer`]. It
+    /// records a peer we chose, and it still respects `max_peers` so a stream
+    /// of tickets cannot grow the roster without bound.
+    pub fn pin_dialed(&mut self, peer: PeerFingerprint) -> Result<(), AuthzReject> {
+        if self.enrolled.contains(&peer) {
+            return Ok(());
+        }
+        if self.enrolled.len() >= self.max_peers {
+            return Err(AuthzReject::RosterFull {
+                max: self.max_peers,
+            });
+        }
+        self.enrolled.push(peer);
+        Ok(())
+    }
+
+    /// Un-pin `peer`, returning whether it was enrolled. Revocation of ONE
+    /// peer; [`crate::share_credentials::ShareCredentials::forget_capability`]
+    /// revokes the share as a whole.
+    ///
+    /// A revoked peer that still holds the capability can re-enroll while the
+    /// enrollment window is open — un-pinning alone is not enough to lock out
+    /// a holder of the secret. Callers that mean "this peer is out for good"
+    /// must also end the window or rotate the capability.
+    pub fn revoke(&mut self, peer: &PeerFingerprint) -> bool {
+        let before = self.enrolled.len();
+        self.enrolled.retain(|p| p != peer);
+        self.enrolled.len() != before
+    }
+
+    /// Close the enrollment window as of `now`, so no peer that is not already
+    /// pinned can enroll again. Paired with [`Self::revoke`], this is what
+    /// makes a revocation stick against a peer that kept the capability.
+    pub fn close_enrollment(&mut self, now: i64) {
+        // `is_expired_at` is `now > expires_at`, so the window must be set
+        // BEFORE `now` for `now` itself to already be outside it.
+        self.expires_at = ExpiryTime(now - 1);
+    }
+
     /// Core authorization decision. Ordering matters and is security-relevant:
     ///
     /// 1. An **already-enrolled** peer needs no fresh proof and is outside
@@ -589,6 +660,7 @@ impl ShareRoster {
                 peer,
                 capability_id: self.capability_id,
                 newly_enrolled: false,
+                basis: AdmissionBasis::AlreadyPinned,
             });
         }
         if self.expires_at.is_expired_at(now) {
@@ -618,6 +690,7 @@ impl ShareRoster {
             peer,
             capability_id: self.capability_id,
             newly_enrolled: true,
+            basis: AdmissionBasis::BearerCapability,
         })
     }
 
@@ -649,6 +722,7 @@ impl ShareRoster {
                 peer,
                 capability_id: self.capability_id,
                 newly_enrolled: false,
+                basis: AdmissionBasis::AlreadyPinned,
             });
         }
         let owner = self.owner.as_ref().ok_or(AuthzReject::NoOwnerRoster)?;
@@ -668,6 +742,7 @@ impl ShareRoster {
             peer,
             capability_id: self.capability_id,
             newly_enrolled: true,
+            basis: AdmissionBasis::OwnerSignedDevice,
         })
     }
 }

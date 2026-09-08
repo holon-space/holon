@@ -193,7 +193,10 @@ impl<'de> Deserialize<'de> for OwnerSignature {
 /// lifecycle: lazy generation (deferred to first enrollment), keychain
 /// persistence, and recovery-code restore.
 pub struct OwnerCustody {
-    keychain: Box<dyn KeychainStore>,
+    /// `Arc`, not `Box`, so a restart test can hand the same store to the
+    /// custody it rebuilds — the point of the keychain is that it outlives one
+    /// process, and an owned `Box` cannot express that in a single one.
+    keychain: std::sync::Arc<dyn KeychainStore>,
     account: String,
 }
 
@@ -201,14 +204,17 @@ impl OwnerCustody {
     /// Custody over the founding-device account with the platform keychain.
     pub fn founding_device() -> Self {
         Self {
-            keychain: holon_secrets::platform_keychain(OWNER_KEYCHAIN_SERVICE),
+            keychain: holon_secrets::platform_keychain(OWNER_KEYCHAIN_SERVICE).into(),
             account: FOUNDING_DEVICE_ACCOUNT.to_string(),
         }
     }
 
     /// Custody over an explicit keychain + account (tests / non-default
     /// fleets).
-    pub fn with_keychain(keychain: Box<dyn KeychainStore>, account: impl Into<String>) -> Self {
+    pub fn with_keychain(
+        keychain: std::sync::Arc<dyn KeychainStore>,
+        account: impl Into<String>,
+    ) -> Self {
         Self {
             keychain,
             account: account.into(),
@@ -287,7 +293,10 @@ mod tests {
     use super::*;
 
     fn custody() -> OwnerCustody {
-        OwnerCustody::with_keychain(Box::new(InMemoryKeychainStore::new()), "test-owner")
+        OwnerCustody::with_keychain(
+            std::sync::Arc::new(InMemoryKeychainStore::new()),
+            "test-owner",
+        )
     }
 
     #[test]
@@ -365,7 +374,10 @@ mod tests {
         let (key1, recovery) = c1.first_enroll().unwrap();
 
         // Device 2 (fresh keychain) recovers from the code.
-        let c2 = OwnerCustody::with_keychain(Box::new(InMemoryKeychainStore::new()), "test-owner");
+        let c2 = OwnerCustody::with_keychain(
+            std::sync::Arc::new(InMemoryKeychainStore::new()),
+            "test-owner",
+        );
         let key2 = c2.recover(&recovery).unwrap();
 
         assert_eq!(key1.public(), key2.public());

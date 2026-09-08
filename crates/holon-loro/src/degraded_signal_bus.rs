@@ -216,7 +216,43 @@ pub enum ShareDegradedReason {
     /// All-clear: a re-import that completes, which is the moment the archive's
     /// content reaches the store.
     PairingReimportDeferred { orphans: usize, archive: String },
+    /// A peer joined this share by proving the ticket's BEARER capability:
+    /// possession of the ticket string is the whole credential, so whoever the
+    /// ticket was forwarded to could have joined instead. That is the stopgap
+    /// ADR 0028 R5 accepts until enrollment binds a device key — disclosed
+    /// here so the user can see that this share's trust rests on a secret that
+    /// travelled, not on a paired identity. `peer` is the QUIC-authenticated
+    /// node key (public); the capability secret is never carried.
+    ///
+    /// All-clear: never automatic — it is a fact about how the share was
+    /// joined, and it ends only when the share is unshared or the peer
+    /// revoked.
+    BearerTicketEnrollment { peer: String },
+    /// This device minted its owner identity key on its first share, and the
+    /// one-time recovery code that key produced could not be shown to anyone —
+    /// no surface exists yet that can display it (ADR 0028 D1 defers the mint
+    /// to first use, and the code is show-once by construction).
+    ///
+    /// The consequence is bounded and worth stating exactly: the shared DATA is
+    /// not at risk, and neither is any peer's access. What is lost with the
+    /// keychain entry is this device's ability to sign and verify its own
+    /// roster sidecars — after which its shares fail CLOSED (they are not
+    /// advertised) rather than open.
+    ///
+    /// The code itself is never carried here, logged, or rendered; this
+    /// condition says only that one existed and went unshown. `shared_tree_id`
+    /// is the sentinel [`OWNER_IDENTITY_SUBJECT`], because the key is
+    /// device-wide rather than per-share.
+    ///
+    /// All-clear: none — it is a fact about a mint that already happened. It
+    /// ends when a recovery-code surface exists and the user has seen a
+    /// freshly rotated code.
+    OwnerRecoveryCodeNotShown,
 }
+
+/// Subject of the device-wide conditions on this bus, which have no share to
+/// name. Used by [`ShareDegradedReason::OwnerRecoveryCodeNotShown`].
+pub const OWNER_IDENTITY_SUBJECT: &str = "owner-identity";
 
 impl ShareDegradedReason {
     /// Kind constants, so an all-clear site names the condition it lifts
@@ -238,6 +274,8 @@ impl ShareDegradedReason {
     pub const VAULT_FILE_EMPTIED: &'static str = "vault-file-emptied";
     pub const WRITEBACK_DEGRADED: &'static str = "writeback-degraded";
     pub const EDIT_REFUSED_READ_ONLY_FORMAT: &'static str = "edit-refused-read-only-format";
+    pub const BEARER_TICKET_ENROLLMENT: &'static str = "bearer-ticket-enrollment";
+    pub const OWNER_RECOVERY_CODE_NOT_SHOWN: &'static str = "owner-recovery-code-not-shown";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`DegradedConditionKey`]. Total: every degradation is a sticky
@@ -263,6 +301,8 @@ impl ShareDegradedReason {
             Self::PairingReimportedLocalContent { .. } => Self::PAIRING_REIMPORTED_LOCAL_CONTENT,
             Self::PairingReimportDeferred { .. } => Self::PAIRING_REIMPORT_DEFERRED,
             Self::EditRefusedReadOnlyFormat { .. } => Self::EDIT_REFUSED_READ_ONLY_FORMAT,
+            Self::BearerTicketEnrollment { .. } => Self::BEARER_TICKET_ENROLLMENT,
+            Self::OwnerRecoveryCodeNotShown => Self::OWNER_RECOVERY_CODE_NOT_SHOWN,
         }
     }
 }

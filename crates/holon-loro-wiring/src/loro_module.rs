@@ -492,7 +492,12 @@ fn register_subtree_share(injector: &Injector) {
     }));
     injector.provide::<Arc<IrohAdvertiser>>(Provider::root(|resolver| {
         let key = resolver.resolve::<Arc<SecretKey>>();
-        Shared::new(Arc::new(IrohAdvertiser::new_with_key((**key).clone())))
+        // The bus is where a BEARER-ticket admission is disclosed to the user
+        // (ADR 0028 R5 stopgap); without it the advertiser can only log.
+        let bus = resolver.resolve::<Arc<holon_loro::degraded_signal_bus::DegradedSignalBus>>();
+        Shared::new(Arc::new(
+            IrohAdvertiser::new_with_key((**key).clone()).with_degraded_bus((*bus).clone()),
+        ))
     }));
     // `Arc<DegradedSignalBus>` is NOT registered here. Disclosure must exist in
     // every container, not only the Loro one, so the composition root
@@ -539,6 +544,11 @@ fn register_subtree_share(injector: &Injector) {
         // `LoroShareBackend::new_with_sql` returns `Arc<Self>` because its
         // internal `self_weak` is populated via `Arc::new_cyclic` — the
         // Arc has to exist to carry the Weak. Callers store the Arc as-is.
+        // Share secrets go to the OS keychain: the per-share capability that
+        // gates the advertiser's roster, and the owner key that signs the
+        // roster sidecar. Both are minted lazily on the first share.
+        let credentials = Arc::new(holon_loro::share_credentials::ShareCredentials::platform());
+
         Shared::new(LoroShareBackend::new_with_sql(
             store_arc,
             (*snapshot_store).clone(),
@@ -546,6 +556,7 @@ fn register_subtree_share(injector: &Injector) {
             (*advertiser).clone(),
             (*bus).clone(),
             (**key).clone(),
+            credentials,
             Some(sql_ops),
             Some(downstream_projection),
         ))

@@ -214,7 +214,13 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // boundary lock.
     ("crates/holon-loro/src/loro_backend.rs", 10),
     ("crates/holon-loro/src/loro_document.rs", 3),
-    ("crates/holon-loro/src/loro_share_backend.rs", 14),
+    // +1: the `rehydrate_over` test helper. `rehydrate_shared_trees` is async and
+    // so cannot run inside `with_read`'s synchronous closure — the same reason
+    // the one production caller below (`loro_module.rs`) carries an escape. The
+    // four restart tests share this single helper rather than each taking a raw
+    // doc; sealing it needs that function split into guarded reads around its
+    // awaits, which is the follow-up `loro_module.rs` already names.
+    ("crates/holon-loro/src/loro_share_backend.rs", 15),
     // +1: the layout doc's `subscribe_root` registration, same rationale as the
     // global doc's.
     ("crates/holon-loro/src/loro_sync_controller.rs", 2),

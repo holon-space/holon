@@ -4,10 +4,11 @@
 //! ## What the type buys
 //! [`import_peer_delta`] is the only function in this crate that writes peer
 //! bytes into a doc, and it cannot be called without an [`AdmittedPeer`].
-//! `AdmittedPeer` has no public field and no `Default`: it exists only where an
-//! admission decision was taken, so "an import with no decision behind it" is
-//! not a state a caller can reach — the way `AuthorizedPeer` already works for
-//! enrollment, one layer up.
+//! `AdmittedPeer` has no public field, no `Default`, and every constructor is
+//! `pub(crate)`: it exists only where THIS crate took an admission decision, so
+//! "an import with no decision behind it" is not a state any caller can reach —
+//! and no downstream crate can mint one at all. That is the way
+//! `AuthorizedPeer` already works for enrollment, one layer up.
 //!
 //! ## Which capability each direction exercises
 //! Applying a peer's ops into THIS device's replica is that peer writing here,
@@ -21,9 +22,7 @@
 //! ## What an admission does NOT prove
 //! Only that the peer is a member of this share with these capabilities. The
 //! identity behind it is the QUIC/TLS-authenticated iroh node key, so this is
-//! exactly as strong as the transport's peer authentication and no stronger. An
-//! un-gated share (see [`crate::iroh_advertiser::ShareAdmission::Ungated`])
-//! admits whoever reaches the endpoint.
+//! exactly as strong as the transport's peer authentication and no stronger.
 
 use std::sync::Arc;
 
@@ -40,7 +39,11 @@ use crate::share_enrollment::PeerFingerprint;
 
 /// Proof that a specific remote peer is admitted to a specific container, and
 /// with which capabilities. Constructible only through the named constructors
-/// below, each of which states the basis of its decision.
+/// below, each of which states the basis of its decision — and each
+/// `pub(crate)`, so the admission decision cannot be taken outside the
+/// transport layer that owns it. That is what makes [`import_peer_delta`] and
+/// [`authorize_peer_read`] safe to leave `pub`: a downstream crate can name the
+/// types but cannot mint the witness either one demands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdmittedPeer {
     peer: PeerFingerprint,
@@ -52,7 +55,7 @@ impl AdmittedPeer {
     /// Acceptor side: the peer proved the share capability (or presented an
     /// owner-signed device entry) against this share's roster, which is what
     /// `capabilities` rests on.
-    pub fn enrolled(
+    pub(crate) fn enrolled(
         container: impl Into<String>,
         authorized: &AuthorizedPeer,
         capabilities: Capabilities,
@@ -68,7 +71,7 @@ impl AdmittedPeer {
     /// and (on the enrolled dial) proved its own membership to it. There is no
     /// roster on this side, so `capabilities` is what this device grants the
     /// peer it dialed — the caller must be able to say why.
-    pub fn dialed(
+    pub(crate) fn dialed(
         container: impl Into<String>,
         peer: PeerFingerprint,
         capabilities: Capabilities,
@@ -80,12 +83,16 @@ impl AdmittedPeer {
         }
     }
 
-    /// No proof was required: the share is advertised un-gated, so the peer is
-    /// whoever reached the endpoint. Named apart from the two decisions above
-    /// because it is not one — it records that the caller chose to admit a
-    /// stranger, and with what. See
-    /// [`crate::iroh_advertiser::ShareAdmission::Ungated`].
-    pub fn ungated(
+    /// No proof was required: whoever reached the endpoint is admitted. Named
+    /// apart from the two decisions above because it is not one — it records
+    /// that the caller chose to admit a stranger, and with what.
+    ///
+    /// Compiled out of a production build. The only surviving caller is the
+    /// roster-less `sync_doc_accept` transport harness, itself compiled out the
+    /// same way; no production accept path can reach an un-gated admission, and
+    /// no crate outside this one can mint one.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn ungated(
         container: impl Into<String>,
         peer: PeerFingerprint,
         capabilities: Capabilities,

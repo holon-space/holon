@@ -27,6 +27,9 @@ use tokio::task::JoinHandle;
 use tracing::debug;
 use tracing::warn;
 
+use crate::degraded_signal_bus::DegradedSignalBus;
+use crate::degraded_signal_bus::ShareDegraded;
+use crate::degraded_signal_bus::ShareDegradedReason;
 use crate::iroh_sync_adapter::connection_remote_addr;
 use crate::iroh_sync_adapter::create_endpoint;
 use crate::iroh_sync_adapter::create_endpoint_with_key;
@@ -36,11 +39,12 @@ use crate::peer_import::AdmittedPeer;
 use crate::peer_import::PeerReadAccess;
 use crate::peer_import::authorize_peer_read;
 use crate::share_enrollment::AcceptorRefused;
+use crate::share_enrollment::AdmissionBasis;
+use crate::share_enrollment::AuthorizedPeer;
 use crate::share_enrollment::ENROLLMENT_FAILED_CODE;
 use crate::share_enrollment::ENROLLMENT_REFUSED_CODE;
 use crate::share_enrollment::ShareRoster;
 use crate::share_enrollment::acceptor_enroll;
-use crate::share_enrollment::peer_fingerprint;
 
 pub const ALPN_PREFIX: &str = "loro-sync";
 
@@ -67,15 +71,18 @@ pub enum ShareAdmission {
         roster: SharedRoster,
         capabilities: Capabilities,
     },
-    /// DISCLOSED HOLE — no enrollment runs, so every peer that reaches the
-    /// endpoint is admitted with `capabilities`. The `shared_tree_id` sits in
-    /// the ALPN and in projected rows, so "reaches the endpoint" is everyone
-    /// who can route to us.
+    /// No enrollment runs, so every peer that reaches the endpoint is admitted
+    /// with `capabilities`. The `shared_tree_id` sits in the ALPN and in
+    /// projected rows, so "reaches the endpoint" is everyone who can route to
+    /// us — which is the hole bugfunnel
+    /// `2026-09-08-the-subtree-share-hot-path-advertises-un-gated` records.
     ///
-    /// Spelled per call site rather than implied by a `None`, so
-    /// `rg 'ShareAdmission::Ungated'` enumerates exactly the shares still to be
-    /// gated. See bugfunnel
-    /// `2026-09-08-the-subtree-share-hot-path-advertises-un-gated`.
+    /// **Compiled out of a production build.** It survives only so the gated
+    /// advertiser's own tests can dial an un-gated acceptor and show what the
+    /// gate is worth. A production caller cannot name this variant, so "the
+    /// hot path advertises un-gated" is now a compile error rather than a
+    /// review finding — the check is `cargo check -p holon-loro`, not a grep.
+    #[cfg(test)]
     Ungated { capabilities: Capabilities },
 }
 
@@ -102,6 +109,10 @@ struct ShareHandle {
 #[derive(Clone)]
 pub struct IrohAdvertiser {
     shares: Arc<RwLock<HashMap<String, ShareHandle>>>,
+    /// Where a bearer-ticket admission is DISCLOSED. `None` in standalone
+    /// transport tests, which have no frontend to disclose to; the `warn!` in
+    /// the accept loop fires either way, so the stopgap is never silent.
+    degraded_bus: Option<Arc<DegradedSignalBus>>,
     /// Optional stable secret key used to bind every share's
     /// `Endpoint`. When `Some`, iroh endpoint identity is stable
     /// across process restarts — critical for `known_peers` dedup on
@@ -115,6 +126,7 @@ impl IrohAdvertiser {
     pub fn new() -> Self {
         Self {
             shares: Arc::new(RwLock::new(HashMap::new())),
+            degraded_bus: None,
             secret_key: None,
         }
     }
@@ -124,15 +136,25 @@ impl IrohAdvertiser {
     pub fn new_with_key(secret_key: SecretKey) -> Self {
         Self {
             shares: Arc::new(RwLock::new(HashMap::new())),
+            degraded_bus: None,
             secret_key: Some(secret_key),
         }
     }
 
+    /// Publish this advertiser's admission disclosures on `bus`. The one
+    /// disclosure today is `BearerTicketEnrollment`: a peer joined by proving a
+    /// secret that travelled, not by being a paired device (ADR 0028 R5).
+    pub fn with_degraded_bus(mut self, bus: Arc<DegradedSignalBus>) -> Self {
+        self.degraded_bus = Some(bus);
+        self
+    }
+
     /// Start advertising `doc` on `loro-sync/{shared_tree_id}` with NO
     /// enrollment: every peer that reaches the endpoint is admitted with
-    /// `capabilities`. Naming the capabilities is the point — see
+    /// `capabilities`. Test-only, like the variant it names — see
     /// [`ShareAdmission::Ungated`].
-    pub async fn start_share_ungated(
+    #[cfg(test)]
+    pub(crate) async fn start_share_ungated(
         &self,
         shared_tree_id: String,
         doc: Arc<LoroDoc>,
@@ -201,6 +223,9 @@ impl IrohAdvertiser {
         preferred_port: Option<u16>,
         admission: ShareAdmission,
     ) -> Result<EndpointAddr> {
+        // Gated with the variant it reports: a production build cannot construct
+        // an un-gated share, so this disclosure only has a subject under `test`.
+        #[cfg(test)]
         if let ShareAdmission::Ungated { capabilities } = &admission {
             warn!(
                 shared_tree_id = %shared_tree_id,
@@ -232,6 +257,7 @@ impl IrohAdvertiser {
 
         let roster = match &admission {
             ShareAdmission::Enrolled { roster, .. } => Some(roster.clone()),
+            #[cfg(test)]
             ShareAdmission::Ungated { .. } => None,
         };
         let accepter_ep = endpoint.clone();
@@ -241,6 +267,7 @@ impl IrohAdvertiser {
             shared_tree_id.clone(),
             on_peer_connected,
             admission,
+            self.degraded_bus.clone(),
         ));
 
         guard.insert(
@@ -310,12 +337,45 @@ impl Default for IrohAdvertiser {
     }
 }
 
+/// Disclose that a peer joined by BEARER capability rather than as a paired
+/// device — the ADR 0028 R5 stopgap. A `warn!` always, so every session log
+/// carries the line, plus a sticky degraded condition when a bus exists, so the
+/// user sees it and not only the log.
+///
+/// Only a FRESH bearer admission is disclosed. A reconnect of an already-pinned
+/// peer would re-raise the same sticky condition on every round, which says
+/// nothing new; the pin it re-uses was disclosed when it was made.
+fn disclose_bearer_admission(
+    shared_tree_id: &str,
+    authorized: &AuthorizedPeer,
+    bus: Option<&Arc<DegradedSignalBus>>,
+) {
+    if authorized.basis() != AdmissionBasis::BearerCapability {
+        return;
+    }
+    let peer = format!("{:?}", authorized.peer());
+    warn!(
+        shared_tree_id = %shared_tree_id,
+        peer = %peer,
+        "[advertiser] peer admitted on a BEARER ticket: possession of the ticket secret is the \
+         whole credential, so whoever it was forwarded to could have joined instead. Stopgap \
+         until enrollment binds a device key (ADR 0028 R5)"
+    );
+    if let Some(bus) = bus {
+        bus.emit(ShareDegraded {
+            shared_tree_id: shared_tree_id.to_string(),
+            reason: ShareDegradedReason::BearerTicketEnrollment { peer },
+        });
+    }
+}
+
 async fn accept_loop(
     endpoint: Endpoint,
     doc: Arc<LoroDoc>,
     shared_tree_id: String,
     on_peer_connected: Option<OnPeerConnected>,
     admission: ShareAdmission,
+    degraded_bus: Option<Arc<DegradedSignalBus>>,
 ) {
     debug!("[advertiser:{shared_tree_id}] accept loop started");
     while let Some(incoming) = endpoint.accept().await {
@@ -323,6 +383,7 @@ async fn accept_loop(
         let id = shared_tree_id.clone();
         let cb = on_peer_connected.clone();
         let admission = admission.clone();
+        let bus = degraded_bus.clone();
         tokio::spawn(async move {
             let conn = match incoming.await {
                 Ok(c) => c,
@@ -349,9 +410,8 @@ async fn accept_loop(
             // device entry) on a dedicated stream BEFORE we run sync. A peer
             // that merely knows the (leaky) `shared_tree_id` — a forged ticket
             // — cannot pass this and never reaches `sync_doc_handle_connection`,
-            // so it can neither read nor write the shared doc. An UN-gated
-            // share keeps the legacy behaviour (used by standalone transport
-            // tests that construct the advertiser directly).
+            // so it can neither read nor write the shared doc. `Enrolled` is
+            // the only admission a production build can construct.
             //
             // The decision's OUTCOME is what the sync leg then runs on: the
             // `AdmittedPeer` below is the only thing that can carry a peer's
@@ -371,6 +431,7 @@ async fn accept_loop(
                                 authorized.newly_enrolled(),
                                 capabilities
                             );
+                            disclose_bearer_admission(&id, &authorized, bus.as_ref());
                             AdmittedPeer::enrolled(&id, &authorized, capabilities.clone())
                         }
                         Err(e) => {
@@ -392,9 +453,12 @@ async fn accept_loop(
                         }
                     }
                 }
-                ShareAdmission::Ungated { capabilities } => {
-                    AdmittedPeer::ungated(&id, peer_fingerprint(&conn), capabilities.clone())
-                }
+                #[cfg(test)]
+                ShareAdmission::Ungated { capabilities } => AdmittedPeer::ungated(
+                    &id,
+                    crate::share_enrollment::peer_fingerprint(&conn),
+                    capabilities.clone(),
+                ),
             };
             // The read gate runs HERE, not inside the sync leg, because the
             // callback below makes this peer one we dial BACK (with a grant of
@@ -616,6 +680,97 @@ mod tests {
         );
         Ok(())
     }
+    /// The bearer-ticket path is a STOPGAP (ADR 0028 R5), so it must be
+    /// disclosed rather than merely working: a peer that joins by proving a
+    /// secret that travelled raises a sticky
+    /// `ShareDegradedReason::BearerTicketEnrollment` naming the share.
+    ///
+    /// The negative half is the point of the test: a RECONNECT of the same
+    /// peer, admitted off the pin rather than off a fresh proof, must not
+    /// re-raise — the disclosure describes how the peer joined, and the pin it
+    /// re-uses was disclosed when it was made.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_bearer_ticket_admission_is_disclosed_once_on_the_degraded_bus() -> Result<()> {
+        use crate::degraded_signal_bus::DegradedSignalBus;
+        use crate::degraded_signal_bus::ShareDegradedReason;
+        use crate::share_enrollment::CapabilitySecret;
+        use crate::share_enrollment::ExpiryTime;
+        use crate::share_enrollment::ShareRoster;
+
+        let tree_id = "bearerDisclosure";
+        let bus = Arc::new(DegradedSignalBus::new());
+        let mut changes = bus.subscribe().changes;
+
+        let server_doc = Arc::new(LoroDoc::new());
+        server_doc.set_peer_id(11)?;
+        server_doc.commit();
+
+        let capability = CapabilitySecret::generate();
+        let roster = Arc::new(tokio::sync::Mutex::new(ShareRoster::new(
+            tree_id,
+            capability.clone(),
+            ExpiryTime(chrono::Utc::now().timestamp() + 3600),
+            4,
+        )));
+
+        let adv = IrohAdvertiser::new().with_degraded_bus(bus.clone());
+        let addr = adv
+            .start_share_gated(
+                tree_id.into(),
+                server_doc.clone(),
+                roster.clone(),
+                Capabilities::read_write(),
+                None,
+                None,
+            )
+            .await?;
+        let alpn = make_alpn(ALPN_PREFIX, tree_id);
+
+        // One peer, dialing twice on the SAME endpoint key: the first dial
+        // enrolls off the capability, the second is admitted off the pin.
+        let client_doc = Arc::new(LoroDoc::new());
+        client_doc.set_peer_id(22)?;
+        let client_ep = create_endpoint(vec![alpn.clone()]).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        for _ in 0..2 {
+            let _ = sync_doc_initiate_enrolled_rw(
+                &client_ep,
+                &client_doc,
+                &alpn,
+                addr.clone(),
+                &capability,
+                tree_id,
+            )
+            .await;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        adv.drop_share(tree_id).await?;
+
+        let mut disclosures = 0usize;
+        while let Ok(change) = changes.try_recv() {
+            if let Some(event) = change.raised()
+                && matches!(
+                    event.reason,
+                    ShareDegradedReason::BearerTicketEnrollment { .. }
+                )
+            {
+                assert_eq!(event.shared_tree_id, tree_id);
+                disclosures += 1;
+            }
+        }
+        assert_eq!(
+            roster.lock().await.enrolled_count(),
+            1,
+            "both dials must be the SAME peer, or the reconnect half proves nothing"
+        );
+        assert_eq!(
+            disclosures, 1,
+            "a bearer-ticket admission must be disclosed exactly once: raised on the enrolling \
+             dial, not re-raised on the reconnect that rides the pin"
+        );
+        Ok(())
+    }
 
     /// FLAGSHIP (ADR 0028 H5): the enrollment gate closes the bearer-
     /// `shared_tree_id` forgery hole over the LIVE iroh transport.
@@ -759,6 +914,120 @@ mod tests {
 
         // The roster pinned exactly the one honest peer.
         assert_eq!(roster.lock().await.enrolled_count(), 1);
+
+        adv.drop_share(tree_id).await?;
+        Ok(())
+    }
+
+    /// Enrollment answers *who*, capabilities answer *what*. A peer that
+    /// proved the real capability into a READ-ONLY share reads it and cannot
+    /// write it: its delta is refused at `import_peer_delta` with the typed
+    /// `PeerAccessRefused` naming the missing `Write`, never dropped quietly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_read_only_gated_share_serves_an_enrolled_peer_but_refuses_its_delta() -> Result<()> {
+        use crate::peer_import::AdmittedPeer;
+        use crate::peer_import::PeerAccessRefused;
+        use crate::peer_import::import_peer_delta;
+        use crate::share_enrollment::CapabilitySecret;
+        use crate::share_enrollment::Challenge;
+        use crate::share_enrollment::EnrollmentProofMsg;
+        use crate::share_enrollment::ExpiryTime;
+        use crate::share_enrollment::PeerFingerprint;
+        use crate::share_enrollment::ShareRoster;
+
+        let tree_id = "readOnlyShare";
+        let server_doc = Arc::new(LoroDoc::new());
+        server_doc.set_peer_id(11)?;
+        {
+            let tree = server_doc.get_tree(TREE_NAME);
+            tree.enable_fractional_index(0);
+            let root = tree.create(None)?;
+            let meta = tree.get_meta(root)?;
+            let text: LoroText = meta.ensure_mergeable_text("content_raw")?;
+            text.insert(0, "published-content")?;
+        }
+        server_doc.commit();
+
+        let capability = CapabilitySecret::generate();
+        let roster = Arc::new(tokio::sync::Mutex::new(ShareRoster::new(
+            tree_id,
+            capability.clone(),
+            ExpiryTime(chrono::Utc::now().timestamp() + 3600),
+            4,
+        )));
+
+        let adv = IrohAdvertiser::new();
+        let addr = adv
+            .start_share_gated(
+                tree_id.into(),
+                server_doc.clone(),
+                roster.clone(),
+                Capabilities::read_only(),
+                None,
+                None,
+            )
+            .await?;
+        let alpn = make_alpn(ALPN_PREFIX, tree_id);
+
+        // The enrolled reader carries an edit of its own, so the acceptor is
+        // actually offered a delta to refuse.
+        let reader_doc = Arc::new(LoroDoc::new());
+        reader_doc.set_peer_id(22)?;
+        {
+            let tree = reader_doc.get_tree(TREE_NAME);
+            tree.enable_fractional_index(0);
+            let root = tree.create(None)?;
+            let meta = tree.get_meta(root)?;
+            let text: LoroText = meta.ensure_mergeable_text("content_raw")?;
+            text.insert(0, "reader-graffiti")?;
+        }
+        reader_doc.commit();
+
+        let ep = create_endpoint(vec![alpn.clone()]).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let dialed =
+            sync_doc_initiate_enrolled_rw(&ep, &reader_doc, &alpn, addr, &capability, tree_id)
+                .await;
+        // The dial's own outcome is not the property — what moved is.
+        let _ = dialed;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        assert!(
+            format!("{:?}", reader_doc.get_deep_value()).contains("published-content"),
+            "a READ capability must still serve the share to an enrolled peer"
+        );
+        assert!(
+            !format!("{:?}", server_doc.get_deep_value()).contains("reader-graffiti"),
+            "a read-only peer's ops must not enter the shared replica"
+        );
+        assert_eq!(roster.lock().await.enrolled_count(), 1);
+
+        // The refusal the acceptor produced, by type: a read-only admission is
+        // built exactly as the accept loop builds it, and its import errs with
+        // `PeerAccessRefused` naming the missing `Write`.
+        let challenge = Challenge::generate();
+        let proof = EnrollmentProofMsg::build(&capability, &challenge, tree_id);
+        let authorized = roster
+            .lock()
+            .await
+            .authorize(
+                chrono::Utc::now().timestamp(),
+                &challenge,
+                &proof.capability_id,
+                &proof.proof,
+                PeerFingerprint::from_bytes([5u8; 32]),
+            )
+            .expect("a peer holding the real capability enrolls");
+        let admitted = AdmittedPeer::enrolled(tree_id, &authorized, Capabilities::read_only());
+        let delta = reader_doc.export(ExportMode::Snapshot)?;
+        let refusal = import_peer_delta(&server_doc, &admitted, &delta)
+            .expect_err("a read-only admission must refuse a delta");
+        let typed = refusal
+            .downcast_ref::<PeerAccessRefused>()
+            .expect("the refusal must be the typed PeerAccessRefused, not a formatted string");
+        assert_eq!(typed.missing, holon_api::sharing::Capability::Write);
+        assert_eq!(typed.container, tree_id);
 
         adv.drop_share(tree_id).await?;
         Ok(())

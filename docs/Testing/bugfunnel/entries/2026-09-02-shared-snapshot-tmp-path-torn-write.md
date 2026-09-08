@@ -3,7 +3,7 @@ id: 2026-09-02-shared-snapshot-tmp-path-torn-write
 date: 2026-09-02
 gap: ORACLE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   Four call sites publish a share's snapshot through one deterministic
   `<id>.loro.tmp` path with no mutual exclusion, so two concurrent saves
@@ -79,14 +79,33 @@ must import cleanly AND round-trip to the doc the writer intended.
 
 ## Remedy
 
-OPEN. Deliberately not fixed in the `subtree-share-race` lane, whose scope was
-the `P-NO-TMP-LEFTOVER` flake. Needs an owner and a design call between a unique
-temp name and a per-share write lock.
+FIXED in `share-lifecycle` rev 3, taking the unique-temp-name option of the two
+this entry named. `SharedSnapshotStore::stage_tmp` gives every write a private
+tmp sibling (`<final name>.<pid>-<seq>.tmp`) and `publish_tmp` renames it; all
+four publish paths (`save`, `save_peers`, `save_port`, `save_generation`) go
+through them, so no two writers of the same file can share a tmp. The trigger
+was the same race surfacing on the peers sidecar under load —
+`2026-09-09-concurrent-peer-sidecar-writes-share-one-tmp-file`, which carries
+the full analysis and the second half of the fix (the peer set is now persisted
+under the `known_peers` guard).
 
-Note for whoever takes it: the retry sweep that lane added to `SettleSaves`
-widens the window in which a genuine orphan self-heals, because a failed publish
-leaves its temp file at the same path that the next successful publish renames
-away. Any oracle written for this bug should not rely on the temp file surviving.
+Covering test, red for the right reason first against a probe that restores the
+fixed tmp name (`lane-logs/r3-red-3-save-probe.log`, the probe reverted with a
+matching sha256 in `lane-logs/r3-probe-{green,restored}-sha.txt`):
+`holon_loro::shared_snapshot_store::tests::concurrent_snapshot_saves_publish_a_loadable_file`
+— two concurrent `save` calls for one share, the slower held inside its publish
+window; it asserts both that the slower writer's publish succeeds and that the
+published file still imports, which is this entry's byte-level oracle at the
+unit level.
+
+The suggested PBT oracle is NOT added: `P-NO-SILENT-CORRUPT` still checks only
+for zero-byte files, so the "every `.loro` imports cleanly after every settle"
+invariant remains unwritten. That is a residual coverage gap, not a live defect.
+
+`sweep_stale_tmps` now collects any `*.tmp` under `shares/` rather than four
+fixed suffixes, so a failed publish's orphan is still swept at the next startup
+under the new naming. The note below about orphans is therefore still accurate:
+a temp file must not be relied on to survive.
 
 ## Keystone repro
 

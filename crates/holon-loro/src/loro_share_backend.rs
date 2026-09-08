@@ -48,14 +48,24 @@ use crate::iroh_advertiser::ALPN_PREFIX;
 use crate::iroh_advertiser::IrohAdvertiser;
 use crate::iroh_advertiser::OnPeerConnected;
 use crate::iroh_advertiser::ShareAdmission;
+use crate::iroh_advertiser::SharedRoster;
 use crate::iroh_sync_adapter::SharedTreeSyncManager;
 use crate::iroh_sync_adapter::create_endpoint;
 use crate::iroh_sync_adapter::make_alpn;
-use crate::iroh_sync_adapter::sync_doc_initiate;
+use crate::iroh_sync_adapter::sync_doc_initiate_enrolled;
 use crate::loro_document_store::DocScope;
 use crate::loro_document_store::LoroDocumentStore;
 use crate::loro_sync_controller::project_shared_doc_to_ops;
+use crate::owner_identity::OwnerIdentityKey;
 use crate::peer_import::PeerReadAccess;
+use crate::roster_sidecar::RosterSidecar;
+use crate::roster_sidecar::RosterSidecarBody;
+use crate::share_credentials::ShareCredentials;
+use crate::share_enrollment::CapabilitySecret;
+use crate::share_enrollment::ExpiryTime;
+use crate::share_enrollment::PeerFingerprint;
+use crate::share_enrollment::ShareRoster;
+use crate::share_enrollment::peer_fingerprint;
 use crate::share_peer_id::stable_peer_id;
 use crate::shared_snapshot_store::SharedSnapshotStore;
 use crate::shared_tree::HistoryRetention;
@@ -85,6 +95,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// seconds no *new* peer may enroll (already-enrolled peers keep syncing). 30
 /// days is a placeholder pending the lease-policy ruling (ADR 0028 D4/H8).
 const DEFAULT_ENROLLMENT_WINDOW_SECS: i64 = 30 * 24 * 60 * 60;
+/// How many distinct peers one share's roster may pin. Bounds the blast radius
+/// of a leaked ticket: the (max+1)-th holder is refused loudly rather than
+/// quietly joining.
+const DEFAULT_SHARE_MAX_PEERS: usize = 8;
 
 /// Stable id (bare, no `block:` prefix) of the recipient-side **"Shared with
 /// me" root** — the dedicated home for accepted shares (ADR 0028 H7). A single
@@ -246,6 +260,11 @@ pub struct LoroShareBackend {
     /// (debounced), diffs the doc and writes creates/updates/deletes
     /// into the SQL block table so the UI stays in sync.
     projection_workers: Arc<RwLock<HashMap<String, ProjectionWorker>>>,
+    /// Custody of every share's capability secret plus the owner key that
+    /// signs its roster sidecar. This is what makes a share GATED: without a
+    /// capability there is no roster, and without a roster the advertiser
+    /// would admit whoever reaches the endpoint.
+    credentials: Arc<ShareCredentials>,
     /// Weak reference to self, populated during `Arc::new_cyclic`
     /// construction — the closure receives a `&Weak<Self>` BEFORE the
     /// `Arc` is fully built, so the field is set up once atomically.
@@ -542,6 +561,7 @@ impl LoroShareBackend {
     /// `Weak<Self>` BEFORE the `Arc` is fully assembled, letting us
     /// populate the field in the same statement that constructs the
     /// `Arc`. No post-construction registration, no runtime lock.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<RwLock<LoroDocumentStore>>,
         snapshot_store: Arc<SharedSnapshotStore>,
@@ -549,6 +569,7 @@ impl LoroShareBackend {
         advertiser: Arc<IrohAdvertiser>,
         degraded_bus: Arc<DegradedSignalBus>,
         device_key: SecretKey,
+        credentials: Arc<ShareCredentials>,
     ) -> Arc<Self> {
         Self::new_with_sql(
             store,
@@ -557,6 +578,7 @@ impl LoroShareBackend {
             advertiser,
             degraded_bus,
             device_key,
+            credentials,
             None,
             None,
         )
@@ -575,6 +597,7 @@ impl LoroShareBackend {
         advertiser: Arc<IrohAdvertiser>,
         degraded_bus: Arc<DegradedSignalBus>,
         device_key: SecretKey,
+        credentials: Arc<ShareCredentials>,
         sql_ops: Option<Arc<dyn OriginTaggedWrites>>,
         downstream_projection: Option<Arc<dyn DownstreamProjection>>,
     ) -> Arc<Self> {
@@ -585,6 +608,7 @@ impl LoroShareBackend {
             advertiser,
             degraded_bus,
             device_key,
+            credentials,
             sql_ops,
             downstream_projection,
             known_peers: Arc::new(RwLock::new(HashMap::new())),
@@ -990,8 +1014,14 @@ impl LoroShareBackend {
     /// bases: an inbound dialer the admission accepted
     /// ([`Self::remember_admitted_peer`]) and the ticket author's own addr,
     /// which THIS device chose to accept a share from.
+    ///
+    /// The sidecar write happens UNDER the `known_peers` guard, not after it:
+    /// a revocation persisting the narrowed set runs concurrently, and two
+    /// writers that each snapshot the map and then race to disk let the stale
+    /// snapshot land last — putting a revoked peer's addr back while both
+    /// report success.
     async fn remember_peer(&self, shared_tree_id: &str, addr: EndpointAddr) {
-        let persisted = {
+        let persist = {
             let mut guard = self.known_peers.write().await;
             let entry = guard.entry(shared_tree_id.to_string()).or_default();
             // Merge into any existing entry for the same `EndpointId`.
@@ -1013,9 +1043,10 @@ impl LoroShareBackend {
                 peers = ?entry,
                 "[share] remember_peer updated known_peers"
             );
-            entry.clone()
+            let persisted = entry.clone();
+            self.snapshot_store.save_peers(shared_tree_id, &persisted)
         };
-        if let Err(e) = self.snapshot_store.save_peers(shared_tree_id, &persisted) {
+        if let Err(e) = persist {
             // Not fatal — the in-memory entry is authoritative while
             // the process runs. Surface as degraded so the user knows
             // cross-peer sync after restart may regress.
@@ -1033,6 +1064,38 @@ impl LoroShareBackend {
         }
     }
 
+    /// Drop every remembered dial address belonging to `peer`, in memory and
+    /// in the sidecar. `EndpointAddr::id` IS the node public key the roster
+    /// pins, so the two identify the same principal.
+    ///
+    /// A sidecar that cannot be rewritten is an `Err`, not a warning: the
+    /// in-memory drop dies with the process, so a revocation whose sidecar
+    /// write failed is a revocation the next restart silently undoes — the
+    /// peer's addr comes back and `sync_with_peers` dials it again. The caller
+    /// must see that its revocation did not hold.
+    ///
+    /// Persisted under the `known_peers` guard for the reason spelled out on
+    /// [`Self::remember_peer`]: an admission racing this write must not put the
+    /// addr back.
+    async fn forget_peer_addrs(&self, shared_tree_id: &str, peer: &PeerFingerprint) -> Result<()> {
+        let persist = {
+            let mut guard = self.known_peers.write().await;
+            let Some(entry) = guard.get_mut(shared_tree_id) else {
+                return Ok(());
+            };
+            entry.retain(|addr| &PeerFingerprint::from_bytes(*addr.id.as_bytes()) != peer);
+            let remaining = entry.clone();
+            self.snapshot_store.save_peers(shared_tree_id, &remaining)
+        };
+        persist.map_err(|e| {
+            err(format!(
+                "the peers sidecar for share {shared_tree_id} could not be rewritten after \
+                 revoking peer {peer:?}, so that peer's dial addr survives on disk and comes \
+                 back at the next restart: {e:#}"
+            ))
+        })
+    }
+
     /// Build a peer-connected callback that remembers every inbound
     /// dialer the admission accepted. Returns an `OnPeerConnected`
     /// suitable for `IrohAdvertiser::start_share_with_callback`.
@@ -1045,6 +1108,18 @@ impl LoroShareBackend {
             let access = access.clone();
             tokio::spawn(async move {
                 strong.remember_admitted_peer(&access, addr).await;
+                // The callback fires only AFTER the admission decision, so a
+                // peer newly pinned by `acceptor_enroll` is in the live roster
+                // by now. Writing the sidecar here is what lets it reconnect
+                // after a restart without re-proving the capability.
+                if let Err(e) = strong.persist_roster(access.container()).await {
+                    warn!(
+                        shared_tree_id = %access.container(),
+                        error = %e,
+                        "[share] roster sidecar not updated after an admission; a peer admitted \
+                         now may have to re-enroll after a restart"
+                    );
+                }
             });
         })
     }
@@ -1056,10 +1131,145 @@ impl LoroShareBackend {
     /// the port stable is what keeps the addrs peers persisted for us
     /// dialable across our restarts — relay and discovery are disabled,
     /// so a changed port partitions us until WE dial THEM first.
+    /// Build the acceptor roster for a share whose capability this device has
+    /// just minted (author) or just received in a ticket (recipient), and
+    /// write the signed sidecar a later restart rebuilds it from.
+    ///
+    /// The capability is filed in the keychain FIRST: a roster that exists
+    /// only in memory would not survive a restart, and the restart path
+    /// refuses to advertise a share it cannot gate.
+    async fn install_roster(
+        &self,
+        shared_tree_id: &str,
+        capability: &CapabilitySecret,
+        expires_at: ExpiryTime,
+    ) -> Result<SharedRoster> {
+        self.credentials
+            .store_capability(shared_tree_id, capability)
+            .map_err(|e| err(format!("{e:#}")))?;
+        let owner = self
+            .credentials
+            .owner_key(&self.degraded_bus)
+            .map_err(|e| err(format!("{e:#}")))?;
+        let roster = ShareRoster::new(
+            shared_tree_id,
+            capability.clone(),
+            expires_at,
+            DEFAULT_SHARE_MAX_PEERS,
+        )
+        .with_owner(owner.public());
+        self.write_roster_sidecar(&roster, &owner)
+            .map_err(|e| err(format!("{e:#}")))?;
+        Ok(Arc::new(tokio::sync::Mutex::new(roster)))
+    }
+
+    /// Rebuild a share's roster after a restart: the capability from the
+    /// keychain, the pinned-peer set from the owner-signed sidecar. An already
+    /// -enrolled peer reconnects without re-proving, which is the whole point
+    /// of persisting the pinned set.
+    ///
+    /// Every failure is loud. A share whose capability or sidecar is gone must
+    /// not be advertised at all — advertising it un-gated is the hole.
+    async fn rehydrate_roster(&self, shared_tree_id: &str) -> Result<SharedRoster> {
+        let capability = self
+            .credentials
+            .load_capability(shared_tree_id)
+            .map_err(|e| err(format!("{e:#}")))?;
+        let owner = self
+            .credentials
+            .owner_key(&self.degraded_bus)
+            .map_err(|e| err(format!("{e:#}")))?;
+        let body = RosterSidecar::load(
+            self.snapshot_store.shares_dir(),
+            shared_tree_id,
+            &owner.public(),
+        )
+        .map_err(|e| err(format!("{e:#}")))?;
+        Ok(Arc::new(tokio::sync::Mutex::new(
+            RosterSidecar::into_roster(body, capability),
+        )))
+    }
+
+    fn write_roster_sidecar(
+        &self,
+        roster: &ShareRoster,
+        owner: &OwnerIdentityKey,
+    ) -> anyhow::Result<()> {
+        // The B1 owner-signed device entries are a self-device fleet concern;
+        // a third-party subtree share admits by capability only, so the entry
+        // set is empty and the sidecar's `owner` field serves solely as the
+        // integrity key.
+        let body = RosterSidecarBody::from_roster(roster, Vec::new())?;
+        RosterSidecar::save(self.snapshot_store.shares_dir(), &body, owner)
+    }
+
+    /// Snapshot the live roster's pinned-peer set back into the signed
+    /// sidecar, so a peer admitted this session is still pinned after a
+    /// restart. Called after every inbound admission and after a revocation.
+    async fn persist_roster(&self, shared_tree_id: &str) -> Result<()> {
+        let Some(roster) = self.advertiser.roster_for(shared_tree_id).await else {
+            return Err(err(format!(
+                "share {shared_tree_id} is advertised without a roster, so there is no pinned-peer \
+                 set to persist"
+            )));
+        };
+        let owner = self
+            .credentials
+            .owner_key(&self.degraded_bus)
+            .map_err(|e| err(format!("{e:#}")))?;
+        let guard = roster.lock().await;
+        self.write_roster_sidecar(&guard, &owner).map_err(|e| {
+            err(format!(
+                "persist roster sidecar for {shared_tree_id}: {e:#}"
+            ))
+        })
+    }
+
+    /// Revoke one peer from a live share: un-pin it, close the enrollment
+    /// window so the capability it may still hold cannot re-admit it, and
+    /// persist both. Its next dial is refused at the enrollment gate, so no
+    /// further delta of its reaches this device's copy.
+    ///
+    /// Returns whether the peer had been enrolled. An `Err` means the
+    /// revocation did NOT fully hold — the roster sidecar or the peers sidecar
+    /// could not be rewritten, so a restart brings the revoked peer back.
+    pub async fn revoke_share_peer(
+        &self,
+        shared_tree_id: &str,
+        peer: PeerFingerprint,
+    ) -> Result<bool> {
+        let Some(roster) = self.advertiser.roster_for(shared_tree_id).await else {
+            return Err(err(format!(
+                "share {shared_tree_id} is not advertised with a roster; there is nothing to \
+                 revoke from"
+            )));
+        };
+        let was_enrolled = {
+            let mut guard = roster.lock().await;
+            let removed = guard.revoke(&peer);
+            guard.close_enrollment(chrono::Utc::now().timestamp());
+            removed
+        };
+        self.persist_roster(shared_tree_id).await?;
+        // Revoking only the acceptor side would leave the outbound leg intact:
+        // `sync_with_peers` dials every remembered addr and pulls, so a revoked
+        // peer's ops would keep arriving through OUR dial. Forget its addrs.
+        self.forget_peer_addrs(shared_tree_id, &peer).await?;
+        warn!(
+            shared_tree_id = %shared_tree_id,
+            peer = ?peer,
+            was_enrolled = was_enrolled,
+            "[share] peer revoked; the enrollment window is closed so its capability cannot \
+             re-admit it"
+        );
+        Ok(was_enrolled)
+    }
+
     async fn start_advertising_stable(
         &self,
         shared_tree_id: &str,
         doc: Arc<LoroDoc>,
+        admission: ShareAdmission,
     ) -> anyhow::Result<EndpointAddr> {
         let preferred_port = match self.snapshot_store.load_port(shared_tree_id) {
             Ok(p) => p,
@@ -1079,17 +1289,7 @@ impl LoroShareBackend {
                 doc,
                 Some(self.peer_connected_callback()),
                 preferred_port,
-                // OPEN HOLE, stated rather than implied: the H5 enrollment gate
-                // is not yet wired into the backend hot path
-                // (share_subtree/accept/resync/rehydrate must adopt a roster in
-                // lockstep, and the capability secret must be persisted first),
-                // so every peer that reaches this endpoint is admitted as a
-                // full writer — which is what the ticket already grants in
-                // practice. Tracked as bugfunnel
-                // `2026-09-08-the-subtree-share-hot-path-advertises-un-gated`.
-                ShareAdmission::Ungated {
-                    capabilities: Capabilities::read_write(),
-                },
+                admission,
             )
             .await?;
         let bound_port = addr.addrs.iter().find_map(|t| match t {
@@ -1153,6 +1353,14 @@ impl LoroShareBackend {
                 "pre-push snapshot save failed; refusing to push un-persisted ops: {e:#}"
             )));
         }
+        // The peer on the other end gates us exactly as we gate it, so every
+        // outbound round proves our own membership. A share whose capability
+        // is gone cannot dial at all — the alternative would be an un-enrolled
+        // dial that only works against a peer that gates nobody.
+        let capability = self
+            .credentials
+            .load_capability(shared_tree_id)
+            .map_err(|e| err(format!("cannot sync share {shared_tree_id}: {e:#}")))?;
         let alpn_bytes = make_alpn(ALPN_PREFIX, shared_tree_id);
         let advertiser_ep = self.advertiser.endpoint_for(shared_tree_id).await;
         let mut synced = 0usize;
@@ -1169,16 +1377,16 @@ impl LoroShareBackend {
                 dial_addr = ?addr,
                 "[share] dialing peer"
             );
-            // The peers dialed here are the ones this device recorded for the
-            // share, and the share itself is advertised un-gated (see
-            // `start_advertising_stable`), so the round grants what the ticket
-            // already grants. Narrowing this needs the persisted capability
-            // secret the same bugfunnel entry tracks.
-            let fut = sync_doc_initiate(
+            // `read_write` is what THIS device grants the peer it dialed, and
+            // it is symmetric with what our own gated share confers on the
+            // peers it admits: a subtree share is a shared workspace, not a
+            // publication (D72.a — full writer after enforcement).
+            let fut = sync_doc_initiate_enrolled(
                 &ep,
                 &doc,
                 &alpn_bytes,
                 addr,
+                &capability,
                 shared_tree_id,
                 Capabilities::read_write(),
             );
@@ -1215,6 +1423,19 @@ impl LoroShareBackend {
     /// Test-only access to the advertiser (for teardown in tests).
     pub fn advertiser_for_test(&self) -> Arc<IrohAdvertiser> {
         self.advertiser.clone()
+    }
+
+    /// Test-only view of the addrs this device would dial for a share. The
+    /// outbound half of revocation is invisible from the roster, so the
+    /// revoked-peer tests assert on this set rather than on the sidecar file
+    /// the set is loaded from.
+    pub async fn known_peers_for_test(&self, shared_tree_id: &str) -> Vec<EndpointAddr> {
+        self.known_peers
+            .read()
+            .await
+            .get(shared_tree_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -1694,8 +1915,30 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         self.manager
             .register_arc(shared_tree_id.clone(), shared_arc.clone());
 
+        // Mint the share's access capability + enrollment deadline BEFORE
+        // advertising: the capability is what the acceptor roster is keyed on,
+        // and a share must never reach the endpoint stage without one. The
+        // capability — not the leaky `shared_tree_id` — is the real secret a
+        // recipient proves possession of (see `share_enrollment`).
+        let capability = CapabilitySecret::generate();
+        let expires_at =
+            ExpiryTime(chrono::Utc::now().timestamp() + DEFAULT_ENROLLMENT_WINDOW_SECS);
+        let roster = self
+            .install_roster(&shared_tree_id, &capability, expires_at)
+            .await?;
+
         let addr = self
-            .start_advertising_stable(&shared_tree_id, shared_arc.clone())
+            .start_advertising_stable(
+                &shared_tree_id,
+                shared_arc.clone(),
+                ShareAdmission::Enrolled {
+                    roster,
+                    // A share is a shared workspace: an enrolled peer authors
+                    // into it (D72.a). What bounds the blast radius is who may
+                    // enroll, not what membership confers.
+                    capabilities: Capabilities::read_write(),
+                },
+            )
             .await
             .map_err(|e| err(format!("start advertiser: {e:#}")))?;
 
@@ -1707,16 +1950,6 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             .await?;
 
         let alpn = format!("{ALPN_PREFIX}/{shared_tree_id}");
-        // Mint the share's access capability + enrollment deadline. The
-        // capability — not the leaky `shared_tree_id` — is the real secret a
-        // recipient proves possession of at enrollment (see
-        // `share_enrollment`). NOTE: the acceptor-side gate that verifies it is
-        // wired with the enrollment-ceremony ruling (ADR 0028 §H5/C1'); until
-        // then this is forward-compat plumbing, not an enforced boundary.
-        let capability = crate::share_enrollment::CapabilitySecret::generate();
-        let expires_at = crate::share_enrollment::ExpiryTime(
-            chrono::Utc::now().timestamp() + DEFAULT_ENROLLMENT_WINDOW_SECS,
-        );
         let ticket = Ticket::new(shared_tree_id.clone(), addr, alpn, capability, expires_at)
             .encode()
             .map_err(|e| err(format!("encode ticket: {e:#}")))?;
@@ -1747,11 +1980,12 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 parent_uri.scheme()
             )));
         }
-        // SECURITY (disclosed gap): the v2 ticket's capability is decoded but
-        // NOT enforced here yet — acceptance is still ALPN-only. Wiring the
-        // acceptor gate is deferred to the enrollment-ceremony ruling (see
-        // share_enrollment.rs module docs); until then possession of this
-        // ticket string remains a bearer read+write capability.
+        // The ticket's capability is the share's access secret in both
+        // directions: we prove it to the author when we dial, and our own
+        // roster is keyed on it so the author (and only a peer holding it) can
+        // dial us back. Possession of the ticket is therefore still what grants
+        // access — but it is now the only thing that does, and it is bounded by
+        // the enrollment window, the peer cap, and revocation.
         let t = Ticket::decode(&ticket).map_err(|e| err(format!("decode ticket: {e:#}")))?;
 
         // Create a fresh LoroDoc for the shared tree. `configure_text_styles`
@@ -1782,8 +2016,22 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // with a useless stale addr for B.
         let shared_arc = Arc::new(shared_doc);
         let shared_tree_id = t.shared_tree_id.clone();
+        // Our copy of the share is gated on the SAME capability the ticket
+        // carried, so the author can dial us back and a stranger who learned
+        // the `shared_tree_id` cannot. The expiry we adopt is the ticket's:
+        // one window governs enrollment into this share on both ends.
+        let roster = self
+            .install_roster(&shared_tree_id, &t.capability, t.expires_at)
+            .await?;
         match self
-            .start_advertising_stable(&shared_tree_id, shared_arc.clone())
+            .start_advertising_stable(
+                &shared_tree_id,
+                shared_arc.clone(),
+                ShareAdmission::Enrolled {
+                    roster,
+                    capabilities: Capabilities::read_write(),
+                },
+            )
             .await
         {
             Ok(_) => {}
@@ -1804,19 +2052,47 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             .await
             .ok_or_else(|| err("advertiser endpoint missing right after start_share"))?;
         // The ticket author owns the subtree we just accepted, so it authors
-        // into our copy. Un-gated on both ends today — same open entry.
-        let initiate = sync_doc_initiate(
+        // into our copy. We prove the ticket's capability to it before any
+        // bytes move; a forged ticket gets no further than this dial.
+        let initiate = sync_doc_initiate_enrolled(
             &client_ep,
             &shared_arc,
             &alpn_bytes,
             t.addr.clone(),
+            &t.capability,
             &shared_tree_id,
             Capabilities::read_write(),
         );
-        let _conn = timeout(CONNECT_TIMEOUT, initiate)
+        let conn = timeout(CONNECT_TIMEOUT, initiate)
             .await
             .map_err(|_| err("initial sync timed out"))?
             .map_err(|e| err(format!("initial sync failed: {e:#}")))?;
+
+        // Pin the author we just dialed. QUIC authenticated it as the node key
+        // the ticket named and it accepted our capability proof, so its later
+        // inbound dials need no fresh enrollment — which matters because those
+        // can fall outside the ticket's window.
+        // Read the roster back from the advertiser rather than using the one
+        // built above: on the "already advertising" branch the LIVE roster is
+        // an earlier one, and pinning into a detached copy would pin nothing.
+        let live_roster = self
+            .advertiser
+            .roster_for(&shared_tree_id)
+            .await
+            .ok_or_else(|| {
+                err(format!(
+                    "share {shared_tree_id} is advertised without a roster right after an enrolled \
+                     accept"
+                ))
+            })?;
+        {
+            let mut guard = live_roster.lock().await;
+            guard
+                .pin_dialed(peer_fingerprint(&conn))
+                .map_err(|e| err(format!("pin the share author into our roster: {e}")))?;
+        }
+        self.persist_roster(&shared_tree_id).await?;
+        let _conn = conn;
 
         // Persist the shared snapshot BEFORE creating a mount node in
         // the global tree. If save fails, no mount node has been
@@ -2129,9 +2405,19 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         }
 
         // (6) Delete the on-disk snapshot — now safe, all workers are gone.
+        // This also removes the roster sidecar, so no restart can rebuild an
+        // acceptor roster for a share that no longer exists here.
         self.snapshot_store
             .delete_snapshot(&shared_tree_id)
             .map_err(|e| err(format!("delete_snapshot({shared_tree_id}): {e:#}")))?;
+
+        // (7) Revoke the share as a whole: drop its capability secret. Every
+        // ticket ever issued for it is now inert — this device can no longer
+        // build the roster a holder would prove itself against, and cannot
+        // prove itself to anyone else either.
+        self.credentials
+            .forget_capability(&shared_tree_id)
+            .map_err(|e| err(format!("revoke the capability for {shared_tree_id}: {e:#}")))?;
 
         let response = serde_json::json!({
             "shared_tree_id": shared_tree_id,
@@ -2336,28 +2622,63 @@ pub async fn rehydrate_shared_trees(
             }
         }
 
-        // Start advertising. "Already advertising" is success (e.g.,
-        // two rehydration paths got wired up). Other errors are
-        // degraded-mode but non-fatal — the share is still in the
-        // registry and can be pulled from.
-        match backend
-            .start_advertising_stable(&shared_tree_id, arc.clone())
-            .await
-        {
-            Ok(_) => {}
-            Err(e) if is_already_advertising(&e) => {}
+        // Rebuild the acceptor roster from the keychain capability + the
+        // owner-signed sidecar. A share whose roster cannot be rebuilt is NOT
+        // advertised: serving it un-gated would hand every peer that knows the
+        // (leaky) `shared_tree_id` read+write, which is exactly the hole this
+        // path closes. The share stays registered and syncable outbound, and
+        // the failure is disclosed rather than silently downgraded.
+        let roster = match backend.rehydrate_roster(&shared_tree_id).await {
+            Ok(roster) => Some(roster),
             Err(e) => {
                 warn!(
                     shared_tree_id = %shared_tree_id,
                     error = %e,
-                    "[share] advertiser start_share failed during rehydrate"
+                    "[share] roster could not be rebuilt; refusing to advertise this share"
                 );
                 backend.degraded_bus.emit(ShareDegraded {
                     shared_tree_id: shared_tree_id.clone(),
-                    reason: ShareDegradedReason::RehydrationFailed(format!("advertiser: {e:#}")),
+                    reason: ShareDegradedReason::RehydrationFailed(format!(
+                        "roster unavailable, share not advertised: {e:#}"
+                    )),
                 });
-                // Intentionally continue — the share is usable for
-                // pulls even without advertising.
+                None
+            }
+        };
+
+        // Start advertising. "Already advertising" is success (e.g.,
+        // two rehydration paths got wired up). Other errors are
+        // degraded-mode but non-fatal — the share is still in the
+        // registry and can be pulled from.
+        if let Some(roster) = roster {
+            match backend
+                .start_advertising_stable(
+                    &shared_tree_id,
+                    arc.clone(),
+                    ShareAdmission::Enrolled {
+                        roster,
+                        capabilities: Capabilities::read_write(),
+                    },
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(e) if is_already_advertising(&e) => {}
+                Err(e) => {
+                    warn!(
+                        shared_tree_id = %shared_tree_id,
+                        error = %e,
+                        "[share] advertiser start_share failed during rehydrate"
+                    );
+                    backend.degraded_bus.emit(ShareDegraded {
+                        shared_tree_id: shared_tree_id.clone(),
+                        reason: ShareDegradedReason::RehydrationFailed(format!(
+                            "advertiser: {e:#}"
+                        )),
+                    });
+                    // Intentionally continue — the share is usable for
+                    // pulls even without advertising.
+                }
             }
         }
 
@@ -2547,25 +2868,83 @@ mod tests {
     use super::*;
     use crate::loro_document_store::LoroDocumentStore;
 
-    fn make_backend() -> (Arc<LoroShareBackend>, TempDir) {
-        let dir = TempDir::new().unwrap();
-        let store = Arc::new(RwLock::new(LoroDocumentStore::new(
-            dir.path().to_path_buf(),
-        )));
+    /// A device's keychain, as a value a restart can be handed again. The
+    /// production keychain outlives the process; an in-memory double only
+    /// does so if the test keeps the same instance across both backends.
+    fn test_keychain() -> Arc<holon_secrets::InMemoryKeychainStore> {
+        Arc::new(holon_secrets::InMemoryKeychainStore::new())
+    }
+
+    fn test_credentials(
+        keychain: Arc<holon_secrets::InMemoryKeychainStore>,
+    ) -> Arc<ShareCredentials> {
+        let owner_keychain = keychain.clone();
+        Arc::new(ShareCredentials::with_stores(
+            keychain,
+            crate::owner_identity::OwnerCustody::with_keychain(owner_keychain, "test-owner"),
+        ))
+    }
+
+    /// Rebuild a backend over an existing storage dir and keychain — the
+    /// restart the rehydrate path is written for.
+    fn make_backend_at(
+        dir_path: &std::path::Path,
+        credentials: Arc<ShareCredentials>,
+    ) -> Arc<LoroShareBackend> {
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(dir_path.to_path_buf())));
         let bus = Arc::new(DegradedSignalBus::new());
         let snapshot_store = Arc::new(SharedSnapshotStore::new(
-            dir.path().to_path_buf(),
+            dir_path.to_path_buf(),
             bus.clone(),
         ));
         let manager = Arc::new(SharedTreeSyncManager::new());
         // Use the persistent key-from-disk path so a `drop+re-make`
         // simulates a real process restart (same device identity).
-        let key = crate::device_key_store::load_or_create_device_key(dir.path()).unwrap();
+        let key = crate::device_key_store::load_or_create_device_key(dir_path).unwrap();
         let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
-        (
-            LoroShareBackend::new(store, snapshot_store, manager, advertiser, bus, key),
-            dir,
+        LoroShareBackend::new(
+            store,
+            snapshot_store,
+            manager,
+            advertiser,
+            bus,
+            key,
+            credentials,
         )
+    }
+
+    fn make_backend() -> (Arc<LoroShareBackend>, TempDir) {
+        let (backend, _keychain, dir) = make_backend_with_keychain();
+        (backend, dir)
+    }
+
+    /// Rehydrate a freshly-rebuilt backend's shares — the restart every
+    /// rehydrate test performs.
+    ///
+    /// The raw-doc escape lives HERE, once, rather than at each call site:
+    /// `rehydrate_shared_trees` is async and so cannot run inside
+    /// `LoroDocument::with_read`'s synchronous closure. This mirrors the one
+    /// production caller, `holon-loro-wiring`'s `loro_module.rs`, which carries
+    /// the same escape for the same reason.
+    async fn rehydrate_over(backend: &Arc<LoroShareBackend>) -> usize {
+        let collab = backend.test_global_doc().await;
+        // ALLOW(loro_doc_escape): async consumer, single-threaded test, no
+        // concurrent writer.
+        let doc_arc = collab.doc();
+        rehydrate_shared_trees(backend, &doc_arc)
+            .await
+            .expect("rehydrate_shared_trees")
+    }
+
+    fn make_backend_with_keychain() -> (
+        Arc<LoroShareBackend>,
+        Arc<holon_secrets::InMemoryKeychainStore>,
+        TempDir,
+    ) {
+        let dir = TempDir::new().unwrap();
+        let keychain = test_keychain();
+        let backend = make_backend_at(dir.path(), test_credentials(keychain.clone()));
+        (backend, keychain, dir)
     }
 
     /// `share_subtree` mints its roster with `DEFAULT_ENROLLMENT_WINDOW_SECS`,
@@ -3749,7 +4128,7 @@ mod tests {
             .filter(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.ends_with(".loro.tmp"))
+                    .is_some_and(|n| n.ends_with(".tmp"))
             })
             .collect()
     }
@@ -3920,6 +4299,610 @@ mod tests {
         );
     }
 
+    /// Share A's subtree and return `(ticket, shared_tree_id)`.
+    async fn share_and_ticket(backend: &LoroShareBackend, block: &str) -> (String, String) {
+        let resp = backend
+            .share_subtree(block, "none".into())
+            .await
+            .expect("share_subtree");
+        let j: serde_json::Value = match resp.response.unwrap() {
+            Value::String(s) => serde_json::from_str(&s).unwrap(),
+            other => panic!("unexpected response type: {other:?}"),
+        };
+        (
+            j["ticket"].as_str().unwrap().to_string(),
+            j["shared_tree_id"].as_str().unwrap().to_string(),
+        )
+    }
+
+    /// The single peer this share's roster has pinned.
+    async fn only_enrolled_peer(
+        backend: &LoroShareBackend,
+        shared_tree_id: &str,
+    ) -> PeerFingerprint {
+        let roster = backend
+            .advertiser_for_test()
+            .roster_for(shared_tree_id)
+            .await
+            .expect("a share created through the lifecycle is advertised WITH a roster");
+        let guard = roster.lock().await;
+        let peers = guard.enrolled_peers();
+        assert_eq!(
+            peers.len(),
+            1,
+            "expected exactly one pinned peer, found {}",
+            peers.len()
+        );
+        peers[0]
+    }
+
+    /// Append `content` to the shared subtree's root text on `backend`.
+    async fn edit_shared_root(backend: &LoroShareBackend, shared_tree_id: &str, content: &str) {
+        let doc = backend
+            .manager_for_test()
+            .get_doc(shared_tree_id)
+            .expect("shared doc registered");
+        let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+        let root = tree.roots()[0];
+        let meta = tree.get_meta(root).unwrap();
+        let text: loro::LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
+        text.insert(0, content).unwrap();
+        doc.commit();
+    }
+
+    fn shared_doc_debug(backend: &LoroShareBackend, shared_tree_id: &str) -> String {
+        format!(
+            "{:?}",
+            backend
+                .manager_for_test()
+                .get_doc(shared_tree_id)
+                .expect("shared doc registered")
+                .get_deep_value()
+        )
+    }
+
+    /// LIFECYCLE H5, the half the advertiser tests could not reach: a share
+    /// created by `share_subtree` is GATED, so the leaky `shared_tree_id` —
+    /// which travels in the mount node and in projected SQL rows — buys a
+    /// stranger neither a read nor a write.
+    ///
+    /// The stranger is given everything a forged ticket carries: the ALPN
+    /// (which IS the share id) and a dialable addr. It holds no capability.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_stranger_holding_only_the_shared_tree_id_can_neither_read_nor_write_the_share() {
+        use crate::iroh_sync_adapter::sync_doc_initiate;
+
+        let (backend_a, _dir_a) = make_backend();
+        seed_block(&backend_a, "root-a", None, "root-a").await;
+        seed_block(&backend_a, "shared", Some("root-a"), "confidential-payload").await;
+
+        let (_ticket, shared_tree_id) = share_and_ticket(&backend_a, "block:shared").await;
+
+        // Non-vacuity: the content really is in the share, so "the stranger
+        // did not get it" is a fact about the gate, not about an empty doc.
+        assert!(
+            shared_doc_debug(&backend_a, &shared_tree_id).contains("confidential-payload"),
+            "the shared replica must hold the content the stranger is denied"
+        );
+
+        let addr = backend_a
+            .advertiser_for_test()
+            .endpoint_for(&shared_tree_id)
+            .await
+            .expect("the share is advertised")
+            .addr();
+        let alpn = make_alpn(ALPN_PREFIX, &shared_tree_id);
+
+        let stranger_doc = Arc::new(LoroDoc::new());
+        stranger_doc.set_peer_id(9_999).unwrap();
+        {
+            let tree = stranger_doc.get_tree(crate::loro_backend::TREE_NAME);
+            tree.enable_fractional_index(0);
+            let node = tree.create(None::<TreeID>).unwrap();
+            let meta = tree.get_meta(node).unwrap();
+            let text: loro::LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
+            text.insert(0, "stranger-graffiti").unwrap();
+        }
+        stranger_doc.commit();
+
+        let ep = create_endpoint(vec![alpn.clone()]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let dialed = sync_doc_initiate(
+            &ep,
+            &stranger_doc,
+            &alpn,
+            addr,
+            &shared_tree_id,
+            Capabilities::read_write(),
+        )
+        .await;
+        // Whether the dial errs or is simply hung up on is the acceptor's
+        // business; the property is what crossed.
+        let _ = dialed;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert!(
+            !format!("{:?}", stranger_doc.get_deep_value()).contains("confidential-payload"),
+            "an un-rostered peer must not receive the shared subtree"
+        );
+        assert!(
+            !shared_doc_debug(&backend_a, &shared_tree_id).contains("stranger-graffiti"),
+            "an un-rostered peer's ops must not enter the shared replica"
+        );
+        assert_eq!(
+            backend_a
+                .advertiser_for_test()
+                .roster_for(&shared_tree_id)
+                .await
+                .expect("gated share")
+                .lock()
+                .await
+                .enrolled_count(),
+            0,
+            "a peer that proved nothing must not be pinned"
+        );
+
+        // CONTROL, in the same test against the same live endpoint: a peer
+        // that holds the TICKET's capability — the only thing the stranger
+        // lacked — does get the subtree. Without this, "the stranger received
+        // nothing" would also hold for a share nobody could reach at all.
+        let ticket = Ticket::decode(&_ticket).expect("decode our own ticket");
+        let holder_doc = Arc::new(LoroDoc::new());
+        holder_doc.set_peer_id(8_888).unwrap();
+        let holder_ep = create_endpoint(vec![alpn.clone()]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        sync_doc_initiate_enrolled(
+            &holder_ep,
+            &holder_doc,
+            &alpn,
+            ticket.addr.clone(),
+            &ticket.capability,
+            &shared_tree_id,
+            Capabilities::read_write(),
+        )
+        .await
+        .expect("a peer holding the ticket's capability must enroll and sync");
+        assert!(
+            format!("{:?}", holder_doc.get_deep_value()).contains("confidential-payload"),
+            "control: the capability holder must receive what the stranger was denied"
+        );
+    }
+
+    /// Revocation is only revocation if it stops BOTH legs: the revoked peer
+    /// cannot dial in (un-pinned, and the enrollment window is closed so the
+    /// capability it kept cannot re-admit it), and this device stops dialing
+    /// it — otherwise its ops would keep arriving through our own pull.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn revoking_a_peer_stops_every_further_import_from_it() {
+        let (backend_a, _dir_a) = make_backend();
+        let (backend_b, _dir_b) = make_backend();
+
+        seed_block(&backend_a, "root-a", None, "root-a").await;
+        seed_block(&backend_a, "shared", Some("root-a"), "base").await;
+        seed_block(&backend_b, "root-b", None, "root-b").await;
+
+        let (ticket, shared_tree_id) = share_and_ticket(&backend_a, "block:shared").await;
+        backend_b
+            .accept_shared_subtree("block:root-b", ticket)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Non-vacuity: an enrolled peer's edit DOES reach A, so the negative
+        // below is about the revocation and not about a dead sync path.
+        edit_shared_root(&backend_b, &shared_tree_id, "before-revocation-").await;
+        backend_b.sync_with_peers(&shared_tree_id).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            shared_doc_debug(&backend_a, &shared_tree_id).contains("before-revocation-"),
+            "an enrolled peer's edit must reach the sharer"
+        );
+
+        let b_peer = only_enrolled_peer(&backend_a, &shared_tree_id).await;
+        assert!(
+            backend_a
+                .revoke_share_peer(&shared_tree_id, b_peer)
+                .await
+                .unwrap(),
+            "the peer was enrolled, so revoking it must report a removal"
+        );
+
+        edit_shared_root(&backend_b, &shared_tree_id, "after-revocation-").await;
+        // B still holds the capability and still knows A's addr — the two
+        // things revocation must survive.
+        let synced = backend_b.sync_with_peers(&shared_tree_id).await.unwrap();
+        assert_eq!(synced, 0, "a revoked peer's dial must not complete a round");
+        // And A must not pull it either.
+        let _ = backend_a.sync_with_peers(&shared_tree_id).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert!(
+            !shared_doc_debug(&backend_a, &shared_tree_id).contains("after-revocation-"),
+            "no op authored by a revoked peer may enter the replica afterwards"
+        );
+    }
+
+    /// Revocation has to survive a restart, and the acceptor half does so on
+    /// its own (the roster sidecar is rewritten). The OUTBOUND half is the one
+    /// that can quietly come back: `sync_with_peers` dials every addr in
+    /// `known_peers`, and that set is reloaded from the peers sidecar at
+    /// rehydrate. If the revocation only dropped the in-memory copy, the next
+    /// launch would dial the revoked peer again and pull its ops.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_revoked_peer_is_not_re_dialed_after_a_restart() {
+        let (backend_a, keychain_a, dir_a) = make_backend_with_keychain();
+        let (backend_b, _dir_b) = make_backend();
+
+        seed_block(&backend_a, "root-a", None, "root-a").await;
+        seed_block(&backend_a, "shared", Some("root-a"), "base").await;
+        seed_block(&backend_b, "root-b", None, "root-b").await;
+
+        let (ticket, shared_tree_id) = share_and_ticket(&backend_a, "block:shared").await;
+        backend_b
+            .accept_shared_subtree("block:root-b", ticket)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let b_peer = only_enrolled_peer(&backend_a, &shared_tree_id).await;
+        // Non-vacuity: A really would dial B, so "A does not dial B after the
+        // restart" is about the revocation and not about an empty peer set.
+        assert_eq!(
+            backend_a.known_peers_for_test(&shared_tree_id).await.len(),
+            1,
+            "A must know B before the revocation, or the assertion below is vacuous"
+        );
+
+        assert!(
+            backend_a
+                .revoke_share_peer(&shared_tree_id, b_peer)
+                .await
+                .unwrap(),
+            "the peer was enrolled, so revoking it must report a removal"
+        );
+
+        // Restart A over the same storage dir and keychain — a real relaunch.
+        backend_a.advertiser_for_test().close_all().await;
+        backend_a.flush_all().await;
+        let dir_a_path = dir_a.path().to_path_buf();
+        drop(backend_a);
+        backend_b.advertiser_for_test().close_all().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let backend_a = make_backend_at(&dir_a_path, test_credentials(keychain_a));
+        assert_eq!(
+            rehydrate_over(&backend_a).await,
+            1,
+            "A must rehydrate its one share"
+        );
+
+        let dialable = backend_a.known_peers_for_test(&shared_tree_id).await;
+        assert!(
+            !dialable
+                .iter()
+                .any(|addr| PeerFingerprint::from_bytes(*addr.id.as_bytes()) == b_peer),
+            "the revoked peer came back as a dial target after the restart: {dialable:?}"
+        );
+
+        backend_a.advertiser_for_test().close_all().await;
+    }
+
+    /// A revocation whose peers sidecar cannot be rewritten did NOT hold: the
+    /// in-memory drop dies with the process and the next launch dials the
+    /// revoked peer again. So the failure is an `Err` naming the peer, not a
+    /// `warn!` the caller can neither see nor act on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_revocation_that_cannot_be_persisted_fails_loudly_naming_the_peer() {
+        let (backend_a, _keychain_a, _dir_a) = make_backend_with_keychain();
+        let (backend_b, _dir_b) = make_backend();
+
+        seed_block(&backend_a, "root-a", None, "root-a").await;
+        seed_block(&backend_a, "shared", Some("root-a"), "base").await;
+        seed_block(&backend_b, "root-b", None, "root-b").await;
+
+        let (ticket, shared_tree_id) = share_and_ticket(&backend_a, "block:shared").await;
+        backend_b
+            .accept_shared_subtree("block:root-b", ticket)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let b_peer = only_enrolled_peer(&backend_a, &shared_tree_id).await;
+
+        // Block the sidecar's atomic write by occupying its published path
+        // with a directory: the rename onto it fails, so `save_peers` errs.
+        // The roster sidecar written earlier in `revoke_share_peer` has its
+        // own name and is untouched.
+        let blocker = backend_a.snapshot_store().peers_path(&shared_tree_id);
+        let _ = std::fs::remove_file(&blocker);
+        std::fs::create_dir_all(&blocker).unwrap();
+
+        let err = backend_a
+            .revoke_share_peer(&shared_tree_id, b_peer)
+            .await
+            .expect_err("a revocation that cannot be persisted must not report success");
+        let msg = format!("{err:#}");
+        assert!(msg.contains(&shared_tree_id), "{msg}");
+        assert!(
+            msg.contains(&format!("{b_peer:?}")),
+            "the error must name the peer whose revocation did not stick: {msg}"
+        );
+
+        backend_a.advertiser_for_test().close_all().await;
+        backend_b.advertiser_for_test().close_all().await;
+    }
+
+    /// Build a peer addr plus the fingerprint the roster pins it under.
+    fn synthetic_peer() -> (EndpointAddr, crate::share_enrollment::PeerFingerprint) {
+        let addr = EndpointAddr::new(iroh::SecretKey::generate(&mut rand::rng()).public());
+        let fp = crate::share_enrollment::PeerFingerprint::from_bytes(*addr.id.as_bytes());
+        (addr, fp)
+    }
+
+    /// The admission callback persists the peers sidecar from a spawned task,
+    /// so it overlaps a revocation persisting the same sidecar. The revocation
+    /// must still land: an `Err` here is a revocation the caller must treat as
+    /// "did not stick", and the peer stays dialable after the next launch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_concurrent_admission_does_not_fail_a_revocations_sidecar_write() {
+        let (backend, _dir) = make_backend();
+        let id = "tree-revocation-race".to_string();
+        let (revoked, revoked_fp) = synthetic_peer();
+        let (other, _) = synthetic_peer();
+        backend.remember_peer(&id, revoked.clone()).await;
+
+        backend
+            .snapshot_store()
+            .stall_next_peers_publish(Duration::from_millis(500));
+        let revoking = {
+            let backend = Arc::clone(&backend);
+            let id = id.clone();
+            tokio::spawn(async move { backend.forget_peer_addrs(&id, &revoked_fp).await })
+        };
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        backend.remember_peer(&id, other).await;
+
+        revoking
+            .await
+            .unwrap()
+            .expect("a concurrent admission must not make the revocation's sidecar write fail");
+    }
+
+    /// The mirror interleaving: the admission is the slower writer. It
+    /// snapshots `known_peers` BEFORE the revocation removes the peer, so
+    /// if the disk write happens outside that lock the admission's stale
+    /// copy lands last and puts the revoked peer's dial addr back — with
+    /// both operations reporting success. `sync_with_peers` dials the
+    /// sidecar after a restart, so that is a silently undone revocation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_concurrent_admission_cannot_restore_a_revoked_peers_addr_on_disk() {
+        let (backend, _dir) = make_backend();
+        let id = "tree-admission-race".to_string();
+        let (revoked, revoked_fp) = synthetic_peer();
+        backend.remember_peer(&id, revoked.clone()).await;
+
+        backend
+            .snapshot_store()
+            .stall_next_peers_publish(Duration::from_millis(500));
+        let admitting = {
+            let backend = Arc::clone(&backend);
+            let id = id.clone();
+            let addr = revoked.clone();
+            tokio::spawn(async move { backend.remember_peer(&id, addr).await })
+        };
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        backend.forget_peer_addrs(&id, &revoked_fp).await.unwrap();
+        admitting.await.unwrap();
+
+        let on_disk = backend.snapshot_store().load_peers(&id).unwrap();
+        assert!(
+            !on_disk.iter().any(|a| a.id == revoked.id),
+            "a revoked peer's dial addr must not survive in the sidecar: {on_disk:?}"
+        );
+    }
+
+    /// Fail CLOSED at rehydrate: a share whose roster cannot be rebuilt (the
+    /// keychain entry holding its capability is gone) is NOT advertised.
+    /// Advertising it would serve the leaky `shared_tree_id` to every peer that
+    /// can route here — the exact hole this lane closes — so the share stays
+    /// registered and pullable, and the refusal is disclosed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_share_whose_roster_cannot_be_rebuilt_is_not_advertised() {
+        let (backend_a, keychain_a, dir_a) = make_backend_with_keychain();
+        seed_block(&backend_a, "root-a", None, "root-a").await;
+        seed_block(&backend_a, "shared", Some("root-a"), "confidential-payload").await;
+        let (_ticket, shared_tree_id) = share_and_ticket(&backend_a, "block:shared").await;
+
+        backend_a.advertiser_for_test().close_all().await;
+        backend_a.flush_all().await;
+        let dir_a_path = dir_a.path().to_path_buf();
+        drop(backend_a);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // CONTROL first, over the same storage dir: with the keychain intact
+        // the restart DOES advertise, gated. Without it, "not advertised"
+        // would also hold for a share that simply failed to rehydrate.
+        {
+            let control = make_backend_at(&dir_a_path, test_credentials(keychain_a));
+            assert_eq!(rehydrate_over(&control).await, 1);
+            assert!(
+                control
+                    .advertiser_for_test()
+                    .roster_for(&shared_tree_id)
+                    .await
+                    .is_some(),
+                "control: with its capability the share rehydrates GATED"
+            );
+            control.advertiser_for_test().close_all().await;
+            control.flush_all().await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // The lost keychain: same shares on disk, no capability filed.
+        let lost = make_backend_at(&dir_a_path, test_credentials(test_keychain()));
+        let mut changes = lost.degraded_bus().subscribe().changes;
+        assert_eq!(
+            rehydrate_over(&lost).await,
+            1,
+            "the share still rehydrates — it is usable for pulls, just not served"
+        );
+
+        assert!(
+            !lost.advertiser_for_test().is_active(&shared_tree_id).await,
+            "a share whose roster could not be rebuilt must NOT be advertised — serving it \
+             would admit whoever knows the shared_tree_id"
+        );
+        assert!(
+            lost.advertiser_for_test()
+                .roster_for(&shared_tree_id)
+                .await
+                .is_none()
+        );
+
+        let mut disclosed = Vec::new();
+        while let Ok(change) = changes.try_recv() {
+            if let Some(event) = change.raised()
+                && let ShareDegradedReason::RehydrationFailed(detail) = &event.reason
+                && event.shared_tree_id == shared_tree_id
+            {
+                disclosed.push(detail.clone());
+            }
+        }
+        assert!(
+            disclosed.iter().any(|d| d.contains("share not advertised")),
+            "the refusal must be disclosed, not silent: {disclosed:?}"
+        );
+
+        lost.advertiser_for_test().close_all().await;
+    }
+
+    /// The owner identity key is minted on the FIRST share and its one-time
+    /// recovery code is dropped — nothing can show it. That is disclosed on
+    /// the degraded bus (the code itself never is), once: a second share
+    /// reloads the same key and has nothing new to say.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn the_dropped_owner_recovery_code_is_disclosed_once_on_the_first_share() {
+        let (backend, _dir) = make_backend();
+        let mut changes = backend.degraded_bus().subscribe().changes;
+
+        seed_block(&backend, "root-a", None, "root-a").await;
+        seed_block(&backend, "first", Some("root-a"), "first").await;
+        seed_block(&backend, "second", Some("root-a"), "second").await;
+
+        let (_t1, _id1) = share_and_ticket(&backend, "block:first").await;
+        let (_t2, _id2) = share_and_ticket(&backend, "block:second").await;
+
+        let mut disclosures = 0usize;
+        while let Ok(change) = changes.try_recv() {
+            if let Some(event) = change.raised()
+                && matches!(event.reason, ShareDegradedReason::OwnerRecoveryCodeNotShown)
+            {
+                assert_eq!(
+                    event.shared_tree_id,
+                    crate::degraded_signal_bus::OWNER_IDENTITY_SUBJECT
+                );
+                disclosures += 1;
+            }
+        }
+        assert_eq!(
+            disclosures, 1,
+            "the dropped recovery code is disclosed on the mint only — the second share reloads \
+             the same key"
+        );
+
+        backend.advertiser_for_test().close_all().await;
+    }
+
+    /// The roster is durable state, not session state: a restart rebuilds it
+    /// from the keychain capability plus the owner-signed sidecar, so a peer
+    /// admitted before the restart reconnects WITHOUT re-proving anything.
+    ///
+    /// Proven by the short-circuit in `ShareRoster::authorize`: an
+    /// already-pinned peer is authorized with a garbage proof (`newly_enrolled
+    /// == false`), while an unknown peer presenting the same garbage is
+    /// refused. If the pinned set had been lost, the first call would fail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_restart_reloads_the_roster_so_an_enrolled_peer_need_not_re_enroll() {
+        use crate::share_enrollment::CapabilityId;
+        use crate::share_enrollment::Challenge;
+        use crate::share_enrollment::ProofTag;
+
+        let (backend_a, keychain_a, dir_a) = make_backend_with_keychain();
+        let (backend_b, _dir_b) = make_backend();
+
+        seed_block(&backend_a, "root-a", None, "root-a").await;
+        seed_block(&backend_a, "shared", Some("root-a"), "base").await;
+        seed_block(&backend_b, "root-b", None, "root-b").await;
+
+        let (ticket, shared_tree_id) = share_and_ticket(&backend_a, "block:shared").await;
+        backend_b
+            .accept_shared_subtree("block:root-b", ticket)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let b_peer = only_enrolled_peer(&backend_a, &shared_tree_id).await;
+
+        // Restart A over the same storage dir and the same keychain.
+        backend_a.advertiser_for_test().close_all().await;
+        backend_a.flush_all().await;
+        let dir_a_path = dir_a.path().to_path_buf();
+        drop(backend_a);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let backend_a = make_backend_at(&dir_a_path, test_credentials(keychain_a));
+        let rehydrated = rehydrate_over(&backend_a).await;
+        assert_eq!(rehydrated, 1, "A must rehydrate its one share");
+
+        let roster = backend_a
+            .advertiser_for_test()
+            .roster_for(&shared_tree_id)
+            .await
+            .expect("a rehydrated share must be advertised WITH its roster, never un-gated");
+        let mut guard = roster.lock().await;
+        assert!(
+            guard.is_enrolled(&b_peer),
+            "the pinned peer set must survive the restart"
+        );
+
+        let now = chrono::Utc::now().timestamp();
+        let garbage_id = CapabilityId::from_bytes([0u8; 32]);
+        let garbage_proof = ProofTag::from_bytes([0u8; 32]);
+        let authorized = guard
+            .authorize(
+                now,
+                &Challenge::generate(),
+                &garbage_id,
+                &garbage_proof,
+                b_peer,
+            )
+            .expect("an already-pinned peer reconnects without re-proving the capability");
+        assert!(
+            !authorized.newly_enrolled(),
+            "the peer must be recognised as already enrolled, not admitted afresh"
+        );
+        assert!(
+            guard
+                .authorize(
+                    now,
+                    &Challenge::generate(),
+                    &garbage_id,
+                    &garbage_proof,
+                    PeerFingerprint::from_bytes([42u8; 32]),
+                )
+                .is_err(),
+            "the short-circuit must apply to pinned peers only — an unknown peer with the same \
+             garbage proof must still be refused"
+        );
+    }
+
     /// Focused debug test for the known_peers+auto-resync feature
     /// path. Seeds A and B, does share→accept, then:
     ///   1. verifies A has B's addr in its sidecar after the accept
@@ -3993,7 +4976,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn cross_peer_sync_after_restart_debug() {
-        let (backend_a, dir_a) = make_backend();
+        let (backend_a, keychain_a, dir_a) = make_backend_with_keychain();
         let (backend_b, _dir_b) = make_backend();
 
         seed_block(&backend_a, "root-a", None, "root-a").await;
@@ -4033,13 +5016,9 @@ mod tests {
         drop(backend_a);
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let bus = Arc::new(DegradedSignalBus::new());
-        let store = Arc::new(RwLock::new(LoroDocumentStore::new(dir_a_path.clone())));
-        let snapshot_store = Arc::new(SharedSnapshotStore::new(dir_a_path.clone(), bus.clone()));
-        let manager = Arc::new(SharedTreeSyncManager::new());
-        let key = crate::device_key_store::load_or_create_device_key(&dir_a_path).unwrap();
-        let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
-        let backend_a = LoroShareBackend::new(store, snapshot_store, manager, advertiser, bus, key);
+        // Same storage dir AND same keychain: a restart keeps both, and the
+        // rehydrated roster needs the capability secret from the second.
+        let backend_a = make_backend_at(&dir_a_path, test_credentials(keychain_a));
         let collab = backend_a.test_global_doc().await;
         // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
         // exists to observe.
@@ -4137,7 +5116,7 @@ mod tests {
             d.commit();
         }
 
-        let (backend_a, dir_a) = make_backend();
+        let (backend_a, keychain_a, dir_a) = make_backend_with_keychain();
         let (backend_b, _dir_b) = make_backend();
 
         seed_block(&backend_a, "root-a", None, "root-a").await;
@@ -4193,13 +5172,9 @@ mod tests {
         drop(backend_a);
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let bus = Arc::new(DegradedSignalBus::new());
-        let store = Arc::new(RwLock::new(LoroDocumentStore::new(dir_a_path.clone())));
-        let snapshot_store = Arc::new(SharedSnapshotStore::new(dir_a_path.clone(), bus.clone()));
-        let manager = Arc::new(SharedTreeSyncManager::new());
-        let key = crate::device_key_store::load_or_create_device_key(&dir_a_path).unwrap();
-        let advertiser = Arc::new(IrohAdvertiser::new_with_key(key.clone()));
-        let backend_a = LoroShareBackend::new(store, snapshot_store, manager, advertiser, bus, key);
+        // Same storage dir AND same keychain: a restart keeps both, and the
+        // rehydrated roster needs the capability secret from the second.
+        let backend_a = make_backend_at(&dir_a_path, test_credentials(keychain_a));
         let collab = backend_a.test_global_doc().await;
         // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
         // exists to observe.
@@ -4480,6 +5455,7 @@ mod tests {
             advertiser,
             bus,
             key,
+            test_credentials(test_keychain()),
             Some(sql.clone() as Arc<dyn OriginTaggedWrites>),
             projection,
         );
