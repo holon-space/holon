@@ -144,3 +144,28 @@ impl RefBootMut for ReferenceState {
         }
     }
 }
+
+impl holon_pbt_core::capabilities::RefReboot for ReferenceState {
+    /// The persistence split for a `Reboot`, field by field.
+    ///
+    /// KEPT, because Turso holds them and the second boot re-opens the same
+    /// file: blocks + edges, `focus_roots` / `current_focus` / per-region
+    /// `focused_entity_id`, `navigation_history`, pins, `drawer_open` (the
+    /// `widget_open` table) and `expanded_toggles` (whose flip also writes the
+    /// block's `collapsed` field).
+    ///
+    /// DROPPED, because only the dead process held them:
+    /// - `active_editor` — the `HeadlessEditorMirror` buffer. Dropped WITHOUT
+    ///   committing: the reboot shuts the engine down with no blur, so text
+    ///   that never reached the store is genuinely lost. Committing here would
+    ///   model a save prod does not perform.
+    /// - `focused_cursor` — the caret lives in `InputState`, not in SQL.
+    /// - `seen_focus_targets` — the known-views cache is per-process, so the
+    ///   first navigation after a boot pays the view-creation cost again
+    ///   (`inv-sql-budget`'s first-visit allowance).
+    fn reboot_drops_in_memory_state(&mut self) {
+        self.ui.tab.active_editor = None;
+        self.ui.tab.focused_cursor.clear();
+        self.ui.tab.seen_focus_targets.clear();
+    }
+}

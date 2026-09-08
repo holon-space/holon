@@ -246,6 +246,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `JumpToSearchHit` — after a jump the caret is live INSIDE the new root: on the destination's first child, or on the destination's creation affordance when it has no children. Never on the destination itself, which renders through the editor-less `page_title` variant and leaves the keyboard dead (docs/Testing/bugfunnel/entries/ 2026-09-08-quick-open-enter-navigation-leaves-no-editable-focus.md).
 - `Nothing` — no-op interleaving for schedule diversity
 - `PressKey` — raw key chord -> bubble_input resolution
+- `Reboot` — what survives a real restart
 - `ReceiverCreateBlock` — a peer-authored block under an owner-authored parent, and its arrival on the owner after a reverse round.
 - `Search` — the hit set equals the reference model's literal substring match over block content and page titles, folded by Unicode simple case folding, with pattern metacharacters matching themselves and an empty query returning nothing.
 - `StartApp` — application startup + seeded sidebar watch

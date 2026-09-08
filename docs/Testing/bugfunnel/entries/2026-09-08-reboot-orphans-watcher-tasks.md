@@ -29,9 +29,14 @@ supervisor declaring itself permanently degraded:
 ```
 
 Found by the `keystone-reboot` lane, by the new `Reboot` transition itself on
-its FIRST weighted run — not by dogfooding. `inv-no-observed-errors` reds with
-11–12 swallowed problems per reboot tick.
-Log: `.claude/worktrees/keystone-reboot/lane-logs/inc2-probe2-94006.log`.
+its FIRST weighted run — not by dogfooding. `inv-no-observed-errors` red every
+time; the count of swallowed problems per reboot tick was measured between 4 and
+15 across runs. It varied because it counts whichever of the dead boot's
+watchers happened to be mid-read when the actor closed, plus however many of the
+org-writeback supervisor's three restart rounds fired before it gave up — the
+defect itself was never intermittent.
+Logs: `.claude/worktrees/keystone-reboot/lane-logs/inc2-probe2-94006.log`,
+`rev2-redhunt-51601.log`.
 
 ## Root cause
 
@@ -118,6 +123,32 @@ much narrower than the original defect (the parent is joined, and the guard fire
 before the store closes), but it is not the "join or report by name" guarantee
 the rest of the seam gives. Closing it needs `watch_ui` to own a cancel-aware
 join rather than an abort guard.
+
+### Exercising the reproducer
+
+The `Reboot` transition stays env-gated (`HOLON_PBT_REBOOT`), so reaching this
+state needs ALL THREE variables:
+
+```
+HOLON_PBT_REBOOT=1 HOLON_PBT_FORCE_FULL=1 HOLON_PBT_REBOOT_WEIGHT=40 \
+  just pbt general 8
+```
+
+`HOLON_PBT_REBOOT=1` alone is not a reproducer and its green proves nothing: the
+weight stays 1 against ~70 other transitions, so a short run
+(`just keystone-smoke`, 4 cases) draws zero reboots and passes. `FORCE_FULL`
+pins the Turso wiring the transition requires; the weight makes reboots the
+dominant draw.
+
+### Open oracle gap alongside this one
+
+A weighted run also trips the registered draw-dependent
+`drawer-open-matches-ref` known red on its first case, before any `Reboot` is
+drawn, so every reboot-drawing configuration softens
+`inv-drawer-open-matches-ref` to `warn`. That is the invariant that would judge
+the `RefReboot` model's `drawer_open` claim, which is therefore asserted by the
+model and unverified in practice. It needs no new mechanism — only that known
+red fixed.
 
 ### Covering tests
 

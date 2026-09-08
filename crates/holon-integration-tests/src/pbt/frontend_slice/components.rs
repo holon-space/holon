@@ -215,7 +215,10 @@ struct BootParams {
 pub struct HeadlessFrontendComponent {
     /// The current boot. Swapped wholesale by [`Self::reboot`]; every read goes
     /// through an accessor so no call site can hold a handle across a reboot.
-    boot: std::sync::RwLock<Arc<BootedSession>>,
+    /// `None` only INSIDE [`Self::reboot`], between taking the old boot out and
+    /// installing the replacement — the window in which the component must hold
+    /// no clone of the dead boot for the assert there to mean anything.
+    boot: std::sync::RwLock<Option<Arc<BootedSession>>>,
     /// The vault both boots run over.
     store: Arc<HeadlessStore>,
     /// Replayed verbatim by [`Self::reboot`].
@@ -753,7 +756,7 @@ impl HeadlessFrontendComponent {
         let documents = Self::cache_doc_ids(&store).await;
 
         Self {
-            boot: std::sync::RwLock::new(Arc::new(booted)),
+            boot: std::sync::RwLock::new(Some(Arc::new(booted))),
             store,
             boot_params,
             watches: Mutex::new(Vec::new()),
@@ -781,7 +784,7 @@ impl HeadlessFrontendComponent {
         let settle = params.settle;
 
         let holon_config = HolonConfig {
-            db_path: Some(temp_path.join("test.db")),
+            db_path: Some(store.db_path()),
             vault: holon_frontend::config::VaultConfig {
                 root: Some(temp_path.to_path_buf()),
             },
@@ -888,55 +891,17 @@ impl HeadlessFrontendComponent {
         }
 
         if settle > Duration::ZERO {
-            // Boot settle: CONVERGE instead of sleeping the full budget — the same
-            // three signals as the composed per-transition settle
-            // (`convergence::converge_signals`), with `settle` as the CAP (worst
-            // case = the former flat sleep; a quiescent boot returns in ms). The
-            // doc-id caching below reads the session-persisted `:ID:` drawers from
-            // disk, so the org drain must complete first. The org idle signal (and
-            // the Loro handles) resolve on a spawned `post_ready_work` task, so
-            // poll for the signal within the budget — a config with no org
-            // file-sync never resolves it and pays the full budget, exactly the
-            // old behavior.
-            let deadline = tokio::time::Instant::now() + settle;
-            let injector = injector_slot
-                .get()
-                .expect("DI injector captured during build");
-            let mut org_idle = injector
-                .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
-                .ok(); // ALLOW(ok): optional DI service — absent when org sync is off
-            while org_idle.is_none() && tokio::time::Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-                org_idle = injector
-                    .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
-                    .ok(); // ALLOW(ok): optional DI service — absent when org sync is off
-            }
-            let sync = injector
-                .try_resolve::<holon_loro::LoroSyncControllerHandle>()
-                .ok(); // ALLOW(ok): optional DI service — absent when Loro/sync is off
-            let store = injector
-                .try_resolve::<holon_loro::LoroDocumentStore>()
-                .ok() // ALLOW(ok): optional DI service — absent when Loro is off
-                .map(|s| (*s).clone());
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            // Boot settle: tolerate non-convergence (returns bool) — the sync
-            // controller / idle signal resolve on a spawned post_ready_work task,
-            // so a not-yet-wired signal at boot is expected, not a race. The
-            // per-transition composed settle is the one that fails loud.
-            let _boot_converged = crate::pbt::convergence::converge_signals(
-                Some(&engine),
-                sync,
-                store,
-                org_idle,
-                injector
-                    .try_resolve::<holon_api::live_data::BlockFeed>()
-                    .ok() // ALLOW(ok): optional DI service — absent without a block matview
-                    .map(|bf| bf.0.clone()),
-                // Boot registers only the sidebar page-list watch; the reactive
-                // consumer-drain stage matters for per-transition settles, not
-                // this tolerant boot settle.
-                None,
-                remaining,
+            // Boot settle: tolerate non-convergence (the result is dropped) — the
+            // sync controller / idle signal resolve on a spawned `post_ready_work`
+            // task, so a not-yet-wired signal at boot is expected, not a race. The
+            // per-transition composed settle, and `reboot`'s own convergence, are
+            // the ones that fail loud.
+            let _boot_converged = Self::converge_boot(
+                &engine,
+                injector_slot
+                    .get()
+                    .expect("DI injector captured during build"),
+                settle,
             )
             .await;
         }
@@ -953,6 +918,54 @@ impl HeadlessFrontendComponent {
                 .expect("DI injector captured during build")
                 .clone(),
         }
+    }
+
+    /// Converge a freshly-booted session's three projection signals
+    /// (`convergence::converge_signals`) within `budget`, reporting whether the
+    /// fixed point was reached. The doc-id caching a boot does next reads the
+    /// session-persisted `:ID:` drawers from disk, so the org drain must
+    /// complete first; the org idle signal (and the Loro handles) resolve on a
+    /// spawned `post_ready_work` task, so poll for the signal within the budget
+    /// — a config with no org file-sync never resolves it and pays the full
+    /// budget.
+    async fn converge_boot(
+        engine: &Arc<BackendEngine>,
+        injector: &fluxdi::Injector,
+        budget: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut org_idle = injector
+            .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+            .ok(); // ALLOW(ok): optional DI service — absent when org sync is off
+        while org_idle.is_none() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            org_idle = injector
+                .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+                .ok(); // ALLOW(ok): optional DI service — absent when org sync is off
+        }
+        let sync = injector
+            .try_resolve::<holon_loro::LoroSyncControllerHandle>()
+            .ok(); // ALLOW(ok): optional DI service — absent when Loro/sync is off
+        let store = injector
+            .try_resolve::<holon_loro::LoroDocumentStore>()
+            .ok() // ALLOW(ok): optional DI service — absent when Loro is off
+            .map(|s| (*s).clone());
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        crate::pbt::convergence::converge_signals(
+            Some(engine),
+            sync,
+            store,
+            org_idle,
+            injector
+                .try_resolve::<holon_api::live_data::BlockFeed>()
+                .ok() // ALLOW(ok): optional DI service — absent without a block matview
+                .map(|bf| bf.0.clone()),
+            // A boot registers only the sidebar page-list watch; the reactive
+            // consumer-drain stage matters for per-transition settles.
+            None,
+            remaining,
+        )
+        .await
     }
 
     /// Cache each tracked file's resolved doc-block id from a CLEAN parse at
@@ -1014,17 +1027,54 @@ impl HeadlessFrontendComponent {
         self.watches.lock().expect("watches lock").clear();
         self.invalidate_render_cache();
 
-        let old = self.booted();
+        // TAKE the boot out rather than cloning it: the replacement must be
+        // built while this component holds NO handle on the dead one, or the old
+        // ReactiveEngine / FrontendSession / file-sync tasks run against a
+        // shut-down `db_handle` for the whole second boot. The caller's own
+        // clones (cap map, slice handle) are released before this is reached —
+        // `composed::wide_e2e::reboot_wide` asserts that.
+        let old = self
+            .boot
+            .write()
+            .expect("boot cell poisoned")
+            .take()
+            .expect("[reboot] no boot installed — reboot is only reachable from a booted session");
         // The production teardown: the session's watchers stop, THEN the store
         // closes. Calling it here is what makes this transition a reboot rather
         // than a store yanked out from under a live session.
         holon_app::shutdown_session(&old.injector)
             .await
             .unwrap_or_else(|e| panic!("[reboot] session shutdown failed: {e:#}"));
+        let dead = Arc::downgrade(&old);
         drop(old);
+        assert!(
+            dead.upgrade().is_none(),
+            "[reboot] {} clone(s) of the pre-reboot session are still alive as the second boot \
+             starts — its ReactiveEngine / file-sync / clock tasks would keep running against the \
+             shut-down Turso actor. Every holder must release the old boot BEFORE this point.",
+            dead.strong_count()
+        );
 
         let booted = Self::boot_session(&self.store, &self.boot_params).await;
-        *self.boot.write().expect("boot cell poisoned") = Arc::new(booted);
+        *self.boot.write().expect("boot cell poisoned") = Some(Arc::new(booted));
+
+        // The boot settle is a tolerant 300ms (see `boot_session`) — enough for
+        // the first boot, whose caller then converges fail-loud, but on its own
+        // it would let the identity assert below pass VACUOUSLY: a re-seed that
+        // lands after the window leaves `after == before`. So converge for real
+        // first, on the wedge budget the per-transition settle uses, and fail
+        // loud rather than tolerate.
+        let wedge = crate::pbt::invariants::bodies::settle_budget::wedge_deadline();
+        let booted = self.booted();
+        let converged = Self::converge_boot(&booted.engine, &booted.injector, wedge).await;
+        drop(booted);
+        assert!(
+            converged,
+            "[reboot] the second boot's projections did not reach a fixed point within {wedge:?} \
+             (HOLON_PBT_LATENCY_WEDGE_MS) — a reboot that never settles cannot be judged, and its \
+             re-seed teeth below would read a half-projected store"
+        );
+        self.settle_block_ids_stable(wedge).await;
 
         // A reboot must RE-OPEN the store, never re-seed it. If the second boot
         // re-ingested the seed tree or re-minted pages, the block set would grow
@@ -1055,13 +1105,11 @@ impl HeadlessFrontendComponent {
     /// is observed by the next call rather than by whoever happened to
     /// clone first.
     fn booted(&self) -> Arc<BootedSession> {
-        self.boot.read().expect("boot cell poisoned").clone()
-    }
-
-    /// The vault this component boots over — shared with the composed builder
-    /// so a rebuild after [`Self::reboot`] targets the SAME store.
-    pub(crate) fn store(&self) -> Arc<HeadlessStore> {
-        self.store.clone()
+        self.boot
+            .read()
+            .expect("boot cell poisoned")
+            .clone()
+            .expect("[booted] read while no boot is installed — only `reboot` empties the cell")
     }
 
     pub(crate) fn org_fs(&self) -> &Arc<holon_filesystem::InMemoryFileSystem> {
@@ -1069,7 +1117,7 @@ impl HeadlessFrontendComponent {
     }
 
     pub(crate) fn org_root(&self) -> &PathBuf {
-        &self.store.org_root
+        self.store.org_root()
     }
 
     pub(crate) fn org_paths(&self) -> &[PathBuf] {
@@ -1281,6 +1329,22 @@ impl HeadlessFrontendComponent {
             .set(resolver)
             .map_err(|_| "HeadlessFrontendComponent resolver already set")
             .expect("set resolver once");
+    }
+
+    /// A reboot re-composes over the SAME component, which already holds the
+    /// run's resolver — and [`Self::set_resolver`] is once-only. Assert the
+    /// rebuild brought that same map rather than re-setting it: a different
+    /// resolver would translate the oracle's synthetic ids against a stale
+    /// table and diverge silently.
+    pub(crate) fn assert_resolver_is(&self, resolver: &crate::pbt::op_write_cap::IdResolver) {
+        let held = self
+            .resolver
+            .get()
+            .expect("[reboot] the adopted component holds no resolver — it was never composed");
+        assert!(
+            Arc::ptr_eq(held, resolver),
+            "[reboot] the rebuild passed a different IdResolver than the boot did"
+        );
     }
 
     /// Resolve an oracle-space id to its SUT-space id (identity if the resolver
@@ -1915,7 +1979,7 @@ impl HeadlessFrontendComponent {
         };
         let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         loop {
-            let caret = self.reactive.focused_block();
+            let caret = self.reactive().focused_block();
             if caret.as_ref() == Some(&expected) {
                 return;
             }
@@ -2315,7 +2379,7 @@ impl holon_pbt_core::capabilities::SutSearch for HeadlessFrontendComponent {
         );
         // `synthetic_dispatch` is `engine.dispatch_intent_sync` — the same door
         // the overlay's Enter goes through, so the caret seat rides along.
-        self.driver
+        self.driver_concrete()
             .synthetic_dispatch("navigation", "focus", params)
             .await
             .unwrap_or_else(|e| {

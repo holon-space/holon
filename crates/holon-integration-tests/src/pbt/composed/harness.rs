@@ -263,13 +263,27 @@ pub trait ComposedSlice {
     /// Rebuilding is the contract, not swapping handles: caps captured the
     /// previous boot's engine/driver handles and `CapMap` is insert-only, so a
     /// partial swap would leave a "reboot" no assertion can catch.
+    ///
+    /// The old handle and cap map arrive BY VALUE so the impl can release every
+    /// clone of the dead boot before the replacement starts. Keeping them
+    /// borrowed is what let the previous boot's engine/session/watcher tasks
+    /// run against a shut-down storage actor for the whole second boot.
     async fn reboot(
-        _: &Self::Handle,
+        _: Self::Handle,
+        _: CapMap,
         _: &IdResolver,
         _: &ReferenceState,
     ) -> Option<(CapMap, Self::Handle)> {
         None
     }
+
+    /// Open the per-tick measurement window (span metrics, reseed attribution)
+    /// for a transition the HARNESS applies itself, so it never reaches
+    /// [`apply_transition`](Self::apply_transition) where every other
+    /// transition opens its own. Today that is only the reboot.
+    ///
+    /// Default no-op: a slice with no measurement caps has no window to open.
+    async fn note_tick_start(_: &Self::Transition, _: &CapMap) {}
 
     /// Dispatch one transition onto the SUT caps (the per-alphabet `match`).
     async fn apply_transition(
@@ -697,6 +711,167 @@ pub(crate) struct EngageTally {
 }
 
 impl<S: ComposedSlice> ComposedSut<S> {
+    /// Everything a tick does AFTER its measured apply+settle window:
+    /// authorship scoping, weights telemetry, the synthetic→real id reconcile
+    /// and `align_ids`. Shared by [`Self::apply`] and [`Self::rebooted`] so a
+    /// reboot tick is bookkept identically to every other tick.
+    #[allow(clippy::too_many_arguments)]
+    fn post_apply(
+        mut sut: Self,
+        ref_state: &ReferenceState,
+        is_redo: bool,
+        before: BTreeSet<EntityUri>,
+        after: BTreeSet<EntityUri>,
+        action_us: u64,
+        record_label: Option<String>,
+    ) -> Self {
+        // Authorship scoping, read AFTER the settle so a block a peer authored
+        // and this tick's sync round carried is already classified when the
+        // reconcile below runs. Accumulated, never retracted.
+        {
+            let handle = &sut.handle;
+            let foreign = sut.rt.block_on(S::foreign_ids(handle));
+            sut.foreign_ids.extend(foreign);
+        }
+        // Weights-spike telemetry: record this transition's kind + wall micros
+        // (flag-off => `record_label` is `None`, so no accumulation happens).
+        if let Some(label) = record_label {
+            sut.telemetry.borrow_mut().record(label, action_us);
+        }
+        // Per-tick reconciliation: a single transition mints at most one block, so
+        // the one unmapped synthetic id (oracle, post-apply) pairs 1:1 with the one
+        // new real id (SUT). Accumulate into the shared resolver. (For a counter-sync
+        // backend the real id *is* the synthetic id, so this maps it to itself — the
+        // `align_ids` hook below kept the next mint in lockstep.)
+        //
+        // The synthetic schemes the harness reconciles: `block::split-N` (split tails)
+        // AND `block:ref-doc-N` (CreateDocument-minted doc pages — the doc-uri-minting
+        // generalization of the seam's `block_tree_post_action` CreateDocument arm).
+        // Both are placeholders the oracle allocates that the SUT backend
+        // materializes as fresh ids. This is a COMPOSED-LOCAL predicate,
+        // deliberately NOT the global `is_synthetic_ref_id` (which E2ESut keys
+        // its split-only mapping off — widening it there would make E2ESut
+        // mis-treat doc-uris as splits).
+        let mut map = sut.resolver.lock().expect("resolver lock");
+        // Resolver staleness across undo→redo. `UndoLastMutation` DELETES the real
+        // block a synthetic maps to; `Redo` then re-creates it under a FRESH uuid
+        // (prod burns block ids across undo — see `ReferenceState::pop_undo_to_redo`)
+        // while the oracle's redo snapshot restores the SAME synthetic label. Retire
+        // exactly the pairs that are BOTH live on the oracle side (the synthetic is
+        // a block the oracle currently holds) and dead on the SUT side (its uuid is
+        // gone) — those must re-pair below. A pair whose synthetic the oracle no
+        // longer holds is NOT retired: a deleted block's mapping is still needed to
+        // resolve oracle references that outlive it (e.g. `navigation_history`).
+        // The retired pair moves to `burned`, which still feeds the C2 provenance
+        // oracle — the dead uuid owns real `block_history` rows.
+        // Observed counterexample: [SplitBlock(c1,0), UndoLastMutation, Redo] —
+        // `tests/split_undo_redo_reconcile.rs`.
+        let retired: Vec<(EntityUri, EntityUri)> = map
+            .iter()
+            .filter(|(syn, real)| {
+                !after.contains(*real) && ref_state.domain.block_state.blocks.contains_key(*syn)
+            })
+            .map(|(syn, real)| (syn.clone(), real.clone()))
+            .collect();
+        for (syn, _) in &retired {
+            map.remove(syn);
+        }
+        // `action` is the transition's Debug head (`Redo(Redo)` -> "Redo"), the
+        // discriminator the redo gate needs without constraining `S::Transition`.
+        if is_redo {
+            sut.redo_burned
+                .extend(retired.iter().map(|(_, real)| real.clone()));
+        }
+        sut.burned.extend(retired.clone());
+        // Born-equal doc pages: `WriteOrgFile` pins the oracle's `block:ref-doc-N`
+        // into the file via `#+ID:`, so the SUT ingests the SAME id — synthetic in
+        // scheme, but with no fresh real partner. Self-map those (identity), like
+        // the counter-sync case above; only synthetics the SUT does NOT already
+        // hold (CreateDocument's empty file → fresh uuid) enter the 1:1 pairing.
+        let unmapped: Vec<EntityUri> = ref_state
+            .domain
+            .block_state
+            .blocks
+            .keys()
+            .filter(|id| is_composed_minted_synthetic_id(id) && !map.contains_key(id))
+            .cloned()
+            .collect();
+        let (born_equal, synthetic): (Vec<EntityUri>, Vec<EntityUri>) =
+            unmapped.into_iter().partition(|id| after.contains(id));
+        for id in born_equal {
+            map.insert(id.clone(), id);
+        }
+        // Born-equal DETERMINISTIC ids minted THIS tick (in the SUT's new set AND
+        // already held by the oracle) — e.g. `InstantiateTemplate`'s instance blocks,
+        // whose production deterministic instance id (`plan_instantiation`) the oracle
+        // reproduces exactly. Self-map them (identity) so `history_ever_created`
+        // (derived from this map) knows every real id the oracle minted; without it a
+        // later `UndoLastMutation` leaves the append-only `block_history` create row
+        // looking like a phantom (`inv-history-no-phantom-rows`). Restricted to this
+        // tick's `after \ before` so seeds/layout are untouched; `k == v` self-maps
+        // never count toward `history_min_op_groups`.
+        for id in after.difference(&before) {
+            if ref_state.domain.block_state.blocks.contains_key(id)
+                && !is_peer_scheme_id(id)
+                && !sut.foreign_ids.contains(id)
+                && !is_composed_minted_synthetic_id(id)
+                && !map.contains_key(id)
+            {
+                map.insert(id.clone(), id.clone());
+            }
+        }
+        // Peer-merged blocks (`block:peer-…`) surface in the SUT `block_raw` with a
+        // stable id already shared with the oracle — they need no synthetic→real
+        // mapping, so exclude them from `real_new` to keep the 1:1 split/doc
+        // guard intact (a `MergeFromPeer` would otherwise make `real_new`
+        // outrun `synthetic` and panic). Born-equal ids (External
+        // `ApplyMutation::Create` and `BulkExternalAdd` write the block WITH
+        // its oracle id in the `:ID:` drawer, so `resolve_mutation_ids` leaves a
+        // Create's NEW id as-is) surface in the SUT with the SAME id the oracle already
+        // holds. Like peer-merged blocks they are shared, need no synthetic→real
+        // mapping, and would otherwise make `real_new` outrun `synthetic`
+        // (which only counts synthetic-scheme oracle ids) and panic.
+        // `resolve_id` passes unmapped ids through as identity, so dropping
+        // them here is correct.
+        // Blocks a SECOND writer authored (`ComposedSlice::foreign_ids`) are
+        // excluded for the same reason as peer-scheme ids: the oracle never
+        // minted a synthetic for them, so counting them here would make
+        // `real_new` outrun `synthetic` and panic on a block the model is not
+        // responsible for. Their own side-scoped oracle judges them.
+        let real_new: Vec<EntityUri> = after
+            .difference(&before)
+            .filter(|id| !is_peer_scheme_id(id))
+            .filter(|id| !sut.foreign_ids.contains(*id))
+            .filter(|id| !ref_state.domain.block_state.blocks.contains_key(*id))
+            .cloned()
+            .collect();
+        let vanished: Vec<&EntityUri> = before.difference(&after).collect();
+        assert_eq!(
+            synthetic.len(),
+            real_new.len(),
+            "per-tick reconcile: one synthetic per minted real id (syn={synthetic:?}, \
+             real={real_new:?}); this tick RETIRED {retired:?} and the SUT LOST \
+             {vanished:?} from block_raw"
+        );
+        // Pairing safety for the R2 StaleExternalRewrite CHURN (multiple mints in
+        // one tick, unlike the usual one-mint transitions this zip was written for):
+        // the churn re-mints only NON-UNIQUE / empty content (unique content remaps
+        // via `tiered_match`, keeping its id — never appears here), so every element
+        // of `synthetic`/`real_new` this tick shares the same (parent, content). The
+        // zip is therefore order-insensitive: (1) `inv-blocks-match-ref` normalizes on
+        // {id, parent, content, tags, …} with NO sort_key / position field, so
+        // identical-(parent, content) blocks are interchangeable, and (2) no
+        // cross-content mispair is possible because all churn mints carry the same
+        // content. The oracle predicts the identical churn in `StaleExternalRewrite::
+        // apply_to_ref` (shared `tiered_match`), so the two lengths match here.
+        for (syn, real) in synthetic.into_iter().zip(real_new) {
+            map.insert(syn, real);
+        }
+        drop(map);
+        S::align_ids(&sut.handle, ref_state);
+        sut
+    }
+
     /// Restart the app and return the SUT rebuilt around the new boot, carrying
     /// this case's harness-side accumulators across.
     ///
@@ -711,19 +886,108 @@ impl<S: ComposedSlice> ComposedSut<S> {
     /// after a reboot would sweep every block the run has created into the
     /// seed-excused set and silently disarm the `inv-blocks-match-ref` family
     /// for the rest of the case.
-    fn rebooted(mut self, ref_state: &ReferenceState) -> Self {
-        let (caps, handle) = self
-            .rt
-            .block_on(S::reboot(&self.handle, &self.resolver, ref_state))
-            .expect(
-                "a reboot transition reached a slice with no reboot seam \
-                 (`ComposedSlice::reboot` returned None) — the slice must narrow the transition \
-                 out of its alphabet instead of applying it as a no-op",
+    ///
+    /// Measured, wedge-bounded and telemetered exactly like every other
+    /// transition: a reboot is the most expensive tick the alphabet can draw,
+    /// so hiding it from the latency recorders would leave the one transition
+    /// most likely to wedge as the only one nothing times.
+    ///
+    /// Destructured rather than field-assigned because `S::reboot` takes the
+    /// old handle and cap map BY VALUE — they must be dropped before the second
+    /// boot starts, and a `&mut self` swap can only drop them after it returns.
+    fn rebooted(self, ref_state: &ReferenceState, transition: &S::Transition) -> Self {
+        let Self {
+            caps,
+            handle,
+            resolver,
+            burned,
+            redo_burned,
+            scaffold_ids,
+            foreign_ids,
+            rt,
+            settle,
+            engaged,
+            telemetry,
+            tick,
+            _slice,
+        } = self;
+        let action = "Reboot".to_string();
+        let record_label = super::telemetry::telemetry_enabled().then(|| action.clone());
+        tick.set(tick.get() + 1);
+        let wedge = crate::pbt::invariants::bodies::settle_budget::wedge_deadline();
+        let resolver_ref = &resolver;
+        let (before, after, caps, handle, action_us) = rt.block_on(async move {
+            let before = sut_ids(&caps).await;
+            S::invalidate_render_caches(&handle);
+            let t_action = std::time::Instant::now();
+            let rebuilt =
+                tokio::time::timeout(wedge, S::reboot(handle, caps, resolver_ref, ref_state)).await;
+            let (caps, handle) = rebuilt
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "[inv-settle-budget] WEDGED: 'Reboot' did not finish shutting down and \
+                         booting again within {wedge:?} (HOLON_PBT_LATENCY_WEDGE_MS)"
+                    )
+                })
+                .expect(
+                    "a reboot transition reached a slice with no reboot seam \
+                     (`ComposedSlice::reboot` returned None) — the slice must narrow the \
+                     transition out of its alphabet instead of applying it as a no-op",
+                );
+            let action_us = t_action.elapsed().as_micros() as u64;
+            if let Some(l) =
+                caps.get::<dyn crate::pbt::composed::settle_latency::SettleLatencyLifecycle>()
+            {
+                l.note_settle(&action, std::time::Duration::from_micros(action_us));
+            }
+            tracing::info!(
+                target: "holon_latency",
+                stage = "action_total",
+                action = %action,
+                total_ms = t_action.elapsed().as_millis() as u64,
+                "holon_latency",
             );
-        self.caps = caps;
-        self.handle = handle;
-        self.tick.set(self.tick.get() + 1);
-        self
+            feed_sut_clock(&caps, ref_state).await;
+            let after = sut_ids(&caps).await;
+            // Open the measurement window LAST. It must be opened (the window
+            // the previous transition left open would otherwise bill this
+            // boot's `ensure_schema` DDL and re-projection reads to that
+            // transition — measured as NavigateFocus.sql_ddl=76), and opened
+            // here rather than before the restart because a boot's cost is not
+            // an interaction's cost: the FIRST boot is outside every budget
+            // window for the same reason.
+            S::note_tick_start(transition, &caps).await;
+            (before, after, caps, handle, action_us)
+        });
+        let sut = Self {
+            caps,
+            handle,
+            resolver,
+            burned,
+            redo_burned,
+            scaffold_ids,
+            foreign_ids,
+            rt,
+            settle,
+            engaged,
+            telemetry,
+            tick,
+            _slice,
+        };
+        // The same post-apply path every transition takes. The id reconcile is a
+        // no-op by construction (a reboot re-opens the store, so `before ==
+        // after` — asserted inside the seam), but running it keeps ONE
+        // bookkeeping path: a future reboot that did move ids would be
+        // reconciled, not silently unmodeled.
+        Self::post_apply(
+            sut,
+            ref_state,
+            false,
+            before,
+            after,
+            action_us,
+            record_label,
+        )
     }
 
     /// Construct a `ComposedSut` around ALREADY-BOOTED caps instead of
@@ -931,7 +1195,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
 
     fn apply(mut sut: Self, ref_state: &ReferenceState, transition: S::Transition) -> Self {
         if S::is_reboot(&transition) {
-            return sut.rebooted(ref_state);
+            return sut.rebooted(ref_state, &transition);
         }
         let action = action_label(&transition);
         // Kept for the post-apply redo gate below (`action` itself is moved into
@@ -1038,151 +1302,15 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 (before, after, action_us)
             })
         };
-        // Authorship scoping, read AFTER the settle so a block a peer authored
-        // and this tick's sync round carried is already classified when the
-        // reconcile below runs. Accumulated, never retracted.
-        {
-            let handle = &sut.handle;
-            let foreign = sut.rt.block_on(S::foreign_ids(handle));
-            sut.foreign_ids.extend(foreign);
-        }
-        // Weights-spike telemetry: record this transition's kind + wall micros
-        // (flag-off => `record_label` is `None`, so no accumulation happens).
-        if let Some(label) = record_label {
-            sut.telemetry.borrow_mut().record(label, action_us);
-        }
-        // Per-tick reconciliation: a single transition mints at most one block, so
-        // the one unmapped synthetic id (oracle, post-apply) pairs 1:1 with the one
-        // new real id (SUT). Accumulate into the shared resolver. (For a counter-sync
-        // backend the real id *is* the synthetic id, so this maps it to itself — the
-        // `align_ids` hook below kept the next mint in lockstep.)
-        //
-        // The synthetic schemes the harness reconciles: `block::split-N` (split tails)
-        // AND `block:ref-doc-N` (CreateDocument-minted doc pages — the doc-uri-minting
-        // generalization of the seam's `block_tree_post_action` CreateDocument arm).
-        // Both are placeholders the oracle allocates that the SUT backend
-        // materializes as fresh ids. This is a COMPOSED-LOCAL predicate,
-        // deliberately NOT the global `is_synthetic_ref_id` (which E2ESut keys
-        // its split-only mapping off — widening it there would make E2ESut
-        // mis-treat doc-uris as splits).
-        let mut map = sut.resolver.lock().expect("resolver lock");
-        // Resolver staleness across undo→redo. `UndoLastMutation` DELETES the real
-        // block a synthetic maps to; `Redo` then re-creates it under a FRESH uuid
-        // (prod burns block ids across undo — see `ReferenceState::pop_undo_to_redo`)
-        // while the oracle's redo snapshot restores the SAME synthetic label. Retire
-        // exactly the pairs that are BOTH live on the oracle side (the synthetic is
-        // a block the oracle currently holds) and dead on the SUT side (its uuid is
-        // gone) — those must re-pair below. A pair whose synthetic the oracle no
-        // longer holds is NOT retired: a deleted block's mapping is still needed to
-        // resolve oracle references that outlive it (e.g. `navigation_history`).
-        // The retired pair moves to `burned`, which still feeds the C2 provenance
-        // oracle — the dead uuid owns real `block_history` rows.
-        // Observed counterexample: [SplitBlock(c1,0), UndoLastMutation, Redo] —
-        // `tests/split_undo_redo_reconcile.rs`.
-        let retired: Vec<(EntityUri, EntityUri)> = map
-            .iter()
-            .filter(|(syn, real)| {
-                !after.contains(*real) && ref_state.domain.block_state.blocks.contains_key(*syn)
-            })
-            .map(|(syn, real)| (syn.clone(), real.clone()))
-            .collect();
-        for (syn, _) in &retired {
-            map.remove(syn);
-        }
-        // `action` is the transition's Debug head (`Redo(Redo)` -> "Redo"), the
-        // discriminator the redo gate needs without constraining `S::Transition`.
-        if is_redo {
-            sut.redo_burned
-                .extend(retired.iter().map(|(_, real)| real.clone()));
-        }
-        sut.burned.extend(retired.clone());
-        // Born-equal doc pages: `WriteOrgFile` pins the oracle's `block:ref-doc-N`
-        // into the file via `#+ID:`, so the SUT ingests the SAME id — synthetic in
-        // scheme, but with no fresh real partner. Self-map those (identity), like
-        // the counter-sync case above; only synthetics the SUT does NOT already
-        // hold (CreateDocument's empty file → fresh uuid) enter the 1:1 pairing.
-        let unmapped: Vec<EntityUri> = ref_state
-            .domain
-            .block_state
-            .blocks
-            .keys()
-            .filter(|id| is_composed_minted_synthetic_id(id) && !map.contains_key(id))
-            .cloned()
-            .collect();
-        let (born_equal, synthetic): (Vec<EntityUri>, Vec<EntityUri>) =
-            unmapped.into_iter().partition(|id| after.contains(id));
-        for id in born_equal {
-            map.insert(id.clone(), id);
-        }
-        // Born-equal DETERMINISTIC ids minted THIS tick (in the SUT's new set AND
-        // already held by the oracle) — e.g. `InstantiateTemplate`'s instance blocks,
-        // whose production deterministic instance id (`plan_instantiation`) the oracle
-        // reproduces exactly. Self-map them (identity) so `history_ever_created`
-        // (derived from this map) knows every real id the oracle minted; without it a
-        // later `UndoLastMutation` leaves the append-only `block_history` create row
-        // looking like a phantom (`inv-history-no-phantom-rows`). Restricted to this
-        // tick's `after \ before` so seeds/layout are untouched; `k == v` self-maps
-        // never count toward `history_min_op_groups`.
-        for id in after.difference(&before) {
-            if ref_state.domain.block_state.blocks.contains_key(id)
-                && !is_peer_scheme_id(id)
-                && !sut.foreign_ids.contains(id)
-                && !is_composed_minted_synthetic_id(id)
-                && !map.contains_key(id)
-            {
-                map.insert(id.clone(), id.clone());
-            }
-        }
-        // Peer-merged blocks (`block:peer-…`) surface in the SUT `block_raw` with a
-        // stable id already shared with the oracle — they need no synthetic→real
-        // mapping, so exclude them from `real_new` to keep the 1:1 split/doc
-        // guard intact (a `MergeFromPeer` would otherwise make `real_new`
-        // outrun `synthetic` and panic). Born-equal ids (External
-        // `ApplyMutation::Create` and `BulkExternalAdd` write the block WITH
-        // its oracle id in the `:ID:` drawer, so `resolve_mutation_ids` leaves a
-        // Create's NEW id as-is) surface in the SUT with the SAME id the oracle already
-        // holds. Like peer-merged blocks they are shared, need no synthetic→real
-        // mapping, and would otherwise make `real_new` outrun `synthetic`
-        // (which only counts synthetic-scheme oracle ids) and panic.
-        // `resolve_id` passes unmapped ids through as identity, so dropping
-        // them here is correct.
-        // Blocks a SECOND writer authored (`ComposedSlice::foreign_ids`) are
-        // excluded for the same reason as peer-scheme ids: the oracle never
-        // minted a synthetic for them, so counting them here would make
-        // `real_new` outrun `synthetic` and panic on a block the model is not
-        // responsible for. Their own side-scoped oracle judges them.
-        let real_new: Vec<EntityUri> = after
-            .difference(&before)
-            .filter(|id| !is_peer_scheme_id(id))
-            .filter(|id| !sut.foreign_ids.contains(*id))
-            .filter(|id| !ref_state.domain.block_state.blocks.contains_key(*id))
-            .cloned()
-            .collect();
-        let vanished: Vec<&EntityUri> = before.difference(&after).collect();
-        assert_eq!(
-            synthetic.len(),
-            real_new.len(),
-            "per-tick reconcile: one synthetic per minted real id (syn={synthetic:?}, \
-             real={real_new:?}); this tick RETIRED {retired:?} and the SUT LOST \
-             {vanished:?} from block_raw"
-        );
-        // Pairing safety for the R2 StaleExternalRewrite CHURN (multiple mints in
-        // one tick, unlike the usual one-mint transitions this zip was written for):
-        // the churn re-mints only NON-UNIQUE / empty content (unique content remaps
-        // via `tiered_match`, keeping its id — never appears here), so every element
-        // of `synthetic`/`real_new` this tick shares the same (parent, content). The
-        // zip is therefore order-insensitive: (1) `inv-blocks-match-ref` normalizes on
-        // {id, parent, content, tags, …} with NO sort_key / position field, so
-        // identical-(parent, content) blocks are interchangeable, and (2) no
-        // cross-content mispair is possible because all churn mints carry the same
-        // content. The oracle predicts the identical churn in `StaleExternalRewrite::
-        // apply_to_ref` (shared `tiered_match`), so the two lengths match here.
-        for (syn, real) in synthetic.into_iter().zip(real_new) {
-            map.insert(syn, real);
-        }
-        drop(map);
-        S::align_ids(&sut.handle, ref_state);
-        sut
+        Self::post_apply(
+            sut,
+            ref_state,
+            is_redo,
+            before,
+            after,
+            action_us,
+            record_label,
+        )
     }
 
     fn check_invariants(sut: &Self, ref_state: &ReferenceState) {

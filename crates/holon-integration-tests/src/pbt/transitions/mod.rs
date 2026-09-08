@@ -135,6 +135,7 @@ mod open_tab_via_modifier_click;
 pub mod outdent;
 mod pin_block;
 mod press_key;
+mod reboot;
 pub mod receiver_create_block;
 mod redo;
 pub mod register_entity_scheme;
@@ -221,6 +222,7 @@ pub use open_tab_via_modifier_click::OpenTabViaModifierClick;
 pub use outdent::Outdent;
 pub use pin_block::PinBlock;
 pub use press_key::PressKey;
+pub use reboot::Reboot;
 pub use receiver_create_block::ReceiverCreateBlock;
 pub use redo::Redo;
 pub use register_entity_scheme::RegisterEntityScheme;
@@ -302,6 +304,7 @@ crate::declare_e2e_transitions! {
         OpenTabViaModifierClick(OpenTabViaModifierClick),
         PinBlock(PinBlock),
         PressKey(PressKey),
+        Reboot(Reboot),
         Redo(Redo),
         RegisterEntityScheme(RegisterEntityScheme),
         RehomeEntity(RehomeEntity),
@@ -629,6 +632,7 @@ mod required_caps_guard {
         one!(DeleteDocument, lc::SutAppLifecycle);
         one!(RenameDocument, lc::SutAppLifecycle);
         one!(EpochFlipRejected, lc::SutAppLifecycle);
+        one!(Reboot, lc::SutAppLifecycle);
         one!(SimulateRestart, lc::SutAppLifecycle);
         one!(StartApp, lc::SutAppLifecycle);
 

@@ -406,6 +406,7 @@ async fn compose_sut_seeded_impl(
         // of the alphabet and the clock never advances past boot (default).
         // The reboot seam: adopt the caller's already-rebooted component rather
         // than booting a fresh store.
+        let adopted = existing_frontend.is_some();
         let comp = match existing_frontend {
             Some(comp) => comp,
             None => Arc::new(match peer_id {
@@ -436,7 +437,13 @@ async fn compose_sut_seeded_impl(
         // ids (e.g. `block::split-N`) to the real minted ids — the same map the
         // block-tree writer below uses. Without this, pinning/focusing a post-split
         // synthetic id targets a ghost and diverges `inv-focus-roots`/`inv-nav-focus`.
-        comp.set_resolver(resolver.clone());
+        // An adopted component already holds this run's resolver (`set_resolver`
+        // is once-only, and the harness carries the map across the reboot).
+        if adopted {
+            comp.assert_resolver_is(resolver);
+        } else {
+            comp.set_resolver(resolver.clone());
+        }
         // Register the NON-gesture caps (reads/projections/lifecycle). The
         // gesture-write family (`SutBlockTreeWrite`/`SutFocusWrite`/
         // `SutEditorMirrorWrite`/`SutMutate`) is registered separately, gated

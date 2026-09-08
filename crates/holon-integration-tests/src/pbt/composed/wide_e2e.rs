@@ -895,14 +895,84 @@ fn wide_seed_tree() -> Vec<NewBlock> {
     ]
 }
 
+/// The observability accumulators a REBOOT carries forward, lifted out of the
+/// dying cap map before it is dropped.
+///
+/// They hold no boot-scoped handle — only this CASE's ledgers — and the case
+/// spans both boots, so recreating them at a reboot would throw away the
+/// pre-reboot half of its settle-latency, span-metrics, observed-error,
+/// declared-column and reseed attribution and judge the post-reboot ticks on a
+/// partial record.
+struct ObservabilityCarry {
+    settle: Arc<dyn crate::pbt::composed::settle_latency::SettleLatency>,
+    settle_lifecycle: Arc<dyn crate::pbt::composed::settle_latency::SettleLatencyLifecycle>,
+    #[cfg(feature = "otel-testing")]
+    otel: OtelObservabilityCarry,
+}
+
+#[cfg(feature = "otel-testing")]
+struct OtelObservabilityCarry {
+    budget: Arc<dyn crate::pbt::composed::span_metrics::ComposedBudget>,
+    trend: Arc<dyn crate::pbt::composed::complexity_trend::ComposedTrend>,
+    metrics_lifecycle: Arc<dyn crate::pbt::composed::span_metrics::SutMetricsLifecycle>,
+    observed: Arc<dyn crate::pbt::composed::observed_errors::ObservedProblems>,
+    declared_gaps: Arc<dyn crate::pbt::composed::declared_column_gaps::DeclaredColumnGaps>,
+    reseed: Arc<dyn crate::pbt::composed::reseed_observer::ReseedAttribution>,
+}
+
+impl ObservabilityCarry {
+    /// Every cap [`install_observability_caps`] inserted, read back out. Each
+    /// `expect` names a cap the boot ALWAYS installs, so a miss is a wiring
+    /// regression, never a configuration.
+    fn from_caps(caps: &CapMap) -> Self {
+        fn take<C: ?Sized + holon_pbt_core::composition::CapName>(caps: &CapMap) -> Arc<C> {
+            caps.get::<C>().unwrap_or_else(|| {
+                panic!(
+                    "[reboot] observability cap '{}' absent from the pre-reboot map — every wide \
+                     boot installs it",
+                    C::NAME
+                )
+            })
+        }
+        Self {
+            settle: take(caps),
+            settle_lifecycle: take(caps),
+            #[cfg(feature = "otel-testing")]
+            otel: OtelObservabilityCarry {
+                budget: take(caps),
+                trend: take(caps),
+                metrics_lifecycle: take(caps),
+                observed: take(caps),
+                declared_gaps: take(caps),
+                reseed: take(caps),
+            },
+        }
+    }
+}
+
 /// The observability caps every composed wide SUT carries: the settle-latency
 /// recorder (`inv-settle-budget`) and, under `otel-testing`, the span-metrics,
-/// observed-error, declared-column-gap and reseed-attribution hosts. Shared by
-/// the boot and the REBOOT rebuild, so a post-reboot tick is judged by exactly
-/// the same invariants as every other tick. The per-case resets inside are
-/// process-global; a reboot re-runs them, which is the honest semantics (the
-/// pre-reboot process's attribution does not carry into the new one).
-fn install_observability_caps(caps: &mut CapMap) {
+/// observed-error, declared-column-gap and reseed-attribution hosts.
+///
+/// `carry` is `Some` on the REBOOT rebuild: the SAME accumulator objects are
+/// re-inserted and the process-global per-case resets are skipped, so a case
+/// containing a reboot keeps one continuous attribution record rather than
+/// starting over mid-case.
+fn install_observability_caps(caps: &mut CapMap, carry: Option<ObservabilityCarry>) {
+    if let Some(c) = carry {
+        caps.insert(c.settle);
+        caps.insert(c.settle_lifecycle);
+        #[cfg(feature = "otel-testing")]
+        {
+            caps.insert(c.otel.budget);
+            caps.insert(c.otel.trend);
+            caps.insert(c.otel.metrics_lifecycle);
+            caps.insert(c.otel.observed);
+            caps.insert(c.otel.declared_gaps);
+            caps.insert(c.otel.reseed);
+        }
+        return;
+    }
     // `inv-settle-budget` coverage: the per-transition latency recorder the
     // harness fills from its timed apply+settle window (the same window the
     // `holon_latency` `stage=action_total` event reports). One `Arc`,
@@ -1197,7 +1267,7 @@ pub async fn boot_and_seed_wide_with_peer_id(
             as std::sync::Arc<dyn holon_pbt_core::capabilities::SutReadOnlyEditAttempt>);
     }
 
-    install_observability_caps(&mut caps);
+    install_observability_caps(&mut caps, None);
 
     // Scaffold = everything the SUT booted OR the oracle models, EXCEPT the
     // non-seed working tree (parent/c1/c2) — and, for a frontend config, EXCEPT
@@ -1296,7 +1366,8 @@ pub async fn boot_and_seed_wide_with_peer_id(
 /// navigation state survives a boot is exactly what the `Reboot` transition's
 /// reference model claims, so aligning it here would erase the observation.
 pub async fn reboot_wide(
-    handle: &WideHandle,
+    handle: WideHandle,
+    caps: CapMap,
     resolver: &IdResolver,
     ref_state: &ReferenceState,
 ) -> (CapMap, WideHandle) {
@@ -1307,13 +1378,29 @@ pub async fn reboot_wide(
              draw without one must narrow the transition out rather than reach here",
         )
         .clone();
+    let carry = ObservabilityCarry::from_caps(&caps);
+
+    // Release the old boot BEFORE restarting. The caps and the handle hold this
+    // component (every frontend cap IS an `Arc<HeadlessFrontendComponent>`) plus
+    // direct clones of that boot's engine/reactive/driver; kept alive across the
+    // shutdown, the previous session's watcher and clock tasks go on querying a
+    // closed Turso actor for the whole second boot.
+    drop(caps);
+    drop(handle);
+    let holders = Arc::strong_count(&frontend);
+    assert_eq!(
+        holders, 1,
+        "[reboot] {holders} references to the pre-reboot frontend survive the cap map and the \
+         handle — a reboot must leave exactly this one. Whoever still holds it keeps the dead \
+         boot's engine and watcher tasks alive against a shut-down storage actor."
+    );
     frontend.reboot().await;
 
     let set = set_for_wiring(&ref_state.harness.wiring);
     let bundle = compose_sut_over_existing(&set, resolver, frontend).await;
     let handle = WideHandle::from_bundle(&bundle);
     let mut caps = bundle.caps;
-    install_observability_caps(&mut caps);
+    install_observability_caps(&mut caps, Some(carry));
     converge_projections(&handle, crate::pbt::composed::soak_seed::soak_settle()).await;
     (caps, handle)
 }
@@ -1890,14 +1977,22 @@ impl ComposedSlice for WideE2E {
         boot_and_seed_wide(resolver, ref_state).await
     }
 
+    /// `Reboot` replaces the cap map and the handle wholesale, so the harness
+    /// must intercept it before `apply_transition` — which only borrows
+    /// `&mut CapMap` and never sees the handle.
+    fn is_reboot(t: &E2ETransition) -> bool {
+        matches!(t, E2ETransition::Reboot(_))
+    }
+
     /// The real restart: drop this boot's engine and boot again over the same
     /// on-disk store, rebuilding the cap map around the new boot.
     async fn reboot(
-        handle: &WideHandle,
+        handle: WideHandle,
+        caps: CapMap,
         resolver: &IdResolver,
         ref_state: &ReferenceState,
     ) -> Option<(CapMap, WideHandle)> {
-        Some(reboot_wide(handle, resolver, ref_state).await)
+        Some(reboot_wide(handle, caps, resolver, ref_state).await)
     }
 
     /// Replace the flat post-apply `sleep(SETTLE)` with the 3-projection
@@ -2042,26 +2137,32 @@ impl ComposedSlice for WideE2E {
         }
     }
 
+    /// Reset the span collector + record the wall/RSS baseline for THIS
+    /// transition, before its SQL runs — so `inv-sql-budget` measures the
+    /// transition, not the accumulation of every prior tick
+    /// (`freeze_for_check` snapshots at check time) — and mark the reseed
+    /// observer steady (Inc 0), attributing every full-reseed event fired
+    /// during this transition's apply + settle to its label. Boot/seed
+    /// projection events precede the first call and stay tagged non-steady
+    /// (legitimate `coldboot`, not a leak).
+    async fn note_tick_start(transition: &E2ETransition, caps: &CapMap) {
+        #[cfg(feature = "otel-testing")]
+        if let Some(m) = caps.get::<dyn crate::pbt::composed::span_metrics::SutMetricsLifecycle>() {
+            m.note_transition_start(transition);
+        }
+        #[cfg(feature = "otel-testing")]
+        crate::pbt::composed::reseed_observer::ReseedObserver::global()
+            .note_transition(&format!("{transition:?}"));
+        #[cfg(not(feature = "otel-testing"))]
+        let _ = (transition, caps);
+    }
+
     async fn apply_transition(
         transition: &E2ETransition,
         ref_state: &ReferenceState,
         caps: &mut CapMap,
     ) {
-        // Reset the span collector + record the wall/RSS baseline for THIS transition,
-        // before its SQL runs — so `inv-sql-budget` measures the transition, not the
-        // accumulation of every prior tick. (`freeze_for_check` snapshots at check
-        // time.)
-        #[cfg(feature = "otel-testing")]
-        if let Some(m) = caps.get::<dyn crate::pbt::composed::span_metrics::SutMetricsLifecycle>() {
-            m.note_transition_start(transition);
-        }
-        // Reseed-attribution pin (Inc 0): mark the observer steady (post-seed) and
-        // attribute every full-reseed event fired during this transition's apply +
-        // settle to its label. Boot/seed projection events precede the first call
-        // and stay tagged non-steady (legitimate `coldboot`, not a leak).
-        #[cfg(feature = "otel-testing")]
-        crate::pbt::composed::reseed_observer::ReseedObserver::global()
-            .note_transition(&format!("{transition:?}"));
+        Self::note_tick_start(transition, caps).await;
         TransitionImpl::apply_to_sut(transition, ref_state, caps).await;
     }
 

@@ -32,9 +32,10 @@ use crate::pbt::transition_budgets::docs_tolerance;
 /// Re-trigger an org re-ingest (NOT a true reboot). The SUT apply touch-writes
 /// the on-disk org files so the running `FileSyncController` re-parses them;
 /// blocks are preserved and re-processed from disk. It does NOT drop+reopen the
-/// Turso handle, rehydrate the Loro container, or restart the engine — the true
-/// persistence-across-restart class (a real `RebootStorage`) is a separate,
-/// unbuilt transition (F9 fork). Do not read this as a storage reboot.
+/// Turso handle, rehydrate the Loro container, or restart the engine, so it can
+/// never observe what the STORE restores. That class belongs to
+/// [`crate::pbt::transitions::Reboot`], which shuts the engine down and boots
+/// again over the same store. Do not read this one as a storage reboot.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
 #[step_template("the app is restarted")]
 pub struct SimulateRestart;

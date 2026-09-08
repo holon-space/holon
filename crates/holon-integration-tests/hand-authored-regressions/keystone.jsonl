@@ -730,3 +730,17 @@
 # — `set_field('content'): capture prior state: Block not found: <newborn uuid>`. Re-enable with
 # the ordering fix.
 # {"name": "a-jump-into-an-empty-page-seats-the-slot-and-the-first-keystroke-births", "description": "BugFunnel 2026-09-08 quick-open-enter-navigation-leaves-no-editable-focus, the EMPTY half (D97.a Fork B). CreateDocument mints the childless page block:ref-doc-0 titled doc_0. Enter on it must seat the caret on that page's :__virtual: creation affordance, so the very NEXT keystroke births exactly one block under it with no click in between — TypeChars is legal here only because the caret is on a slot. RED before the fix as the postcondition, with the caret on block:ref-doc-0.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"JumpToSearchHit": {"query": "doc_0", "hit": "block:ref-doc-0"}}, {"TypeChars": {"text": "z"}}]}
+#
+# --- a reboot no longer orphans the previous boot's watcher tasks --------------------------------
+# The defect this case was shrunk from (docs/Testing/bugfunnel/entries/
+# 2026-09-08-reboot-orphans-watcher-tasks.md, now FIXED): shutting the Turso actor down left the
+# previous boot's org-writeback supervisor, `UiWatcher`, `holon_rule_watcher` and debounced org
+# re-render reading a closed actor, for a burst of `Actor channel closed` ERRORs (measured 4-15 per
+# reboot tick). `holon_app::shutdown_session` now stops those tasks BEFORE the store closes, so the
+# case is pinned as an EXECUTED one and this file is the regression guard for that ordering.
+#
+# Exercising the transition outside this file needs ALL THREE variables -- the gate alone is not a
+# reproducer, since at the default weight 1 against ~70 transitions a short run draws zero reboots
+# and passes green, proving nothing:
+#   HOLON_PBT_REBOOT=1 HOLON_PBT_FORCE_FULL=1 HOLON_PBT_REBOOT_WEIGHT=40 just pbt general 8
+{"name": "reboot-orphans-the-previous-boots-watchers", "description": "Shrunk minimal failing input from the 2026-09-08 keystone-reboot lane's first weighted Reboot run. One reboot over the retained store; RED with [inv-no-observed-errors] because the dead boot's watcher tasks keep reading the closed Turso actor and the org-writeback supervisor escalates to permanently degraded. Turso wiring is load-bearing -- a Loro-only draw narrows Reboot out.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Org", "Markdown", "Turso"], "sync_adapters": [], "actors": ["MCPServer", "ActionEngine"]}}, "transitions": [{"Reboot": null}]}

@@ -794,6 +794,25 @@ pub trait RefAudience {
     fn block_effective_audience(&self, block: &EntityUri) -> Audience;
 }
 
+/// Reference-side model of an app RESTART: the store survives, the process does
+/// not.
+///
+/// Split apart from [`RefLifecycle`] because it is the only reference mutation
+/// whose content is a claim about PERSISTENCE — which half of the model the
+/// store restored — rather than about a user action. The `Reboot` transition
+/// gates on it, so a reference that makes no such claim never generates one.
+pub trait RefReboot {
+    /// Drop exactly the state a restart cannot restore, and nothing else.
+    ///
+    /// The persisted half (blocks, edges, focus roots, current focus,
+    /// navigation history, pins, widget-open bits) stays: those are Turso
+    /// tables the second boot re-opens. The in-memory half (the editor buffer
+    /// and its caret) goes, uncommitted text included — the reboot drops the
+    /// engine with no blur, so pending keystrokes that never reached the store
+    /// are lost.
+    fn reboot_drops_in_memory_state(&mut self);
+}
+
 // ─── Reference-side: Lifecycle (admin gates) ─────────────────────────
 
 /// Setup/lifecycle predicates that wide-PBT transitions gate on.
