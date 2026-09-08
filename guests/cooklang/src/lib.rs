@@ -10,8 +10,12 @@
 
 use std::collections::HashMap;
 
+use cooklang::CooklangParser;
+use cooklang::Extensions;
 use cooklang::Item;
 use cooklang::Recipe;
+use cooklang::convert::Converter;
+use cooklang::convert::UnitsFile;
 use cooklang::model::Content;
 use cooklang::quantity::Number;
 use cooklang::quantity::Quantity;
@@ -172,9 +176,35 @@ struct BlockText {
     step_number: Option<u32>,
 }
 
+/// The German unit vocabulary, layered over cooklang's bundled English units.
+///
+/// The guest has no filesystem, so the units file is compiled in rather than
+/// read. Without it a timer written `~{20%Minuten}` is an ERROR and costs the
+/// reader the whole recipe (ruling D100.a).
+///
+/// It lives under `src/` because `guests/build.sh` keys its restaging on that
+/// directory: a copy anywhere else would edit without triggering a rebuild.
+const GERMAN_UNITS: &str = include_str!("german.toml");
+
+/// A parser matching `cooklang::parse` — every extension, the bundled units —
+/// plus the German layer.
+fn parser() -> Result<CooklangParser, String> {
+    let german: UnitsFile = toml::from_str(GERMAN_UNITS)
+        .map_err(|e| format!("the compiled-in German units file is not valid: {e}"))?;
+    let converter = Converter::builder()
+        .with_bundled_units()
+        .and_then(|b| b.with_units_file(german))
+        .and_then(|b| b.finish())
+        .map_err(|e| {
+            format!("the German units layer does not build onto the bundled units: {e}")
+        })?;
+    Ok(CooklangParser::new(Extensions::all(), converter))
+}
+
 fn parse_recipe(source: &str) -> Result<Recipe, String> {
     reject_unclosed_component_brace(source)?;
-    let recipe = cooklang::parse(source)
+    let recipe = parser()?
+        .parse(source)
         .into_result()
         .map(|(recipe, _warnings)| recipe)
         .map_err(|report| {

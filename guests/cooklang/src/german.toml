@@ -1,0 +1,38 @@
+# German unit vocabulary for the `.cook` guest — a cooklang units file layered
+# on top of the bundled English one (ruling D100.a).
+#
+# ALIASES ONLY, never `names` or `symbols`: those two decide how cooklang
+# FORMATS a unit, so restricting this layer to aliases teaches the parser to
+# READ German while leaving every existing recipe's projection untouched.
+#
+# Unit lookup is a case-sensitive map, so each word appears both as the ordinary
+# capitalised German noun and lower-cased — EXCEPT where the lower-cased form is
+# already an English name of some unit (`minute`, `milliliter`, `millimeter`).
+# Every alias must be unique across all units, and every key must name a unit
+# the bundled file declares; the converter refuses to build otherwise, so a typo
+# here surfaces as a loud refusal rather than a silently missing word.
+
+[extend.units]
+
+# Time. This is the layer's reason to exist: cooklang validates TIMER units
+# against the converter and refuses the whole recipe when one is unknown.
+s = { aliases = ["Sekunde", "Sekunden", "sekunde", "sekunden", "Sek", "sek"] }
+min = { aliases = ["Minute", "Minuten", "minuten", "Min"] }
+h = { aliases = ["Stunde", "Stunden", "stunde", "stunden", "Std", "std"] }
+d = { aliases = ["Tag", "Tage", "tag", "tage"] }
+
+# Mass.
+gram = { aliases = ["Gramm", "gramm"] }
+kilogram = { aliases = ["Kilogramm", "kilogramm", "Kilo", "kilo"] }
+
+# Volume.
+liter = { aliases = ["Liter"] }
+milliliter = { aliases = ["Milliliter"] }
+tablespoon = { aliases = ["Esslöffel", "esslöffel", "EL", "El"] }
+teaspoon = { aliases = ["Teelöffel", "teelöffel", "TL", "Tl"] }
+cup = { aliases = ["Tasse", "Tassen", "tasse", "tassen"] }
+
+# Length.
+meter = { aliases = ["Meter"] }
+centimeter = { aliases = ["Zentimeter", "zentimeter"] }
+millimeter = { aliases = ["Millimeter"] }

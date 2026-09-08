@@ -201,8 +201,8 @@ it. Rulings D90.a (delete `cook.rs`, add the incremental scan) and ADR 0034.
   deliberate
   `#[ignore]`d red, the D66.a pattern) by
   `a_second_boot_re_parses_only_the_recipe_that_changed`.
-* **Open, named.** `ADVANCED_UNITS` is still ON in the guest — see §7 R11. The
-  scan is still not incremental — see §7 R13.
+* **Open, named.** `ADVANCED_UNITS` is still ON in the guest and STAYS on
+  (D100.a; see §7 R11). The scan is still not incremental — see §7 R13.
 
 ### Inc B — pantry + ops + cookable-now live query — **LANDED**
 * **Scope.** `pantry_item` type; add/consume/adjust ops; the "what can I cook now" live query (a recipe is cookable iff every `ingredient_use` has a `pantry_item` with sufficient converted quantity).
@@ -335,17 +335,18 @@ C1 is on NO critical path — it is startable today and independent of A/B/D.
   are in the entry:
   `docs/Testing/bugfunnel/entries/2026-09-08-a-cook-vaults-second-boot-re-parses-a-varying-number-of-recipes.md`.
 
-* **R11 — OPEN, needs a ruling.** D91.a says `ADVANCED_UNITS` stays OFF so
-  German timer units parse. MEASURED at lowcode Inc 3: it is currently **ON**
-  in the guest and was ON in the deleted native parser too — `cooklang::parse`
-  uses `Extensions::default()`, which is `all()`. Turning it off does fix
-  `~{9%Minuten}`, but it is not only a timer-table switch: the same flag is
-  what lets a quantity omit the `%` (`@flour{200 g}`), so with it off that
-  recipe's unit column goes empty and the amount becomes the text `"200 g"`.
-  Inc 3 therefore did NOT flip it — a silent projection change over every
-  `%`-less recipe is exactly the class this plan refuses. The ruling needs
-  re-taking with that second effect on the table (a German units FILE, remedy
-  (1) of the bugfunnel entry, has neither side effect).
+* **R11 — CLOSED by D100.a (2026-09-10), which SUPERSEDES D91.a.**
+  `ADVANCED_UNITS` stays **ON**. D91.a had proposed turning it off so German
+  timer units parse; the measurement at lowcode Inc 3 showed the flag was ON all
+  along (`cooklang::parse` uses `Extensions::default()` = `all()`) and that it is
+  not only a timer-table switch — it is also what lets a quantity omit the `%`
+  (`@flour{200 g}`), so turning it off would silently empty the unit column of
+  every `%`-less recipe. D100.a closes the refusal the other way, by remedy (1)
+  of the bugfunnel entry: a German units FILE, `guests/cooklang/src/german.toml`,
+  compiled into the guest and layered over cooklang's bundled English units. It
+  adds ALIASES only, never names or symbols, so no existing recipe's projection
+  moves; `the_english_projection_is_unchanged_by_the_german_units` pins that
+  against a golden captured before the file existed.
   Entry: `docs/Testing/bugfunnel/entries/2026-09-02-a-german-timer-unit-refuses-the-whole-recipe.md`.
 
 * **R2 — CLOSED 2026-09-01 by the D.0 spike.** The FK is declared on the **CHILD**, and the parent's relation set is **derived** from it — two authorable declarations that can disagree is how the two seats come to disagree.

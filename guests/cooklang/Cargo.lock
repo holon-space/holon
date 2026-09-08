@@ -101,6 +101,7 @@ dependencies = [
  "holon-abi-guest",
  "serde_json",
  "serde_yaml",
+ "toml",
 ]
 
 [[package]]

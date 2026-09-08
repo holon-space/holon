@@ -325,6 +325,81 @@ fn an_unrepresentable_metadata_value_is_refused_by_name() {
     );
 }
 
+/// D100.a — the vault is German-authored, so a timer written `~{20%Minuten}`
+/// must be a real timer, not a diagnostic that costs the reader the whole file.
+#[test]
+fn a_german_recipe_parses_with_its_own_timer_and_quantity_units() {
+    let r = parse("kartoffelsuppe.cook");
+    assert_eq!(r.document.content, "Kartoffelsuppe");
+
+    let uses = support::ingredient_use_rows(
+        &std::fs::read_to_string(fixtures().join("kartoffelsuppe.cook")).unwrap(),
+    )
+    .unwrap();
+
+    let kartoffeln = use_of(&uses, "Kartoffeln");
+    assert_eq!(kartoffeln.get("quantity"), Some(&Value::Float(500.0)));
+    assert_eq!(
+        kartoffeln.get("unit"),
+        Some(&Value::String("g".to_string()))
+    );
+
+    let mehl = use_of(&uses, "Mehl");
+    assert_eq!(mehl.get("quantity"), Some(&Value::Float(200.0)));
+    assert_eq!(mehl.get("unit"), Some(&Value::String("g".to_string())));
+
+    // The timers survive into the step prose with their German unit intact.
+    assert!(
+        find(&r.blocks, "20 Minuten").content.contains("köcheln"),
+        "the minute timer must render in its own step"
+    );
+    find(&r.blocks, "1 Stunde");
+}
+
+/// D100.a adds German vocabulary and must add nothing else: an English recipe's
+/// whole projection stays byte-identical. The golden was captured BEFORE the
+/// German units file existed, so a diff here is the regression it guards.
+#[test]
+fn the_english_projection_is_unchanged_by_the_german_units() {
+    let golden = std::fs::read_to_string(fixtures().join("pancakes.projection.txt"))
+        .expect("the pre-change English golden must be readable");
+    assert_eq!(projection_digest(&parse("pancakes.cook")), golden);
+}
+
+/// Every observable a `.cook` file projects, in one deterministic text.
+fn projection_digest(r: &FileFormatParseResult) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("document {}\n", block_line(&r.document)));
+    for block in &r.blocks {
+        out.push_str(&format!("block {}\n", block_line(block)));
+    }
+    for set in &r.typed_rows {
+        out.push_str(&format!(
+            "rowset {} {} {}\n",
+            set.type_name, set.owner_column, set.owner_value
+        ));
+        for row in &set.rows {
+            let mut cells: Vec<String> = row
+                .iter()
+                .map(|(key, value)| format!("{key}={value:?}"))
+                .collect();
+            cells.sort();
+            out.push_str(&format!("  row {}\n", cells.join(" ")));
+        }
+    }
+    out
+}
+
+fn block_line(block: &Block) -> String {
+    let mut properties: Vec<String> = block
+        .properties
+        .iter()
+        .map(|(key, value)| format!("{key}={value:?}"))
+        .collect();
+    properties.sort();
+    format!("{:?} [{}]", block.content, properties.join(" "))
+}
+
 #[test]
 fn write_back_is_refused_loudly() {
     let r = parse("pancakes.cook");

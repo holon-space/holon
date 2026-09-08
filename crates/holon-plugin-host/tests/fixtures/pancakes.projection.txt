@@ -1,0 +1,15 @@
+document "Buttermilk Pancakes" [course=String("breakfast") servings=String("4")]
+block "Whisk the flour and baking powder together in a large bowl." [step_number=String("1")]
+block "In a second bowl beat the eggs into the buttermilk." [step_number=String("2")]
+block "Pour the wet into the dry and fold until barely combined. Rest the batter for 15 minutes." [step_number=String("3")]
+block "Melt butter in a skillet over medium heat and cook each pancake for 2 minutes a side." [step_number=String("4")]
+block "Serve with maple syrup." [step_number=String("5")]
+rowset recipe source_path pancakes.cook
+  row course=String("breakfast") id=String("pancakes.cook") source_path=String("pancakes.cook") title=String("Buttermilk Pancakes")
+rowset ingredient_use recipe_id recipe:pancakes.cook
+  row id=String("pancakes.cook::iu::flour-0") quantity=Float(200.0) raw_name=String("flour") recipe_id=String("recipe:pancakes.cook") step_index=Integer(1) unit=String("g")
+  row id=String("pancakes.cook::iu::baking-powder-0") quantity=Float(2.0) raw_name=String("baking powder") recipe_id=String("recipe:pancakes.cook") step_index=Integer(1) unit=String("tsp")
+  row id=String("pancakes.cook::iu::eggs-0") quantity=Float(2.0) raw_name=String("eggs") recipe_id=String("recipe:pancakes.cook") step_index=Integer(2) unit=Null
+  row id=String("pancakes.cook::iu::buttermilk-0") quantity=Float(300.0) raw_name=String("buttermilk") recipe_id=String("recipe:pancakes.cook") step_index=Integer(2) unit=String("ml")
+  row id=String("pancakes.cook::iu::butter-0") quantity=Float(1.0) raw_name=String("butter") recipe_id=String("recipe:pancakes.cook") step_index=Integer(4) unit=String("tbsp")
+  row id=String("pancakes.cook::iu::maple-syrup-0") quantity=Null raw_name=String("maple syrup") recipe_id=String("recipe:pancakes.cook") step_index=Integer(5) unit=Null
