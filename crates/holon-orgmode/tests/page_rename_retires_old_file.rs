@@ -171,6 +171,8 @@ impl BlockReader for Fixtures {
                         content_hash: hash.clone(),
                         // Org embeds its id, so the skip never reads this.
                         document_id: None,
+                        // Org is a writable format: it declares no membership.
+                        read_only_blocks: Vec::new(),
                     },
                 )
             })

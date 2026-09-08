@@ -505,6 +505,12 @@ pub struct ReferenceState {
     /// through the `RefAudience` cap.
     pub sharing: super::sharing_state::SharingRefState,
 
+    /// Read-only-home overlay: which blocks are homed in a
+    /// `WriteTier::ReadOnly` format and how many writes the run aimed at
+    /// them. Empty on an org-only draw; read by `AttemptReadOnlyEdit`
+    /// through the `RefReadOnlyHomes` cap.
+    pub read_only: super::read_only_state::ReadOnlyRefState,
+
     /// C2 history-oracle expectation (NOT model state proper): populated by the
     /// harness `run_report` from the id-reconcile map. `history_ever_created`
     /// = every real id the oracle minted (anchor for the phantom-history subset
@@ -934,6 +940,7 @@ impl ReferenceState {
             loro: LoroRefExt::default(),
             clock: ClockState::new(),
             sharing: super::sharing_state::SharingRefState::default(),
+            read_only: super::read_only_state::ReadOnlyRefState::default(),
             history_ever_created: BTreeSet::new(),
             history_min_op_groups: 0,
             undo_redo_burned_ids: BTreeSet::new(),

@@ -1,21 +1,16 @@
 //! The dispatcher's write-tier authority: may a write name this block at all.
 //!
-//! It lives with the composition root because answering needs a block reader
-//! (to find the block's owning document) and the degraded bus (to disclose the
-//! refusal), neither of which the engine crate links.
+//! It lives with the composition root because disclosing the refusal needs the
+//! degraded bus, which the engine crate does not link.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fluxdi::Injector;
 use holon_api::EntityUri;
 use holon_core::EditRefused;
 use holon_core::ReadOnlyDocuments;
 use holon_core::Result;
 use holon_core::WriteTierAuthority;
-use holon_filesystem::BlockReader;
-use holon_filesystem::sync_ports::BlockRowMemo;
-use holon_filesystem::sync_ports::nearest_page_ancestor;
 use holon_loro::DegradedSignalBus;
 use holon_loro::ShareDegraded;
 use holon_loro::ShareDegradedReason;
@@ -23,35 +18,13 @@ use holon_loro::ShareDegradedReason;
 /// Refuses writes to blocks of documents homed in a read-only format, and
 /// raises the refusal on the degraded bus so the window shows it.
 pub struct ReadOnlyFormatGate {
-    /// Resolved lazily: this gate is consulted from inside the dispatcher, so
-    /// resolving the dispatcher's own dependencies at wiring time is a cycle.
-    injector: Injector,
     documents: Arc<ReadOnlyDocuments>,
     bus: Arc<DegradedSignalBus>,
 }
 
 impl ReadOnlyFormatGate {
-    pub fn new(
-        injector: Injector,
-        documents: Arc<ReadOnlyDocuments>,
-        bus: Arc<DegradedSignalBus>,
-    ) -> Self {
-        Self {
-            injector,
-            documents,
-            bus,
-        }
-    }
-
-    /// The document owning `id`: the nearest `Page` at or above it.
-    async fn owning_document(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
-        let reader = self.injector.resolve_async::<dyn BlockReader>().await;
-        let mut rows = BlockRowMemo::new();
-        Ok(nearest_page_ancestor(reader.as_ref(), id, &mut rows, None)
-            .await
-            .map_err(|e| format!("write-tier gate: locating the document owning `{id}`: {e}"))?
-            .into_page()
-            .map(|page| page.id))
+    pub fn new(documents: Arc<ReadOnlyDocuments>, bus: Arc<DegradedSignalBus>) -> Self {
+        Self { documents, bus }
     }
 }
 
@@ -61,16 +34,29 @@ impl WriteTierAuthority for ReadOnlyFormatGate {
         !self.documents.is_empty()
     }
 
+    /// One membership lookup, no store read.
+    ///
+    /// Every rendered editable row asks this on every draw
+    /// (`BlockCellRegistry::editable_field_any`), so a per-block parent walk
+    /// here made one `.cook` file in a vault cost a tree walk per row per
+    /// frame. The registry carries the file's blocks instead, recorded at
+    /// ingest.
     async fn refusal_for(&self, block_id: &str) -> Result<Option<EditRefused>> {
         if self.documents.is_empty() {
             return Ok(None);
         }
-        let id = EntityUri::parse(block_id)?;
-        // The block may BE the document; the parent walk starts at itself.
-        let Some(doc_id) = self.owning_document(&id).await? else {
-            return Ok(None);
-        };
-        Ok(self.documents.refusal(&doc_id))
+        Ok(self
+            .documents
+            .refusal_for_block(&EntityUri::parse(block_id)?))
+    }
+
+    async fn adopt_sync_import(&self, block_id: &str, parent_id: &str) -> Result<bool> {
+        if self.documents.is_empty() {
+            return Ok(false);
+        }
+        Ok(self
+            .documents
+            .adopt(&EntityUri::parse(parent_id)?, &EntityUri::parse(block_id)?))
     }
 
     fn disclose(&self, refusal: &EditRefused) {

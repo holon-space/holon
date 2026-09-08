@@ -524,6 +524,12 @@ impl OperationDispatcher {
     /// telling the store what it says, and `Sync` is a peer's already-merged
     /// history — refusing either would break the replica it comes from rather
     /// than protect the file.
+    ///
+    /// A read-only-homed document still accepts no writes from ANY origin. A
+    /// sync import lands, because it already landed in the peer, but the block
+    /// it adds under a read-only root inherits that root's membership here —
+    /// otherwise pairing reopens the hole the refusal closed, with a block that
+    /// can never reach the file yet stays editable.
     async fn enforce_write_tier(
         &self,
         resolved_entity_name: &str,
@@ -533,7 +539,25 @@ impl OperationDispatcher {
         let Some(authority) = &self.write_tier else {
             return Ok(());
         };
-        if resolved_entity_name != "block" || matches!(origin, OpOrigin::Ingest | OpOrigin::Sync) {
+        if resolved_entity_name != "block" || matches!(origin, OpOrigin::Ingest) {
+            return Ok(());
+        }
+        if matches!(origin, OpOrigin::Sync) {
+            let (Some(id), Some(parent)) = (
+                params.get("id").and_then(|v| v.as_string()),
+                params.get("parent_id").and_then(|v| v.as_string()),
+            ) else {
+                return Ok(());
+            };
+            if authority.adopt_sync_import(id, parent).await? {
+                tracing::warn!(
+                    block = %id,
+                    parent = %parent,
+                    "[OperationDispatcher] a sync import added a block under a read-only-homed \
+                     document. It is stored and it is uneditable: no writer can ever put it into \
+                     the authoritative file."
+                );
+            }
             return Ok(());
         }
         for key in ["id", "parent_id"] {
@@ -1713,6 +1737,8 @@ impl Module for OperationModule {
 
 #[cfg(test)]
 mod tests {
+    use holon_api::EntityUri;
+
     use self::super::*;
 
     // Mock OperationProvider for testing
@@ -1740,7 +1766,7 @@ mod tests {
                 )
                 .into());
             }
-            if matches!(op_name, "test_op" | "set_field") {
+            if matches!(op_name, "test_op" | "set_field" | "create") {
                 Ok(OperationResult::irreversible(Vec::new()))
             } else {
                 Err(format!("Unknown operation: {}", op_name).into())
@@ -1770,6 +1796,102 @@ mod tests {
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         }
+    }
+
+    /// The registry the production gate consults, behind the seam the
+    /// dispatcher sees. No disclosure double: the import is not a refusal.
+    struct TestTier(Arc<holon_core::ReadOnlyDocuments>);
+
+    #[async_trait]
+    impl holon_core::WriteTierAuthority for TestTier {
+        fn any_read_only_documents(&self) -> bool {
+            !self.0.is_empty()
+        }
+
+        async fn refusal_for(
+            &self,
+            block_id: &str,
+        ) -> Result<Option<holon_core::write_tier_gate::EditRefused>> {
+            Ok(self.0.refusal_for_block(&EntityUri::parse(block_id)?))
+        }
+
+        async fn adopt_sync_import(&self, block_id: &str, parent_id: &str) -> Result<bool> {
+            Ok(self
+                .0
+                .adopt(&EntityUri::parse(parent_id)?, &EntityUri::parse(block_id)?))
+        }
+
+        fn disclose(&self, _: &holon_core::write_tier_gate::EditRefused) {}
+    }
+
+    fn block_params(pairs: &[(&str, &str)]) -> StorageEntity {
+        pairs
+            .iter()
+            .map(|(k, v)| (Arc::from(*k), holon_api::Value::String((*v).to_string())))
+            .collect()
+    }
+
+    /// A read-only-homed document accepts no writes from ANY origin. A sync
+    /// import LANDS — the merge already happened in the peer it came from — but
+    /// the block it adds under a read-only root inherits that root's
+    /// membership, or pairing reopens the hole the refusal closed with a block
+    /// no writer can ever put into the authoritative file.
+    ///
+    /// Entry
+    /// `2026-09-08-a-synced-block-under-a-read-only-document-stays-editable`.
+    #[tokio::test]
+    async fn a_sync_import_under_a_read_only_root_is_adopted_not_left_editable() {
+        let path = std::path::Path::new("/vault/Pancakes.cook");
+        let step = EntityUri::block("Pancakes.cook::b::0");
+        let documents = Arc::new(holon_core::ReadOnlyDocuments::new());
+        documents.record(
+            &EntityUri::block("Pancakes.cook"),
+            "cooklang",
+            path,
+            &holon_core::ReadOnlyMembers::from_persisted_row(path, vec![step.clone()])
+                .expect("a non-empty membership"),
+        );
+
+        let mut dispatcher = OperationDispatcher::new(vec![Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![
+                create_test_operation("block", "create"),
+                create_test_operation("block", "set_field"),
+            ],
+        })]);
+        dispatcher.set_write_tier_authority(Arc::new(TestTier(documents.clone())));
+
+        dispatcher
+            .execute_operation_with_provenance(
+                &EntityName::new("block"),
+                "create",
+                block_params(&[("id", "block:peer-added"), ("parent_id", step.as_str())]),
+                AuthoredInput::Verbatim,
+                OpOrigin::Sync,
+            )
+            .await
+            .expect("a peer's import must land — refusing it only makes this store disagree");
+
+        let refusal = dispatcher
+            .execute_operation_with_provenance(
+                &EntityName::new("block"),
+                "set_field",
+                block_params(&[
+                    ("id", "block:peer-added"),
+                    ("field", "content"),
+                    ("value", "TYPED"),
+                ]),
+                AuthoredInput::Verbatim,
+                OpOrigin::User,
+            )
+            .await
+            .expect_err(
+                "the imported block accepted a user edit that can never reach the recipe file",
+            );
+        assert!(
+            refusal.to_string().contains("read-only format"),
+            "the refusal must name the tier, got: {refusal}",
+        );
     }
 
     #[tokio::test]

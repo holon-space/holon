@@ -1739,6 +1739,11 @@ mod tests {
                 path: std::path::PathBuf::from("/vault/Pancakes.cook"),
             }))
         }
+        /// The keystroke path never imports; this double refuses everything it
+        /// is asked about, which is what these tests are about.
+        async fn adopt_sync_import(&self, _: &str, _: &str) -> holon_core::Result<bool> {
+            Ok(false)
+        }
         fn disclose(&self, refusal: &holon_core::EditRefused) {
             self.disclosed.lock().unwrap().push(refusal.to_string());
         }

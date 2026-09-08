@@ -121,8 +121,24 @@ PARTIAL, two pieces open:
    affordance set is built from the widget spec, which carries no write tier,
    so making it derive from the tier is its own change through the render
    pipeline.
-2. **Keystone parity.** The composed fixture is still org-only
-   (`crates/holon-integration-tests/src/pbt/composed/builder.rs`), so the
-   keystone cannot generate an edit against a read-only-format block. Seeding a
-   `.cook` document there exposes every existing invariant to a second format
-   at once, which is a change of its own size.
+2. **Keystone parity — CLOSED.** The composed fixture seeds
+   `keystone-recipe.cook` on every frontend draw
+   (`wide_e2e::seed_read_only_recipe`), the `AttemptReadOnlyEdit` transition
+   aims a store-origin write at one of its steps, and
+   `inv-read-only-home-refuses-writes` asserts that `block_raw` still holds what
+   the ingest wrote and that the refusal was raised on the degraded bus. Red for
+   the right reason with the dispatcher's gate neutered: "block
+   `block:keystone-recipe.cook::b::0` is homed in a read-only file, yet
+   `block_raw` no longer holds what the ingest wrote". Replayed deterministically
+   by the `a-write-to-a-read-only-homed-block-is-refused` hand-authored case.
+
+   The fixture immediately earned its keep: with one read-only document in the
+   vault, `inv-sql-budget` reds on `DeleteBackward` (11 dedup reads against a
+   budget of 5+5). The gate is consulted for EVERY rendered editable block, not
+   only the read-only ones — `BlockCellRegistry::editable_field_any` resolves the
+   owning document through an uncached `nearest_page_ancestor` walk — so a single
+   `.cook` file makes the whole vault pay. CLOSED by the same rev: the walk is
+   gone, replaced by the membership registry `ReadOnlyDocuments` (two hash
+   lookups, no store read), and `DeleteBackward` is back inside its budget —
+   `[inv-sql-budget] DeleteBackward: reads=12 (dedup 8)/5 ... tol=5`, pinned by
+   `just hand-authored`.

@@ -81,6 +81,45 @@ async fn add_missing_property_kinds_column(db_handle: &DbHandle) -> Result<()> {
     Ok(())
 }
 
+/// Add `read_only_blocks` to a `file` table created before read-only formats
+/// carried their block membership.
+///
+/// `CREATE TABLE IF NOT EXISTS` leaves an existing table at its old shape, so
+/// without this the controller's persist UPDATE fails on a missing column and
+/// every read-only file's membership is lost at the next boot. NULL for every
+/// existing row is truthful: the next ingest of each file writes the set it
+/// declares.
+async fn add_missing_read_only_blocks_column(db_handle: &DbHandle) -> Result<()> {
+    let already_declared = db_handle
+        .query_positional(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'file'",
+            vec![],
+        )
+        .await?
+        .first()
+        .and_then(|r| r.get("sql"))
+        .and_then(|v| v.as_string().map(str::to_string))
+        .ok_or_else(|| {
+            StorageError::SchemaError(
+                "file is missing from sqlite_master right after its CREATE TABLE".to_string(),
+            )
+        })?
+        .contains("read_only_blocks");
+
+    if already_declared {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        "[CoreSchemaModule] MIGRATING `file`: it predates the `read_only_blocks` column. Adding \
+         it; each file's read-only membership is written by its next ingest."
+    );
+    db_handle
+        .execute_ddl("ALTER TABLE file ADD COLUMN read_only_blocks TEXT")
+        .await?;
+    Ok(())
+}
+
 /// Core schema module providing the fundamental tables: block_raw, files, and
 /// the `clock` relation.
 ///
@@ -135,6 +174,7 @@ impl SchemaModule for CoreSchemaModule {
         for stmt in sql_statements(include_str!("../sql/schema/files.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
+        add_missing_read_only_blocks_column(db_handle).await?;
         tracing::debug!("[CoreSchemaModule] files table + indexes created");
 
         // `clock` relation (ADR 0024 P5, time-as-data). Seed a deterministic

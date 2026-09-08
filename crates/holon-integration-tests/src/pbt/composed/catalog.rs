@@ -40,6 +40,12 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // catches a traversal in ANY derived path (name chain, image content,
         // `file:` URI), not just the one call site a fix was reported at.
         invariants::no_write_outside_vault_root::wire(),
+        // A read-only home is a write boundary: no store-origin write against a
+        // block homed in a `WriteTier::ReadOnly` file reaches `block_raw`, and
+        // every refusal is disclosed on the degraded bus. Needs the production
+        // write-tier authority (`SutReadOnlyHomes`) plus the fixture's declared
+        // homes, so an org-only draw deselects it instead of passing vacuously.
+        invariants::read_only_home_refuses_writes::wire(),
         invariants::source_language::wire(),
         // FLT-1.b: every `holon_filter` source block resolves to a typed
         // FilterSpec over the projected block set. SutBackend only, no ref.

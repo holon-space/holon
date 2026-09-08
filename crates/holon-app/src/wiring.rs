@@ -385,7 +385,6 @@ impl FrontendInjectorExt for Injector {
                 let documents = resolver.resolve::<Arc<holon_core::ReadOnlyDocuments>>();
                 let bus = resolver.resolve::<Arc<holon_loro::DegradedSignalBus>>();
                 Arc::new(crate::read_only_format_gate::ReadOnlyFormatGate::new(
-                    resolver.clone(),
                     (*documents).clone(),
                     (*bus).clone(),
                 )) as Arc<dyn holon_core::WriteTierAuthority>

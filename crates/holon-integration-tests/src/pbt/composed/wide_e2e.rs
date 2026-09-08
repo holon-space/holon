@@ -248,6 +248,106 @@ pub const WIDE_TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n
                                  parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* \
                                  c2\n:PROPERTIES:\n:ID: c2\n:END:\n";
 
+/// The keystone's READ-ONLY-format document. Cooklang ships no writer, so this
+/// file is authoritative input: the store may project it and may never author
+/// it. Two steps, because one is enough to be refused and a second proves the
+/// gate is per-document rather than per-block.
+///
+/// `CookFormatAdapter` ids the steps `block:<vault-relative path>::b::<seq>`,
+/// which is why [`READ_ONLY_STEP_IDS`] can be constants — the ids are derived
+/// from the filename, not minted.
+pub const KEYSTONE_RECIPE_COOK: &str = "\
+---
+title: Keystone Recipe
+servings: 2
+---
+Crack the @eggs{2} into a bowl.
+
+Whisk in the @flour{200%g}.
+";
+
+/// The vault filename of [`KEYSTONE_RECIPE_COOK`].
+pub const READ_ONLY_RECIPE_FILE: &str = "keystone-recipe.cook";
+
+/// The step blocks `KEYSTONE_RECIPE_COOK` ingests as — the oracle's read-only
+/// homes and `AttemptReadOnlyEdit`'s only targets.
+pub const READ_ONLY_STEP_IDS: [&str; 2] = [
+    "block:keystone-recipe.cook::b::0",
+    "block:keystone-recipe.cook::b::1",
+];
+
+/// Declare the recipe's steps read-only-homed in the oracle. Seeded ONLY for a
+/// frontend draw, which is the only arm whose boot ingests the vault's files;
+/// [`boot_and_seed_wide`] keys the file seed on the same condition, so a
+/// Loro-only draw carries neither and `inv-read-only-home-refuses-writes`
+/// deselects there.
+///
+/// The steps' CONTENT is deliberately not modeled: they are booted-but-not-tree
+/// ids, so the scaffold math seed-classifies them and every block invariant
+/// ignores them. The file is their authority, and the read-only invariant
+/// compares the store against what the ingest wrote rather than against a
+/// hand-copy of the recipe.
+pub fn seed_read_only_recipe(state: &mut ReferenceState) {
+    // The recipe's PAGE is modeled: it renders in the page list, and the
+    // ViewModel's entity-id oracle knows only what the ref carries. Its id is
+    // convergent-by-path (Model.md invariant 13), so it is DERIVED here the way
+    // production derives it rather than pasted as a literal.
+    let page = read_only_recipe_page();
+    let mut page_block = Block::new_text(page.clone(), EntityUri::no_parent(), "keystone-recipe");
+    page_block.set_page(true);
+    state
+        .domain
+        .block_state
+        .blocks
+        .insert(page.clone(), page_block);
+    // Seed-classified (`no_parent` document), like the forward-edge page: the
+    // file is this subtree's authority, so the block comparison must not hold
+    // the oracle's hand-copy against it.
+    state
+        .domain
+        .block_state
+        .block_documents
+        .insert(page.clone(), EntityUri::no_parent());
+    // Deliberately NOT in `files.documents`: that map is the ORG-file
+    // bookkeeping the home-profile oracle reads, and a recipe is held by no org
+    // file. Production resolves the page's profile as `holon-native` for the
+    // same reason — the profile axis has no read-only-format value yet.
+    let _ = &page;
+    // The steps, as the cook adapter de-sugars them. Modeled so the whole-vault
+    // watch/query oracles know them; seed-classified like the page, so the
+    // block comparison still treats the file as their authority.
+    for (id, text) in READ_ONLY_STEP_IDS.iter().zip(READ_ONLY_STEP_TEXT) {
+        let uri = EntityUri::parse(id).expect("a literal recipe step id");
+        state.domain.block_state.blocks.insert(
+            uri.clone(),
+            Block::new_text(uri.clone(), page.clone(), text),
+        );
+        state
+            .domain
+            .block_state
+            .block_documents
+            .insert(uri.clone(), EntityUri::no_parent());
+        state.read_only.seed_home(uri);
+    }
+}
+
+/// The steps' text as `CookFormatAdapter` de-sugars it (`@eggs{2}` → `eggs`).
+/// A hand-copy on purpose: if the adapter's de-sugaring changes, the oracles
+/// say so instead of quietly adopting the new output.
+pub const READ_ONLY_STEP_TEXT: [&str; 2] = ["Crack the eggs into a bowl.", "Whisk in the flour."];
+
+/// The page the recipe file materializes as. Titled from the file STEM (the
+/// cook adapter carries no `sync_document_metadata`, so the cooklang `title:`
+/// never reaches the persisted page) and id'd by that same name chain.
+pub fn read_only_recipe_page() -> EntityUri {
+    EntityUri::parse(
+        holon_api::link_parser::PageId::for_path("keystone-recipe")
+            .expect("a single-segment page path")
+            .as_str(),
+    )
+    .expect("PageId mints a parseable block id")
+}
+
 /// The `#+ID:` page id of the forward-edge ingest corpus.
 pub fn forward_edge_page() -> EntityUri {
     EntityUri::block("forward-edge-page")
@@ -899,6 +999,12 @@ pub async fn boot_and_seed_wide_with_peer_id(
         "#+ID: journals\n"
     };
     let mut seed_files: Vec<(&str, &str)> = vec![("structural-page.org", WIDE_TREE_ORG)];
+    // The read-only-format document. Seeded on the same condition as the oracle
+    // (`seed_read_only_recipe`, a frontend draw) so file and oracle cannot
+    // disagree about whether this vault has a second format.
+    if !ref_state.read_only.homes().is_empty() {
+        seed_files.push((READ_ONLY_RECIPE_FILE, KEYSTONE_RECIPE_COOK));
+    }
     if carries_folder_companion {
         seed_files.push(("2026-07-10.org", FOLDER_JOURNAL_PAGE_ORG));
     }
@@ -981,6 +1087,44 @@ pub async fn boot_and_seed_wide_with_peer_id(
                 "[boot journal] auto-create rule did not fire journal {journal_id} within budget"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    // The read-only-home rung. The recipe ingests through the SAME file-sync
+    // controller as the org files, so wait for its steps in `block_raw` before
+    // snapshotting: a baseline taken mid-ingest would be empty and the
+    // invariant would compare nothing. Fail loud on timeout — a recipe that
+    // never ingests means the fixture, not the gate, is what this run measured.
+    if let Some(frontend) = &handle.frontend {
+        if !ref_state.read_only.homes().is_empty() {
+            let expected: BTreeSet<EntityUri> =
+                ref_state.read_only.homes().iter().cloned().collect();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                converge_projections(&handle, Duration::from_millis(300)).await;
+                if expected.is_subset(&sut_ids(&caps).await) {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    let seen: Vec<String> = sut_ids(&caps)
+                        .await
+                        .iter()
+                        .filter(|id| id.as_str().contains("cook") || id.as_str().contains("recipe"))
+                        .map(|id| id.to_string())
+                        .collect();
+                    panic!(
+                        "[read-only homes] {READ_ONLY_RECIPE_FILE} did not ingest its steps \
+                         {expected:?} within budget. Recipe-shaped ids actually in the store: \
+                         {seen:?}"
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            frontend.snapshot_read_only_ingest().await;
+            caps.insert(frontend.clone()
+                as std::sync::Arc<dyn holon_pbt_core::capabilities::SutReadOnlyHomes>);
+            caps.insert(frontend.clone()
+                as std::sync::Arc<dyn holon_pbt_core::capabilities::SutReadOnlyEditAttempt>);
         }
     }
 
@@ -1470,6 +1614,7 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
     // (no `SutSqlProjection`).
     if set.has_projection(Projection::ViewModel) {
         seed_forward_edge_corpus(&mut state);
+        seed_read_only_recipe(&mut state);
         // Companion page-tag demotion closure (dogfood 2026-07-12): a top-level
         // page-file (`2026-07-10.org`) whose `Page` doc-root is inlined as a plain
         // heading in the `Journals.org` companion. Frontend-only (a Turso org-

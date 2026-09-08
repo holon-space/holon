@@ -78,7 +78,7 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
 
 ## Invariants
 
-(1)–(7) are [Replication §9](Replication.md); (8)–(13) extend them.
+(1)–(7) are [Replication §9](Replication.md); (8)–(14) extend them.
 
 1. One base per replica, diffed against — never against the cache.
 2. One consolidator per sibling-set owns order; sinks store its fi verbatim.
@@ -170,6 +170,31 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     never substitutes for the constructor — each reintroduces the
     duplicate-identity bug class the ADR measured (34% of the live vault as
     duplicate rows from re-minting on re-parse).
+14. **A read-only home is a write boundary** — a block whose document is homed
+    in a `WriteTier::ReadOnly` file (cooklang today) is a projection of input
+    Holon ships no writer for, so no store-origin write may name it. The
+    decision is made once, at the writers, against one authority
+    (`WriteTierAuthority`, `crates/holon-core/src/write_tier_gate.rs`): the
+    operation dispatcher (invariant 4's one writer) and the editor's text cell
+    (`ReadOnlyTextCellBacking`, which writes the `LoroText` container directly
+    and so bypasses the dispatcher) both consult it and both refuse with the
+    typed `EditRefused`. Only store-origin writes are judged — `OpOrigin::Ingest`
+    is the file telling the store what it says and `OpOrigin::Sync` is a peer's
+    merged history, and refusing either would break the replica it came from.
+    A refusal is always DISCLOSED (`EDIT_REFUSED_READ_ONLY_FORMAT` on the
+    degraded bus): an edit that silently lands only in the store is the failure
+    mode this project ranks last. Pinned by
+    `inv-read-only-home-refuses-writes` in the composed keystone, whose fixture
+    seeds a `.cook` document, and end-to-end by
+    `crates/holon-integration-tests/tests/cook_vault_ingest.rs`.
+    The authority answers from a block→home MEMBERSHIP the file-sync controller
+    records at ingest and persists beside `file.content_hash`, not from a walk
+    up each block's parents: every editable row asks on every draw, so a walk
+    made one read-only file in a vault cost a store read per row per frame. The
+    membership needs no invalidation — a block enters or leaves a read-only
+    document only through a write naming its root or one of its blocks, which
+    is exactly what this invariant refuses — and a boot that skips a file's
+    ingest loads it from that row rather than rebuilding it.
 
 ## Page identity: name-chains derive only through page ancestors
 

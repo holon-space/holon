@@ -33,6 +33,7 @@ use holon_api::capability::Consolidator;
 use holon_core::CanonicalPath;
 use holon_core::DownstreamProjection;
 use holon_core::ReadOnlyDocuments;
+use holon_core::ReadOnlyMembers;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FormatRegistry;
@@ -647,6 +648,20 @@ impl std::fmt::Display for CascadeAuthority {
     }
 }
 
+/// What a home-recording site knows about a read-only document's blocks.
+///
+/// [`ReadOnlyMembers`] is the only currency, and it can be built only from the
+/// file's own account of itself, so a site that has no such account cannot
+/// declare one.
+enum HomeMembership {
+    /// The file's blocks, from the parse that read it or from the `file` row a
+    /// previous parse stamped.
+    Declared(ReadOnlyMembers),
+    /// This site only moved the home, or the path's format is writable and
+    /// holds no read-only membership at all.
+    Untouched,
+}
+
 pub struct FileSyncController {
     /// What we last wrote to (or confirmed on) disk, per file.
     /// Uses CanonicalPath to resolve macOS /var → /private/var symlinks,
@@ -669,6 +684,13 @@ pub struct FileSyncController {
     /// present, so without this the skip is unreachable and every such file is
     /// re-parsed on every boot.
     last_projection_doc: HashMap<CanonicalPath, EntityUri>,
+
+    /// The read-only block membership persisted beside each
+    /// `file.content_hash`, loaded at startup by the same read. A boot that
+    /// takes the fast path above never parses the file, so this is the ONLY
+    /// place its membership can come from — rebuilding it from the store would
+    /// be the parent walk this registry exists to delete.
+    persisted_read_only_blocks: HashMap<CanonicalPath, Vec<EntityUri>>,
 
     /// Cheap dirty-check signature `(mtime, size)` per tracked path. Used by
     /// `poll_external_changes` to skip the expensive `read_to_string` when
@@ -990,6 +1012,7 @@ impl FileSyncController {
             last_projection: HashMap::new(),
             last_projection_hash: HashMap::new(),
             last_projection_doc: HashMap::new(),
+            persisted_read_only_blocks: HashMap::new(),
             disk_signatures: HashMap::new(),
             base_store: SyncBaseStore::in_memory(),
             base_source: HashMap::new(),
@@ -1374,6 +1397,10 @@ impl FileSyncController {
                         Ok(Some(canonical)) => {
                             if let Some(document) = projection.document_id {
                                 self.last_projection_doc.insert(canonical.clone(), document);
+                            }
+                            if !projection.read_only_blocks.is_empty() {
+                                self.persisted_read_only_blocks
+                                    .insert(canonical.clone(), projection.read_only_blocks);
                             }
                             self.last_projection_hash
                                 .insert(canonical, projection.content_hash);
@@ -2238,7 +2265,12 @@ impl FileSyncController {
     /// write-back, an ingest, an atomic file rename — so a later page rename
     /// can always find the file to retire, with or without the Loro-backed
     /// alias registry.
-    fn note_doc_home(&mut self, doc_id: &EntityUri, path: &Path) {
+    fn note_doc_home(
+        &mut self,
+        doc_id: &EntityUri,
+        path: &Path,
+        members: HomeMembership,
+    ) -> Result<()> {
         let canonical = CanonicalPath::new(path);
         // The reverse index the cold-boot skip reads for an id-less format.
         // Kept here rather than only at boot so the FIRST ingest of a file
@@ -2246,21 +2278,40 @@ impl FileSyncController {
         self.last_projection_doc
             .insert(canonical.clone(), doc_id.clone());
         self.doc_home.insert(doc_id.clone(), canonical);
-        self.publish_write_tier(doc_id, path);
+        self.publish_write_tier(doc_id, path, members)
     }
 
-    /// Mirror `doc_id`'s home tier into the registry the dispatcher's
-    /// write-tier gate reads.
-    fn publish_write_tier(&self, doc_id: &EntityUri, path: &Path) {
+    /// Whether `path`'s format refuses write-back.
+    fn is_read_only_path(&self, path: &Path) -> bool {
+        self.formats
+            .adapter_for(path)
+            .is_some_and(|a| a.write_tier() == WriteTier::ReadOnly)
+    }
+
+    /// Mirror `doc_id`'s home tier — and, for a read-only home, the blocks the
+    /// file declares — into the registry the dispatcher's write-tier gate
+    /// reads.
+    fn publish_write_tier(
+        &self,
+        doc_id: &EntityUri,
+        path: &Path,
+        members: HomeMembership,
+    ) -> Result<()> {
         let Some(docs) = &self.read_only_docs else {
-            return;
+            return Ok(());
         };
         match self.formats.adapter_for(path) {
-            Some(adapter) if adapter.write_tier() == WriteTier::ReadOnly => {
-                docs.record(doc_id, adapter.format_name(), path)
-            }
+            Some(adapter) if adapter.write_tier() == WriteTier::ReadOnly => match members {
+                HomeMembership::Declared(blocks) => {
+                    docs.record(doc_id, adapter.format_name(), path, &blocks)
+                }
+                HomeMembership::Untouched => docs
+                    .rehome(doc_id, adapter.format_name(), path)
+                    .map_err(|e| anyhow::anyhow!("[FileSyncController] {e}"))?,
+            },
             _ => docs.forget(doc_id),
         }
+        Ok(())
     }
 
     /// Drop every per-file tracking entry for a vanished path.
@@ -2277,6 +2328,7 @@ impl FileSyncController {
         self.block_home.retain(|_, home| home != canonical);
         self.last_projection.remove(canonical);
         self.last_projection_hash.remove(canonical);
+        self.persisted_read_only_blocks.remove(canonical);
         self.disk_signatures.remove(canonical);
         self.base_source.remove(canonical);
         // A deleted file must not leave a stale ingest-quarantine entry: if the
@@ -2293,7 +2345,7 @@ impl FileSyncController {
     /// forget/re-discover round-trip (which would re-ingest the file as new).
     /// The diff `base` itself is keyed by document id, not path, so it needs no
     /// migration.
-    fn migrate_file_state(&mut self, from: &CanonicalPath, to: &CanonicalPath) {
+    fn migrate_file_state(&mut self, from: &CanonicalPath, to: &CanonicalPath) -> Result<()> {
         let mut moved: Vec<EntityUri> = Vec::new();
         for (doc_id, home) in self.doc_home.iter_mut() {
             if home == from {
@@ -2301,8 +2353,11 @@ impl FileSyncController {
                 moved.push(doc_id.clone());
             }
         }
+        if let Some(v) = self.persisted_read_only_blocks.remove(from) {
+            self.persisted_read_only_blocks.insert(to.clone(), v);
+        }
         for doc_id in &moved {
-            self.publish_write_tier(doc_id, to.as_path_buf());
+            self.publish_write_tier(doc_id, to.as_path_buf(), HomeMembership::Untouched)?;
         }
         for home in self.block_home.values_mut() {
             if home == from {
@@ -2346,6 +2401,7 @@ impl FileSyncController {
         if self.writeback_readonly.remove(from) {
             self.writeback_readonly.insert(to.clone());
         }
+        Ok(())
     }
 
     /// Handle an ATOMIC on-disk rename (`mv A.org B.org` in the vault). Reached
@@ -2416,11 +2472,11 @@ impl FileSyncController {
 
         // Migrate per-file tracking state (echo-suppression, hashes, base
         // source, quarantine) from the old path to the new one.
-        self.migrate_file_state(&from_canon, &to_canon);
+        self.migrate_file_state(&from_canon, &to_canon)?;
 
         // Re-point the doc's home so `inv-every-page-has-its-own-file` and every
         // file-tracking consumer resolve the doc to its NEW home immediately.
-        self.note_doc_home(&document_uri, to);
+        self.note_doc_home(&document_uri, to, HomeMembership::Untouched)?;
         if let Some(ref registrar) = self.alias_registrar {
             registrar.register_alias(&document_uri, to).await;
         }
@@ -3171,12 +3227,53 @@ impl FileSyncController {
                 // BOTH records, as the full ingest writes both: a rename
                 // retires the union of them (`prior_page_homes`), so one left
                 // unwritten is one home the retire cannot reach.
-                self.note_doc_home(root, path);
-                if let Some(ref registrar) = self.alias_registrar {
-                    registrar.register_alias(root, path).await;
+                // The skip never parses the file, so a read-only home's block
+                // membership can only come from the `file` row carrying the
+                // hash this skip just matched — the two are written by one
+                // UPDATE. A matched hash with no membership is therefore a
+                // damaged row, and the skip is refused rather than taken: the
+                // full ingest below re-derives the membership from the file
+                // itself. Neither of the alternatives is admissible — a parent
+                // walk would leave the walk alive on the boot every returning
+                // user takes, and aborting this file would leave its blocks
+                // registered nowhere, which is exactly the edits-accepted
+                // state the refusal exists to prevent.
+                // A writable file declares no read-only membership, so its home
+                // record needs none; a read-only one may take the skip only
+                // when the row it matched carries the blocks the skipped parse
+                // would have declared.
+                let membership = if self.read_only_docs.is_some() && self.is_read_only_path(path) {
+                    self.persisted_read_only_blocks
+                        .get(&canonical)
+                        .cloned()
+                        .map(|blocks| {
+                            ReadOnlyMembers::from_persisted_row(path, blocks)
+                                .map(HomeMembership::Declared)
+                                .map_err(|e| anyhow::anyhow!("[FileSyncController] {e}"))
+                        })
+                        .transpose()?
+                } else {
+                    Some(HomeMembership::Untouched)
+                };
+                match membership {
+                    // Falls through to the full ingest below, which re-derives
+                    // the membership from the file and rewrites the row.
+                    None => tracing::error!(
+                        path = %path.display(),
+                        "[FileSyncController] the file row's `content_hash` matched but it \
+                         carries no `read_only_blocks`, so the cold-boot skip cannot know which \
+                         blocks this authoritative file owns. Re-ingesting the file instead of \
+                         skipping it; the ingest rewrites both.",
+                    ),
+                    Some(membership) => {
+                        self.note_doc_home(root, path, membership)?;
+                        if let Some(ref registrar) = self.alias_registrar {
+                            registrar.register_alias(root, path).await;
+                        }
+                        self.last_projection.insert(canonical.clone(), disk_content);
+                        return Ok(IngestOutcome::Ingested);
+                    }
                 }
-                self.last_projection.insert(canonical.clone(), disk_content);
-                return Ok(IngestOutcome::Ingested);
             }
         }
 
@@ -3352,7 +3449,34 @@ impl FileSyncController {
         // earlier duplicate-id refusal for it is resolved — re-arm the loud
         // disclosure in case the same path collides again later.
         self.duplicate_id_disclosed.retain(|(p, _)| p != &canonical);
-        self.note_doc_home(&document_uri, path);
+        // The blocks a read-only file declares, from the parse that just read
+        // it — the file is their sole authority, so this is the one place the
+        // set is known. Empty for a writable file, which records no membership
+        // at all.
+        let membership = if self.is_read_only_path(path) {
+            // A read-only file cannot be written back, so a minted id would be
+            // a fresh identity on every boot rather than something the file
+            // could ever carry. Its adapter must derive every id from the file.
+            anyhow::ensure!(
+                new_parse.blocks_needing_ids.is_empty(),
+                "[FileSyncController] the {} adapter parsed {} leaving {} block(s) without an id, \
+                 but the file is read-only and can never be written back with the minted ones — \
+                 they would churn on every boot. The adapter must derive ids from the file.",
+                ingest_adapter.format_name(),
+                path.display(),
+                new_parse.blocks_needing_ids.len(),
+            );
+            HomeMembership::Declared(ReadOnlyMembers::from_parse(&document_uri, &new_parse))
+        } else {
+            HomeMembership::Untouched
+        };
+        // The same set the row is stamped with further down, so a boot that
+        // skips this parse loads exactly what this parse declared.
+        let read_only_members: Vec<EntityUri> = match &membership {
+            HomeMembership::Declared(m) => m.as_slice().to_vec(),
+            HomeMembership::Untouched => Vec::new(),
+        };
+        self.note_doc_home(&document_uri, path, membership)?;
         self.note_block_homes(&new_parse.blocks, &canonical);
         if let Some(ref registrar) = self.alias_registrar {
             registrar.register_alias(&document_uri, path).await;
@@ -4628,8 +4752,14 @@ impl FileSyncController {
         {
             self.last_projection
                 .insert(canonical.clone(), disk_content.to_string());
-            self.persist_disk_hash_for(&canonical, rel_path, &disk_hash, &document_uri)
-                .await;
+            self.persist_disk_hash_for(
+                &canonical,
+                rel_path,
+                &disk_hash,
+                &document_uri,
+                &read_only_members,
+            )
+            .await;
             return Ok(IngestOutcome::Ingested);
         }
 
@@ -4650,8 +4780,14 @@ impl FileSyncController {
             );
             self.last_projection
                 .insert(canonical.clone(), disk_content.to_string());
-            self.persist_disk_hash_for(&canonical, rel_path, &disk_hash, &document_uri)
-                .await;
+            self.persist_disk_hash_for(
+                &canonical,
+                rel_path,
+                &disk_hash,
+                &document_uri,
+                &read_only_members,
+            )
+            .await;
             return Ok(IngestOutcome::Ingested);
         }
 
@@ -4665,8 +4801,14 @@ impl FileSyncController {
         if ingest_adapter.write_tier() == WriteTier::ReadOnly {
             self.last_projection
                 .insert(canonical.clone(), disk_content.to_string());
-            self.persist_disk_hash_for(&canonical, rel_path, &disk_hash, &document_uri)
-                .await;
+            self.persist_disk_hash_for(
+                &canonical,
+                rel_path,
+                &disk_hash,
+                &document_uri,
+                &read_only_members,
+            )
+            .await;
             return Ok(IngestOutcome::Ingested);
         }
 
@@ -4726,8 +4868,14 @@ impl FileSyncController {
                 );
                 self.last_projection
                     .insert(canonical.clone(), disk_content.to_string());
-                self.persist_disk_hash_for(&canonical, rel_path, &disk_hash, &document_uri)
-                    .await;
+                self.persist_disk_hash_for(
+                    &canonical,
+                    rel_path,
+                    &disk_hash,
+                    &document_uri,
+                    &read_only_members,
+                )
+                .await;
                 return Ok(IngestOutcome::Ingested);
             }
             // Checked BEFORE the drop verdict, mirroring the block-driven
@@ -4821,8 +4969,14 @@ impl FileSyncController {
         // in both cases `rendered` is the canonical projection). Updates
         // in-memory map and persists to SQL so next boot's fast-path engages.
         let final_hash = self.projection_hash(&rendered);
-        self.persist_disk_hash_for(&canonical, rel_path, &final_hash, &document_uri)
-            .await;
+        self.persist_disk_hash_for(
+            &canonical,
+            rel_path,
+            &final_hash,
+            &document_uri,
+            &read_only_members,
+        )
+        .await;
 
         // Update last_projection
         self.last_projection.insert(canonical.clone(), rendered);
@@ -4830,22 +4984,35 @@ impl FileSyncController {
         Ok(IngestOutcome::Ingested)
     }
 
-    /// Update `last_projection_hash` / `last_projection_doc` in memory and
-    /// persist BOTH to the file row via the BlockReader's raw-SQL write-back —
-    /// the hash alone cannot arm the next boot's fast path for a
-    /// `ByRecordedHome` format, which has no other way to name its document.
-    /// Best-effort: a failure to persist does not abort the ingest — we've
-    /// already committed the block ops and don't want to bail the controller.
-    /// Logged at warn so the case is observable.
+    /// Update `last_projection_hash` in memory and persist the whole row —
+    /// hash, document and the read-only block membership the next boot's skip
+    /// will need — to the `file` row via the BlockReader's raw-SQL write-back.
+    /// The hash alone cannot arm the next boot's fast path: a `ByRecordedHome`
+    /// format has no other way to name its document, and a read-only home has
+    /// no other way to learn which blocks it owns. Best-effort: a failure to
+    /// persist does not abort the ingest — we've already committed the block
+    /// ops and don't want to bail the controller. Logged at warn so the case
+    /// is observable.
+    ///
+    /// `read_only_members` is empty for every writable file, and persisting it
+    /// clears what the row held — a file whose format turned writable is no
+    /// longer a read-only home.
     async fn persist_disk_hash_for(
         &mut self,
         canonical: &CanonicalPath,
         rel_path: &Path,
         hash: &str,
         document_id: &EntityUri,
+        read_only_members: &[EntityUri],
     ) {
         self.last_projection_hash
             .insert(canonical.clone(), hash.to_string());
+        if read_only_members.is_empty() {
+            self.persisted_read_only_blocks.remove(canonical);
+        } else {
+            self.persisted_read_only_blocks
+                .insert(canonical.clone(), read_only_members.to_vec());
+        }
         let rel = rel_path.to_string_lossy();
         let file_uri = EntityUri::file(&rel);
         // The row's own path fields, used only if this write is the one that
@@ -4858,9 +5025,14 @@ impl FileSyncController {
             Some(p) if !p.as_os_str().is_empty() => p.to_string_lossy().to_string(),
             _ => ".".to_string(),
         };
+        // Hash, document and membership in ONE row shape: the boot that arms
+        // on the hash needs both of the others, and a write that carried only
+        // some of them would leave the next boot re-ingesting forever (missing
+        // document) or trusting an empty membership (missing blocks).
         let projection = crate::sync_ports::FileProjection {
             content_hash: hash.to_string(),
             document_id: Some(document_id.clone()),
+            read_only_blocks: read_only_members.to_vec(),
         };
         if let Err(e) = self
             .block_reader
@@ -7249,7 +7421,10 @@ impl FileSyncController {
         }
         match self.fs.write(path, rendered).await {
             Ok(()) => {
-                self.note_doc_home(doc_id, path);
+                // Unreachable for a read-only home: the tier gate above
+                // returned before this write, so this only ever records a
+                // writable home (which drops any membership).
+                self.note_doc_home(doc_id, path, HomeMembership::Untouched)?;
                 self.disclose_share_inlined_into(doc_id, path, rendered)
                     .await;
                 Ok(true)

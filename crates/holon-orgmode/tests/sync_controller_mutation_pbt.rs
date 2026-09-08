@@ -2314,6 +2314,8 @@ mod fast_path_loro_presence_tests {
                             content_hash: v.clone(),
                             // Org embeds its id, so the skip never reads this.
                             document_id: None,
+                            // Org is writable: it declares no membership.
+                            read_only_blocks: Vec::new(),
                         },
                     )
                 })

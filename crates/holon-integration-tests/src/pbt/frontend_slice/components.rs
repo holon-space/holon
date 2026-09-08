@@ -260,6 +260,16 @@ pub struct HeadlessFrontendComponent {
     /// Arms `render_snapshot_cache`. OFF by default; the composed builder turns
     /// it on via `enable_render_cache` after boot.
     render_cache_enabled: std::sync::atomic::AtomicBool,
+    /// `(block id, content)` for every block the production
+    /// [`holon_core::WriteTierAuthority`] classifies as read-only-homed, taken
+    /// once after the boot ingest. `None` until the composed builder calls
+    /// [`Self::snapshot_read_only_ingest`]; the invariant reads it as the
+    /// baseline the file — not the store — authored.
+    read_only_ingest: Mutex<Option<Vec<(String, String)>>>,
+    /// `(writes aimed at a read-only-homed block, writes the dispatcher
+    /// refused)`. Counted separately so a run that attempted nothing is
+    /// distinguishable from a run whose refusals all fired.
+    read_only_attempts: Mutex<(usize, usize)>,
 }
 
 /// Does this defining SELECT carry a real BIND PLACEHOLDER (so
@@ -705,7 +715,12 @@ impl HeadlessFrontendComponent {
             // `SutOrgRender` / the external-mutation doc rewriter) and false-RED
             // `inv-blocks-match-ref/org`. The org invariants keep the keystone-sized
             // comparison surface; the soak load is exercised via store/CDC/Loro.
-            if !filename.starts_with("soak-") {
+            // A non-org seed file (the read-only `.cook` recipe) is written to
+            // the vault so the file-sync controller ingests it, but never
+            // tracked: the org readers (`SutOrgRead` / `SutOrgRender`) parse
+            // what they are handed AS org, and a cooklang file parsed as org is
+            // a divergence the fixture invented.
+            if !filename.starts_with("soak-") && filename.ends_with(".org") {
                 org_paths.push(file_path);
             }
         }
@@ -929,6 +944,8 @@ impl HeadlessFrontendComponent {
             clock,
             render_snapshot_cache: Mutex::new(None),
             render_cache_enabled: std::sync::atomic::AtomicBool::new(false),
+            read_only_ingest: Mutex::new(None),
+            read_only_attempts: Mutex::new((0, 0)),
         }
     }
 
@@ -6557,5 +6574,134 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
     async fn block_raw_ids(&self) -> std::collections::BTreeSet<String> {
         let rows = self.sql_query("SELECT id FROM block_raw").await;
         rows.iter().filter_map(|r| Self::cell(r, "id")).collect()
+    }
+}
+
+// ─── Read-only homes (`inv-read-only-home-refuses-writes`) ───────────────
+//
+// The vault's read-only set is not re-derived here: it is asked of the
+// PRODUCTION `WriteTierAuthority` — the same object the dispatcher consults —
+// so the invariant measures the decision the app actually makes rather than a
+// second rule that could agree while production's diverges.
+
+impl HeadlessFrontendComponent {
+    async fn write_tier_authority(&self) -> Option<Arc<dyn holon_core::WriteTierAuthority>> {
+        self.injector
+            .optional_resolve_async::<dyn holon_core::WriteTierAuthority>()
+            .await
+    }
+
+    /// `(id, content)` for every `block_raw` row the production authority
+    /// refuses writes to, sorted. Empty — after ONE atomic read — for a vault
+    /// with no read-only-format document, which is every org-only draw.
+    async fn read_only_rows(&self) -> Vec<(String, String)> {
+        let Some(authority) = self.write_tier_authority().await else {
+            return Vec::new();
+        };
+        if !authority.any_read_only_documents() {
+            return Vec::new();
+        }
+        let mut rows = Vec::new();
+        for row in self.sql_query("SELECT id, content FROM block_raw").await {
+            let (Some(id), Some(content)) = (Self::cell(&row, "id"), Self::cell(&row, "content"))
+            else {
+                continue;
+            };
+            let refused = authority
+                .refusal_for(&id)
+                .await
+                .unwrap_or_else(|e| panic!("[read-only homes] authority failed for {id}: {e}"))
+                .is_some();
+            if refused {
+                rows.push((id, content));
+            }
+        }
+        rows.sort();
+        rows
+    }
+
+    /// Take the post-ingest baseline. Called by the composed builder once the
+    /// boot ingest has settled and before the first transition, so what it
+    /// captures is what the FILE said.
+    pub(crate) async fn snapshot_read_only_ingest(&self) {
+        let rows = self.read_only_rows().await;
+        *self
+            .read_only_ingest
+            .lock()
+            .expect("read_only_ingest poisoned") = Some(rows);
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponent {
+    async fn read_only_blocks_at_ingest(&self) -> Vec<(String, String)> {
+        self.read_only_ingest
+            .lock()
+            .expect("read_only_ingest poisoned")
+            .clone()
+            .expect(
+                "[read-only homes] the ingest baseline was never taken — the composed builder \
+                 must call `snapshot_read_only_ingest` after boot, or the invariant would compare \
+                 the store against itself",
+            )
+    }
+
+    async fn read_only_blocks_now(&self) -> Vec<(String, String)> {
+        self.read_only_rows().await
+    }
+
+    async fn read_only_write_attempts(&self) -> (usize, usize) {
+        *self
+            .read_only_attempts
+            .lock()
+            .expect("read_only_attempts poisoned")
+    }
+
+    async fn raised_degraded_conditions(&self) -> Vec<String> {
+        let Some(bus) = self
+            .injector
+            .optional_resolve_async::<Arc<holon_loro::DegradedSignalBus>>()
+            .await
+        else {
+            return Vec::new();
+        };
+        bus.subscribe()
+            .current
+            .iter()
+            .map(|c| c.reason.condition_kind().to_string())
+            .collect()
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutReadOnlyEditAttempt for HeadlessFrontendComponent {
+    async fn attempt_read_only_edit(&self, block_id: &str, content: &str) -> Result<(), String> {
+        let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
+        params.insert("id".into(), holon_api::Value::String(block_id.to_string()));
+        params.insert("field".into(), holon_api::Value::String("content".into()));
+        params.insert(
+            "value".into(),
+            holon_api::Value::String(content.to_string()),
+        );
+        let outcome = self
+            .engine
+            .execute_operation(
+                &holon_api::EntityName::from("block".to_string()),
+                "set_field",
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        let mut counts = self
+            .read_only_attempts
+            .lock()
+            .expect("read_only_attempts poisoned");
+        counts.0 += 1;
+        if outcome.is_err() {
+            counts.1 += 1;
+        }
+        outcome
     }
 }

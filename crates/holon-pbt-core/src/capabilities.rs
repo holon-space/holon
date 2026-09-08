@@ -2269,6 +2269,51 @@ pub trait SutFsWrites {
     async fn vault_write_targets(&self) -> (String, Vec<String>);
 }
 
+// ─── Read-only-home cluster ──────────────────────────────────────────
+//
+// Binds: `inv-read-only-home-refuses-writes`. Supplied only by a slice whose
+// vault holds a document homed in a `WriteTier::ReadOnly` format, so an
+// org-only slice deselects the invariant rather than passing it vacuously.
+
+/// A block homed in a read-only format, as `(block id, content)`.
+pub type ReadOnlyBlock = (String, String);
+
+#[holon_macros::capmap_adapter]
+pub trait SutReadOnlyHomes {
+    /// Every block whose owning document is homed in a read-only format, with
+    /// the content the INGEST wrote — snapshotted once, before the run's first
+    /// transition. The comparison baseline: the file is authoritative, so this
+    /// is what the store is allowed to hold for the rest of the run.
+    async fn read_only_blocks_at_ingest(&self) -> Vec<ReadOnlyBlock>;
+
+    /// The same blocks, read out of `block_raw` NOW.
+    async fn read_only_blocks_now(&self) -> Vec<ReadOnlyBlock>;
+
+    /// How many store-origin writes this run aimed at a read-only-homed block,
+    /// and how many of them the dispatcher refused. A refusal that did not
+    /// happen is the defect; a write that never happened is a vacuous pass, and
+    /// the two must be told apart.
+    async fn read_only_write_attempts(&self) -> (usize, usize);
+
+    /// The `condition_kind`s the degraded-signal bus raised over the run.
+    async fn raised_degraded_conditions(&self) -> Vec<String>;
+}
+
+#[holon_macros::capmap_adapter]
+pub trait SutReadOnlyEditAttempt {
+    /// Aim a store-origin content write at `block_id` through the production
+    /// operation dispatcher and record how it went. `Err` carries the
+    /// dispatcher's refusal message.
+    async fn attempt_read_only_edit(&self, block_id: &str, content: &str) -> Result<(), String>;
+}
+
+/// Reference-side twin: which blocks the oracle believes are homed in a
+/// read-only format, so the attempt transition can aim at one.
+#[holon_macros::capmap_adapter] // sync trait → no async-trait
+pub trait RefReadOnlyHomes {
+    fn read_only_homed_blocks(&self) -> BTreeSet<EntityUri>;
+}
+
 // ─── Reference-side: extended read-only projections ──────────────────
 //
 // Each surfaces `ReferenceState` fields that invariant bodies need. Thin

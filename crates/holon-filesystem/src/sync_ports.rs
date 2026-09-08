@@ -20,12 +20,19 @@ use holon_api::block::Block;
 /// to prove the content is present in every active store. A format whose
 /// content embeds no id ([`holon_core::DocumentIdentity::ByRecordedHome`]) has
 /// no other way to name that document at boot.
-#[derive(Debug, Clone)]
+///
+/// One row shape, written by one statement: a skip that takes the hash must
+/// also take the membership, because it never parses the file and the row is
+/// then its whole account of which blocks that file owns.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileProjection {
     pub content_hash: String,
     /// `None` while the provider has created the file row but no document has
     /// been attached to it yet.
     pub document_id: Option<EntityUri>,
+    /// The blocks a read-only-format file declared at that ingest, document
+    /// root included. Empty for every writable file.
+    pub read_only_blocks: Vec<EntityUri>,
 }
 
 /// Read-only access to blocks, organized by document.
@@ -109,11 +116,13 @@ pub trait BlockReader: Send + Sync {
     /// Returns (doc_id, blocks) pairs. Path resolution is the caller's concern.
     async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>>;
 
-    /// Load `(file_id, content_hash)` pairs from the `file` table. Used by
+    /// Load the persisted cold-boot state of every `file` row. Used by
     /// `FileSyncController` at startup to populate the projection-hash cache
-    /// (`last_projection_hash`) before CDC has replayed file events into
-    /// the in-process cache — so we can short-circuit on-disk-unchanged
-    /// re-ingests without doing a single block-table SQL op.
+    /// (`last_projection_hash`) and the read-only block membership before CDC
+    /// has replayed file events into the in-process cache — so we can
+    /// short-circuit on-disk-unchanged re-ingests without doing a single
+    /// block-table SQL op, and still know which blocks that skipped ingest
+    /// would have declared read-only.
     ///
     /// Returns the URI form (e.g. `file:projects/todo.org`) since the
     /// caller knows its own root directory and can resolve to a concrete
@@ -125,11 +134,16 @@ pub trait BlockReader: Send + Sync {
 
     /// Phase 1 write-back: persist what this ingest projected for one file so
     /// the next boot's `load_file_projections` returns it and the fast path
-    /// engages. UPSERTS: `OrgmodeSyncProvider` creates rows for org files
-    /// only, so a plugin format's row exists nowhere else and an UPDATE would
-    /// silently match no row — the file would re-parse on every boot forever.
+    /// engages WITH the membership its skipped ingest would have recorded.
+    /// UPSERTS: `OrgmodeSyncProvider` creates rows for org files only, so a
+    /// plugin format's row exists nowhere else and an UPDATE would silently
+    /// match no row — the file would re-parse on every boot forever.
     /// `name`/`parent_dir` are the row's own path fields, needed only when
-    /// this call is the one that creates it. Default impl is a no-op for
+    /// this call is the one that creates it.
+    ///
+    /// Hash and membership travel together because the fast path keys on the
+    /// hash and then requires the membership: a stored hash without one is a
+    /// file whose blocks silently become editable. Default impl is a no-op for
     /// backends without a `file` table.
     async fn persist_file_projection(
         &self,

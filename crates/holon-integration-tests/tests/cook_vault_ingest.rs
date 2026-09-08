@@ -768,6 +768,220 @@ fn an_edit_to_a_recipe_block_is_refused_at_the_dispatcher() {
     });
 }
 
+/// Dispatch a content edit at `id` and return the refusal, or `None` when the
+/// store took it.
+async fn edit_refusal(env: &holon_integration_tests::TestEnvironment, id: &str) -> Option<String> {
+    env.test_ctx()
+        .execute_op(
+            "block",
+            "set_field",
+            params(&[
+                ("id", holon_api::Value::String(id.to_string())),
+                ("field", holon_api::Value::String("content".to_string())),
+                (
+                    "value",
+                    holon_api::Value::String("TYPED AFTER A REBOOT".to_string()),
+                ),
+            ])
+            .into_iter()
+            .map(|(k, v)| (std::sync::Arc::from(k.as_str()), v))
+            .collect(),
+        )
+        .await
+        .err()
+        .map(|e| e.to_string())
+}
+
+/// The `read_only_blocks` cell of a file row, verbatim.
+async fn stored_membership(
+    env: &holon_integration_tests::TestEnvironment,
+    file_id: &str,
+) -> Option<String> {
+    rows(
+        env,
+        &format!("SELECT read_only_blocks FROM file WHERE id = '{file_id}'"),
+    )
+    .await
+    .first()
+    .and_then(|r| text(r, "read_only_blocks").map(str::to_string))
+}
+
+/// The re-save that makes the controller stamp the recipe's `file` row.
+///
+/// The row itself is production's: `persist_file_projection` UPSERTS it, which
+/// is the only reason a `.cook` file has one at all — `OrgmodeSyncProvider`
+/// creates rows for org files only. The stamp happens on an ingest, and only a
+/// CHANGED file re-ingests, so the re-save is what arms the next boot.
+async fn arm_the_cold_boot_skip(env: &holon_integration_tests::TestEnvironment, content: &str) {
+    re_save(env, content).await;
+}
+
+/// The recipe with one extra step — different bytes, same shape.
+const PANCAKES_COOK_V2: &str = "\
+---
+title: Fluffy Pancakes
+servings: 4
+---
+Crack the @eggs{2} into a bowl.
+
+Whisk in the @flour{200%g} and cook for ~{3%minutes}.
+
+Serve with @syrup{}.
+";
+
+/// Red 10 — the tier decision survives a reboot, and it survives it as DATA.
+///
+/// The write-tier gate answers from a block→home membership recorded at
+/// ingest, not from a parent walk per block: the walk cost one store read per
+/// editable row per render, which is what armed the `inv-sql-budget` red. That
+/// membership therefore has to outlive the process, so it is persisted beside
+/// `file.content_hash` — the pair a boot that SKIPS the ingest reads together,
+/// since such a boot never parses the file and has nothing else to learn the
+/// file's blocks from.
+///
+/// The skip itself does not fire for cooklang in this build:
+/// `CookFormatAdapter::doc_id_from_content` returns `None` (a recipe embeds no
+/// id), and the fast path needs that id. What is pinned here is the round trip
+/// — the ingest writes both halves, the next boot reads them, and the recipe's
+/// blocks stay refused across the restart.
+#[test]
+fn a_recipe_edit_is_refused_after_a_reboot() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut env = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .with_vault_file("Notes.org", NOTES_ORG)
+            .build(rt.clone())
+            .await
+            .expect("a vault holding a `.cook` file must boot");
+
+        assert!(
+            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
+            "precondition: the recipe's first step must be in the store"
+        );
+        arm_the_cold_boot_skip(&env, PANCAKES_COOK_V2).await;
+
+        // The premise of the whole test: boot-1 stamped BOTH halves of the
+        // row. Without the hash the second boot re-ingests and proves nothing;
+        // without the membership the second boot has nothing to load. Polled:
+        // the ingest's row write and this read are separate transactions.
+        let mut membership = String::new();
+        for _ in 0..100 {
+            membership = stored_membership(&env, "file:Pancakes.cook")
+                .await
+                .unwrap_or_default();
+            if !membership.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            membership.contains(RECIPE_STEP),
+            "premise: the recipe's ingest must persist its block membership beside the content \
+             hash, else the next boot's skip cannot know the file's blocks. \
+             file.read_only_blocks = {membership:?}"
+        );
+        assert_eq!(
+            stored_membership(&env, "file:Notes.org").await,
+            None,
+            "a writable file must carry no read-only membership — the registry it feeds decides \
+             whether an edit is refused"
+        );
+
+        env.stop_app().await.expect("stop_app after boot-1");
+        env.start_app(true).await.expect("boot-2 start_app");
+        assert!(
+            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
+            "the recipe's blocks must survive the reboot"
+        );
+        env.wait_for_org_files_stable(25, Duration::from_millis(1500))
+            .await;
+
+        let before = stored_content(&env, RECIPE_STEP)
+            .await
+            .expect("the step row must exist after the reboot");
+        let refusal = edit_refusal(&env, RECIPE_STEP)
+            .await
+            .expect("editing a recipe step after a reboot must still be refused");
+        assert!(
+            refusal.contains("read-only format") && refusal.contains("Pancakes.cook"),
+            "the refusal must name the format and the authoritative file, got: {refusal}"
+        );
+        assert_eq!(
+            stored_content(&env, RECIPE_STEP).await.as_deref(),
+            Some(before.as_str()),
+            "the refused edit reached the store anyway"
+        );
+
+        // The org leg of the same vault stays editable across the reboot too:
+        // the rule is the write tier, not "this vault has a second format".
+        assert_eq!(
+            edit_refusal(&env, "block:notes-child").await,
+            None,
+            "an org block in the same vault must still be editable after the reboot"
+        );
+    });
+}
+
+/// Red 11 — a `file` row whose membership is missing (written by a build that
+/// predates the column, or damaged) must not resolve as "this file has no
+/// read-only blocks". The next boot re-ingests the file and rewrites the row,
+/// so the repair happens once. The controller's fast path refuses to SKIP on
+/// such a row for the same reason: of the two states the skip could otherwise
+/// reach, one is the per-block store walk and the other is a registry that
+/// holds none of the file's blocks — the read amplification and the silent
+/// edits-accepted hole.
+#[test]
+fn a_file_row_missing_its_membership_is_rewritten_by_the_next_boot() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut env = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .build(rt.clone())
+            .await
+            .expect("a vault holding a `.cook` file must boot");
+
+        assert!(
+            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
+            "precondition: the recipe's first step must be in the store"
+        );
+        arm_the_cold_boot_skip(&env, PANCAKES_COOK_V2).await;
+
+        // Damage the membership ONLY: the hash stays, so the next boot's fast
+        // path still believes the file is unchanged and would take the skip.
+        env.query_sql("UPDATE file SET read_only_blocks = NULL WHERE id = 'file:Pancakes.cook'")
+            .await
+            .expect("clear the persisted membership");
+
+        env.stop_app().await.expect("stop_app after boot-1");
+        env.start_app(true).await.expect("boot-2 start_app");
+        assert!(
+            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
+            "the recipe's blocks must survive the reboot"
+        );
+        env.wait_for_org_files_stable(25, Duration::from_millis(1500))
+            .await;
+
+        let refusal = edit_refusal(&env, RECIPE_STEP)
+            .await
+            .expect("a recipe step must stay refused even when its row lost its membership");
+        assert!(
+            refusal.contains("read-only format"),
+            "the refusal must name the format, got: {refusal}"
+        );
+        let membership = stored_membership(&env, "file:Pancakes.cook")
+            .await
+            .unwrap_or_default();
+        assert!(
+            membership.contains(RECIPE_STEP),
+            "the re-ingest must rewrite the membership, or every later boot repeats the repair. \
+             file.read_only_blocks = {membership:?}"
+        );
+    });
+}
+
 /// Red 7 — disclosure. The refusal must reach the window, not only the log:
 /// the whole defect class is an edit that looks like it worked.
 #[test]

@@ -365,10 +365,10 @@ impl BlockReader for CacheBlockReader {
         Ok(blocks_by_document(&all_blocks))
     }
 
-    /// Phase 1: load each file row's hash and document directly from the
-    /// `file` table via raw SQL — bypasses the in-process file QueryableCache
-    /// so we can read at controller startup, before CDC has replayed file
-    /// events.
+    /// Phase 1: load each file row's hash, document and read-only membership
+    /// directly from the `file` table via raw SQL — bypasses the in-process
+    /// file QueryableCache so we can read at controller startup, before CDC has
+    /// replayed file events.
     async fn load_file_projections(
         &self,
     ) -> anyhow::Result<Vec<(holon_api::EntityUri, holon_filesystem::FileProjection)>> {
@@ -376,7 +376,7 @@ impl BlockReader for CacheBlockReader {
             .cache
             .db_handle()
             .query(
-                "SELECT id, content_hash, document_id FROM file",
+                "SELECT id, content_hash, document_id, read_only_blocks FROM file",
                 std::collections::HashMap::new(),
             )
             .await
@@ -408,11 +408,35 @@ impl BlockReader for CacheBlockReader {
                 }
                 _ => None,
             };
+            // A malformed membership must not read as "this file has none":
+            // that is the shape that quietly makes an authoritative file's
+            // blocks editable.
+            let read_only_blocks = match row.get("read_only_blocks") {
+                Some(holon_api::Value::String(s)) if !s.is_empty() => {
+                    let ids: Vec<String> = serde_json::from_str(s).map_err(|e| {
+                        anyhow::anyhow!(
+                            "[CacheBlockReader] file.read_only_blocks of {id} is not a JSON array \
+                             of block ids ({e}): {s:?}"
+                        )
+                    })?;
+                    ids.iter()
+                        .map(|b| holon_api::EntityUri::parse(b))
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "[CacheBlockReader] file.read_only_blocks of {id} names a \
+                                 non-EntityUri block: {e}"
+                            )
+                        })?
+                }
+                _ => Vec::new(),
+            };
             out.push((
                 uri,
                 holon_filesystem::FileProjection {
                     content_hash: hash,
                     document_id,
+                    read_only_blocks,
                 },
             ));
         }
@@ -456,20 +480,41 @@ impl BlockReader for CacheBlockReader {
             Some(uri) => holon_api::Value::String(uri.id().to_string()),
             None => holon_api::Value::Null,
         };
+        // One statement for hash AND membership: the next boot's fast path
+        // arms on the hash and then REQUIRES the membership, so a row carrying
+        // one without the other is a file whose blocks silently turn editable.
+        let members = if projection.read_only_blocks.is_empty() {
+            holon_api::Value::Null
+        } else {
+            let ids: Vec<String> = projection
+                .read_only_blocks
+                .iter()
+                .map(|b| b.to_string())
+                .collect();
+            holon_api::Value::String(serde_json::to_string(&ids)?)
+        };
         let params = vec![
             holon_api::Value::String(file_id.to_string()),
             holon_api::Value::String(name.to_string()),
             holon_api::Value::String(parent_dir.to_string()),
             holon_api::Value::String(projection.content_hash.clone()),
             document_id,
+            members,
         ];
         self.cache
             .db_handle()
             .execute_values(
-                "INSERT INTO file (id, name, parent_id, content_hash, document_id) \
-                 VALUES (?, ?, ?, ?, ?) \
+                // `name`/`parent_id` are deliberately absent from the update
+                // list: `file.id` already encodes the path they spell, so they
+                // cannot legitimately differ on a conflict, and leaving them
+                // out keeps `OrgmodeSyncProvider` the sole authority for the
+                // row's identity fields. This leg owns the projection columns
+                // — and owns them TOGETHER, because a hash written without its
+                // membership is the silent edits-accepted hole.
+                "INSERT INTO file (id, name, parent_id, content_hash, document_id, \
+                 read_only_blocks) VALUES (?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET content_hash = excluded.content_hash, \
-                 document_id = excluded.document_id",
+                 document_id = excluded.document_id, read_only_blocks = excluded.read_only_blocks",
                 params,
             )
             .await

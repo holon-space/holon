@@ -33,6 +33,7 @@ use holon_core::file_format::WritebackDropVerdict;
 use holon_core::traits::Result as OrderingResult;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
+use holon_filesystem::FileProjection;
 use holon_filesystem::FileSyncController;
 use holon_filesystem::fs_port::RealFileSystem;
 use holon_orgmode::file_format::OrgFormatAdapter;
@@ -60,6 +61,9 @@ struct FixtureAdapter {
     /// What the parsed document declares about itself. Shared with the test so
     /// it can stand for the user editing the file's metadata between ingests.
     props: Arc<Mutex<Vec<(String, String)>>>,
+    /// The bare document id the format embeds, org's `#+ID:` in miniature.
+    /// `None` is the cooklang shape — no identity in the file at all.
+    embedded_doc_id: Option<String>,
     org: OrgFormatAdapter,
 }
 
@@ -78,8 +82,17 @@ impl FixtureAdapter {
             refuse: None,
             refuse_only: None,
             props: declared_props(),
+            embedded_doc_id: None,
             org: OrgFormatAdapter::new(),
         }
+    }
+
+    /// A format that DOES embed its document's identity, the way org does —
+    /// which is what makes the controller's cold-boot byte-identity skip
+    /// reachable at all.
+    fn with_embedded_doc_id(mut self, bare: &str) -> Self {
+        self.embedded_doc_id = Some(bare.to_string());
+        self
     }
 
     fn refusing(reason: &str) -> Self {
@@ -88,6 +101,7 @@ impl FixtureAdapter {
             refuse: Some(reason.to_string()),
             refuse_only: None,
             props: declared_props(),
+            embedded_doc_id: None,
             org: OrgFormatAdapter::new(),
         }
     }
@@ -178,9 +192,9 @@ impl FileFormatAdapter for FixtureAdapter {
     }
 
     fn doc_id_from_content(&self, _: &str) -> Option<String> {
-        // Like cooklang: the format embeds no identity, so the controller
-        // resolves the document by its path-derived name chain.
-        None
+        // `None` is the cooklang shape: the format embeds no identity, so the
+        // controller resolves the document by its path-derived name chain.
+        self.embedded_doc_id.clone()
     }
 
     fn build_block_params(
@@ -279,10 +293,29 @@ impl DocumentManager for RecordingDocManager {
     }
 }
 
-/// Block store double: holds whatever the ingest places into it.
+/// Block store double: holds whatever the ingest places into it, and the
+/// `file` rows the controller stamps — the cold-boot skip's whole input.
 #[derive(Default)]
 struct RecordingReader {
     blocks: Mutex<Vec<Block>>,
+    file_rows: Mutex<Vec<(EntityUri, FileProjection)>>,
+}
+
+impl RecordingReader {
+    fn file_row(&self) -> (EntityUri, FileProjection) {
+        self.file_rows
+            .lock()
+            .unwrap()
+            .first()
+            .cloned()
+            .expect("an ingest stamps the file row it hashed")
+    }
+
+    /// Replace the persisted rows with `row` — the test standing for a boot
+    /// that loads a row an earlier one wrote, damaged or intact.
+    fn seed_file_row(&self, row: (EntityUri, FileProjection)) {
+        *self.file_rows.lock().unwrap() = vec![row];
+    }
 }
 
 #[async_trait]
@@ -322,6 +355,23 @@ impl BlockReader for RecordingReader {
 
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
         Ok(Vec::new())
+    }
+
+    async fn load_file_projections(&self) -> anyhow::Result<Vec<(EntityUri, FileProjection)>> {
+        Ok(self.file_rows.lock().unwrap().clone())
+    }
+
+    /// The double stores what production's ONE UPSERT writes: the whole
+    /// projection, never a hash on its own.
+    async fn persist_file_projection(
+        &self,
+        file_id: &EntityUri,
+        _: &str,
+        _: &str,
+        projection: &FileProjection,
+    ) -> anyhow::Result<()> {
+        self.seed_file_row((file_id.clone(), projection.clone()));
+        Ok(())
     }
 }
 
@@ -418,8 +468,33 @@ struct Vault {
     /// The metadata the fixture file declares; edit it between ingests to stand
     /// for the user changing the file's own metadata.
     props: Arc<Mutex<Vec<(String, String)>>>,
+    reader: Arc<RecordingReader>,
+    root: PathBuf,
+    formats: Arc<FormatRegistry>,
     _tmp: tempfile::TempDir,
     file: PathBuf,
+}
+
+impl Vault {
+    /// A SECOND controller over the same store and vault — a reboot. Its
+    /// read-only registry is fresh, as a restarted process's is, so what it
+    /// ends up holding is exactly what this boot decided.
+    fn reboot(&self) -> (FileSyncController, Arc<holon_core::ReadOnlyDocuments>) {
+        let read_only = Arc::new(holon_core::ReadOnlyDocuments::new());
+        let controller = FileSyncController::with_formats(
+            self.reader.clone(),
+            self.docs.clone(),
+            self.root.clone(),
+            self.formats.clone(),
+            Arc::new(RecordingOrdering {
+                reader: self.reader.clone(),
+            }),
+            Arc::new(RealFileSystem),
+        )
+        .with_downstream_projection(Arc::new(DirectProjection))
+        .with_read_only_documents(read_only.clone());
+        (controller, read_only)
+    }
 }
 
 impl Vault {
@@ -451,18 +526,22 @@ fn vault(adapter: FixtureAdapter, contents: &str) -> Vault {
     let controller = FileSyncController::with_formats(
         reader.clone(),
         docs.clone(),
-        root,
-        formats,
+        root.clone(),
+        formats.clone(),
         Arc::new(RecordingOrdering {
             reader: reader.clone(),
         }),
         Arc::new(RealFileSystem),
     )
-    .with_downstream_projection(Arc::new(DirectProjection));
+    .with_downstream_projection(Arc::new(DirectProjection))
+    .with_read_only_documents(Arc::new(holon_core::ReadOnlyDocuments::new()));
     Vault {
         controller,
         docs,
         props,
+        reader,
+        root,
+        formats,
         _tmp: tmp,
         file,
     }
@@ -743,6 +822,129 @@ async fn a_reset_re_arms_the_read_only_skip_disclosure() {
         2,
         "the skip set outlived the incarnation it describes: after a Reset the \
          file is silently skipped and the set never shrinks",
+    );
+}
+
+// ── 3b. The cold-boot skip refuses a row that lost its membership ───────────
+
+/// ERROR-level tracing capture, the sibling of [`InfoCapture`].
+#[derive(Clone, Default)]
+struct ErrorCapture(Arc<Mutex<Vec<String>>>);
+
+impl ErrorCapture {
+    fn mentions(&self, needle: &str) -> usize {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains(needle))
+            .count()
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for ErrorCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+        if *event.metadata().level() == tracing::Level::ERROR {
+            let mut buf = String::new();
+            event.record(&mut MsgVisitor(&mut buf));
+            self.0.lock().unwrap().push(buf);
+        }
+    }
+}
+
+/// The membership the row carries is a boot's whole account of a read-only
+/// file's blocks, because the skip that reads it never parses the file.
+///
+/// The skip is reachable only for a format that embeds its document's identity
+/// — it resolves the doc id before it decides anything — so the fixture format
+/// grows one here. Cooklang embeds none, which is why the `.cook` suite cannot
+/// reach this branch at all.
+///
+/// A row that kept its hash and lost its blocks must NOT be skipped: the skip
+/// would register none of the file's blocks and every one of them would accept
+/// edits that can never reach the disk.
+#[tokio::test]
+async fn a_read_only_row_without_its_membership_refuses_the_cold_boot_skip() {
+    let cap = ErrorCapture::default();
+    let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(cap.clone()));
+
+    let mut v = vault(
+        FixtureAdapter::parsing(WriteTier::ReadOnly).with_embedded_doc_id("fixture-doc"),
+        "Boil water\nStir\n",
+    );
+    let path = v.file.clone();
+    v.controller
+        .on_file_changed(&path)
+        .await
+        .expect("boot 1 ingests the file");
+    let (file_id, stamped) = v.reader.file_row();
+    assert!(
+        !stamped.read_only_blocks.is_empty(),
+        "premise: boot 1 stamps the membership beside the hash, else there is no \
+         intact row for the control below",
+    );
+
+    // The damaged row: the hash stands, so the next boot still believes the
+    // file is unchanged and would take the skip.
+    v.reader.seed_file_row((
+        file_id.clone(),
+        FileProjection {
+            read_only_blocks: Vec::new(),
+            ..stamped.clone()
+        },
+    ));
+    v.reader.blocks.lock().unwrap().clear();
+
+    let (mut damaged, registry) = v.reboot();
+    damaged.initialize().await.expect("boot 2 initializes");
+    damaged
+        .on_file_changed(&path)
+        .await
+        .expect("boot 2 ingests the file");
+
+    assert_eq!(
+        cap.mentions("carries no `read_only_blocks`"),
+        1,
+        "the skip was taken over a row that declares nothing — every block of an \
+         authoritative file is now editable, silently",
+    );
+    assert!(
+        !v.reader.blocks.lock().unwrap().is_empty(),
+        "the refused skip must fall through to the full ingest, which re-derives \
+         the membership from the file itself",
+    );
+    let step = EntityUri::block("Spaghetti-Carbonara.fixture::b::0");
+    assert!(
+        registry.refusal_for_block(&step).is_some(),
+        "after the repair the file's blocks must earn the refusal again",
+    );
+
+    // The control: with the row INTACT the skip is taken — no ERROR, no
+    // re-ingest — and the membership still reaches the registry. Without it
+    // the assertion above would pass for a branch that is simply unreachable.
+    v.reader.seed_file_row((file_id, stamped));
+    v.reader.blocks.lock().unwrap().clear();
+    let (mut intact, registry) = v.reboot();
+    intact.initialize().await.expect("boot 3 initializes");
+    intact
+        .on_file_changed(&path)
+        .await
+        .expect("boot 3 ingests the file");
+
+    assert_eq!(
+        cap.mentions("carries no `read_only_blocks`"),
+        1,
+        "an intact row raised the damaged-row ERROR",
+    );
+    assert!(
+        v.reader.blocks.lock().unwrap().is_empty(),
+        "boot 3 re-ingested a file whose row was intact — the cold-boot skip did \
+         not fire, so this test is not exercising it",
+    );
+    assert!(
+        registry.refusal_for_block(&step).is_some(),
+        "the skipped boot must load the membership its skipped parse would have \
+         declared, or the file's blocks are editable until something re-ingests",
     );
 }
 

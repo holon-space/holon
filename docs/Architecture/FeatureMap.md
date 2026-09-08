@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 74 transitions; the repo declares 75 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 75 transitions; the repo declares 76 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -241,6 +241,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 ### Transitions
 
 - `ApplyMutation` — org vs Loro ingress the shrinker can localize
+- `AttemptReadOnlyEdit` — the write the dispatcher must refuse, without which `inv-read-only-home-refuses-writes` can only prove that nothing tried
 - `CreateBlockUnderFocus` — creation-slot gesture mint under focus root
 - `Nothing` — no-op interleaving for schedule diversity
 - `PressKey` — raw key chord -> bubble_input resolution
@@ -259,6 +260,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `inv-editor-caret-matches-ref`
 - `inv-frontend-no-error-widgets` — no Error widget in the laid-out BoundsRegistry (authoritative) or, absent geometry, the ViewModel tree
 - `inv-net-totality` — an operation the system can fire that the derived net does not describe, so every net-based analysis (conflicts, cycles, the marking oracle) silently reports on a partial world
+- `inv-read-only-home-refuses-writes` — a store-origin write against a block whose document is homed in a `WriteTier::ReadOnly` file
 - `inv-shows-source-when-no-query`
 - `inv-state-toggle-toy`
 - `inv-two-writer-peer-writes-land` — generic ComposedSut StateMachineTest: per-tick reconcile + catalog check + non-vacuity floor

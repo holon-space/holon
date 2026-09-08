@@ -68,6 +68,7 @@ pub use sync_gate::SyncGateWatcher;
 pub use write_tier_gate::EditRefused;
 pub use write_tier_gate::ReadOnlyDocuments;
 pub use write_tier_gate::ReadOnlyHome;
+pub use write_tier_gate::ReadOnlyMembers;
 pub use write_tier_gate::WriteTierAuthority;
 
 #[cfg(test)]
