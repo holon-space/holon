@@ -5,10 +5,13 @@
 //! @c4 uses holon-core "core datasource traits" "Rust"
 //! @c4 uses holon-macros "entity/operation derive macros" "Rust"
 //! @c4 uses holon-turso "Turso storage adapter" "Rust"
-//! @c4 uses holon-loro "Loro CRDT backend & P2P sync" "Rust"
 //! @c4 uses holon-petri "Petri-net task materialization" "Rust"
 //! @c4 uses holon-rules "holon_rule YAML front-end" "Rust"
 //! @c4 uses holon-profiles "entity profile resolution" "Rust"
+//! @c4 uses holon-advice "runtime advice rules" "Rust"
+//! @c4 uses holon-kitchen "kitchen domain: recipes & shopping" "Rust"
+//! @c4 uses holon-net "derived Petri-net projection" "Rust"
+//! @c4 uses holon-org-format "org parse/render" "Rust"
 //!
 //! Main orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API,
 //! BackendEngine, and DI modules.

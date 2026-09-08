@@ -5,16 +5,16 @@
 # as debt-free. Ratchet DOWN: as violations are fixed, regenerate with
 #   ./archlint/archlint --update-baseline
 # See archlint/BURNDOWN.md for the category table and burn-down priority.
-# Snapshot total: 110 violation(s) across 11 rule(s).
+# Snapshot total: 104 violation(s) across 11 rule(s).
 #
 #   deleted_cell_symbol: 2
 #   entity_uri_from_raw: 9
 #   entity_uri_parse_default: 1
-#   fallback: 14
+#   fallback: 12
 #   frontend-provider-dep: 1
 #   frontend-raw-sql: 3
 #   loro_doc_escape: 35
-#   no-underscore-params: 37
+#   no-underscore-params: 33
 #   ok: 4
 #   raw_sql_in_frontend: 3
 #   sole_block_writer: 1
@@ -37,7 +37,6 @@ fallback	crates/holon-frontend/src/user_driver.rs	// Final fallback: if the rout
 fallback	crates/holon-frontend/src/user_driver.rs	/// This is NOT a fallback — it is the intended path for that feature. //
 fallback	crates/holon-frontend/src/user_driver.rs	/// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable. //
 fallback	crates/holon-frontend/src/user_driver.rs	/// `send_key_chord` uses for its router fallback. If the entity is //
-fallback	crates/holon-loro-wiring/src/loro_module.rs	/// env/random fallback. Injected by `SessionConfig::loro_peer_id` so two
 fallback	crates/holon-orgmode/src/file_watcher.rs	/// fallback, see docs/Testing/BugFunnel.md 2026-07-27).
 fallback	frontends/dioxus-web/src/render/builders/mod.rs	// per file. Variants not covered by a file hit the fallback (empty element //
 fallback	frontends/dioxus-web/src/render/builders/mod.rs	/// Fallback arm emitted by `builder_registry!` when a `ViewKind` variant //
@@ -104,8 +103,6 @@ no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_blocks(&self,
 no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
 no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
 no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
-no-underscore-params	crates/holon-markdown/src/logseq.rs	fn sync_document_metadata(&self, _parsed: &Block, _persisted: &mut Block) -> bool {
-no-underscore-params	crates/holon-markdown/src/logseq.rs	fn sync_document_metadata(&self, _parsed: &Block, _persisted: &mut Block) -> bool {
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	_rendered: &str,
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	_root: &Path,
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	_sanctioned_removals: &std::collections::HashSet<String>,
@@ -117,8 +114,6 @@ no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_blocks(&sel
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
-no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn sync_document_metadata(&self, _parsed: &Block, _persisted: &mut Block) -> bool {
-no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn sync_document_metadata(&self, _parsed: &Block, _persisted: &mut Block) -> bool {
 no-underscore-params	frontends/gpui/src/render/builders/divider.rs	pub fn render(_node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
 ok	crates/holon-frontend/src/advice_weaver.rs	let rows = query_engine
 ok	crates/holon-loro/src/multi_peer.rs	let meta = tree.get_meta(node).ok()?;

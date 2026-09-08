@@ -14,6 +14,19 @@
 //! @c4 uses holon-pbt-core "PBT transition traits" "Rust"
 //! @c4 uses holon-loro "Loro CRDT backend & P2P sync" "Rust"
 //! @c4 uses holon-profiles "entity profile resolution" "Rust"
+//! @c4 uses holon-advice "runtime advice rules" "Rust"
+//! @c4 uses holon-capability "format capability profiles" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-kitchen "kitchen domain: recipes & shopping" "Rust"
+//! @c4 uses holon-loro-testing "Loro subsystem PBT slice" "Rust"
+//! @c4 uses holon-loro-wiring "Loro-to-engine wiring" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//! @c4 uses holon-net "derived Petri-net projection" "Rust"
+//! @c4 uses holon-oracles "live ref-less invariants" "Rust"
+//! @c4 uses holon-org-format "org parse/render" "Rust"
+//! @c4 uses holon-sharing "ADR 0028 policy overlay" "Rust"
+//! @c4 uses holon-turso "Turso storage adapter" "Rust"
+//! @c4 uses holon-turso-testing "Turso subsystem PBT slice" "Rust"
 //!
 //! Shared test infrastructure for Holon integration tests
 //!

@@ -268,30 +268,26 @@ shipped. Anchors: `share_subtree`, `HistoryRetention` in
   absent from the reintegrated tree). Contrast `unmount_with_reintegration`
   (`HistoryRetention::Full`) which succeeds because lineage is preserved.
 
-**H6 — Markdown identity drift. ✅ FIXED (2026-07-02) — MOOT since 2026-07-06: the
-`holon-markdown` crate was removed as unwired dead code (recoverable from git history).**
-An out-of-charset block id used to be *silently* dropped from rendered text (empty
+**H6 — Markdown identity drift. ✅ MOOT — the markdown crate carries no renderer.**
+An out-of-charset block id used to be *silently* dropped from rendered markdown (empty
 `^` marker), so the re-parse minted a fresh UUID → the block lost identity across a
-round-trip. `block_id_marker` (`holon-markdown/src/renderer.rs`) now returns a loud
-`MarkdownRenderError::{OutOfCharsetBlockId, EmptyBlockId}` instead of an empty marker;
-the error propagates through the whole inherent render path (`render_document →
-render_blocks → render_tree → render_heading`). Valid-charset ids (`[A-Za-z0-9_-]`,
-UUIDs included) still round-trip identically. Pinned by the focused in-crate PBT
-`holon-markdown/tests/markdown_block_round_trip_pbt.rs` (`parse(render(block)).id ==
-block.id` for valid ids; loud error, no silent remint, for out-of-charset ids) —
-modeled on `holon-orgmode/tests/org_block_round_trip_pbt.rs`.
+round-trip. `crates/holon-markdown` is a workspace member again (`Cargo.toml:19`), but
+in an ingest-only shape: `LogseqMarkdownAdapter` (`logseq.rs:81`) and
+`ObsidianMarkdownAdapter` (`obsidian.rs:121`) both report `WriteTier::ReadOnly` and
+there is no render path for an id to drift through. Read-only-ness is what is pinned
+now — `ReadOnlyWriteGuard` (`lib.rs:62`) plus the adapters' `writeback_drops` refusal,
+by `crates/holon-markdown/tests/write_guard.rs`; ingest by `logseq_ingest.rs` and
+`obsidian_ingest.rs`.
 
-- **Wiring gap (do not forget):** `holon-markdown` still has **zero prod
-  dependents** — it is not wired into `FileSyncController` (`holon-core/src/
-  file_format.rs` speaks of it in the subjunctive; the live disk path is org-only).
-  The fix is therefore latent. The `FileFormatAdapter` trait's `render_document /
-  render_blocks` return `String`; the markdown adapter surfaces the render error by
-  panicking loudly at that seam (see the `unwrap_or_else` in
-  `holon-markdown/src/file_format.rs`) rather than widening the shared trait to
-  `Result` for a path the live org renderer would have to change to serve. **When
-  markdown graduates into file-sync:** widen the trait to `Result`, drop that panic,
-  and lift this round-trip property into the composed invariant catalog (per the
-  `pbt-composition` skill), retiring the standalone in-crate PBT.
+- **Wiring gap (do not forget):** neither markdown adapter is in the vault
+  `FormatRegistry`, which holds org and `.cook` alone
+  (`crates/holon-app/src/wiring.rs:359-364`). They are held out deliberately: both
+  claim `md`, and the registry refuses a duplicate extension at construction until a
+  vault-flavor discriminator picks between them (ruling D56.a, `wiring.rs:356-358`).
+  **When markdown graduates into file-sync:** a write tier above `ReadOnly` brings back
+  a renderer, and with it this identity property — lift it into the composed invariant
+  catalog (per the `pbt-composition` skill) rather than re-adding a standalone
+  in-crate PBT.
 - **Deliberate addressability limit:** paragraph bodies fold into their heading
   block — only headings/fences/images are independently addressable on disk. This is
   by design (the org adapter folds the same way); it is *not* an identity bug.

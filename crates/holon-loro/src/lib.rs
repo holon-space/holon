@@ -5,6 +5,7 @@
 //! @c4 uses holon-core "core datasource traits" "Rust"
 //! @c4 uses holon-filesystem "filesystem ports" "Rust"
 //! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//! @c4 uses holon-secrets "OS-keychain secret storage" "Rust"
 //!
 //! Loro CRDT document engine and peer-to-peer synchronization.
 //!

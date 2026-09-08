@@ -5,6 +5,10 @@
 //! @c4 uses holon-core "core datasource traits" "Rust"
 //! @c4 uses holon-filesystem "filesystem ports" "Rust"
 //! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//! @c4 uses holon-advice "runtime advice rules" "Rust"
+//! @c4 uses holon-oracles "live ref-less invariants" "Rust"
+//! @c4 uses holon-org-format "org parse/render" "Rust"
+//! @c4 uses holon-pbt-core "PBT transition traits" "Rust"
 //!
 //! Frontend session abstraction and the MVVM **ViewModel** layer — owns the
 //! reactive `ReactiveViewModel` tree that the GPUI and TUI Views observe.

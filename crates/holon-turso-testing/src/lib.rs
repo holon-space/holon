@@ -1,8 +1,8 @@
 //! @c4 component
 //! @c4 layer Testing
 //! Pattern: Test Harness
-//! @c4 uses holon-turso "production Turso storage backend under test" "Rust"
 //! @c4 uses holon-pbt-core "PBT cap traits + contribution seam" "Rust"
+//! @c4 uses holon-api "shared value & operation types" "Rust"
 //!
 //! Companion PBT crate for `holon-turso` — the Turso storage subsystem's slice
 //! of the ONE composed-keystone PBT (co-location Phase 2, plan §5-turso).

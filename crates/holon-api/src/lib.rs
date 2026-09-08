@@ -3,6 +3,7 @@
 //! Pattern: Shared Kernel
 //! @c4 uses holon-expr "compiled Rhai expressions" "Rust"
 //! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//! @c4 uses holon-pattern "guard AST & parser" "Rust"
 //!
 //! Shared value types, Operation descriptors, Change/CDC types, and entity
 //! conversion traits. No frontend deps.

@@ -10,6 +10,10 @@
 //! @c4 uses holon-orgmode "org-mode sync I/O" "Rust"
 //! @c4 uses holon-loro "Loro CRDT backend & P2P sync" "Rust"
 //! @c4 uses holon-profiles "entity profile resolution" "Rust"
+//! @c4 uses holon-capability "format capability profiles" "Rust"
+//! @c4 uses holon-kitchen "kitchen domain: recipes & shopping" "Rust"
+//! @c4 uses holon-loro-wiring "Loro-to-engine wiring" "Rust"
+//! @c4 uses holon-turso "Turso storage adapter" "Rust"
 //!
 //! DI assembly crate (composition root) — owns every wiring that names concrete
 //! backends: Turso/Loro/OrgMode modules, MCP integrations, and

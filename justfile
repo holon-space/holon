@@ -98,8 +98,21 @@ arch-compile:
 # Regenerate the committed @c4 design baselines. Run after an *intentional*
 # structural change (crate added/removed/relevelled), then commit the result.
 arch-baseline:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `--design` MERGES into an existing architecture.json, so a crate deleted
+    # from the tree would linger in the baseline forever. Discard first: the
+    # baseline is a pure function of the tree's @c4 annotations.
+    rm -f {{archidoc_baseline}}/crates/architecture.json {{archidoc_baseline}}/frontends/architecture.json
     archidoc ir compile "{{justfile_directory()}}/crates"    --design --output-dir {{archidoc_baseline}}/crates
     archidoc ir compile "{{justfile_directory()}}/frontends" --design --output-dir {{archidoc_baseline}}/frontends
+    # archidoc canonicalizes the scanned PATH into `scan_root`, so a committed
+    # baseline would otherwise record the absolute path of whichever workspace
+    # regenerated it and churn on every run. Nothing reads the field; rewrite it
+    # repo-relative so the file is a pure function of the tree.
+    /usr/bin/python3 scripts/rewrite-scan-root.py \
+        {{archidoc_baseline}}/crates/architecture.json    crates \
+        {{archidoc_baseline}}/frontends/architecture.json frontends
 
 # Fail if the crate/frontend @c4 structure drifts from the committed baseline.
 arch-validate: arch-compile

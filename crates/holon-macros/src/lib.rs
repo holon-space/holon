@@ -1,6 +1,7 @@
 //! @c4 component
 //! @c4 layer Core
 //! Pattern: Code Generation
+//! @c4 uses holon-pattern "guard AST & parser" "Rust"
 //!
 //! Procedural macros: `#[operations_trait]`, `#[affects(...)]`, and entity
 //! derives.

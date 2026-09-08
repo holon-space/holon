@@ -3,6 +3,9 @@
 //! Pattern: Test Harness
 //! @c4 uses holon-loro "production CRDT backend under test" "Rust"
 //! @c4 uses holon-pbt-core "PBT cap traits + contribution seam" "Rust"
+//! @c4 uses holon "core orchestration" "Rust"
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
 //!
 //! Companion PBT crate for `holon-loro` — the first subsystem to OWN its
 //! composed-keystone contributions (co-location Phase 1, plan §5-loro).

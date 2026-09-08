@@ -5,6 +5,10 @@
 //! @c4 uses holon-loro "Loro CRDT backend & P2P sync" "Rust"
 //! @c4 uses holon-turso "Turso storage adapter" "Rust"
 //! @c4 uses holon-sharing "ADR 0028 policy overlay" "Rust"
+//! @c4 uses holon-advice "runtime advice rules" "Rust"
+//! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-profiles "entity profile resolution" "Rust"
 //!
 //! The wiring that binds the Loro CRDT backend to the `holon` engine.
 //!

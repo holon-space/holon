@@ -1,11 +1,13 @@
 //! @c4 component
 //! @c4 layer Adapters
 //! Pattern: Adapter
-//! @c4 uses holon "core orchestration" "Rust"
 //! @c4 uses holon-api "shared value & operation types" "Rust"
 //! @c4 uses holon-core "core datasource traits" "Rust"
 //! @c4 uses holon-macros "entity/operation derive macros" "Rust"
 //! @c4 uses holon-profiles "entity profile resolution" "Rust"
+//! @c4 uses holon-rows "typed row JSON Lines" "Rust"
+//! @c4 uses holon-secrets "OS-keychain secret storage" "Rust"
+//! @c4 uses holon-turso "Turso storage adapter" "Rust"
 //!
 //! Reusable MCP client: connects to MCP servers and exposes their tools as
 //! `OperationProvider`s.

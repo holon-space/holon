@@ -2,6 +2,8 @@
 //! @c4 layer Testing
 //! Pattern: Strategy
 //! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-macros "entity/operation derive macros" "Rust"
+//! @c4 uses holon-org-format "org parse/render" "Rust"
 //!
 //! Cross-PBT transition traits shared between `holon-layout-testing` and
 //! `holon-integration-tests`.

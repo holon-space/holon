@@ -1,7 +1,6 @@
 //! @c4 component
 //! @c4 layer Testing
 //! Pattern: Test Harness
-//! @c4 uses holon "core orchestration" "Rust"
 //! @c4 uses holon-api "shared value & operation types" "Rust"
 //! @c4 uses holon-core "core datasource traits" "Rust"
 //! @c4 uses holon-macros "entity/operation derive macros" "Rust"

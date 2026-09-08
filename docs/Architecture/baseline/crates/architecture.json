@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "scan_root": "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/docs-gate/crates",
+  "scan_root": "crates",
   "root": {
     "name": ".",
     "path": ".",
@@ -12,7 +12,7 @@
         "description": "Main orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API, BackendEngine, and DI modules.",
         "pattern": "Facade",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: Facade\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-petri \"Petri-net task materialization\" \"Rust\"\n@c4 uses holon-rules \"holon_rule YAML front-end\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nMain orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API,\nBackendEngine, and DI modules.",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Facade\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-petri \"Petri-net task materialization\" \"Rust\"\n@c4 uses holon-rules \"holon_rule YAML front-end\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n@c4 uses holon-advice \"runtime advice rules\" \"Rust\"\n@c4 uses holon-kitchen \"kitchen domain: recipes & shopping\" \"Rust\"\n@c4 uses holon-net \"derived Petri-net projection\" \"Rust\"\n@c4 uses holon-org-format \"org parse/render\" \"Rust\"\n\nMain orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API,\nBackendEngine, and DI modules.",
         "source_file": "holon/src/lib.rs",
         "layer": "Core",
         "relationships": [
@@ -37,11 +37,6 @@
             "protocol": "Rust"
           },
           {
-            "target": "holon-loro",
-            "label": "Loro CRDT backend & P2P sync",
-            "protocol": "Rust"
-          },
-          {
             "target": "holon-petri",
             "label": "Petri-net task materialization",
             "protocol": "Rust"
@@ -54,6 +49,26 @@
           {
             "target": "holon-profiles",
             "label": "entity profile resolution",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-advice",
+            "label": "runtime advice rules",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-kitchen",
+            "label": "kitchen domain: recipes & shopping",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-net",
+            "label": "derived Petri-net projection",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-org-format",
+            "label": "org parse/render",
             "protocol": "Rust"
           }
         ],
@@ -850,7 +865,7 @@
         "description": "Shared value types, Operation descriptors, Change/CDC types, and entity conversion traits. No frontend deps.",
         "pattern": "Shared Kernel",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: Shared Kernel\n@c4 uses holon-expr \"compiled Rhai expressions\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nShared value types, Operation descriptors, Change/CDC types, and entity\nconversion traits. No frontend deps.",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Shared Kernel\n@c4 uses holon-expr \"compiled Rhai expressions\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\n\nShared value types, Operation descriptors, Change/CDC types, and entity\nconversion traits. No frontend deps.",
         "source_file": "holon-api/src/lib.rs",
         "layer": "Core",
         "relationships": [
@@ -862,6 +877,11 @@
           {
             "target": "holon-macros",
             "label": "entity/operation derive macros",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-pattern",
+            "label": "guard AST & parser",
             "protocol": "Rust"
           }
         ],
@@ -1119,6 +1139,9 @@
                 "name": "share_props.rs"
               },
               {
+                "name": "sharing.rs"
+              },
+              {
                 "name": "spawner.rs"
               },
               {
@@ -1194,7 +1217,7 @@
         "description": "DI assembly crate (composition root) — owns every wiring that names concrete backends: Turso/Loro/OrgMode modules, MCP integrations, and `FrontendSession`.",
         "pattern": "Composition Root",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Composition\nPattern: Composition Root\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-frontend \"frontend session abstraction\" \"Rust\"\n@c4 uses holon-mcp-client \"MCP client providers\" \"Rust\"\n@c4 uses holon-orgmode \"org-mode sync I/O\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nDI assembly crate (composition root) — owns every wiring that names concrete\nbackends: Turso/Loro/OrgMode modules, MCP integrations, and\n`FrontendSession`.\n\nOwns all DI assembly that names concrete backends: the Turso\n`BackendEngine` stack ([`wiring`]), the no-Turso Loro stack ([`no_turso`]),\nconfig-driven session construction ([`session`]) and default-layout seeding\n([`seed`]). `holon-frontend` (the shared ViewModel) and `holon-orgmode`\nstay storage-agnostic: they expose capability traits and\n`FrontendSession::from_parts`; this crate supplies the implementations.\n\nOnly frontends that assemble backends depend on this crate (gpui, tui,\nmcp, integration tests) — never the storage-agnostic layers, and never\nthe wasm frontends (which bring their own wiring).",
+        "content": "@c4 component\n@c4 layer Composition\nPattern: Composition Root\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-frontend \"frontend session abstraction\" \"Rust\"\n@c4 uses holon-mcp-client \"MCP client providers\" \"Rust\"\n@c4 uses holon-orgmode \"org-mode sync I/O\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n@c4 uses holon-capability \"format capability profiles\" \"Rust\"\n@c4 uses holon-kitchen \"kitchen domain: recipes & shopping\" \"Rust\"\n@c4 uses holon-loro-wiring \"Loro-to-engine wiring\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n\nDI assembly crate (composition root) — owns every wiring that names concrete\nbackends: Turso/Loro/OrgMode modules, MCP integrations, and\n`FrontendSession`.\n\nOwns all DI assembly that names concrete backends: the Turso\n`BackendEngine` stack ([`wiring`]), the no-Turso Loro stack ([`no_turso`]),\nconfig-driven session construction ([`session`]) and default-layout seeding\n([`seed`]). `holon-frontend` (the shared ViewModel) and `holon-orgmode`\nstay storage-agnostic: they expose capability traits and\n`FrontendSession::from_parts`; this crate supplies the implementations.\n\nOnly frontends that assemble backends depend on this crate (gpui, tui,\nmcp, integration tests) — never the storage-agnostic layers, and never\nthe wasm frontends (which bring their own wiring).",
         "source_file": "holon-app/src/lib.rs",
         "layer": "Composition",
         "relationships": [
@@ -1241,6 +1264,26 @@
           {
             "target": "holon-profiles",
             "label": "entity profile resolution",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-capability",
+            "label": "format capability profiles",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-kitchen",
+            "label": "kitchen domain: recipes & shopping",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-loro-wiring",
+            "label": "Loro-to-engine wiring",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-turso",
+            "label": "Turso storage adapter",
             "protocol": "Rust"
           }
         ],
@@ -2022,7 +2065,7 @@
         "description": "Frontend session abstraction and the MVVM **ViewModel** layer — owns the reactive `ReactiveViewModel` tree that the GPUI and TUI Views observe.",
         "pattern": "MVVM ViewModel",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: MVVM ViewModel\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nFrontend session abstraction and the MVVM **ViewModel** layer — owns the\nreactive `ReactiveViewModel` tree that the GPUI and TUI Views observe.\n\nUses `premortem` for layered config (Defaults → TOML → CLI/env) and `clap`\nfor CLI parsing. Configuration is defined once in [`config::HolonConfig`]\nand automatically gets CLI + env var + TOML file support.\n\n# Usage\n\n```rust,ignore\nuse holon_frontend::{FrontendSession, cli};\n\nlet (config, session_cfg, config_dir, locked) =\n    cli::build_session(widgets)?;\nlet session = FrontendSession::new_from_config(\n    config, session_cfg, config_dir, locked,\n).await?;\n```",
+        "content": "@c4 component\n@c4 layer Core\nPattern: MVVM ViewModel\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-advice \"runtime advice rules\" \"Rust\"\n@c4 uses holon-oracles \"live ref-less invariants\" \"Rust\"\n@c4 uses holon-org-format \"org parse/render\" \"Rust\"\n@c4 uses holon-pbt-core \"PBT transition traits\" \"Rust\"\n\nFrontend session abstraction and the MVVM **ViewModel** layer — owns the\nreactive `ReactiveViewModel` tree that the GPUI and TUI Views observe.\n\nUses `premortem` for layered config (Defaults → TOML → CLI/env) and `clap`\nfor CLI parsing. Configuration is defined once in [`config::HolonConfig`]\nand automatically gets CLI + env var + TOML file support.\n\n# Usage\n\n```rust,ignore\nuse holon_frontend::{FrontendSession, cli};\n\nlet (config, session_cfg, config_dir, locked) =\n    cli::build_session(widgets)?;\nlet session = FrontendSession::new_from_config(\n    config, session_cfg, config_dir, locked,\n).await?;\n```",
         "source_file": "holon-frontend/src/lib.rs",
         "layer": "Core",
         "relationships": [
@@ -2044,6 +2087,26 @@
           {
             "target": "holon-macros",
             "label": "entity/operation derive macros",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-advice",
+            "label": "runtime advice rules",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-oracles",
+            "label": "live ref-less invariants",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-org-format",
+            "label": "org parse/render",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-pbt-core",
+            "label": "PBT transition traits",
             "protocol": "Rust"
           }
         ],
@@ -2492,7 +2555,7 @@
         "description": "Shared test infrastructure for Holon integration tests",
         "pattern": "Test Harness",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-app \"DI composition root\" \"Rust\"\n@c4 uses holon-block-roundtrip-testing \"block round-trip generators\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-frontend \"frontend session abstraction\" \"Rust\"\n@c4 uses holon-layout-testing \"layout PBT primitives\" \"Rust\"\n@c4 uses holon-mcp \"MCP frontend\" \"Rust\"\n@c4 uses holon-mcp-client \"MCP client providers\" \"Rust\"\n@c4 uses holon-orgmode \"org-mode sync I/O\" \"Rust\"\n@c4 uses holon-pbt-core \"PBT transition traits\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nShared test infrastructure for Holon integration tests\n\nThis module provides reusable components for both property-based tests\nand Cucumber BDD tests.",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-app \"DI composition root\" \"Rust\"\n@c4 uses holon-block-roundtrip-testing \"block round-trip generators\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-frontend \"frontend session abstraction\" \"Rust\"\n@c4 uses holon-layout-testing \"layout PBT primitives\" \"Rust\"\n@c4 uses holon-mcp \"MCP frontend\" \"Rust\"\n@c4 uses holon-mcp-client \"MCP client providers\" \"Rust\"\n@c4 uses holon-orgmode \"org-mode sync I/O\" \"Rust\"\n@c4 uses holon-pbt-core \"PBT transition traits\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n@c4 uses holon-advice \"runtime advice rules\" \"Rust\"\n@c4 uses holon-capability \"format capability profiles\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-kitchen \"kitchen domain: recipes & shopping\" \"Rust\"\n@c4 uses holon-loro-testing \"Loro subsystem PBT slice\" \"Rust\"\n@c4 uses holon-loro-wiring \"Loro-to-engine wiring\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-net \"derived Petri-net projection\" \"Rust\"\n@c4 uses holon-oracles \"live ref-less invariants\" \"Rust\"\n@c4 uses holon-org-format \"org parse/render\" \"Rust\"\n@c4 uses holon-sharing \"ADR 0028 policy overlay\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-turso-testing \"Turso subsystem PBT slice\" \"Rust\"\n\nShared test infrastructure for Holon integration tests\n\nThis module provides reusable components for both property-based tests\nand Cucumber BDD tests.",
         "source_file": "holon-integration-tests/src/lib.rs",
         "layer": "Testing",
         "relationships": [
@@ -2559,6 +2622,71 @@
           {
             "target": "holon-profiles",
             "label": "entity profile resolution",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-advice",
+            "label": "runtime advice rules",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-capability",
+            "label": "format capability profiles",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-core",
+            "label": "core datasource traits",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-kitchen",
+            "label": "kitchen domain: recipes & shopping",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-loro-testing",
+            "label": "Loro subsystem PBT slice",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-loro-wiring",
+            "label": "Loro-to-engine wiring",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-macros",
+            "label": "entity/operation derive macros",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-net",
+            "label": "derived Petri-net projection",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-oracles",
+            "label": "live ref-less invariants",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-org-format",
+            "label": "org parse/render",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-sharing",
+            "label": "ADR 0028 policy overlay",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-turso",
+            "label": "Turso storage adapter",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-turso-testing",
+            "label": "Turso subsystem PBT slice",
             "protocol": "Rust"
           }
         ],
@@ -4249,160 +4377,25 @@
             ],
             "files": [
               {
-                "name": "advice_dismiss_prod_session_wiring.rs"
-              },
-              {
                 "name": "advice_live_mcp_gate.rs"
-              },
-              {
-                "name": "advice_step4_red.rs"
-              },
-              {
-                "name": "arc_marking_equality.rs"
-              },
-              {
-                "name": "bidirectional_sync.rs"
               },
               {
                 "name": "bisection_pbt.rs"
               },
               {
-                "name": "boot_projector_gated_on_scan.rs"
-              },
-              {
-                "name": "boot_scan_bad_file_survives.rs"
-              },
-              {
-                "name": "chat_view_message_join.rs"
-              },
-              {
-                "name": "class_one_invariant_classifier.rs"
-              },
-              {
-                "name": "cold_boot_share_disclosure.rs"
-              },
-              {
-                "name": "convert_block_to_page_materializes_child_file.rs"
-              },
-              {
                 "name": "cook_vault_ingest.rs"
-              },
-              {
-                "name": "cross_medium_caps.rs"
-              },
-              {
-                "name": "cycle_task_state_cold_boot_reingest.rs"
-              },
-              {
-                "name": "doc_id_writeback_stability.rs"
-              },
-              {
-                "name": "dogfood_recorded_replay.rs"
-              },
-              {
-                "name": "editor_pure_pbt.rs"
-              },
-              {
-                "name": "forward_edge_ingest_regression.rs"
-              },
-              {
-                "name": "fts_query_block_e2e.rs"
               },
               {
                 "name": "general_e2e_composed_pbt.rs"
               },
               {
-                "name": "gpui_mcp_replay.rs"
-              },
-              {
                 "name": "hand_authored_regressions.rs"
-              },
-              {
-                "name": "holon_rule_runtime_discovery_prod_session.rs"
-              },
-              {
-                "name": "host_page_with_inline_subpages_ingest.rs"
-              },
-              {
-                "name": "idless_external_reedit_dup.rs"
-              },
-              {
-                "name": "idonly_folder_companion_identity_collision.rs"
-              },
-              {
-                "name": "integration_configure_button_visibility.rs"
-              },
-              {
-                "name": "integration_state_boot_population.rs"
-              },
-              {
-                "name": "integration_state_boot_records_status.rs"
-              },
-              {
-                "name": "integration_state_section_refreshes.rs"
-              },
-              {
-                "name": "integrations_section_renders_every_row.rs"
-              },
-              {
-                "name": "interaction_trace_connectivity.rs"
-              },
-              {
-                "name": "journals_restart_survival.rs"
-              },
-              {
-                "name": "journals_seed_file_collision.rs"
-              },
-              {
-                "name": "junction_survives_reboot_repro.rs"
               },
               {
                 "name": "latency_slo_gate.rs"
               },
               {
-                "name": "layout_bridge_smoke.rs"
-              },
-              {
-                "name": "live_self_check_suite.rs"
-              },
-              {
-                "name": "local_ui_state_precedence.rs"
-              },
-              {
-                "name": "local_vault_fidelity.rs"
-              },
-              {
                 "name": "logseq_db_import_store.rs"
-              },
-              {
-                "name": "logseq_org_vault_ingest.rs"
-              },
-              {
-                "name": "loro_create_persists_prod_session.rs"
-              },
-              {
-                "name": "loro_live_entity_wiring.rs"
-              },
-              {
-                "name": "loro_memory_start_app.rs"
-              },
-              {
-                "name": "loro_projection_atomic_advance.rs"
-              },
-              {
-                "name": "loro_restart_unseeded_vault.rs"
-              },
-              {
-                "name": "loro_sync_controller_pbt.rs"
-              },
-              {
-                "name": "loro_unseeded_vault_split.rs"
-              },
-              {
-                "name": "matview_duplicate_row_repro.rs"
-              },
-              {
-                "name": "matview_reboot_duplicate_repro.rs"
               },
               {
                 "name": "mcp_add_subtask_edge_fields.rs"
@@ -4414,55 +4407,10 @@
                 "name": "mcp_render_org_matches_writeback.rs"
               },
               {
-                "name": "merge_blocks_pbt.rs"
-              },
-              {
-                "name": "multiline_serializer_test.rs"
-              },
-              {
-                "name": "navigate_back_keeps_panel_populated.rs"
-              },
-              {
-                "name": "no_tracked_proptest_regressions.rs"
-              },
-              {
-                "name": "org_roundtrip_pbt.rs"
-              },
-              {
-                "name": "org_serializer_prod_content_parity.rs"
-              },
-              {
-                "name": "parentage_assertion_replay.rs"
-              },
-              {
-                "name": "perspective_slot_resolution.rs"
-              },
-              {
-                "name": "phantom_loro_exists_repro.rs"
-              },
-              {
                 "name": "place_all_restates_total_sibling_order.rs"
               },
               {
-                "name": "pn_catalog_truthfulness_probe.rs"
-              },
-              {
-                "name": "probe_link_marks_roundtrip.rs"
-              },
-              {
-                "name": "query_equivalence_pbt.rs"
-              },
-              {
-                "name": "ref_entity_lookup_parity.rs"
-              },
-              {
                 "name": "refdoc1_remap_totality_replay.rs"
-              },
-              {
-                "name": "region_writeback_loss.rs"
-              },
-              {
-                "name": "schedule_boundary_observables.rs"
               },
               {
                 "name": "shape_profile_shrink.rs"
@@ -4471,85 +4419,25 @@
                 "name": "sidebar_bind_latency_probe.rs"
               },
               {
-                "name": "sidebar_modifier_click_open_tab_probe.rs"
-              },
-              {
                 "name": "single_large_document_scale.rs"
-              },
-              {
-                "name": "split_block_content_pbt.rs"
-              },
-              {
-                "name": "split_block_stale_display_regression.rs"
-              },
-              {
-                "name": "split_doc_root_idless_duplicates.rs"
-              },
-              {
-                "name": "split_undo_redo_reconcile.rs"
               },
               {
                 "name": "stale_rewrite_sibling_order.rs"
               },
               {
-                "name": "step_vocabulary_agreement.rs"
-              },
-              {
-                "name": "step_vocabulary_laws.rs"
-              },
-              {
-                "name": "substrate_corruption_faults.rs"
-              },
-              {
                 "name": "subtree_of_bfs_cost_turso.rs"
-              },
-              {
-                "name": "task_vocabulary_reaches_the_store.rs"
-              },
-              {
-                "name": "tour_spike.rs"
-              },
-              {
-                "name": "turso_ivm_index_bug.rs"
               },
               {
                 "name": "two_instance_composed_pbt.rs"
               },
               {
-                "name": "undo_cycle_task_state_coverage.rs"
-              },
-              {
-                "name": "undo_prod_session_wiring.rs"
-              },
-              {
                 "name": "undo_redo_reference_heal.rs"
-              },
-              {
-                "name": "watch_guard_raii.rs"
-              },
-              {
-                "name": "watch_query_ordering_spec_wiring.rs"
-              },
-              {
-                "name": "watch_recovers_when_table_appears.rs"
-              },
-              {
-                "name": "watch_ui.rs"
               },
               {
                 "name": "web_arm_keystone.rs"
               },
               {
                 "name": "web_arm_spike.rs"
-              },
-              {
-                "name": "widget_only_headline.rs"
-              },
-              {
-                "name": "wiki_link_ingest_marks_junction.rs"
-              },
-              {
-                "name": "writeback_stale_cross_doc_prune.rs"
               }
             ]
           }
@@ -4942,7 +4830,7 @@
         "description": "Loro CRDT document engine and peer-to-peer synchronization.",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nLoro CRDT document engine and peer-to-peer synchronization.\n\nThis crate provides the Loro CRDT backend, P2P sync infrastructure,\nand snapshot/block query capabilities — extracted from the `holon` god\ncrate.\n\nRe-exported into `holon::sync` so existing `holon::sync::*` paths resolve.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-secrets \"OS-keychain secret storage\" \"Rust\"\n\nLoro CRDT document engine and peer-to-peer synchronization.\n\nThis crate provides the Loro CRDT backend, P2P sync infrastructure,\nand snapshot/block query capabilities — extracted from the `holon` god\ncrate.\n\nRe-exported into `holon::sync` so existing `holon::sync::*` paths resolve.",
         "source_file": "holon-loro/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
@@ -4964,6 +4852,11 @@
           {
             "target": "holon-macros",
             "label": "entity/operation derive macros",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-secrets",
+            "label": "OS-keychain secret storage",
             "protocol": "Rust"
           }
         ],
@@ -5089,6 +4982,9 @@
                 "name": "pairing_swap.rs"
               },
               {
+                "name": "peer_import.rs"
+              },
+              {
                 "name": "roster_sidecar.rs"
               },
               {
@@ -5146,7 +5042,7 @@
         "description": "Companion PBT crate for `holon-loro` — the first subsystem to OWN its composed-keystone contributions (co-location Phase 1, plan §5-loro).",
         "pattern": "Test Harness",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon-loro \"production CRDT backend under test\" \"Rust\"\n@c4 uses holon-pbt-core \"PBT cap traits + contribution seam\" \"Rust\"\n\nCompanion PBT crate for `holon-loro` — the first subsystem to OWN its\ncomposed-keystone contributions (co-location Phase 1, plan §5-loro).\n\nOwns the Loro storage subsystem's cleanly-decoupled PBT artifacts:\n- [`LoroBackendComponent`] — the SUT cap component wrapping a real\n  `holon_loro::LoroBackend` (`SutBackend` + `SutLoroLog` +\n  `SutLoroTaskState`).\n- [`LoroSut`] — the peer-mesh / Loro-validation SUT (`sut_loro`), plus its\n  [`quiescence`] and [`peer_ops`] helpers.\n- The six peer-sync / CRDT [`transitions`] (`AddPeer`, `PeerEdit`,\n  `PeerCharEdit`, `MergeFromPeer`, `SyncWithPeer`, `CreateStaleLoro`), each\n  generic over the reference type `R`.\n- `inv-loro-no-errors` and `inv-loro-children-match-ref` invariant bodies +\n  their `wire()`s.\n\nExposed to the central fold via [`pbt_contribution`] / [`pbt_footprint`].\n\n## Ref-state independence (plan §4)\nNothing here names a concrete reference-state type: the invariant bodies and\ntransitions read `Ref*` capabilities generically. A guard integration test\n(`tests/no_ref_state_dep.rs`) fails the build if this crate ever reaches for\nthe central `ReferenceState` monolith.\n\n## Dispatch stays central (for now)\nThe `LoroSut` and transitions are co-located here (Phase-1a Step 4), but the\ncentral `declare_e2e_transitions!` enum still assembles them (it re-exports\nthe structs) — the strategy is enum-driven, so [`pbt_contribution`]'s\n`generators` is inert until a later contribution-driven-strategy phase.\n\n## `/loro` correspondence arm co-located (Phase-1a follow-on)\nThe `inv-blocks-match-ref/loro` store arm now lives here\n([`invariants::loro_blocks_match_ref`]) as a single-store\n`Correspondence<NonSeedBlocks>`, contributed through [`pbt_contribution`].\nThis was unblocked by lifting the correspondence framework, the\n`NonSeedBlocks` observable, and the `block_compare` leaf onto the pbt-core\nfloor; the central table keeps only the not-yet-co-located `block_raw` +\n`matview` arms (Phase 2).",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon-loro \"production CRDT backend under test\" \"Rust\"\n@c4 uses holon-pbt-core \"PBT cap traits + contribution seam\" \"Rust\"\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nCompanion PBT crate for `holon-loro` — the first subsystem to OWN its\ncomposed-keystone contributions (co-location Phase 1, plan §5-loro).\n\nOwns the Loro storage subsystem's cleanly-decoupled PBT artifacts:\n- [`LoroBackendComponent`] — the SUT cap component wrapping a real\n  `holon_loro::LoroBackend` (`SutBackend` + `SutLoroLog` +\n  `SutLoroTaskState`).\n- [`LoroSut`] — the peer-mesh / Loro-validation SUT (`sut_loro`), plus its\n  [`quiescence`] and [`peer_ops`] helpers.\n- The six peer-sync / CRDT [`transitions`] (`AddPeer`, `PeerEdit`,\n  `PeerCharEdit`, `MergeFromPeer`, `SyncWithPeer`, `CreateStaleLoro`), each\n  generic over the reference type `R`.\n- `inv-loro-no-errors` and `inv-loro-children-match-ref` invariant bodies +\n  their `wire()`s.\n\nExposed to the central fold via [`pbt_contribution`] / [`pbt_footprint`].\n\n## Ref-state independence (plan §4)\nNothing here names a concrete reference-state type: the invariant bodies and\ntransitions read `Ref*` capabilities generically. A guard integration test\n(`tests/no_ref_state_dep.rs`) fails the build if this crate ever reaches for\nthe central `ReferenceState` monolith.\n\n## Dispatch stays central (for now)\nThe `LoroSut` and transitions are co-located here (Phase-1a Step 4), but the\ncentral `declare_e2e_transitions!` enum still assembles them (it re-exports\nthe structs) — the strategy is enum-driven, so [`pbt_contribution`]'s\n`generators` is inert until a later contribution-driven-strategy phase.\n\n## `/loro` correspondence arm co-located (Phase-1a follow-on)\nThe `inv-blocks-match-ref/loro` store arm now lives here\n([`invariants::loro_blocks_match_ref`]) as a single-store\n`Correspondence<NonSeedBlocks>`, contributed through [`pbt_contribution`].\nThis was unblocked by lifting the correspondence framework, the\n`NonSeedBlocks` observable, and the `block_compare` leaf onto the pbt-core\nfloor; the central table keeps only the not-yet-co-located `block_raw` +\n`matview` arms (Phase 2).",
         "source_file": "holon-loro-testing/src/lib.rs",
         "layer": "Testing",
         "relationships": [
@@ -5158,6 +5054,21 @@
           {
             "target": "holon-pbt-core",
             "label": "PBT cap traits + contribution seam",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon",
+            "label": "core orchestration",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-api",
+            "label": "shared value & operation types",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-macros",
+            "label": "entity/operation derive macros",
             "protocol": "Rust"
           }
         ],
@@ -5265,7 +5176,7 @@
         "description": "The wiring that binds the Loro CRDT backend to the `holon` engine.",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-sharing \"ADR 0028 policy overlay\" \"Rust\"\n\nThe wiring that binds the Loro CRDT backend to the `holon` engine.\n\nEverything here needs BOTH `holon` and `holon-loro`; nothing in `holon`\nneeds it back. Keeping it in its own crate is what lets `holon` compile in\nparallel with `holon-loro` instead of waiting for it.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-sharing \"ADR 0028 policy overlay\" \"Rust\"\n@c4 uses holon-advice \"runtime advice rules\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nThe wiring that binds the Loro CRDT backend to the `holon` engine.\n\nEverything here needs BOTH `holon` and `holon-loro`; nothing in `holon`\nneeds it back. Keeping it in its own crate is what lets `holon` compile in\nparallel with `holon-loro` instead of waiting for it.",
         "source_file": "holon-loro-wiring/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
@@ -5287,6 +5198,26 @@
           {
             "target": "holon-sharing",
             "label": "ADR 0028 policy overlay",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-advice",
+            "label": "runtime advice rules",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-api",
+            "label": "shared value & operation types",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-core",
+            "label": "core datasource traits",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-profiles",
+            "label": "entity profile resolution",
             "protocol": "Rust"
           }
         ],
@@ -5332,9 +5263,16 @@
         "description": "Procedural macros: `#[operations_trait]`, `#[affects(...)]`, and entity derives.",
         "pattern": "Code Generation",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: Code Generation\n\nProcedural macros: `#[operations_trait]`, `#[affects(...)]`, and entity\nderives.",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Code Generation\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\n\nProcedural macros: `#[operations_trait]`, `#[affects(...)]`, and entity\nderives.",
         "source_file": "holon-macros/src/lib.rs",
         "layer": "Core",
+        "relationships": [
+          {
+            "target": "holon-pattern",
+            "label": "guard AST & parser",
+            "protocol": "Rust"
+          }
+        ],
         "dirs": [
           {
             "name": "src",
@@ -5392,15 +5330,10 @@
         "description": "Macro-expansion tests for `holon-macros`.",
         "pattern": "Test Harness",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nMacro-expansion tests for `holon-macros`.",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nMacro-expansion tests for `holon-macros`.",
         "source_file": "holon-macros-test/src/lib.rs",
         "layer": "Testing",
         "relationships": [
-          {
-            "target": "holon",
-            "label": "core orchestration",
-            "protocol": "Rust"
-          },
           {
             "target": "holon-api",
             "label": "shared value & operation types",
@@ -5571,15 +5504,10 @@
         "description": "Reusable MCP client: connects to MCP servers and exposes their tools as `OperationProvider`s.",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n\nReusable MCP client: connects to MCP servers and exposes their tools as\n`OperationProvider`s.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n@c4 uses holon-rows \"typed row JSON Lines\" \"Rust\"\n@c4 uses holon-secrets \"OS-keychain secret storage\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n\nReusable MCP client: connects to MCP servers and exposes their tools as\n`OperationProvider`s.",
         "source_file": "holon-mcp-client/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
-          {
-            "target": "holon",
-            "label": "core orchestration",
-            "protocol": "Rust"
-          },
           {
             "target": "holon-api",
             "label": "shared value & operation types",
@@ -5598,6 +5526,21 @@
           {
             "target": "holon-profiles",
             "label": "entity profile resolution",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-rows",
+            "label": "typed row JSON Lines",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-secrets",
+            "label": "OS-keychain secret storage",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-turso",
+            "label": "Turso storage adapter",
             "protocol": "Rust"
           }
         ],
@@ -6019,23 +5962,13 @@
         "description": "Org-mode format: pure parsing and rendering.",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nOrg-mode format: pure parsing and rendering.\n\nThis crate contains the format-level concerns for org-mode files:\n- **Parsing**: `parse_org_file` converts `&str` content into typed `Block`\n  entities.\n- **Rendering**: `OrgRenderer` serializes `Block` entities back to org text.\n\nNo disk I/O, no file watching, no DI wiring. Depends only on `holon-api`\ntypes and pure format libraries (`orgize`, `sha2`, `hex`, `chrono`, `uuid`).\n\nThe disk I/O and sync layer lives in `holon-orgmode`, which re-exports //\nALLOW(compatibility): see holon-orgmode crate header everything from this\ncrate so older import paths keep resolving.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n\nOrg-mode format: pure parsing and rendering.\n\nThis crate contains the format-level concerns for org-mode files:\n- **Parsing**: `parse_org_file` converts `&str` content into typed `Block`\n  entities.\n- **Rendering**: `OrgRenderer` serializes `Block` entities back to org text.\n\nNo disk I/O, no file watching, no DI wiring. Depends only on `holon-api`\ntypes and pure format libraries (`orgize`, `sha2`, `hex`, `chrono`, `uuid`).\n\nThe disk I/O and sync layer lives in `holon-orgmode`, which re-exports //\nALLOW(compatibility): see holon-orgmode crate header everything from this\ncrate so older import paths keep resolving.",
         "source_file": "holon-org-format/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
           {
             "target": "holon-api",
             "label": "shared value & operation types",
-            "protocol": "Rust"
-          },
-          {
-            "target": "holon-core",
-            "label": "core datasource traits",
-            "protocol": "Rust"
-          },
-          {
-            "target": "holon-macros",
-            "label": "entity/operation derive macros",
             "protocol": "Rust"
           }
         ],
@@ -6165,15 +6098,10 @@
         "description": "Org-mode disk I/O and sync layer.",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-org-format \"org parse/render\" \"Rust\"\n\nOrg-mode disk I/O and sync layer.\n\nThis crate handles file watching, bidirectional sync between org files and\nthe block store, and DI wiring. Format-level concerns (parsing, rendering,\ndiffing) live in `holon-org-format` and are re-exported here so external //\nALLOW(compatibility): re-export bridge during the org-format split\ncallers keep working through the crate split.\n\n# Type System\n\nThis crate uses the generic `Block` type from the core holon crate,\nwith org-specific fields stored in the `properties` JSON field. Extension\ntraits (`OrgDocumentExt`, `OrgBlockExt`) provide accessors for these\norg-specific fields.\n\n- `Block` (with `name` set) + `OrgDocumentExt`: Represents an org file\n- `Block` + `OrgBlockExt`: Represents an org headline",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-org-format \"org parse/render\" \"Rust\"\n\nOrg-mode disk I/O and sync layer.\n\nThis crate handles file watching, bidirectional sync between org files and\nthe block store, and DI wiring. Format-level concerns (parsing, rendering,\ndiffing) live in `holon-org-format` and are re-exported here so external //\nALLOW(compatibility): re-export bridge during the org-format split\ncallers keep working through the crate split.\n\n# Type System\n\nThis crate uses the generic `Block` type from the core holon crate,\nwith org-specific fields stored in the `properties` JSON field. Extension\ntraits (`OrgDocumentExt`, `OrgBlockExt`) provide accessors for these\norg-specific fields.\n\n- `Block` (with `name` set) + `OrgDocumentExt`: Represents an org file\n- `Block` + `OrgBlockExt`: Represents an org headline",
         "source_file": "holon-orgmode/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
-          {
-            "target": "holon",
-            "label": "core orchestration",
-            "protocol": "Rust"
-          },
           {
             "target": "holon-api",
             "label": "shared value & operation types",
@@ -6187,11 +6115,6 @@
           {
             "target": "holon-filesystem",
             "label": "filesystem ports",
-            "protocol": "Rust"
-          },
-          {
-            "target": "holon-macros",
-            "label": "entity/operation derive macros",
             "protocol": "Rust"
           },
           {
@@ -6432,13 +6355,23 @@
         "description": "Cross-PBT transition traits shared between `holon-layout-testing` and `holon-integration-tests`.",
         "pattern": "Strategy",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Testing\nPattern: Strategy\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n\nCross-PBT transition traits shared between `holon-layout-testing` and\n`holon-integration-tests`.\n\nDefines the two PBT transition traits — `TransitionFactory<Ref>` and\n`TransitionImpl<Ref, Sut>` — generic over reference-state and SUT,\nplus the variant structs that show up in more than one PBT.\n\n## Why generic\n\nEach PBT carries its own reference-state and its own SUT handle.\nThe layout PBT has a thin generation context + a frontend\n`LayoutSut`; the integration-tests PBT has a rich `ReferenceState` +\nan async `dyn SutHandle`. By parameterising the traits over `Ref`\nand `Sut`, the *same* variant struct (e.g. [`SwitchViewMode`]) can\nhave one impl per PBT — different `(Ref, Sut)` tuples → distinct\nimpls → no coherence conflict.\n\n## File per variant\n\nEvery variant under [`interactions`] gets its own file holding the\nstruct. The per-PBT impls of `TransitionFactory` / `TransitionImpl`\nlive in the consumer crate's own per-variant file (orphan rule\npermits this — at least one of the type parameters is local to the\nimplementing crate).",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Strategy\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-org-format \"org parse/render\" \"Rust\"\n\nCross-PBT transition traits shared between `holon-layout-testing` and\n`holon-integration-tests`.\n\nDefines the two PBT transition traits — `TransitionFactory<Ref>` and\n`TransitionImpl<Ref, Sut>` — generic over reference-state and SUT,\nplus the variant structs that show up in more than one PBT.\n\n## Why generic\n\nEach PBT carries its own reference-state and its own SUT handle.\nThe layout PBT has a thin generation context + a frontend\n`LayoutSut`; the integration-tests PBT has a rich `ReferenceState` +\nan async `dyn SutHandle`. By parameterising the traits over `Ref`\nand `Sut`, the *same* variant struct (e.g. [`SwitchViewMode`]) can\nhave one impl per PBT — different `(Ref, Sut)` tuples → distinct\nimpls → no coherence conflict.\n\n## File per variant\n\nEvery variant under [`interactions`] gets its own file holding the\nstruct. The per-PBT impls of `TransitionFactory` / `TransitionImpl`\nlive in the consumer crate's own per-variant file (orphan rule\npermits this — at least one of the type parameters is local to the\nimplementing crate).",
         "source_file": "holon-pbt-core/src/lib.rs",
         "layer": "Testing",
         "relationships": [
           {
             "target": "holon-api",
             "label": "shared value & operation types",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-macros",
+            "label": "entity/operation derive macros",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-org-format",
+            "label": "org parse/render",
             "protocol": "Rust"
           }
         ],
@@ -6583,7 +6516,7 @@
         "description": "Materialization layer: Holon task blocks → Petri Net for WSJF ranking.",
         "pattern": "Adapter",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Engine\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-engine \"Petri-net engine\" \"Rust\"\n\nMaterialization layer: Holon task blocks → Petri Net for WSJF ranking.\n\nReads task blocks from the database and constructs a Petri Net where:\n- Tokens represent entities (the user, referenced people/documents)\n- Transitions represent tasks (with dependency ordering via completion\n  tokens)\n- The objective function scores tasks via prototypal inheritance with `=`\n  computed properties\n\nPrototype blocks define both literal defaults and `=`-prefixed Rhai computed\nattributes. Instance (task) blocks inherit from and override prototype\nproperties.\n\nContent prefix parsing order (each strips its marker):\n1. `>` — sequential dependency on previous sibling\n2. `@[[Person]]:` — delegation to another person\n3. `?` — question producing a knowledge token\n\nThe engine then ranks enabled transitions by WSJF (Δobj / duration).",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Adapter\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-engine \"Petri-net engine\" \"Rust\"\n@c4 uses holon-expr \"compiled Rhai expressions\" \"Rust\"\n\nMaterialization layer: Holon task blocks → Petri Net for WSJF ranking.\n\nReads task blocks from the database and constructs a Petri Net where:\n- Tokens represent entities (the user, referenced people/documents)\n- Transitions represent tasks (with dependency ordering via completion\n  tokens)\n- The objective function scores tasks via prototypal inheritance with `=`\n  computed properties\n\nPrototype blocks define both literal defaults and `=`-prefixed Rhai computed\nattributes. Instance (task) blocks inherit from and override prototype\nproperties.\n\nContent prefix parsing order (each strips its marker):\n1. `>` — sequential dependency on previous sibling\n2. `@[[Person]]:` — delegation to another person\n3. `?` — question producing a knowledge token\n\nThe engine then ranks enabled transitions by WSJF (Δobj / duration).",
         "source_file": "holon-petri/src/lib.rs",
         "layer": "Engine",
         "relationships": [
@@ -6600,6 +6533,11 @@
           {
             "target": "holon-engine",
             "label": "Petri-net engine",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-expr",
+            "label": "compiled Rhai expressions",
             "protocol": "Rust"
           }
         ],
@@ -6739,7 +6677,7 @@
         "description": "EntityProfile system: per-entity, per-row render + operation resolution.",
         "pattern": "Strategy",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: Strategy\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-engine \"Petri-net engine\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n\nEntityProfile system: per-entity, per-row render + operation resolution.\n\nEach entity (e.g., \"block\") can have a profile that defines:\n- Computed fields (Rhai expressions evaluated from row data)\n- A default render expression + operations\n- Conditional variants that override rendering based on row data\n\nProfile blocks are org blocks with an `entity_profile_for` property.\nBlock content is YAML using the `= ` prefix convention from petri.rs\nfor Rhai expressions.\n\nNOTE: Rhai ASTs are !Send+!Sync, so EntityProfile stores source strings\nand compiles on-demand during resolution. Compilation is fast for small\nexpressions (<1µs each).",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Strategy\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n\nEntityProfile system: per-entity, per-row render + operation resolution.\n\nEach entity (e.g., \"block\") can have a profile that defines:\n- Computed fields (Rhai expressions evaluated from row data)\n- A default render expression + operations\n- Conditional variants that override rendering based on row data\n\nProfile blocks are org blocks with an `entity_profile_for` property.\nBlock content is YAML using the `= ` prefix convention from petri.rs\nfor Rhai expressions.\n\nNOTE: Rhai ASTs are !Send+!Sync, so EntityProfile stores source strings\nand compiles on-demand during resolution. Compilation is fast for small\nexpressions (<1µs each).",
         "source_file": "holon-profiles/src/lib.rs",
         "layer": "Core",
         "relationships": [
@@ -6751,16 +6689,6 @@
           {
             "target": "holon-core",
             "label": "core datasource traits",
-            "protocol": "Rust"
-          },
-          {
-            "target": "holon-engine",
-            "label": "Petri-net engine",
-            "protocol": "Rust"
-          },
-          {
-            "target": "holon-macros",
-            "label": "entity/operation derive macros",
             "protocol": "Rust"
           }
         ],
@@ -7372,18 +7300,18 @@
         "description": "Companion PBT crate for `holon-turso` — the Turso storage subsystem's slice of the ONE composed-keystone PBT (co-location Phase 2, plan §5-turso).",
         "pattern": "Test Harness",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon-turso \"production Turso storage backend under test\" \"Rust\"\n@c4 uses holon-pbt-core \"PBT cap traits + contribution seam\" \"Rust\"\n\nCompanion PBT crate for `holon-turso` — the Turso storage subsystem's slice\nof the ONE composed-keystone PBT (co-location Phase 2, plan §5-turso).\n\nOwns the pure-Turso correspondence ARMS, co-located out of the central\ntable:\n- The two Turso arms (`block_raw`, `matview`) of the SHARED\n  [`NonSeedBlocks`] observable (whose struct + `ref_non_seed_blocks` stay on\n  the pbt-core floor; the `/loro` arm is contributed by\n  `holon-loro-testing`).\n- The whole `block_content` / `block_parent` / `advice_matviews` observables\n  (every arm Turso-owned): observable struct + `impl Observable` +\n  `ref_project` move here entirely.\n\nExposed to the central fold via [`pbt_contribution`] / [`pbt_footprint`].\n\n## Ref-state independence (plan §4)\nNothing here names a concrete reference-state type: the projections read\n`Ref*` / `Sut*` capabilities generically through the composed `CapMap`. A\nguard integration test (`tests/no_ref_state_dep.rs`) fails the build if this\ncrate ever reaches for the central `ReferenceState` monolith.\n\n## SUT component stays central (for now)\nThe `SqlProjectionComponent` SUT cap component is still assembled by the\ncentral `compose_sut_*`; this Phase co-locates the correspondence ARMS only\n(exactly like the Loro follow-on moved the `/loro` arm, not the `LoroSut`).\nSo [`pbt_contribution`]'s `cap_installers` and `generators` are empty.",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon-pbt-core \"PBT cap traits + contribution seam\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n\nCompanion PBT crate for `holon-turso` — the Turso storage subsystem's slice\nof the ONE composed-keystone PBT (co-location Phase 2, plan §5-turso).\n\nOwns the pure-Turso correspondence ARMS, co-located out of the central\ntable:\n- The two Turso arms (`block_raw`, `matview`) of the SHARED\n  [`NonSeedBlocks`] observable (whose struct + `ref_non_seed_blocks` stay on\n  the pbt-core floor; the `/loro` arm is contributed by\n  `holon-loro-testing`).\n- The whole `block_content` / `block_parent` / `advice_matviews` observables\n  (every arm Turso-owned): observable struct + `impl Observable` +\n  `ref_project` move here entirely.\n\nExposed to the central fold via [`pbt_contribution`] / [`pbt_footprint`].\n\n## Ref-state independence (plan §4)\nNothing here names a concrete reference-state type: the projections read\n`Ref*` / `Sut*` capabilities generically through the composed `CapMap`. A\nguard integration test (`tests/no_ref_state_dep.rs`) fails the build if this\ncrate ever reaches for the central `ReferenceState` monolith.\n\n## SUT component stays central (for now)\nThe `SqlProjectionComponent` SUT cap component is still assembled by the\ncentral `compose_sut_*`; this Phase co-locates the correspondence ARMS only\n(exactly like the Loro follow-on moved the `/loro` arm, not the `LoroSut`).\nSo [`pbt_contribution`]'s `cap_installers` and `generators` are empty.",
         "source_file": "holon-turso-testing/src/lib.rs",
         "layer": "Testing",
         "relationships": [
           {
-            "target": "holon-turso",
-            "label": "production Turso storage backend under test",
+            "target": "holon-pbt-core",
+            "label": "PBT cap traits + contribution seam",
             "protocol": "Rust"
           },
           {
-            "target": "holon-pbt-core",
-            "label": "PBT cap traits + contribution seam",
+            "target": "holon-api",
+            "label": "shared value & operation types",
             "protocol": "Rust"
           }
         ],

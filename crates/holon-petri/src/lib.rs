@@ -4,6 +4,7 @@
 //! @c4 uses holon-api "shared value & operation types" "Rust"
 //! @c4 uses holon-core "core datasource traits" "Rust"
 //! @c4 uses holon-engine "Petri-net engine" "Rust"
+//! @c4 uses holon-expr "compiled Rhai expressions" "Rust"
 //!
 //! Materialization layer: Holon task blocks → Petri Net for WSJF ranking.
 //!
