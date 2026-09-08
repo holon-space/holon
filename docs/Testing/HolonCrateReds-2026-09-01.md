@@ -150,6 +150,12 @@ implemented"]`. It pins §5.3's end state, which is not built: the interim
 behaviour refuses the recreate with `IdentityCollision`. Remove the attribute
 when the unique-random recreate lands.
 
+## The other un-gated crate
+
+`holon-gpui` has the same shape and is still open:
+[GpuiCrateReds-2026-09-10.md](GpuiCrateReds-2026-09-10.md) — 16 deterministic
+and 42 load-sensitive reds of 390 tests, in no gate.
+
 ## Gating recommendation
 
 **Add `-p holon` to the D43.a parallel nextest, not a nightly.** Both blockers

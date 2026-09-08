@@ -545,6 +545,14 @@ Notes:
   111–179s; its single red coincided with a load average above 200 and was a
   QUIC transport timeout). Any other failure blocks the land. The signatures
   live in `docs/Testing/HolonCrateReds-2026-09-01.md`.
+- **`holon-gpui` is in NO gate and is red** (measured 2026-09-10). `gate-compile`
+  typechecks it; nothing executes its 390 windowed tests. Four runs of
+  `cargo nextest run --no-fail-fast -p holon-gpui --features holon-gpui/pbt`
+  found 16 deterministic and 42 load-sensitive failures. The register — every
+  signature, its class and rate, a root-cause hypothesis per family, and a
+  proposed gate step with its two known-signature regex tiers — is
+  `docs/Testing/GpuiCrateReds-2026-09-10.md`. Bug-funnel entry:
+  `2026-09-10-holon-gpui-suite-red-at-main-and-ungated` (ENVIRONMENT, OPEN).
 - **The two-instance binary is in the weave list because it was in nothing
   else** (2026-09-02). It is not in `gate-compile` (which only typechecks), not
   in `keystone-smoke`, not in `loro-suite`, not in the land battery — so it
