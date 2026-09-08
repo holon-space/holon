@@ -82,6 +82,13 @@ pub struct SearchUiState {
     ///     opening search over a focused block keeps the keyboard up instead of
     ///     letting it drop ~150ms later.
     focus_gen: u64,
+    /// Window focus at the moment `open` stole it, handed back by `close`.
+    ///
+    /// The editor→window focus bridge (`editor_view::spawn_focus_binding`) is
+    /// deduped on the `focused_block` signal, and closing the overlay does not
+    /// move that signal — so nothing re-grabs focus on its own and the window
+    /// is left focusing a widget that is no longer rendered.
+    restore_focus: Option<gpui::FocusHandle>,
 }
 
 /// Emitted whenever the search state changes so `HolonApp` re-renders.
@@ -102,6 +109,7 @@ impl SearchUiState {
             query: String::new(),
             generation: 0,
             focus_gen: 0,
+            restore_focus: None,
         }
     }
 
@@ -127,6 +135,7 @@ impl SearchUiState {
         self.error = None;
         self.selected = 0;
         self.generation = self.generation.wrapping_add(1);
+        self.restore_focus = window.focused(cx);
         self.input.update(cx, |input, cx| {
             input.set_value("", window, cx);
             input.focus(window, cx);
@@ -139,8 +148,19 @@ impl SearchUiState {
         self.focus_gen = crate::soft_keyboard::editor_focus_gained();
     }
 
-    pub fn close(&mut self, cx: &mut gpui::Context<Self>) {
+    /// Close the modal and hand window focus back to whoever held it on
+    /// `open`.
+    ///
+    /// The hand-back is a no-op on the navigating paths (Enter / result
+    /// click): the destination becomes the main region's focus root, which
+    /// renders through the editor-less `page_title` variant, so the recorded
+    /// handle points at a widget that just unmounted. Bugfunnel
+    /// `2026-09-08-quick-open-enter-navigation-leaves-no-editable-focus`.
+    pub fn close(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
         self.open = false;
+        if let Some(handle) = self.restore_focus.take() {
+            window.focus(&handle, cx);
+        }
         // Dismiss the soft keyboard (generation-guarded, so it is a no-op if
         // focus has since moved to another text input). An explicit dismissal,
         // not a focus-out event — the modal is going away — so it goes
@@ -356,10 +376,10 @@ pub fn render_search_overlay(
                                 .text_color(theme.muted_fg)
                                 .child(target.to_string()),
                         )
-                        .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             navigate_to(&services, &target);
                             state_entity.update(cx, |s, cx| {
-                                s.close(cx);
+                                s.close(window, cx);
                                 cx.emit(NotifySearchUi);
                                 cx.notify();
                             });
@@ -415,12 +435,12 @@ pub fn render_search_overlay(
         .items_center()
         .pt(px(80.0))
         .px(px(16.0))
-        .on_key_down(move |ev, _window, cx| {
+        .on_key_down(move |ev, window, cx| {
             let key = ev.keystroke.key.as_str();
             match key {
                 "escape" => {
                     key_state.update(cx, |s, cx| {
-                        s.close(cx);
+                        s.close(window, cx);
                         cx.emit(NotifySearchUi);
                         cx.notify();
                     });
@@ -431,7 +451,7 @@ pub fn render_search_overlay(
                     if let Some(target) = target {
                         navigate_to(&key_services, &target);
                         key_state.update(cx, |s, cx| {
-                            s.close(cx);
+                            s.close(window, cx);
                             cx.emit(NotifySearchUi);
                             cx.notify();
                         });
@@ -465,9 +485,9 @@ pub fn render_search_overlay(
                 // the input / results never close the modal.
                 .on_mouse_down_out({
                     let state_entity = state_entity.clone();
-                    move |_, _window, cx| {
+                    move |_, window, cx| {
                         state_entity.update(cx, |s, cx| {
-                            s.close(cx);
+                            s.close(window, cx);
                             cx.emit(NotifySearchUi);
                             cx.notify();
                         });

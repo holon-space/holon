@@ -3,7 +3,7 @@ id: 2026-09-03-closing-quick-open-never-returns-keyboard-focus
 date: 2026-09-03
 gap: COVERAGE
 secondary: ENVIRONMENT
-status: OPEN
+status: FIXED
 summary: >-
   After Escape closes the quick-open overlay the window holds no editor focus,
   so every following keystroke is dropped while the engine still reports a
@@ -81,4 +81,61 @@ SutDriver, SutLayout — the live snapshot hosts only SutBackend"` against the
 live app (1 passed, 0 failed, 33 skipped of 34). The oracle exists; the one
 environment where the bug lives is the one it cannot observe.
 
-Screenshot: `lane-logs/dogfood-r2/21-after-escape.png`.
+Transcript quoted above; the run is the `dogfood-search` lane's second
+round (untracked session artefacts).
+
+## Fixed 2026-09-08
+
+Covering tests, all in `frontends/gpui/tests/quick_open_returns_focus_windowed.rs`
+(the windowed TestPlatform tier — the only rung with real gpui focus handles):
+
+* `closing_quick_open_hands_keyboard_focus_back` — Escape.
+* `clicking_away_from_quick_open_hands_keyboard_focus_back` — a real
+  `MouseDownEvent` on the backdrop, reaching `close` through
+  `on_mouse_down_out`.
+* `enter_navigating_out_of_quick_open_leaves_no_zombie_focus` — the navigating
+  path, which lands in a different state (see the Enter entry below).
+* `quick_open_round_trip_without_a_focused_editor_is_neutral` — opening and
+  closing with nothing focused must change nothing.
+
+Why the oracle skipped, and where it now runs. Nothing was wrong with
+`inv-window-focus-matches-engine-focus` itself. It needs `SutDriver` +
+`SutLayout`; the LIVE app is reached through the MCP snapshot, which hosts
+only `SutBackend`, so against the running instance the invariant is
+deselected-as-skipped and can never see this sequence. The windowed tier does
+supply both caps, but no windowed driver ever opened or closed the overlay, so
+the oracle had nothing to measure. The tests drive the real overlay and run
+that ONE invariant over the windowed `CapMap` (`compose_windowed_sut` +
+`run_selected`). On the two hand-back rungs a `Skipped` outcome FAILS the test,
+so the vacuous pass that hid this defect cannot come back.
+
+Red for the right reason, with the hand-back removed from `close` —
+`docs/Testing/fixture-logs-2026-09-08/quick-open-focus-red.txt`:
+
+    [inv-window-focus-matches-engine-focus] window focus diverged from engine
+    focus (settled, polled 1s): engine.focused_block() =
+    Some(EntityUri("block:chord-target")), window-focused editor(s) in the
+    committed frame = [], engine block's editable_text mounted: true.
+
+That is the dogfood transcript's `Engine focused_block=Some(...); editors
+reporting window focus: []` reproduced in a test.
+
+Fix: `SearchUiState` captures `window.focused(cx)` in `open` and
+`close(window, cx)` hands it back (`frontends/gpui/src/search_ui.rs`). All
+four close call sites — Escape, Enter-navigates, result click, click-away — go
+through that one chokepoint.
+
+## Still open
+
+The hand-back is a no-op on the two paths where the captured handle is not the
+right destination, and each has its own entry:
+
+* Enter-navigates —
+  `2026-09-08-quick-open-enter-navigation-leaves-no-editable-focus`.
+* Nothing focused when the overlay opened: there is no handle to restore. The
+  round trip is neutral (pinned above), which is the chosen product rule; see
+  the Enter entry for why "focus something" is not a local decision.
+
+The generated open/close TRANSITION the original remedy asked for — and the
+Gherkin step vocabulary — are still absent: these are dedicated windowed
+tests, not keystone-generated sequences.

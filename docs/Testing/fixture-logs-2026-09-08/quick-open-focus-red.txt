@@ -1,0 +1,69 @@
+Red-for-the-right-reason run for bugfunnel
+2026-09-03-closing-quick-open-never-returns-keyboard-focus.
+
+Produced by removing the focus hand-back from SearchUiState::close
+(frontends/gpui/src/search_ui.rs) and running:
+
+  cargo nextest run -p holon-gpui \
+    --features holon-integration-tests/pbt,holon-gpui/pbt \
+    --test quick_open_returns_focus_windowed --test-threads=1
+
+The two guard rungs (enter-navigate, no-focus round trip) stay green:
+they pin states the hand-back does not reach.
+
+────────────
+ Nextest run ID 98205359-abd1-42e7-ac5e-f4c0579f5281 with nextest profile: default
+    Starting 4 tests across 1 binary
+        FAIL [   7.359s] (1/4) holon-gpui::quick_open_returns_focus_windowed clicking_away_from_quick_open_hands_keyboard_focus_back
+        FAIL [   7.273s] (2/4) holon-gpui::quick_open_returns_focus_windowed closing_quick_open_hands_keyboard_focus_back
+        PASS [   7.008s] (3/4) holon-gpui::quick_open_returns_focus_windowed enter_navigating_out_of_quick_open_leaves_no_zombie_focus
+        PASS [  11.503s] (4/4) holon-gpui::quick_open_returns_focus_windowed quick_open_round_trip_without_a_focused_editor_is_neutral
+────────────
+     Summary [  33.145s] 4 tests run: 2 passed, 2 failed, 0 skipped
+        FAIL [   7.359s] (1/4) holon-gpui::quick_open_returns_focus_windowed clicking_away_from_quick_open_hands_keyboard_focus_back
+  stdout ───
+
+    running 1 test
+    test clicking_away_from_quick_open_hands_keyboard_focus_back ... FAILED
+
+    failures:
+
+    failures:
+        clicking_away_from_quick_open_hands_keyboard_focus_back
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 7.33s
+
+  stderr ───
+    2026-09-08T03:58:03.988310Z  WARN http_client: Using fake HTTP client with 404 response
+    2026-09-08T03:58:04.029619Z  WARN holon_profiles::type_registry: computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns entity="block" fields=has_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+    [GPUI] pre-warm timeout — window will open with loading state
+    [test_tracing] UNATTRIBUTED PROBLEM on thread clicking_away_from_quick_open_hands_keyboard_focus_back — 0 test scopes active, cannot blame one: [PANIC] clicking_away_from_quick_open_hands_keyboard_focus_back (frontends/gpui/tests/quick_open_returns_focus_windowed.rs:318): [after click-away closed quick-open] inv-window-focus-matches-engine-focus: Fail("[inv-window-focus-matches-engine-focus] window focus diverged from engine focus (settled, polled 1s): engine.focused_block() = Some(EntityUri(\"block:chord-target\")), window-focused editor(s) in the committed frame = [], engine block's editable_text mounted: true. A stale window-focused editor consumes keystrokes meant for the engine-focused block (steal-back / zombie-editor, ADR 0010).")
+
+    thread 'clicking_away_from_quick_open_hands_keyboard_focus_back' (5037567) panicked at frontends/gpui/tests/quick_open_returns_focus_windowed.rs:318:9:
+    [after click-away closed quick-open] inv-window-focus-matches-engine-focus: Fail("[inv-window-focus-matches-engine-focus] window focus diverged from engine focus (settled, polled 1s): engine.focused_block() = Some(EntityUri(\"block:chord-target\")), window-focused editor(s) in the committed frame = [], engine block's editable_text mounted: true. A stale window-focused editor consumes keystrokes meant for the engine-focused block (steal-back / zombie-editor, ADR 0010).")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   7.273s] (2/4) holon-gpui::quick_open_returns_focus_windowed closing_quick_open_hands_keyboard_focus_back
+  stdout ───
+
+    running 1 test
+    test closing_quick_open_hands_keyboard_focus_back ... FAILED
+
+    failures:
+
+    failures:
+        closing_quick_open_hands_keyboard_focus_back
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 7.25s
+
+  stderr ───
+    2026-09-08T03:58:11.348770Z  WARN http_client: Using fake HTTP client with 404 response
+    2026-09-08T03:58:11.374213Z  WARN holon_profiles::type_registry: computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns entity="block" fields=has_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+    [GPUI] pre-warm timeout — window will open with loading state
+    [test_tracing] UNATTRIBUTED PROBLEM on thread closing_quick_open_hands_keyboard_focus_back — 0 test scopes active, cannot blame one: [PANIC] closing_quick_open_hands_keyboard_focus_back (frontends/gpui/tests/quick_open_returns_focus_windowed.rs:318): [after escape closed quick-open] inv-window-focus-matches-engine-focus: Fail("[inv-window-focus-matches-engine-focus] window focus diverged from engine focus (settled, polled 1s): engine.focused_block() = Some(EntityUri(\"block:chord-target\")), window-focused editor(s) in the committed frame = [], engine block's editable_text mounted: true. A stale window-focused editor consumes keystrokes meant for the engine-focused block (steal-back / zombie-editor, ADR 0010).")
+
+    thread 'closing_quick_open_hands_keyboard_focus_back' (5037851) panicked at frontends/gpui/tests/quick_open_returns_focus_windowed.rs:318:9:
+    [after escape closed quick-open] inv-window-focus-matches-engine-focus: Fail("[inv-window-focus-matches-engine-focus] window focus diverged from engine focus (settled, polled 1s): engine.focused_block() = Some(EntityUri(\"block:chord-target\")), window-focused editor(s) in the committed frame = [], engine block's editable_text mounted: true. A stale window-focused editor consumes keystrokes meant for the engine-focused block (steal-back / zombie-editor, ADR 0010).")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+error: test run failed
