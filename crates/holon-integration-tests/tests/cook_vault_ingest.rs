@@ -1,4 +1,4 @@
-//! A `.cook` file in the vault reaches `CookFormatAdapter` on a REAL boot, and
+//! A `.cook` file in the vault reaches the cooklang plugin on a REAL boot, and
 //! is never written back.
 //!
 //! Kitchen Inc A landed the adapter but nothing routed a vault file to it: the
@@ -127,7 +127,7 @@ fn a_cook_file_in_the_vault_ingests_beside_org() {
             );
         }
 
-        // The recipe's document. `CookFormatAdapter::parse` ids the document
+        // The recipe's document. The cooklang plugin's parse ids the document
         // by its vault-relative path and titles it from cooklang metadata.
         // The recipe's page entity. Titled from the FILENAME, as every page
         // is: the cooklang `title:` metadata reaches the document block the
@@ -176,7 +176,7 @@ fn a_cook_file_in_the_vault_ingests_beside_org() {
         );
         // De-sugared cooklang: `@eggs{2}` rendered as "eggs", `~{3%minutes}`
         // as "3 minutes". No org parser produces this from a file with no
-        // headlines, so this is the decisive proof that CookFormatAdapter —
+        // headlines, so this is the decisive proof that the cooklang plugin —
         // and not some fallback — parsed the file.
         assert!(
             steps.contains("Crack the eggs into a bowl.")
@@ -971,5 +971,361 @@ fn a_keystroke_on_a_recipe_block_is_refused_at_the_cell() {
                 text: "X".to_string(),
             })
             .expect("an org-homed block stays writable through its cell");
+    });
+}
+
+/// A second recipe, so the scan has something it must NOT re-parse.
+fn recipe(title: &str, first_step: &str) -> String {
+    format!("---\ntitle: {title}\n---\n{first_step} with @salt{{1%g}}.\n\nRest for ~{{5%min}}.\n")
+}
+
+/// Every child block a recipe file owns, id and text, ordered — what "the
+/// untouched file's projection did not move" is measured on.
+async fn recipe_blocks(
+    env: &holon_integration_tests::TestEnvironment,
+    file: &str,
+) -> Vec<(String, String)> {
+    let rows = env
+        .query_sql(&format!(
+            "SELECT id, content FROM block_raw WHERE id LIKE 'block:{file}::b::%' ORDER BY id"
+        ))
+        .await
+        .expect("query block_raw for a recipe's blocks");
+    rows.iter()
+        .map(|r| {
+            (
+                r.get("id")
+                    .and_then(|v| v.as_string())
+                    .expect("id")
+                    .to_string(),
+                r.get("content")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Wait until `file`'s child blocks are present.
+async fn wait_for_recipe(env: &holon_integration_tests::TestEnvironment, file: &str) {
+    let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
+    while recipe_blocks(env, file).await.is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{file} never produced blocks"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Red 5a — the file row must record WHICH document the ingest gave the file.
+///
+/// This is the fact the cold-boot skip needs and cannot re-derive: a plugin
+/// guest is a pure function over bytes and embeds no id, so the only place its
+/// document survives a process boundary is `file.document_id`. Asserted for
+/// BOTH formats: an org file's identity is embedded and does not NEED the
+/// column, but a half-filled column is a trap for the next reader.
+#[test]
+fn a_cook_file_records_its_document_on_the_file_row() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let env = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .with_vault_file("Notes.org", NOTES_ORG)
+            .build(rt.clone())
+            .await
+            .expect("a vault holding a `.cook` file must boot");
+
+        wait_for_recipe(&env, "Pancakes.cook").await;
+
+        let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
+        loop {
+            let homes = file_document_homes(&env).await;
+            let cook = homes.get("file:Pancakes.cook").cloned().flatten();
+            let org = homes.get("file:Notes.org").cloned().flatten();
+            if cook.is_some() && org.is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the ingest never recorded a document on the file row: Pancakes.cook -> {cook:?}, \
+                 Notes.org -> {org:?}; every row in the table: {homes:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+}
+
+/// Red 5b — a recorded document must SURVIVE the next scan of the vault.
+///
+/// `file.document_id` has two writers: the controller's ingest, and the org
+/// sync provider's scan (whose `File` changes reach the same row through
+/// `QueryableCache<File>`). The second one knows the file's bytes but not the
+/// document they name, so a scan that writes what it does not know erases what
+/// the first one recorded — and the cold-boot skip then re-parses a recipe
+/// through the wasm interpreter because a row about a DIFFERENT file was
+/// rewritten. `a_cook_file_records_its_document_on_the_file_row` cannot see
+/// this: it stops at the first moment both rows are non-null.
+#[test]
+fn a_recorded_document_survives_a_later_org_scan() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let env = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .with_vault_file("Notes.org", NOTES_ORG)
+            .build(rt.clone())
+            .await
+            .expect("a vault holding a `.cook` file must boot");
+
+        wait_for_recipe(&env, "Pancakes.cook").await;
+        let recorded = wait_for_both_homes(&env).await;
+
+        env.write_org_file(
+            "Notes.org",
+            &format!("{NOTES_ORG}** A Second Note\n:PROPERTIES:\n:ID: notes-second\n:END:\n"),
+        )
+        .await
+        .expect("rewrite the org file so the provider rescans the vault");
+
+        // The scan is asynchronous, so an immediate read could pass before the
+        // stomping write lands. Hold the property for the whole window instead
+        // of sampling once at its end.
+        let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
+        while std::time::Instant::now() < deadline {
+            let homes = file_document_homes(&env).await;
+            for (id, before) in &recorded {
+                assert_eq!(
+                    homes.get(id).cloned().flatten().as_ref(),
+                    Some(before),
+                    "an org scan erased the document {id} was recorded against ({before}); every \
+                     row: {homes:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+}
+
+/// Both file rows' recorded documents, once the ingest has written them.
+async fn wait_for_both_homes(
+    env: &holon_integration_tests::TestEnvironment,
+) -> HashMap<String, String> {
+    let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
+    loop {
+        let homes = file_document_homes(env).await;
+        let cook = homes.get("file:Pancakes.cook").cloned().flatten();
+        let org = homes.get("file:Notes.org").cloned().flatten();
+        if let (Some(cook), Some(org)) = (cook, org) {
+            return HashMap::from([
+                ("file:Pancakes.cook".to_string(), cook),
+                ("file:Notes.org".to_string(), org),
+            ]);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the ingest never recorded a document on both file rows: {homes:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Every `file` row's id and the document it records, as raw SQL sees them.
+async fn file_document_homes(
+    env: &holon_integration_tests::TestEnvironment,
+) -> HashMap<String, Option<String>> {
+    let rows = env
+        .query_sql("SELECT id, document_id FROM file")
+        .await
+        .expect("query the file table");
+    rows.iter()
+        .map(|r| {
+            (
+                r.get("id")
+                    .and_then(|v| v.as_string())
+                    .expect("every file row has an id")
+                    .to_string(),
+                r.get("document_id")
+                    .and_then(|v| v.as_string())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+            )
+        })
+        .collect()
+}
+
+/// Red 5c — a recipe lands in EVERY active store, not only in SQL.
+///
+/// The cold-boot skip may only fire when the content it is skipping is present
+/// in every store that holds it; a SQL row with an empty Loro tree is the shape
+/// that predicate exists to refuse. So whether a recipe reaches Loro decides
+/// whether the skip is reachable at all for a plugin format — it is measured
+/// here rather than assumed by the skip.
+#[test]
+fn a_recipe_lands_in_every_active_store() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut env = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .build(rt.clone())
+            .await
+            .expect("a vault holding a `.cook` file must boot");
+        wait_for_recipe(&env, "Pancakes.cook").await;
+        env.stop_app().await.expect("stop the app");
+        env.start_app(true).await.expect("boot the app again");
+
+        let Some(backend) = env.loro_backend() else {
+            return; // SqlOnly: SQL is the only active store, nothing to compare.
+        };
+        let snapshot = backend.snapshot_blocks().await;
+        let steps: Vec<&String> = snapshot
+            .keys()
+            .filter(|id| id.contains("Pancakes.cook"))
+            .collect();
+        assert!(
+            !steps.is_empty(),
+            "the Loro tree holds none of Pancakes.cook's step blocks while SQL holds them all. \
+             Loro holds {} blocks.",
+            snapshot.len()
+        );
+
+        // The document ROOT, separately: the skip's presence obligation is
+        // asked about the root, not about the steps, so a root the ingest left
+        // out of the tree is exactly what keeps the skip unreachable.
+        let root = file_document_homes(&env)
+            .await
+            .get("file:Pancakes.cook")
+            .cloned()
+            .flatten()
+            .expect("the ingest recorded a document for Pancakes.cook");
+        let root_id = format!("block:{root}");
+        assert!(
+            snapshot.contains_key(&root_id),
+            "SQL homes Pancakes.cook at {root_id}, but the Loro tree holds its {} step block(s) \
+             under no such root — the recipe's steps and its document root landed in different \
+             stores",
+            steps.len()
+        );
+    });
+}
+
+/// Red 5b — the share probe must not parse a read-only file.
+///
+/// `probe_share_file` decides whether a file is a shared-subtree projection
+/// sink, and it decides by PARSING. It sits ahead of the cold-boot skip, so for
+/// a wasm format every file paid the interpreter once for the probe and once
+/// for the ingest — the skip could at best have halved a doubled cost. A
+/// read-only format is authoritative input Holon never rendered, so the answer
+/// is known without asking.
+///
+/// The recipe below carries the probe's own trigger substring in its text,
+/// which is what makes the property about the TIER and not about the cheap
+/// pre-filter that normally hides the cost.
+#[test]
+fn a_read_only_file_is_never_parsed_by_the_share_probe() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let before = holon_plugin_host::guest_parses();
+        let env = TestEnvironmentBuilder::new()
+            .with_vault_file(
+                "Sharing.cook",
+                "---\ntitle: Sharing\n---\nMention share-role in a step with @salt{1%g}.\n",
+            )
+            .build(rt.clone())
+            .await
+            .expect("a vault holding a `.cook` file must boot");
+
+        wait_for_recipe(&env, "Sharing.cook").await;
+
+        let parses = holon_plugin_host::guest_parses() - before;
+        assert_eq!(
+            parses, 1,
+            "booting one recipe ran the guest {parses} times; a read-only file is parsed by the \
+             ingest and by nothing else"
+        );
+    });
+}
+
+/// Red 4 — the INCREMENTAL SCAN. A `.cook` file the guest already parsed and
+/// whose bytes did not move must not be parsed again on the next boot.
+///
+/// This is a budget property, not a cosmetic one: the wasm interpreter costs
+/// ~20x the native parser it replaces, so a scan that re-parses an unchanged
+/// vault spends the whole 200 ms interaction→projection budget on work with no
+/// output. Org files already skip through the controller's content-hash fast
+/// path; a plugin format could not reach it, because that path resolves the
+/// document from an id embedded IN the content and a guest embeds none.
+///
+/// Two of the three seams are closed, and each has its own test above: the
+/// ingest records `file.document_id`, and the share probe does not parse a
+/// read-only file ahead of the skip.
+///
+/// KNOWN RED, `#[ignore]`d so it does not fail a land gate (the D66.a pattern);
+/// run it with `--run-ignored all`. What is measured across five identical runs
+/// is a SPREAD, not a constant: the second boot ran the guest 6/4/5/5/7 times,
+/// and the skip's `in_tree` probe answered differently for the same document
+/// root between runs (and between two roots inside one scan). Run 2 answered
+/// `true` for both roots and still parsed 4 times, so the probe is not the only
+/// cause. Tracked, with the root-cause candidates and the measurement each
+/// needs, as `docs/Testing/bugfunnel/entries/
+/// 2026-09-08-a-cook-vaults-second-boot-re-parses-a-varying-number-of-recipes.
+/// md`.
+#[test]
+#[ignore = "known red: the second boot ran the guest 6/4/5/5/7 times over five identical runs (expected 1), with the in_tree probe answering inconsistently for the same root — see the bugfunnel entry"]
+fn a_second_boot_re_parses_only_the_recipe_that_changed() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut env = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .with_vault_file(
+                "Linsensuppe.cook",
+                &recipe("Linsensuppe", "Simmer the lentils"),
+            )
+            .with_vault_file("Waffles.cook", &recipe("Waffles", "Whisk the batter"))
+            .build(rt.clone())
+            .await
+            .expect("a vault of three recipes must boot");
+
+        for file in ["Pancakes.cook", "Linsensuppe.cook", "Waffles.cook"] {
+            wait_for_recipe(&env, file).await;
+        }
+        let first_boot = holon_plugin_host::guest_parses();
+        assert!(
+            first_boot >= 3,
+            "the first boot parsed {first_boot} files through the guest; three recipes must reach \
+             it, so the counter is not wired to the production adapter"
+        );
+
+        let untouched = recipe_blocks(&env, "Waffles.cook").await;
+        assert!(!untouched.is_empty(), "Waffles.cook projected no blocks");
+
+        env.stop_app().await.expect("stop the app");
+        env.write_org_file(
+            "Linsensuppe.cook",
+            &recipe("Linsensuppe", "Simmer the lentils gently"),
+        )
+        .await
+        .expect("rewrite one recipe while the app is down");
+        env.start_app(true).await.expect("boot the app again");
+        for file in ["Pancakes.cook", "Linsensuppe.cook", "Waffles.cook"] {
+            wait_for_recipe(&env, file).await;
+        }
+
+        let second_boot = holon_plugin_host::guest_parses() - first_boot;
+        assert_eq!(
+            second_boot, 1,
+            "the second boot ran the guest {second_boot} times; only Linsensuppe.cook changed, so \
+             a scan that re-parses the other two is paying the interpreter for nothing"
+        );
+        assert_eq!(
+            recipe_blocks(&env, "Waffles.cook").await,
+            untouched,
+            "the untouched recipe's blocks moved across a boot that never re-read its file"
+        );
     });
 }

@@ -173,6 +173,8 @@ futures-util = { version = "0.3", optional = true }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+# The vault-scan counter the incremental-scan test reads across a restart.
+holon-plugin-host.workspace = true
 # Increment 2.5 catalog-truthfulness probe: the PN simulator the declared
 # transitions are fired on (tests/pn_catalog_truthfulness_probe.rs).
 holon-engine.workspace = true

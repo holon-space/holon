@@ -2,25 +2,28 @@
 //! store. Parsing a step correctly is worth nothing if the params builder drops
 //! what it parsed.
 
-use std::path::Path;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 
 use holon_api::EntityUri;
 use holon_api::ROUTING_DOC_URI_KEY;
 use holon_api::Value;
 use holon_core::file_format::FileFormatAdapter;
-use holon_kitchen::CookFormatAdapter;
-use holon_kitchen::STEP_NUMBER_KEY;
+
+mod support;
+
+/// The cell a cooklang step numbers itself with, as the guest spells it.
+const STEP_NUMBER_KEY: &str = "step_number";
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    support::fixtures_dir()
 }
 
 fn parsed() -> holon_core::file_format::FileFormatParseResult {
     let root = fixtures();
     let path = root.join("pancakes.cook");
     let content = std::fs::read_to_string(&path).unwrap();
-    CookFormatAdapter::new()
+    support::bundled_cook_plugin()
         .parse(&path, &content, &EntityUri::no_parent(), &root)
         .unwrap()
 }
@@ -34,9 +37,12 @@ fn step_number_survives_into_the_ingest_params() {
         .find(|b| b.get_property_str(STEP_NUMBER_KEY).as_deref() == Some("1"))
         .expect("no step 1");
 
-    let params =
-        holon_kitchen::params::build_block_params(step, &r.document.id, &r.document.id, None)
-            .unwrap();
+    let params = support::bundled_cook_plugin().build_block_params(
+        step,
+        &r.document.id,
+        &r.document.id,
+        None,
+    );
 
     assert_eq!(
         params.get(STEP_NUMBER_KEY),
@@ -48,13 +54,12 @@ fn step_number_survives_into_the_ingest_params() {
 #[test]
 fn document_metadata_survives_into_the_ingest_params() {
     let r = parsed();
-    let params = holon_kitchen::params::build_block_params(
+    let params = support::bundled_cook_plugin().build_block_params(
         &r.document,
         &EntityUri::no_parent(),
         &r.document.id,
         None,
-    )
-    .unwrap();
+    );
 
     assert_eq!(
         params.get("servings"),
@@ -72,9 +77,12 @@ fn document_metadata_survives_into_the_ingest_params() {
 fn params_carry_identity_content_and_routing() {
     let r = parsed();
     let step = &r.blocks[0];
-    let params =
-        holon_kitchen::params::build_block_params(step, &r.document.id, &r.document.id, None)
-            .unwrap();
+    let params = support::bundled_cook_plugin().build_block_params(
+        step,
+        &r.document.id,
+        &r.document.id,
+        None,
+    );
 
     assert_eq!(params.get("id"), Some(&Value::String(step.id.to_string())));
     assert_eq!(
@@ -90,19 +98,30 @@ fn params_carry_identity_content_and_routing() {
 
 #[test]
 fn a_property_naming_a_storage_column_is_refused_not_silently_inserted() {
-    // `build_block_params` is pub, so a caller that never went through the
-    // parse boundary can reach it. A debug_assert would be a no-op in release
-    // — exactly where emitting `content` as a param would overwrite the row's
-    // own text unseen.
+    // `build_block_params` is on the public trait, so a caller that never went
+    // through the parse boundary can reach it. A debug_assert would be a no-op
+    // in release — exactly where emitting `content` as a param would overwrite
+    // the row's own text unseen. The trait returns params rather than a
+    // `Result`, so a PANIC is the refusal channel here — asserting an `Err`
+    // instead would need the trait signature changed, not this test.
     let r = parsed();
     let mut block = r.blocks[0].clone();
     block.set_property("content".to_string(), "hijacked");
 
-    let msg =
-        holon_kitchen::params::build_block_params(&block, &r.document.id, &r.document.id, None)
-            .err()
-            .expect("a storage-column property key must be refused")
-            .to_string();
+    let adapter = support::bundled_cook_plugin();
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let payload = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        adapter.build_block_params(&block, &r.document.id, &r.document.id, None)
+    }))
+    .err()
+    .expect("a storage-column property key must be refused");
+    std::panic::set_hook(previous);
+
+    let msg = payload
+        .downcast_ref::<String>()
+        .expect("the refusal panics with a message")
+        .clone();
     assert!(
         msg.contains("content") && msg.contains("storage column"),
         "refusal must name the key and why: {msg}"

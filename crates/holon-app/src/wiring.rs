@@ -351,17 +351,27 @@ impl FrontendInjectorExt for Injector {
                 .collect();
             self.provide::<OrgModeConfig>(Provider::root(move |_| Shared::new(org_config.clone())));
 
-            // The vault's file formats. Org pages are read AND written; `.cook`
-            // recipes are authoritative input, so the controller refuses to
-            // write them back. The markdown adapters are deliberately NOT here:
-            // both claim `md`, which the registry refuses at construction until
-            // a vault-flavor discriminator picks between them (D56.a).
+            // The vault's file formats. Org is the one built in — it is read
+            // AND written, and its renderer is the write leg. Every other
+            // format arrives as a bundled sidecar plus a wasm guest, so
+            // nothing in Rust names cooklang. The markdown adapters are
+            // deliberately NOT here: both claim `md`, which the registry
+            // refuses at construction until a vault-flavor discriminator picks
+            // between them (D56.a).
+            let mut adapters: Vec<std::sync::Arc<dyn holon_core::file_format::FileFormatAdapter>> =
+                vec![std::sync::Arc::new(
+                    holon_orgmode::file_format::OrgFormatAdapter::new(),
+                )];
+            for plugin in holon_plugin_host::PluginFormatAdapter::bundled(
+                holon_plugin_host::PluginLimits::default(),
+            )
+            .map_err(|e| anyhow::anyhow!("bundled vault format plugins: {e:#}"))?
+            {
+                adapters.push(std::sync::Arc::new(plugin));
+            }
             let formats = std::sync::Arc::new(
-                holon_core::FormatRegistry::new(vec![
-                    std::sync::Arc::new(holon_orgmode::file_format::OrgFormatAdapter::new()),
-                    std::sync::Arc::new(holon_kitchen::CookFormatAdapter::new()),
-                ])
-                .map_err(|e| anyhow::anyhow!("vault format registry: {e}"))?,
+                holon_core::FormatRegistry::new(adapters)
+                    .map_err(|e| anyhow::anyhow!("vault format registry: {e}"))?,
             );
             self.provide::<holon_core::FormatRegistry>(Provider::root(move |_| formats.clone()));
 

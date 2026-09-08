@@ -177,12 +177,20 @@ impl BlockReader for LoroBlockReader {
     }
 
     /// No SQL `file` table under Loro — nothing to load.
-    async fn load_file_hashes(&self) -> AnyhowResult<Vec<(EntityUri, String)>> {
+    async fn load_file_projections(
+        &self,
+    ) -> AnyhowResult<Vec<(EntityUri, holon_filesystem::FileProjection)>> {
         Ok(vec![])
     }
 
     /// No SQL `file` table under Loro — nothing to persist.
-    async fn persist_file_hash(&self, _: &EntityUri, _: &str) -> AnyhowResult<()> {
+    async fn persist_file_projection(
+        &self,
+        _: &EntityUri,
+        _: &str,
+        _: &str,
+        _: &holon_filesystem::FileProjection,
+    ) -> AnyhowResult<()> {
         Ok(())
     }
 

@@ -265,8 +265,11 @@ so invariant 4 survives and no connector becomes a second writer.
   parse differences — the German timer units the current parser refuses are
   already a known entry. A divergence quietly absorbed is a gate failure.
 - **`crates/holon-kitchen`'s bespoke parser and shopping client are DELETED**
-  once the plugin path and the mapping layer land: `cook.rs`, `rows.rs`,
-  `file_format.rs` and the `cooklang` dependency go with the format plugin;
+  once the plugin path and the mapping layer land. The FORMAT half is DONE
+  (lowcode Inc 3): `cook.rs`, `rows.rs`, `params.rs`, `file_format.rs` and the
+  `cooklang` dependency are gone, and `crates/holon-app/src/wiring.rs` builds
+  the vault's format registry from `BUNDLED_PLUGINS` — org is the only format
+  Rust still names. Still pending:
   `shopping.rs`, `shopping_sync.rs` and `crates/holon-app/src/shopping_rest.rs`
   go with the generic mapping layer and the renamed `RemoteListReconciler`. No
   old path stays. That move also closes a platform hole — the write leg lives in

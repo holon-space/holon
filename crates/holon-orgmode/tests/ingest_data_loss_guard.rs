@@ -72,8 +72,8 @@ struct FakeStore {
     docs: Arc<Mutex<HashMap<EntityUri, Block>>>,
     swallow: Option<(EntityUri, EntityUri)>,
     /// What production stamps through `persist_file_hash`, replayed by
-    /// `load_file_hashes` so a later controller boots the cold-boot fast path
-    /// on the hash an earlier one actually wrote.
+    /// `load_file_projections` so a later controller boots the cold-boot fast
+    /// path on the hash an earlier one actually wrote.
     hashes: Arc<Mutex<Vec<(EntityUri, String)>>>,
 }
 
@@ -320,14 +320,37 @@ impl BlockReader for FakeStore {
         Ok(Vec::new())
     }
 
-    async fn load_file_hashes(&self) -> anyhow::Result<Vec<(EntityUri, String)>> {
-        Ok(self.hashes.lock().unwrap().clone())
+    async fn load_file_projections(
+        &self,
+    ) -> anyhow::Result<Vec<(EntityUri, holon_filesystem::FileProjection)>> {
+        Ok(self
+            .hashes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(uri, hash)| {
+                (
+                    uri.clone(),
+                    holon_filesystem::FileProjection {
+                        content_hash: hash.clone(),
+                        // Org embeds its id, so the skip never reads this.
+                        document_id: None,
+                    },
+                )
+            })
+            .collect())
     }
 
-    async fn persist_file_hash(&self, uri: &EntityUri, hash: &str) -> anyhow::Result<()> {
+    async fn persist_file_projection(
+        &self,
+        uri: &EntityUri,
+        _: &str,
+        _: &str,
+        projection: &holon_filesystem::FileProjection,
+    ) -> anyhow::Result<()> {
         let mut hashes = self.hashes.lock().unwrap();
         hashes.retain(|(u, _)| u != uri);
-        hashes.push((uri.clone(), hash.to_string()));
+        hashes.push((uri.clone(), projection.content_hash.clone()));
         Ok(())
     }
 }

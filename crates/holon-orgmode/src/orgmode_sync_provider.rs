@@ -43,6 +43,7 @@ use tokio::sync::broadcast;
 
 use crate::parser::compute_content_hash;
 use crate::parser::generate_file_id;
+use crate::parser::parse_doc_id_any_carrier;
 
 /// `File::parent_id` value for a file sitting directly in the vault root.
 /// A plain relative path, not an entity id — see `File::parent_id`.
@@ -215,12 +216,17 @@ impl OrgModeSyncProvider {
                     _ => ROOT_PARENT.to_string(),
                 };
 
+                // `QueryableCache<File>` UPSERTs EVERY column of the change, so
+                // `document_id` is written, not left alone — emitting `None`
+                // here erases the document the ingest recorded for this file.
+                // An org file names its document in its own content, which is
+                // the same carrier the ingest resolves identity from.
                 let file = File::new(
                     file_id.clone(),
                     file_name.clone(),
                     parent_id.clone(),
                     content_hash.clone(),
-                    None,
+                    parse_doc_id_any_carrier(&content),
                 );
                 let is_new = !old_state.file_hashes.contains_key(&file_id);
                 if is_new {
@@ -750,6 +756,38 @@ mod tests {
             matches!(&batch.inner[0], Change::Updated { .. }),
             "expected Updated, got {:?}",
             batch.inner[0]
+        );
+    }
+
+    /// Every `File` this provider emits reaches the `file` table through
+    /// `QueryableCache<File>`, whose UPSERT writes EVERY column from the
+    /// change — `document_id = excluded.document_id` included. So a scan that
+    /// emits `None` does not leave the column alone, it clears it, erasing the
+    /// document the ingest recorded. The column is the only place a plugin
+    /// format's document survives a boot, so the provider must emit the
+    /// document its content names rather than the absence of an opinion.
+    #[tokio::test]
+    async fn a_scanned_org_file_carries_the_document_its_content_names() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("notes.org"),
+            "#+ID: notes-doc\n* Notes Root\n:PROPERTIES:\n:ID: notes-root\n:END:\n",
+        )
+        .unwrap();
+
+        let provider = provider_for(dir.path());
+        let mut file_rx = provider.subscribe_files();
+        provider.sync(StreamPosition::Beginning).await.unwrap();
+
+        let change = file_rx.try_recv().unwrap().inner.remove(0);
+        let Change::Created { data, .. } = change else {
+            panic!("a first scan emits Created, got {change:?}");
+        };
+        assert_eq!(
+            data.document_id.as_deref(),
+            Some("notes-doc"),
+            "the scan emitted document_id {:?} for a file whose content names `notes-doc`",
+            data.document_id
         );
     }
 }

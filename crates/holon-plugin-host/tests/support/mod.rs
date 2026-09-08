@@ -1,5 +1,5 @@
-//! Shared fixtures for the plugin-host suites: the installed cooklang plugin,
-//! and the recipe generator both differential legs are driven with.
+//! Shared fixtures for the plugin-host suites: the cooklang plugin, the
+//! pancakes recipe, and the generator the property suites are driven with.
 
 // Each test binary compiles the whole module and uses a different part of it.
 #![allow(dead_code)]
@@ -7,6 +7,9 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+use holon_api::EntityUri;
+use holon_api::StorageEntity;
+use holon_core::file_format::FileFormatAdapter;
 use holon_plugin_host::PluginFormatAdapter;
 use holon_plugin_host::PluginLimits;
 use proptest::prelude::*;
@@ -25,10 +28,42 @@ pub fn cook_plugin() -> PluginFormatAdapter {
     .expect("the cooklang plugin must load from its sidecar")
 }
 
+/// The cooklang plugin as PRODUCTION builds it — from the bytes compiled in.
+pub fn bundled_cook_plugin() -> PluginFormatAdapter {
+    PluginFormatAdapter::bundled(PluginLimits::default())
+        .expect("the bundled plugins must load")
+        .into_iter()
+        .next()
+        .expect("cooklang is bundled")
+}
+
+pub fn fixtures_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
 pub fn pancakes_fixture() -> String {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../holon-kitchen/tests/fixtures/pancakes.cook");
+    let path = fixtures_dir().join("pancakes.cook");
     std::fs::read_to_string(&path).expect("the pancakes fixture must be readable")
+}
+
+/// The `ingredient_use` rows the plugin projects for `content`, or the
+/// refusal message. Replaces the deleted `holon_kitchen::ingredient_uses`.
+pub fn ingredient_use_rows(content: &str) -> Result<Vec<StorageEntity>, String> {
+    let root = Path::new("/vault");
+    let parsed = bundled_cook_plugin()
+        .parse(
+            &root.join("Rezepte/T.cook"),
+            content,
+            &EntityUri::no_parent(),
+            root,
+        )
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(parsed
+        .typed_rows
+        .into_iter()
+        .find(|set| set.type_name == "ingredient_use")
+        .expect("the cooklang sidecar declares an ingredient_use scope on every parse")
+        .rows)
 }
 
 /// Ingredient names the cooklang grammar reads as one name and whose slugs

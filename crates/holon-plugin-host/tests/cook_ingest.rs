@@ -4,27 +4,30 @@
 //!
 //! Read-only tier: the write half of the trait must REFUSE, not render wrong
 //! bytes (`.cook` files in the vault stay authoritative).
+//!
+//! The parser under test is the cooklang PLUGIN, loaded from the bytes
+//! production compiles in.
 
-use std::path::Path;
 use std::path::PathBuf;
 
 use holon_api::EntityUri;
+use holon_api::StorageEntity;
+use holon_api::Value;
 use holon_api::block::Block;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
-use holon_kitchen::CookFormatAdapter;
-use holon_kitchen::IngredientUse;
-use holon_kitchen::ingredient_uses;
+
+mod support;
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    support::fixtures_dir()
 }
 
 fn parse(rel: &str) -> FileFormatParseResult {
     let root = fixtures();
     let path = root.join(rel);
     let content = std::fs::read_to_string(&path).unwrap();
-    CookFormatAdapter::new()
+    support::bundled_cook_plugin()
         .parse(&path, &content, &EntityUri::no_parent(), &root)
         .unwrap()
 }
@@ -36,9 +39,16 @@ fn find<'a>(blocks: &'a [Block], needle: &str) -> &'a Block {
         .unwrap_or_else(|| panic!("no block containing {needle:?}"))
 }
 
+/// The `ingredient_use` row whose `raw_name` cell is `name`.
+fn use_of<'a>(rows: &'a [StorageEntity], name: &str) -> &'a StorageEntity {
+    rows.iter()
+        .find(|row| row.get("raw_name") == Some(&Value::String(name.to_string())))
+        .unwrap_or_else(|| panic!("no ingredient use named {name:?}"))
+}
+
 #[test]
 fn adapter_claims_the_cook_extension() {
-    assert_eq!(CookFormatAdapter::new().extensions(), &["cook"]);
+    assert_eq!(support::bundled_cook_plugin().extensions(), &["cook"]);
 }
 
 #[test]
@@ -111,43 +121,48 @@ fn step_text_reads_as_prose_with_components_inlined() {
 
 #[test]
 fn ingredients_extract_with_quantity_and_unit() {
-    let content = std::fs::read_to_string(fixtures().join("pancakes.cook")).unwrap();
-    let uses = ingredient_uses(&content).unwrap();
+    let content = support::pancakes_fixture();
+    let uses = support::ingredient_use_rows(&content).unwrap();
 
-    let flour = uses.iter().find(|u| u.name == "flour").expect("no flour");
-    assert_eq!(flour.quantity, Some(200.0));
-    assert_eq!(flour.unit.as_deref(), Some("g"));
+    let flour = use_of(&uses, "flour");
+    assert_eq!(flour.get("quantity"), Some(&Value::Float(200.0)));
+    assert_eq!(flour.get("unit"), Some(&Value::String("g".to_string())));
 
-    let eggs = uses.iter().find(|u| u.name == "eggs").expect("no eggs");
-    assert_eq!(eggs.quantity, Some(2.0));
-    assert_eq!(eggs.unit, None, "a bare count must carry no unit");
+    let eggs = use_of(&uses, "eggs");
+    assert_eq!(eggs.get("quantity"), Some(&Value::Float(2.0)));
+    assert_eq!(
+        eggs.get("unit"),
+        Some(&Value::Null),
+        "a bare count must carry no unit"
+    );
 
-    // Inc A does NOT bind ingredients to products — that is Inc D. The binding
-    // slot exists and is empty, so the unmatched state is visible rather than
-    // silently absent.
-    assert!(uses.iter().all(|u| u.product_id.is_none()));
+    // Inc A does NOT bind ingredients to products — that is Inc D's D6 seam.
+    // The sidecar declares no `product_id` column, so the cell is ABSENT, not
+    // NULL: anything stronger would assert Inc D behaviour that does not exist.
+    assert!(uses.iter().all(|row| row.get("product_id").is_none()));
 }
 
 #[test]
 fn an_unquantified_ingredient_keeps_its_name_and_no_quantity() {
-    let content = std::fs::read_to_string(fixtures().join("pancakes.cook")).unwrap();
-    let uses = ingredient_uses(&content).unwrap();
-    let syrup: &IngredientUse = uses
-        .iter()
-        .find(|u| u.name == "maple syrup")
-        .expect("no maple syrup");
-    assert_eq!(syrup.quantity, None);
-    assert_eq!(syrup.unit, None);
+    let content = support::pancakes_fixture();
+    let uses = support::ingredient_use_rows(&content).unwrap();
+    let syrup = use_of(&uses, "maple syrup");
+    assert_eq!(syrup.get("quantity"), Some(&Value::Null));
+    assert_eq!(syrup.get("unit"), Some(&Value::Null));
 }
 
 #[test]
 fn ingredient_uses_carry_the_step_they_appear_in() {
-    let content = std::fs::read_to_string(fixtures().join("pancakes.cook")).unwrap();
-    let uses = ingredient_uses(&content).unwrap();
-    let flour = uses.iter().find(|u| u.name == "flour").unwrap();
-    assert_eq!(flour.step_index, 1);
-    let butter = uses.iter().find(|u| u.name == "butter").unwrap();
-    assert_eq!(butter.step_index, 4);
+    let content = support::pancakes_fixture();
+    let uses = support::ingredient_use_rows(&content).unwrap();
+    assert_eq!(
+        use_of(&uses, "flour").get("step_index"),
+        Some(&Value::Integer(1))
+    );
+    assert_eq!(
+        use_of(&uses, "butter").get("step_index"),
+        Some(&Value::Integer(4))
+    );
 }
 
 #[test]
@@ -156,8 +171,7 @@ fn an_unclosed_quantity_brace_fails_loud_instead_of_losing_the_quantity() {
     // the quantity with no error and no warning — `flour` simply arrives
     // amount-less. Silent loss like that would feed Inc D a confidently wrong
     // rollup, so we refuse it at the boundary.
-    let err = ingredient_uses("Add the @flour{200%g to the bowl.\n").unwrap_err();
-    let msg = err.to_string();
+    let msg = support::ingredient_use_rows("Add the @flour{200%g to the bowl.\n").unwrap_err();
     assert!(
         msg.contains("cooklang") && msg.contains("brace"),
         "error should name the format and the cause: {msg}"
@@ -169,8 +183,7 @@ fn a_late_closing_brace_that_swallows_a_component_is_refused() {
     // MEASURED (0.18.7): `@flour{200%g @sugar}` yields ONE ingredient, flour,
     // with unit "g @sugar" — @sugar is gone from the recipe entirely. Braces
     // BALANCE, so a counting guard passes it; only the parsed unit shows it.
-    let err = ingredient_uses("Add @flour{200%g @sugar} to the bowl.\n").unwrap_err();
-    let msg = err.to_string();
+    let msg = support::ingredient_use_rows("Add @flour{200%g @sugar} to the bowl.\n").unwrap_err();
     assert!(
         msg.contains("flour") && msg.contains("sigil"),
         "error should name the ingredient and the swallowed component: {msg}"
@@ -180,8 +193,7 @@ fn a_late_closing_brace_that_swallows_a_component_is_refused() {
 #[test]
 fn a_late_closing_brace_that_swallows_prose_is_refused() {
     // MEASURED (0.18.7): unit becomes "g with a". Balanced braces again.
-    let err = ingredient_uses("Mix @flour{200%g with a } sign\n").unwrap_err();
-    let msg = err.to_string();
+    let msg = support::ingredient_use_rows("Mix @flour{200%g with a } sign\n").unwrap_err();
     assert!(
         msg.contains("flour") && msg.contains("unit"),
         "error should name the ingredient and its bogus unit: {msg}"
@@ -193,8 +205,7 @@ fn a_sigil_swallowed_into_the_value_is_refused() {
     // MEASURED (0.18.7): `@flour{200 @sugar}` puts the sigil in the VALUE —
     // Text("200 @sugar") with NO unit at all — so a unit-only check skips it
     // entirely and @sugar is silently lost.
-    let err = ingredient_uses("Add @flour{200 @sugar} to the bowl.\n").unwrap_err();
-    let msg = err.to_string();
+    let msg = support::ingredient_use_rows("Add @flour{200 @sugar} to the bowl.\n").unwrap_err();
     assert!(
         msg.contains("flour") && msg.contains("sigil"),
         "error should name the ingredient and the swallowed component: {msg}"
@@ -209,8 +220,7 @@ fn a_component_swallowed_by_cookware_is_refused() {
     //
     // Timers need no companion rung: `~{10 @salt}` is a hard cooklang parse
     // error ("Timer value is text"), so parse_recipe already refuses it.
-    let err = ingredient_uses("Use the #pot{1 @salt} now.\n").unwrap_err();
-    let msg = err.to_string();
+    let msg = support::ingredient_use_rows("Use the #pot{1 @salt} now.\n").unwrap_err();
     assert!(
         msg.contains("cookware") && msg.contains("pot") && msg.contains("sigil"),
         "error should name the cookware and the swallowed component: {msg}"
@@ -221,33 +231,43 @@ fn a_component_swallowed_by_cookware_is_refused() {
 fn a_textual_amount_without_a_sigil_still_parses() {
     // `@salt{a pinch}` is legitimate cooklang: a text amount is fine, only a
     // SIGIL inside one signals a swallow. The value check must not refuse it.
-    let uses = ingredient_uses("Season with @salt{a pinch}.\n").unwrap();
+    let uses = support::ingredient_use_rows("Season with @salt{a pinch}.\n").unwrap();
     assert_eq!(uses.len(), 1);
-    assert_eq!(uses[0].name, "salt");
-    assert_eq!(uses[0].quantity, None);
+    assert_eq!(
+        uses[0].get("raw_name"),
+        Some(&Value::String("salt".to_string()))
+    );
+    assert_eq!(uses[0].get("quantity"), Some(&Value::Null));
 }
 
 #[test]
 fn cookware_with_a_plain_amount_still_parses() {
-    let uses = ingredient_uses("Use #pot{2} and @rice{1%kg}.\n").unwrap();
+    let uses = support::ingredient_use_rows("Use #pot{2} and @rice{1%kg}.\n").unwrap();
     assert_eq!(uses.len(), 1);
-    assert_eq!(uses[0].name, "rice");
+    assert_eq!(
+        uses[0].get("raw_name"),
+        Some(&Value::String("rice".to_string()))
+    );
 }
 
 #[test]
 fn a_stray_closing_brace_in_prose_still_parses() {
     // A surplus `}` is ordinary prose. The earlier counting guard REFUSED this
     // legitimate recipe; only an unclosed OPEN brace may be refused.
-    let uses = ingredient_uses("Use the #pot{} for @rice{200%g} and note a } sign.\n").unwrap();
+    let uses = support::ingredient_use_rows("Use the #pot{} for @rice{200%g} and note a } sign.\n")
+        .unwrap();
     assert_eq!(uses.len(), 1);
-    assert_eq!(uses[0].unit.as_deref(), Some("g"));
+    assert_eq!(uses[0].get("unit"), Some(&Value::String("g".to_string())));
 }
 
 #[test]
 fn a_two_word_unit_is_accepted() {
     // `fl oz` is a real unit — the word-count bound must not refuse it.
-    let uses = ingredient_uses("Add @cream{200%fl oz}.\n").unwrap();
-    assert_eq!(uses[0].unit.as_deref(), Some("fl oz"));
+    let uses = support::ingredient_use_rows("Add @cream{200%fl oz}.\n").unwrap();
+    assert_eq!(
+        uses[0].get("unit"),
+        Some(&Value::String("fl oz".to_string()))
+    );
 }
 
 #[test]
@@ -255,16 +275,20 @@ fn a_two_word_swallow_is_a_known_miss() {
     // Stated bound, not an endorsement: the word-count rule catches three words
     // and up, so a two-word swallow still gets through. Pinned so the limit is
     // visible and a future tightening has a place to land.
-    let uses = ingredient_uses("Mix @flour{200%g with} more\n").unwrap();
-    assert_eq!(uses[0].unit.as_deref(), Some("g with"));
+    let uses = support::ingredient_use_rows("Mix @flour{200%g with} more\n").unwrap();
+    assert_eq!(
+        uses[0].get("unit"),
+        Some(&Value::String("g with".to_string()))
+    );
 }
 
 #[test]
 fn balanced_braces_still_parse() {
     // The brace guard must not refuse legitimate recipes.
-    let uses = ingredient_uses("Add the @flour{200%g} to the #bowl{} for ~{2%min}.\n").unwrap();
+    let uses = support::ingredient_use_rows("Add the @flour{200%g} to the #bowl{} for ~{2%min}.\n")
+        .unwrap();
     assert_eq!(uses.len(), 1);
-    assert_eq!(uses[0].quantity, Some(200.0));
+    assert_eq!(uses[0].get("quantity"), Some(&Value::Float(200.0)));
 }
 
 #[test]
@@ -273,7 +297,7 @@ fn a_scalar_list_metadata_value_is_kept_not_dropped() {
     let root = fixtures();
     let path = root.join("tagged.cook");
     let content = "---\ntitle: Tagged\ntags: [quick, vegan]\n---\n\nBoil @water{1%l}.\n";
-    let r = CookFormatAdapter::new()
+    let r = support::bundled_cook_plugin()
         .parse(&path, content, &EntityUri::no_parent(), &root)
         .unwrap();
     assert_eq!(
@@ -288,11 +312,13 @@ fn an_unrepresentable_metadata_value_is_refused_by_name() {
     let root = fixtures();
     let path = root.join("nested.cook");
     let content = "---\ntitle: Nested\nnutrition:\n  kcal: 200\n---\n\nBoil @water{1%l}.\n";
-    let msg = CookFormatAdapter::new()
-        .parse(&path, content, &EntityUri::no_parent(), &root)
-        .err()
-        .expect("a nested metadata value must be refused, not silently skipped")
-        .to_string();
+    let msg = format!(
+        "{:#}",
+        support::bundled_cook_plugin()
+            .parse(&path, content, &EntityUri::no_parent(), &root)
+            .err()
+            .expect("a nested metadata value must be refused, not silently skipped")
+    );
     assert!(
         msg.contains("nutrition"),
         "refusal must name the offending key: {msg}"
@@ -302,7 +328,7 @@ fn an_unrepresentable_metadata_value_is_refused_by_name() {
 #[test]
 fn write_back_is_refused_loudly() {
     let r = parse("pancakes.cook");
-    let a = CookFormatAdapter::new();
+    let a = support::bundled_cook_plugin();
     let verdict = a.writeback_drops(
         &fixtures().join("pancakes.cook"),
         "",

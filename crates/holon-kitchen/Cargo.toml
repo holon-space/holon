@@ -19,7 +19,6 @@ chrono.workspace = true
 holon-rows.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
-cooklang = "0.18"
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]

@@ -62,6 +62,43 @@ pub struct DeclaredScope {
     pub id_entity: String,
 }
 
+/// Where a format's guest bytes come from.
+///
+/// Both doors are the same format: a bundled plugin is the shipped default and
+/// an installed one is the user's, and neither gets a capability the other
+/// lacks.
+#[derive(Debug, Clone)]
+pub enum GuestSource {
+    /// A `.wasm` beside the sidecar on disk.
+    File(PathBuf),
+    /// Compiled in beside its sidecar text.
+    Bundled(&'static [u8]),
+}
+
+impl GuestSource {
+    /// How this guest names itself in an error.
+    pub fn label(&self) -> String {
+        match self {
+            Self::File(path) => path.display().to_string(),
+            Self::Bundled(_) => "<bundled>".to_string(),
+        }
+    }
+}
+
+/// A sidecar and its guest, compiled into the binary.
+#[derive(Debug, Clone, Copy)]
+pub struct BundledPlugin {
+    pub sidecar_yaml: &'static str,
+    pub guest_wasm: &'static [u8],
+}
+
+/// The formats Holon ships. A user sidecar in the plugin directory is the other
+/// door; nothing here is privileged over one.
+pub static BUNDLED_PLUGINS: &[BundledPlugin] = &[BundledPlugin {
+    sidecar_yaml: include_str!("../plugins/cooklang.yaml"),
+    guest_wasm: include_bytes!("../plugins/cooklang.wasm"),
+}];
+
 /// A loaded, validated sidecar — the parsed form the adapter is built from.
 #[derive(Debug)]
 pub struct PluginFormat {
@@ -71,7 +108,7 @@ pub struct PluginFormat {
     pub format_name: &'static str,
     pub extensions: &'static [&'static str],
     pub write_tier: WriteTier,
-    pub guest_path: PathBuf,
+    pub guest: GuestSource,
     pub scopes: Vec<DeclaredScope>,
 }
 
@@ -89,11 +126,28 @@ impl PluginFormat {
                 path.display()
             )
         })?;
-        Self::from_yaml(yaml, dir)
+        let guest_path = dir.join(&yaml.guest);
+        if !guest_path.is_file() {
+            bail!(
+                "format {:?} names guest {}, which is not a file",
+                yaml.format,
+                guest_path.display()
+            );
+        }
+        Self::from_yaml(yaml, GuestSource::File(guest_path))
             .with_context(|| format!("plugin sidecar {} is not admissible", path.display()))
     }
 
-    fn from_yaml(yaml: SidecarYaml, dir: &Path) -> Result<Self> {
+    /// Validate a sidecar whose text and guest are compiled in.
+    pub fn bundled(plugin: &BundledPlugin) -> Result<Self> {
+        let yaml: SidecarYaml = serde_yaml::from_str(plugin.sidecar_yaml)
+            .context("a bundled plugin sidecar is not valid")?;
+        let format = yaml.format.clone();
+        Self::from_yaml(yaml, GuestSource::Bundled(plugin.guest_wasm))
+            .with_context(|| format!("the bundled {format:?} sidecar is not admissible"))
+    }
+
+    fn from_yaml(yaml: SidecarYaml, guest: GuestSource) -> Result<Self> {
         if yaml.write_tier == DeclaredWriteTier::ReadWrite {
             bail!(
                 "format {:?} declares write_tier: read_write, but a plugin earns write-back only \
@@ -116,15 +170,6 @@ impl PluginFormat {
                     yaml.format
                 );
             }
-        }
-
-        let guest_path = dir.join(&yaml.guest);
-        if !guest_path.is_file() {
-            bail!(
-                "format {:?} names guest {}, which is not a file",
-                yaml.format,
-                guest_path.display()
-            );
         }
 
         let mut scopes: Vec<DeclaredScope> = Vec::with_capacity(yaml.scopes.len());
@@ -181,7 +226,7 @@ impl PluginFormat {
             format_name: yaml.format.leak(),
             extensions: extensions.leak(),
             write_tier: WriteTier::ReadOnly,
-            guest_path,
+            guest,
             scopes,
         })
     }

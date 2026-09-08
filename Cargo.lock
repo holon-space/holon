@@ -1949,12 +1949,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codesnake"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2205f7f6d3de68ecf4c291c789b3edf07b6569268abd0188819086f71ae42225"
-
-[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2309,33 +2303,6 @@ name = "cookie-factory"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9885fa71e26b8ab7855e2ec7cae6e9b380edff76cd052e07c683a0319d51b3a2"
-
-[[package]]
-name = "cooklang"
-version = "0.18.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa816a0452383c8d2bdab659df49c3ca0c86a0ca85699587bcb878d4ba174ebf"
-dependencies = [
- "bitflags 2.13.1",
- "codesnake",
- "enum-map",
- "finl_unicode",
- "indexmap 2.14.0",
- "prettyplease",
- "proc-macro2",
- "quote",
- "serde",
- "serde_yaml",
- "smallvec",
- "strum 0.26.3",
- "syn 2.0.119",
- "thiserror 2.0.19",
- "toml 0.8.23",
- "tracing",
- "unicase",
- "unicode-width 0.2.2",
- "yansi",
-]
 
 [[package]]
 name = "copypasta"
@@ -3480,27 +3447,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enum-map"
-version = "2.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6866f3bfdf8207509a033af1a75a7b08abda06bbaaeae6669323fd5a097df2e9"
-dependencies = [
- "enum-map-derive",
- "serde",
-]
-
-[[package]]
-name = "enum-map-derive"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f282cfdfe92516eb26c2af8589c274c7c17681f5ecc03c18255fe741c6aa64eb"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "enum_dispatch"
 version = "0.3.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3798,12 +3744,6 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
-
-[[package]]
-name = "finl_unicode"
-version = "1.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9844ddc3a6e533d62bba727eb6c28b5d360921d5175e9ff0f1e621a5c590a4d5"
 
 [[package]]
 name = "fixedbitset"
@@ -5327,6 +5267,7 @@ dependencies = [
  "holon-mcp-client",
  "holon-org-format",
  "holon-orgmode",
+ "holon-plugin-host",
  "holon-profiles",
  "holon-turso",
  "proptest 1.11.0",
@@ -5586,6 +5527,7 @@ dependencies = [
  "holon-org-format",
  "holon-orgmode",
  "holon-pbt-core",
+ "holon-plugin-host",
  "holon-profiles",
  "holon-sharing",
  "holon-turso",
@@ -5626,7 +5568,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "cooklang",
  "holon-api",
  "holon-core",
  "holon-profiles",
@@ -6034,7 +5975,6 @@ dependencies = [
  "anyhow",
  "holon-api",
  "holon-core",
- "holon-kitchen",
  "holon-rows",
  "proptest 1.11.0",
  "serde",
@@ -13758,7 +13698,6 @@ version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
 dependencies = [
- "indexmap 2.14.0",
  "serde",
  "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",

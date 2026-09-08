@@ -20,6 +20,7 @@ holon-core.workspace = true
 holon-profiles.workspace = true
 holon-frontend.workspace = true
 holon-kitchen.workspace = true
+holon-plugin-host.workspace = true
 holon-orgmode.workspace = true
 holon-filesystem.workspace = true
 holon-loro.workspace = true

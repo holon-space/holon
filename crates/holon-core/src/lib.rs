@@ -49,6 +49,7 @@ pub use downstream_projection::ProjectionPass;
 pub use entity_cache::CacheFactory;
 pub use entity_cache::EntityCache;
 pub use file_format::DOCUMENT_TITLE_KEY;
+pub use file_format::DocumentIdentity;
 pub use file_format::FileFormatAdapter;
 pub use file_format::FileFormatParseResult;
 pub use file_format::FormatRegistry;

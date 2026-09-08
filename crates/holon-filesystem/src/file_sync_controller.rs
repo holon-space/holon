@@ -611,10 +611,19 @@ pub struct FileSyncController {
 
     /// Phase 1 fast-path: `sha256(RENDERER_VERSION || render(parsed_blocks))`
     /// per file, persisted via `file.content_hash`. Populated at startup
-    /// from `block_reader.load_file_hashes()` so a cold boot of an unchanged
-    /// vault skips block-table batches entirely (parses + renders + hashes,
-    /// then compares — no SQL writes when the hash matches).
+    /// from `block_reader.load_file_projections()` so a cold boot of an
+    /// unchanged vault skips block-table batches entirely (parses + renders +
+    /// hashes, then compares — no SQL writes when the hash matches).
     last_projection_hash: HashMap<CanonicalPath, String>,
+
+    /// The document each file projected to, as the last ingest recorded it.
+    /// Loaded from the same `file` rows as the hashes above, and read ONLY for
+    /// a format whose content embeds no id
+    /// ([`holon_core::DocumentIdentity::ByRecordedHome`]) — for those the
+    /// cold-boot skip has no other way to name the document it must prove
+    /// present, so without this the skip is unreachable and every such file is
+    /// re-parsed on every boot.
+    last_projection_doc: HashMap<CanonicalPath, EntityUri>,
 
     /// Cheap dirty-check signature `(mtime, size)` per tracked path. Used by
     /// `poll_external_changes` to skip the expensive `read_to_string` when
@@ -918,6 +927,7 @@ impl FileSyncController {
         Self {
             last_projection: HashMap::new(),
             last_projection_hash: HashMap::new(),
+            last_projection_doc: HashMap::new(),
             disk_signatures: HashMap::new(),
             base_store: SyncBaseStore::in_memory(),
             base_source: HashMap::new(),
@@ -1291,14 +1301,18 @@ impl FileSyncController {
         // events. If an on-disk file's `hash(RENDERER_VERSION || disk_bytes)`
         // matches its stored hash, `on_file_changed` skips block ingest
         // entirely — the dominant cold-boot cost. See plan §Phase 1.
-        match self.block_reader.load_file_hashes().await {
+        match self.block_reader.load_file_projections().await {
             Ok(rows) => {
-                for (uri, hash) in rows {
+                for (uri, projection) in rows {
                     // One unusable persisted row must not stop the boot: skip
                     // it (its file re-ingests) and disclose why.
                     match self.file_uri_to_canonical_path(&uri) {
                         Ok(Some(canonical)) => {
-                            self.last_projection_hash.insert(canonical, hash);
+                            if let Some(document) = projection.document_id {
+                                self.last_projection_doc.insert(canonical.clone(), document);
+                            }
+                            self.last_projection_hash
+                                .insert(canonical, projection.content_hash);
                         }
                         Ok(None) => {}
                         Err(e) => tracing::error!(
@@ -1317,8 +1331,8 @@ impl FileSyncController {
             }
             Err(e) => {
                 warn!(
-                    "[FileSyncController] load_file_hashes failed; cold-boot fast path disabled, \
-                     will re-ingest every file. Error: {e}"
+                    "[FileSyncController] load_file_projections failed; cold-boot fast path \
+                     disabled, will re-ingest every file. Error: {e}"
                 );
             }
         }
@@ -1403,6 +1417,7 @@ impl FileSyncController {
             .in_tree(root)
             .await
             .map_err(|e| anyhow::anyhow!("[FileSyncController] in_tree({root}): {e:#}"))?;
+        debug!(root = %root, ?present, "[FileSyncController] in_tree probe");
         // None → no separate tree (SqlOnly): SQL is the only active store.
         Ok(present.unwrap_or(true))
     }
@@ -2019,8 +2034,13 @@ impl FileSyncController {
     /// can always find the file to retire, with or without the Loro-backed
     /// alias registry.
     fn note_doc_home(&mut self, doc_id: &EntityUri, path: &Path) {
-        self.doc_home
-            .insert(doc_id.clone(), CanonicalPath::new(path));
+        let canonical = CanonicalPath::new(path);
+        // The reverse index the cold-boot skip reads for an id-less format.
+        // Kept here rather than only at boot so the FIRST ingest of a file
+        // already makes the skip reachable for it.
+        self.last_projection_doc
+            .insert(canonical.clone(), doc_id.clone());
+        self.doc_home.insert(doc_id.clone(), canonical);
         self.publish_write_tier(doc_id, path);
     }
 
@@ -2040,6 +2060,7 @@ impl FileSyncController {
 
     /// Drop every per-file tracking entry for a vanished path.
     fn forget_file_state(&mut self, canonical: &CanonicalPath) {
+        self.last_projection_doc.remove(canonical);
         if let Some(docs) = &self.read_only_docs {
             for (doc_id, home) in &self.doc_home {
                 if home == canonical {
@@ -2665,6 +2686,15 @@ impl FileSyncController {
     /// per-file ingest routes disclose per file; the boot sweep would flood, so
     /// it counts and discloses once).
     async fn probe_share_file(&self, path: &Path, disk_content: &str) -> Result<ShareProbe> {
+        // A shared-subtree projection file is one Holon RENDERED from a shared
+        // Loro doc. A read-only-tier format is authoritative input Holon never
+        // writes, so it can never be one — and asking costs a full parse,
+        // which for a wasm plugin is the interpreter run the whole cold-boot
+        // skip exists to avoid. Keyed on the TIER, not on an extension, so a
+        // format added later inherits the answer.
+        if self.adapter(path)?.write_tier() == WriteTier::ReadOnly {
+            return Ok(ShareProbe::Ordinary);
+        }
         let lc = disk_content.to_ascii_lowercase();
         if !lc.contains("share-role") && !lc.contains("shared-tree-id") {
             return Ok(ShareProbe::Ordinary);
@@ -2802,15 +2832,26 @@ impl FileSyncController {
         let disk_hash = self.projection_hash(&disk_content);
         // Both of the fast path's obligations — proving the content is present
         // in every active store, and recording where the document lives — need
-        // the document's identity, so it is parsed ONCE here and its absence
-        // makes the skip unreachable. A file the fast path can reach was
-        // rendered by Holon (its hash matched one we stamped), so it carries
+        // the document's identity, so it is resolved ONCE here and its absence
+        // makes the skip unreachable.
+        //
+        // Two ways to get it, one per identity kind. An `Embedded` format was
+        // rendered by Holon (its hash matched one we stamped) so it carries
         // `#+ID:`; one that somehow does not takes the full ingest, which
-        // resolves identity properly.
-        let disk_root = self
-            .adapter(path)?
-            .doc_id_from_content(&disk_content)
-            .map(|bare| EntityUri::block(&bare));
+        // resolves identity properly. A `ByRecordedHome` format — every wasm
+        // plugin, whose guest is a pure function over bytes — has no id in the
+        // file at all, so its document is the one the last ingest recorded for
+        // this path. Without that second door an authoritative `.cook` vault is
+        // re-parsed through the interpreter on every boot.
+        let adapter = self.adapter(path)?;
+        let disk_root = match adapter.document_identity() {
+            holon_core::DocumentIdentity::Embedded => adapter
+                .doc_id_from_content(&disk_content)
+                .map(|bare| EntityUri::block(&bare)),
+            holon_core::DocumentIdentity::ByRecordedHome => {
+                self.last_projection_doc.get(&canonical).cloned()
+            }
+        };
 
         // The duplicate-`#+ID:` refusal sits AHEAD of both doors into a home
         // record: the byte-identity skip below records one without resolving
@@ -2831,6 +2872,13 @@ impl FileSyncController {
             }
         }
 
+        debug!(
+            path = %path.display(),
+            stored = ?self.last_projection_hash.get(&canonical),
+            disk = %disk_hash,
+            root = ?disk_root,
+            "[FileSyncController] cold-boot skip candidate"
+        );
         if let (Some(stored), Some(root)) = (self.last_projection_hash.get(&canonical), &disk_root)
         {
             // Invariant: fast-path skip requires the content present in EVERY
@@ -4301,7 +4349,7 @@ impl FileSyncController {
         {
             self.last_projection
                 .insert(canonical.clone(), disk_content.to_string());
-            self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
+            self.persist_disk_hash_for(&canonical, rel_path, &disk_hash, &document_uri)
                 .await;
             return Ok(IngestOutcome::Ingested);
         }
@@ -4323,7 +4371,7 @@ impl FileSyncController {
             );
             self.last_projection
                 .insert(canonical.clone(), disk_content.to_string());
-            self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
+            self.persist_disk_hash_for(&canonical, rel_path, &disk_hash, &document_uri)
                 .await;
             return Ok(IngestOutcome::Ingested);
         }
@@ -4338,7 +4386,7 @@ impl FileSyncController {
         if ingest_adapter.write_tier() == WriteTier::ReadOnly {
             self.last_projection
                 .insert(canonical.clone(), disk_content.to_string());
-            self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
+            self.persist_disk_hash_for(&canonical, rel_path, &disk_hash, &document_uri)
                 .await;
             return Ok(IngestOutcome::Ingested);
         }
@@ -4399,7 +4447,7 @@ impl FileSyncController {
                 );
                 self.last_projection
                     .insert(canonical.clone(), disk_content.to_string());
-                self.persist_disk_hash_for(&canonical, rel_path, &disk_hash)
+                self.persist_disk_hash_for(&canonical, rel_path, &disk_hash, &document_uri)
                     .await;
                 return Ok(IngestOutcome::Ingested);
             }
@@ -4494,7 +4542,7 @@ impl FileSyncController {
         // in both cases `rendered` is the canonical projection). Updates
         // in-memory map and persists to SQL so next boot's fast-path engages.
         let final_hash = self.projection_hash(&rendered);
-        self.persist_disk_hash_for(&canonical, rel_path, &final_hash)
+        self.persist_disk_hash_for(&canonical, rel_path, &final_hash, &document_uri)
             .await;
 
         // Update last_projection
@@ -4503,27 +4551,46 @@ impl FileSyncController {
         Ok(IngestOutcome::Ingested)
     }
 
-    /// Update `last_projection_hash` in memory and persist to
-    /// `file.content_hash` via the BlockReader's raw-SQL write-back. Best-
-    /// effort: a failure to persist (e.g. file row not yet created by
-    /// `OrgmodeSyncProvider`) does not abort the ingest — we've already
-    /// committed the block ops and don't want to bail the controller. The
-    /// next sync will create the row and the following boot will write
-    /// the hash successfully. Logged at warn so the case is observable.
+    /// Update `last_projection_hash` / `last_projection_doc` in memory and
+    /// persist BOTH to the file row via the BlockReader's raw-SQL write-back —
+    /// the hash alone cannot arm the next boot's fast path for a
+    /// `ByRecordedHome` format, which has no other way to name its document.
+    /// Best-effort: a failure to persist does not abort the ingest — we've
+    /// already committed the block ops and don't want to bail the controller.
+    /// Logged at warn so the case is observable.
     async fn persist_disk_hash_for(
         &mut self,
         canonical: &CanonicalPath,
         rel_path: &Path,
         hash: &str,
+        document_id: &EntityUri,
     ) {
         self.last_projection_hash
             .insert(canonical.clone(), hash.to_string());
         let rel = rel_path.to_string_lossy();
         let file_uri = EntityUri::file(&rel);
-        if let Err(e) = self.block_reader.persist_file_hash(&file_uri, hash).await {
+        // The row's own path fields, used only if this write is the one that
+        // creates it (a non-org format's row exists nowhere else).
+        let name = rel_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| rel.to_string());
+        let parent_dir = match rel_path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_string_lossy().to_string(),
+            _ => ".".to_string(),
+        };
+        let projection = crate::sync_ports::FileProjection {
+            content_hash: hash.to_string(),
+            document_id: Some(document_id.clone()),
+        };
+        if let Err(e) = self
+            .block_reader
+            .persist_file_projection(&file_uri, &name, &parent_dir, &projection)
+            .await
+        {
             warn!(
-                "[FileSyncController] persist_file_hash failed for {} ({}): {} (in-memory hash \
-                 updated; next boot will re-ingest)",
+                "[FileSyncController] persist_file_projection failed for {} ({}): {} (in-memory \
+                 hash updated; next boot will re-ingest)",
                 file_uri,
                 canonical.as_path_buf().display(),
                 e

@@ -25,9 +25,13 @@ mod params;
 pub mod sidecar;
 
 pub use adapter::PluginFormatAdapter;
+pub use adapter::guest_parses;
 pub use host::PluginError;
 pub use host::PluginHost;
 pub use host::PluginLimits;
 pub use sidecar::BLOCK_SCOPE;
+pub use sidecar::BUNDLED_PLUGINS;
+pub use sidecar::BundledPlugin;
 pub use sidecar::DOCUMENT_SCOPE;
+pub use sidecar::GuestSource;
 pub use sidecar::PluginFormat;

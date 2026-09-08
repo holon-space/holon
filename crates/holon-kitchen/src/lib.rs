@@ -9,36 +9,22 @@
 //! Kitchen domain: recipes and the shopping list, and (later) pantry and
 //! nutrition.
 //!
-//! Two read legs today. The cooklang adapter projects `.cook` files, which are
-//! authoritative and are never written back here. [`shopping`] pulls the
-//! shopping-list peer, which owns its own list and issues no item ids, so this
-//! crate carries the identity and reconciliation the generic entity mirror
-//! cannot supply.
-//!
-//! Per-format de-risking: this crate exercises the existing Block-shaped
-//! `FileFormatAdapter` on a second, non-org format — extension claiming,
-//! document identity, and read authority. It deliberately does NOT generalize
-//! `FileFormatAdapter`/`FileFormatParseResult` to be type-generic; that is BG
-//! Inc-5's C7 and stays out of scope (see docs/Plans/Kitchen.md R1).
+//! Recipes reach the vault through the cooklang PLUGIN — a wasm guest and a
+//! sidecar under `crates/holon-plugin-host/plugins/` — so no `.cook` parsing
+//! lives here. What remains is the part a format plugin cannot express: the
+//! declared kitchen types, the cookable-now queries, and the shopping-list
+//! peer, which owns its own list and issues no item ids, so this crate carries
+//! the identity and reconciliation the generic entity mirror cannot supply.
 
-pub mod cook;
 pub mod cookable;
-pub mod file_format;
-pub mod params;
-mod rows;
 pub mod shopping;
 pub mod shopping_sync;
 
 use anyhow::Context as _;
 use anyhow::Result;
-pub use cook::IngredientUse;
-pub use cook::STEP_NUMBER_KEY;
-pub use cook::ingredient_uses;
-pub use cook::parse_recipe;
 pub use cookable::COOK_BLOCKERS_SQL;
 pub use cookable::COOKABLE_RECIPES_SQL;
 pub use cookable::CookBlockReason;
-pub use file_format::CookFormatAdapter;
 use holon_api::entity::TypeDefinition;
 use holon_profiles::parse_profile_yaml;
 use holon_profiles::type_registry::TypeRegistry;

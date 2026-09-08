@@ -11,6 +11,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use anyhow::Context as _;
 use anyhow::Result;
@@ -20,6 +22,7 @@ use holon_api::EntityUri;
 use holon_api::StorageEntity;
 use holon_api::Value;
 use holon_api::block::Block;
+use holon_core::file_format::DocumentIdentity;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
 use holon_core::file_format::TypedRowSet;
@@ -32,7 +35,20 @@ use crate::PluginLimits;
 use crate::params::build_block_params;
 use crate::sidecar::BLOCK_SCOPE;
 use crate::sidecar::DOCUMENT_SCOPE;
+use crate::sidecar::GuestSource;
 use crate::sidecar::PluginFormat;
+
+/// How many files every plugin in this process has run its guest over.
+///
+/// The interpreter costs ~20x a native parser, so "how many files did the scan
+/// actually parse" is the number the vault-scan budget is spent in. A test
+/// reads it across a restart to prove an unchanged file was not re-parsed.
+static GUEST_PARSES: AtomicU64 = AtomicU64::new(0);
+
+/// The running total of [`GUEST_PARSES`].
+pub fn guest_parses() -> u64 {
+    GUEST_PARSES.load(Ordering::Relaxed)
+}
 
 /// The cell a document row titles the document with; every other cell of that
 /// row is a document property.
@@ -53,18 +69,35 @@ pub struct PluginFormatAdapter {
 impl PluginFormatAdapter {
     /// Load the sidecar at `sidecar_path` and instantiate the guest it names.
     pub fn load(sidecar_path: &Path, limits: PluginLimits) -> Result<Self> {
-        let format = PluginFormat::load(sidecar_path)?;
-        let wasm = std::fs::read(&format.guest_path).with_context(|| {
-            format!(
-                "cannot read the guest {} that format {:?} names",
-                format.guest_path.display(),
-                format.format_name
-            )
-        })?;
+        Self::instantiate(PluginFormat::load(sidecar_path)?, limits)
+    }
+
+    /// Every format Holon ships, instantiated from the bytes compiled in.
+    ///
+    /// This is what a wiring call per format used to be: a format joins the
+    /// vault by its sidecar, whether that sidecar is bundled or installed.
+    pub fn bundled(limits: PluginLimits) -> Result<Vec<Self>> {
+        crate::sidecar::BUNDLED_PLUGINS
+            .iter()
+            .map(|plugin| Self::instantiate(PluginFormat::bundled(plugin)?, limits))
+            .collect()
+    }
+
+    fn instantiate(format: PluginFormat, limits: PluginLimits) -> Result<Self> {
+        let wasm = match &format.guest {
+            GuestSource::File(path) => std::fs::read(path).with_context(|| {
+                format!(
+                    "cannot read the guest {} that format {:?} names",
+                    path.display(),
+                    format.format_name
+                )
+            })?,
+            GuestSource::Bundled(bytes) => bytes.to_vec(),
+        };
         let host = PluginHost::from_bytes(&wasm, limits).map_err(|e| {
             anyhow!(
                 "guest {} of format {:?} does not load: {e}",
-                format.guest_path.display(),
+                format.guest.label(),
                 format.format_name
             )
         })?;
@@ -118,6 +151,8 @@ impl PluginFormatAdapter {
                 self.format.format_name
             )
         })?;
+        GUEST_PARSES.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(source_path, format = self.format.format_name, "guest parse");
         host.parse(content.as_bytes(), ctx.as_bytes()).map_err(|e| {
             anyhow!(
                 "the {} plugin refused {source_path}: {e}",
@@ -236,6 +271,10 @@ impl FileFormatAdapter for PluginFormatAdapter {
         // A guest is a pure function over bytes; nothing in the contract lets
         // it name a stable document id, so the caller resolves by name chain.
         None
+    }
+
+    fn document_identity(&self) -> DocumentIdentity {
+        DocumentIdentity::ByRecordedHome
     }
 
     fn build_block_params(

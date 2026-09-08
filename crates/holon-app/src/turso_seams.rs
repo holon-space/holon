@@ -365,19 +365,22 @@ impl BlockReader for CacheBlockReader {
         Ok(blocks_by_document(&all_blocks))
     }
 
-    /// Phase 1: load `(file_id, content_hash)` rows directly from the `file`
-    /// table via raw SQL — bypasses the in-process file QueryableCache so we
-    /// can read at controller startup, before CDC has replayed file events.
-    async fn load_file_hashes(&self) -> anyhow::Result<Vec<(holon_api::EntityUri, String)>> {
+    /// Phase 1: load each file row's hash and document directly from the
+    /// `file` table via raw SQL — bypasses the in-process file QueryableCache
+    /// so we can read at controller startup, before CDC has replayed file
+    /// events.
+    async fn load_file_projections(
+        &self,
+    ) -> anyhow::Result<Vec<(holon_api::EntityUri, holon_filesystem::FileProjection)>> {
         let rows = self
             .cache
             .db_handle()
             .query(
-                "SELECT id, content_hash FROM file",
+                "SELECT id, content_hash, document_id FROM file",
                 std::collections::HashMap::new(),
             )
             .await
-            .map_err(|e| anyhow::anyhow!("[CacheBlockReader] load_file_hashes failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("[CacheBlockReader] load_file_projections failed: {e}"))?;
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
@@ -397,7 +400,21 @@ impl BlockReader for CacheBlockReader {
             let uri = holon_api::EntityUri::parse(&id).map_err(|e| {
                 anyhow::anyhow!("[CacheBlockReader] file.id={id:?} not a valid EntityUri: {e}")
             })?;
-            out.push((uri, hash));
+            let document_id = match row.get("document_id") {
+                Some(holon_api::Value::String(s)) if !s.is_empty() => {
+                    // ALLOW(entity_uri_from_raw): `file.document_id` is stored
+                    // bare (a UUID), so `from_raw` gives it its scheme back.
+                    Some(holon_api::EntityUri::from_raw(s))
+                }
+                _ => None,
+            };
+            out.push((
+                uri,
+                holon_filesystem::FileProjection {
+                    content_hash: hash,
+                    document_id,
+                },
+            ));
         }
         Ok(out)
     }
@@ -426,21 +443,38 @@ impl BlockReader for CacheBlockReader {
         }
     }
 
-    async fn persist_file_hash(
+    async fn persist_file_projection(
         &self,
         file_id: &holon_api::EntityUri,
-        hash: &str,
+        name: &str,
+        parent_dir: &str,
+        projection: &holon_filesystem::FileProjection,
     ) -> anyhow::Result<()> {
+        // `file.document_id` is stored bare, matching how
+        // `load_file_projections` reads it back.
+        let document_id = match &projection.document_id {
+            Some(uri) => holon_api::Value::String(uri.id().to_string()),
+            None => holon_api::Value::Null,
+        };
         let params = vec![
-            holon_api::Value::String(hash.to_string()),
             holon_api::Value::String(file_id.to_string()),
+            holon_api::Value::String(name.to_string()),
+            holon_api::Value::String(parent_dir.to_string()),
+            holon_api::Value::String(projection.content_hash.clone()),
+            document_id,
         ];
         self.cache
             .db_handle()
-            .execute_values("UPDATE file SET content_hash = ? WHERE id = ?", params)
+            .execute_values(
+                "INSERT INTO file (id, name, parent_id, content_hash, document_id) \
+                 VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT(id) DO UPDATE SET content_hash = excluded.content_hash, \
+                 document_id = excluded.document_id",
+                params,
+            )
             .await
             .map_err(|e| {
-                anyhow::anyhow!("[CacheBlockReader] persist_file_hash UPDATE failed: {e}")
+                anyhow::anyhow!("[CacheBlockReader] persist_file_projection UPSERT failed: {e}")
             })?;
         Ok(())
     }

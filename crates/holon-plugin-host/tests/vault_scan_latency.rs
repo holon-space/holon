@@ -50,6 +50,10 @@ fn fuel_and_memory_headroom() {
 /// 200 generated recipes through ONE host — the vault scan. Reports against
 /// the 200 ms SLO rather than asserting it, because the SLO covers the whole
 /// interaction and this measures only the parse leg of it.
+///
+/// There is no native leg to divide by any more: the Rust cooklang parser this
+/// used to be a ratio against is deleted, so the figure stands against the SLO
+/// alone.
 #[test]
 #[ignore = "release-only measurement; run with --release --run-ignored all"]
 fn two_hundred_recipes_on_one_host() {
@@ -82,30 +86,6 @@ fn two_hundred_recipes_on_one_host() {
     println!(
         "VAULT SCAN: {} recipes, {bytes} bytes, {rows} rows in {:.1} ms ({:.3} ms per recipe) — \
          SLO is 200 ms per interaction",
-        vault.len(),
-        elapsed.as_secs_f64() * 1000.0,
-        elapsed.as_secs_f64() * 1000.0 / vault.len() as f64
-    );
-}
-
-/// The same 200 recipes through the native adapter, so the interpreter's cost
-/// is a ratio rather than an absolute nobody can place.
-#[test]
-#[ignore = "release-only measurement; run with --release --run-ignored all"]
-fn two_hundred_recipes_natively() {
-    let native = holon_kitchen::CookFormatAdapter::new();
-    let vault = support::generated_vault(200);
-    let root = PathBuf::from("/vault");
-
-    let started = Instant::now();
-    for (rel, content) in &vault {
-        native
-            .parse(&root.join(rel), content, &EntityUri::no_parent(), &root)
-            .unwrap();
-    }
-    let elapsed = started.elapsed();
-    println!(
-        "NATIVE SCAN: {} recipes in {:.1} ms ({:.3} ms per recipe)",
         vault.len(),
         elapsed.as_secs_f64() * 1000.0,
         elapsed.as_secs_f64() * 1000.0 / vault.len() as f64

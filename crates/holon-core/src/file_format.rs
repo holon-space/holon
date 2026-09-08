@@ -215,6 +215,12 @@ pub trait FileFormatAdapter: Send + Sync {
     /// committing to a full parse.
     fn doc_id_from_content(&self, content: &str) -> Option<String>;
 
+    /// Where this format's document identity comes from. See
+    /// [`DocumentIdentity`]; the default is the org contract.
+    fn document_identity(&self) -> DocumentIdentity {
+        DocumentIdentity::Embedded
+    }
+
     /// Build the operation-params `StorageEntity` for a create/update of
     /// `block`, as handed to `OperationProvider::execute_operation`. The
     /// `document_uri` is recorded under `ROUTING_DOC_URI_KEY` so the consumer
@@ -293,6 +299,22 @@ pub trait FileFormatAdapter: Send + Sync {
         sanctioned_removals: &HashSet<String>,
         root: &Path,
     ) -> Result<WritebackDropVerdict>;
+}
+
+/// Where a document's identity is read from.
+///
+/// The distinction decides whether the controller can recognise an unchanged
+/// file WITHOUT parsing it: the content-hash skip needs the document the file
+/// projects to, and only an `Embedded` id is readable from the bytes alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentIdentity {
+    /// The id lives in the content — org's `#+ID:`. Readable by
+    /// [`FileFormatAdapter::doc_id_from_content`] without a parse.
+    Embedded,
+    /// The content names no id, so the document is whichever one the last
+    /// ingest recorded for this path. A wasm plugin guest is a pure function
+    /// over bytes and can mint nothing stable, so every plugin format is this.
+    ByRecordedHome,
 }
 
 /// Whether a format's files may be written back by the sync controller.

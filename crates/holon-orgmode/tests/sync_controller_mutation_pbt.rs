@@ -2273,7 +2273,7 @@ mod fast_path_loro_presence_tests {
 
     /// BlockReader that round-trips `file.content_hash` across a simulated
     /// reboot: `persist_file_hash` captures into a shared map,
-    /// `load_file_hashes` serves it back — so a second controller's
+    /// `load_file_projections` serves it back — so a second controller's
     /// `initialize()` arms the fast path with the hash the first boot
     /// stamped (no hand-computed hash, no coupling to the renderer version
     /// or consolidator tag).
@@ -2299,20 +2299,37 @@ mod fast_path_loro_presence_tests {
         async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>> {
             self.inner.iter_documents_with_blocks().await
         }
-        async fn load_file_hashes(&self) -> Result<Vec<(EntityUri, String)>> {
+        async fn load_file_projections(
+            &self,
+        ) -> Result<Vec<(EntityUri, holon_filesystem::FileProjection)>> {
             Ok(self
                 .hashes
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|(k, v)| (EntityUri::parse(k).expect("stored file uri"), v.clone()))
+                .map(|(k, v)| {
+                    (
+                        EntityUri::parse(k).expect("stored file uri"),
+                        holon_filesystem::FileProjection {
+                            content_hash: v.clone(),
+                            // Org embeds its id, so the skip never reads this.
+                            document_id: None,
+                        },
+                    )
+                })
                 .collect())
         }
-        async fn persist_file_hash(&self, uri: &EntityUri, hash: &str) -> Result<()> {
+        async fn persist_file_projection(
+            &self,
+            uri: &EntityUri,
+            _: &str,
+            _: &str,
+            projection: &holon_filesystem::FileProjection,
+        ) -> Result<()> {
             self.hashes
                 .lock()
                 .unwrap()
-                .insert(uri.as_str().to_string(), hash.to_string());
+                .insert(uri.as_str().to_string(), projection.content_hash.clone());
             Ok(())
         }
     }

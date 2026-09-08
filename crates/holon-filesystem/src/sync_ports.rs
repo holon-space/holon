@@ -13,6 +13,21 @@ use async_trait::async_trait;
 use holon_api::EntityUri;
 use holon_api::block::Block;
 
+/// What the last ingest recorded for one vault file.
+///
+/// The hash is what makes an unchanged file recognisable without a parse; the
+/// document is what makes the resulting SKIP legal, because the skip still has
+/// to prove the content is present in every active store. A format whose
+/// content embeds no id ([`holon_core::DocumentIdentity::ByRecordedHome`]) has
+/// no other way to name that document at boot.
+#[derive(Debug, Clone)]
+pub struct FileProjection {
+    pub content_hash: String,
+    /// `None` while the provider has created the file row but no document has
+    /// been attached to it yet.
+    pub document_id: Option<EntityUri>,
+}
+
 /// Read-only access to blocks, organized by document.
 ///
 /// The org crate uses this to render blocks → org text without knowing
@@ -104,19 +119,25 @@ pub trait BlockReader: Send + Sync {
     /// caller knows its own root directory and can resolve to a concrete
     /// `CanonicalPath`. Default impl returns empty so backends without a
     /// `file` table (in-memory tests) don't have to implement it.
-    async fn load_file_hashes(&self) -> Result<Vec<(EntityUri, String)>> {
+    async fn load_file_projections(&self) -> Result<Vec<(EntityUri, FileProjection)>> {
         Ok(Vec::new())
     }
 
-    /// Phase 1 write-back: persist `content_hash` for a file row so the
-    /// next boot's `load_file_hashes` returns the new value and the
-    /// fast-path engages. Returns `Ok(())` whether the row existed or
-    /// not — `OrgmodeSyncProvider` is the authoritative creator of file
-    /// rows, and on first ingest the row may not yet exist; the next
-    /// provider sync will create it and we'll succeed on a later
-    /// re-ingest. Default impl is a no-op for backends without a `file`
-    /// table.
-    async fn persist_file_hash(&self, _: &EntityUri, _: &str) -> Result<()> {
+    /// Phase 1 write-back: persist what this ingest projected for one file so
+    /// the next boot's `load_file_projections` returns it and the fast path
+    /// engages. UPSERTS: `OrgmodeSyncProvider` creates rows for org files
+    /// only, so a plugin format's row exists nowhere else and an UPDATE would
+    /// silently match no row — the file would re-parse on every boot forever.
+    /// `name`/`parent_dir` are the row's own path fields, needed only when
+    /// this call is the one that creates it. Default impl is a no-op for
+    /// backends without a `file` table.
+    async fn persist_file_projection(
+        &self,
+        _: &EntityUri,
+        _: &str,
+        _: &str,
+        _: &FileProjection,
+    ) -> Result<()> {
         Ok(())
     }
 

@@ -44,9 +44,9 @@ struct Store {
     by_id: HashMap<EntityUri, Block>,
     children: HashMap<EntityUri, Vec<Block>>,
     /// Whatever production stamped through `persist_file_hash`. Replayed by
-    /// `load_file_hashes` so a second controller boots the cold-boot fast path
-    /// on the hash the first one actually wrote — no reimplementation of
-    /// `projection_hash` in the test.
+    /// `load_file_projections` so a second controller boots the cold-boot fast
+    /// path on the hash the first one actually wrote — no reimplementation
+    /// of `projection_hash` in the test.
     file_hashes: Vec<(EntityUri, String)>,
 }
 
@@ -155,14 +155,40 @@ impl BlockReader for Fixtures {
         Ok(Vec::new())
     }
 
-    async fn load_file_hashes(&self) -> anyhow::Result<Vec<(EntityUri, String)>> {
-        Ok(self.0.lock().unwrap().file_hashes.clone())
+    async fn load_file_projections(
+        &self,
+    ) -> anyhow::Result<Vec<(EntityUri, holon_filesystem::FileProjection)>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .file_hashes
+            .iter()
+            .map(|(uri, hash)| {
+                (
+                    uri.clone(),
+                    holon_filesystem::FileProjection {
+                        content_hash: hash.clone(),
+                        // Org embeds its id, so the skip never reads this.
+                        document_id: None,
+                    },
+                )
+            })
+            .collect())
     }
 
-    async fn persist_file_hash(&self, uri: &EntityUri, hash: &str) -> anyhow::Result<()> {
+    async fn persist_file_projection(
+        &self,
+        uri: &EntityUri,
+        _: &str,
+        _: &str,
+        projection: &holon_filesystem::FileProjection,
+    ) -> anyhow::Result<()> {
         let mut store = self.0.lock().unwrap();
         store.file_hashes.retain(|(u, _)| u != uri);
-        store.file_hashes.push((uri.clone(), hash.to_string()));
+        store
+            .file_hashes
+            .push((uri.clone(), projection.content_hash.clone()));
         Ok(())
     }
 }

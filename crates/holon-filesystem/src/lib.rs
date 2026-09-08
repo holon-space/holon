@@ -81,6 +81,7 @@ pub use sync_ports::BlockReader;
 pub use sync_ports::BlockRowMemo;
 pub use sync_ports::DocumentManager;
 pub use sync_ports::ExistingChild;
+pub use sync_ports::FileProjection;
 pub use sync_ports::ImageDataProvider;
 pub use sync_ports::IncomingIdentity;
 pub use sync_ports::MatchBasis;

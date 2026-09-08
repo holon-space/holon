@@ -169,6 +169,41 @@ Risk-eliminating order. Each is independently landable with a red-first surface 
 * **Red-first.** `lane-logs/red3-registry-missing.*.log` (unresolved `FormatRegistry` / `WriteTier`, before implementation); `lane-logs/red1-red2-no-cook-registration.*.log` (cook adapter unregistered → no page minted for `Pancakes.cook`; wiring restored byte-for-byte, sha verified).
 * **Out of scope, held.** Markdown registration (both flavors claim `md`; needs the vault-flavor discriminator) · a cooklang renderer / any `.cook` write leg · C7 type-genericity · populating `recipe` ROWS (Inc B/D — the adapter emits blocks, nothing writes that table yet) · carrying the cooklang `title:` metadata onto the persisted page (pages are titled from the filename; `sync_document_metadata` is the seam) · the `.org`-hardcoded page-file derivation (see R7).
 
+### Lowcode Inc 3 — the plugin becomes the ONLY cooklang parser — **implemented (unlanded, lane `lowcode-inc3`)**
+
+Supersedes Inc A's `CookFormatAdapter` and the parts of Inc A/A2/A3 that named
+it. Rulings D90.a (delete `cook.rs`, add the incremental scan) and ADR 0034.
+
+* **What is gone.** `crates/holon-kitchen/src/{cook,rows,params,file_format}.rs`
+  and the `cooklang` dependency. `holon-kitchen` now owns only what a format
+  plugin cannot express — the declared types, the cookable-now queries and the
+  shopping peer. Nothing in Rust names cooklang.
+* **What replaces it.** The wasm guest + sidecar under
+  `crates/holon-plugin-host/plugins/`, compiled into the binary as
+  `BUNDLED_PLUGINS` and instantiated by `PluginFormatAdapter::bundled`.
+  `crates/holon-app/src/wiring.rs` builds the `FormatRegistry` from org plus
+  every bundled plugin, so a second format costs a `.wasm` and a yaml.
+* **Safe because the differential said so.** `cook_plugin_differential_pbt.rs`
+  compared the two legs over generated recipes with an EMPTY divergence table.
+  Its job discharged, it is deleted with the leg it compared; the refusal,
+  block-param and row-contract suites MOVED to `holon-plugin-host` and now
+  drive the plugin.
+* **The incremental scan — TWO of three seams closed; the third is R13.** The
+  controller's cold-boot content-hash skip is structurally unreachable for a
+  `.cook` file: it resolves the document from an id embedded IN the content,
+  and a guest is a pure function over bytes that embeds none — so every recipe
+  is re-parsed through the interpreter on every boot, at ~20x the native cost.
+  Landed: `FileFormatAdapter::document_identity()` states which kind a format
+  is, and `BlockReader::load_file_projections` carries `file.document_id`
+  beside the hash, `persist_file_projection` WRITES it (R12 A1), and the share
+  probe no longer parses a read-only file ahead of the skip (R12 B2). Still
+  not reaching 1 — see R13. Pinned (as a
+  deliberate
+  `#[ignore]`d red, the D66.a pattern) by
+  `a_second_boot_re_parses_only_the_recipe_that_changed`.
+* **Open, named.** `ADVANCED_UNITS` is still ON in the guest — see §7 R11. The
+  scan is still not incremental — see §7 R13.
+
 ### Inc B — pantry + ops + cookable-now live query — **LANDED**
 * **Scope.** `pantry_item` type; add/consume/adjust ops; the "what can I cook now" live query (a recipe is cookable iff every `ingredient_use` has a `pantry_item` with sufficient converted quantity).
 * **Riskiest thing — DISCHARGED.** The cookable-now predicate is an aggregate in disguise ("ALL children satisfy…"). **It must be written as a query, not as a computed field**, or it silently front-runs Inc D and forces the language growth early. Ruling for the executor: query. Delivered as two SQL constants in `holon-kitchen/src/cookable.rs`, both composed from ONE `SATISFIES` fragment so the cookable list and the blocker list cannot disagree.
@@ -257,6 +292,62 @@ C1 is on NO critical path — it is startable today and independent of A/B/D.
 ## 7. Open risks / rulings needed
 
 * **R1 — GRANTED.** Inc A claims PARTIAL Inc-5 de-risking (extension claiming, identity, read authority), explicitly not C7. Wording lands in the BG doc.
+* **R12 — RULED and half-closed; the residual is R13.** Both forks were ruled
+  and implemented at lowcode Inc 3 (`lane-report-lowcode-inc3.md`).
+  **(A) ruled A1.** `persist_file_hash` is now `persist_file_projection`, an
+  UPSERT that writes `content_hash` AND `document_id` together — symmetric with
+  the `load_file_projections` read leg. The old UPDATE matched no row for a
+  `.cook` file at all (`OrgModeSyncProvider` creates rows for org only), so
+  nothing about a recipe survived a boot. Pinned by
+  `a_cook_file_records_its_document_on_the_file_row`.
+  **(B) ruled B2.** `probe_share_file` returns `Ordinary` for a
+  `WriteTier::ReadOnly` file without parsing it: a shared-subtree mount is a
+  projection Holon wrote, and authoritative input cannot be one. Measured A/B
+  (`lane-logs/rev3-forkb-ab.sh`, 3 runs per side, deterministic 3/3 both ways):
+  a read-only file whose bytes trip the probe's `share-role` pre-filter costs
+  **3 guest parses per boot without the guard, 1 with it**. It saves nothing for
+  a recipe that does NOT carry those substrings — the pre-filter already
+  short-circuits there, and neither three-recipe fixture carries them — so the
+  earlier vault-wide "6 → 3" figure is withdrawn as unmeasured. Pinned by
+  `a_read_only_file_is_never_parsed_by_the_share_probe`.
+
+  **(C) the second file-row writer.** `OrgModeSyncProvider` emitted
+  `document_id: None` on every scan, and `QueryableCache<File>` UPSERTs every
+  column of a change — so a scan CLEARED the document the ingest recorded rather
+  than leaving it alone. The provider now emits the document its content names
+  (`parse_doc_id_any_carrier`). Pinned by
+  `a_scanned_org_file_carries_the_document_its_content_names` (holon-orgmode)
+  and `a_recorded_document_survives_a_later_org_scan`.
+
+* **R13 — OPEN. The second boot re-parses a VARYING number of recipes.**
+  With R12 closed the skip reaches its last gate holding a matching hash and a
+  resolved root, and the vault is still not incremental. Measured over five
+  identical runs (`lane-logs/rev3-probe5.sh`,
+  `lane-logs/rev3-probe/DISTRIBUTION.txt`): the second boot ran the guest
+  **6 / 4 / 5 / 5 / 7** times where 1 is correct, and the skip's `in_tree`
+  probe answered inconsistently for the SAME document root across runs (and for
+  two roots inside one scan). Run 2 answered `true` for both roots and still
+  parsed 4 times, so `in_tree` is not the only cause. The earlier reading —
+  a deterministic `in_tree` false negative, contrasted with org roots answering
+  true — is withdrawn: an org file never reaches the probe in this harness
+  (`stored != disk` short-circuits it in 5/5 runs), so that comparison was never
+  measured. Root-cause candidates and the discriminating measurement each needs
+  are in the entry:
+  `docs/Testing/bugfunnel/entries/2026-09-08-a-cook-vaults-second-boot-re-parses-a-varying-number-of-recipes.md`.
+
+* **R11 — OPEN, needs a ruling.** D91.a says `ADVANCED_UNITS` stays OFF so
+  German timer units parse. MEASURED at lowcode Inc 3: it is currently **ON**
+  in the guest and was ON in the deleted native parser too — `cooklang::parse`
+  uses `Extensions::default()`, which is `all()`. Turning it off does fix
+  `~{9%Minuten}`, but it is not only a timer-table switch: the same flag is
+  what lets a quantity omit the `%` (`@flour{200 g}`), so with it off that
+  recipe's unit column goes empty and the amount becomes the text `"200 g"`.
+  Inc 3 therefore did NOT flip it — a silent projection change over every
+  `%`-less recipe is exactly the class this plan refuses. The ruling needs
+  re-taking with that second effect on the table (a German units FILE, remedy
+  (1) of the bugfunnel entry, has neither side effect).
+  Entry: `docs/Testing/bugfunnel/entries/2026-09-02-a-german-timer-unit-refuses-the-whole-recipe.md`.
+
 * **R2 — CLOSED 2026-09-01 by the D.0 spike.** The FK is declared on the **CHILD**, and the parent's relation set is **derived** from it — two authorable declarations that can disagree is how the two seats come to disagree.
 
   ```yaml
@@ -304,6 +395,7 @@ Cookidoo (NG1) · site importers (NG5/K5) · OpenFoodFacts network (NG4) · shar
 | P31 adapter routing — LANDED | `grep -n "formats: Arc<FormatRegistry>" crates/holon-filesystem/src/file_sync_controller.rs` · `grep -n "fn write_tier" crates/holon-core/src/file_format.rs` — absence means A2 was reverted |
 | R7 page-file derivation still org-only | `grep -n 'push(format!("{segment}.org"))' crates/holon-filesystem/src/vault_path.rs` — a hit means R7 is still open |
 | P32 markdown precedent unwired | `grep -rn "ObsidianMarkdownAdapter" crates/ \| grep -v holon-markdown` — hits outside its own crate/tests mean it went live |
-| P29 brace guard | `cargo nextest run -p holon-kitchen -E 'test(unclosed_quantity_brace)'` |
+| P29 brace guard | `cargo nextest run -p holon-plugin-host -E 'test(unclosed_quantity_brace)'` — the guard moved into the guest with the parser (lowcode Inc 3) |
+| Lowcode Inc 3 held — no Rust names cooklang | `grep -rn cooklang crates/ --include '*.rs' \| grep -v holon-plugin-host` — a hit outside the plugin host means a bespoke parser came back |
 | §3.4 correlated subquery still rejected by the fork | `cargo nextest run -p holon-turso --test agg_subquery_matview_spike` — probes A / `COUNT(*) FILTER` are the fork-capability guards. A RED there means a fork bump changed what plants, and §3.4's lowering must be revisited (it does NOT mean the tests are broken) |
 | P13 eval-seat blast radius still 4 matches / 1 migrating caller | `grep -c "Computation::Lit" crates/holon-api/src/computation.rs` · `grep -rn "computation.eval(\|comp.eval(" crates --include='*.rs' \| grep -v /tests/` |
