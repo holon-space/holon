@@ -93,12 +93,19 @@ Some text so the write-back fold has a document to render.
 ";
 
 pub struct Booted {
-    pub session: Arc<FrontendSession>,
     pub engine: Arc<holon::api::BackendEngine>,
+    /// Read only by `session_shutdown_stops_watchers`; the other binary that
+    /// includes this harness boots the same session and never drives it.
+    #[allow(dead_code)]
     pub shutdown: Arc<SessionShutdown>,
-    /// The container the production teardown is driven through.
+    /// The container the production teardown is driven through. Same as
+    /// `shutdown`: one of the two binaries has no teardown to drive.
+    #[allow(dead_code)]
     pub injector: fluxdi::Injector,
-    pub reactive: Arc<holon_frontend::reactive::ReactiveEngine>,
+    /// Held, never read: dropping either would tear down the very watchers
+    /// these tests exist to observe.
+    _session: Arc<FrontendSession>,
+    _reactive: Arc<holon_frontend::reactive::ReactiveEngine>,
     _live: holon_frontend::reactive::LiveBlock,
     dir: tempfile::TempDir,
 }
@@ -173,11 +180,11 @@ pub async fn boot_a_working_session() -> Booted {
     let live = reactive.watch_live(&holon_api::EntityUri::block(PROBE_PAGE), services);
 
     Booted {
-        session,
         engine,
         shutdown,
-        reactive,
         injector,
+        _session: session,
+        _reactive: reactive,
         _live: live,
         dir,
     }

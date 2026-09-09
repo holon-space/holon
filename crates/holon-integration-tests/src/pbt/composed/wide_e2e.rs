@@ -958,6 +958,9 @@ impl ObservabilityCarry {
 /// re-inserted and the process-global per-case resets are skipped, so a case
 /// containing a reboot keeps one continuous attribution record rather than
 /// starting over mid-case.
+// The harness holds single-threaded SUT parts in `Arc` because the
+// production trait signatures it feeds require `Arc`, not `Rc`.
+#[allow(clippy::arc_with_non_send_sync)]
 fn install_observability_caps(caps: &mut CapMap, carry: Option<ObservabilityCarry>) {
     if let Some(c) = carry {
         caps.insert(c.settle);
