@@ -2687,6 +2687,23 @@ impl FileSyncController {
         .map(|page| page.id))
     }
 
+    /// Whether Holon's own record says this path last held NON-EMPTY content —
+    /// i.e. whether an empty parse of it would delete anything.
+    ///
+    /// `last_projection_hash` is loaded from `file.content_hash` at startup, so
+    /// the answer survives a restart. The session map alone would call every
+    /// file new at cold boot, which is exactly when a save in flight is most
+    /// dangerous to get wrong.
+    fn holds_content_for(&self, canonical: &CanonicalPath) -> bool {
+        if let Some(projected) = self.last_projection.get(canonical) {
+            return !projected.is_empty();
+        }
+        match self.last_projection_hash.get(canonical) {
+            Some(recorded) => *recorded != self.projection_hash(""),
+            None => false,
+        }
+    }
+
     /// Read `path`, or `Ok(None)` when it has vanished (an external deletion —
     /// the ingest path resolves that, not the pre-ingest steps).
     async fn read_if_present(&self, path: &Path) -> Result<Option<String>> {
@@ -2821,12 +2838,17 @@ impl FileSyncController {
             }
         };
 
-        // A 0-byte file is never a document: it carries no `#+ID:` and no
-        // title, so nothing in it can identify the document that lives at this
-        // path. Parsing it anyway yields zero blocks, and the ingest diff turns
-        // that into a delete of every block the document had — for a file whose
-        // real bytes are still being written. Refuse it and wait for them.
-        if disk_content.is_empty() {
+        // A 0-byte file at a path Holon HOLDS CONTENT FOR is a save in flight:
+        // every truncate-then-write save makes the target observable at zero
+        // length first, and parsing it yields zero blocks, which the ingest diff
+        // turns into a delete of every block the document had. Refuse it and
+        // wait for the bytes.
+        //
+        // At a path Holon holds nothing for there is no such document, and a
+        // 0-byte file is not an intermediate at all: it is what an empty
+        // title-less page RENDERS to, so refusing it would make that page
+        // uncreatable from disk and unrecoverable after a restart.
+        if disk_content.is_empty() && self.holds_content_for(&canonical) {
             self.empty_since
                 .entry(canonical.clone())
                 .or_insert(EmptyFileWatch {

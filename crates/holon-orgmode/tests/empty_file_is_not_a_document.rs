@@ -485,3 +485,61 @@ async fn a_file_that_stays_empty_is_disclosed_as_degraded() {
         v.disclosures.calls(),
     );
 }
+
+/// The other half of the 0-byte story, and the one rev 1 broke: a title-less
+/// page with no blocks RENDERS to zero bytes — `render_document_header`
+/// deliberately emits no synthetic `#+TITLE:` for a doc-root whose name its
+/// filename carries — so a 0-byte `.org` file is that page's canonical on-disk
+/// form. Refusing every 0-byte file means such a page can never be created from
+/// disk and never comes back after a restart.
+///
+/// The refusal protects the blocks of the document at the path. A path Holon
+/// holds no content for has none, so there is nothing there to protect.
+#[tokio::test]
+async fn a_new_zero_byte_file_becomes_its_page() {
+    let mut v = vault();
+    let fresh = v.path.parent().unwrap().join("Fresh.org");
+    std::fs::write(&fresh, "").unwrap();
+
+    let _ = v
+        .controller
+        .on_file_changed(&fresh)
+        .await
+        .expect("a new 0-byte file must not be an ingest error");
+
+    let titles: Vec<String> = v
+        .docs
+        .by_id
+        .lock()
+        .unwrap()
+        .values()
+        .map(|d| d.title().to_string())
+        .collect();
+    assert!(
+        titles.iter().any(|t| t == "Fresh"),
+        "a 0-byte file at a path Holon holds nothing for was refused, so the page it IS never \
+         came into being — and that file is exactly what an empty title-less page renders to; \
+         titles were {titles:?}",
+    );
+}
+
+/// ANTI-OVERCORRECTION: scoping the refusal must not reopen the clobber for the
+/// path the refusal exists for — a file Holon HAS content for.
+#[tokio::test]
+async fn a_zero_byte_file_at_a_path_with_content_is_still_refused() {
+    let mut v = vault();
+    let path = v.path.clone();
+    let _ = v.controller.on_file_changed(&path).await.unwrap();
+    let before = v.block_ids();
+    assert_eq!(before.len(), 2, "fixture must land two blocks: {before:?}");
+
+    std::fs::write(&path, "").unwrap();
+    let _ = v.controller.on_file_changed(&path).await.unwrap();
+
+    assert_eq!(
+        v.block_ids(),
+        before,
+        "the save-in-flight clobber is back: a 0-byte read deleted the blocks of a document \
+         Holon holds content for",
+    );
+}
