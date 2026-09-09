@@ -418,8 +418,7 @@ impl Module for LoroModule {
             // a banner rather than a log line.
             let degraded =
                 resolver.resolve::<Arc<holon_loro::degraded_signal_bus::DegradedSignalBus>>();
-            let controller =
-                LoroSyncController::new(doc_store_arc, projection, (*degraded).clone());
+            let controller = LoroSyncController::new(projection, (*degraded).clone());
 
             // Phase 4: resolve the shared convergent block feed (built once in
             // `EventInfraModule` as `BlockFeed`, available in both modes) and

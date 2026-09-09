@@ -1,6 +1,6 @@
-//! Inc A rung 1 — a `.cook` file ingests into a recipe document + step blocks
-//! + typed ingredient uses, through the same `FileFormatAdapter` seam org and
-//! the markdown adapters ride.
+//! Inc A rung 1 — a `.cook` file ingests into a recipe document + step
+//! blocks + typed ingredient uses, through the same `FileFormatAdapter` seam
+//! org and the markdown adapters ride.
 //!
 //! Read-only tier: the write half of the trait must REFUSE, not render wrong
 //! bytes (`.cook` files in the vault stay authoritative).

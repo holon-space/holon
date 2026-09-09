@@ -328,7 +328,6 @@ pub fn projection_degraded_key() -> crate::degraded_signal_bus::DegradedConditio
 
 /// Bidirectional sync between Loro and the abstract command/event bus.
 pub struct LoroSyncController {
-    doc_store: Arc<RwLock<LoroDocumentStore>>,
     /// The downstream Loro→SQL projection (consolidator → sink convergent
     /// feed). The controller drives it from its run loop on every Loro
     /// change; org's initial scan drives the same instance synchronously via
@@ -406,14 +405,12 @@ impl LoroSyncControllerHandle {
 
 impl LoroSyncController {
     pub fn new(
-        doc_store: Arc<RwLock<LoroDocumentStore>>,
         projection: Arc<LoroProjection>,
         degraded: Arc<crate::degraded_signal_bus::DegradedSignalBus>,
     ) -> Self {
         let last_synced = projection.last_synced();
         let wake = projection.wake_handle();
         Self {
-            doc_store,
             projection,
             last_synced,
             wake,

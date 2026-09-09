@@ -472,8 +472,7 @@ mod tests {
     #[test]
     fn a_non_letter_priority_cookie_is_refused_loudly() {
         let err = parse_org("* TODO [#1] Ship it\n")
-            .err()
-            .expect("a non-letter priority cookie must refuse the parse");
+            .expect_err("a non-letter priority cookie must refuse the parse");
         assert!(
             matches!(err, ToonError::BadOrgPriority { .. }),
             "expected a priority refusal, got {err:?}"

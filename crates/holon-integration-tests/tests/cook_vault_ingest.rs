@@ -1498,9 +1498,9 @@ fn a_second_boot_re_parses_only_the_recipe_that_changed() {
             .with_vault_file("Pancakes.cook", PANCAKES_COOK)
             .with_vault_file(
                 "Linsensuppe.cook",
-                &recipe("Linsensuppe", "Simmer the lentils"),
+                recipe("Linsensuppe", "Simmer the lentils"),
             )
-            .with_vault_file("Waffles.cook", &recipe("Waffles", "Whisk the batter"))
+            .with_vault_file("Waffles.cook", recipe("Waffles", "Whisk the batter"))
             .build(rt.clone())
             .await
             .expect("a vault of three recipes must boot");

@@ -114,8 +114,7 @@ fn a_property_naming_a_storage_column_is_refused_not_silently_inserted() {
     let payload = std::panic::catch_unwind(AssertUnwindSafe(|| {
         adapter.build_block_params(&block, &r.document.id, &r.document.id, None)
     }))
-    .err()
-    .expect("a storage-column property key must be refused");
+    .expect_err("a storage-column property key must be refused");
     std::panic::set_hook(previous);
 
     let msg = payload

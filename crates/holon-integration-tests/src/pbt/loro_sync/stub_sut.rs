@@ -96,11 +96,8 @@ impl StubSut {
             sink_reader,
             &self.storage_dir,
         ));
-        let controller = LoroSyncController::new(
-            self.doc_store.clone(),
-            projection,
-            Arc::new(holon_loro::DegradedSignalBus::new()),
-        );
+        let controller =
+            LoroSyncController::new(projection, Arc::new(holon_loro::DegradedSignalBus::new()));
         // The stub exercises the EventBus inbound/outbound path with in-memory
         // stores and no MatviewManager, so the Phase 4 block mirror is fed an
         // empty, unsubscribed `LiveData<Block>` (no source) — a no-op mirror.

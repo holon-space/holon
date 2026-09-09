@@ -4313,8 +4313,8 @@ mod duplicate_block_slug_tests {
         let second = fixture.root_dir.join("Second.org");
         tokio::fs::write(&first, FIRST).await.unwrap();
         tokio::fs::write(&second, SECOND).await.unwrap();
-        fixture.controller.on_file_changed(&first).await.unwrap();
-        fixture.controller.on_file_changed(&second).await.unwrap();
+        let _ = fixture.controller.on_file_changed(&first).await.unwrap();
+        let _ = fixture.controller.on_file_changed(&second).await.unwrap();
 
         let renamed = FIRST.replace("dupblk-shared", "dupblk-first-renamed");
         tokio::fs::write(&first, &renamed).await.unwrap();

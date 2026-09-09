@@ -46,7 +46,6 @@
 //! @pbt covers vault-scale-interaction-latency — a keystroke edit and a cold
 //! page switch stay inside the interaction budget on a many-document vault
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -58,16 +57,16 @@ use holon_integration_tests::TestEnvironmentBuilder;
 /// The project SLO (CLAUDE.md): interaction -> projection-visible.
 const SLO: Duration = Duration::from_millis(200);
 
-/// NO WALL-CLOCK RUNG IS ASSERTED HERE, and that is a measured decision rather
-/// than caution. Six runs of the SAME tree at 2793 blocks on this shared
-/// machine produced navigate p50s of 301, 322, 333, 401, 466 and 1407 ms — a
-/// 4.7x spread with the code held constant, and boot times from 42 s to 151 s
-/// over the same runs. A bound loose enough not to flap at 1407 ms would be
-/// past 3 s, which no longer distinguishes a regression from the defect this
-/// file was written against. So the wall-clock figures are PRINTED for a human
-/// (and for `scripts/measure_latency.py`, which parses the same run's stage
-/// events), and the one assertion is [`MAX_FULL_PASSES`] — a ratio machine load
-/// cannot move.
+// NO WALL-CLOCK RUNG IS ASSERTED HERE, and that is a measured decision rather
+// than caution. Six runs of the SAME tree at 2793 blocks on this shared
+// machine produced navigate p50s of 301, 322, 333, 401, 466 and 1407 ms — a
+// 4.7x spread with the code held constant, and boot times from 42 s to 151 s
+// over the same runs. A bound loose enough not to flap at 1407 ms would be
+// past 3 s, which no longer distinguishes a regression from the defect this
+// file was written against. So the wall-clock figures are PRINTED for a human
+// (and for `scripts/measure_latency.py`, which parses the same run's stage
+// events), and the one assertion is `MAX_FULL_PASSES` — a ratio machine load
+// cannot move.
 
 /// The teeth for the defect this file was written against, and the one
 /// assertion machine load cannot move: a cold boot needs exactly ONE

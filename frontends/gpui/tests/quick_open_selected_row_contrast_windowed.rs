@@ -128,7 +128,7 @@ impl Fixture {
         let mut app = Box::new(HeadlessAppContext::with_platform(
             text_system,
             assets,
-            || gpui_platform::current_headless_renderer(),
+            gpui_platform::current_headless_renderer,
         ));
 
         let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));

@@ -1026,8 +1026,9 @@ impl std::fmt::Display for PageWalkBreak {
 /// owned by a document the walk simply could not reach.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PageAncestor {
-    /// The nearest `Page` at or above the block.
-    Page(Block),
+    /// The nearest `Page` at or above the block. Boxed: an inline `Block`
+    /// makes every `NoOwner` answer carry ~424 bytes it never uses.
+    Page(Box<Block>),
     /// The chain reached the root sentinel with no `Page` above it.
     NoOwner,
     /// The chain could not be followed to an answer.
@@ -1040,7 +1041,7 @@ impl PageAncestor {
     /// is dropped.
     pub fn into_page(self) -> Option<Block> {
         match self {
-            PageAncestor::Page(page) => Some(page),
+            PageAncestor::Page(page) => Some(*page),
             PageAncestor::NoOwner | PageAncestor::Broken(_) => None,
         }
     }
@@ -1101,7 +1102,7 @@ pub async fn nearest_page_ancestor(
             return Ok(PageAncestor::Broken(PageWalkBreak::ChainLeftTheStore));
         };
         if block.is_page() {
-            return Ok(PageAncestor::Page(block));
+            return Ok(PageAncestor::Page(Box::new(block)));
         }
         cur = block.parent_id;
     }

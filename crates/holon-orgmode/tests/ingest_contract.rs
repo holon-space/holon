@@ -873,7 +873,8 @@ async fn a_read_only_row_without_its_membership_refuses_the_cold_boot_skip() {
         "Boil water\nStir\n",
     );
     let path = v.file.clone();
-    v.controller
+    let _ = v
+        .controller
         .on_file_changed(&path)
         .await
         .expect("boot 1 ingests the file");
@@ -897,7 +898,7 @@ async fn a_read_only_row_without_its_membership_refuses_the_cold_boot_skip() {
 
     let (mut damaged, registry) = v.reboot();
     damaged.initialize().await.expect("boot 2 initializes");
-    damaged
+    let _ = damaged
         .on_file_changed(&path)
         .await
         .expect("boot 2 ingests the file");
@@ -926,7 +927,7 @@ async fn a_read_only_row_without_its_membership_refuses_the_cold_boot_skip() {
     v.reader.blocks.lock().unwrap().clear();
     let (mut intact, registry) = v.reboot();
     intact.initialize().await.expect("boot 3 initializes");
-    intact
+    let _ = intact
         .on_file_changed(&path)
         .await
         .expect("boot 3 ingests the file");

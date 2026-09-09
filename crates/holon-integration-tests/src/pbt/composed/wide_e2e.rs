@@ -1095,37 +1095,37 @@ pub async fn boot_and_seed_wide_with_peer_id(
     // snapshotting: a baseline taken mid-ingest would be empty and the
     // invariant would compare nothing. Fail loud on timeout — a recipe that
     // never ingests means the fixture, not the gate, is what this run measured.
-    if let Some(frontend) = &handle.frontend {
-        if !ref_state.read_only.homes().is_empty() {
-            let expected: BTreeSet<EntityUri> =
-                ref_state.read_only.homes().iter().cloned().collect();
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-            loop {
-                converge_projections(&handle, Duration::from_millis(300)).await;
-                if expected.is_subset(&sut_ids(&caps).await) {
-                    break;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    let seen: Vec<String> = sut_ids(&caps)
-                        .await
-                        .iter()
-                        .filter(|id| id.as_str().contains("cook") || id.as_str().contains("recipe"))
-                        .map(|id| id.to_string())
-                        .collect();
-                    panic!(
-                        "[read-only homes] {READ_ONLY_RECIPE_FILE} did not ingest its steps \
-                         {expected:?} within budget. Recipe-shaped ids actually in the store: \
-                         {seen:?}"
-                    );
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+    if let Some(frontend) = &handle.frontend
+        && !ref_state.read_only.homes().is_empty()
+    {
+        let expected: BTreeSet<EntityUri> = ref_state.read_only.homes().iter().cloned().collect();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            converge_projections(&handle, Duration::from_millis(300)).await;
+            if expected.is_subset(&sut_ids(&caps).await) {
+                break;
             }
-            frontend.snapshot_read_only_ingest().await;
-            caps.insert(frontend.clone()
-                as std::sync::Arc<dyn holon_pbt_core::capabilities::SutReadOnlyHomes>);
-            caps.insert(frontend.clone()
-                as std::sync::Arc<dyn holon_pbt_core::capabilities::SutReadOnlyEditAttempt>);
+            if tokio::time::Instant::now() >= deadline {
+                let seen: Vec<String> = sut_ids(&caps)
+                    .await
+                    .iter()
+                    .filter(|id| id.as_str().contains("cook") || id.as_str().contains("recipe"))
+                    .map(|id| id.to_string())
+                    .collect();
+                panic!(
+                    "[read-only homes] {READ_ONLY_RECIPE_FILE} did not ingest its steps \
+                     {expected:?} within budget. Recipe-shaped ids actually in the store: \
+                     {seen:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        frontend.snapshot_read_only_ingest().await;
+        caps.insert(
+            frontend.clone() as std::sync::Arc<dyn holon_pbt_core::capabilities::SutReadOnlyHomes>
+        );
+        caps.insert(frontend.clone()
+            as std::sync::Arc<dyn holon_pbt_core::capabilities::SutReadOnlyEditAttempt>);
     }
 
     // `inv-settle-budget` coverage: the per-transition latency recorder the
