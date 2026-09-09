@@ -299,13 +299,13 @@ fn a_canonical_raw_link_is_emitted_byte_for_byte() {
 
 /// A link that adopts to NOTHING is the one shape normalization must refuse.
 ///
-/// Rewriting `[[   ]]` to what adoption leaves would emit the empty string:
-/// settled, `Exact`, silent — and the user's bytes gone with no disclosure.
-/// Settlement is not worth buying at that price, so these keep the raw bytes
-/// and stay on the loud rung. `ContentUnpreserved` is the assertion, not a
-/// tolerated leftover: the emission must SAY it could not represent this.
+/// Rewriting `[[   ]]` to what adoption leaves would emit the empty string and
+/// the user's bytes would be gone. So these keep the raw bytes — and because
+/// extraction hands the same literal back as plain text, keeping them is also
+/// what settles: the emitted bytes re-parse to the stored content, which is
+/// `Exact`, not a degradation to disclose.
 #[test]
-fn a_link_that_adopts_to_nothing_keeps_its_bytes_and_stays_loud() {
+fn a_link_that_adopts_to_nothing_keeps_its_bytes_and_settles() {
     for content in ["[[   ]]", "[[]]", "[[a][ ]]", "[[  ][  ]]", "a [[  ]] b"] {
         let mut block = Block::new_text(
             EntityUri::block("empty-adoption"),
@@ -321,9 +321,36 @@ fn a_link_that_adopts_to_nothing_keeps_its_bytes_and_stays_loud() {
         );
         assert_eq!(
             fidelity,
-            RenderFidelity::ContentUnpreserved,
-            "{content:?}: refusing to normalize must stay disclosed, not pass as Exact"
+            RenderFidelity::Exact,
+            "{content:?}: bytes that survive both halves of the cycle are Exact"
         );
+    }
+}
+
+/// The EXTRACT half of the same refusal. The render half above keeps the bytes;
+/// re-ingesting them must hand back the same bytes, or the cycle is not a fixed
+/// point and the two halves disagree about what the block holds.
+///
+/// A store holding `[[]]` renders `[[]]` to disk, so a reference model that
+/// derives content by running the cycle to convergence lands on whatever
+/// extraction says — `""` while extraction erases the literal, against the
+/// `[[]]` the store and the disk both hold. That gap is the keystone's
+/// `inv-blocks-match-ref` `content sut="[[]]" ref=""`.
+#[test]
+fn a_link_that_adopts_to_nothing_survives_re_ingest() {
+    for content in ["[[   ]]", "[[]]", "[[][]]", "[[a][ ]]", "a [[  ]] b"] {
+        let (reparsed, marks) = extract_inline_marks(content);
+        assert_eq!(
+            reparsed, content,
+            "{content:?}: re-ingest erased bytes the renderer had preserved"
+        );
+        assert!(
+            marks.is_empty(),
+            "{content:?}: an empty label must mint no (zero-width) Link mark, got {marks:?}"
+        );
+        // Two cycles: the shape the renderer emits for the re-parsed state must
+        // be the same shape again, so nothing grows or shrinks per writeback.
+        assert_fixed_point(content, &[], 2);
     }
 }
 

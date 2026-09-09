@@ -184,24 +184,17 @@ fn a_padded_raw_link_is_not_a_degradation_at_all() {
     assert!(events.is_empty(), "unexpected disclosure: {events:?}");
 }
 
-/// The other side of that repair: a link adopting to NOTHING is NOT normalized,
-/// because the normalized form is the empty string. Emitting it would settle
-/// silently at `Exact` while deleting the user's bytes — the "degrades to look
-/// fine" outcome. The loud ERROR is the required answer here, so this test
-/// asserts the disclosure rather than its absence.
+/// The same verdict for a link adopting to NOTHING. `[[   ]]` has no label to
+/// adopt into, so extraction mints no mark and hands the literal back as plain
+/// text — the emitted bytes re-parse to exactly what the store holds. `Exact`
+/// is the honest answer, and the ERROR rung would fire on every render of an
+/// ordinary user-typable string, reddening `inv-no-observed-errors` forever.
 #[test]
-fn a_link_that_adopts_to_nothing_still_errors() {
+fn a_link_that_adopts_to_nothing_is_not_a_degradation_at_all() {
     let (fidelity, events) = render_capturing("severity-empty-adoption", "[[   ]]", &[]);
 
-    assert_eq!(fidelity, RenderFidelity::ContentUnpreserved);
-    assert_eq!(
-        events,
-        vec![Captured {
-            level: Level::ERROR,
-            rung: Some("Unrepresentable".to_string()),
-        }],
-        "an unannounced erasure is worse than a disclosed refusal to settle"
-    );
+    assert_eq!(fidelity, RenderFidelity::Exact);
+    assert!(events.is_empty(), "unexpected disclosure: {events:?}");
 }
 
 /// An exact render says nothing at all — the disclosure is not chatter.

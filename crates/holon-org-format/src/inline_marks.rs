@@ -806,9 +806,14 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
             // Link mark is an illegal state — it has no visible content and no
             // meaningful target, and it renders back as reversed brackets
             // (`]][[`), the on-disk corruption confirmed by dogfood #4. Parse,
-            // don't validate: drop it at the boundary so it is never created,
-            // emitting no mark and no content for the empty literal.
+            // don't validate: mint no mark for it.
+            //
+            // The literal's BYTES still survive, as plain text. The render half
+            // emits this shape unchanged, so erasing it here would leave the two
+            // halves disagreeing about what the block holds and the store↔disk
+            // cycle without a fixed point.
             if text.is_empty() {
+                push_text(state, &raw, node_src.clone(), true);
                 return;
             }
             // The label is a slice of the link literal, so a caret inside it
@@ -1457,21 +1462,21 @@ mod tests {
     }
 
     #[test]
-    fn empty_link_is_dropped_at_extraction_no_zero_width_mark() {
+    fn empty_link_mints_no_zero_width_mark_and_keeps_its_bytes() {
         // `[[]]` and `[[][]]` have an empty label — the Link mark would span
-        // zero characters. Parse, don't validate: the boundary drops them so a
+        // zero characters. Parse, don't validate: the boundary mints none, so a
         // zero-width Link mark is never created (the dogfood #4 `]][[` root).
-        for input in ["[[]]", "[[][]]"] {
+        // The literal itself is ordinary text and survives byte-for-byte.
+        for input in ["[[]]", "[[][]]", "[[   ]]"] {
             let (out, marks) = extract(input);
-            assert_eq!(out, "", "empty link `{input}` must leave no content");
+            assert_eq!(out, input, "empty link `{input}` must keep its bytes");
             assert!(
                 marks.is_empty(),
                 "empty link `{input}` must produce no mark, got {marks:?}"
             );
         }
-        // Surrounding text is preserved; only the empty link contributes nothing.
         let (out, marks) = extract("a[[]]b");
-        assert_eq!(out, "ab");
+        assert_eq!(out, "a[[]]b");
         assert!(marks.is_empty(), "got {marks:?}");
     }
 
@@ -1536,7 +1541,7 @@ mod tests {
             marks = sp;
         }
         // Converged and never doubled: every disk iterate after the first is
-        // identical (empty), so no growth across cycles.
+        // identical, so no growth across cycles.
         assert!(
             seen.iter().skip(1).all(|d| d == &seen[1]),
             "disk form not stable across cycles: {seen:?}"
