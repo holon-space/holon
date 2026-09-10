@@ -617,7 +617,7 @@ where
     #[holon_macros::emits(excluded("block.sort_key", "the ordering authority mints order keys"))]
     #[holon_macros::emits(excluded("block.after_block_id", "a positional anchor, not a column"))]
     #[holon_macros::marking_delta(
-        block(structural = relocates, text = produces, existence = untouched),
+        block(structural = relocates, text = produces, existence = reads),
         varies_by("field")
     )]
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult>;

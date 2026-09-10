@@ -3,7 +3,7 @@ id: 2026-09-10-user-launched-gpui-app-never-installed-the-editor-cell-registry
 date: 2026-09-10
 gap: ENVIRONMENT
 secondary: null
-status: FIXED
+status: OPEN
 summary: >-
   The user-launched GPUI app never installed the block-cell registry, so every
   keystroke wrote through the per-keystroke whole-buffer `set_field`
@@ -68,10 +68,18 @@ way, so the one configuration that lacked it was the only one never exercised.
 
 ## Remedy
 
-FIXED in the `slot-birth` lane:
+**OPEN — the GPUI app deliberately stays on the no-cell leg until the
+`cell-undo` lane lands (D113.a).** Installing the registry puts every keystroke
+on the cell leg, and that leg has no undo: cmd+z after typing restores nothing
+(`2026-09-11-cmd-z-restores-nothing-after-typing-through-the-editor-cell`).
+Shipping the install before undo covers cell writes would trade this escape for
+a worse, user-visible one, so the install is the `cell-undo` lane's last step.
 
-- `GpuiModule::on_start` now calls the shared `install_block_cell_registry`,
-  gated on `crdt_enabled` exactly as the harnesses are.
+What the `slot-birth` lane DID land, all of it still in place:
+
+- `GpuiModule::on_start` does not install the registry, and says why at the
+  call site. The TUI's `on_start` and the MCP reset path still do; the TUI has
+  no undo binding, so its behaviour is unchanged.
 - That installer returns a typed `Result<CellRegistryInstall>` instead of a
   discarded `bool`: `Err` when CRDT is enabled and no registry resolves,
   `Ok(NotWired)` only when CRDT is off. Every caller propagates or asserts.
@@ -81,3 +89,7 @@ FIXED in the `slot-birth` lane:
   the new `BuilderServices::cell_registry_wired`.
 - `frontends/tui/src/di.rs` was a second install implementation with different
   semantics; it now calls the shared one.
+- `TestEnvironment::start_app` makes the install OPT-IN
+  (`enable_block_cell_registry`), so a windowed fixture defaults to the leg the
+  app runs. Only the slot-birth windowed PBT opts in, because the in-process
+  birth IS its subject.

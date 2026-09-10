@@ -232,6 +232,23 @@ when either half fails:
   environment event in the journal** — a lost claim is something a
   compensation rule can fire on, never silent marking drift.
 
+**Typing into a creation slot is a text edit whose first character also creates
+the node.** The slot has no node until then; the first character's write IS the
+create, performed in-process through the cell registry (`split_block`'s
+precedent), with the SQL row following through the outbound projector. It is
+listed here because it looks like a create and is governed by the text-edit
+bypass above: one writer, causal order by construction, nothing for the
+dispatcher to arbitrate. The net observes the resulting node as marking, exactly
+as it observes every other text edit.
+
+The reason it is not modelled as a marking precondition instead: an existence
+precondition satisfied in-process by the same task that needs it is not an
+ordering problem, and modelling it as one costs a durable row per gesture while
+leaving the CRDT leg — which bypasses the dispatcher by this very section —
+uncovered. The `crdt.enabled = false` (SqlOnly) leg, where no cell route exists
+and the create is dispatched, is a test axis rather than a production wiring
+(`crates/holon-integration-tests/src/pbt/composed/wide_e2e.rs:2764-2790`).
+
 **Authorization-relevant predicates read the store, never the derived
 projection.** The projection lags its sources — cold start, IVM catch-up — and
 a subject the projection cannot classify tempts a guard toward "confirm",

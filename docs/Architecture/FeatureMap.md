@@ -274,13 +274,16 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 ### Known reds
 
 - `bulk-add-sibling-order-under-journals`
+- `cooklang-read-only-split-block-refusal`
 - `deletebackward-sql-reads-budget`
 - `drawer-open-matches-ref`
+- `drawer-open-matches-ref-reverse`
 - `lib-type-chars-home-profile-derived`
 - `loro-backend-change-count`
 - `opentab-sql-reads-budget`
 - `pinblock-lazy-day-page-shell`
 - `proptest-sm-shrink-seen-transitions`
+- `quick-open-pages-section-misses-a-matching-page`
 - `turso-block-query-source-round-trip`
 - `typechars-sql-reads-budget`
 - `vault-scale-main-panel-delivery`

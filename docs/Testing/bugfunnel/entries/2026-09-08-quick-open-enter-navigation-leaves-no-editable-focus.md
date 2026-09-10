@@ -97,8 +97,40 @@ Covering tests:
   (`[JumpToSearchHit] after navigating main to block:structural-page, the
   engine caret is None but must be block:parent`).
 
-The EMPTY destination's half is pinned windowed only. Its headless replay is
-parked on a separate ordering defect (D109): the affordance birth SPAWNS the
-newborn's `block.create` while the same keystroke's `set_field` is dispatched
-straight after it, and the write can reach the store first — measured on the
-CRDT leg (`LoroBlockOperations`: `Block not found: <newborn uuid>`).
+## The empty destination's half — the ordering defect, and what it really was
+
+The empty-destination half was pinned windowed only, its headless replay parked
+on what was filed as an ordering defect (D109). The cause is **not** a missing
+durable ordering mechanism. It is that **one gesture was executed as two
+unordered `tokio::spawn`s**: `birth_creation_affordance` spawned the newborn's
+`block.create` while the same keystroke's `set_field` was dispatched straight
+after it, and nothing orders task N against task N-1 — so the write could reach
+the store first (`LoroBlockOperations`: `Block not found: <newborn uuid>`).
+
+Ruled D112.a: the first keystroke into a creation slot **is** the create. The
+node is made synchronously, in-process, through the block-cell registry on the
+keystroke's own path, and the SQL row follows through the outbound projector —
+`split_block`'s existing precedent. With one operation there is no second effect
+to order; causality is structural rather than enforced. ADR 0032 §3 records it
+under the text-edit bypass.
+
+Covering tests:
+
+- Windowed: `typing_into_a_slot_creates_the_node_before_the_write`
+  (`frontends/gpui/tests/quick_open_returns_focus_windowed.rs`) — an ORDERING
+  observable, not an end state: the harness span collector must record no
+  `block.create` reaching the dispatcher for the gesture, so a create that
+  merely wins a race fails it.
+- Keystone: the un-parked
+  `a-jump-into-an-empty-page-seats-the-slot-and-the-first-keystroke-births`
+  (`crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl`),
+  green with main's caps unchanged.
+
+## Test gaps this escaped through
+
+- The windowed fixture installed no block-cell registry, so the windowed suite
+  tested a leg production does not take for keystrokes.
+- The user-launched GPUI app installed none either, so production typed through
+  per-keystroke whole-buffer `set_field` spawns rather than the CRDT cell leg —
+  recorded separately in
+  `2026-09-10-user-launched-gpui-app-never-installed-the-editor-cell-registry`.
