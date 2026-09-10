@@ -3101,6 +3101,14 @@ pub trait RefSqlCardinality {
     /// post-apply state cannot tell them apart.
     fn last_open_tab_activated(&self) -> bool;
 
+    /// True iff the most recent keystroke ALSO created the block it wrote to —
+    /// a caret seated in a creation slot, where typing is a text edit whose
+    /// first character creates the node. `TypeChars`' budget switches on it
+    /// because such a keystroke reads the newborn's row set on first write,
+    /// and the post-apply state cannot tell it from a keystroke into a block
+    /// that already existed.
+    fn last_keystroke_created_its_target(&self) -> bool;
+
     /// True iff a block-content write reaches SQL as a write — i.e. SQL, not
     /// Loro, holds block CRUD. Per-keystroke write budgets fork on it: in the
     /// Loro arm the content lands in the CRDT and only the undo journal is a

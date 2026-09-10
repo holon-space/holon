@@ -41,6 +41,9 @@ impl RefEditorMirror for ReferenceState {
 
 impl RefEditorMirrorMut for ReferenceState {
     fn type_chars(&mut self, text: &str) {
+        // An ordinary keystroke writes to a block that already exists, so it
+        // clears the newborn charge the slot-birth path sets.
+        self.ui.tab.last_keystroke_created_its_target = false;
         if let Some(editor) = self.ui.tab.active_editor.as_mut() {
             editor.type_chars(text);
         }

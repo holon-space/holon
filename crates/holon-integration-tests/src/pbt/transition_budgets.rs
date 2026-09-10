@@ -116,6 +116,7 @@ struct CardinalityProbe {
     first_visit: bool,
     open_tab_activated: bool,
     content_writes_sql: bool,
+    keystroke_created_its_target: bool,
 }
 
 impl holon_pbt_core::capabilities::RefSqlCardinality for CardinalityProbe {
@@ -139,6 +140,9 @@ impl holon_pbt_core::capabilities::RefSqlCardinality for CardinalityProbe {
     }
     fn last_open_tab_activated(&self) -> bool {
         self.open_tab_activated
+    }
+    fn last_keystroke_created_its_target(&self) -> bool {
+        self.keystroke_created_its_target
     }
     fn content_writes_reach_sql(&self) -> bool {
         self.content_writes_sql
@@ -176,19 +180,23 @@ pub fn declared_complexity_class(
     for first_visit in [false, true] {
         for open_tab_activated in [false, true] {
             for content_writes_sql in [false, true] {
-                let at = |scale| {
-                    transition.expected_sql(&CardinalityProbe {
-                        scale,
-                        first_visit,
-                        open_tab_activated,
-                        content_writes_sql,
-                    })
-                };
-                let small = at(SMALL);
-                let large = at(LARGE);
-                if (small.reads, small.writes, small.ddl) != (large.reads, large.writes, large.ddl)
-                {
-                    return ComplexityClass::StateDependent;
+                for keystroke_created_its_target in [false, true] {
+                    let at = |scale| {
+                        transition.expected_sql(&CardinalityProbe {
+                            scale,
+                            first_visit,
+                            open_tab_activated,
+                            content_writes_sql,
+                            keystroke_created_its_target,
+                        })
+                    };
+                    let small = at(SMALL);
+                    let large = at(LARGE);
+                    if (small.reads, small.writes, small.ddl)
+                        != (large.reads, large.writes, large.ddl)
+                    {
+                        return ComplexityClass::StateDependent;
+                    }
                 }
             }
         }

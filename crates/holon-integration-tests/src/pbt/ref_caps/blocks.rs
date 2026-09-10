@@ -243,6 +243,12 @@ impl RefBlockTree for ReferenceState {
 
 impl RefBlockTreeMut for ReferenceState {
     fn birth_block_via_creation_slot(&mut self, parent: &EntityUri, content: &str) {
+        // This keystroke also creates its target, which costs the newborn's
+        // first-write read set. Recorded here rather than read back later
+        // because the post-apply state cannot tell this shape from a keystroke
+        // into a block that already existed. Cleared by the next ordinary
+        // keystroke (`type_chars`), so it is true for one transition only.
+        self.ui.tab.last_keystroke_created_its_target = true;
         ReferenceState::birth_block_under_slot(self, parent, content);
     }
 

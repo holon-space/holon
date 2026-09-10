@@ -94,6 +94,13 @@ pub struct UITabState {
     /// pick which of the two `OPEN_TAB_*_READS` ceilings applies.
     pub last_open_tab_activated: bool,
 
+    /// Whether the most recent keystroke also CREATED the block it wrote to
+    /// (a caret in a creation slot). Recorded by the ref's slot-birth apply
+    /// because `expected_sql` only sees the post-apply state, where the block
+    /// exists under either branch. `inv-sql-budget` reads it to charge the
+    /// newborn's first-write read set exactly once.
+    pub last_keystroke_created_its_target: bool,
+
     /// How many block MERGES the most recent `DeleteBackward` performed — a
     /// backspace at caret 0 joins into the predecessor rather than deleting a
     /// character. Recorded by `DeleteBackward::apply_to_ref` because
@@ -117,6 +124,7 @@ impl UITabState {
             seen_focus_targets: HashSet::new(),
             last_navigate_first_visit: false,
             last_open_tab_activated: false,
+            last_keystroke_created_its_target: false,
             last_backspace_joins: 0,
         }
     }

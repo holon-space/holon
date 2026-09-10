@@ -721,15 +721,12 @@
 # Both cases pin the SEAT, which is what the fix moved: the caret lands INSIDE the destination
 # (its first child, or its creation affordance) and never on the destination itself.
 {"name": "a-jump-into-a-populated-page-seats-the-caret-on-its-first-child", "description": "BugFunnel 2026-09-08 quick-open-enter-navigation-leaves-no-editable-focus, the NON-EMPTY half (D97.a Fork B). Enter on a quick-open hit that HAS children must seat the caret on its first child by sort_key (block:parent), never on block:structural-page itself, which renders through the editor-less page_title variant. JumpToSearchHit's own postcondition IS that assertion; RED before the fix with the caret on block:structural-page. No keystroke follows deliberately: typing into the seated row is the GPUI rung's job (enter_navigating_out_of_quick_open_seats_a_caret), and headlessly it runs into two separate open questions this case must not conflate with the seat -- clicking the seated row keeps the seat's offset 0 where the reference predicts end-of-text, and the first keystroke into a freshly jumped-to root reads 17 where TypeChars' budget models 7.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"JumpToSearchHit": {"query": "structural", "hit": "block:structural-page"}}]}
-# The EMPTY half is authored but PARKED: it reds on a production defect this lane found and did
-# not fix (D109, with Martin). The caret seat lands on the affordance correctly and the keystroke
-# births a newborn through the chokepoint, but `birth_creation_affordance` SPAWNS the newborn's
-# `block.create` while the same keystroke's `set_field("content")` is dispatched straight after
-# it, so the write can reach the store first. Measured on the CRDT leg: with this case's
-# `["Loro","Turso"]` wiring the failure is raised by `LoroBlockOperations::execute_operation`
-# — `set_field('content'): capture prior state: Block not found: <newborn uuid>`. Re-enable with
-# the ordering fix.
-# {"name": "a-jump-into-an-empty-page-seats-the-slot-and-the-first-keystroke-births", "description": "BugFunnel 2026-09-08 quick-open-enter-navigation-leaves-no-editable-focus, the EMPTY half (D97.a Fork B). CreateDocument mints the childless page block:ref-doc-0 titled doc_0. Enter on it must seat the caret on that page's :__virtual: creation affordance, so the very NEXT keystroke births exactly one block under it with no click in between — TypeChars is legal here only because the caret is on a slot. RED before the fix as the postcondition, with the caret on block:ref-doc-0.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"JumpToSearchHit": {"query": "doc_0", "hit": "block:ref-doc-0"}}, {"TypeChars": {"text": "z"}}]}
+# The EMPTY half pins the ORDERING as well as the seat: the keystroke's write names a block the
+# same gesture is creating, so the node must exist before the write reaches the store. Typing into
+# a creation slot IS a text edit whose first character also creates the node (ADR 0032 §3), created
+# in-process on the caller's path. Without that ordering the CRDT leg raises
+# `set_field('content'): capture prior state: Block not found: <newborn uuid>`.
+{"name": "a-jump-into-an-empty-page-seats-the-slot-and-the-first-keystroke-births", "description": "BugFunnel 2026-09-08 quick-open-enter-navigation-leaves-no-editable-focus, the EMPTY half (D97.a Fork B). CreateDocument mints the childless page block:ref-doc-0 titled doc_0. Enter on it must seat the caret on that page's :__virtual: creation affordance, so the very NEXT keystroke births exactly one block under it with no click in between — TypeChars is legal here only because the caret is on a slot. RED before the fix as the postcondition, with the caret on block:ref-doc-0.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"CreateDocument": {"file_name": "doc_0.org"}}, {"JumpToSearchHit": {"query": "doc_0", "hit": "block:ref-doc-0"}}, {"TypeChars": {"text": "z"}}]}
 #
 # --- a reboot no longer orphans the previous boot's watcher tasks --------------------------------
 # The defect this case was shrunk from (docs/Testing/bugfunnel/entries/

@@ -39,6 +39,20 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 /// page: the block itself, then the page.
 const VOCABULARY_RESOLVE_READS: usize = 2;
 
+/// Extra reads charged when the keystroke ALSO created the block it wrote to.
+///
+/// A keystroke whose target was created in the same gesture reads the
+/// newborn's row set on first write (measured 20 dedup / 35 raw); tracked for
+/// reduction by the redundant-read roster (task #15).
+///
+/// The RESIDUAL of the measurement, not an independent derivation: the ordinary
+/// formula grants `REACTIVE_BASE(5) + 2*1 + 0 = 7` and the measured dedup count
+/// is 20, so this is `20 - 7`. The case therefore sits AT its cap with zero
+/// headroom before the tolerance — any added read on this shape reds it.
+/// Charged ONLY on this shape, so the ordinary ceiling keeps its full
+/// protection for every keystroke into an existing block.
+const NEWBORN_FIRST_WRITE_READS: usize = 13;
+
 /// Type a short ASCII string into the active editor.
 /// Gated to `PBT_ATOMIC_EDITOR=1` runs.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
@@ -234,8 +248,13 @@ crate::cap_transition! {
             })
             .count();
         let vocabulary_reads = VOCABULARY_RESOLVE_READS * source_keystrokes;
+        let newborn_reads = if state.last_keystroke_created_its_target() {
+            NEWBORN_FIRST_WRITE_READS
+        } else {
+            0
+        };
         ExpectedSql {
-            reads: REACTIVE_BASE + 2 * chars + vocabulary_reads,
+            reads: REACTIVE_BASE + 2 * chars + vocabulary_reads + newborn_reads,
             // A source-channel keystroke lands TWO columns (content and
             // task_state) where a content keystroke lands one. Charged for
             // every keystroke the channel admits — an OVER-approximation,
