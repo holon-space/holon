@@ -642,6 +642,16 @@ impl EditorViewModel {
         let Some(id) = id else {
             return Ok(None);
         };
+        // `edit_target_id` births a caret-on-affordance into a real newborn, so
+        // an affordance id here means a call site skipped that chokepoint. The
+        // write would surface one layer down as "Block not found" against an id
+        // that never existed — the same reason `structural_block_action`
+        // asserts for the structural table.
+        assert!(
+            !crate::row_origin::RowOrigin::from_id(&id).is_creation_placeholder(),
+            "text write dispatched against creation-affordance id {id:?} — an affordance is not \
+             a block; the write must name the newborn `edit_target_id` resolves it to"
+        );
         // Stamp a monotonic ordering token on this write and record it as our
         // last local sequence BEFORE the caller dispatches, so a fast CDC echo
         // cannot race a not-yet-recorded seq.

@@ -110,6 +110,31 @@ pub trait EntityCellRegistry: Send + Sync {
         Ok(false)
     }
 
+    /// Create an entity WITHOUT yielding — the same authoritative create as
+    /// [`create_entity`](Self::create_entity), on the caller's own thread.
+    ///
+    /// Exists because one caller genuinely cannot yield: a keystroke into a
+    /// creation slot must have the node before it writes the character, and
+    /// the two must not become separate tasks (the reordering D112 records).
+    /// Creating a Loro node is synchronous work, so this is the honest shape
+    /// rather than blocking on a future that never pends.
+    ///
+    /// `Ok(false)` means "not routed here" and the caller falls back exactly as
+    /// for [`create_entity`](Self::create_entity) — including every case this
+    /// narrow path declines to handle, such as a parent that is not yet in the
+    /// tree. Default impl declines, so a registry opts in deliberately.
+    fn create_entity_sync(
+        &self,
+        _: &EntityUri,
+        _: Option<&EntityUri>,
+        _: &EntityUri,
+        _: BlockContent,
+        _: &std::collections::HashMap<String, holon_api::Value>,
+        _: &holon_api::BlockEdges,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Delete an entity authoritatively through this registry's backing
     /// store (e.g. `LoroBackend::delete_block`); the outbound projector then
     /// emits the SQL DELETE tagged `EventOrigin::Loro`. Mirrors

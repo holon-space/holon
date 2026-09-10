@@ -221,6 +221,12 @@ pub struct TestEnvironment {
     /// `Cell` so `set_enable_loro` can write via `&self`.
     enable_loro: Cell<bool>,
 
+    /// Whether `start_app` installs the editor-cell registry, so keystrokes
+    /// commit through the per-keystroke CRDT cell instead of the on-blur
+    /// `set_field` funnel. Default FALSE, matching the GPUI app (D113.a).
+    /// `Cell` so a test can opt in through `&self` before `start_app`.
+    block_cell_registry: Cell<bool>,
+
     /// Which storage substrate `start_app` assembles (default: `Turso`).
     storage: StorageSelector,
 
@@ -518,6 +524,7 @@ impl TestEnvironmentBuilder {
             seed_count: Cell::new(None),
             enable_fake_mcp: Cell::new(self.enable_fake_mcp),
             enable_loro: Cell::new(enable_loro),
+            block_cell_registry: Cell::new(false),
             storage: StorageSelector::Turso,
             loro_backend: OnceCell::new(),
             loro_org_idle: OnceCell::new(),
@@ -718,6 +725,7 @@ impl TestEnvironment {
             seed_count: Cell::new(None),
             enable_fake_mcp: Cell::new(false),
             enable_loro: Cell::new(true),
+            block_cell_registry: Cell::new(false),
             storage: StorageSelector::Turso,
             loro_backend: OnceCell::new(),
             loro_org_idle: OnceCell::new(),
@@ -867,6 +875,14 @@ impl TestEnvironment {
         self.enable_loro.set(enable);
     }
 
+    /// Opt this environment into the editor-cell registry, so keystrokes commit
+    /// through the per-keystroke CRDT cell. Call BEFORE `start_app`. Only a
+    /// test whose subject IS that leg should: the default matches the GPUI app,
+    /// which does not install it (D113.a).
+    pub fn enable_block_cell_registry(&self) {
+        self.block_cell_registry.set(true);
+    }
+
     /// The mode this environment's container actually boots in. Read off the
     /// SAME `HolonConfig` `start_app` builds rather than off the caller's flag,
     /// so a construction that loses an explicit `false` reports the mode that
@@ -982,6 +998,17 @@ impl TestEnvironment {
         if let Some(sync_handle) = sync_handle {
             self.latch_loro_sync_handle(sync_handle);
         }
+        // The editor-cell registry is OPT-IN here, because the GPUI app does
+        // not install it (D113.a): a fixture that installed it by default would
+        // test a leg production does not run. `enable_block_cell_registry`
+        // turns it on for a test whose subject IS that leg.
+        holon_app::loro_seams::install_block_cell_registry(
+            self.injector.get().expect("injector latched above"),
+            &reactive_engine,
+            enable_loro && self.block_cell_registry.get(),
+        )
+        .await
+        .expect("installing the editor-cell registry for this test session");
         self.latch_reactive_engine(reactive_engine);
         if let Some(idle_signal) = idle_signal {
             self.latch_org_sync_idle(idle_signal);

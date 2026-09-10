@@ -411,6 +411,44 @@ impl EntityCellRegistry for BlockCellRegistry {
     /// tagged `EventOrigin::Loro`, which the inbound gate `EchoSuppress`es
     /// rather than dropping as an unmigrated SQL-direct write. SqlOnly
     /// mode returns `Ok(false)` so the caller falls back to the SQL path.
+    fn create_entity_sync(
+        &self,
+        parent_id: &EntityUri,
+        after_id: Option<&EntityUri>,
+        new_id: &EntityUri,
+        content: holon_api::BlockContent,
+        properties: &std::collections::HashMap<String, holon_api::Value>,
+        edges: &holon_api::BlockEdges,
+    ) -> Result<bool> {
+        // Narrow on purpose: this path exists for the creation-slot keystroke,
+        // where the parent is the page the caret is in and is already in the
+        // tree. Anything else — an anchor or parent that is not live, an id
+        // that already exists — DECLINES to `Ok(false)` and takes the async
+        // path, rather than growing a second implementation of the exotic
+        // cases (placeholder roots, positional re-anchoring) that would then
+        // have to be kept in step.
+        let backend = &self.backend;
+        if after_id.is_some() || backend.is_live_anywhere_sync(new_id.id()) {
+            return Ok(false);
+        }
+        if !(parent_id.is_no_parent()
+            || parent_id.is_sentinel()
+            || backend.is_live_anywhere_sync(parent_id.id()))
+        {
+            return Ok(false);
+        }
+        backend
+            .create_block_with_properties_sync(
+                parent_id.clone(),
+                content,
+                Some(new_id.clone()),
+                properties,
+                edges,
+            )
+            .map_err(|e| anyhow!("create_block_sync({new_id}): {e:#}"))?;
+        Ok(true)
+    }
+
     async fn create_entity(
         &self,
         parent_id: &EntityUri,

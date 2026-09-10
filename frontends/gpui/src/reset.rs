@@ -69,8 +69,9 @@ pub async fn build_fresh_sut(
     };
     let session_config = SessionConfig::new(ui_info);
 
-    // Capture the DI injector so we can resolve the Loro `BlockCellRegistry`
-    // after build (the windowless path bypasses frontend `on_start`).
+    // Capture the DI injector so the fresh session's convergence / mirror
+    // handles can be resolved after build (the windowless path bypasses
+    // frontend `on_start`).
     let injector_slot: Arc<std::sync::OnceLock<fluxdi::Injector>> =
         Arc::new(std::sync::OnceLock::new());
     let injector_slot_c = injector_slot.clone();
@@ -99,22 +100,9 @@ pub async fn build_fresh_sut(
     )
     .await?;
 
-    // Loro editor-cell registry (crdt on) — else typing errs "no MutableText".
-    // Mirrors components.rs:208-221.
-    {
-        let injector = injector_slot
-            .get()
-            .expect("injector captured in extra_resolve");
-        let registry: Arc<holon_loro::block_cell_registry::BlockCellRegistry> = injector
-            .resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
-            .await;
-        let registry_dyn: Arc<dyn holon_frontend::cell::EntityCellRegistry> = registry;
-        reactive
-            .block_cell_registry
-            .lock()
-            .unwrap()
-            .replace(registry_dyn);
-    }
+    // NO editor-cell registry (D113.a), matching `GpuiModule::on_start`: a
+    // reset must hand back the same leg start-up gave, or a reset would move
+    // the running app onto the cell leg, where cmd+z restores nothing.
 
     // Resolve the fresh SUT's convergence/mirror handles from its own injector
     // (root_async factories — awaited so they are live by hand-off, not raced).

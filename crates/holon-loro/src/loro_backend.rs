@@ -2234,8 +2234,13 @@ impl LoroBackend {
     /// tree. A create-idempotence guard asking the global-only question would
     /// mint a second node for a block the layout doc already holds.
     pub async fn is_live_anywhere(&self, id: &str) -> bool {
+        self.is_live_anywhere_sync(id)
+    }
+
+    /// Synchronous twin of [`Self::is_live_anywhere`].
+    pub fn is_live_anywhere_sync(&self, id: &str) -> bool {
         !matches!(
-            self.resolve_write_target(id).await,
+            self.resolve_write_target_sync(id),
             Err(ApiError::BlockNotFound { .. })
         )
     }
@@ -2250,10 +2255,16 @@ impl LoroBackend {
     /// (peer+counter), so a stale global TreeID is still a valid key to probe
     /// the shared docs with.
     async fn resolve_write_target(&self, id: &str) -> Result<WriteTarget, ApiError> {
+        self.resolve_write_target_sync(id)
+    }
+
+    /// Synchronous twin of [`Self::resolve_write_target`]: the whole resolve is
+    /// a cache probe plus tree walks under the doc lock, never I/O.
+    fn resolve_write_target_sync(&self, id: &str) -> Result<WriteTarget, ApiError> {
         if let Some(target) = self.resolve_layout(id) {
             return Ok(target);
         }
-        if let Some(tree_id) = self.resolve_to_tree_id(id).await {
+        if let Some(tree_id) = self.resolve_to_tree_id_sync(id) {
             let alive_global = self
                 .collab_doc
                 .with_read(|doc| Ok(is_node_alive(&doc.get_tree(TREE_NAME), tree_id)))
@@ -2496,6 +2507,15 @@ impl LoroBackend {
         parent: &EntityUri,
         child: Option<&EntityUri>,
     ) -> Result<ParentRoute, ApiError> {
+        self.resolve_write_target_for_parent_sync(parent, child)
+    }
+
+    /// Synchronous twin of [`Self::resolve_write_target_for_parent`].
+    fn resolve_write_target_for_parent_sync(
+        &self,
+        parent: &EntityUri,
+        child: Option<&EntityUri>,
+    ) -> Result<ParentRoute, ApiError> {
         let child_is_layout_root =
             child.is_some_and(|c| c.as_str() == holon_api::DEFAULT_DOC_BLOCK_ID);
         if self.layout_doc.is_some() && child_is_layout_root {
@@ -2513,7 +2533,7 @@ impl LoroBackend {
                 parent: parent.clone(),
             });
         }
-        if let Some(tree_id) = self.resolve_to_tree_id(parent.as_str()).await {
+        if let Some(tree_id) = self.resolve_to_tree_id_sync(parent.as_str()) {
             let alive_global = self
                 .collab_doc
                 .with_read(|doc| Ok(is_node_alive(&doc.get_tree(TREE_NAME), tree_id)))
@@ -3058,6 +3078,27 @@ impl LoroBackend {
         properties: &HashMap<String, Value>,
         edges: &holon_api::BlockEdges,
     ) -> Result<Block, ApiError> {
+        self.create_block_with_properties_sync(parent_id, content, id, properties, edges)
+    }
+
+    /// The body of [`Self::create_block_with_properties`], as a plain `fn`.
+    ///
+    /// Creating a node is synchronous work — a resolve and a write under the
+    /// doc lock, which is a `parking_lot::RwLock`. The async twin above is a
+    /// wrapper, so there is one implementation and no `now_or_never` anywhere.
+    ///
+    /// What genuinely lags is the SQL row, which the outbound projector emits
+    /// afterwards; the NODE is there when this returns. That is what lets a
+    /// keystroke create the block it is about to write, in order, on one
+    /// thread.
+    pub fn create_block_with_properties_sync(
+        &self,
+        parent_id: EntityUri,
+        content: BlockContent,
+        id: Option<EntityUri>,
+        properties: &HashMap<String, Value>,
+        edges: &holon_api::BlockEdges,
+    ) -> Result<Block, ApiError> {
         let now = self.now_millis();
         let stable_id = match &id {
             Some(uri) => uri.id().to_string(),
@@ -3068,9 +3109,7 @@ impl LoroBackend {
         // shared doc. The global `id_cache` must never receive a shared TreeID
         // (its keys index the global tree only), so the shared arm resolves the
         // parent against a throwaway cache and skips `cache_stable_id` below.
-        let parent_route = self
-            .resolve_write_target_for_parent(&parent_id, id.as_ref())
-            .await?;
+        let parent_route = self.resolve_write_target_for_parent_sync(&parent_id, id.as_ref())?;
         let write_doc = self.parent_doc(&parent_route.target);
         let is_global = matches!(parent_route.target, ParentWriteTarget::Global);
         let id_cache = if is_global {
@@ -3864,6 +3903,15 @@ impl LoroBackend {
     /// Find a tree node's TreeID by its stable ID (UUID).
     /// Checks cache first, falls back to linear scan + cache population.
     pub async fn find_tree_id_by_stable_id(&self, stable_id: &str) -> Option<loro::TreeID> {
+        self.find_tree_id_by_stable_id_sync(stable_id)
+    }
+
+    /// The body of [`Self::find_tree_id_by_stable_id`]. Plain `fn` because it
+    /// is plain work: a cache probe and a tree walk under the doc lock, which
+    /// is a `parking_lot::RwLock`. A caller that must not yield — the frontend
+    /// creating a node on the keystroke path — needs this shape, and the async
+    /// twin above is the wrapper, not the implementation.
+    pub fn find_tree_id_by_stable_id_sync(&self, stable_id: &str) -> Option<loro::TreeID> {
         if let Some(tid) = self.resolve_stable_id_cached(stable_id) {
             // Validate the cached TreeID is still alive. A delete → undo(create)
             // resurrects the SAME stable id under a NEW TreeID (delete+recreate,
@@ -3922,6 +3970,11 @@ impl LoroBackend {
     /// Accepts both `block:{peer}:{counter}` (TreeID format) and `block:{uuid}`
     /// (stable ID). Uses cache for stable ID lookups.
     pub async fn resolve_to_tree_id(&self, id_str: &str) -> Option<loro::TreeID> {
+        self.resolve_to_tree_id_sync(id_str)
+    }
+
+    /// Synchronous twin of [`Self::resolve_to_tree_id`].
+    pub fn resolve_to_tree_id_sync(&self, id_str: &str) -> Option<loro::TreeID> {
         // Fast path: try parsing as TreeID directly
         if let Some(tid) = str_to_tree_id(id_str) {
             return Some(tid);
@@ -3931,7 +3984,7 @@ impl LoroBackend {
         // id formats)
         let uri = EntityUri::from_raw(id_str);
         if uri.is_block() || uri.is_sentinel() {
-            return self.find_tree_id_by_stable_id(uri.id()).await;
+            return self.find_tree_id_by_stable_id_sync(uri.id());
         }
         None
     }

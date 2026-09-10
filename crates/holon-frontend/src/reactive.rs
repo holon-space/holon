@@ -523,6 +523,17 @@ pub trait BuilderServices: Send + Sync {
     /// LoroModule is loaded). Returns `Err` for headless/stub services
     /// that don't have a LoroDoc, or for blocks not yet present in the
     /// Loro tree.
+    /// Whether an editor-cell registry is wired at all.
+    ///
+    /// Separates the two reasons [`Self::editable_text`] can fail, which a
+    /// bare `Err` conflates: no registry in this wiring (a whole leg is
+    /// absent), versus this ONE row having no node yet — a creation slot
+    /// before its first keystroke, which is ordinary. The first is a wiring
+    /// error worth shouting about; the second is expected.
+    fn cell_registry_wired(&self) -> bool {
+        false
+    }
+
     fn editable_text(&self, _: &EntityUri, _: &str) -> anyhow::Result<crate::cell::Cell<String>> {
         Err(anyhow::anyhow!(
             "editable_text not supported by this BuilderServices implementation"
@@ -3013,9 +3024,6 @@ impl ReactiveEngine {
         let id = EntityUri::parse(&format!("{entity_type}:{}", uuid::Uuid::new_v4()))
             .context("minting a creation-slot newborn id")?;
 
-        self.ui_state
-            .ephemeral_newborns
-            .record(affordance_id, id.clone());
         // Any newborn we are leaving behind goes now — this focus move is the
         // blur the reaper waits for.
         self.reap_untouched_newborns(Some(&id));
@@ -3023,6 +3031,47 @@ impl ReactiveEngine {
         // very call is bringing into existence.
         self.ui_state.set_focus_with_caret(id.clone(), 0);
 
+        // The node is created HERE, synchronously, before this returns — so
+        // the keystroke that follows writes into a block that exists. Creating
+        // a Loro node is synchronous work (a resolve and a tree write under a
+        // `parking_lot` lock), so this neither blocks on I/O nor yields.
+        //
+        // It is not dispatched as `block.create`: this IS a text edit, whose
+        // first character happens to also create the node (ADR 0032 §3). The
+        // SQL row follows through the outbound projector, exactly as it does
+        // for `split_block`, which creates its new block the same way.
+        //
+        // The previous shape spawned the create and let the keystroke race it.
+        // Both effects belong to one gesture, and a gesture is not two tasks.
+        if let Some(registry) = self.block_cell_registry.lock().unwrap().clone() {
+            let created = registry
+                .create_entity_sync(
+                    &parent,
+                    None,
+                    &id,
+                    holon_api::BlockContent::Text { raw: String::new() },
+                    &HashMap::new(),
+                    &holon_api::BlockEdges::default(),
+                )
+                .with_context(|| format!("creating the slot's newborn {id}"))?;
+            if created {
+                // Only a block that EXISTS can be reaped, and only now does one.
+                self.ui_state
+                    .ephemeral_newborns
+                    .record(affordance_id, id.clone());
+                return Ok(id);
+            }
+        }
+
+        // No cell route here (SqlOnly, synthetic stores): fall back to the
+        // dispatched create. Ordering on that leg is a separate lane's subject.
+        tracing::warn!(
+            newborn = %id,
+            "creation-slot birth falls back to a DETACHED dispatched create: no cell route is \
+             wired here (CRDT off — the SqlOnly test axis). A write from the same gesture is NOT \
+             ordered after this create, so the first keystroke can reach the store before the \
+             block exists."
+        );
         let mut params: HashMap<String, holon_api::Value> = HashMap::new();
         params.insert("id".into(), holon_api::Value::String(id.to_string()));
         params.insert(
@@ -3030,6 +3079,9 @@ impl ReactiveEngine {
             holon_api::Value::String(parent.as_str().to_string()),
         );
         params.insert("content".into(), holon_api::Value::String(String::new()));
+        self.ui_state
+            .ephemeral_newborns
+            .record(affordance_id, id.clone());
 
         let session = self.session.clone();
         let entity = holon_api::EntityName::new(&entity_type);
@@ -4572,6 +4624,10 @@ impl BuilderServices for ReactiveEngine {
                 .search_link_candidates(&filter)
                 .await
         })
+    }
+
+    fn cell_registry_wired(&self) -> bool {
+        self.block_cell_registry.lock().unwrap().is_some()
     }
 
     fn editable_text(

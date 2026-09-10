@@ -258,9 +258,13 @@ impl FrontendInjectorExt for Injector {
                 .map_err(|e| anyhow::anyhow!("Failed to register LoroModule: {}", e))?;
 
             // BlockCellRegistry is registered by LoroModule above; no
-            // additional registration needed here. Frontends resolve
-            // `Arc<BlockCellRegistry>` from DI and assign it to
-            // `ReactiveEngine.block_cell_registry` in their `on_start`.
+            // additional registration needed here. Installing it on a
+            // `ReactiveEngine` is a separate step through
+            // [`crate::install_block_cell_registry`] — one function, so a
+            // harness cannot boot a subtly different frontend than production.
+            // Installers today: the TUI and the headless PBT slice. The GPUI
+            // app does NOT (D113.a) — neither at start-up nor on MCP reset — so
+            // its keystrokes take the on-blur funnel.
 
             // Loro-backed alias registrar (doc_id ↔ path). The file-sync
             // controller resolves `dyn AliasRegistrar` from DI; in the Turso

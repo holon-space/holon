@@ -163,7 +163,19 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// The ordinary fixture: no editor-cell registry, the leg the GPUI app
+    /// runs (D113.a), so keystrokes commit through the on-blur funnel.
     fn boot(window_name: &str) -> Self {
+        Self::boot_inner(window_name, false)
+    }
+
+    /// For the two cases whose subject IS the cell leg: the slot's newborn is
+    /// created in-process through the registry on the first keystroke.
+    fn boot_with_cell_registry(window_name: &str) -> Self {
+        Self::boot_inner(window_name, true)
+    }
+
+    fn boot_inner(window_name: &str, cell_registry: bool) -> Self {
         let text_system = real_text_system();
         let assets: Arc<dyn AssetSource> = Arc::new(());
         let mut app = Box::new(HeadlessAppContext::with_platform(
@@ -174,6 +186,9 @@ impl Fixture {
 
         let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
         let env = runtime.block_on(async { TestEnvironment::new(runtime.clone()).unwrap() });
+        if cell_registry {
+            env.enable_block_cell_registry();
+        }
         runtime.block_on(async { env.start_app(true).await.expect("start_app") });
         runtime
             .block_on(graft_chord_target_row(&env))
@@ -649,3 +664,171 @@ fn quick_open_round_trip_without_a_focused_editor_is_neutral() {
 // Installs the windowed capturing tracing subscriber before this binary's
 // first line of test code (see tests/test_init/mod.rs).
 mod test_init;
+
+/// Typing into a creation slot creates the node BEFORE the character is
+/// written, and the SQL row follows.
+///
+/// D112: the birth and the write were two independent `tokio::spawn`s, so the
+/// character could reach the store before the node existed. On this leg the
+/// write goes through the Loro cell, which resolves the node in the tree and
+/// errors loudly when it is absent (`block_cell_registry.rs:150-152`) — and the
+/// dispatcher never sees it, so no gate on the execute path could order it.
+///
+/// ONE character on purpose. The two-character case below belongs to a
+/// different, older defect and would confound this one.
+#[test]
+fn typing_into_a_slot_creates_the_node_before_the_write() {
+    // Opened BEFORE the SUT boots: the collector attributes spans per test
+    // scope and installs its layer on first use, so one reached for afterwards
+    // captures nothing and reading without a scope is a hard error.
+    let _scope = holon_integration_tests::test_tracing::begin_test_scope();
+    let spans = holon_integration_tests::test_tracing::SpanCollector::global();
+
+    let mut f = Fixture::boot_with_cell_registry("Holon-TestPlatform-SlotBirthIsATextEdit");
+    f.focus_target_row();
+    f.open_quick_open_from_row();
+
+    for ch in "chord".chars() {
+        f.runtime
+            .block_on(f.driver.send_raw_keystroke(&ch.to_string(), &[]))
+            .expect("query characters must reach the overlay's input");
+    }
+    f.settle();
+    f.runtime
+        .block_on(f.driver.send_raw_keystroke("enter", &[]))
+        .expect("enter must be consumed by the overlay's key handler");
+    f.settle();
+
+    assert_eq!(
+        f.engine.focused_block().map(|u| u.to_string()),
+        Some(destination_slot()),
+        "the jump must seat the caret on the empty destination's creation slot, else this \
+         rung proves nothing"
+    );
+    assert_eq!(
+        f.children_of(&f.target.to_string()),
+        Vec::<(String, String)>::new(),
+        "seating alone must create nothing — the node appears with the first character"
+    );
+
+    // The premise assertion below names a boot that never warmed: without it, an
+    // unpainted destination reaches the 5 s wait and reports as a product
+    // failure. The wait stays; the assertion guards it.
+    //
+    // One failure in nine runs under load has been observed here, with
+    // `keystroke_lands` false at that wait. Its cause is NOT established.
+    // The ORDERING observable, not just the end state: no `block.create` may be
+    // DISPATCHED at all. The node must come from the cell registry on the
+    // keystroke's own path, so a create reaching the dispatcher means the
+    // detached spawn is back and the content assertion below would be passing
+    // only by winning a race.
+    //
+    // Read from the harness's own span collector rather than the frontend's
+    // dispatch journal: the detached create called the session directly and
+    // recorded no intent, so a journal-only assertion could not see the very
+    // spawn this forbids.
+    //
+    // Reset here so the window is the TYPING, not the whole test: the fixture's
+    // own seeding grafts its rows with ordinary `block.create` dispatches, and
+    // those are not what this forbids.
+    spans.reset();
+
+    assert!(
+        f.painted_entities()
+            .iter()
+            .any(|(id, _, _)| id == &destination_slot()),
+        "the destination's creation slot must be PAINTED before typing — an empty paint list \
+         here means the window never finished pre-warming, not that the product is wrong. \
+         Painted: {:?}",
+        f.painted_entities()
+    );
+    assert!(
+        f.keystroke_lands("a", Duration::from_secs(5)),
+        "the character typed into a seated slot must land"
+    );
+    f.settle();
+
+    // `children_of` reads `block_raw`, so a passing assertion here is also the
+    // proof that the SQL row followed the Loro node through the outbound
+    // projector — the half of the design that is not visible in the tree.
+    let dispatched = spans.dispatched_operations();
+    assert!(
+        !dispatched.contains(&("block".to_string(), "create".to_string())),
+        "the node must be created in-process through the cell registry, so NO `block.create` \
+         may reach the dispatcher for this gesture — one that does means the detached spawn is \
+         back, and the content assertion below would then be passing only by winning a race. \
+         Dispatched: {dispatched:?}"
+    );
+
+    let born = f.children_of(&f.target.to_string());
+    assert_eq!(
+        born.len(),
+        1,
+        "typing must birth EXACTLY one block under the destination, got {born:?}"
+    );
+    assert_eq!(
+        born[0].1, "a",
+        "the newborn must carry exactly the typed character, got {born:?}"
+    );
+    f.shutdown();
+}
+
+/// PARKED — red-first evidence for the caret-advance defect, not for D112.
+///
+/// Typing two characters into a fresh slot yields `"ba"`: the second keystroke
+/// is inserted at caret offset 0 instead of after the first. Measured cause —
+/// the editor's own input already holds `"ba"` before any write, so every layer
+/// below it records faithfully:
+///
+/// ```text
+/// DIAG delta buffer="a" new_text="ba"
+/// DIAG cell.apply_text_op op=Insert { pos_codepoint: 0, text: "b" } container_before="a"
+/// ```
+///
+/// The caret is seeded at 0 when the slot is seated
+/// (`ReactiveEngine::birth_creation_affordance`, `set_focus_with_caret(id, 0)`)
+/// and is still 0 when the second character arrives. PRE-EXISTING: an A/B
+/// against `main`'s birth code reproduces it identically, so it is not the
+/// slot-birth change. Unreached until now because no test typed TWO characters
+/// into a fresh slot.
+#[test]
+#[ignore = "bugfunnel: 2026-09-10-second-keystroke-into-a-fresh-slot-inserts-at-caret-zero — PRE-EXISTING caret-advance defect (A/B: reproduces on main). Red-for-the-right-reason for the `slot-caret-advance` lane; typing \"ab\" yields \"ba\". Removing this ignore is that lane's first step."]
+fn a_second_keystroke_into_a_fresh_slot_appends_rather_than_prepends() {
+    let mut f = Fixture::boot_with_cell_registry("Holon-TestPlatform-SlotCaretAdvance");
+    f.focus_target_row();
+    f.open_quick_open_from_row();
+
+    for ch in "chord".chars() {
+        f.runtime
+            .block_on(f.driver.send_raw_keystroke(&ch.to_string(), &[]))
+            .expect("query characters must reach the overlay's input");
+    }
+    f.settle();
+    f.runtime
+        .block_on(f.driver.send_raw_keystroke("enter", &[]))
+        .expect("enter must be consumed by the overlay's key handler");
+    f.settle();
+
+    assert!(
+        f.keystroke_lands("a", Duration::from_secs(5)),
+        "the first character into a seated slot must land"
+    );
+    assert!(
+        f.keystroke_lands("b", Duration::from_secs(5)),
+        "the second character must land in the node the first one created"
+    );
+    f.settle();
+
+    let born = f.children_of(&f.target.to_string());
+    assert_eq!(
+        born.len(),
+        1,
+        "typing must birth EXACTLY one block under the destination, got {born:?}"
+    );
+    assert_eq!(
+        born[0].1, "ab",
+        "the newborn must carry the characters in typed order — \"ba\" means the second \
+         keystroke was inserted at caret 0 instead of after the first; got {born:?}"
+    );
+    f.shutdown();
+}

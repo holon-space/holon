@@ -875,20 +875,18 @@ impl HeadlessFrontendComponent {
         // resolving it here gives the SAME doc the op pipeline + `block_raw`
         // projection share — typed text lands in the projection the invariant reads.
         // Mirrors `E2ESut`'s `ensure_reactive_engine` registry wiring (`sut.rs`).
-        if loro_enabled {
-            let injector = injector_slot
+        // Not the same decision as `TestEnvironment::start_app`, where the
+        // registry is opt-in: this slice IS the headless Loro leg, so it always
+        // installs; a windowed fixture defaults to the GPUI app's no-cell leg.
+        holon_app::loro_seams::install_block_cell_registry(
+            injector_slot
                 .get()
-                .expect("DI injector captured during build");
-            let registry: Arc<holon_loro::block_cell_registry::BlockCellRegistry> = injector
-                .resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
-                .await;
-            let registry_dyn: Arc<dyn holon_frontend::cell::EntityCellRegistry> = registry;
-            reactive
-                .block_cell_registry
-                .lock()
-                .unwrap()
-                .replace(registry_dyn);
-        }
+                .expect("DI injector captured during build"),
+            &reactive,
+            loro_enabled,
+        )
+        .await
+        .expect("installing the editor-cell registry for a loro-enabled slice");
 
         if settle > Duration::ZERO {
             // Boot settle: tolerate non-convergence (the result is dropped) — the

@@ -163,8 +163,24 @@ impl EditorView {
         // ALLOW(entity_uri_from_raw): boundary — `row_id` is the render-spec row id (a
         // `String`); parse once here before handing a typed URI to the cell registry.
         let row_uri = holon_api::EntityUri::from_raw(&row_id);
-        if let Ok(cell) = services.editable_text(&row_uri, &field_for_subscription) {
-            controller.attach_cell(cell);
+        match services.editable_text(&row_uri, &field_for_subscription) {
+            Ok(cell) => controller.attach_cell(cell),
+            // No registry at all: after start-up installs one this is an
+            // impossible state with the CRDT enabled, and it silently demotes
+            // EVERY keystroke to the on-blur funnel — so it is shouted about
+            // rather than swallowed. It stays reachable, and quiet, in a
+            // deliberately CRDT-less wiring.
+            Err(e) if !services.cell_registry_wired() => {
+                tracing::error!(
+                    "no editor-cell registry for {row_id}: every keystroke will write through \
+                     the on-blur funnel instead of the per-keystroke CRDT cell ({e:#})"
+                );
+            }
+            // This ONE row has no node yet — a creation slot before its first
+            // keystroke. Ordinary, and the slot's own path creates the node.
+            Err(e) => {
+                tracing::debug!("no cell for {row_id} yet: {e:#}");
+            }
         }
 
         // Increment G — seed `InputState` from the cell authority when a cell is

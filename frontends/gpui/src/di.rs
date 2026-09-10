@@ -121,6 +121,14 @@ impl Module for GpuiModule {
             let services: Arc<dyn BuilderServices> = engine.clone();
             slot.0.set(services.clone()).ok();
 
+            // NO editor-cell registry here (D113.a): every keystroke commits
+            // through the on-blur `set_field` funnel, which carries an inverse.
+            // The cell leg has no undo — cmd+z after typing restores nothing
+            // (bug-funnel
+            // `2026-09-11-cmd-z-restores-nothing-after-typing-through-the-editor-cell`)
+            // — so `install_block_cell_registry` is called here once the
+            // `cell-undo` lane lands.
+
             if mcp_enabled {
                 let mcp = injector.resolve::<McpServerHandle>();
                 mcp.set_builder_services(services);

@@ -712,6 +712,69 @@ impl holon_filesystem::MountRegistry for LoroMountRegistry {
     }
 }
 
+/// What [`install_block_cell_registry`] did.
+///
+/// A typed answer, not a `bool`: "no registry" means two opposite things —
+/// this wiring has no CRDT at all, or one is expected and missing — and a
+/// boolean makes the second look like the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellRegistryInstall {
+    /// Installed; the editor resolves `Cell<String>` and types through the
+    /// CRDT.
+    Installed,
+    /// This wiring has no CRDT, so there is nothing to install and the editor
+    /// writes through the on-blur `set_field` funnel by design.
+    NotWired,
+}
+
+/// Install the Loro editor-cell registry on a `ReactiveEngine`.
+///
+/// **The one implementation**, so a harness cannot install the registry
+/// differently from the frontend it stands in for.
+///
+/// Who calls it today: the TUI's `on_start` and the headless PBT frontend
+/// slice. The GPUI app does NOT (D113.a) — not at start-up and not on MCP
+/// reset — it types through the on-blur `set_field` funnel, because the cell
+/// leg has no undo —
+/// and `TestEnvironment::start_app` therefore makes the install opt-in, so a
+/// windowed fixture defaults to the same leg the app runs.
+///
+/// Without the registry the editor resolves no `Cell`, so typing falls to the
+/// on-blur `set_field` writer ("no MutableText") instead of the per-keystroke
+/// CRDT path.
+///
+/// `crdt_enabled` is the caller's own wiring decision. With it FALSE this
+/// returns [`CellRegistryInstall::NotWired`]; with it TRUE a registry that
+/// cannot be resolved is an `Err`, never a quiet no-op — the caller asked for
+/// the CRDT leg and must not get the other one in silence.
+pub async fn install_block_cell_registry(
+    injector: &fluxdi::Injector,
+    reactive: &holon_frontend::reactive::ReactiveEngine,
+    crdt_enabled: bool,
+) -> anyhow::Result<CellRegistryInstall> {
+    if !crdt_enabled {
+        return Ok(CellRegistryInstall::NotWired);
+    }
+    let registry = injector
+        .optional_resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
+        .await
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "CRDT is enabled for this session but no `BlockCellRegistry` is registered, so \
+                 every keystroke would fall to the on-blur `set_field` funnel instead of the \
+                 per-keystroke CRDT cell. That is the leg the editor is built on, so this is a \
+                 wiring error rather than a degraded mode."
+            )
+        })?;
+    let registry_dyn: std::sync::Arc<dyn holon_frontend::cell::EntityCellRegistry> = registry;
+    reactive
+        .block_cell_registry
+        .lock()
+        .unwrap()
+        .replace(registry_dyn);
+    Ok(CellRegistryInstall::Installed)
+}
+
 #[cfg(test)]
 mod order_minting_type_level {
     //! Type-level proof for spec 0008 §3.2 (Replication.md §5): the Loro

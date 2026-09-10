@@ -24,7 +24,6 @@ use holon_frontend::reactive::BuilderServicesSlot;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::reactive::RenderInterpreterInjectorExt;
 use holon_frontend::reactive::make_interpret_fn;
-use holon_loro::block_cell_registry::BlockCellRegistry;
 use holon_mcp::McpInjectorExt;
 use holon_mcp::di::McpServerHandle;
 
@@ -70,6 +69,7 @@ impl Module for TuiModule {
     }
 
     fn on_start(&self, injector: Shared<Injector>) -> ModuleLifecycleFuture {
+        let crdt_enabled = self.holon_config.crdt_enabled();
         Box::pin(async move {
             let _session = injector.resolve_async::<FrontendSession>().await;
 
@@ -81,20 +81,14 @@ impl Module for TuiModule {
             // Wire `BlockCellRegistry` (Loro-backed when LoroModule is
             // loaded) into the ReactiveEngine so `BuilderServices::
             // editable_text` resolves through `Cell<String>`. SqlOnly
-            // mode skips this — `editable_text` will return `Err` and
-            // editors will run without a CRDT-backed cell.
-            match injector.try_resolve_async::<BlockCellRegistry>().await {
-                Ok(registry) => {
-                    engine.block_cell_registry.lock().unwrap().replace(registry);
-                    eprintln!("[TuiModule] BlockCellRegistry wired via DI");
-                }
-                Err(_) => {
-                    eprintln!(
-                        "[TuiModule] BlockCellRegistry not registered — editable_text unavailable \
-                         in this session"
-                    );
-                }
-            }
+            // mode skips this — `editable_text` returns the no-cell branch and
+            // editors run without a CRDT-backed cell.
+            //
+            // Through the SHARED installer, so the TUI cannot boot a subtly
+            // different frontend than production or the harnesses.
+            holon_app::loro_seams::install_block_cell_registry(&injector, &engine, crdt_enabled)
+                .await
+                .map_err(|e| to_di_err("on_start", &e))?;
 
             let mcp = injector.resolve::<McpServerHandle>();
             mcp.set_builder_services(services);
