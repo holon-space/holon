@@ -2180,8 +2180,8 @@ impl FileSyncController {
         }
     }
 
-    /// Disclose a refused duplicate-`#+ID:` file: ERROR the first time this
-    /// path collides, DEBUG on every repeat.
+    /// Disclose a refused duplicate-`#+ID:` file: ERROR + a sticky degraded
+    /// banner the first time this path collides, DEBUG on every repeat.
     fn disclose_duplicate_doc_id(
         &mut self,
         doc_id: &EntityUri,
@@ -2189,23 +2189,10 @@ impl FileSyncController {
         refused: &Path,
         canonical: &CanonicalPath,
     ) {
-        if self
+        if !self
             .duplicate_id_disclosed
             .insert((canonical.clone(), DUPLICATE_ID_SITE))
         {
-            tracing::error!(
-                doc_id = %doc_id,
-                claimed_by = %claimed_by.display(),
-                refused = %refused.display(),
-                "[FileSyncController] DUPLICATE DOCUMENT ID: this file carries an `#+ID:` \
-                 another file on disk already claims, so it is NOT ingested — its blocks \
-                 would merge into that document and collapse two vault files into one. \
-                 Give this file a fresh `#+ID:`, or delete it if it is a stray copy. The \
-                 claimant is whichever file this session ingested FIRST, and the vault \
-                 scan order is arbitrary, so which of the two wins can differ between \
-                 runs. Repeats for this path log at DEBUG.",
-            );
-        } else {
             tracing::debug!(
                 doc_id = %doc_id,
                 claimed_by = %claimed_by.display(),
@@ -2213,6 +2200,40 @@ impl FileSyncController {
                 "[FileSyncController] duplicate `#+ID:` still refused (already disclosed \
                  once at ERROR)",
             );
+            return;
+        }
+        let detail = format!(
+            "DUPLICATE DOCUMENT ID: '{doc_id}' is carried by BOTH {} and {}, so {} is NOT \
+             ingested — its blocks would merge into that document and collapse two vault files \
+             into one. Give this file a fresh `#+ID:`, or delete it if it is a stray copy. The \
+             claimant is whichever file this session ingested FIRST, and the vault scan order is \
+             arbitrary, so which of the two wins can differ between runs.",
+            claimed_by.display(),
+            refused.display(),
+            refused.display(),
+        );
+        tracing::error!(
+            doc_id = %doc_id,
+            claimed_by = %claimed_by.display(),
+            refused = %refused.display(),
+            "[FileSyncController] {detail} Repeats for this path log at DEBUG.",
+        );
+        self.raise_ingest_refused_banner(refused, &detail);
+    }
+
+    /// Raise the sticky degraded banner behind a whole-file ingest refusal.
+    ///
+    /// Both duplicate-id refusals cost the user the same thing — one whole
+    /// page — so both reach the banner here, not only the log.
+    fn raise_ingest_refused_banner(&self, refused: &Path, detail: &str) {
+        let format = self
+            .formats
+            .require(refused)
+            .expect("the ingest that reached the refusal resolved an adapter for this file")
+            .format_name()
+            .to_string();
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.ingest_refused(refused, &format, detail);
         }
     }
 
@@ -2257,15 +2278,7 @@ impl FileSyncController {
             refused = %refused.display(),
             "[FileSyncController] {detail} Repeats for this path log at DEBUG.",
         );
-        let format = self
-            .formats
-            .require(refused)
-            .expect("the ingest that reached the slug check resolved an adapter for this file")
-            .format_name()
-            .to_string();
-        if let Some(disclosure) = &self.writeback_disclosure {
-            disclosure.ingest_refused(refused, &format, &detail);
-        }
+        self.raise_ingest_refused_banner(refused, &detail);
     }
 
     /// Record that `path` now holds `doc_id`'s file.

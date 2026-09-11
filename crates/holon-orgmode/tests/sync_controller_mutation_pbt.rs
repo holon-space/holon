@@ -4176,6 +4176,24 @@ mod intermediate_ancestor_writeback_hole {
     }
 }
 
+/// Captures the degraded conditions a refused ingest raises, as
+/// `"<path>|<reason>"` — the banner's own payload, so a test asserts on what
+/// the user would read rather than on a log line.
+#[derive(Default)]
+struct RefusalLog(Mutex<Vec<String>>);
+
+impl holon_filesystem::WritebackDisclosure for RefusalLog {
+    fn writeback_degraded(&self, _: &str) {}
+    fn ingest_refused(&self, path: &std::path::Path, _: &str, reason: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("{}|{reason}", path.display()));
+    }
+    fn ingest_recovered(&self, _: &std::path::Path) {}
+    fn vault_file_emptied(&self, _: &std::path::Path) {}
+}
+
 /// D102.a — two vault files that both declare the same block `:ID:`.
 ///
 /// A slug is a document-scoped name, so nothing stops a stale copy or a
@@ -4186,28 +4204,10 @@ mod intermediate_ancestor_writeback_hole {
 /// naming both paths and the slug, and ingest nothing of it until a human
 /// resolves the collision.
 mod duplicate_block_slug_tests {
-    use std::sync::Arc;
-    use std::sync::Mutex;
-
     use holon_filesystem::ClaimedId;
     use holon_filesystem::IngestOutcome;
 
     use super::*;
-
-    #[derive(Default)]
-    struct RefusalLog(Mutex<Vec<String>>);
-
-    impl holon_filesystem::WritebackDisclosure for RefusalLog {
-        fn writeback_degraded(&self, _: &str) {}
-        fn ingest_refused(&self, path: &std::path::Path, _: &str, reason: &str) {
-            self.0
-                .lock()
-                .unwrap()
-                .push(format!("{}|{reason}", path.display()));
-        }
-        fn ingest_recovered(&self, _: &std::path::Path) {}
-        fn vault_file_emptied(&self, _: &std::path::Path) {}
-    }
 
     const FIRST: &str = "\
 #+ID: 0f4a1c22-1111-4c19-9d84-2ac6b0e51137
@@ -4326,5 +4326,94 @@ mod duplicate_block_slug_tests {
             "the claimant no longer declares the slug, so the refusal has nothing left to stand \
              on and the file must ingest"
         );
+    }
+}
+
+/// Two vault files that both declare the same document `#+ID:`.
+///
+/// The refusal itself is old and correct — the second file would merge into the
+/// first's document and collapse two vault files into one. THE BUG
+/// (`2026-09-11-duplicate-doc-id-refused-without-banner`): only the
+/// block-`:ID:` twin above reached the degraded banner. The document-level
+/// refusal logged at ERROR and stopped there, so a production vault lost a
+/// whole page with nothing in the UI to say so. Both refusals cost the user the
+/// same page, so both must disclose the same way.
+mod duplicate_doc_id_tests {
+    use holon_filesystem::ClaimedId;
+    use holon_filesystem::IngestOutcome;
+
+    use super::*;
+
+    const SHARED_DOC_ID: &str = "2905bbe4-c5bc-736d-2b7b-87761c174714";
+
+    const FIRST: &str = "\
+#+ID: 2905bbe4-c5bc-736d-2b7b-87761c174714
+* TODO Only the first file has this
+:PROPERTIES:
+:ID: dupdoc-first-only
+:END:
+";
+
+    const SECOND: &str = "\
+#+ID: 2905bbe4-c5bc-736d-2b7b-87761c174714
+* DONE Only the second file has this
+:PROPERTIES:
+:ID: dupdoc-second-only
+:END:
+";
+
+    #[tokio::test]
+    async fn a_second_file_claiming_a_doc_id_is_refused_whole_and_disclosed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new_with(temp_dir.path(), vec!["First".to_string()], false);
+        let log = Arc::new(RefusalLog::default());
+        fixture.controller = fixture.controller.with_writeback_disclosure(log.clone());
+        fixture.controller.initialize().await.expect("initialize");
+
+        let first = fixture.root_dir.join("First.org");
+        let second = fixture.root_dir.join("Second.org");
+        tokio::fs::write(&first, FIRST).await.unwrap();
+        tokio::fs::write(&second, SECOND).await.unwrap();
+
+        assert_eq!(
+            fixture.controller.on_file_changed(&first).await.unwrap(),
+            IngestOutcome::Ingested,
+            "the first file to claim a document id must ingest normally"
+        );
+        let outcome = fixture.controller.on_file_changed(&second).await.unwrap();
+
+        assert_eq!(
+            outcome,
+            IngestOutcome::RefusedWhileClaimed(ClaimedId::Document(EntityUri::block(
+                SHARED_DOC_ID
+            ))),
+            "a file declaring a `#+ID:` another file already owns must be REFUSED, naming the id \
+             that beat it"
+        );
+        assert!(
+            fixture
+                .store
+                .get_block_authoritative(&EntityUri::block("dupdoc-second-only"))
+                .await
+                .unwrap()
+                .is_none(),
+            "refusing the file must leave NOTHING of it in the store"
+        );
+
+        let raised = log.0.lock().unwrap().clone();
+        assert_eq!(
+            raised.len(),
+            1,
+            "the refusal must raise EXACTLY one degraded condition, keyed by the refused file — \
+             losing a whole page silently is the one outcome we never ship. Raised: {raised:?}"
+        );
+        for needle in ["First.org", "Second.org", SHARED_DOC_ID] {
+            assert!(
+                raised[0].contains(needle),
+                "the banner must name both files and the id so a user can decide which copy to \
+                 keep; '{needle}' is missing from: {}",
+                raised[0]
+            );
+        }
     }
 }
