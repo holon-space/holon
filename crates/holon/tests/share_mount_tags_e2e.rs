@@ -95,6 +95,7 @@ fn share_backend(dir: &TempDir, handle: DbHandle) -> Arc<LoroShareBackend> {
         )),
         Some(holon_loro_wiring::block_sql_write_provider(handle)),
         None,
+        None,
     )
 }
 

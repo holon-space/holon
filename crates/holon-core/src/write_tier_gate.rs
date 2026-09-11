@@ -194,6 +194,13 @@ impl ReadOnlyDocuments {
     /// from, so it lands and inherits the tier; refusing it here would only
     /// make this store disagree with that peer while the file stays unwritable
     /// either way.
+    ///
+    /// The binding is to WHERE the block is homed, so it is re-decided on every
+    /// import naming the block: a peer that moves an adopted block out from
+    /// under the read-only document ENDS its adoption, or the block stays
+    /// uneditable forever for a reason no user can see or undo. Only an
+    /// adoption is ended that way — `member_of` is the file's own account of
+    /// itself, and only a re-ingest or [`Self::forget`] may end that.
     pub fn adopt(&self, parent_id: &EntityUri, block_id: &EntityUri) -> bool {
         let mut inner = self.inner.write().expect("ReadOnlyDocuments lock");
         let Some(doc_id) = inner
@@ -202,6 +209,7 @@ impl ReadOnlyDocuments {
             .or_else(|| inner.adopted.get(parent_id))
             .cloned()
         else {
+            inner.adopted.remove(block_id);
             return false;
         };
         inner.adopted.insert(block_id.clone(), doc_id);
@@ -420,5 +428,38 @@ mod tests {
         assert!(docs.refusal_for_block(&imported).is_some());
         docs.forget(&doc());
         assert_eq!(docs.refusal_for_block(&imported), None);
+    }
+
+    /// The tier is a property of WHERE a block is homed, so a peer that moves
+    /// an adopted block out from under the recipe ends its adoption. Without
+    /// this the block is uneditable forever: it is in no file, so no re-ingest
+    /// reaches it, and `forget` only fires when the document itself goes.
+    #[test]
+    fn a_block_a_peer_moved_out_of_the_read_only_subtree_stops_being_refused() {
+        let docs = recorded();
+        let imported = EntityUri::block("peer-added");
+        assert!(docs.adopt(&step(0), &imported));
+        assert!(docs.refusal_for_block(&imported).is_some());
+
+        // The next import names the same block under an ordinary parent.
+        assert!(!docs.adopt(&EntityUri::block("notes"), &imported));
+        assert_eq!(
+            docs.refusal_for_block(&imported),
+            None,
+            "a block re-parented out of the recipe is writable again"
+        );
+    }
+
+    /// The revocation above reaches ADOPTIONS only. A block the file itself
+    /// declares stays refused whatever an import claims about its parent —
+    /// that membership is the file's account of itself.
+    #[test]
+    fn a_file_declared_block_is_not_revoked_by_an_import_naming_an_ordinary_parent() {
+        let docs = recorded();
+        assert!(!docs.adopt(&EntityUri::block("notes"), &step(0)));
+        assert!(
+            docs.refusal_for_block(&step(0)).is_some(),
+            "only a re-ingest or `forget` may end a file-declared membership"
+        );
     }
 }

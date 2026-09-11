@@ -76,21 +76,40 @@ and at the dispatcher by
 `crates/holon/src/api/operation_dispatcher.rs`'s
 `a_sync_import_under_a_read_only_root_is_adopted_not_left_editable`.
 
-## Residual — two, both open and both disclosed here only
+## Residual — two; #1 CLOSED 2026-09-11, #2 still open
 
-**1. The Loro import leg does not reach the adoption at all.** The write-tier
-gate keys on `OpOrigin`, and `LoroShareBackend`'s import calls
-`execute_operation` — the origin-less entry point, which defaults to
-`OpOrigin::User` — at `crates/holon-loro/src/loro_share_backend.rs:808`, `:845`
-and `:935`. So the path a real peer's blocks will travel does not currently pass
-`OpOrigin::Sync`, and `adopt_sync_import` is bypassed. Two consequences, and
-they point opposite ways: today those imports are judged as USER writes, so a
-block created under a read-only root is REFUSED outright (the store stays
-consistent, the peer's block is dropped); once that leg is given its true
-origin, adoption starts running and the block lands uneditable instead. The fix
-in this entry is therefore correct at the gate and inert on the only import leg
-that exists — closing that requires the sharing lane to thread the origin
-through, which is its call, not this one's.
+**1. The Loro import leg did not reach the adoption at all. CLOSED
+(2026-09-11, lane `loro-import-origin`).**
+
+The mechanism recorded here on 2026-09-08 was wrong in a way worth keeping,
+because it made the residual sound milder than it was. `LoroShareBackend`'s
+`sql_ops` is not the operation dispatcher: DI hands it a bare
+`SqlOperationProvider` (`holon_loro_wiring::block_sql_write_provider`,
+`crates/holon-loro-wiring/src/loro_module.rs`). So the share projection legs
+never entered `execute_operation_with_provenance` at all, and no origin —
+`User` or otherwise — was ever assigned to them. The claimed consequence, that
+such an import would be REFUSED outright as a user write, was false: nothing
+judged it. It landed, fully editable, exactly the state this entry set out to
+prevent. Measured, not reasoned: the new test's first assertion (the row
+reaches SQL) passed while red.
+
+`OpOrigin::Sync` is still constructed nowhere in production — it cannot be
+threaded through a dispatcher that is not on this path. The fix instead puts
+the dispatcher's `Sync` branch where the import actually happens:
+`LoroShareBackend` now holds the `WriteTierAuthority` and calls
+`adopt_imported_block(s)` before each of its three SQL-projection writes (the
+live peer-sync projection worker, the accept/rehydrate descendant projection,
+and the mount node, whose accept parent can itself be a read-only-homed block).
+
+Covered by `a_peer_import_under_a_read_only_homed_block_is_adopted_not_left_editable`
+in `crates/holon-loro/src/loro_share_backend.rs`, which drives the real
+projection worker with a peer's update and asserts the import lands, keeps the
+recipe step as its parent, and earns the file's refusal.
+
+Still not routed through the dispatcher: the whole-store pairing re-import
+(`DevicePairing::reimport` → `BlockOrdering::create_in_tree_batch` →
+`BlockCellRegistry`) writes to Loro through a third seam that consults no
+write-tier authority on create. Out of scope here and unpinned.
 
 **2. The adoption is session state, and its loss is silent.** It is not written
 into `file.read_only_blocks` (that column is the FILE's account of itself,

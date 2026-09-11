@@ -552,6 +552,15 @@ fn register_subtree_share(injector: &Injector) {
         // roster sidecar. Both are minted lazily on the first share.
         let credentials = Arc::new(holon_loro::share_credentials::ShareCredentials::platform());
 
+        // The write-tier authority for imported blocks. The share projection
+        // legs write straight to `sql_ops`, bypassing the dispatcher's
+        // `OpOrigin::Sync` branch, so they consult the same authority
+        // themselves. Optional for the same reason the cell registry's is:
+        // a composition without a format registry installs none.
+        let write_tier = resolver
+            .optional_resolve_async::<dyn holon_core::WriteTierAuthority>()
+            .await;
+
         Shared::new(LoroShareBackend::new_with_sql(
             store_arc,
             (*snapshot_store).clone(),
@@ -562,6 +571,7 @@ fn register_subtree_share(injector: &Injector) {
             credentials,
             Some(sql_ops),
             Some(downstream_projection),
+            write_tier,
         ))
     }));
 

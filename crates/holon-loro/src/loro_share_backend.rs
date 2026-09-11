@@ -25,6 +25,7 @@ use holon_core::OperationResult;
 use holon_core::OriginTaggedWrites;
 use holon_core::Result;
 use holon_core::UndoAction;
+use holon_core::WriteTierAuthority;
 use iroh::EndpointAddr;
 use iroh::SecretKey;
 use loro::LoroDoc;
@@ -77,6 +78,63 @@ use crate::ticket::Ticket;
 
 fn err(msg: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
     Box::<dyn std::error::Error + Send + Sync>::from(msg.into())
+}
+
+/// The write-tier decision for one block this device imported from a peer.
+///
+/// This is the dispatcher's `OpOrigin::Sync` branch (`enforce_write_tier`),
+/// placed where the import actually happens: the share projection legs write
+/// straight to the SQL block provider, so nothing they do is ever judged by
+/// the dispatcher. The import LANDS — the merge already happened in the peer,
+/// and refusing it here would only make this store disagree with the replica —
+/// and it inherits the tier of the document that owns its parent, or the
+/// recipient is left with a block it can edit and no writer can ever put into
+/// the authoritative file.
+async fn adopt_imported_block(
+    authority: Option<&Arc<dyn WriteTierAuthority>>,
+    id: &str,
+    parent_id: &str,
+) -> Result<()> {
+    // Absent only where the composition has no vault root, and disclosed once
+    // by `new_with_sql` when it is — not swallowed here.
+    let Some(authority) = authority else {
+        return Ok(());
+    };
+    if !authority.any_read_only_documents() {
+        return Ok(());
+    }
+    if authority
+        .adopt_sync_import(id, parent_id)
+        .await
+        .map_err(|e| err(format!("write-tier adoption of imported block {id}: {e}")))?
+    {
+        warn!(
+            block = %id,
+            parent = %parent_id,
+            "[LoroShareBackend] a sync import added a block under a read-only-homed document. It \
+             is stored and it is uneditable: no writer can ever put it into the authoritative file."
+        );
+    }
+    Ok(())
+}
+
+/// [`adopt_imported_block`] for a batch of projection ops. Mirrors the
+/// dispatcher's own rule — every block write naming both a subject and a
+/// destination is judged, whatever the op is called.
+async fn adopt_imported_blocks(
+    authority: Option<&Arc<dyn WriteTierAuthority>>,
+    ops: &[(String, StorageEntity)],
+) -> Result<()> {
+    for (_, params) in ops {
+        let (Some(id), Some(parent)) = (
+            params.get("id").and_then(|v| v.as_string()),
+            params.get("parent_id").and_then(|v| v.as_string()),
+        ) else {
+            continue;
+        };
+        adopt_imported_block(authority, id, parent).await?;
+    }
+    Ok(())
 }
 
 /// Entity name under which `LoroShareBackend` registers its operations.
@@ -245,6 +303,15 @@ pub struct LoroShareBackend {
     /// re-remove the just-re-created rows (see `share_subtree`). `Option`
     /// for the same reason as `sql_ops`: tests without the DI stack skip it.
     downstream_projection: Option<Arc<dyn DownstreamProjection>>,
+    /// The write-tier authority, for the blocks a peer's import puts under a
+    /// document homed in a read-only format.
+    ///
+    /// The projection legs below write straight to `sql_ops`, never through
+    /// the operation dispatcher, so the dispatcher's `OpOrigin::Sync` branch
+    /// never judges them. This field is that branch, held where the import
+    /// actually happens. `Option` for the same reason as `sql_ops`: tests
+    /// without the DI stack skip it.
+    write_tier: Option<Arc<dyn WriteTierAuthority>>,
     /// `shared_tree_id → known peer endpoint addrs`. Populated on
     /// accept (ticket author's addr), on every inbound advertiser
     /// handshake, and at startup from the sidecar JSON.
@@ -372,6 +439,7 @@ fn spawn_projection_worker(
     mount_block_uri: String,
     shared_tree_id: String,
     global_doc: Arc<crate::loro_document::LoroDocument>,
+    write_tier: Option<Arc<dyn WriteTierAuthority>>,
 ) -> ProjectionWorker {
     use std::sync::Mutex as StdMutex;
 
@@ -394,6 +462,7 @@ fn spawn_projection_worker(
             let stid = shared_tree_id.clone();
             let watermark = watermark.clone();
             let global_doc = global_doc.clone();
+            let write_tier = write_tier.clone();
             async move {
                 let current = doc.oplog_frontiers();
                 let last = watermark.lock().unwrap().clone();
@@ -451,6 +520,7 @@ fn spawn_projection_worker(
                              a live local block — refusing to clobber local content"
                         )));
                     }
+                    adopt_imported_blocks(write_tier.as_ref(), &ops).await?;
                     let entity = EntityName::new("block");
                     // SECURITY (Ruling B): shared-doc projection ops carry
                     // `position: None` — the Loro tree owns order, this sink
@@ -581,6 +651,7 @@ impl LoroShareBackend {
             credentials,
             None,
             None,
+            None,
         )
     }
 
@@ -600,7 +671,23 @@ impl LoroShareBackend {
         credentials: Arc<ShareCredentials>,
         sql_ops: Option<Arc<dyn OriginTaggedWrites>>,
         downstream_projection: Option<Arc<dyn DownstreamProjection>>,
+        write_tier: Option<Arc<dyn WriteTierAuthority>>,
     ) -> Arc<Self> {
+        // Disclosed ONCE, here, rather than per write: a backend that projects
+        // into SQL but cannot ask the tier will store a peer's blocks under a
+        // read-only-homed document as fully editable, and nothing can ever put
+        // them into the authoritative file. `holon-app`'s wiring registers the
+        // authority only inside its vault-root branch, so a session with no
+        // vault root legitimately has none — and no files either, which is why
+        // this is a disclosure and not a refusal.
+        if sql_ops.is_some() && write_tier.is_none() {
+            warn!(
+                "[LoroShareBackend] constructed with a SQL projection sink but no \
+                 WriteTierAuthority: sync imports landing under a read-only-homed document will \
+                 be stored EDITABLE and no writer can ever put them into the authoritative file. \
+                 Expected only in a session with no vault root, which has no such documents."
+            );
+        }
         Arc::new_cyclic(|self_weak| Self {
             store,
             snapshot_store,
@@ -611,6 +698,7 @@ impl LoroShareBackend {
             credentials,
             sql_ops,
             downstream_projection,
+            write_tier,
             known_peers: Arc::new(RwLock::new(HashMap::new())),
             save_workers: Arc::new(RwLock::new(HashMap::new())),
             sync_workers: Arc::new(RwLock::new(HashMap::new())),
@@ -679,6 +767,7 @@ impl LoroShareBackend {
             mount_block_uri,
             shared_tree_id.clone(),
             global_doc,
+            self.write_tier.clone(),
         );
         self.projection_workers
             .write()
@@ -827,6 +916,10 @@ impl LoroShareBackend {
             Value::String(shared_tree_id.to_string()),
         );
 
+        // A share accepted UNDER a block of a read-only-homed document puts the
+        // mount itself inside that document.
+        adopt_imported_block(self.write_tier.as_ref(), mount_block_uri, parent_block_uri).await?;
+
         let entity = EntityName::new("block");
         sql_ops
             .execute_operation(&entity, "create", params)
@@ -953,6 +1046,7 @@ impl LoroShareBackend {
                  live local block — refusing to shadow local content"
             )));
         }
+        adopt_imported_blocks(self.write_tier.as_ref(), &ops).await?;
         let entity = EntityName::new("block");
         for (op_name, params) in ops {
             sql_ops
@@ -5435,6 +5529,45 @@ mod tests {
     fn make_backend_with_sql_and_projection(
         projection: Option<Arc<dyn DownstreamProjection>>,
     ) -> (Arc<LoroShareBackend>, Arc<RecordingSqlOps>, TempDir) {
+        let (backend, sql, dir) = build_backend(projection, None);
+        (backend, sql, dir)
+    }
+
+    /// The recipe fixture every read-only-tier test here shares: one
+    /// `.cook` document whose declared membership is a single step.
+    fn recipe_documents() -> (Arc<holon_core::ReadOnlyDocuments>, EntityUri) {
+        let path = std::path::Path::new("/vault/Pancakes.cook");
+        let step = EntityUri::block("Pancakes.cook::b::0");
+        let documents = Arc::new(holon_core::ReadOnlyDocuments::new());
+        documents.record(
+            &EntityUri::block("Pancakes.cook"),
+            "cooklang",
+            path,
+            &holon_core::ReadOnlyMembers::from_persisted_row(path, vec![step.clone()])
+                .expect("a non-empty membership"),
+        );
+        (documents, step)
+    }
+
+    /// `make_backend_with_sql`, plus the write-tier authority over a recipe
+    /// document — the wiring a vault holding one `.cook` file produces.
+    fn make_backend_with_tier() -> (
+        Arc<LoroShareBackend>,
+        Arc<RecordingSqlOps>,
+        Arc<holon_core::ReadOnlyDocuments>,
+        EntityUri,
+        TempDir,
+    ) {
+        let (documents, step) = recipe_documents();
+        let tier = Arc::new(TestTier(documents.clone())) as Arc<dyn WriteTierAuthority>;
+        let (backend, sql, dir) = build_backend(None, Some(tier));
+        (backend, sql, documents, step, dir)
+    }
+
+    fn build_backend(
+        projection: Option<Arc<dyn DownstreamProjection>>,
+        write_tier: Option<Arc<dyn WriteTierAuthority>>,
+    ) -> (Arc<LoroShareBackend>, Arc<RecordingSqlOps>, TempDir) {
         let dir = TempDir::new().unwrap();
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(
             dir.path().to_path_buf(),
@@ -5458,6 +5591,7 @@ mod tests {
             test_credentials(test_keychain()),
             Some(sql.clone() as Arc<dyn OriginTaggedWrites>),
             projection,
+            write_tier,
         );
         (backend, sql, dir)
     }
@@ -5486,6 +5620,7 @@ mod tests {
             "block:mount".to_string(),
             "proj-share".to_string(),
             global,
+            None,
         );
 
         {
@@ -5561,6 +5696,7 @@ mod tests {
             "block:mount".to_string(),
             "hostile-share".to_string(),
             global,
+            None,
         );
 
         {
@@ -5598,6 +5734,286 @@ mod tests {
             row.get("content").and_then(|v| v.as_string()),
             Some("MY PRIVATE JOURNAL"),
             "hostile share must NOT overwrite the recipient's local journal"
+        );
+    }
+
+    /// Stands for the composition root's `ReadOnlyFormatGate` — the same
+    /// authority the dispatcher and the editor's text cell consult.
+    struct TestTier(Arc<holon_core::ReadOnlyDocuments>);
+
+    #[async_trait]
+    impl WriteTierAuthority for TestTier {
+        fn any_read_only_documents(&self) -> bool {
+            !self.0.is_empty()
+        }
+
+        async fn refusal_for(&self, block_id: &str) -> Result<Option<holon_core::EditRefused>> {
+            Ok(self.0.refusal_for_block(&EntityUri::parse(block_id)?))
+        }
+
+        async fn adopt_sync_import(&self, block_id: &str, parent_id: &str) -> Result<bool> {
+            Ok(self
+                .0
+                .adopt(&EntityUri::parse(parent_id)?, &EntityUri::parse(block_id)?))
+        }
+
+        fn disclose(&self, _: &holon_core::EditRefused) {}
+    }
+
+    /// Residual #1 of bugfunnel entry
+    /// `2026-09-08-a-synced-block-under-a-read-only-document-stays-editable`,
+    /// on the leg a real peer's blocks actually travel.
+    ///
+    /// The sharer shared a step of a `.cook` file; a peer added a block under
+    /// it and synced back. The projection worker writes that import straight
+    /// to the SQL block provider, never through the operation dispatcher, so
+    /// the dispatcher's `OpOrigin::Sync` branch never judges it. The import
+    /// must still LAND — the merge already happened in the peer — and it must
+    /// inherit the document's tier, or the recipient ends up with a fully
+    /// editable block that no writer can ever put into the recipe file.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_peer_import_under_a_read_only_homed_block_is_adopted_not_left_editable() {
+        use crate::loro_backend::TREE_NAME;
+
+        let path = std::path::Path::new("/vault/Pancakes.cook");
+        let (documents, step) = recipe_documents();
+
+        let bus = Arc::new(DegradedSignalBus::new());
+        let sql = Arc::new(RecordingSqlOps::default());
+        // `share_subtree` prunes the shared subtree from the global tree, so
+        // the collision guard finds no live local node for these ids.
+        let global =
+            Arc::new(crate::loro_document::LoroDocument::new("ro-global".to_string()).unwrap());
+
+        let doc = Arc::new(LoroDoc::new());
+        let _worker = spawn_projection_worker(
+            doc.clone(),
+            sql.clone() as Arc<dyn OriginTaggedWrites>,
+            bus.clone(),
+            "block:mount".to_string(),
+            "ro-share".to_string(),
+            global,
+            Some(Arc::new(TestTier(documents.clone())) as Arc<dyn WriteTierAuthority>),
+        );
+
+        // The peer's update: the shared root IS the recipe step, and the peer
+        // hung a new block under it.
+        {
+            let tree = doc.get_tree(TREE_NAME);
+            let root = tree.create(None::<TreeID>).unwrap();
+            let root_meta = tree.get_meta(root).unwrap();
+            root_meta
+                .insert(STABLE_ID, loro::LoroValue::from("Pancakes.cook::b::0"))
+                .unwrap();
+            let root_text: loro::LoroText = root_meta.ensure_mergeable_text("content_raw").unwrap();
+            root_text.insert(0, "Crack the eggs").unwrap();
+
+            let child = tree.create(Some(root)).unwrap();
+            let child_meta = tree.get_meta(child).unwrap();
+            child_meta
+                .insert(STABLE_ID, loro::LoroValue::from("peer-added"))
+                .unwrap();
+            let child_text: loro::LoroText =
+                child_meta.ensure_mergeable_text("content_raw").unwrap();
+            child_text.insert(0, "and whisk them").unwrap();
+            doc.commit();
+        }
+
+        let imported = EntityUri::block("peer-added");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while sql.get(imported.as_str()).is_none() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the peer's block never reached SQL — a sync import must land, not be refused"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let row = sql.get(imported.as_str()).expect("the row just appeared");
+        assert_eq!(
+            row.get("parent_id").and_then(|v| v.as_string()),
+            Some(step.as_str()),
+            "the import must keep the recipe step as its parent"
+        );
+
+        let refusal = documents.refusal_for_block(&imported).unwrap_or_else(|| {
+            panic!(
+                "{imported} was imported under {step}, a block of a read-only-homed document, and \
+                 earns no refusal — every local edit to it is accepted and none of them can ever \
+                 reach {}",
+                path.display()
+            )
+        });
+        assert!(
+            refusal.to_string().contains("Pancakes.cook"),
+            "the refusal must name the file, got: {refusal}"
+        );
+    }
+
+    /// PROBE, RED BY DESIGN. Bugfunnel entry
+    /// `2026-09-11-a-sync-import-projected-before-its-document-is-recorded-stays-editable`.
+    ///
+    /// The share projection can run BEFORE the file-sync controller records the
+    /// document's read-only home, and nothing re-judges an import once it has
+    /// landed. The membership `record` installs is derived from the FILE, which
+    /// never declares an imported block, so the block stays editable for the
+    /// rest of the vault's life with no disclosure at all.
+    ///
+    /// `#[ignore]` rather than left failing: the fix is not local to this
+    /// crate. `ReadOnlyDocuments` holds no block tree, so `record` cannot find
+    /// the children an earlier import placed under the blocks it is claiming;
+    /// closing it needs an owner for "imports this device has taken", which is
+    /// the same store Residual #2 of the 2026-09-08 entry asks for.
+    /// Run it with `cargo nextest run -p holon-loro --run-ignored all`.
+    #[ignore = "documented gap: bugfunnel 2026-09-11-a-sync-import-projected-before-its-document-is-recorded-stays-editable"]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_projected_before_its_document_is_recorded_is_never_re_judged() {
+        use crate::loro_backend::TREE_NAME;
+
+        // The vault has not ingested the recipe yet: nothing is recorded.
+        let path = std::path::Path::new("/vault/Pancakes.cook");
+        let step = EntityUri::block("Pancakes.cook::b::0");
+        let documents = Arc::new(holon_core::ReadOnlyDocuments::new());
+
+        let bus = Arc::new(DegradedSignalBus::new());
+        let sql = Arc::new(RecordingSqlOps::default());
+        let global =
+            Arc::new(crate::loro_document::LoroDocument::new("early-global".to_string()).unwrap());
+        let doc = Arc::new(LoroDoc::new());
+        let _worker = spawn_projection_worker(
+            doc.clone(),
+            sql.clone() as Arc<dyn OriginTaggedWrites>,
+            bus.clone(),
+            "block:mount".to_string(),
+            "early-share".to_string(),
+            global,
+            Some(Arc::new(TestTier(documents.clone())) as Arc<dyn WriteTierAuthority>),
+        );
+
+        {
+            let tree = doc.get_tree(TREE_NAME);
+            let root = tree.create(None::<TreeID>).unwrap();
+            let root_meta = tree.get_meta(root).unwrap();
+            root_meta
+                .insert(STABLE_ID, loro::LoroValue::from("Pancakes.cook::b::0"))
+                .unwrap();
+            let child = tree.create(Some(root)).unwrap();
+            let child_meta = tree.get_meta(child).unwrap();
+            child_meta
+                .insert(STABLE_ID, loro::LoroValue::from("peer-added-early"))
+                .unwrap();
+            let child_text: loro::LoroText =
+                child_meta.ensure_mergeable_text("content_raw").unwrap();
+            child_text.insert(0, "and whisk them").unwrap();
+            doc.commit();
+        }
+
+        let imported = EntityUri::block("peer-added-early");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while sql.get(imported.as_str()).is_none() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the peer's block never reached SQL"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        // Now the ingest runs and the document's home is recorded.
+        documents.record(
+            &EntityUri::block("Pancakes.cook"),
+            "cooklang",
+            path,
+            &holon_core::ReadOnlyMembers::from_persisted_row(path, vec![step.clone()])
+                .expect("a non-empty membership"),
+        );
+
+        assert!(
+            documents.refusal_for_block(&imported).is_some(),
+            "{imported} sits under {step} and the recipe is now recorded, yet it earns no \
+             refusal — the import landed before the ingest and nothing re-judges it"
+        );
+    }
+
+    /// The MOUNT leg. A share accepted UNDER a block of a read-only-homed
+    /// document puts the mount node itself inside that document, so the mount
+    /// inherits the tier — and every descendant projected beneath it inherits
+    /// it through the mount (see the sibling test below).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mount_projected_under_a_read_only_homed_parent_is_adopted() {
+        let (backend, sql, documents, step, _dir) = make_backend_with_tier();
+        let mount = "block:mount-in-recipe";
+        let identity = MountIdentity {
+            title: "Shared steps".to_string(),
+            tags: vec![holon_api::block::PAGE_TAG.to_string()],
+        };
+
+        backend
+            .project_mount_to_sql(mount, step.as_str(), "stid-mount", &identity)
+            .await
+            .expect("the mount projection must land");
+
+        assert!(
+            sql.get(mount).is_some(),
+            "the mount row must land — an accept under a recipe step is not refused"
+        );
+        let mount_uri = EntityUri::parse(mount).expect("a valid mount uri");
+        assert!(
+            documents.refusal_for_block(&mount_uri).is_some(),
+            "{mount} was mounted under {step}, a block of a read-only-homed document, and earns \
+             no refusal — the mount is editable and nothing can write it back"
+        );
+    }
+
+    /// The DESCENDANT leg (`accept_shared_subtree` / `rehydrate_shared_trees`).
+    /// The mount is already bound to the recipe; the blocks projected beneath
+    /// it inherit the binding through it, which is the chain
+    /// `ReadOnlyDocuments::adopt` follows when a parent is itself adopted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn descendants_projected_under_an_adopted_mount_inherit_its_read_only_home() {
+        use crate::loro_backend::TREE_NAME;
+
+        let (backend, sql, documents, step, _dir) = make_backend_with_tier();
+        let mount = "block:mount-in-recipe";
+        let mount_uri = EntityUri::parse(mount).expect("a valid mount uri");
+        // The mount leg already bound the mount; this test pins the descendant
+        // leg alone, so it seeds that binding directly.
+        assert!(documents.adopt(&step, &mount_uri), "the mount binds first");
+
+        let shared = LoroDoc::new();
+        {
+            let tree = shared.get_tree(TREE_NAME);
+            let root = tree.create(None::<TreeID>).unwrap();
+            let root_meta = tree.get_meta(root).unwrap();
+            root_meta
+                .insert(STABLE_ID, loro::LoroValue::from("shared-root"))
+                .unwrap();
+            let root_text: loro::LoroText = root_meta.ensure_mergeable_text("content_raw").unwrap();
+            root_text.insert(0, "Shared steps").unwrap();
+
+            let child = tree.create(Some(root)).unwrap();
+            let child_meta = tree.get_meta(child).unwrap();
+            child_meta
+                .insert(STABLE_ID, loro::LoroValue::from("shared-child"))
+                .unwrap();
+            let child_text: loro::LoroText =
+                child_meta.ensure_mergeable_text("content_raw").unwrap();
+            child_text.insert(0, "Fold gently").unwrap();
+            shared.commit();
+        }
+
+        backend
+            .project_descendants_to_sql(&shared, mount, "stid-descendants")
+            .await
+            .expect("the descendant projection must land");
+
+        let root_uri = EntityUri::block("shared-root");
+        assert!(
+            sql.get(root_uri.as_str()).is_some(),
+            "the shared root must land under the mount"
+        );
+        assert!(
+            documents.refusal_for_block(&root_uri).is_some(),
+            "{root_uri} was projected under {mount}, which is bound to a read-only-homed \
+             document, and earns no refusal — it is editable and unwritable at once"
         );
     }
 
