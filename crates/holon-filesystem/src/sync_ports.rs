@@ -997,7 +997,8 @@ fn poison_row(row: Option<Block>) -> Option<Block> {
 /// separate values rather than one `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PageWalkBreak {
-    /// A row on the chain is not in the store.
+    /// An ANCESTOR row on the chain is not in the store. The block itself
+    /// being absent is [`PageAncestor::StartAbsent`], which is not a break.
     ChainLeftTheStore,
     /// Two blocks on the chain are each other's ancestor.
     ParentCycle,
@@ -1010,7 +1011,9 @@ impl std::fmt::Display for PageWalkBreak {
     /// vault-wide-recovery disclosure has to decide.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let what = match self {
-            PageWalkBreak::ChainLeftTheStore => "a row on its parent chain is not in the store",
+            PageWalkBreak::ChainLeftTheStore => {
+                "an ancestor row on its parent chain is not in the store"
+            }
             PageWalkBreak::ParentCycle => "its parent chain is cyclic",
             PageWalkBreak::DepthBound => "its parent chain is longer than the walk's depth bound",
         };
@@ -1031,6 +1034,10 @@ pub enum PageAncestor {
     Page(Box<Block>),
     /// The chain reached the root sentinel with no `Page` above it.
     NoOwner,
+    /// The store does not hold `start` itself, so there is no chain to follow
+    /// and nothing is broken. Every block of a file being ingested for the
+    /// first time answers this, which is why it must not read as a fault.
+    StartAbsent,
     /// The chain could not be followed to an answer.
     Broken(PageWalkBreak),
 }
@@ -1042,7 +1049,7 @@ impl PageAncestor {
     pub fn into_page(self) -> Option<Block> {
         match self {
             PageAncestor::Page(page) => Some(*page),
-            PageAncestor::NoOwner | PageAncestor::Broken(_) => None,
+            PageAncestor::NoOwner | PageAncestor::StartAbsent | PageAncestor::Broken(_) => None,
         }
     }
 }
@@ -1090,14 +1097,20 @@ pub async fn nearest_page_ancestor(
             return Ok(PageAncestor::Broken(PageWalkBreak::ParentCycle));
         }
         let Some(block) = rows.get(reader, &cur, reads).await? else {
+            if cur == *start {
+                // Asking about an id the store does not hold is an ordinary
+                // question, not a fault: the ingest path asks it of every block
+                // of a file it is seeing for the first time.
+                return Ok(PageAncestor::StartAbsent);
+            }
             // WARN, not ERROR: unlike a cycle or the depth bound this is often
-            // a race — a parent row that has not landed yet — but it still
-            // arms the vault-wide recovery re-render, and an undisclosed
-            // vault-wide pass is indistinguishable from working routing.
+            // a race — a parent row that has not landed yet. The CONSEQUENCE is
+            // deliberately not named here: two of this walk's three callers
+            // collapse every "no page" answer to `None` and re-render nothing,
+            // so only the routing decision can disclose what the break costs.
             tracing::warn!(
                 "[nearest_page_ancestor] the chain from {start} leaves the store at {cur} — no \
-                 owning page can be named while that row is missing; routing falls back to a \
-                 re-render of every tracked file"
+                 owning page can be named while that ancestor row is missing"
             );
             return Ok(PageAncestor::Broken(PageWalkBreak::ChainLeftTheStore));
         };

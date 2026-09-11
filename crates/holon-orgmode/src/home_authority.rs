@@ -105,6 +105,13 @@ pub enum DocHome {
 pub enum UnresolvedHome {
     /// The parent-chain walk broke.
     Walk(holon_filesystem::PageWalkBreak),
+    /// The walk found no row for the id it started from, on a path that had
+    /// just read that row: [`BlockHomeAuthority::locate`] reads it before it
+    /// walks. A walk started from an ANCESTOR reports
+    /// [`holon_filesystem::PageWalkBreak::ChainLeftTheStore`] instead, so what
+    /// is left here is a burst that lost a row it held — a defect in the burst,
+    /// not a condition in the vault.
+    StartAbsent,
     /// [`BlockHomeAuthority::locate_batch`]'s own top-down pass named no home
     /// for a block it resolved the parentage of — a defect in that pass, not in
     /// the block's parentage.
@@ -115,6 +122,9 @@ impl std::fmt::Display for UnresolvedHome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UnresolvedHome::Walk(break_) => write!(f, "{break_}"),
+            UnresolvedHome::StartAbsent => {
+                f.write_str("the authority no longer holds the row the walk started from")
+            }
             UnresolvedHome::BatchPassGap => {
                 f.write_str("the batch home pass covered no home for it")
             }
@@ -128,6 +138,9 @@ impl DocHome {
         match ancestor {
             holon_filesystem::PageAncestor::Page(page) => DocHome::Resolved(page.id),
             holon_filesystem::PageAncestor::NoOwner => DocHome::Untracked,
+            holon_filesystem::PageAncestor::StartAbsent => {
+                DocHome::Unresolvable(UnresolvedHome::StartAbsent)
+            }
             holon_filesystem::PageAncestor::Broken(why) => {
                 DocHome::Unresolvable(UnresolvedHome::Walk(why))
             }
@@ -227,6 +240,30 @@ impl BlockHomeAuthority {
         let doc = self
             .walk_doc(id, &mut memo.rows, Some(&self.locate_reads))
             .await?;
+        memo.docs.insert(id.clone(), doc.clone());
+        Ok(doc)
+    }
+
+    /// The home of an ANCESTOR id the batch snapshot did not hold.
+    ///
+    /// [`Self::resolve_doc`] answers `StartAbsent` whenever the store holds no
+    /// row for the id it is handed. Here that id is a parent the batch never
+    /// read, so the honest reading is that the chain left the STORE — an
+    /// ordinary vault condition the recovery pass exists for — and not that a
+    /// burst lost a row it was holding.
+    async fn resolve_ancestor_doc(
+        &self,
+        id: &EntityUri,
+        memo: &mut HomeBurstMemo,
+    ) -> Result<DocHome> {
+        let doc = match self.resolve_doc(id, memo).await? {
+            DocHome::Unresolvable(UnresolvedHome::StartAbsent) => DocHome::Unresolvable(
+                UnresolvedHome::Walk(holon_filesystem::PageWalkBreak::ChainLeftTheStore),
+            ),
+            other => other,
+        };
+        // `resolve_doc` memoized its own reading; the burst must not keep an
+        // answer this call just corrected.
         memo.docs.insert(id.clone(), doc.clone());
         Ok(doc)
     }
@@ -451,7 +488,18 @@ impl HomeAuthority<DocHome> for BlockHomeAuthority {
                 }
                 let Some(parent) = parent_of.get(&cur) else {
                     // Chain left the snapshot — pay one authoritative walk.
-                    break self.resolve_doc(&EntityUri::parse(&cur)?, memo).await?;
+                    // Every key of `parent_of` is present in it, so the first
+                    // iteration never lands here: `cur` is always an ancestor
+                    // the batch did not read, which is what lets the walk's
+                    // "no row" answer be read as a broken CHAIN.
+                    debug_assert!(
+                        !chain.is_empty(),
+                        "locate_batch walked authoritatively from {cur}, an id it holds a row \
+                         for — the answer would be misclassified as a chain break"
+                    );
+                    break self
+                        .resolve_ancestor_doc(&EntityUri::parse(&cur)?, memo)
+                        .await?;
                 };
                 // The root sentinel, with no `Page` seen on the way up: the
                 // chain is intact and names no owner.

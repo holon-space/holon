@@ -377,3 +377,67 @@ async fn a_homed_block_still_routes_to_its_document() {
         "the ordinary routing must be untouched by the split",
     );
 }
+
+// ── The batch path names the condition it actually found ────────────────────
+
+/// `locate_batch` covers a block's parent from its own snapshot when the batch
+/// carries it. When it does not, it pays one authoritative walk — and that walk
+/// starts at the PARENT id, which nobody asked about and which the store may
+/// not hold. A block with a dangling parent reaches exactly that branch.
+///
+/// The answer must name the chain, not the burst: an orphan with a parent the
+/// vault lost is an ordinary vault condition the recovery pass exists for.
+/// Reporting it as "the authority no longer holds the row the walk started
+/// from" blames an internal defect for a real repair the reader has to make —
+/// the same misleading fail-loud message entry
+/// `2026-09-11-the-boot-scan-announces-a-vault-wide-re-render-it-never-runs`
+/// set out to remove.
+#[tokio::test]
+async fn a_batch_orphan_with_a_dangling_parent_names_the_chain_not_the_burst() {
+    let mut store = Store::new();
+    let block = store.add("orphan", EntityUri::block("never-stored"), false);
+    let authority = BlockHomeAuthority::new(Arc::new(store), Arc::new(NoOrdering));
+
+    let mut memo = HomeBurstMemo::default();
+    let placed = authority
+        .locate_batch(&[block.id.as_str().to_string()], &mut memo)
+        .await
+        .expect("the batch answers rather than failing the stream");
+    let home = placed
+        .get(block.id.as_str())
+        .expect("the batch places every id it was handed")
+        .doc
+        .clone();
+
+    assert_eq!(
+        home,
+        DocHome::Unresolvable(UnresolvedHome::Walk(PageWalkBreak::ChainLeftTheStore)),
+        "the batch walked from the PARENT id — an id it never read — so a missing row there \
+         is the chain leaving the store, not a burst dropping a row it was holding",
+    );
+
+    // The reader of a vault-wide re-render has to act on it, so check the
+    // sentence they get, not only the variant behind it.
+    let cap = LogCapture::default();
+    let route = {
+        let _g = tracing::subscriber::set_default(tracing_subscriber::registry().with(cap.clone()));
+        route_homed_block(&home, &block.id, &block.parent_id, &block.properties)
+    };
+    let warns = cap.at(tracing::Level::WARN);
+    assert!(
+        warns.contains("ancestor row"),
+        "the disclosure must send the reader to the parent chain; log was: {warns}",
+    );
+    assert!(
+        !warns.contains("walk started from"),
+        "the disclosure blamed the burst for a parent the vault lost; log was: {warns}",
+    );
+
+    // ANTI-OVERCORRECTION: naming the condition honestly must not change what
+    // the block routes to.
+    assert_eq!(
+        route,
+        BlockRoute::Recover,
+        "an orphan whose owning document cannot be named still recovers through the bulk pass",
+    );
+}

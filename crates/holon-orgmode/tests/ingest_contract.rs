@@ -1149,3 +1149,93 @@ async fn a_refusal_is_keyed_by_the_file_not_by_its_format() {
          clears every other refused file's banner",
     );
 }
+
+// ── 5. A first ingest claims no work it does not do ─────────────────────────
+
+/// WARN-level tracing capture, the sibling of [`InfoCapture`] and
+/// [`ErrorCapture`].
+#[derive(Clone, Default)]
+struct WarnCapture(Arc<Mutex<Vec<String>>>);
+
+impl WarnCapture {
+    fn mentioning(&self, needle: &str) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.contains(needle))
+            .cloned()
+            .collect()
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for WarnCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            let mut buf = String::new();
+            event.record(&mut MsgVisitor(&mut buf));
+            self.0.lock().unwrap().push(buf);
+        }
+    }
+}
+
+/// Entry `2026-09-11-the-boot-scan-announces-a-vault-wide-re-render-it-never-runs`.
+///
+/// Every block of a file ingested for the FIRST time is, by definition, absent
+/// from the store when the cross-doc membership guard asks which document
+/// authoritatively owns it. That question is ordinary — the guard's own
+/// contract reads "an id-less / brand-new / unknown block resolves to `None` →
+/// normal ingest" — but the ancestor walk answered it by announcing a re-render
+/// of every tracked file. One boot over Martin's vault printed 2535 such lines
+/// and armed no bulk pass at all.
+///
+/// A disclosure of a consequence that does not follow is worse than silence:
+/// it is the fail-loud channel reporting a fault where there is none, and it
+/// sent a lane hunting a re-render storm that never happened.
+#[tokio::test]
+async fn a_first_ingest_announces_no_vault_wide_re_render() {
+    let cap = WarnCapture::default();
+    let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(cap.clone()));
+
+    let mut v = vault(
+        FixtureAdapter::parsing(WriteTier::ReadWrite),
+        "Boil water\nStir\nServe\n",
+    );
+    // A nested file ingested BEFORE its folder companion — the order an
+    // initial scan hands files over in, where a chain's upper rows genuinely
+    // have not landed yet.
+    let nested = v.root.join("Sub").join("Tiramisu.fixture");
+    std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    std::fs::write(&nested, "Whip eggs\nSoak biscuits\n").unwrap();
+    let companion = v.root.join("Sub.fixture");
+    std::fs::write(&companion, "The folder companion\n").unwrap();
+
+    for path in [v.file.clone(), nested, companion] {
+        let _ = v
+            .controller
+            .on_file_changed(&path)
+            .await
+            .unwrap_or_else(|e| panic!("{} ingests: {e}", path.display()));
+    }
+
+    let breaks = cap.mentioning("[nearest_page_ancestor]");
+    assert!(
+        breaks.is_empty(),
+        "an ordinary first ingest reported {} broken ancestor walk(s). Every one is a block \
+         this very ingest is about to create, asked about before it exists — the guard's own \
+         contract calls that answer normal ingest. The lines were:\n{}",
+        breaks.len(),
+        breaks.join("\n"),
+    );
+
+    let claims = cap.mentioning("re-render of every tracked file");
+    assert!(
+        claims.is_empty(),
+        "an ordinary first ingest announced {} vault-wide re-render(s) that no routing \
+         decision asked for — the walk narrates a consequence only its caller knows, and \
+         these callers collapse every 'no page' answer to `None` and re-render nothing. \
+         The lines were:\n{}",
+        claims.len(),
+        claims.join("\n"),
+    );
+}

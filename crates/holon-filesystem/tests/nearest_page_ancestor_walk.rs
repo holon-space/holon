@@ -232,3 +232,51 @@ async fn a_page_is_its_own_owner() {
 
     assert_eq!(found.id, EntityUri::block("page"));
 }
+
+/// A block the store does not hold is not a broken chain — there is no chain.
+/// The ingest path asks this of every block of a file it sees for the first
+/// time, and reads the answer as "brand-new block, nothing to route".
+#[tokio::test]
+async fn an_absent_start_block_is_not_a_broken_chain() {
+    let reader = Arc::new(RecordingReader::new(&[("page", true)]));
+
+    let found = nearest_page_ancestor(
+        reader.as_ref(),
+        &EntityUri::block("never-ingested"),
+        &mut BlockRowMemo::new(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        found,
+        PageAncestor::StartAbsent,
+        "an id the store does not hold must answer StartAbsent — reporting it as a broken \
+         chain makes an ordinary first ingest indistinguishable from corrupt parentage, and \
+         every block of every file announces the fault on the way in"
+    );
+}
+
+/// ANTI-OVERCORRECTION: the block is present, its PARENT is not. That is the
+/// genuine break the recovery pass exists for and it must survive the split.
+#[tokio::test]
+async fn an_absent_ancestor_row_is_still_a_broken_chain() {
+    let mut reader = RecordingReader::new(&[]);
+    let orphan = EntityUri::block("orphan");
+    reader.blocks.insert(
+        orphan.clone(),
+        Block::new_text(orphan.clone(), EntityUri::block("never-stored"), "orphan"),
+    );
+
+    let found = nearest_page_ancestor(&reader, &orphan, &mut BlockRowMemo::new(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        found,
+        PageAncestor::Broken(PageWalkBreak::ChainLeftTheStore),
+        "a parent row the store does not hold leaves the owning document unknown — a document \
+         may well own this block, which is what separates it from an absent block"
+    );
+}
