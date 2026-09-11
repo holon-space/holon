@@ -18,6 +18,7 @@
 pub const SIDECAR_SCHEMA_VERSION: u32 = 2;
 
 /// One compiled-in sidecar.
+#[derive(Debug)]
 pub struct BundledSidecar {
     /// Provider name — the installed file's stem must match it.
     pub provider: &'static str,

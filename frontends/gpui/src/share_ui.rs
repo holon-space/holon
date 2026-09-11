@@ -200,9 +200,13 @@ pub enum DegradedKind {
     /// Yellow — a sidecar file is installed for an integration that is not
     /// switched on, so it runs nothing. Names the state file to write.
     IntegrationNotEnabled,
-    /// Yellow — a sidecar file names an integration this build does not ship.
-    /// Nothing on disk can introduce one, so the file does nothing.
+    /// Yellow — a state file refers to a connection nothing provides: no
+    /// bundled sidecar and no usable file introduces one.
     IntegrationSidecarNotBundled,
+    /// Yellow — a file NAMES a connection but cannot be used, so that
+    /// connection does not exist. The remedy is to fix the file the toast
+    /// points at, which is why the reason travels with it.
+    IntegrationSidecarUnusable,
     /// Yellow — a peer joined a share by proving the ticket's BEARER secret
     /// rather than as a paired device. The share works; what is disclosed is
     /// that its trust rests on a secret that travelled (ADR 0028 R5 stopgap).
@@ -533,9 +537,22 @@ impl ShareUiState {
                     kind: DegradedKind::IntegrationSidecarNotBundled,
                     shared_tree_id: event.shared_tree_id,
                     detail: format!(
-                        "{provider}: {installed_path} names an integration this build does not \
-                         ship — it runs nothing"
+                        "{provider}: nothing provides a connection by this name — \
+                         {installed_path} runs nothing"
                     ),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ShareDegradedReason::IntegrationSidecarUnusable {
+                provider,
+                installed_path,
+                why,
+            } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationSidecarUnusable,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: format!("{provider}: {installed_path} cannot be used — {why}"),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -2127,10 +2144,13 @@ fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
             "⚠",
             "Integration is not switched on",
         ),
-        DegradedKind::IntegrationSidecarNotBundled => (
+        DegradedKind::IntegrationSidecarNotBundled => {
+            (gpui::rgba(0xfbbf24ff), "⚠", "No connection by this name")
+        }
+        DegradedKind::IntegrationSidecarUnusable => (
             gpui::rgba(0xfbbf24ff),
             "⚠",
-            "Integration file for a provider this build does not ship",
+            "Connection file cannot be used",
         ),
         DegradedKind::PairingReimported => {
             (gpui::rgba(0x60a5faff), "i", "Content kept from this device")

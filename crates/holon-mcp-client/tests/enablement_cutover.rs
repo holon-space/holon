@@ -211,9 +211,17 @@ fn an_unbundled_installed_sidecar_is_ignored_and_disclosed() {
         .ignored
         .iter()
         .find(|i| i.provider == "my-own-thing")
-        .expect("an unbundled file is disclosed, never silently skipped");
+        .expect("an unusable file is disclosed, never silently skipped");
     assert_eq!(ignored.installed_path, installed);
-    assert!(matches!(ignored.reason, IgnoredReason::NotBundled));
+    // A file with an unbundled stem no longer means "nothing can name this".
+    // It NAMES a connection now, so the disclosure says what is wrong with the
+    // file — here, that it declares no `schema_version`. The property this
+    // test exists for is unchanged: the file ran nothing and said so.
+    let reason = format!("{:?}", ignored.reason);
+    assert!(
+        reason.contains("schema_version"),
+        "the disclosure must name what the file has to fix; got: {reason}"
+    );
 }
 
 /// Enablement moved; the CONTENT axis did not. An enabled provider still runs

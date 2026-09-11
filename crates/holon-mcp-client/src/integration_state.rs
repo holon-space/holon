@@ -22,7 +22,6 @@ use futures_signals::signal::ReadOnlyMutable;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::bundled_sidecars::BUNDLED_SIDECARS;
 use crate::provider_name::ProviderName;
 
 /// Where one credential value lives. The state file records the LOCATION of a
@@ -169,6 +168,9 @@ pub struct IntegrationConfigStore {
     /// the bundle, in file-name order, so adding one never reshuffles the rows
     /// above it.
     order: Vec<ProviderName>,
+    /// The presence answer this store was built from, kept so the loader and
+    /// the settings surface read the same scan rather than repeating it.
+    roster: crate::roster::ConnectionRoster,
 }
 
 impl IntegrationConfigStore {
@@ -181,39 +183,53 @@ impl IntegrationConfigStore {
     /// configured integration off, and an empty file is exactly what a crashed
     /// write used to leave behind.
     pub fn load(dir: &Path) -> anyhow::Result<Self> {
+        Self::over_roster(dir, crate::roster::ConnectionRoster::scan(dir)?)
+    }
+
+    /// The same, over a roster the caller already scanned — so the store and
+    /// the loader read ONE view of presence rather than two scans that can
+    /// disagree about what is on disk.
+    pub fn over_roster(
+        dir: &Path,
+        roster: crate::roster::ConnectionRoster,
+    ) -> anyhow::Result<Self> {
         let mut states = HashMap::new();
-        let mut order = Vec::with_capacity(BUNDLED_SIDECARS.len());
-        for sidecar in BUNDLED_SIDECARS {
-            let path = state_path_in(dir, sidecar.provider);
+        let mut order = Vec::with_capacity(roster.entries().len());
+        for entry in roster.entries() {
+            let provider = entry.name.as_str();
+            let path = state_path_in(dir, provider);
             let state = match std::fs::read_to_string(&path) {
                 Ok(text) => toml::from_str::<StateFile>(&text)
                     .map_err(anyhow::Error::new)
                     .and_then(StateFile::into_state)
                     .with_context(|| {
                         format!(
-                            "Integration '{}' has an unusable state file '{}'",
-                            sidecar.provider,
+                            "Integration '{provider}' has an unusable state file '{}'",
                             path.display()
                         )
                     })?,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => IntegrationState::default(),
                 Err(e) => {
                     return Err(anyhow::Error::new(e).context(format!(
-                        "Failed to read state file '{}' for integration '{}'",
-                        path.display(),
-                        sidecar.provider
+                        "Failed to read state file '{}' for integration '{provider}'",
+                        path.display()
                     )));
                 }
             };
-            let name = ProviderName::bundled(sidecar.provider);
-            order.push(name.clone());
-            states.insert(name, Mutable::new(state));
+            order.push(entry.name.clone());
+            states.insert(entry.name.clone(), Mutable::new(state));
         }
         Ok(Self {
             dir: dir.to_path_buf(),
             states,
             order,
+            roster,
         })
+    }
+
+    /// The presence axis this store was built over.
+    pub fn roster(&self) -> &crate::roster::ConnectionRoster {
+        &self.roster
     }
 
     /// The directory the state files and sidecars share.

@@ -8,10 +8,8 @@ use holon_rows::RowMapper;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::bundled_sidecars::BUNDLED_SIDECARS;
 use crate::bundled_sidecars::BundledSidecar;
 use crate::bundled_sidecars::SIDECAR_SCHEMA_VERSION;
-use crate::bundled_sidecars::bundled_sidecar;
 use crate::credential_path::CredentialRoot;
 use crate::integration_state::Configuration;
 use crate::integration_state::ENABLE_COMMAND;
@@ -640,9 +638,16 @@ pub enum IgnoredReason {
         /// The file's content, for a disclosure with room for five lines.
         enabling_state_file: String,
     },
-    /// The build ships no sidecar for this name, and presence is settled at
-    /// compile time — so nothing on disk can introduce a provider.
+    /// The build ships no sidecar for this name, and no usable file names it
+    /// either — so there is nothing to switch on. A leftover state file is the
+    /// usual cause.
     NotBundled,
+    /// A file named this connection but could not be used, and there is no
+    /// bundled copy to fall back to. Carries the reason in the reader's terms
+    /// — typically that the file does not declare this build's
+    /// `schema_version`, which is what a sidecar written before a format
+    /// cutover looks like.
+    Unusable { why: String },
 }
 
 /// A bundled integration that is switched ON but that this build refuses to
@@ -700,6 +705,75 @@ pub struct LoadedIntegrations {
 /// is a separate axis and is deliberately not consulted here, so a surface that
 /// must read a switched-OFF provider's sidecar (the consent flow) gets the same
 /// answer the loader would give once it is switched on.
+/// What a connection's content resolved to.
+///
+/// An UNUSABLE introduced connection has no config at all — there is no
+/// bundled copy behind it — so this says that in the type rather than handing
+/// back an empty `IntegrationFileConfig` that every later stage would have to
+/// recognise as meaning nothing.
+enum ResolvedContent {
+    Usable {
+        config: Box<IntegrationFileConfig>,
+        /// Set when an installed file was passed over for the bundled copy.
+        superseded: Option<String>,
+    },
+    Unusable {
+        why: String,
+    },
+}
+
+fn choose_content_for(
+    entry: &crate::roster::ConnectionEntry,
+    file: Option<&(PathBuf, String)>,
+) -> anyhow::Result<ResolvedContent> {
+    match &entry.source {
+        crate::roster::ConnectionSource::Bundled(bundled) => {
+            let (config, superseded) = choose_content(bundled, file)?;
+            Ok(ResolvedContent::Usable {
+                config: Box::new(config),
+                superseded,
+            })
+        }
+        crate::roster::ConnectionSource::Installed { path } => {
+            let (_, content) = file.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "connection '{}' was introduced by '{}', which has since disappeared",
+                    entry.name,
+                    path.display()
+                )
+            })?;
+            match serde_yaml::from_str::<IntegrationFileConfig>(content) {
+                Ok(config) if config.schema_version == Some(SIDECAR_SCHEMA_VERSION) => {
+                    Ok(ResolvedContent::Usable {
+                        config: Box::new(config),
+                        superseded: None,
+                    })
+                }
+                Ok(config) => Ok(ResolvedContent::Unusable {
+                    why: format!(
+                        "it declares schema_version {} but this build's sidecar format is \
+                         schema_version {SIDECAR_SCHEMA_VERSION}, and there is no bundled copy of \
+                         '{}' to fall back to",
+                        match config.schema_version {
+                            Some(v) => v.to_string(),
+                            None => "none".to_string(),
+                        },
+                        entry.name
+                    ),
+                }),
+                Err(e) => Ok(ResolvedContent::Unusable {
+                    why: format!(
+                        "it does not parse against this build's sidecar format, so no \
+                         schema_version could be established, and there is no bundled copy of \
+                         '{}' to fall back to: {e}",
+                        entry.name
+                    ),
+                }),
+            }
+        }
+    }
+}
+
 fn choose_content(
     bundled: &'static BundledSidecar,
     file: Option<&(PathBuf, String)>,
@@ -758,8 +832,14 @@ pub struct ProviderContent {
 /// on — what the in-app consent flow reads to learn the provider's OAuth
 /// endpoints and where its credentials belong.
 pub fn provider_content(dir: &Path, provider: &str) -> anyhow::Result<ProviderContent> {
-    let bundled = bundled_sidecar(provider)
-        .ok_or_else(|| anyhow::anyhow!("this build ships no integration named '{provider}'"))?;
+    let roster = crate::roster::ConnectionRoster::scan(dir)?;
+    let entry = roster.get(provider).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no connection named '{provider}' — this build ships none, and no usable file in \
+             '{}' introduces one",
+            dir.display()
+        )
+    })?;
     let installed = scan_installed_sidecars(dir)?;
     let files = installed.get(provider).map(Vec::as_slice).unwrap_or(&[]);
     anyhow::ensure!(
@@ -768,8 +848,18 @@ pub fn provider_content(dir: &Path, provider: &str) -> anyhow::Result<ProviderCo
          that picks between them",
         files.len()
     );
-    let (config, superseded) = choose_content(bundled, files.first())?;
-    Ok(ProviderContent { config, superseded })
+    match choose_content_for(entry, files.first())? {
+        ResolvedContent::Usable { config, superseded } => Ok(ProviderContent {
+            config: *config,
+            superseded,
+        }),
+        // An introduced connection whose file will not read has no content at
+        // all. Loud here rather than a derived-name row, because this is what
+        // the settings surface and the consent flow both ask.
+        ResolvedContent::Unusable { why } => Err(anyhow::anyhow!(
+            "the file introducing connection '{provider}' cannot be used: {why}"
+        )),
+    }
 }
 
 pub fn load_integration_configs(
@@ -783,8 +873,8 @@ pub fn load_integration_configs(
     let mut ignored = Vec::new();
     let mut inert: Vec<InertIntegration> = Vec::new();
 
-    for bundled in BUNDLED_SIDECARS {
-        let provider = bundled.provider;
+    for entry in store.roster().entries() {
+        let provider = entry.name.as_str();
         let files = installed.get(provider).map(Vec::as_slice).unwrap_or(&[]);
         // Two files for a provider that RUNS disagree about what is running, and
         // there is no rule that picks between them. Two for a provider that
@@ -818,7 +908,32 @@ pub fn load_integration_configs(
             continue;
         }
 
-        let (config, incompatibility) = choose_content(bundled, file)?;
+        // An introduced connection's secret namespace, checked on the FILE
+        // TEXT before anything is built that could resolve a variable.
+        if entry.is_introduced()
+            && let Some((path, content)) = file
+            && let Err(why) = crate::roster::check_secret_namespace(&entry.name, content)
+        {
+            ignored.push(IgnoredSidecar {
+                provider: provider.to_string(),
+                installed_path: path.clone(),
+                reason: IgnoredReason::Unusable { why },
+            });
+            continue;
+        }
+
+        let (config, incompatibility) = match choose_content_for(entry, file)? {
+            ResolvedContent::Usable { config, superseded } => (*config, superseded),
+            ResolvedContent::Unusable { why } => {
+                let (path, _) = file.expect("only an installed file can be unusable");
+                ignored.push(IgnoredSidecar {
+                    provider: provider.to_string(),
+                    installed_path: path.clone(),
+                    reason: IgnoredReason::Unusable { why },
+                });
+                continue;
+            }
+        };
 
         // Where a provider's secrets may live is decided HERE, at load, before
         // anything is built that could open one. A sidecar naming a location
@@ -855,6 +970,12 @@ pub fn load_integration_configs(
 
         if let Some(incompatibility) = incompatibility {
             let (path, _) = file.expect("only an installed file can be incompatible");
+            let crate::roster::ConnectionSource::Bundled(bundled) = &entry.source else {
+                unreachable!(
+                    "an introduced connection resolves to Usable or Unusable; only a BUNDLED one \
+                     can supersede an installed file"
+                )
+            };
             superseded.push(SupersededSidecar {
                 provider: provider.to_string(),
                 installed_path: path.clone(),
@@ -865,23 +986,28 @@ pub fn load_integration_configs(
         configs.push((provider.to_string(), config));
     }
 
-    for (provider, files) in installed.iter() {
-        if bundled_sidecar(provider).is_none() {
-            // One entry per FILE: an unbundled name can enable nothing, so two
-            // of them are two useless files, not an ambiguity to refuse over.
-            for (path, _) in files {
-                ignored.push(IgnoredSidecar {
-                    provider: provider.clone(),
-                    installed_path: path.clone(),
-                    reason: IgnoredReason::NotBundled,
-                });
-            }
-        }
+    // Files the roster could not turn into a connection at all — an unusable
+    // name, or two files claiming one name. A file that DID name a connection
+    // is handled above, on the enablement axis.
+    for rejected in store.roster().rejected() {
+        let provider = rejected
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("<unnamed>")
+            .to_string();
+        ignored.push(IgnoredSidecar {
+            provider,
+            installed_path: rejected.path.clone(),
+            reason: IgnoredReason::Unusable {
+                why: rejected.reason.clone(),
+            },
+        });
     }
 
     // A state file for a name this build does not ship is read by nothing. It
     // is the shape a typo takes, so it is disclosed rather than left inert.
-    for path in orphan_state_files(dir)? {
+    for path in orphan_state_files(dir, store.roster())? {
         let provider = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -930,7 +1056,9 @@ fn enable_remedy(dir: &Path, provider: &str) -> String {
 /// their content. A missing directory yields nothing. Grouping rather than
 /// overwriting keeps the "two files, one provider" case visible to the caller,
 /// which is the only place that knows whether it matters.
-fn scan_installed_sidecars(dir: &Path) -> anyhow::Result<HashMap<String, Vec<(PathBuf, String)>>> {
+pub(crate) fn scan_installed_sidecars(
+    dir: &Path,
+) -> anyhow::Result<HashMap<String, Vec<(PathBuf, String)>>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -984,7 +1112,10 @@ fn scan_installed_sidecars(dir: &Path) -> anyhow::Result<HashMap<String, Vec<(Pa
 /// The `*.state.toml` files in `dir` whose provider this build does not ship.
 /// The store only ever looks up the providers it knows, so these are invisible
 /// to it — this scan is what makes them findable.
-fn orphan_state_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+fn orphan_state_files(
+    dir: &Path,
+    roster: &crate::roster::ConnectionRoster,
+) -> anyhow::Result<Vec<PathBuf>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1008,7 +1139,10 @@ fn orphan_state_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
         else {
             continue;
         };
-        if bundled_sidecar(provider).is_none() {
+        // Orphan means NO connection of that name — the bundle is no longer
+        // the whole answer, so a state file beside the file that introduces
+        // its connection is not an orphan.
+        if roster.get(provider).is_none() {
             orphans.push(path);
         }
     }
@@ -1312,10 +1446,14 @@ entities: {}
         assert!(loaded.configs.is_empty());
         assert_eq!(loaded.ignored.len(), 1, "the .txt is not a sidecar at all");
         assert_eq!(loaded.ignored[0].installed_path, installed);
-        assert!(matches!(
-            loaded.ignored[0].reason,
-            IgnoredReason::NotBundled
-        ));
+        // The file NAMES a connection now (presence is a union), so the
+        // disclosure says what is wrong with the file rather than "no such
+        // provider" — here, that it declares no `schema_version`.
+        let reason = format!("{:?}", loaded.ignored[0].reason);
+        assert!(
+            reason.contains("schema_version"),
+            "the disclosure must name what to fix in the file; got: {reason}"
+        );
     }
 
     #[test]
@@ -1577,7 +1715,7 @@ mod bundled_command_portability {
     /// must be spawnable on a machine that is not the author's.
     #[test]
     fn every_bundled_sidecar_names_a_portable_command() {
-        for bundled in BUNDLED_SIDECARS {
+        for bundled in crate::bundled_sidecars::BUNDLED_SIDECARS {
             parse_bundled(bundled)
                 .unwrap_or_else(|e| panic!("bundled sidecar '{}': {e:#}", bundled.provider));
         }

@@ -1,0 +1,247 @@
+//! The PRESENCE axis: which connections exist at all.
+//!
+//! It used to be a compile-time constant, so a file on disk could neither
+//! introduce a connection nor switch one on. The second half of that is the
+//! security property and is unchanged — enablement is still the state store's
+//! decision and nothing else's. The first half is what ADR 0034 §6 asks for and
+//! what this module supplies: a user's own `<name>.yaml` names a connection the
+//! build does not ship.
+//!
+//! A roster is a VALUE computed once per scan, so the store, the loader and the
+//! settings surface all read one answer rather than three re-derivations that
+//! can disagree.
+//!
+//! Order is part of the answer, because the settings list renders in it: the
+//! bundle first, in its declared order, then introduced connections in
+//! file-name order. Adding a file never reshuffles the rows above it.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::path::PathBuf;
+
+use crate::bundled_sidecars::BUNDLED_SIDECARS;
+use crate::bundled_sidecars::BundledSidecar;
+use crate::provider_name::ProviderName;
+
+/// Where one connection's content comes from.
+#[derive(Debug, Clone)]
+pub enum ConnectionSource {
+    /// Compiled in. An installed file with this stem OVERRIDES its content
+    /// (the existing schema-gated rule) but does not introduce anything.
+    Bundled(&'static BundledSidecar),
+    /// Introduced by a file. Nothing reviewed this content, which is why the
+    /// loader applies rules to it that a bundled sidecar does not need.
+    Installed { path: PathBuf },
+}
+
+/// One connection the build knows about, by either route.
+#[derive(Debug, Clone)]
+pub struct ConnectionEntry {
+    pub name: ProviderName,
+    pub source: ConnectionSource,
+}
+
+impl ConnectionEntry {
+    /// Whether this connection's content came from a file rather than the
+    /// bundle. The rules that apply only to unreviewed content read this
+    /// rather than re-deriving it from the name.
+    pub fn is_introduced(&self) -> bool {
+        matches!(self.source, ConnectionSource::Installed { .. })
+    }
+}
+
+/// A file in the integrations directory that named no connection, and why.
+///
+/// Carried rather than logged, for the reason the rest of this crate carries
+/// its disclosures: a file the user put there deliberately, silently doing
+/// nothing, is the failure this code exists to refuse.
+#[derive(Debug, Clone)]
+pub struct RejectedFile {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+/// The presence axis, in render order.
+#[derive(Debug, Clone)]
+pub struct ConnectionRoster {
+    entries: Vec<ConnectionEntry>,
+    rejected: Vec<RejectedFile>,
+}
+
+impl ConnectionRoster {
+    /// Scan `dir` and union it with the bundle.
+    ///
+    /// A missing directory just means no installed files. A single unusable
+    /// file is rejected and disclosed, never fatal: one bad name must not take
+    /// down every other connection the user has.
+    pub fn scan(dir: &Path) -> anyhow::Result<Self> {
+        let installed = crate::integration_config::scan_installed_sidecars(dir)?;
+
+        let mut entries: Vec<ConnectionEntry> = BUNDLED_SIDECARS
+            .iter()
+            .map(|s| ConnectionEntry {
+                name: ProviderName::bundled(s.provider),
+                source: ConnectionSource::Bundled(s),
+            })
+            .collect();
+        let mut rejected = Vec::new();
+
+        // BTreeMap so introduced connections land in file-name order, which is
+        // the order the settings list appends them in.
+        let by_stem: BTreeMap<&String, &Vec<(PathBuf, String)>> = installed.iter().collect();
+        for (stem, files) in by_stem {
+            if crate::bundled_sidecars::bundled_sidecar(stem).is_some() {
+                // A bundled stem OVERRIDES content and introduces nothing, so
+                // it is already in the roster exactly once.
+                continue;
+            }
+            let name = match ProviderName::parse(stem) {
+                Ok(name) => name,
+                Err(e) => {
+                    for (path, _) in files {
+                        rejected.push(RejectedFile {
+                            path: path.clone(),
+                            reason: format!(
+                                "its file name is not a usable connection name: {e}. Rename the \
+                                 file; the name becomes a file path and a keychain account, so it \
+                                 may hold only lowercase letters, digits, '-' and '_'."
+                            ),
+                        });
+                    }
+                    continue;
+                }
+            };
+            // Two files for one introduced name: nothing can pick between
+            // them, and picking by scan order would be the silent choice this
+            // crate refuses. Both are rejected, and the name is NOT introduced.
+            if files.len() > 1 {
+                for (path, _) in files {
+                    rejected.push(RejectedFile {
+                        path: path.clone(),
+                        reason: format!(
+                            "'{name}' has {} installed files and there is no rule that picks \
+                             between them — delete all but one",
+                            files.len()
+                        ),
+                    });
+                }
+                continue;
+            }
+            let (path, _) = &files[0];
+            entries.push(ConnectionEntry {
+                name,
+                source: ConnectionSource::Installed { path: path.clone() },
+            });
+        }
+
+        Ok(Self { entries, rejected })
+    }
+
+    /// A roster of the bundle alone — what a caller with no directory to scan
+    /// gets, and what every pre-existing bundled-only path still sees.
+    pub fn bundled_only() -> Self {
+        Self {
+            entries: BUNDLED_SIDECARS
+                .iter()
+                .map(|s| ConnectionEntry {
+                    name: ProviderName::bundled(s.provider),
+                    source: ConnectionSource::Bundled(s),
+                })
+                .collect(),
+            rejected: Vec::new(),
+        }
+    }
+
+    pub fn entries(&self) -> &[ConnectionEntry] {
+        &self.entries
+    }
+
+    /// Files that named no connection. Every one is disclosed by the loader.
+    pub fn rejected(&self) -> &[RejectedFile] {
+        &self.rejected
+    }
+
+    /// The names, in render order.
+    pub fn names(&self) -> Vec<ProviderName> {
+        self.entries.iter().map(|e| e.name.clone()).collect()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&ConnectionEntry> {
+        self.entries.iter().find(|e| e.name == *name)
+    }
+}
+
+/// Every `${VAR}` name the text references, in order of appearance.
+///
+/// Reads the FILE TEXT rather than a list of known fields: a reference can sit
+/// in a call URL, an auth value, a query parameter or a child-process
+/// argument, and a rule that enumerated fields would silently miss the next
+/// place one can hide.
+pub fn referenced_vars(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        match after.find('}') {
+            Some(end) => {
+                let var = &after[..end];
+                if !var.is_empty() {
+                    out.push(var.to_string());
+                }
+                rest = &after[end + 1..];
+            }
+            // Unterminated: the expander refuses it later with its own
+            // message, and there is no name here to judge.
+            None => break,
+        }
+    }
+    out
+}
+
+/// The variable-name prefix an introduced connection owns.
+///
+/// `my-own-thing` owns `my_own_thing_`, because hyphen and underscore are one
+/// separator everywhere else a name is compared in this system. The trailing
+/// separator is what stops `evil` from owning `eviltwin_key`.
+pub fn secret_namespace_prefix(name: &ProviderName) -> String {
+    format!("{}_", fold_separators(name.as_str()))
+}
+
+/// Lowercase with `.` and `-` both folded to `_`, for COMPARING a connection
+/// name against a variable name.
+///
+/// Deliberately not `holon_secrets::secret_account`, which folds `.` only and
+/// is the keychain account IDENTITY: widening that would rename existing
+/// entries. Here nothing is stored, only compared, so a connection named
+/// `my-own-thing` can own `${MY_OWN_THING_TOKEN}` without touching where any
+/// secret lives.
+fn fold_separators(s: &str) -> String {
+    s.to_ascii_lowercase().replace(['.', '-'], "_")
+}
+
+/// Refuse an introduced connection that reaches for a secret outside its own
+/// namespace.
+///
+/// This is the whole defence against the one-line exfiltration: a dropped file
+/// naming another provider's credential in a URL it controls. A bundled
+/// sidecar is exempt — it is reviewed, and the convention would rename the
+/// variables every existing install already has.
+pub fn check_secret_namespace(name: &ProviderName, text: &str) -> Result<(), String> {
+    let prefix = secret_namespace_prefix(name);
+    for var in referenced_vars(text) {
+        let normalized = fold_separators(&var);
+        if !normalized.starts_with(&prefix) {
+            return Err(format!(
+                "it references ${{{var}}}, which is outside its own secret namespace. A \
+                 connection introduced by a file may reference only variables named \
+                 '{}*' (case-insensitively, with '-' and '_' alike) — otherwise a \
+                 dropped file could send another connection's credentials to an endpoint \
+                 it chose. Rename the variable, or put this connection's own secret under \
+                 '{}…' with `holon-secret set`.",
+                prefix.to_uppercase(),
+                prefix.to_uppercase()
+            ));
+        }
+    }
+    Ok(())
+}

@@ -177,15 +177,28 @@ pub enum ShareDegradedReason {
         /// renders one instruction that works instead of inventing its own.
         remedy: String,
     },
-    /// An installed sidecar names a provider this build does not ship. Presence
-    /// is settled at compile time, so nothing on disk can introduce a provider
-    /// and the file does nothing at all. `shared_tree_id` carries the file
-    /// stem.
+    /// A state file names a connection nothing provides — the build ships no
+    /// sidecar for it and no usable file introduces one. A leftover state file
+    /// after a rename or a deletion is the usual cause. `shared_tree_id`
+    /// carries the file stem.
     ///
-    /// All-clear: none — the build would have to ship the provider.
+    /// All-clear: none — a connection of that name has to start existing.
     IntegrationSidecarNotBundled {
         provider: String,
         installed_path: String,
+    },
+    /// A file NAMES a connection but cannot be used, so the connection does
+    /// not exist: a stale `schema_version`, a file that will not parse, a
+    /// reference to another connection's secret, or two files claiming one
+    /// name. Distinct from the case above, where nothing named it at all —
+    /// here the remedy is to fix the file the message points at, not to add a
+    /// provider. `shared_tree_id` carries the file stem.
+    ///
+    /// All-clear: none — the file has to change.
+    IntegrationSidecarUnusable {
+        provider: String,
+        installed_path: String,
+        why: String,
     },
     /// This device was paired to an owner AFTER it had been used on its own, so
     /// the store it now shows is the owner's plus the `blocks` it wrote here,
@@ -262,6 +275,7 @@ impl ShareDegradedReason {
     pub const INTEGRATION_NEEDS_AUTH: &'static str = "integration-needs-auth";
     pub const INTEGRATION_NOT_ENABLED: &'static str = "integration-not-enabled";
     pub const INTEGRATION_SIDECAR_NOT_BUNDLED: &'static str = "integration-sidecar-not-bundled";
+    pub const INTEGRATION_SIDECAR_UNUSABLE: &'static str = "integration-sidecar-unusable";
     pub const INTEGRATION_SIDECAR_SUPERSEDED: &'static str = "integration-sidecar-superseded";
     pub const PAIRING_REIMPORTED_LOCAL_CONTENT: &'static str = "pairing-reimported-local-content";
     pub const PAIRING_REIMPORT_DEFERRED: &'static str = "pairing-reimport-deferred";
@@ -289,6 +303,7 @@ impl ShareDegradedReason {
             Self::IntegrationSidecarSuperseded { .. } => Self::INTEGRATION_SIDECAR_SUPERSEDED,
             Self::IntegrationNotEnabled { .. } => Self::INTEGRATION_NOT_ENABLED,
             Self::IntegrationSidecarNotBundled { .. } => Self::INTEGRATION_SIDECAR_NOT_BUNDLED,
+            Self::IntegrationSidecarUnusable { .. } => Self::INTEGRATION_SIDECAR_UNUSABLE,
             Self::SnapshotSaveFailed(_) => Self::SNAPSHOT_SAVE_FAILED,
             Self::SnapshotLoadFailed(_) => Self::SNAPSHOT_LOAD_FAILED,
             Self::RehydrationFailed(_) => Self::REHYDRATION_FAILED,

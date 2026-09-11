@@ -159,6 +159,11 @@ fn disclose_ignored_sidecar(s: &IgnoredSidecar, bus: &DegradedSignalBus) {
             provider: s.provider.clone(),
             installed_path: s.installed_path.display().to_string(),
         },
+        IgnoredReason::Unusable { why } => ShareDegradedReason::IntegrationSidecarUnusable {
+            provider: s.provider.clone(),
+            installed_path: s.installed_path.display().to_string(),
+            why: why.clone(),
+        },
     };
     bus.emit(ShareDegraded {
         shared_tree_id: s.provider.clone(),
@@ -185,9 +190,16 @@ fn log_ignored_sidecar(s: &IgnoredSidecar) {
             enabling_state_file
         ),
         IgnoredReason::NotBundled => warn!(
-            "[McpIntegrationsModule] '{}' names provider '{}', which this build does not ship — \
-             it does nothing. Integrations are compiled in (crates/holon-mcp-client/src/\
-             bundled_sidecars.rs); add it there and rebuild, or delete the file.",
+            "[McpIntegrationsModule] '{}' refers to connection '{}', which nothing provides — \
+             this build ships no sidecar for it and no usable file introduces one. Delete the \
+             leftover file, or add a '{}.yaml' that declares this build's schema_version.",
+            s.installed_path.display(),
+            s.provider,
+            s.provider
+        ),
+        IgnoredReason::Unusable { why } => warn!(
+            "[McpIntegrationsModule] '{}' names connection '{}' but cannot be used, so that \
+             connection does not exist: {why}",
             s.installed_path.display(),
             s.provider
         ),
