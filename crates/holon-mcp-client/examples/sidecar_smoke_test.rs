@@ -133,7 +133,20 @@ async fn connect(
     rmcp::service::Peer<rmcp::RoleClient>,
     holon_mcp_client::McpRunningService,
 )> {
-    let token = cfg.auth.as_ref().and_then(|a| a.static_token.clone());
+    // The sidecar names the variable; the value comes from the environment.
+    // Resolved here rather than passed through, because a sidecar can only
+    // ever hold a reference.
+    let token = match cfg.auth.as_ref().and_then(|a| a.static_token.as_ref()) {
+        Some(secret) => Some(format!(
+            "{}{}",
+            secret.prefix(),
+            std::env::var(secret.var()).with_context(|| format!(
+                "the sidecar references ${{{}}}, which is not set in the environment",
+                secret.var()
+            ))?
+        )),
+        None => None,
+    };
     let transport = cfg
         .transport
         .as_ref()

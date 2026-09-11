@@ -508,7 +508,7 @@ utcp:
     - name: x
       tool_call_template:
         call_template_type: http
-        url: http://x/p
+        url: https://x/p
         http_method: GET
 holon:
   poll_interval: 90s

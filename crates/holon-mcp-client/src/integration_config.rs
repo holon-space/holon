@@ -26,6 +26,7 @@ use crate::mcp_sidecar::ToolConfig;
 use crate::redaction::Redactor;
 use crate::rest_oauth2::RestOAuth2Config;
 use crate::rest_transport::RestAuth;
+use crate::secret_ref::SecretRef;
 
 /// The sidecar keys a remedy message may send an author to.
 ///
@@ -177,10 +178,10 @@ pub struct RestAuthConfig {
     /// Static-header arm: the header name (e.g. `Authorization`).
     #[serde(default)]
     pub header: Option<String>,
-    /// Static-header arm: the header value; `${VAR}`-expanded at startup. Keep
-    /// the secret out of YAML.
+    /// Static-header arm: the header value, parsed as a reference and expanded
+    /// at startup. A literal here cannot parse — see [`SecretRef`].
     #[serde(default)]
-    pub value: Option<String>,
+    pub value: Option<SecretRef>,
     /// OAuth2 arm: refresh-token-grant configuration.
     #[serde(default)]
     pub oauth2: Option<RestOAuth2Config>,
@@ -201,7 +202,7 @@ impl RestAuthConfig {
         match (self.header, self.value, self.oauth2) {
             (Some(header), Some(value), None) => Ok(RestAuth::Static {
                 header,
-                value: expand_vars(&value, lookup, redactor)?,
+                value: expand_vars(&value.as_written(), lookup, redactor)?,
             }),
             (None, None, Some(oauth2)) => {
                 let provider = crate::rest_oauth2::build_provider(&oauth2, lookup, redactor, root)?;
@@ -224,7 +225,8 @@ impl RestAuthConfig {
 /// Set `static_token` for bearer auth, or `oauth: true` for OAuth 2.1.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthConfig {
-    pub static_token: Option<String>,
+    /// Parsed, so a literal cannot reach this field: see [`SecretRef`].
+    pub static_token: Option<SecretRef>,
     #[serde(default)]
     pub oauth: bool,
 }
@@ -355,7 +357,10 @@ fn build_rest_transport(
             tool.name.clone(),
             crate::rest_transport::RestCall {
                 method,
-                url: expand_vars(&tool.tool_call_template.url, lookup, &redactor)?,
+                url: parse_secure_url(
+                    &format!("the `url` of tool '{}'", tool.name),
+                    &expand_vars(&tool.tool_call_template.url, lookup, &redactor)?,
+                )?,
                 query: cfg.query,
                 format: cfg.format,
                 result_key: cfg.result_key,
@@ -376,6 +381,42 @@ fn build_rest_transport(
         },
         poll_interval: holon.poll_interval,
     })
+}
+
+/// Check one manual call's URL and hand it back unchanged.
+///
+/// A manual's calls carry the connection's auth header, so a cleartext URL
+/// puts the token on the wire for anyone on the path, and lets an on-path
+/// attacker choose the rows that reach the vault. Loopback is the exception
+/// for the reason the consent flow gives it (RFC 8252 §7.3): the request never
+/// leaves the machine.
+///
+/// The refusal names the TOOL and the scheme, never the URL. An expanded URL
+/// can BE the credential — the shopping sidecar's whole endpoint is a
+/// capability URL — so a message quoting it would write the secret into the
+/// log the refusal produces.
+pub(crate) fn parse_secure_url(field: &str, expanded: &str) -> anyhow::Result<String> {
+    let url = reqwest::Url::parse(expanded.trim()).map_err(|e| {
+        anyhow::anyhow!(
+            "{field} is not a valid URL ({e}); the URL itself is not quoted here because it may \
+             carry a credential"
+        )
+    })?;
+    anyhow::ensure!(
+        is_secure_url(&url),
+        "{field} uses {}://, but a connection must use https — a cleartext endpoint sends this \
+         connection's credentials in the clear and lets anyone on the path choose what lands in \
+         the vault. (http:// to a loopback address is the only exception.)",
+        url.scheme()
+    );
+    Ok(expanded.to_string())
+}
+
+/// The one rule, so the load-time guard and the redirect policy cannot drift:
+/// https anywhere, or http only to this machine.
+pub(crate) fn is_secure_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        || (url.scheme() == "http" && crate::oauth_bootstrap::is_loopback_host(url))
 }
 
 /// Resolves `${VAR}` references in integration config strings.
@@ -468,7 +509,7 @@ impl IntegrationFileConfig {
             Some(AuthConfig {
                 static_token: Some(token),
                 ..
-            }) => AuthMode::StaticToken(expand_vars(&token, lookup, &redactor)?),
+            }) => AuthMode::StaticToken(expand_vars(&token.as_written(), lookup, &redactor)?),
             // OAuth needs a credential store — caller must upgrade this.
             _ => AuthMode::None,
         };
@@ -492,8 +533,13 @@ impl IntegrationFileConfig {
                     .collect::<anyhow::Result<HashMap<_, _>>>()?,
             }
         } else if let Some(http) = mcp.http {
+            // The same wire as a manual call: this URI carries `auth_mode`'s
+            // token on every request, so it earns the same guard.
             McpTransport::Http {
-                uri: expand_vars(&http.uri, lookup, &redactor)?,
+                uri: parse_secure_url(
+                    "`transport.http.uri`",
+                    &expand_vars(&http.uri, lookup, &redactor)?,
+                )?,
             }
         } else if let Some(manual) = self.utcp {
             let holon = self.holon.unwrap_or_default();
@@ -1127,7 +1173,7 @@ transport:
     uri: "https://api.example.com/mcp"
 
 auth:
-  static_token: "sk-test-key"
+  static_token: "${TEST_API_KEY}"
 
 entities:
   task:
@@ -1150,7 +1196,10 @@ tools:
         assert!(transport.child_process.is_none());
 
         let auth = config.auth.as_ref().unwrap();
-        assert_eq!(auth.static_token.as_deref(), Some("sk-test-key"));
+        assert_eq!(
+            auth.static_token.as_ref().map(|t| t.var()),
+            Some("TEST_API_KEY")
+        );
         assert!(!auth.oauth);
 
         assert!(config.tools.contains_key("complete-task"));
@@ -1218,13 +1267,14 @@ transport:
   http:
     uri: "https://example.com/mcp"
 auth:
-  static_token: "my-key"
+  static_token: "${MY_KEY}"
 entities: {}
 "#;
         let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
         let mcp_config = config
-            .into_mcp_config(
+            .into_mcp_config_with(
                 "http-provider".into(),
+                &|name| (name == "MY_KEY").then(|| "my-key".to_string()),
                 &CredentialRoot::new("/tmp/holon-test-config"),
             )
             .unwrap();

@@ -298,11 +298,34 @@ impl std::fmt::Debug for RestCallSurface {
     }
 }
 
+/// A reqwest error plus its cause chain, with every URL stripped.
+///
+/// `reqwest`'s own `Display` gives only the outermost layer, so a redirect the
+/// policy refused reads as the bare "error following redirect" and the REASON
+/// — the only part that says what was wrong — is left in `source()`. Callers
+/// then see a failure with no cause, which is the swallowed-error shape this
+/// codebase refuses.
+///
+/// `without_url` is applied first so a URL that is itself a credential does
+/// not ride along; the cause chain is provider text and is redacted again by
+/// `safe` on the way out.
+fn describe_with_causes(e: reqwest::Error) -> String {
+    let stripped = e.without_url();
+    let mut out = stripped.to_string();
+    let mut cause: Option<&dyn std::error::Error> = std::error::Error::source(&stripped);
+    while let Some(c) = cause {
+        out.push_str(": ");
+        out.push_str(&c.to_string());
+        cause = c.source();
+    }
+    out
+}
+
 impl RestCallSurface {
     pub fn new(manual: RestManual) -> Self {
         Self {
             manual,
-            client: reqwest::Client::new(),
+            client: crate::secure_client::secure_http_client(),
         }
     }
 
@@ -481,7 +504,7 @@ impl RestCallSurface {
             self.err(format!(
                 "rest transport: {method} {} failed: {}",
                 self.safe_url(url),
-                e.without_url()
+                describe_with_causes(e)
             ))
         })?;
         let status = resp.status();

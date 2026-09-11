@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::bundled_sidecars::BUNDLED_SIDECARS;
+use crate::provider_name::ProviderName;
 
 /// Where one credential value lives. The state file records the LOCATION of a
 /// secret, never the secret — it is plain-text user config.
@@ -159,7 +160,15 @@ fn write_atomically(path: &Path, text: &str) -> anyhow::Result<()> {
 #[derive(Debug)]
 pub struct IntegrationConfigStore {
     dir: PathBuf,
-    states: HashMap<&'static str, Mutable<IntegrationState>>,
+    states: HashMap<ProviderName, Mutable<IntegrationState>>,
+    /// The presence axis IN ORDER — the bundle's own declaration order. Held
+    /// beside the map because the settings list renders in this order, so it
+    /// is user-visible and cannot be re-derived from an unordered map.
+    ///
+    /// Once a user file can introduce a connection, those APPEND here after
+    /// the bundle, in file-name order, so adding one never reshuffles the rows
+    /// above it.
+    order: Vec<ProviderName>,
 }
 
 impl IntegrationConfigStore {
@@ -173,6 +182,7 @@ impl IntegrationConfigStore {
     /// write used to leave behind.
     pub fn load(dir: &Path) -> anyhow::Result<Self> {
         let mut states = HashMap::new();
+        let mut order = Vec::with_capacity(BUNDLED_SIDECARS.len());
         for sidecar in BUNDLED_SIDECARS {
             let path = state_path_in(dir, sidecar.provider);
             let state = match std::fs::read_to_string(&path) {
@@ -195,11 +205,14 @@ impl IntegrationConfigStore {
                     )));
                 }
             };
-            states.insert(sidecar.provider, Mutable::new(state));
+            let name = ProviderName::bundled(sidecar.provider);
+            order.push(name.clone());
+            states.insert(name, Mutable::new(state));
         }
         Ok(Self {
             dir: dir.to_path_buf(),
             states,
+            order,
         })
     }
 
@@ -208,9 +221,15 @@ impl IntegrationConfigStore {
         &self.dir
     }
 
-    /// The providers this build ships — the presence axis, in full.
-    pub fn providers(&self) -> Vec<&'static str> {
-        BUNDLED_SIDECARS.iter().map(|s| s.provider).collect()
+    /// The providers this store holds state for — the presence axis, in full,
+    /// in the order the settings list renders them.
+    ///
+    /// Read off the recorded order, never off the map: the map is unordered,
+    /// and sorting its keys is a DIFFERENT answer that merely coincides with
+    /// this one while the bundle is declared alphabetically. Pinned by
+    /// `tests/provider_order.rs`.
+    pub fn providers(&self) -> Vec<ProviderName> {
+        self.order.clone()
     }
 
     /// The reactive cell for `provider`, for consumers that want a signal.
@@ -263,7 +282,11 @@ impl IntegrationConfigStore {
             format!(
                 "This build ships no sidecar for integration '{provider}' — it has no state. \
                  Bundled: {}",
-                self.providers().join(", ")
+                self.providers()
+                    .iter()
+                    .map(ProviderName::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         })
     }

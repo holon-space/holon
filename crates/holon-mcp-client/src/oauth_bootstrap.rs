@@ -249,7 +249,7 @@ pub struct AuthorizationRequest {
 /// silently excluded every IPv6 loopback. Parsing also keeps the exemption
 /// exact — `localhost.evil.com` and `127.0.0.1.evil.com` are ordinary domains
 /// that resolve wherever their owner points them, and neither is loopback.
-fn is_loopback_host(url: &reqwest::Url) -> bool {
+pub(crate) fn is_loopback_host(url: &reqwest::Url) -> bool {
     match url.host() {
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
         Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
@@ -783,7 +783,7 @@ pub async fn configure_integration(
     timeout: Duration,
     root: &crate::credential_path::CredentialRoot,
 ) -> anyhow::Result<()> {
-    let http = &reqwest::Client::new();
+    let http = &crate::secure_client::secure_http_client();
     // Everything that can be known before the user is involved is checked
     // first: sending someone to a consent page and only then discovering the
     // sidecar cannot store the result wastes a consent that some providers

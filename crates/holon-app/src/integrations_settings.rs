@@ -19,6 +19,7 @@ use futures_signals::signal::ReadOnlyMutable;
 use holon_api::icon_name::IconName;
 use holon_mcp_client::CredentialRoot;
 use holon_mcp_client::IntegrationConfigStore;
+use holon_mcp_client::ProviderName;
 use holon_mcp_client::integration_state::Configuration;
 use holon_mcp_client::integration_state::IntegrationState;
 use holon_mcp_client::oauth_bootstrap::BrowserOpener;
@@ -52,10 +53,9 @@ impl ConfigStatus {
 /// One row of the integrations settings list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegrationRow {
-    /// The provider id — the same `&'static str` the bundle and the store use,
-    /// so a row can be handed straight back to
-    /// [`IntegrationsSettingsVm::set_enabled`].
-    pub provider: &'static str,
+    /// The provider id — the same parsed name the store keys on, so a row can
+    /// be handed straight back to [`IntegrationsSettingsVm::set_enabled`].
+    pub provider: ProviderName,
     pub enabled: bool,
     pub status: ConfigStatus,
     /// Whether [`IntegrationsSettingsVm::configure`] has a consent flow to run
@@ -209,27 +209,32 @@ impl IntegrationsSettingsVm {
         self.store.state_path(provider)
     }
 
-    /// Every bundled integration, in bundle order.
+    /// Every integration the store knows, ordered by name.
     ///
     /// The list is the PRESENCE axis in full: a provider that is off, or that
     /// the user has never touched, is exactly what the settings surface exists
-    /// to show. Every name comes from the store's own bundle, so a lookup here
-    /// cannot miss — a miss means the store's two views of the bundle have
+    /// to show. Every name comes from the store's own map, so a lookup here
+    /// cannot miss — a miss means the store's two views of presence have
     /// diverged, which no caller could recover from.
+    ///
+    /// Ordered by name rather than by bundle position: presence is becoming a
+    /// union of the bundle and the user's own files, and a file that arrived
+    /// after the bundle was compiled has no position in it.
     pub fn rows(&self) -> Vec<IntegrationRow> {
         self.store
             .providers()
             .into_iter()
             .map(|provider| {
-                let state = self.store.get(provider).unwrap_or_else(|e| {
-                    panic!("Bundled provider '{provider}' has no state cell: {e:#}")
-                });
-                let presentation = self.presentation(provider);
+                let state = self
+                    .store
+                    .get(&provider)
+                    .unwrap_or_else(|e| panic!("Provider '{provider}' has no state cell: {e:#}"));
+                let presentation = self.presentation(&provider);
                 IntegrationRow {
+                    configurable: self.oauth2_config(&provider).is_ok(),
                     provider,
                     enabled: state.enabled,
                     status: ConfigStatus::of(&state.configuration),
-                    configurable: self.oauth2_config(provider).is_ok(),
                     display_name: presentation.display_name,
                     icon: presentation.icon,
                     default_view: presentation.default_view,
@@ -245,7 +250,7 @@ impl IntegrationsSettingsVm {
     /// same file as ignored and this is the second voice on one fact, not the
     /// only one. Refusing to produce a row here instead would take the whole
     /// Integrations section down over one unparseable installed file.
-    fn presentation(&self, provider: &'static str) -> Presentation {
+    fn presentation(&self, provider: &str) -> Presentation {
         let derived = || Presentation {
             display_name: humanize_provider_name(provider),
             icon: IconName::parse(DEFAULT_ICON)
@@ -433,14 +438,15 @@ impl IntegrationsSettingsVm {
     /// Each bundled provider with the signal behind its row, for a caller that
     /// wants to react when a state changes outside its own toggle (another
     /// window, an OAuth bootstrap, a hand-edited state file).
-    pub fn signals(&self) -> Vec<(&'static str, ReadOnlyMutable<IntegrationState>)> {
+    pub fn signals(&self) -> Vec<(ProviderName, ReadOnlyMutable<IntegrationState>)> {
         self.store
             .providers()
             .into_iter()
             .map(|provider| {
-                let state = self.store.state(provider).unwrap_or_else(|e| {
-                    panic!("Bundled provider '{provider}' has no state cell: {e:#}")
-                });
+                let state = self
+                    .store
+                    .state(&provider)
+                    .unwrap_or_else(|e| panic!("Provider '{provider}' has no state cell: {e:#}"));
                 (provider, state)
             })
             .collect()

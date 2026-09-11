@@ -547,11 +547,16 @@ impl Module for McpIntegrationsModule {
                 // `add_frontend`, opened by the `post_ready` scan barrier.
                 let sync_gate: SyncGate = (*resolver.resolve::<SyncGate>()).clone();
 
+                // The keychain is opened once per boot and consulted between
+                // the environment and the plaintext preference.
+                let secret_keychain =
+                    holon_secrets::platform_keychain(holon_secrets::INTEGRATION_SECRET_SERVICE);
                 let var_lookup = holon_frontend::integration_vars::preference_var_lookup(
                     &resolver
                         .resolve::<holon_frontend::config::HolonConfig>()
                         .preferences,
                     |name| std::env::var(name).ok(),
+                    secret_keychain.as_ref(),
                 );
 
                 let mut names = Vec::new();

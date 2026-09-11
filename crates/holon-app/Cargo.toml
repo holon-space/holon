@@ -27,6 +27,7 @@ holon-loro.workspace = true
 holon-loro-wiring.workspace = true
 holon-turso.workspace = true
 holon-mcp-client.workspace = true
+holon-secrets.workspace = true
 # The shopping peer binds the `rest` transport's call surface, whose signatures
 # are rmcp types. It lives here, not in holon-kitchen: that crate is in the
 # worker's wasm graph, and rmcp's child-process transport pulls tokio features

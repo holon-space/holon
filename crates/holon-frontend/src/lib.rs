@@ -450,6 +450,18 @@ impl FrontendSession<()> {
     /// constructor — all backend assembly (Turso DI, no-Turso Loro stack)
     /// lives in the wiring crate and funnels through here.
     pub fn from_parts(parts: SessionParts) -> Self {
+        // Derived here, not asked of the caller: the schema and the config
+        // meet at exactly this point, and a wiring crate that forgot would
+        // write credentials into plaintext with nothing to notice.
+        // A schema defect, not user input: two secret keys sharing one keychain
+        // account would make one integration authenticate with the other's
+        // credential, and it would present as a wrong-token failure nobody
+        // could trace back to a preference name. Loud at startup instead.
+        preferences::assert_secret_accounts_are_distinct(&parts.preference_defs).unwrap_or_else(
+            |e| panic!("[FrontendSession] the preference schema is unusable: {e:#}"),
+        );
+        let mut holon_config = parts.holon_config;
+        holon_config.set_secret_keys(preferences::secret_keys(&parts.preference_defs));
         Self {
             query_engine: parts.query_engine,
             block_query: parts.block_query,
@@ -463,7 +475,7 @@ impl FrontendSession<()> {
             _memory_monitor: memory_monitor::MemoryMonitorHandle::start(),
             preference_defs: parts.preference_defs,
             theme_registry: parts.theme_registry,
-            holon_config: Mutex::new(parts.holon_config),
+            holon_config: Mutex::new(holon_config),
             config_dir: parts.config_dir,
             locked_keys: parts.locked_keys,
             boot_report: parts.boot_report,
@@ -700,6 +712,12 @@ impl<T> FrontendSession<T> {
         value: toml::Value,
     ) -> anyhow::Result<()> {
         let mut guard = self.holon_config.lock().unwrap();
+        // A credential goes to the OS keychain. It is ALSO kept in the
+        // in-memory map so this session behaves as before; `save_runtime`
+        // strips it from what reaches `holon.toml`.
+        if guard.is_secret_preference(key) {
+            store_secret_preference(key, &value)?;
+        }
         guard.set_preference(key, value);
         guard.save_runtime(&self.config_dir)
     }
@@ -982,6 +1000,42 @@ impl<T> FrontendSession<T> {
             .lookup_block_path(block_id)
             .await
     }
+}
+
+/// Put a secret preference's value into the OS keychain, under the account the
+/// `${VAR}` resolver reads.
+///
+/// An empty value CLEARS the entry rather than storing a blank: a user who
+/// empties the field means "this is not configured", and an empty stored
+/// secret reads as unset everywhere else anyway.
+///
+/// Fails loud. A secret the user believes is saved but that never reached the
+/// keychain is the silent-degradation failure this crate refuses, and the
+/// caller surfaces the error the same way it surfaces a failed config write.
+/// No message here quotes the value.
+#[cfg(not(target_arch = "wasm32"))]
+fn store_secret_preference(key: &preferences::PrefKey, value: &toml::Value) -> anyhow::Result<()> {
+    let account = integration_vars::normalize_var_name(key.as_str());
+    let keychain = holon_secrets::platform_keychain(holon_secrets::INTEGRATION_SECRET_SERVICE);
+    let text = value.as_str().unwrap_or_default();
+    if text.is_empty() {
+        return keychain.delete(&account).map_err(|e| {
+            anyhow::anyhow!(
+                "could not clear the stored secret for '{key}' from the keychain: {e:#}"
+            )
+        });
+    }
+    keychain.store(&account, text.as_bytes()).map_err(|e| {
+        anyhow::anyhow!(
+            "could not save '{key}' to the keychain, so it is NOT stored: {e:#}. The value was              not written to holon.toml either, because that file is plaintext."
+        )
+    })
+}
+
+/// On wasm there is no OS keychain, and no integration reads one.
+#[cfg(target_arch = "wasm32")]
+fn store_secret_preference(key: &preferences::PrefKey, _value: &toml::Value) -> anyhow::Result<()> {
+    anyhow::bail!("'{key}' is a credential and this platform has no keychain to store it in")
 }
 
 #[cfg(test)]

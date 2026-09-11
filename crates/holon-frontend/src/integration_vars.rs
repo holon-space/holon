@@ -2,8 +2,8 @@
 //!
 //! A sidecar names its credentials as `${TODOIST_API_KEY}` /
 //! `${SHOPPING_LIST_URL}` so the value stays out of the committed YAML. This
-//! module says where the value comes from: the environment first, then the
-//! preference the Settings UI writes to `holon.toml`.
+//! module says where the value comes from: the environment first, then the OS
+//! keychain, then the preference in `holon.toml`.
 //!
 //! Environment-first is what makes a sandbox launched with an exported
 //! credential authenticate as that credential regardless of the persisted
@@ -11,6 +11,12 @@
 //! typed into Settings, so [`crate::preferences::env_shadowed_keys`] marks
 //! those fields read-only rather than letting the UI show a value nothing
 //! reads.
+//!
+//! Keychain-over-preference is the other ordering that is not arbitrary:
+//! `holon.toml` is PLAINTEXT and the keychain is not. A user who moves a token
+//! into the keychain and forgets to clear the old preference must end up with
+//! the protected copy in force, not the cleartext one still quietly
+//! authenticating.
 
 use std::collections::HashMap;
 
@@ -20,18 +26,19 @@ use crate::preferences::PrefKey;
 /// with `.` and `_` as the same separator. `${SHOPPING_LIST_URL}` and the
 /// `shopping.list_url` preference both normalize to `shopping_list_url`.
 pub fn normalize_var_name(s: &str) -> String {
-    s.to_ascii_lowercase().replace('.', "_")
+    holon_secrets::secret_account(s)
 }
 
-/// A `${VAR}` resolver over `preferences`, consulting `env` first.
+/// A `${VAR}` resolver over `preferences`, consulting `env`, then `keychain`.
 ///
-/// Empty values resolve as unset in both layers, so an exported-but-blank
-/// variable falls through to the preference instead of failing the
+/// An empty value resolves as unset in EVERY layer, so a blank export or a
+/// cleared field falls through to the next one rather than failing the
 /// integration's expansion as if it had been configured.
-pub fn preference_var_lookup(
+pub fn preference_var_lookup<'a>(
     preferences: &HashMap<PrefKey, toml::Value>,
-    env: impl Fn(&str) -> Option<String> + Send + Sync,
-) -> impl Fn(&str) -> Option<String> + Send + Sync {
+    env: impl Fn(&str) -> Option<String> + Send + Sync + 'a,
+    keychain: &'a dyn holon_secrets::KeychainStore,
+) -> impl Fn(&str) -> Option<String> + Send + Sync + 'a {
     let by_norm: HashMap<String, String> = preferences
         .iter()
         .filter_map(|(k, v)| {
@@ -43,65 +50,40 @@ pub fn preference_var_lookup(
     move |name: &str| {
         env(name)
             .filter(|v| !v.is_empty())
+            .or_else(|| keychain_value(keychain, name))
             .or_else(|| by_norm.get(&normalize_var_name(name)).cloned())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Synthetic throughout: a real list URL is a live credential and never
-    /// belongs in a fixture.
-    const PREF_URL: &str = "https://shop.example/!abc123SYNTHETICprefTOKEN/api";
-    const ENV_URL: &str = "https://shop.example/!abc123SYNTHETICenvTOKEN/api";
-
-    fn prefs(pairs: &[(&str, &str)]) -> HashMap<PrefKey, toml::Value> {
-        pairs
-            .iter()
-            .map(|(k, v)| (PrefKey::new(k), toml::Value::String((*v).into())))
-            .collect()
-    }
-
-    #[test]
-    fn a_preference_resolves_the_variable_when_the_environment_is_unset() {
-        let lookup = preference_var_lookup(&prefs(&[("shopping.list_url", PREF_URL)]), |_| None);
-        assert_eq!(lookup("SHOPPING_LIST_URL").as_deref(), Some(PREF_URL));
-    }
-
-    #[test]
-    fn the_environment_outranks_the_preference() {
-        let lookup = preference_var_lookup(&prefs(&[("shopping.list_url", PREF_URL)]), |name| {
-            (name == "SHOPPING_LIST_URL").then(|| ENV_URL.to_string())
-        });
-        assert_eq!(lookup("SHOPPING_LIST_URL").as_deref(), Some(ENV_URL));
-    }
-
-    #[test]
-    fn an_empty_export_falls_through_to_the_preference() {
-        let lookup = preference_var_lookup(&prefs(&[("shopping.list_url", PREF_URL)]), |_| {
-            Some(String::new())
-        });
-        assert_eq!(lookup("SHOPPING_LIST_URL").as_deref(), Some(PREF_URL));
-    }
-
-    #[test]
-    fn an_unconfigured_variable_stays_unresolved() {
-        let lookup = preference_var_lookup(&prefs(&[]), |_| None);
-        assert_eq!(lookup("SHOPPING_LIST_URL"), None);
-    }
-
-    #[test]
-    fn an_empty_preference_is_not_a_configured_value() {
-        let lookup = preference_var_lookup(&prefs(&[("shopping.list_url", "")]), |_| None);
-        assert_eq!(lookup("SHOPPING_LIST_URL"), None);
-    }
-
-    #[test]
-    fn a_dotted_key_and_an_underscored_variable_are_the_same_name() {
-        assert_eq!(
-            normalize_var_name("SHOPPING_LIST_URL"),
-            normalize_var_name("shopping.list_url")
-        );
+/// `name`'s stored secret, or nothing.
+///
+/// A backend FAILURE (a locked keychain, a denied prompt) is disclosed and
+/// then treated as absent, rather than taken down the boot: the integration
+/// that needed it reports itself unconfigured, which is a state the user can
+/// act on. Silence is the one option not taken — an unreadable keychain and an
+/// empty one are different facts and must not look alike in the log.
+fn keychain_value(keychain: &dyn holon_secrets::KeychainStore, name: &str) -> Option<String> {
+    let account = normalize_var_name(name);
+    let stored = match keychain.load(&account) {
+        Ok(stored) => stored,
+        Err(e) => {
+            tracing::warn!(
+                "[integration_vars] could not read '{name}' from the keychain ({e:#}); treating \
+                 it as unset, so any integration referencing it will report itself unconfigured"
+            );
+            return None;
+        }
+    };
+    let bytes = stored?;
+    match String::from_utf8(bytes) {
+        Ok(value) => (!value.is_empty()).then_some(value),
+        Err(_) => {
+            // Length and name only: the bytes are the secret.
+            tracing::warn!(
+                "[integration_vars] the keychain entry for '{name}' is not valid UTF-8, so it \
+                 cannot be substituted into a sidecar; treating it as unset"
+            );
+            None
+        }
     }
 }

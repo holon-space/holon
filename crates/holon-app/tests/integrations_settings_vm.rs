@@ -38,8 +38,12 @@ use holon_mcp_client::integration_state::CredentialRef;
 use holon_mcp_client::integration_state::Credentials;
 use holon_mcp_client::integration_state::IntegrationState;
 
-/// The providers this build ships, in bundle order — spelled out rather than
+/// The providers this build ships, ordered by name — spelled out rather than
 /// read from `BUNDLED_SIDECARS` so the test states what the user must see.
+///
+/// The bundle happens to be declared in this same order, so nothing here
+/// distinguishes the two. The list the VM produces is sorted by name, because
+/// a connection introduced by a user file has no position in the bundle.
 const BUNDLED: &[&str] = &[
     "claude-history",
     "gcal",
@@ -77,11 +81,11 @@ fn the_list_is_every_bundled_provider_off_and_unconfigured_on_a_clean_vault() {
     let (vm, _store) = vm_over(dir.path());
 
     let rows = vm.rows();
-    let providers: Vec<&str> = rows.iter().map(|r| r.provider).collect();
+    let providers: Vec<&str> = rows.iter().map(|r| r.provider.as_str()).collect();
     assert_eq!(
         providers, BUNDLED,
         "the settings list must show the presence axis in full — every bundled \
-         provider, in bundle order"
+         provider, ordered by name"
     );
     for row in &rows {
         assert!(

@@ -200,6 +200,32 @@ pub struct PreferenceDef {
     pub env_override: Option<&'static str>,
 }
 
+impl PreferenceDef {
+    /// A minimal secret def, for tests that exercise schema-level rules
+    /// (collisions) without standing up a whole realistic definition.
+    pub fn secret_for_test(key: PrefKey) -> Self {
+        Self::for_test(key, PrefType::Secret)
+    }
+
+    /// The same, for a non-secret key.
+    pub fn text_for_test(key: PrefKey) -> Self {
+        Self::for_test(key, PrefType::Text)
+    }
+
+    fn for_test(key: PrefKey, pref_type: PrefType) -> Self {
+        Self {
+            key,
+            label: "test".into(),
+            description: "test".into(),
+            section: PrefSection::new("Test"),
+            pref_type,
+            default: toml::Value::String(String::new()),
+            requires_restart: false,
+            env_override: None,
+        }
+    }
+}
+
 /// The keys whose declared [`PreferenceDef::env_override`] is set in `env`, so
 /// the value the user sees in Settings is NOT the one the integration uses.
 ///
@@ -219,6 +245,50 @@ pub fn env_shadowed_keys(
         })
         .map(|def| def.key.clone())
         .collect()
+}
+
+/// The keys whose value is a credential, so it belongs in the OS keychain and
+/// never in plaintext `holon.toml`.
+///
+/// Derived from the schema rather than listed separately: a new secret field
+/// is protected by declaring its type, with nothing else to remember.
+pub fn secret_keys(defs: &[PreferenceDef]) -> HashSet<PrefKey> {
+    defs.iter()
+        .filter(|def| matches!(def.pref_type, PrefType::Secret))
+        .map(|def| def.key.clone())
+        .collect()
+}
+
+/// Refuse a schema in which two SECRET keys would share one keychain account.
+///
+/// The account is the normalized key, and normalization deliberately folds `.`
+/// into `_` and lowercases, because a sidecar's `${SHOPPING_LIST_URL}` and the
+/// preference `shopping.list_url` must address ONE entry — that collapse is
+/// the mechanism, not a bug, and
+/// `crates/holon-app/tests/settings_shopping_list_url_credential.rs` has
+/// asserted it since before the keychain existed.
+///
+/// The same collapse applied to two DISTINCT secret keys is a defect: the
+/// second write silently overwrites the first and one integration ends up
+/// authenticating with the other's credential. The mapping cannot tell the two
+/// situations apart, so the SCHEMA is what must not contain such a pair, and
+/// this says so loudly at startup instead of leaving it to be discovered as a
+/// mysterious wrong-credential failure.
+pub fn assert_secret_accounts_are_distinct(defs: &[PreferenceDef]) -> anyhow::Result<()> {
+    let mut seen: HashMap<String, &PrefKey> = HashMap::new();
+    for def in defs {
+        if !matches!(def.pref_type, PrefType::Secret) {
+            continue;
+        }
+        let account = holon_secrets::secret_account(def.key.as_str());
+        if let Some(previous) = seen.insert(account.clone(), &def.key) {
+            anyhow::bail!(
+                "preference keys '{previous}' and '{}' are both secrets and both map to the                  keychain account '{account}', so whichever is saved last would silently                  overwrite the other and one integration would authenticate with the other's                  credential. Rename one: keys that differ only in '.' versus '_', or in case,                  are the same account.",
+                def.key
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Build the complete preference schema.

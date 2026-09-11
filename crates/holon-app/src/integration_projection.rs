@@ -127,13 +127,13 @@ impl IntegrationStateProjector {
                      default_view = excluded.default_view, \
                      updated_at = excluded.updated_at",
                     vec![
-                        Value::String(integration_row_id(row.provider)),
+                        Value::String(integration_row_id(&row.provider)),
                         Value::String(row.provider.to_string()),
                         Value::Integer(i64::from(row.enabled)),
                         Value::String(IntegrationStatus::Pending.label().to_string()),
                         Value::String(config_status_value(row.status).to_string()),
                         Value::Integer(i64::from(row.configurable)),
-                        Value::String(self.configure_progress(row.provider)),
+                        Value::String(self.configure_progress(&row.provider)),
                         Value::String(row.display_name.clone()),
                         Value::String(row.icon.as_str().to_string()),
                         row.default_view.clone().map_or(Value::Null, Value::String),
@@ -153,7 +153,7 @@ impl IntegrationStateProjector {
         // never reach the statement as sql.
         let projected_ids: Vec<String> = rows
             .iter()
-            .map(|r| integration_row_id(r.provider))
+            .map(|r| integration_row_id(&r.provider))
             .collect();
         let placeholders = vec!["?"; projected_ids.len()].join(", ");
         self.db
@@ -215,7 +215,7 @@ impl IntegrationStateProjector {
         for (provider, signal) in self.vm.signals() {
             self.clone().reproject_on(signal.signal_cloned(), shutdown);
             self.clone().reproject_on(
-                self.vm.configure_progress(provider).signal_cloned(),
+                self.vm.configure_progress(&provider).signal_cloned(),
                 shutdown,
             );
         }

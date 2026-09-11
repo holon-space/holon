@@ -92,6 +92,25 @@ impl KeychainStore for UnavailableKeychainStore {
     }
 }
 
+/// Keychain service holding the `${VAR}` secrets an integration sidecar
+/// references.
+///
+/// One service for all of them, with the variable name as the account: a
+/// sidecar names `${TODOIST_API_KEY}`, so the variable IS the identity, and a
+/// per-provider service would make the same token two entries once two
+/// sidecars reference it.
+pub const INTEGRATION_SECRET_SERVICE: &str = "holon-integrations";
+
+/// The account name a `${VAR}` reference is filed under.
+///
+/// Lowercase with `.` folded to `_`, so `${TODOIST_API_KEY}` and the
+/// `todoist.api_key` preference address ONE entry. This is the canonical
+/// definition; `holon_frontend::integration_vars::normalize_var_name`
+/// delegates here so the two cannot drift into addressing different accounts.
+pub fn secret_account(var: &str) -> String {
+    var.to_ascii_lowercase().replace('.', "_")
+}
+
 /// The backend for the current platform, filing every secret under `service`.
 pub fn platform_keychain(service: &str) -> Box<dyn KeychainStore> {
     #[cfg(target_os = "macos")]

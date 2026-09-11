@@ -276,7 +276,7 @@ impl OAuth2TokenProvider {
             client_secret,
             refresh_token,
             scopes: cfg.scopes.clone(),
-            client: reqwest::Client::new(),
+            client: crate::secure_client::secure_http_client(),
             cached: Mutex::new(None),
             redactor: redactor.clone(),
         })

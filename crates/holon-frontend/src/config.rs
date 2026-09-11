@@ -56,6 +56,14 @@ pub struct HolonConfig {
     #[serde(skip)]
     pub config_dir: Option<PathBuf>,
 
+    /// Preference keys whose value is a SECRET and therefore never written to
+    /// `holon.toml`, which is plaintext. Populated at startup from the
+    /// preference schema; `#[serde(skip)]` because it is a fact about the
+    /// schema, not user config.
+    #[cfg_attr(not(target_arch = "wasm32"), arg(skip))]
+    #[serde(skip)]
+    pub secret_keys: HashSet<PrefKey>,
+
     /// Database file path (default: `{config_dir}/holon.db`)
     #[cfg_attr(not(target_arch = "wasm32"), arg(long, env = "HOLON_DB_PATH"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -697,9 +705,14 @@ impl HolonConfig {
             };
 
             let our_toml = toml::to_string_pretty(self).context("Failed to serialize config")?;
-            let our_table: toml::Table = our_toml
+            let mut our_table: toml::Table = our_toml
                 .parse::<toml::Table>()
                 .context("Failed to re-parse serialized config")?;
+
+            // A credential never reaches this file. Stripped HERE, at the one
+            // place bytes are written, rather than at each call site that
+            // might set one — the keychain is where the value went.
+            self.strip_secret_preferences(&mut our_table);
 
             for (k, v) in our_table {
                 table.insert(k, v);
@@ -714,6 +727,37 @@ impl HolonConfig {
                 .with_context(|| format!("Failed to write {}", path.display()))?;
             Ok(())
         }
+    }
+
+    /// Remove every declared secret key from a serialized config table.
+    ///
+    /// Operates on the TABLE rather than on `self`: the in-memory map keeps
+    /// the value for the running session (the integration that needs it is
+    /// already built from it), and only the on-disk copy is denied.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn strip_secret_preferences(&self, table: &mut toml::Table) {
+        let Some(toml::Value::Table(prefs)) = table.get_mut("preferences") else {
+            return;
+        };
+        for key in &self.secret_keys {
+            prefs.remove(key.as_str());
+        }
+    }
+
+    /// Declare which preference keys hold secrets.
+    ///
+    /// Called once at startup from the preference schema. Until it is called
+    /// every key counts as ordinary config, which is the safe direction only
+    /// because the caller is the composition root and cannot forget without
+    /// the settings surface losing its secret fields too.
+    pub fn set_secret_keys(&mut self, keys: HashSet<PrefKey>) {
+        self.secret_keys = keys;
+    }
+
+    /// Whether `key`'s value belongs in the keychain rather than in
+    /// `holon.toml`.
+    pub fn is_secret_preference(&self, key: &PrefKey) -> bool {
+        self.secret_keys.contains(key)
     }
 
     /// Read a preference value, returning `None` if not set.

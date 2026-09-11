@@ -28,6 +28,7 @@ use holon_core::Result;
 use holon_core::storage::types::StorageEntity;
 use holon_filesystem::sync_ports::BlockReader;
 use holon_mcp_client::IntegrationConfigStore;
+use holon_mcp_client::ProviderName;
 use holon_mcp_client::integration_config::provider_content;
 use holon_mcp_client::oauth_bootstrap::BrowserOpener;
 use holon_mcp_client::oauth_bootstrap::DEFAULT_CONSENT_TIMEOUT;
@@ -266,7 +267,7 @@ impl IntegrationsOperationProvider {
     /// as a click that does nothing: no `default_view` in the sidecar, a
     /// sidecar that will not read, and a `default_view` naming a block the
     /// store does not hold.
-    async fn open_default_view(&self, provider: &'static str) -> Result<OperationResult> {
+    async fn open_default_view(&self, provider: &ProviderName) -> Result<OperationResult> {
         let content = provider_content(self.store.dir(), provider).map_err(|e| {
             format!(
                 "IntegrationsOperationProvider: could not read '{provider}'s sidecar to find its \
@@ -331,16 +332,19 @@ impl IntegrationsOperationProvider {
     /// [`DEFAULT_CONSENT_TIMEOUT`], so awaiting it here would hold the
     /// dispatcher for minutes. Its outcome is observable on the row through the
     /// view model's progress cell, which the mirror projects.
-    fn start_consent_flow(&self, provider: &'static str) {
+    ///
+    /// Takes the name BY VALUE: the flow outlives this call, so a borrowed
+    /// name would have to be `'static`, which a name read off disk is not.
+    fn start_consent_flow(&self, provider: ProviderName) {
         let vm = self.vm.clone();
         let browser = self.browser.clone();
         self.spawner.spawn(Box::pin(async move {
             if let Err(e) = vm
-                .configure(provider, browser.as_ref(), DEFAULT_CONSENT_TIMEOUT)
+                .configure(&provider, browser.as_ref(), DEFAULT_CONSENT_TIMEOUT)
                 .await
             {
                 tracing::warn!(
-                    provider,
+                    provider = %provider,
                     "the consent flow for '{provider}' failed: {e:#} (the row's \
                      configure_progress carries the same reason)"
                 );
@@ -353,7 +357,7 @@ impl IntegrationsOperationProvider {
     /// Both refusals name what arrived AND what would have been accepted: an
     /// id that reaches here at all came from a rendered row, so a mismatch is a
     /// wiring bug somebody has to locate, not user error.
-    fn provider_of(&self, raw: &str) -> Result<&'static str> {
+    fn provider_of(&self, raw: &str) -> Result<ProviderName> {
         let Some((scheme, provider)) = raw.split_once(':') else {
             return Err(format!(
                 "IntegrationsOperationProvider: id {raw:?} is not an entity URI; expected \
@@ -371,7 +375,7 @@ impl IntegrationsOperationProvider {
         self.store
             .providers()
             .into_iter()
-            .find(|p| *p == provider)
+            .find(|p| p == provider)
             .ok_or_else(|| {
                 format!(
                     "IntegrationsOperationProvider: {provider:?} is not an integration this build \
@@ -423,14 +427,14 @@ impl OperationProvider for IntegrationsOperationProvider {
         let provider = self.provider_of(raw_id)?;
 
         if op_name == BEGIN_OAUTH {
-            self.start_consent_flow(provider);
+            self.start_consent_flow(provider.clone());
             return Ok(OperationResult::declared_irreversible(
                 vec![],
                 "a consent grant lives with the provider, not in the content undo stack",
             ));
         }
         if op_name == OPEN_DEFAULT_VIEW {
-            return self.open_default_view(provider).await;
+            return self.open_default_view(&provider).await;
         }
         if op_name != "set_field" {
             return Err(format!(
@@ -456,10 +460,10 @@ impl OperationProvider for IntegrationsOperationProvider {
         let enabled = parse_decision(params.get("value"))?;
         let was = self
             .store
-            .get(provider)
+            .get(&provider)
             .map_err(|e| format!("IntegrationsOperationProvider: reading '{provider}': {e:#}"))?
             .enabled;
-        self.vm.set_enabled(provider, enabled).map_err(|e| {
+        self.vm.set_enabled(&provider, enabled).map_err(|e| {
             format!(
                 "IntegrationsOperationProvider: could not store the decision for '{provider}': \
                  {e:#}"
@@ -468,7 +472,7 @@ impl OperationProvider for IntegrationsOperationProvider {
 
         Ok(OperationResult::declared_irreversible(
             vec![holon_core::FieldDelta::new(
-                integration_row_id(provider),
+                integration_row_id(&provider),
                 ENABLED_FIELD,
                 Value::Boolean(was),
                 Value::Boolean(enabled),

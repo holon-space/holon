@@ -48,6 +48,7 @@ holon-oracles.workspace = true
 # the org parser and the keyword vocabulary it must agree with; the editor VM is
 # its typing-side call site.
 holon-org-format.workspace = true
+holon-secrets.workspace = true
 holon-pbt-core = { path = "../holon-pbt-core", optional = true }
 async-trait.workspace = true
 futures.workspace = true

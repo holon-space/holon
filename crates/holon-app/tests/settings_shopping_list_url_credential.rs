@@ -75,7 +75,10 @@ fn manual_from(
     prefs: &HashMap<PrefKey, toml::Value>,
     env: impl Fn(&str) -> Option<String> + Send + Sync,
 ) -> holon_mcp_client::rest_transport::RestManual {
-    let lookup = preference_var_lookup(prefs, env);
+    // No stored secret: this test is about the preference layer, and an empty
+    // keychain is what a fresh profile has.
+    let keychain = holon_secrets::InMemoryKeychainStore::new();
+    let lookup = preference_var_lookup(prefs, env, &keychain);
     let built = shopping_sidecar()
         .into_mcp_config_with(
             "shopping".to_string(),

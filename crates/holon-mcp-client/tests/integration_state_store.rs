@@ -114,7 +114,7 @@ fn a_never_touched_integration_is_disabled_and_unconfigured() {
     let store = IntegrationConfigStore::load(dir.path()).expect("load");
 
     for provider in store.providers() {
-        let state = store.get(provider).expect("get");
+        let state = store.get(&provider).expect("get");
         assert!(!state.enabled, "{provider} must default off");
         assert_eq!(state.configuration, Configuration::Unconfigured);
     }
@@ -271,7 +271,7 @@ fn state_files_are_invisible_to_the_sidecar_scan() {
     for provider in store.providers() {
         store
             .set(
-                provider,
+                &provider,
                 IntegrationState {
                     enabled: true,
                     configuration: Configuration::Unconfigured,
