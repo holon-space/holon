@@ -25,6 +25,13 @@ holon_macros::widget_builder! {
             .get("locked")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        // Whether a credential is held somewhere this row cannot show it from.
+        // A secret written to the keychain leaves `value` empty, and without
+        // this the field renders "Not set" about a working integration.
+        let secret_stored = row
+            .get("secret_stored")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let value = row
             .get("value")
             .cloned()
@@ -61,6 +68,7 @@ holon_macros::widget_builder! {
         data.insert("value".into(), value);
         data.insert("requires_restart".into(), Value::Boolean(requires_restart));
         data.insert("locked".into(), Value::Boolean(locked));
+        data.insert("secret_stored".into(), Value::Boolean(secret_stored));
         if let Some(options) = row.get("options").cloned() {
             data.insert("options".into(), options);
         }

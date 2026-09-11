@@ -22,6 +22,7 @@ test-infra = [
     "holon-api?/slo-fault-injection",
     "dep:holon",
     "dep:holon-frontend",
+    "dep:holon-secrets",
     "dep:holon-app",
     "dep:holon-orgmode",
     "dep:holon-org-format",
@@ -107,6 +108,7 @@ pbt = [
 holon-loro-wiring = { workspace = true, features = ["testing"] }
 holon = { workspace = true, features = ["test-helpers", "testing"], optional = true }
 holon-frontend = { workspace = true, optional = true }
+holon-secrets = { workspace = true, optional = true }
 holon-app = { workspace = true, optional = true }
 holon-orgmode = { workspace = true, optional = true }
 holon-org-format = { workspace = true, optional = true }

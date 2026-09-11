@@ -223,9 +223,19 @@ a connection is a property of the device that holds the credentials, and sharing
 one is a deliberate act.
 
 Admission follows the existing precedent: bundled copies compiled in
-(`crates/holon-mcp-client/src/bundled_sidecars.rs`) plus user overrides from
-`{config_dir}/connections/*.yaml`, behind the existing `schema_version`
-generation gate. One typed load at boot with `deny_unknown_fields`, refusing
+(`crates/holon-mcp-client/src/bundled_sidecars.rs`) plus user files from
+`{config_dir}/integrations/*.yaml`, behind the existing `schema_version`
+generation gate. A file whose stem matches a bundled name OVERRIDES that
+connection's content; a file whose stem matches none INTRODUCES a connection.
+Enablement is unaffected either way and remains the state store's decision
+alone.
+
+**Amended 2026-09-12 (D117 D-a): the directory is `integrations/`, not
+`connections/`.** Enablement state lives beside the sidecar it describes
+(`<provider>.state.toml`, `integration_state.rs`), so a second root would mean
+two scans, two remedy strings, and a user who drops a file into the wrong one
+getting silence — the failure this whole design exists to refuse. The union is
+built by `crates/holon-mcp-client/src/roster.rs`. One typed load at boot with `deny_unknown_fields`, refusing
 loudly on: an extension two adapters claim; an undeclared type or owner column; a
 `${VAR}` with no preference definition
 (`crates/holon-frontend/src/preferences.rs`); a non-HTTPS non-localhost URL; an

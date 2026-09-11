@@ -30,14 +30,29 @@ PROVIDER="$1"
 DIR="${HOLON_MCP_INTEGRATIONS_DIR:-$HOME/.config/holon/integrations}"
 STATE_FILE="$DIR/${PROVIDER}.state.toml"
 
-# Presence is a compile-time fact: a state file for a provider the build does not
-# ship is read by nothing, so writing one would report success and do nothing.
+# A state file for a name NOTHING provides is read by nothing, so writing one
+# would report success and do nothing. Presence has two sources now: the
+# compiled-in bundle, and a `<provider>.yaml` the user installed in DIR.
 BUNDLED_SRC="$(dirname "$0")/../crates/holon-mcp-client/src/bundled_sidecars.rs"
 [ -r "$BUNDLED_SRC" ] || die "cannot read $BUNDLED_SRC — run this from a Holon checkout"
 BUNDLED="$(sed -n 's/^ *bundled!("\(.*\)"),$/\1/p' "$BUNDLED_SRC")"
 [ -n "$BUNDLED" ] || die "found no bundled providers in $BUNDLED_SRC — its format changed"
-if ! printf '%s\n' "$BUNDLED" | grep -qxF "$PROVIDER"; then
-  die "this build ships no integration '$PROVIDER'. Bundled: $(printf '%s' "$BUNDLED" | tr '\n' ' ')"
+
+INSTALLED=""
+if [ -d "$DIR" ]; then
+  for f in "$DIR"/*.yaml "$DIR"/*.yml; do
+    [ -e "$f" ] || continue
+    base="${f##*/}"
+    INSTALLED="$INSTALLED${base%.*}
+"
+  done
+fi
+
+if ! printf '%s\n' "$BUNDLED" | grep -qxF "$PROVIDER" \
+   && ! printf '%s' "$INSTALLED" | grep -qxF "$PROVIDER"; then
+  die "nothing provides an integration '$PROVIDER': this build ships none, and $DIR holds no \
+'$PROVIDER.yaml'. Bundled: $(printf '%s' "$BUNDLED" | tr '\n' ' '). Installed: $(printf '%s' \
+"$INSTALLED" | tr '\n' ' ')"
 fi
 
 mkdir -p "$DIR"

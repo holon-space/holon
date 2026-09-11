@@ -321,11 +321,14 @@ fn run_enable(dir: &Path, args: &[&str]) -> std::process::Output {
         .expect("run the enable script")
 }
 
-/// D3. A state file for a name this build does not ship is never read by
-/// anything, so writing one must fail rather than report success — the user
-/// would otherwise walk away believing an integration is on.
+/// D3. A state file for a name NOTHING provides is never read by anything, so
+/// writing one must fail rather than report success — the user would otherwise
+/// walk away believing an integration is on.
+///
+/// "Nothing provides it" now means neither bundled NOR introduced by a file in
+/// the same directory; the case below covers the second half.
 #[test]
-fn the_enable_script_refuses_a_provider_this_build_does_not_ship() {
+fn the_enable_script_refuses_a_provider_nothing_provides() {
     let dir = tempfile::tempdir().unwrap();
     let out = run_enable(dir.path(), &["gmial"]);
     assert!(
@@ -342,6 +345,40 @@ fn the_enable_script_refuses_a_provider_this_build_does_not_ship() {
     assert!(
         !dir.path().join("gmial.state.toml").exists(),
         "and writes nothing"
+    );
+}
+
+/// A connection introduced by a file must be switchable by the same script.
+/// Without this the user can drop a file the loader accepts and then be told by
+/// the documented remedy that it does not exist.
+#[test]
+fn the_enable_script_accepts_a_connection_introduced_by_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("my-own-thing.yaml"),
+        format!(
+            "schema_version: {}\nutcp:\n  utcp_version: \"1.1.3\"\n  manual_version: \"1.0.0\"\n  \
+             tools: []\nholon:\n  tools: {{}}\nentities: {{}}\ntools: {{}}\n",
+            holon_mcp_client::SIDECAR_SCHEMA_VERSION
+        ),
+    )
+    .unwrap();
+
+    let out = run_enable(dir.path(), &["my-own-thing"]);
+    assert!(
+        out.status.success(),
+        "a file-introduced connection must be enablable: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        dir.path().join("my-own-thing.state.toml").exists(),
+        "and the state file it names must exist"
+    );
+
+    let loaded = load(dir.path()).expect("load");
+    assert!(
+        loaded.configs.iter().any(|(n, _)| n == "my-own-thing"),
+        "and the loader must then run it — the script and the loader must agree on what exists"
     );
 }
 

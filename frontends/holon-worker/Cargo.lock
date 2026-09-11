@@ -2890,6 +2890,7 @@ dependencies = [
  "holon-macros",
  "holon-oracles",
  "holon-org-format",
+ "holon-secrets",
  "memory-stats",
  "premortem",
  "serde",

@@ -278,6 +278,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `deletebackward-sql-reads-budget`
 - `drawer-open-matches-ref`
 - `drawer-open-matches-ref-reverse`
+- `iroh-nat-traversal-address-set`
 - `lib-type-chars-home-profile-derived`
 - `loro-backend-change-count`
 - `opentab-sql-reads-budget`

@@ -56,6 +56,7 @@ pub use integration_config::IntegrationFileConfig;
 pub use integration_config::LoadedIntegrations;
 pub use integration_config::SupersededSidecar;
 pub use integration_config::load_integration_configs;
+pub use integration_config::provider_content_from;
 pub use integration_state::Configuration;
 pub use integration_state::CredentialRef;
 pub use integration_state::Credentials;

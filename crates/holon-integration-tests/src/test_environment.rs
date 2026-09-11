@@ -73,6 +73,28 @@ fn populate_debug_services(injector: &fluxdi::Injector) -> Arc<holon_mcp::server
 
 /// Build a pre-filled `OnceCell` for a struct literal. Infallible: the cell is
 /// fresh, so `set` cannot fail.
+/// Give `session` an in-memory secret store, and refuse the OS keychain for
+/// the rest of this process.
+///
+/// Called at EVERY point a test session is latched, so no individual test has
+/// to remember. `session.set_preference` on a secret key writes the secret
+/// store, so a test session bound to the machine's real login keychain leaves
+/// the developer's credentials behind on every run — silently, because a
+/// keychain write looks like a successful save.
+///
+/// The refusal half is what makes forgetting impossible rather than merely
+/// unlikely: a session built through some future path that skips this stops
+/// loudly instead of binding the machine's keychain.
+pub(crate) fn bind_test_secret_store(session: &FrontendSession) {
+    holon_frontend::forbid_platform_keychain();
+    // Already-injected is fine: a test that seeded its own store before
+    // latching keeps it. The guard above is what enforces that SOMETHING was
+    // injected.
+    let _ = session.use_secret_store(std::sync::Arc::new(
+        holon_secrets::InMemoryKeychainStore::new(),
+    ));
+}
+
 fn filled_once_cell<T>(value: T) -> OnceCell<T> {
     let cell = OnceCell::new();
     if cell.set(value).is_err() {
@@ -504,7 +526,10 @@ impl TestEnvironmentBuilder {
             org_root,
             temp_dir,
             runtime,
-            session: filled_once_cell(session),
+            session: filled_once_cell({
+                bind_test_secret_store(&session);
+                session
+            }),
             injector: filled_once_cell(injector),
             loro_doc_store: once_cell_from_option(doc_store),
             debug_services: filled_once_cell(debug_services),
@@ -1273,6 +1298,7 @@ impl TestEnvironment {
     /// Latch a build-once session field via `&self`. Fail-loud if already set
     /// (would mean `start_app` ran twice without an intervening `stop_app`).
     fn latch_session(&self, value: Arc<FrontendSession>) {
+        bind_test_secret_store(&value);
         self.session
             .set(value)
             .unwrap_or_else(|_| panic!("session already latched (start_app ran twice?)"));

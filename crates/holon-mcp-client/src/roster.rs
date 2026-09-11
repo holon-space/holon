@@ -75,7 +75,8 @@ impl ConnectionRoster {
     /// file is rejected and disclosed, never fatal: one bad name must not take
     /// down every other connection the user has.
     pub fn scan(dir: &Path) -> anyhow::Result<Self> {
-        let installed = crate::integration_config::scan_installed_sidecars(dir)?;
+        let (installed, mut rejected) =
+            crate::integration_config::scan_installed_sidecars_reporting(dir)?;
 
         let mut entries: Vec<ConnectionEntry> = BUNDLED_SIDECARS
             .iter()
@@ -84,8 +85,6 @@ impl ConnectionRoster {
                 source: ConnectionSource::Bundled(s),
             })
             .collect();
-        let mut rejected = Vec::new();
-
         // BTreeMap so introduced connections land in file-name order, which is
         // the order the settings list appends them in.
         let by_stem: BTreeMap<&String, &Vec<(PathBuf, String)>> = installed.iter().collect();

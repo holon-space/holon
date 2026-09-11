@@ -128,10 +128,57 @@ This aligns with Holon's [privacy-first design](../Vision/AI.md#3-privacy-first-
 ### Integration Pattern
 
 External MCP-based integrations are declared entirely in YAML sidecars; no
-per-integration Rust code is required. Every sidecar this build knows is
-compiled in (`crates/holon-mcp-client/src/bundled_sidecars.rs`) — presence is a
-compile-time fact, so a file on disk can neither introduce a provider nor switch
-one on. `McpIntegrationsModule` in `crates/holon-app/src/mcp_integrations.rs`
+per-integration Rust code is required.
+
+**Presence is a UNION** (`crates/holon-mcp-client/src/roster.rs`): the sidecars
+compiled in (`bundled_sidecars.rs`) plus every `<name>.yaml` in the integrations
+directory whose stem matches no bundled name. A file therefore CAN introduce a
+connection without a rebuild. A file whose stem DOES match a bundled name still
+only overrides that connection's content, behind the `schema_version` gate.
+
+**Enablement is unchanged and is the security property**: a connection runs iff
+the state store says `enabled = true`. A dropped file introduces a possibility,
+never a running connection, and cannot switch itself on. Pinned by
+`crates/holon-mcp-client/tests/enablement_cutover.rs` and
+`tests/user_introduced_connection.rs`.
+
+Rows render in roster order: the bundle first, in its declared order, then
+introduced connections in file-name order, so adding a file never reshuffles
+the rows above it.
+
+**What an INTRODUCED connection may do, and what it may not.** Its content was
+reviewed by nobody, so three rules apply to it that a bundled sidecar does not
+need:
+
+1. **Its own secrets only.** A connection named `x` may reference only
+   `${X_*}` variables. Checked on the file TEXT, so it covers a call URL, an
+   auth value, a `holon.tools.*.query` value and a child-process argument
+   alike. Without it, one line of YAML could send another connection's
+   credential to an endpoint of the file's choosing.
+2. **Its row discloses its origin and its hosts.** The display name and icon
+   are the file's own choice and disclose nothing; the settings row therefore
+   also shows the file path and every host the manual calls. Hosts are read
+   from the manual as WRITTEN, before `${VAR}` expansion — resolving one would
+   mean reading a credential just to draw a row — so a connection whose host
+   comes from a variable shows that variable (`${X_HOST}`) rather than a
+   resolved name: honest about what is not yet known, and never a shorter list
+   than the connection can actually reach.
+3. **No symlinks.** A sidecar is read only from a regular file in the
+   integrations directory. A link points somewhere the text does not say, which
+   would let a file elsewhere decide what the connection calls and which
+   secrets it may name — the same refusal `CredentialRoot::confine` makes for a
+   credential path.
+
+Two rules apply to EVERY sidecar, bundled or not: every call URL (and the MCP
+`transport.http.uri`) must be `https` or a loopback host, enforced again per
+redirect hop; and an auth value must be an optional literal prefix plus exactly
+one `${VAR}` reference, so a literal credential cannot be written into a
+sidecar at all.
+
+A file that names a connection but cannot be used — a stale `schema_version`, a
+parse failure, a foreign secret reference, two files claiming one name, a
+symlink — is disclosed as `IgnoredReason::Unusable` with the reason, never
+silently skipped. `McpIntegrationsModule` in `crates/holon-app/src/mcp_integrations.rs`
 loads the `IntegrationConfigStore` from the integrations directory (default
 `{config_dir}/integrations/`, overridable via `HOLON_MCP_INTEGRATIONS_DIR`) and,
 for each bundled provider whose state says `enabled = true`:
@@ -185,18 +232,39 @@ QueryableCache<DynamicEntity>  →  Turso cache tables (queryable via SQL/PRQL)
 
 ### Adding a New External System
 
-1. Add a `*.yaml` sidecar to `assets/integrations/` and to `BUNDLED_SIDECARS`
-   (see YAML Sidecar below for the full schema), then rebuild — sidecars are
-   compiled in.
-2. Switch it on: `scripts/holon-integration-enable.sh <provider>`, which writes
-   `{config_dir}/integrations/<provider>.state.toml`.
+**As a user, with no rebuild** — the normal path:
+
+1. Write `{config_dir}/integrations/<name>.yaml` at the current
+   `schema_version`, with a `utcp:` manual and a `holon:` section. Its
+   variables must be named `<NAME>_*`.
+2. Put each secret in the OS keychain: `holon-secret set <NAME>_TOKEN`, which
+   reads the value from STDIN so it never appears in the process table.
+   Settings → Integrations writes the same entries.
+3. Switch it on: `scripts/holon-integration-enable.sh <name>`.
+4. Restart the app. The settings row shows the file it came from and the hosts
+   it calls; check both before enabling.
+
+**As a contributor, shipping one with the build:**
+
+1. Add a `*.yaml` sidecar to `assets/integrations/` and to `BUNDLED_SIDECARS`,
+   then rebuild.
+2. Switch it on: `scripts/holon-integration-enable.sh <provider>`.
 3. Set any `${VAR}` secrets in the environment or in Holon's Settings UI
    (the key `todoist.api_key` maps to `${TODOIST_API_KEY}` automatically).
+   A bundled sidecar is not bound by the `<NAME>_*` convention.
 4. Restart the app.
 
-An installed `*.yaml` that enables nothing — because the provider is off, or
-because the build does not ship it — is disclosed at boot on the degraded bus
-(WARN + toast) naming the state file to write. It is never silently ignored.
+**Where a `${VAR}` value comes from**, in order: the environment, then the OS
+keychain, then the plaintext `holon.toml` preference. The keychain outranks the
+preference because `holon.toml` is cleartext, so moving a secret into the
+keychain and forgetting to clear the old field leaves the PROTECTED copy in
+force. Settings writes new secrets to the keychain only; the plaintext layer is
+read-only legacy, and an existing cleartext value is dropped on the next save.
+
+An installed `*.yaml` that enables nothing — because the connection is off, or
+because the file cannot be used — is disclosed at boot on the degraded bus
+(WARN + toast) naming the state file to write or what the file has to fix. It is
+never silently ignored.
 
 No Rust code is needed for an MCP-backed integration unless the MCP server
 requires special connection handling (OAuth flows are already supported

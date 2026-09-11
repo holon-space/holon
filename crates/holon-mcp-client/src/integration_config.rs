@@ -456,6 +456,48 @@ impl std::fmt::Display for UnresolvedVar {
 impl std::error::Error for UnresolvedVar {}
 
 impl IntegrationFileConfig {
+    /// Every host this file's manual calls, sorted and de-duplicated.
+    ///
+    /// What a settings row shows so that enabling a connection is a decision
+    /// about WHERE it reaches, not only about the name its author chose. Read
+    /// off the manual as WRITTEN, before any `${VAR}` is resolved: this runs
+    /// on the settings surface, where resolving a variable would mean reading
+    /// the credential just to draw a row.
+    ///
+    /// A URL whose host comes from a variable is reported as that variable
+    /// rather than dropped — "this connection calls wherever ${X_URL} points"
+    /// is the honest line, and a silently shorter list would read as a
+    /// promise that the connection talks to fewer places than it does.
+    pub fn manual_hosts(&self) -> Vec<String> {
+        let Some(manual) = &self.utcp else {
+            return Vec::new();
+        };
+        let mut hosts: Vec<String> = manual
+            .tools
+            .iter()
+            .map(|t| {
+                let url = t.tool_call_template.url.trim();
+                match reqwest::Url::parse(url) {
+                    Ok(parsed) => parsed
+                        .host_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| url.to_string()),
+                    Err(_) => url
+                        .find("${")
+                        .and_then(|start| {
+                            url[start..]
+                                .find('}')
+                                .map(|end| url[start..start + end + 1].to_string())
+                        })
+                        .unwrap_or_else(|| url.to_string()),
+                }
+            })
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        hosts
+    }
+
     /// This provider's OAuth2 arm, if it has one.
     ///
     /// Its presence is what makes the CONFIGURATION axis mean something: only
@@ -831,6 +873,34 @@ pub struct ProviderContent {
 /// The sidecar content that governs one provider, whether or not it is switched
 /// on — what the in-app consent flow reads to learn the provider's OAuth
 /// endpoints and where its credentials belong.
+/// One provider's content, resolved against a roster and a directory scan the
+/// caller ALREADY has.
+///
+/// The settings list draws every row from one scan through this; going back to
+/// [`provider_content`] per row re-read the directory twice for each of them.
+pub fn provider_content_from(
+    entry: &crate::roster::ConnectionEntry,
+    installed: &InstalledSidecars,
+) -> anyhow::Result<ProviderContent> {
+    let provider = entry.name.as_str();
+    let files = installed.get(provider).map(Vec::as_slice).unwrap_or(&[]);
+    anyhow::ensure!(
+        files.len() <= 1,
+        "Integration '{provider}' has {} installed sidecars — delete all but one, there is no rule \
+         that picks between them",
+        files.len()
+    );
+    match choose_content_for(entry, files.first())? {
+        ResolvedContent::Usable { config, superseded } => Ok(ProviderContent {
+            config: *config,
+            superseded,
+        }),
+        ResolvedContent::Unusable { why } => Err(anyhow::anyhow!(
+            "the file introducing connection '{provider}' cannot be used: {why}"
+        )),
+    }
+}
+
 pub fn provider_content(dir: &Path, provider: &str) -> anyhow::Result<ProviderContent> {
     let roster = crate::roster::ConnectionRoster::scan(dir)?;
     let entry = roster.get(provider).ok_or_else(|| {
@@ -1056,9 +1126,21 @@ fn enable_remedy(dir: &Path, provider: &str) -> String {
 /// their content. A missing directory yields nothing. Grouping rather than
 /// overwriting keeps the "two files, one provider" case visible to the caller,
 /// which is the only place that knows whether it matters.
-pub(crate) fn scan_installed_sidecars(
+pub fn scan_installed_sidecars(dir: &Path) -> anyhow::Result<InstalledSidecars> {
+    Ok(scan_installed_sidecars_reporting(dir)?.0)
+}
+
+/// Installed sidecars grouped by file stem, with each file's content.
+pub type InstalledSidecars = HashMap<String, Vec<(PathBuf, String)>>;
+
+/// The scan, plus the files it refused to read.
+///
+/// A refused file is NOT in the map — every consumer sees the same thing the
+/// loader does, namely that it is not there — and is returned separately so
+/// exactly one place discloses it.
+pub fn scan_installed_sidecars_reporting(
     dir: &Path,
-) -> anyhow::Result<HashMap<String, Vec<(PathBuf, String)>>> {
+) -> anyhow::Result<(InstalledSidecars, Vec<crate::roster::RejectedFile>)> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1067,7 +1149,7 @@ pub(crate) fn scan_installed_sidecars(
                  installed sidecars",
                 dir.display()
             );
-            return Ok(HashMap::new());
+            return Ok((HashMap::new(), Vec::new()));
         }
         Err(e) => {
             return Err(anyhow::Error::new(e).context(format!(
@@ -1077,7 +1159,8 @@ pub(crate) fn scan_installed_sidecars(
         }
     };
 
-    let mut installed: HashMap<String, Vec<(PathBuf, String)>> = HashMap::new();
+    let mut installed: InstalledSidecars = HashMap::new();
+    let mut rejected: Vec<crate::roster::RejectedFile> = Vec::new();
     for entry in entries {
         let entry = entry
             .with_context(|| format!("Failed to read directory entry in '{}'", dir.display()))?;
@@ -1085,6 +1168,40 @@ pub(crate) fn scan_installed_sidecars(
         let ext = path.extension().and_then(|e| e.to_str());
         if ext != Some("yaml") && ext != Some("yml") {
             continue;
+        }
+
+        // A SYMLINK is not followed. A link points somewhere the text does
+        // not say, so following one would let a file outside this directory
+        // decide what a connection calls and which secrets it may name, while
+        // the directory listing shows an ordinary entry. The same refusal
+        // `CredentialRoot::confine` makes for a credential path, for the same
+        // reason.
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                rejected.push(crate::roster::RejectedFile {
+                    path: path.clone(),
+                    reason: "it is a symbolic link, and a sidecar is read only from a regular \
+                             file in this directory — a link would let a file elsewhere decide \
+                             what this connection calls and which secrets it may name. Replace \
+                             the link with the file itself."
+                        .to_string(),
+                });
+                continue;
+            }
+            Ok(meta) if !meta.file_type().is_file() => {
+                rejected.push(crate::roster::RejectedFile {
+                    path: path.clone(),
+                    reason: "it is not a regular file".to_string(),
+                });
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!(
+                    "Failed to stat integration config '{}'",
+                    path.display()
+                )));
+            }
         }
 
         let name = path
@@ -1106,7 +1223,8 @@ pub(crate) fn scan_installed_sidecars(
     for files in installed.values_mut() {
         files.sort_by(|a, b| a.0.cmp(&b.0));
     }
-    Ok(installed)
+    rejected.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((installed, rejected))
 }
 
 /// The `*.state.toml` files in `dir` whose provider this build does not ship.

@@ -412,6 +412,7 @@ pub fn preferences_to_rows(
     defs: &[PreferenceDef],
     current: &HashMap<PrefKey, toml::Value>,
     locked: &HashSet<PrefKey>,
+    stored_secrets: &HashSet<PrefKey>,
 ) -> Vec<HashMap<String, holon_api::Value>> {
     defs.iter()
         .map(|def| {
@@ -439,12 +440,29 @@ pub fn preferences_to_rows(
                 _ => holon_api::Value::Array(vec![]),
             };
 
+            // Whether a credential is actually held for this key, from EITHER
+            // layer: the keychain (where Settings writes now) or a legacy
+            // plaintext value still in `holon.toml`. A secret row with no
+            // value but a stored secret must say "stored", not "Not set" —
+            // otherwise moving secrets into the keychain makes every
+            // configured integration read as unconfigured.
+            let secret_stored = matches!(def.pref_type, PrefType::Secret)
+                && (stored_secrets.contains(&def.key)
+                    || current
+                        .get(&def.key)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|v| !v.is_empty()));
+
             HashMap::from([
                 (
                     "key".into(),
                     holon_api::Value::String(def.key.as_str().into()),
                 ),
                 ("value".into(), toml_to_api_value(value)),
+                (
+                    "secret_stored".into(),
+                    holon_api::Value::Boolean(secret_stored),
+                ),
                 ("label".into(), holon_api::Value::String(def.label.clone())),
                 (
                     "description".into(),
@@ -673,7 +691,7 @@ mod tests {
             (name == "SHOPPING_LIST_URL")
                 .then(|| "https://shop.example/!abc123SYNTHETIClive/api".to_string())
         });
-        let rows = preferences_to_rows(&defs, &stale, &shadowed);
+        let rows = preferences_to_rows(&defs, &stale, &shadowed, &HashSet::new());
         let row = rows
             .iter()
             .find(|r| matches!(r.get("key"), Some(holon_api::Value::String(k)) if *k == *key.as_str()))
@@ -722,7 +740,7 @@ mod tests {
         let registry = ThemeRegistry::load(None);
         let defs = define_preferences(&registry);
         let empty: HashMap<PrefKey, toml::Value> = HashMap::new();
-        let rows = preferences_to_rows(&defs, &empty, &HashSet::new());
+        let rows = preferences_to_rows(&defs, &empty, &HashSet::new(), &HashSet::new());
 
         assert_eq!(rows.len(), defs.len());
 
@@ -748,7 +766,7 @@ mod tests {
             PrefKey::new("ui.theme"),
             toml::Value::String("dracula".into()),
         )]);
-        let rows = preferences_to_rows(&defs, &overrides, &HashSet::new());
+        let rows = preferences_to_rows(&defs, &overrides, &HashSet::new(), &HashSet::new());
 
         let theme_row = rows
             .iter()

@@ -1769,6 +1769,10 @@ impl ReactiveViewModel {
                 };
             }
             "pref_field" => {
+                // An ALLOWLIST, so a row field the builder needs must be named
+                // here as well as emitted by `preferences_to_rows` — a field
+                // added in one place and not the other reaches the row data
+                // and silently never reaches the screen.
                 for key in [
                     "key",
                     "pref_type",
@@ -1776,6 +1780,7 @@ impl ReactiveViewModel {
                     "requires_restart",
                     "locked",
                     "options",
+                    "secret_stored",
                 ] {
                     if let Some(v) = data.get(key) {
                         props.insert(key.to_string(), v.clone());

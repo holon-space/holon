@@ -8,6 +8,7 @@
 //! without moving any logic.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -74,6 +75,29 @@ pub struct IntegrationRow {
     /// The BARE id of the block `integration.open_default_view` focuses, or
     /// `None` when this provider has no view page yet.
     pub default_view: Option<String>,
+    /// For a connection INTRODUCED by a user file: the file it came from.
+    /// `None` for anything the build ships.
+    ///
+    /// The name and the icon on this row are both the file's choice, so they
+    /// disclose nothing — a hostile connection can call itself "Calendar" and
+    /// ask for the same click as a bundled one. The path is what the author
+    /// cannot choose away from the user's own directory.
+    pub origin: Option<String>,
+    /// For an introduced connection: every host its manual calls, sorted and
+    /// de-duplicated. Empty for anything the build ships.
+    ///
+    /// The other half of the same disclosure: enabling a connection is
+    /// consent to reach these hosts with the credential named for it, and that
+    /// is not readable from a display name.
+    pub hosts: Vec<String>,
+}
+
+/// What an introduced connection adds to its row. Both empty for anything the
+/// build ships.
+#[derive(Debug, Default)]
+struct IntroducedDisclosure {
+    origin: Option<String>,
+    hosts: Vec<String>,
 }
 
 /// The sidecar-sourced half of an [`IntegrationRow`], with the derivations
@@ -179,6 +203,9 @@ pub struct IntegrationsSettingsVm {
     root: CredentialRoot,
     /// Per-provider consent-flow progress, keyed by provider id.
     progress: Mutex<HashMap<String, Mutable<ConfigureProgress>>>,
+    /// Providers already reported as unreadable. `rows()` runs per render, so
+    /// without this the same warning is written as fast as the UI redraws.
+    warned_unreadable: Mutex<HashSet<String>>,
 }
 
 impl IntegrationsSettingsVm {
@@ -189,6 +216,7 @@ impl IntegrationsSettingsVm {
             dir,
             root,
             progress: Mutex::new(HashMap::new()),
+            warned_unreadable: Mutex::new(HashSet::new()),
         }
     }
 
@@ -220,75 +248,144 @@ impl IntegrationsSettingsVm {
     /// Ordered by name rather than by bundle position: presence is becoming a
     /// union of the bundle and the user's own files, and a file that arrived
     /// after the bundle was compiled has no position in it.
+    /// ONE directory scan for the whole list, not one per row.
+    ///
+    /// Each row needs its provider's content three times over (the name and
+    /// icon, whether a consent flow exists, and an introduced connection's
+    /// hosts). Resolving that through `provider_content` per use re-read the
+    /// directory twice each time — 36 `read_dir` calls to draw six rows, on
+    /// every render of the settings modal. The roster the store already holds
+    /// plus one scan here answers all of it.
     pub fn rows(&self) -> Vec<IntegrationRow> {
+        let installed =
+            match holon_mcp_client::integration_config::scan_installed_sidecars(&self.dir) {
+                Ok(installed) => installed,
+                Err(e) => {
+                    // The loader reports the same unreadable directory and the
+                    // degraded bus carries it; a settings list that refused to
+                    // render would take away the surface for switching things off.
+                    tracing::warn!(
+                        "[IntegrationsSettingsVm] could not read '{}' ({e:#}); rows fall back to \
+                     derived names and disclose no hosts",
+                        self.dir.display()
+                    );
+                    HashMap::new()
+                }
+            };
+
         self.store
-            .providers()
-            .into_iter()
-            .map(|provider| {
+            .roster()
+            .entries()
+            .iter()
+            .map(|entry| {
+                let provider = entry.name.clone();
                 let state = self
                     .store
                     .get(&provider)
                     .unwrap_or_else(|e| panic!("Provider '{provider}' has no state cell: {e:#}"));
-                let presentation = self.presentation(&provider);
+                // `None` means the sidecar would not read, and the reason has
+                // already been disclosed — an Option rather than a Result
+                // because every consumer below wants the same thing from a
+                // failure (fall to the derivation), and the error itself has
+                // nowhere left to go.
+                let content = match holon_mcp_client::provider_content_from(entry, &installed) {
+                    Ok(content) => Some(content),
+                    Err(e) => {
+                        self.warn_once_unreadable(provider.as_str(), &e);
+                        None
+                    }
+                };
+                let presentation = self.presentation_of(provider.as_str(), content.as_ref());
+                let disclosure = self.introduced_disclosure_of(entry, content.as_ref());
                 IntegrationRow {
-                    configurable: self.oauth2_config(&provider).is_ok(),
+                    configurable: content
+                        .as_ref()
+                        .is_some_and(|c| Self::oauth2_of(&c.config).is_ok()),
                     provider,
                     enabled: state.enabled,
                     status: ConfigStatus::of(&state.configuration),
                     display_name: presentation.display_name,
                     icon: presentation.icon,
                     default_view: presentation.default_view,
+                    origin: disclosure.origin,
+                    hosts: disclosure.hosts,
                 }
             })
             .collect()
     }
 
-    /// `provider`'s presentation triple, resolved against its sidecar.
+    /// Say ONCE per provider that its sidecar will not read.
     ///
-    /// A sidecar that will not read leaves the row on the derivations and says
-    /// so in the log; it is not silent, because the startup loader reports the
-    /// same file as ignored and this is the second voice on one fact, not the
-    /// only one. Refusing to produce a row here instead would take the whole
-    /// Integrations section down over one unparseable installed file.
-    fn presentation(&self, provider: &str) -> Presentation {
+    /// `rows()` runs on every render of the settings modal, so an unconditional
+    /// warning here writes the same line to the log as fast as the user can
+    /// move the mouse. The loader's `IgnoredReason::Unusable` disclosure and
+    /// its toast are what actually tell the user; this line only helps whoever
+    /// reads the log, and it helps exactly as much when written once.
+    fn warn_once_unreadable(&self, provider: &str, e: &anyhow::Error) {
+        let mut warned = self
+            .warned_unreadable
+            .lock()
+            .expect("the warned-set mutex is never held across a panic");
+        if warned.insert(provider.to_string()) {
+            tracing::warn!(
+                provider,
+                "[IntegrationsSettingsVm] '{provider}' sidecar did not read ({e:#}); its row \
+                 falls back to the derived name and the default icon, and it has no default \
+                 view. Reported once per session; the loader's disclosure carries the remedy."
+            );
+        }
+    }
+
+    /// The presentation triple over content the caller already resolved.
+    fn presentation_of(
+        &self,
+        provider: &str,
+        content: Option<&holon_mcp_client::integration_config::ProviderContent>,
+    ) -> Presentation {
         let derived = || Presentation {
             display_name: humanize_provider_name(provider),
             icon: IconName::parse(DEFAULT_ICON)
                 .unwrap_or_else(|e| panic!("DEFAULT_ICON must be a name the renderer draws: {e}")),
             default_view: None,
         };
-        match holon_mcp_client::integration_config::provider_content(&self.dir, provider) {
-            Ok(content) => Presentation {
-                display_name: content
-                    .config
-                    .display_name
-                    .clone()
-                    .unwrap_or_else(|| humanize_provider_name(provider)),
-                icon: content.config.icon.clone().unwrap_or_else(|| {
-                    IconName::parse(DEFAULT_ICON).expect("DEFAULT_ICON is drawable")
-                }),
-                default_view: content.config.default_view.clone(),
-            },
-            Err(e) => {
-                tracing::warn!(
-                    provider,
-                    "[IntegrationsSettingsVm] '{provider}' sidecar did not read ({e:#}); its row \
-                     falls back to the derived name and the default icon, and it has no default \
-                     view"
-                );
-                derived()
-            }
+        let Some(content) = content else {
+            return derived();
+        };
+        Presentation {
+            display_name: content
+                .config
+                .display_name
+                .clone()
+                .unwrap_or_else(|| humanize_provider_name(provider)),
+            icon: content.config.icon.clone().unwrap_or_else(|| {
+                IconName::parse(DEFAULT_ICON).expect("DEFAULT_ICON is drawable")
+            }),
+            default_view: content.config.default_view.clone(),
         }
     }
 
-    /// `provider`'s OAuth2 block, or the reason there is no consent flow to
-    /// run.
-    ///
-    /// One lookup behind both the row's `configurable` flag and the flow
-    /// itself, so the button cannot appear on a row whose flow would
-    /// immediately refuse.
-    fn oauth2_config(&self, provider: &str) -> anyhow::Result<RestOAuth2Config> {
-        Ok(self.provider_oauth2(provider)?.0)
+    /// The introduced-connection disclosure over content the caller already
+    /// resolved. See [`Self::introduced_disclosure`] for what it is for.
+    fn introduced_disclosure_of(
+        &self,
+        entry: &holon_mcp_client::ConnectionEntry,
+        content: Option<&holon_mcp_client::integration_config::ProviderContent>,
+    ) -> IntroducedDisclosure {
+        let holon_mcp_client::ConnectionSource::Installed { path } = &entry.source else {
+            return IntroducedDisclosure::default();
+        };
+        IntroducedDisclosure {
+            origin: Some(path.display().to_string()),
+            hosts: content.map(|c| c.config.manual_hosts()).unwrap_or_default(),
+        }
+    }
+
+    /// The OAuth2 arm of already-resolved content.
+    fn oauth2_of(config: &holon_mcp_client::IntegrationFileConfig) -> anyhow::Result<()> {
+        config
+            .oauth2()
+            .map(|_| ())
+            .ok_or_else(|| anyhow::anyhow!("no oauth2 arm"))
     }
 
     /// `provider`'s OAuth2 block plus any supersession the caller must

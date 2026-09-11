@@ -282,3 +282,93 @@ fn a_bundled_stem_still_overrides_and_does_not_double_enter_the_roster() {
         "a file for a bundled stem overrides its CONTENT; it must not appear twice in the roster"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Symlinks
+// ---------------------------------------------------------------------------
+
+/// A symlinked sidecar is NOT followed.
+///
+/// `CredentialRoot::confine` already refuses a symlink at a credential path,
+/// for the reason that a link points somewhere the text does not say and the
+/// escape is available to anyone who can place one. A sidecar is the same kind
+/// of object: it decides what a connection calls and which secrets it may
+/// name, and following a link would let a file outside the integrations
+/// directory decide both while the directory listing shows an ordinary entry.
+///
+/// Refused rather than silently skipped — a file the user put there doing
+/// nothing in silence is the failure this crate exists to prevent.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_sidecar_is_refused_not_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let real = elsewhere.path().join("payload.yaml");
+    std::fs::write(&real, fixture_yaml()).unwrap();
+    let link = dir.path().join("linked-thing.yaml");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let store = IntegrationConfigStore::load(dir.path()).expect("one symlink must not be fatal");
+    assert!(
+        store
+            .providers()
+            .iter()
+            .all(|p| p.as_str() != "linked-thing"),
+        "a symlinked sidecar must not introduce a connection — got {:?}",
+        store.providers()
+    );
+
+    let loaded = load(dir.path()).expect("load");
+    let disclosed = loaded
+        .ignored
+        .iter()
+        .find(|i| i.installed_path == link)
+        .expect("the symlink is disclosed, never silently skipped");
+    let reason = format!("{:?}", disclosed.reason);
+    assert!(
+        reason.contains("symlink") || reason.contains("symbolic link"),
+        "the disclosure must say WHY, so the user can replace the link with the file; got: \
+         {reason}"
+    );
+}
+
+/// A symlink cannot override a BUNDLED connection's content either — the same
+/// escape, aimed at a connection that already exists.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_override_for_a_bundled_name_is_not_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let real = elsewhere.path().join("payload.yaml");
+    std::fs::write(&real, fixture_yaml()).unwrap();
+    std::os::unix::fs::symlink(&real, dir.path().join("todoist.yaml")).unwrap();
+    enable(dir.path(), "todoist");
+
+    let loaded = load(dir.path()).expect("load");
+    let (_, cfg) = loaded
+        .configs
+        .iter()
+        .find(|(n, _)| n == "todoist")
+        .expect("todoist is bundled and enabled, so it still runs");
+    assert_ne!(
+        cfg.display_name.as_deref(),
+        Some("My Own Thing"),
+        "the symlinked override must NOT have been followed; the bundled content must run"
+    );
+}
+
+/// An ordinary file is still read, so the refusal above is about links and not
+/// about the scan having quietly stopped working.
+#[test]
+fn a_regular_file_is_still_read() {
+    let dir = tempfile::tempdir().unwrap();
+    install(dir.path(), "regular-thing", &fixture_yaml());
+    let store = IntegrationConfigStore::load(dir.path()).expect("store loads");
+    assert!(
+        store
+            .providers()
+            .iter()
+            .any(|p| p.as_str() == "regular-thing"),
+        "a regular file must still introduce a connection"
+    );
+}

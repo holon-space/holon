@@ -215,6 +215,17 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
         .clone()
         .expect("full_headless -> booted ReactiveEngine");
 
+    // `set_preference` on a secret key writes the session's SECRET STORE, and
+    // a session bound to the machine's real keychain would leave the
+    // developer's credentials behind on every run. The test fixture injects an
+    // in-memory store into every session it latches, so this test needs no call
+    // of its own — asserted rather than assumed, because the whole point is
+    // that forgetting is not possible.
+    assert!(
+        holon_frontend::platform_keychain_forbidden(),
+        "the fixture must refuse the OS keychain before any secret is written"
+    );
+
     // Stored before the first render, so the rows the modal paints hold
     // credentials rather than empty fields.
     for (key, value) in [
@@ -225,6 +236,15 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
             .set_preference(&PrefKey::new(key), toml::Value::String(value.into()))
             .unwrap_or_else(|e| panic!("{key} must persist into the test profile: {e:#}"));
     }
+
+    // Proof the writes above went to the INJECTED store: the secret is present
+    // in it. Presence rather than the value, because the session deliberately
+    // offers no way to read a credential back out. Without the fixture's
+    // injection the session would have stopped before reaching here.
+    assert!(
+        session.secret_is_stored("todoist_api_key"),
+        "the secret a test wrote must live in the in-memory store, never on the machine"
+    );
 
     let bounds = BoundsRegistry::new();
     let nav = NavigationState::new();

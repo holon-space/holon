@@ -377,10 +377,40 @@ pub struct FrontendSession<T = ()> {
     holon_config: Mutex<config::HolonConfig>,
     /// Config directory (where holon.toml lives).
     config_dir: PathBuf,
+    /// Where this session reads and writes credential preferences.
+    ///
+    /// A `OnceLock` rather than a constructor argument so a test can supply an
+    /// in-memory store before the first render without every construction site
+    /// learning about keychains — the same shape as
+    /// `McpIntegrationsModule::with_browser`. Left unset it initialises to the
+    /// OS keychain on first use.
+    secret_store: std::sync::OnceLock<Arc<dyn holon_secrets::KeychainStore>>,
     /// Preference keys locked by CLI/env (read-only in UI).
     locked_keys: HashSet<preferences::PrefKey>,
     /// What this session's boot path skipped, and why.
     boot_report: platform::BootReport,
+}
+
+/// Whether this process refuses the OS keychain outright.
+static FORBID_PLATFORM_KEYCHAIN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Refuse the machine's real login keychain in this process.
+///
+/// Armed by every harness that constructs a [`FrontendSession`]. After this, a
+/// session with no injected secret store STOPS instead of quietly binding the
+/// developer's keychain and writing credentials into it — which is what a test
+/// that forgot to inject one did, silently, for as long as nobody looked.
+///
+/// Process-wide rather than per-session, and one-way: a test binary never
+/// wants the real keychain back, and `cfg(test)` does not reach across crates.
+pub fn forbid_platform_keychain() {
+    FORBID_PLATFORM_KEYCHAIN.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether [`forbid_platform_keychain`] has been called.
+pub fn platform_keychain_forbidden() -> bool {
+    FORBID_PLATFORM_KEYCHAIN.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Everything a wiring crate (holon-app) supplies to construct a
@@ -478,6 +508,7 @@ impl FrontendSession<()> {
             holon_config: Mutex::new(holon_config),
             config_dir: parts.config_dir,
             locked_keys: parts.locked_keys,
+            secret_store: std::sync::OnceLock::new(),
             boot_report: parts.boot_report,
         }
     }
@@ -716,10 +747,135 @@ impl<T> FrontendSession<T> {
         // in-memory map so this session behaves as before; `save_runtime`
         // strips it from what reaches `holon.toml`.
         if guard.is_secret_preference(key) {
-            store_secret_preference(key, &value)?;
+            self.store_secret_preference(key, &value)?;
         }
         guard.set_preference(key, value);
         guard.save_runtime(&self.config_dir)
+    }
+
+    /// Read and write credential preferences through `store` instead of the OS
+    /// keychain.
+    ///
+    /// For tests and for a profile that deliberately runs without one. Must be
+    /// called before the first settings render or the first secret write;
+    /// after that the OS keychain is already bound and this is a no-op, which
+    /// it says out loud rather than silently pointing half the session at a
+    /// different store.
+    pub fn use_secret_store(
+        &self,
+        store: Arc<dyn holon_secrets::KeychainStore>,
+    ) -> anyhow::Result<()> {
+        self.secret_store.set(store).map_err(|_| {
+            anyhow::anyhow!(
+                "this session already resolved its secret store; call use_secret_store before the \
+                 first settings render or secret write"
+            )
+        })
+    }
+
+    /// This session's secret store, binding the OS keychain on first use
+    /// unless one was injected.
+    ///
+    /// Private: handing out the store would hand out `store`/`delete`, and
+    /// every credential write belongs to [`Self::store_secret_preference`],
+    /// which owns the empty-value-clears rule and the error wrapping. Tests
+    /// seed through [`Self::seed_secret_for_test`] and read presence through
+    /// [`Self::secret_is_stored`].
+    fn secret_store(&self) -> &Arc<dyn holon_secrets::KeychainStore> {
+        if let Some(store) = self.secret_store.get() {
+            return store;
+        }
+        // Binding here would reach the machine's REAL login keychain. A test
+        // that does so writes credentials into the developer's keychain and
+        // leaves them there, silently. Any harness that builds sessions
+        // refuses it up front, so forgetting to inject is a loud stop.
+        assert!(
+            !platform_keychain_forbidden(),
+            "[FrontendSession] this process refuses the OS keychain, and this session had no \
+             secret store injected. Call `FrontendSession::use_secret_store` before the first \
+             settings render or secret write; a test fixture normally does it for you."
+        );
+        self.secret_store.get_or_init(|| {
+            holon_secrets::platform_keychain(holon_secrets::INTEGRATION_SECRET_SERVICE).into()
+        })
+    }
+
+    /// Put a secret preference's value into this session's secret store, under
+    /// the account the `${VAR}` resolver reads.
+    ///
+    /// An empty value CLEARS the entry rather than storing a blank: a user who
+    /// empties the field means "this is not configured", and an empty stored
+    /// secret reads as unset everywhere else anyway.
+    ///
+    /// Fails loud. A secret the user believes is saved but that never reached
+    /// the store is the silent-degradation failure this crate refuses, and the
+    /// caller surfaces the error the way it surfaces a failed config write. No
+    /// message here quotes the value.
+    fn store_secret_preference(
+        &self,
+        key: &preferences::PrefKey,
+        value: &toml::Value,
+    ) -> anyhow::Result<()> {
+        let account = integration_vars::normalize_var_name(key.as_str());
+        let store = self.secret_store();
+        let text = value.as_str().unwrap_or_default();
+        if text.is_empty() {
+            return store.delete(&account).map_err(|e| {
+                anyhow::anyhow!("could not clear the stored secret for '{key}': {e:#}")
+            });
+        }
+        store.store(&account, text.as_bytes()).map_err(|e| {
+            anyhow::anyhow!(
+                "could not save '{key}' to the keychain, so it is NOT stored: {e:#}. The value \
+                 was not written to holon.toml either, because that file is plaintext."
+            )
+        })
+    }
+
+    /// Put a credential straight into this session's secret store, for a test
+    /// FIXTURE that needs one present before the first render.
+    ///
+    /// Named for what it is. It bypasses [`Self::store_secret_preference`],
+    /// and therefore the empty-value-clears rule and the error wrapping, which
+    /// is exactly why production code must not reach for it.
+    pub fn seed_secret_for_test(&self, account: &str, value: &[u8]) -> anyhow::Result<()> {
+        self.secret_store()
+            .store(account, value)
+            .map_err(|e| anyhow::anyhow!("could not seed the secret store: {e:#}"))
+    }
+
+    /// Whether a credential is stored under `account`. Presence only — the
+    /// value never leaves the store through this.
+    pub fn secret_is_stored(&self, account: &str) -> bool {
+        self.secret_store()
+            .load(account)
+            .is_ok_and(|v| v.is_some_and(|v| !v.is_empty()))
+    }
+
+    /// The secret preferences this profile actually holds a value for.
+    ///
+    /// A keychain read that FAILS is disclosed and counted as absent: the row
+    /// then reads "Not set", which is the honest answer when the store cannot
+    /// be read, and the warning says why. Claiming "stored" on a failed read
+    /// would be the worse lie.
+    fn stored_secret_keys(&self) -> HashSet<preferences::PrefKey> {
+        let store = self.secret_store();
+        preferences::secret_keys(&self.preference_defs)
+            .into_iter()
+            .filter(|key| {
+                let account = integration_vars::normalize_var_name(key.as_str());
+                match store.load(&account) {
+                    Ok(found) => found.is_some_and(|v| !v.is_empty()),
+                    Err(e) => {
+                        tracing::warn!(
+                            "[FrontendSession] could not read '{key}' from the keychain ({e:#}); \
+                             its settings row will read as not set"
+                        );
+                        false
+                    }
+                }
+            })
+            .collect()
     }
 
     /// Generate the render data for the preferences UI.
@@ -740,7 +896,16 @@ impl<T> FrontendSession<T> {
         let mut locked =
             preferences::env_shadowed_keys(&self.preference_defs, &|name| std::env::var(name).ok());
         locked.extend(self.locked_keys.iter().cloned());
-        let rows = preferences::preferences_to_rows(&self.preference_defs, &current, &locked);
+        // Which credentials are actually held. A secret written to the
+        // keychain is absent from `current`, so without this the row would
+        // read "Not set" about a value that is in force.
+        let stored_secrets = self.stored_secret_keys();
+        let rows = preferences::preferences_to_rows(
+            &self.preference_defs,
+            &current,
+            &locked,
+            &stored_secrets,
+        );
         (expr, rows.into_iter().map(Arc::new).collect())
     }
 
@@ -1000,42 +1165,6 @@ impl<T> FrontendSession<T> {
             .lookup_block_path(block_id)
             .await
     }
-}
-
-/// Put a secret preference's value into the OS keychain, under the account the
-/// `${VAR}` resolver reads.
-///
-/// An empty value CLEARS the entry rather than storing a blank: a user who
-/// empties the field means "this is not configured", and an empty stored
-/// secret reads as unset everywhere else anyway.
-///
-/// Fails loud. A secret the user believes is saved but that never reached the
-/// keychain is the silent-degradation failure this crate refuses, and the
-/// caller surfaces the error the same way it surfaces a failed config write.
-/// No message here quotes the value.
-#[cfg(not(target_arch = "wasm32"))]
-fn store_secret_preference(key: &preferences::PrefKey, value: &toml::Value) -> anyhow::Result<()> {
-    let account = integration_vars::normalize_var_name(key.as_str());
-    let keychain = holon_secrets::platform_keychain(holon_secrets::INTEGRATION_SECRET_SERVICE);
-    let text = value.as_str().unwrap_or_default();
-    if text.is_empty() {
-        return keychain.delete(&account).map_err(|e| {
-            anyhow::anyhow!(
-                "could not clear the stored secret for '{key}' from the keychain: {e:#}"
-            )
-        });
-    }
-    keychain.store(&account, text.as_bytes()).map_err(|e| {
-        anyhow::anyhow!(
-            "could not save '{key}' to the keychain, so it is NOT stored: {e:#}. The value was              not written to holon.toml either, because that file is plaintext."
-        )
-    })
-}
-
-/// On wasm there is no OS keychain, and no integration reads one.
-#[cfg(target_arch = "wasm32")]
-fn store_secret_preference(key: &preferences::PrefKey, _value: &toml::Value) -> anyhow::Result<()> {
-    anyhow::bail!("'{key}' is a credential and this platform has no keychain to store it in")
 }
 
 #[cfg(test)]

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use Secrecy::Plain;
+use Secrecy::Secret;
 use holon_api::Value;
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::operations::OperationIntent;
@@ -12,6 +14,16 @@ use crate::geometry::TransparentTracker;
 /// What a secret preference shows instead of its value. The only place the
 /// settings row is allowed to say a secret is present.
 const SECRET_MASK: &str = "••••••••";
+
+/// What a secret row says when the value is held somewhere this row cannot
+/// show it from — today, the OS keychain.
+///
+/// Without this the row renders "Not set" for a secret that IS configured,
+/// because Settings writes credentials to the keychain and the preference map
+/// is empty for that key on the next boot. A working integration reading as
+/// unconfigured is a silent degradation; this says the credential is held and
+/// where, without showing it.
+const SECRET_STORED: &str = "•••••••• Stored in the keychain";
 
 fn dispatch_set_preference(services: &Arc<dyn BuilderServices>, key: &str, value: Value) {
     services.dispatch_intent(OperationIntent {
@@ -59,6 +71,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         .unwrap_or(Value::Null);
     let requires_restart = node.prop_bool("requires_restart").unwrap_or(false);
     let locked = node.prop_bool("locked").unwrap_or(false);
+    let secret_stored = node.prop_bool("secret_stored").unwrap_or(false);
     let options: Vec<Value> = match node.props.lock_ref().get("options") {
         Some(Value::Array(arr)) => arr.clone(),
         _ => vec![],
@@ -79,7 +92,15 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let (input_el, painted) = if locked {
         build_locked_display(ctx, &pref_type, &value_str)
     } else {
-        build_input(ctx, &pref_type, &value, &value_str, &key, &options)
+        build_input(
+            ctx,
+            &pref_type,
+            &value,
+            &value_str,
+            &key,
+            &options,
+            secret_stored,
+        )
     };
 
     let mut label_col = div().flex_col().flex_1().gap(px(2.0)).child(
@@ -186,13 +207,33 @@ fn build_input(
     value_str: &str,
     key: &str,
     options: &[Value],
+    secret_stored: bool,
 ) -> (Div, Option<String>) {
     match pref_type {
         "toggle" => (build_toggle(ctx, value, key), None),
         "choice" => (build_choice(ctx, value_str, key, options), None),
-        "secret" => build_text_field(ctx, key, value_str, true),
-        _ => build_text_field(ctx, key, value_str, false),
+        "secret" => build_text_field(
+            ctx,
+            key,
+            value_str,
+            Secrecy::Secret {
+                stored: secret_stored,
+            },
+        ),
+        _ => build_text_field(ctx, key, value_str, Secrecy::Plain),
     }
+}
+
+/// Whether a text field's value may be shown, and — when it may not — whether
+/// one is held at all.
+///
+/// A bool would leave "secret" and "has a value" as two independent flags and
+/// the impossible fourth combination representable; this is the three states
+/// the row can actually be in.
+#[derive(Clone, Copy)]
+enum Secrecy {
+    Plain,
+    Secret { stored: bool },
 }
 
 fn extract_options(raw_options: &[Value]) -> Vec<(String, String)> {
@@ -269,23 +310,19 @@ fn build_text_field(
     ctx: &GpuiRenderContext,
     key: &str,
     current: &str,
-    is_secret: bool,
+    secrecy: Secrecy,
 ) -> (Div, Option<String>) {
-    let display = if is_secret {
-        if current.is_empty() {
-            "Not set".to_string()
-        } else {
-            SECRET_MASK.to_string()
-        }
-    } else {
-        if current.is_empty() {
-            "Click to set".to_string()
-        } else {
-            current.to_string()
-        }
+    let display = match secrecy {
+        // A value in hand: mask it, whatever else is stored.
+        Secret { .. } if !current.is_empty() => SECRET_MASK.to_string(),
+        // Nothing here, but a credential IS held — say where, never what.
+        Secret { stored: true } => SECRET_STORED.to_string(),
+        Secret { stored: false } => "Not set".to_string(),
+        Plain if current.is_empty() => "Click to set".to_string(),
+        Plain => current.to_string(),
     };
 
-    let text_color = if current.is_empty() {
+    let text_color = if current.is_empty() && !matches!(secrecy, Secret { stored: true }) {
         tc(ctx, |t| t.muted_foreground)
     } else {
         tc(ctx, |t| t.foreground)
@@ -295,7 +332,7 @@ fn build_text_field(
     let key_owned = key.to_string();
     let current_owned = current.to_string();
     let el_id = format!("pref-text-{key}");
-    let hidden = is_secret;
+    let hidden = matches!(secrecy, Secret { .. });
 
     let el = div().child(
         div()

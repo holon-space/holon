@@ -16,6 +16,7 @@
 //! field, or never renders at all
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use holon_api::Value;
@@ -48,7 +49,7 @@ fn settings_tree(shadowing_env: bool) -> Arc<ReactiveViewModel> {
         (shadowing_env && name == "SHOPPING_LIST_URL").then(|| STORED_URL.to_string())
     });
 
-    let rows: Vec<Arc<DataRow>> = preferences_to_rows(&defs, &current, &locked)
+    let rows: Vec<Arc<DataRow>> = preferences_to_rows(&defs, &current, &locked, &HashSet::new())
         .into_iter()
         .map(Arc::new)
         .collect();

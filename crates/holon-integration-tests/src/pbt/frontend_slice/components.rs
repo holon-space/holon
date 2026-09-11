@@ -866,6 +866,11 @@ impl HeadlessFrontendComponent {
         .await
         .expect("build headless frontend session");
 
+        // Every session this crate boots gets an in-memory secret store and
+        // forbids the OS-keychain fallback, so no test can reach the machine's
+        // real keychain — see `test_environment::bind_test_secret_store`.
+        crate::test_environment::bind_test_secret_store(&session);
+
         // Wire the Loro-backed `BlockCellRegistry` into the reactive engine — the
         // editor's `MutableText` cells resolve through it. The real GPUI/TUI
         // frontends do this in their own `on_start`; the windowless build bypasses
