@@ -226,5 +226,8 @@ pub(crate) async fn delete_block_in(
     node: TreeID,
 ) -> Result<()> {
     let collab = doc_store.read().await.get_doc(scope).await?;
-    collab.with_write(|txn| Ok(txn.get_tree(TREE_NAME).delete(node)?))
+    collab.with_write(
+        holon_loro::WriteOrigin::Probe("projection_harness"),
+        |txn| Ok(txn.get_tree(TREE_NAME).delete(node)?),
+    )
 }

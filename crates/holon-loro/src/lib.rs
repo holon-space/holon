@@ -133,6 +133,7 @@ pub mod text_merge_provider;
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 pub mod ticket;
+pub mod write_origin;
 
 pub use capability::CapabilityProfile;
 pub use capability::Consolidator;
@@ -192,3 +193,4 @@ pub use loro_sync_controller::projection_stats;
 pub use text_merge_provider::TextHandle;
 pub use text_merge_provider::TextMergeProvider;
 pub use text_merge_provider::TransientLoroTextMerge;
+pub use write_origin::WriteOrigin;

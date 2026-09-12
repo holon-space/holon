@@ -1840,8 +1840,8 @@ mod tests {
             a: &holon_loro::loro_document::LoroDocument,
             b: &holon_loro::loro_document::LoroDocument,
         ) {
-            a.with_write_origin("pair_probe", |doc_a| {
-                b.with_write_origin("pair_probe", |doc_b| {
+            a.with_write(holon_loro::WriteOrigin::Probe("pair_probe"), |doc_a| {
+                b.with_write(holon_loro::WriteOrigin::Probe("pair_probe"), |doc_b| {
                     sync_pair_like_iroh(doc_a, doc_b);
                     Ok(())
                 })
@@ -2005,7 +2005,7 @@ mod tests {
             // text on the other is the exact D70 shape, plus a tree MOVE. The
             // two sides do not sync in between, so grouping each peer's ops
             // into one batch leaves the concurrency the case is about intact.
-            da.with_write_origin("pair_probe", |doc_a| {
+            da.with_write(holon_loro::WriteOrigin::Probe("pair_probe"), |doc_a| {
                 raw_create_under(doc_a, "p1", "a-new");
                 raw_move(doc_a, "c2", "c1");
                 Ok(())
@@ -2016,7 +2016,7 @@ mod tests {
             } else {
                 "p1"
             };
-            db.with_write_origin("pair_probe", |doc_b| {
+            db.with_write(holon_loro::WriteOrigin::Probe("pair_probe"), |doc_b| {
                 if receiver_edits_pretrim_text {
                     // Typing into content that existed BEFORE the owner
                     // compacted — the ordinary own-device gesture (edit an
@@ -2308,37 +2308,40 @@ mod tests {
             // its write guard. The receiver is a bare `LoroDoc` this function
             // owns outright — no doc boundary to cross.
             let (shape_a, shape_b, b_is_shallow, b_since) = da
-                .with_write_origin("empty_receiver_bootstrap", |doc_a| {
-                    assert!(
-                        doc_a.is_shallow(),
-                        "the owner must be shallow for this probe"
-                    );
+                .with_write(
+                    holon_loro::WriteOrigin::Probe("empty_receiver_bootstrap"),
+                    |doc_a| {
+                        assert!(
+                            doc_a.is_shallow(),
+                            "the owner must be shallow for this probe"
+                        );
 
-                    // The receiver's document is CREATED by the pairing payload.
-                    let doc_b = LoroDoc::new();
-                    doc_b.set_peer_id(2).unwrap();
-                    let bootstrap = export_like_iroh(doc_a, &doc_b.oplog_vv());
-                    doc_b.import(&bootstrap).unwrap();
-                    let b_is_shallow = doc_b.is_shallow();
-                    let b_since = format!("{:?}", doc_b.shallow_since_vv().to_vv());
+                        // The receiver's document is CREATED by the pairing payload.
+                        let doc_b = LoroDoc::new();
+                        doc_b.set_peer_id(2).unwrap();
+                        let bootstrap = export_like_iroh(doc_a, &doc_b.oplog_vv());
+                        doc_b.import(&bootstrap).unwrap();
+                        let b_is_shallow = doc_b.is_shallow();
+                        let b_since = format!("{:?}", doc_b.shallow_since_vv().to_vv());
 
-                    assert!(
-                        find(&doc_b, "c1").is_some(),
-                        "the bootstrap payload did not carry the owner's tree"
-                    );
+                        assert!(
+                            find(&doc_b, "c1").is_some(),
+                            "the bootstrap payload did not carry the owner's tree"
+                        );
 
-                    // The same concurrent structure + text as every other variant.
-                    raw_create_under(doc_a, "p1", "a-new");
-                    raw_append_text(&doc_b, "c1", " [B typed]");
-                    raw_move(doc_a, "c2", "c1");
-                    raw_create_under(&doc_b, "p1", "b-new");
+                        // The same concurrent structure + text as every other variant.
+                        raw_create_under(doc_a, "p1", "a-new");
+                        raw_append_text(&doc_b, "c1", " [B typed]");
+                        raw_move(doc_a, "c2", "c1");
+                        raw_create_under(&doc_b, "p1", "b-new");
 
-                    for _ in 0..4 {
-                        sync_pair_like_iroh(doc_a, &doc_b);
-                    }
+                        for _ in 0..4 {
+                            sync_pair_like_iroh(doc_a, &doc_b);
+                        }
 
-                    Ok((tree_shape(doc_a), tree_shape(&doc_b), b_is_shallow, b_since))
-                })
+                        Ok((tree_shape(doc_a), tree_shape(&doc_b), b_is_shallow, b_since))
+                    },
+                )
                 .unwrap();
             drop(da);
             a.advertiser_for_test().close_all().await;

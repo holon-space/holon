@@ -796,10 +796,10 @@ mod adapter {
                 let seen = seen.read().expect("origin sink").clone();
                 assert!(
                     seen.iter()
-                        .any(|o| o == crate::loro_document::SYNC_IMPORT_ORIGIN),
+                        .any(|o| *o == crate::write_origin::WriteOrigin::SyncImport.as_origin()),
                     "the {leg} leg imported a peer delta under origin(s) {seen:?}, none of them \
                      `{}` — the import bypassed `LoroDocument`'s write guard",
-                    crate::loro_document::SYNC_IMPORT_ORIGIN
+                    crate::write_origin::WriteOrigin::SyncImport.as_origin()
                 );
             }
             Ok(())

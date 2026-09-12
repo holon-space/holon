@@ -429,7 +429,10 @@ pub fn commit_share_prune(source_doc: &LoroDoc, extracted: &ExtractedShare) -> R
         &extracted.shared_tree_id,
         extracted.shared_root,
     )?;
-    source_doc.commit();
+    // Deliberately does NOT commit. The caller owns the flush, because only it
+    // knows the write scope's `WriteOrigin` — a commit here would land under
+    // whatever Loro happens to have armed, which after the fork's implicit
+    // commit is nothing at all.
     Ok(mount_node)
 }
 
@@ -453,6 +456,9 @@ pub fn share_subtree(
         retention,
     )?;
     let mount_node = commit_share_prune(source_doc, &extracted)?;
+    // `commit_share_prune` leaves the flush to its caller; this back-compat
+    // helper takes a raw doc, so it has no write scope to label the commit.
+    source_doc.commit();
 
     // Rebuild the legacy `ShareResult` shape from the two-phase output.
     let ExtractedShare {

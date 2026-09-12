@@ -52,6 +52,7 @@ use crate::settled_read::warn_half_born;
 use crate::shared_tree::SharedTreeStore;
 use crate::shared_tree::is_mount_node;
 use crate::shared_tree::read_mount_info;
+use crate::write_origin::WriteOrigin;
 
 // Field name constants
 pub const CONTENT_TYPE: &str = "content_type";
@@ -2139,7 +2140,7 @@ impl LoroBackend {
 
     pub async fn initialize_schema(collab_doc: &LoroDocument) -> Result<(), ApiError> {
         collab_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::SchemaInit, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 tree.enable_fractional_index(0);
 
@@ -2644,7 +2645,7 @@ impl LoroBackend {
         let (write_doc, tree_id) = self.target_doc(&target);
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
 
@@ -2697,7 +2698,7 @@ impl LoroBackend {
         let (write_doc, tree_id) = self.target_doc(&target);
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
                 write_content_to_meta(&meta, content)?;
@@ -2764,7 +2765,7 @@ impl LoroBackend {
         }
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
 
@@ -2837,7 +2838,7 @@ impl LoroBackend {
         let mark_owned = mark.clone();
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
 
@@ -2892,7 +2893,7 @@ impl LoroBackend {
         let key_owned = key.to_string();
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
 
@@ -2982,7 +2983,7 @@ impl LoroBackend {
         let s_owned = s.to_string();
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
 
@@ -3027,7 +3028,7 @@ impl LoroBackend {
         let (write_doc, tree_id) = self.target_doc(&target);
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
 
@@ -3128,7 +3129,7 @@ impl LoroBackend {
             edges: edges.clone(),
         };
         let (created_block, tree_id) = write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let (block, node) = write_new_node(&tree, &id_cache, &request, now)?;
                 doc.commit();
@@ -3220,7 +3221,7 @@ impl LoroBackend {
                 Arc::new(Mutex::new(HashMap::new()))
             };
             let written = write_doc
-                .with_write(|doc| {
+                .with_write(WriteOrigin::BlockOps, |doc| {
                     let tree = doc.get_tree(TREE_NAME);
                     let mut out: Vec<(usize, Block, loro::TreeID)> = Vec::new();
                     for (idx, request) in &members {
@@ -3277,7 +3278,7 @@ impl LoroBackend {
         let (write_doc, tree_id) = self.target_doc(&target);
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
                 // Merge: write only the provided keys so a concurrent peer's
@@ -3315,7 +3316,7 @@ impl LoroBackend {
         let (write_doc, tree_id) = self.target_doc(&target);
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
                 // Authoritative full set (org re-parse): keys absent from the new
@@ -3347,7 +3348,7 @@ impl LoroBackend {
         let (write_doc, tree_id) = self.target_doc(&target);
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
                 // Touch only the named fields (per-key convergence, H3): a
@@ -3405,7 +3406,7 @@ impl LoroBackend {
         };
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let new_parent = resolve_parent_tree_id(&tree, &id_cache, &new_parent_uri)?;
                 // No-op when the parent is unchanged: `tree.mov` APPENDS the
@@ -3532,7 +3533,7 @@ impl LoroBackend {
         }
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 match predecessor {
                     Some(pred_id) => {
@@ -3588,7 +3589,7 @@ impl LoroBackend {
             .map_err(|e| anyhow::anyhow!("set_block_edge_field({key}): {e}"))?;
         let (write_doc, tree_id) = self.target_doc(&target);
         let serialized = serde_json::to_string(values)?;
-        write_doc.with_write(|doc| {
+        write_doc.with_write(WriteOrigin::BlockOps, |doc| {
             let tree = doc.get_tree(TREE_NAME);
             let meta = tree.get_meta(tree_id)?;
             if values.is_empty() {
@@ -3616,7 +3617,7 @@ impl LoroBackend {
 
         let serialized = serde_json::to_string(tags)?;
 
-        write_doc.with_write(|doc| {
+        write_doc.with_write(WriteOrigin::BlockOps, |doc| {
             let tree = doc.get_tree(TREE_NAME);
             let meta = tree.get_meta(tree_id)?;
             if tags.is_empty() {
@@ -3646,7 +3647,7 @@ impl LoroBackend {
 
         let serialized = serde_json::to_string(requires)?;
 
-        write_doc.with_write(|doc| {
+        write_doc.with_write(WriteOrigin::BlockOps, |doc| {
             let tree = doc.get_tree(TREE_NAME);
             let meta = tree.get_meta(tree_id)?;
             if requires.is_empty() {
@@ -3677,7 +3678,7 @@ impl LoroBackend {
 
         let serialized = serde_json::to_string(advice_suppressed)?;
 
-        write_doc.with_write(|doc| {
+        write_doc.with_write(WriteOrigin::BlockOps, |doc| {
             let tree = doc.get_tree(TREE_NAME);
             let meta = tree.get_meta(tree_id)?;
             if advice_suppressed.is_empty() {
@@ -3705,7 +3706,7 @@ impl LoroBackend {
             .map_err(|e| anyhow::anyhow!("set_source_language: {e}"))?;
         let (write_doc, tree_id) = self.target_doc(&target);
 
-        write_doc.with_write(|doc| {
+        write_doc.with_write(WriteOrigin::BlockOps, |doc| {
             let tree = doc.get_tree(TREE_NAME);
             let meta = tree.get_meta(tree_id)?;
             meta.insert(SOURCE_LANGUAGE, loro::LoroValue::from(lang))?;
@@ -4020,7 +4021,7 @@ impl LoroBackend {
             .strip_prefix("block:")
             .unwrap_or(external_id)
             .to_string();
-        write_doc.with_write(|doc| {
+        write_doc.with_write(WriteOrigin::BlockOps, |doc| {
             let tree = doc.get_tree(TREE_NAME);
             let meta = tree.get_meta(tree_id)?;
             meta.insert(STABLE_ID, loro::LoroValue::from(raw_id.as_str()))?;
@@ -4037,7 +4038,7 @@ impl LoroBackend {
     pub async fn create_placeholder_root(&self, stable_id: &str) -> anyhow::Result<String> {
         let sid = stable_id.to_string();
         let id_cache = self.id_cache.clone();
-        self.collab_doc.with_write(|doc| {
+        self.collab_doc.with_write(WriteOrigin::BlockOps, |doc| {
             let tree = doc.get_tree(TREE_NAME);
             let node = tree.create(None)?;
             let meta = tree.get_meta(node)?;
@@ -4475,7 +4476,7 @@ impl CoreOperations for LoroBackend {
         let content_clone = content.clone();
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
                 write_content_to_meta(&meta, &content)?;
@@ -4514,7 +4515,7 @@ impl CoreOperations for LoroBackend {
 
         let mut did_delete = false;
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 // A block's mergeable children are ROOT containers, which
                 // `tree.delete` leaves alive holding the block's content. Name
@@ -4619,7 +4620,7 @@ impl CoreOperations for LoroBackend {
             .map_err(ApiError::from)?;
 
         write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let new_parent_tree_id = resolve_parent_tree_id(&tree, &id_cache, &new_parent)?;
 
@@ -4739,7 +4740,7 @@ impl CoreOperations for LoroBackend {
             Arc::new(Mutex::new(HashMap::new()))
         };
         let created_blocks = write_doc
-            .with_write(|doc| {
+            .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let mut created = Vec::new();
                 let mut id_cache_entries: Vec<(String, loro::TreeID)> = Vec::new();
@@ -4827,7 +4828,7 @@ impl CoreOperations for LoroBackend {
         }
 
         self.collab_doc
-            .with_write(move |doc| {
+            .with_write(WriteOrigin::BlockOps, move |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 // Name every doomed subtree's root containers before ANY delete:
                 // one id in the batch may be an ancestor of another, and a
@@ -6164,7 +6165,7 @@ mod half_born_node_tests {
         create(&backend, EntityUri::block("parent"), "settled").await;
 
         let parent_tid = backend.resolve_to_tree_id("block:parent").await.unwrap();
-        doc.with_write(|d| {
+        doc.with_write(WriteOrigin::BlockOps, |d| {
             d.get_tree(TREE_NAME).create(Some(parent_tid))?;
             Ok(())
         })
@@ -6191,7 +6192,7 @@ mod half_born_node_tests {
         create(&backend, EntityUri::no_parent(), "target").await;
 
         let parent_tid = backend.resolve_to_tree_id("block:parent").await.unwrap();
-        doc.with_write(|d| {
+        doc.with_write(WriteOrigin::BlockOps, |d| {
             d.get_tree(TREE_NAME).create(Some(parent_tid))?;
             Ok(())
         })
@@ -6222,7 +6223,7 @@ mod half_born_node_tests {
         create(&backend, EntityUri::block("parent"), "settled").await;
 
         let parent_tid = backend.resolve_to_tree_id("block:parent").await.unwrap();
-        doc.with_write(|d| {
+        doc.with_write(WriteOrigin::BlockOps, |d| {
             let tree = d.get_tree(TREE_NAME);
             let half_born = tree.create(Some(parent_tid))?;
             // A settled grandchild UNDER the half-born node: its own STABLE_ID

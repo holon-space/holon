@@ -3,9 +3,9 @@
 //! Direct port of the previous `MutableTextInner` (`mutable_text.rs`)
 //! adapted to the [`CellBacking`] / [`TextCellBacking`] traits. Reads the
 //! current string from the `LoroText`, applies local edits as Loro
-//! `insert`/`delete` ops with `set_next_commit_origin("ui_local")` so the
-//! outbound projector can distinguish self-originated writes, and
-//! re-publishes peer-originated deltas through a broadcast channel.
+//! `insert`/`delete` ops under a [`WriteOrigin`] so the outbound projector can
+//! distinguish self-originated writes, and re-publishes peer-originated deltas
+//! through a broadcast channel.
 
 use std::sync::Arc;
 
@@ -30,15 +30,19 @@ use loro::event::Diff;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 
+use crate::write_origin::WriteOrigin;
+
 /// Commit origin stamped on the editor's *own keystroke* writes
-/// (`apply_text_op`). It is the **only** origin the subscribe filter
-/// suppresses: the editor already holds the value it just typed, and
-/// re-delivering its own echo would yank the caret to end via the absolute
-/// `set_value` convergence path (`editor_view::converge_input`).
+/// (`apply_text_op`), i.e. [`WriteOrigin::UiEditorKeystroke`]. It is the
+/// **only** origin the subscribe filter suppresses: the editor already holds
+/// the value it just typed, and re-delivering its own echo would yank the caret
+/// to end via the absolute `set_value` convergence path
+/// (`editor_view::converge_input`).
 ///
 /// Every *other* writer — structural ops / `set_field` (which reach Loro via
-/// `update_block_text` → `LoroDocument::with_write_origin("ui_local")`),
-/// `apply_replace`, and remote peer imports — is an **authoritative** write
+/// `update_block_text` → [`WriteOrigin::BlockOps`]), `apply_replace`
+/// ([`WriteOrigin::UiValueSet`]), and remote peer imports — is an
+/// **authoritative** write
 /// the editor must converge to, so those events pass the filter. Authority
 /// rationale: `docs/Architecture/UI.md` §"Field authority and intent capture".
 ///
@@ -49,7 +53,9 @@ use tokio_stream::wrappers::BroadcastStream;
 /// `current()`; headless never subscribes; gpui suppresses its own echo by
 /// design). Any future consumer that needs to *see* a local editor's
 /// keystrokes on the stream would silently miss them.
-pub(crate) const EDITOR_ECHO_ORIGIN: &str = "ui_editor_echo";
+pub(crate) fn editor_echo_origin() -> std::borrow::Cow<'static, str> {
+    WriteOrigin::UiEditorKeystroke.as_origin()
+}
 
 pub struct LoroTextCellBacking {
     doc: Arc<LoroDoc>,
@@ -77,8 +83,8 @@ impl LoroTextCellBacking {
                 // Filter A: suppress ONLY the editor's own keystroke echo.
                 // Every other writer (structural `with_write`/`set_field`,
                 // `apply_replace`, peer imports) is authoritative and must
-                // reach the editor so it converges. See `EDITOR_ECHO_ORIGIN`.
-                if event.origin == EDITOR_ECHO_ORIGIN {
+                // reach the editor so it converges. See `editor_echo_origin`.
+                if *event.origin == *editor_echo_origin() {
                     return;
                 }
                 // Filter B: only this container.
@@ -131,7 +137,7 @@ impl CellBacking<String> for LoroTextCellBacking {
         let doc = self.doc.clone();
         let text = self.text.clone();
         Box::pin(async move {
-            doc.set_next_commit_origin("ui_local");
+            doc.set_next_commit_origin(&WriteOrigin::UiValueSet.as_origin());
             text.update(&v, loro::UpdateOptions::default())
                 .map_err(|e| anyhow!("LoroText::update failed: {e:?}"))?;
             doc.commit();
@@ -148,9 +154,10 @@ impl TextCellBacking for LoroTextCellBacking {
     fn apply_text_op(&self, op: TextOp) -> Result<()> {
         // The editor's own keystroke — stamp the echo origin so the subscribe
         // filter drops it (the editor already holds this value; converging it
-        // back would yank the caret to end). All non-keystroke writers keep
-        // "ui_local" and therefore pass the filter.
-        self.doc.set_next_commit_origin(EDITOR_ECHO_ORIGIN);
+        // back would yank the caret to end). All non-keystroke writers carry
+        // another origin and therefore pass the filter.
+        self.doc
+            .set_next_commit_origin(&WriteOrigin::UiEditorKeystroke.as_origin());
         match op {
             TextOp::Insert {
                 pos_codepoint,
@@ -295,7 +302,7 @@ mod tests {
             pos_codepoint: 0,
             text: "x".into(),
         })?;
-        // The editor's own keystroke is stamped EDITOR_ECHO_ORIGIN and must
+        // The editor's own keystroke is stamped the keystroke origin and must
         // be dropped by the subscribe filter — it should NOT reach remote_tx.
         assert!(rx.try_recv().is_err());
         Ok(())
@@ -303,11 +310,12 @@ mod tests {
 
     #[tokio::test]
     async fn authoritative_replace_reaches_remote_tx() -> Result<()> {
-        // The fix: a NON-keystroke write (`apply_replace`, origin "ui_local" —
-        // the same origin structural `set_field`/`update_block_text` writes
-        // use) is authoritative and MUST pass the filter so a subscribed
-        // editor converges to it. This is what was previously (wrongly)
-        // swallowed, causing the join's merged content to be lost.
+        // The fix: a NON-keystroke write (`apply_replace`, origin
+        // `WriteOrigin::UiValueSet` — the same origin structural
+        // `set_field`/`update_block_text` writes use) is authoritative and MUST
+        // pass the filter so a subscribed editor converges to it. This is what
+        // was previously (wrongly) swallowed, causing the join's merged content
+        // to be lost.
         let (doc, text) = make_doc_with_text();
         let backing = LoroTextCellBacking::new(doc, text)?;
         let mut rx = backing.remote_tx.subscribe();
@@ -323,7 +331,7 @@ mod tests {
     /// scoped to the originating editor. Two occurrences of the SAME block
     /// share ONE `LoroTextCellBacking` (same `EntityUri` → one `CellCache`
     /// entry → one `remote_tx`, since `Cell` clones share the backing `Arc`).
-    /// A keystroke via `apply_text_op` is stamped `EDITOR_ECHO_ORIGIN` and
+    /// A keystroke via `apply_text_op` is stamped the keystroke origin and
     /// dropped at the doc-subscribe callback (Filter A) BEFORE it reaches
     /// `remote_tx`, so it reaches NEITHER subscriber — a non-typing sibling
     /// occurrence is starved and never converges via `remote_deltas`. This is
@@ -331,11 +339,11 @@ mod tests {
     /// construction" on the shared-cell path: pre-Increment-G it was the
     /// per-row `_data_subscription` (CDC) and the render backstop that
     /// carried sibling liveness — exactly the paths Increment G retires. A
-    /// non-echo write (`apply_replace`, origin `"ui_local"` — the same
-    /// origin class as structural `set_field` / peer imports; the filter is
-    /// a pure origin-string check, so this is representative) DOES reach
-    /// both subscribers, so the filter's legitimate job (never echoing an
-    /// editor's OWN keystroke back to itself) stays proven.
+    /// non-echo write (`apply_replace`, origin `WriteOrigin::UiValueSet` — the
+    /// same origin class as structural `set_field` / peer imports; the
+    /// filter is a pure origin-string check, so this is representative)
+    /// DOES reach both subscribers, so the filter's legitimate job (never
+    /// echoing an editor's OWN keystroke back to itself) stays proven.
     #[tokio::test]
     async fn keystroke_echo_starves_sibling_subscriber() -> Result<()> {
         let (doc, text) = make_doc_with_text();

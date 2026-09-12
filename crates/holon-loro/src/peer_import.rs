@@ -33,9 +33,9 @@ use holon_api::sharing::Capability;
 use loro::LoroDoc;
 
 use crate::loro_document::LoroDocument;
-use crate::loro_document::SYNC_IMPORT_ORIGIN;
 use crate::share_enrollment::AuthorizedPeer;
 use crate::share_enrollment::PeerFingerprint;
+use crate::write_origin::WriteOrigin;
 
 /// Proof that a specific remote peer is admitted to a specific container, and
 /// with which capabilities. Constructible only through the named constructors
@@ -148,8 +148,8 @@ pub struct PeerAccessRefused {
 ///
 /// Two things happen here that a bare `LoroDoc::import` does not do: the
 /// admission's capabilities are enforced, and the write goes through the
-/// document's own boundary lock tagged [`SYNC_IMPORT_ORIGIN`] — so the import
-/// can neither land inside a local batch's interior nor be mistaken by a
+/// document's own boundary lock tagged [`WriteOrigin::SyncImport`] — so the
+/// import can neither land inside a local batch's interior nor be mistaken by a
 /// subscriber for this device's own write.
 ///
 /// `doc` is the raw `Arc<LoroDoc>` the transport carries. Re-wrapping it
@@ -168,7 +168,7 @@ pub fn import_peer_delta(doc: &Arc<LoroDoc>, admitted: &AdmittedPeer, delta: &[u
             .into());
     }
     LoroDocument::from_existing(doc.clone(), admitted.container.clone())
-        .apply_update_with_origin(SYNC_IMPORT_ORIGIN, delta)
+        .apply_update_with_origin(WriteOrigin::SyncImport, delta)
         .with_context(|| {
             format!(
                 "importing an ADMITTED {}-byte delta from peer {:?} into container `{}` — \
@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(doc.get_tree(TREE_NAME).nodes().len(), 1);
         assert_eq!(
             origins.lock().expect("origin sink").as_slice(),
-            [SYNC_IMPORT_ORIGIN.to_string()],
+            [WriteOrigin::SyncImport.as_origin().to_string()],
             "a peer import must be distinguishable from this device's own write"
         );
     }

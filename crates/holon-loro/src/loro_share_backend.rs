@@ -75,6 +75,7 @@ use crate::shared_tree::SHARE_ROLE_PROPERTY;
 use crate::shared_tree::SHARED_TREE_ID_PROPERTY;
 use crate::shared_tree::{self};
 use crate::ticket::Ticket;
+use crate::write_origin::WriteOrigin;
 
 fn err(msg: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
     Box::<dyn std::error::Error + Send + Sync>::from(msg.into())
@@ -1729,7 +1730,8 @@ fn ensure_shared_with_me_root_node(doc: &LoroDoc) -> Result<TreeID> {
         .map_err(|e| err(format!("encode 'Shared with me' tags: {e:#}")))?;
     meta.insert("tags", tags_json.as_str())
         .map_err(|e| err(format!("tag 'Shared with me' as Page: {e:#}")))?;
-    doc.commit();
+    // No commit: the only caller is inside an origin-armed write scope and
+    // flushes through `WriteTxn::commit`, which labels the batch.
     Ok(node)
 }
 
@@ -1847,96 +1849,109 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // forks the shared doc; the snapshot is written to disk before
         // we mutate the source tree. If the save fails, Phase B never
         // runs and the source stays untouched — no rollback.
-        let (shared_arc, shared_root, mount_parent_uri) = collab.with_write(|txn| {
-            let doc = txn.doc();
+        let (shared_arc, shared_root, mount_parent_uri) =
+            collab.with_write(WriteOrigin::ShareLifecycle, |txn| {
+                let doc = txn.doc();
 
-            let tid = find_tree_id_by_stable_id(doc, &id_uri)
-                .ok_or_else(|| anyhow::Error::msg(format!("block {id} not found in Loro tree")))?;
-            if shared_tree::is_mount_node(&doc.get_tree(crate::loro_backend::TREE_NAME), tid) {
-                return Err(anyhow::Error::msg(format!(
-                    "block {id} is already a mount node; sharing a mount is not supported"
-                )));
-            }
-            // Amendment A: the mount is a Page (Inc 2), so it must sit under a
-            // Page (or a root). Bubble the subtree's original parent to its
-            // nearest page ancestor — a no-op in the common case (sharing a
-            // page, or a block already under a page), so the mount stays in
-            // place; only a block shared under a non-page bubbles up. Using this
-            // `parent` for BOTH the SQL mount row and the Loro mount placement
-            // keeps the two stores aligned.
-            let parent = match parent_as_option(doc, tid) {
-                Some(ptid) => nearest_page_ancestor_tid(doc, ptid).map_err(anyhow::Error::msg)?,
-                None => None,
-            };
-
-            // The mount node replaces the shared subtree, so its SQL parent is
-            // the resolved page ancestor (from the parent node's STABLE_ID). A
-            // shared root with no page ancestor → the mount becomes a top-level
-            // block (`no_parent` sentinel).
-            let mount_parent_uri = match parent {
-                Some(parent_tid) => {
-                    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
-                    read_stable_id(&tree, parent_tid)
-                        .map(|s| block_uri_from_bare(&s))
-                        .ok_or_else(|| {
-                            anyhow::Error::msg(format!(
-                                "shared subtree's parent node {parent_tid:?} has no STABLE_ID; \
-                                 cannot resolve the mount's SQL parent"
-                            ))
-                        })?
+                let tid = find_tree_id_by_stable_id(doc, &id_uri).ok_or_else(|| {
+                    anyhow::Error::msg(format!("block {id} not found in Loro tree"))
+                })?;
+                if shared_tree::is_mount_node(&doc.get_tree(crate::loro_backend::TREE_NAME), tid) {
+                    return Err(anyhow::Error::msg(format!(
+                        "block {id} is already a mount node; sharing a mount is not supported"
+                    )));
                 }
-                None => EntityUri::no_parent().as_str().to_string(),
-            };
+                // Amendment A: the mount is a Page (Inc 2), so it must sit under a
+                // Page (or a root). Bubble the subtree's original parent to its
+                // nearest page ancestor — a no-op in the common case (sharing a
+                // page, or a block already under a page), so the mount stays in
+                // place; only a block shared under a non-page bubbles up. Using this
+                // `parent` for BOTH the SQL mount row and the Loro mount placement
+                // keeps the two stores aligned.
+                let parent = match parent_as_option(doc, tid) {
+                    Some(ptid) => {
+                        nearest_page_ancestor_tid(doc, ptid).map_err(anyhow::Error::msg)?
+                    }
+                    None => None,
+                };
 
-            // --- Phase A: fork + extract (source unchanged) ---
-            let extracted =
-                shared_tree::extract_for_share(doc, tid, parent, shared_tree_id.clone(), retention)
-                    .map_err(|e| anyhow::Error::msg(format!("extract_for_share failed: {e:#}")))?;
+                // The mount node replaces the shared subtree, so its SQL parent is
+                // the resolved page ancestor (from the parent node's STABLE_ID). A
+                // shared root with no page ancestor → the mount becomes a top-level
+                // block (`no_parent` sentinel).
+                let mount_parent_uri = match parent {
+                    Some(parent_tid) => {
+                        let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+                        read_stable_id(&tree, parent_tid)
+                            .map(|s| block_uri_from_bare(&s))
+                            .ok_or_else(|| {
+                                anyhow::Error::msg(format!(
+                                    "shared subtree's parent node {parent_tid:?} has no STABLE_ID; \
+                                 cannot resolve the mount's SQL parent"
+                                ))
+                            })?
+                    }
+                    None => EntityUri::no_parent().as_str().to_string(),
+                };
 
-            // Stable peer id BEFORE save so the persisted snapshot
-            // already carries the right identity. Bump the generation so
-            // this mint can never reuse a `(peer_id, counter)` from a
-            // stale snapshot after a crash — see `share_peer_id`.
-            let generation = self
-                .snapshot_store
-                .next_generation(&shared_tree_id)
-                .map_err(|e| anyhow::Error::msg(format!("bump peer-id generation: {e:#}")))?;
-            let peer_id = stable_peer_id(&self.device_key, &shared_tree_id, generation);
-            extracted
-                .shared_doc
-                .set_peer_id(peer_id)
-                .map_err(|e| anyhow::Error::msg(format!("set_peer_id on shared doc: {e:#}")))?;
+                // --- Phase A: fork + extract (source unchanged) ---
+                let extracted = shared_tree::extract_for_share(
+                    doc,
+                    tid,
+                    parent,
+                    shared_tree_id.clone(),
+                    retention,
+                )
+                .map_err(|e| anyhow::Error::msg(format!("extract_for_share failed: {e:#}")))?;
 
-            // --- Persist shared snapshot BEFORE prune ---
-            if let Err(e) = self
-                .snapshot_store
-                .save(&shared_tree_id, &extracted.shared_doc)
-            {
-                self.degraded_bus.emit(ShareDegraded {
-                    shared_tree_id: shared_tree_id.clone(),
-                    reason: ShareDegradedReason::SnapshotSaveFailed(format!("{e:#}")),
-                });
-                // Source doc is still untouched — drop the extracted
-                // doc and bail out. No rollback needed.
-                return Err(anyhow::anyhow!(
-                    "initial snapshot save failed; source tree unchanged: {e:#}"
-                ));
-            }
+                // Stable peer id BEFORE save so the persisted snapshot
+                // already carries the right identity. Bump the generation so
+                // this mint can never reuse a `(peer_id, counter)` from a
+                // stale snapshot after a crash — see `share_peer_id`.
+                let generation = self
+                    .snapshot_store
+                    .next_generation(&shared_tree_id)
+                    .map_err(|e| anyhow::Error::msg(format!("bump peer-id generation: {e:#}")))?;
+                let peer_id = stable_peer_id(&self.device_key, &shared_tree_id, generation);
+                extracted
+                    .shared_doc
+                    .set_peer_id(peer_id)
+                    .map_err(|e| anyhow::Error::msg(format!("set_peer_id on shared doc: {e:#}")))?;
 
-            // --- Phase B: prune source + create mount node ---
-            let shared_root = extracted.shared_root;
-            let mount_tid = shared_tree::commit_share_prune(doc, &extracted)
-                .map_err(|e| anyhow::anyhow!("commit_share_prune failed: {e:#}"))?;
-            set_stable_id(doc, mount_tid, &mount_stable_id)
-                .map_err(|e| anyhow::anyhow!("set mount stable_id: {e:#}"))?;
-            doc.commit();
+                // --- Persist shared snapshot BEFORE prune ---
+                if let Err(e) = self
+                    .snapshot_store
+                    .save(&shared_tree_id, &extracted.shared_doc)
+                {
+                    self.degraded_bus.emit(ShareDegraded {
+                        shared_tree_id: shared_tree_id.clone(),
+                        reason: ShareDegradedReason::SnapshotSaveFailed(format!("{e:#}")),
+                    });
+                    // Source doc is still untouched — drop the extracted
+                    // doc and bail out. No rollback needed.
+                    return Err(anyhow::anyhow!(
+                        "initial snapshot save failed; source tree unchanged: {e:#}"
+                    ));
+                }
 
-            Ok((
-                Arc::new(extracted.shared_doc),
-                shared_root,
-                mount_parent_uri,
-            ))
-        })?;
+                // --- Phase B: prune source + create mount node ---
+                let shared_root = extracted.shared_root;
+                let mount_tid = shared_tree::commit_share_prune(doc, &extracted)
+                    .map_err(|e| anyhow::anyhow!("commit_share_prune failed: {e:#}"))?;
+                set_stable_id(doc, mount_tid, &mount_stable_id)
+                    .map_err(|e| anyhow::anyhow!("set mount stable_id: {e:#}"))?;
+                // Not `doc.commit()`: `commit_share_prune` already consumed the
+                // scope's armed origin, so a bare commit here would land
+                // unlabelled and a text-undo manager would offer to take the
+                // share back.
+                txn.commit();
+
+                Ok((
+                    Arc::new(extracted.shared_doc),
+                    shared_root,
+                    mount_parent_uri,
+                ))
+            })?;
 
         // Flush the global doc so the mount node survives in lockstep
         // with the shared snapshot. Failure here leaves consistent
@@ -2223,19 +2238,20 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // Set when the mount is parented under the "Shared with me" recipient
         // root (H7) — drives the post-lock SQL projection of that root row.
         let mut attached_to_shared_with_me = false;
-        let (mount_stable_id, mount_parent_uri) = collab.with_write(|txn| {
-            let doc = txn.doc();
+        let (mount_stable_id, mount_parent_uri) =
+            collab.with_write(WriteOrigin::ShareLifecycle, |txn| {
+                let doc = txn.doc();
 
-            if let Some((existing_tid, existing_uri)) =
-                find_mount_by_shared_tree_id(doc, &shared_tree_id)?
-            {
-                // Idempotent re-accept: the mount already exists. Recover its
-                // (already page-resolved) SQL parent from its Loro placement.
-                let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
-                // Fail loud identically to the fresh-accept path below: a mount
-                // parented under a node with no STABLE_ID is a corrupt tree, not
-                // a reason to silently relocate the mount to top-level.
-                let parent_uri_existing = match parent_as_option(doc, existing_tid) {
+                if let Some((existing_tid, existing_uri)) =
+                    find_mount_by_shared_tree_id(doc, &shared_tree_id)?
+                {
+                    // Idempotent re-accept: the mount already exists. Recover its
+                    // (already page-resolved) SQL parent from its Loro placement.
+                    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+                    // Fail loud identically to the fresh-accept path below: a mount
+                    // parented under a node with no STABLE_ID is a corrupt tree, not
+                    // a reason to silently relocate the mount to top-level.
+                    let parent_uri_existing = match parent_as_option(doc, existing_tid) {
                     Some(ptid) => read_stable_id(&tree, ptid)
                         .map(|s| block_uri_from_bare(&s))
                         .ok_or_else(|| {
@@ -2246,25 +2262,27 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                         })?,
                     None => no_parent.clone(),
                 };
-                Ok((existing_uri, parent_uri_existing))
-            } else {
-                let new_id = format!("block:{}", Uuid::new_v4());
-                let parent_tid = find_tree_id_by_stable_id(doc, &parent_uri).ok_or_else(|| {
-                    anyhow::Error::msg(format!("parent block {parent_id} not found"))
-                })?;
-                // Amendment A: the mount is a Page, so bubble the accept target
-                // to its nearest page ancestor — a no-op when the user targeted
-                // a page (the common case). The SAME resolved parent lands in
-                // both the Loro tree and the SQL row, keeping the stores
-                // aligned.
-                //
-                // H7 (ADR 0028): when the target has NO page ancestor, the mount
-                // would orphan at `no_parent` — present in SQL but invisible in
-                // the UI (dogfood N3, 2026-07-20). Attach it under the dedicated
-                // "Shared with me" recipient root instead, so accepted shares are
-                // always reachable and rendered.
-                let page_parent_tid =
-                    match nearest_page_ancestor_tid(doc, parent_tid).map_err(anyhow::Error::msg)? {
+                    Ok((existing_uri, parent_uri_existing))
+                } else {
+                    let new_id = format!("block:{}", Uuid::new_v4());
+                    let parent_tid =
+                        find_tree_id_by_stable_id(doc, &parent_uri).ok_or_else(|| {
+                            anyhow::Error::msg(format!("parent block {parent_id} not found"))
+                        })?;
+                    // Amendment A: the mount is a Page, so bubble the accept target
+                    // to its nearest page ancestor — a no-op when the user targeted
+                    // a page (the common case). The SAME resolved parent lands in
+                    // both the Loro tree and the SQL row, keeping the stores
+                    // aligned.
+                    //
+                    // H7 (ADR 0028): when the target has NO page ancestor, the mount
+                    // would orphan at `no_parent` — present in SQL but invisible in
+                    // the UI (dogfood N3, 2026-07-20). Attach it under the dedicated
+                    // "Shared with me" recipient root instead, so accepted shares are
+                    // always reachable and rendered.
+                    let page_parent_tid = match nearest_page_ancestor_tid(doc, parent_tid)
+                        .map_err(anyhow::Error::msg)?
+                    {
                         Some(p) => Some(p),
                         None => {
                             attached_to_shared_with_me = true;
@@ -2272,28 +2290,30 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                         }
                     };
 
-                let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
-                let mount = shared_tree::create_mount_node(
-                    &tree,
-                    page_parent_tid,
-                    &shared_tree_id,
-                    shared_root,
-                )
-                .map_err(|e| anyhow::anyhow!("create mount node: {e:#}"))?;
-                set_stable_id(doc, mount, &new_id)
-                    .map_err(|e| anyhow::anyhow!("set mount stable_id: {e:#}"))?;
-                doc.commit();
-                let mount_parent_uri = match page_parent_tid {
-                    Some(ptid) => read_stable_id(&tree, ptid)
-                        .map(|s| block_uri_from_bare(&s))
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("page ancestor {ptid:?} has no STABLE_ID")
-                        })?,
-                    None => no_parent.clone(),
-                };
-                Ok((new_id, mount_parent_uri))
-            }
-        })?;
+                    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+                    let mount = shared_tree::create_mount_node(
+                        &tree,
+                        page_parent_tid,
+                        &shared_tree_id,
+                        shared_root,
+                    )
+                    .map_err(|e| anyhow::anyhow!("create mount node: {e:#}"))?;
+                    set_stable_id(doc, mount, &new_id)
+                        .map_err(|e| anyhow::anyhow!("set mount stable_id: {e:#}"))?;
+                    // Not `doc.commit()`: `ensure_shared_with_me_root_node` may
+                    // already have consumed the scope's armed origin.
+                    txn.commit();
+                    let mount_parent_uri = match page_parent_tid {
+                        Some(ptid) => read_stable_id(&tree, ptid)
+                            .map(|s| block_uri_from_bare(&s))
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("page ancestor {ptid:?} has no STABLE_ID")
+                            })?,
+                        None => no_parent.clone(),
+                    };
+                    Ok((new_id, mount_parent_uri))
+                }
+            })?;
 
         // Flush the global doc so the mount node is durable.
         if let Err(e) = self.store.read().await.save_all().await {
@@ -2454,7 +2474,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // is immediate and deterministic — the descendant rows live only in SQL
         // (they were never in the global doc), so the global projection never
         // touches them.
-        collab.with_write(|txn| {
+        collab.with_write(WriteOrigin::ShareLifecycle, |txn| {
             let doc = txn.doc();
             let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
             // Name the mount's root containers BEFORE the delete: the delete
@@ -3461,6 +3481,74 @@ mod tests {
                 Some(t.to_string())
             }
             _ => None,
+        }
+    }
+
+    /// Sharing and accepting must never look like typing.
+    ///
+    /// Both seams commit the global document more than once inside one write
+    /// scope — a helper flushes first, then the mount node and its stable id
+    /// are flushed after it. Loro arms an origin for one commit only, so
+    /// without [`WriteTxn::commit`] re-arming, everything after the helper
+    /// lands under the empty origin and a text-undo manager that excludes the
+    /// system prefix would offer to take a share back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn share_and_accept_commit_only_under_system_origins() {
+        let (backend_a, _dir_a) = make_backend();
+        let (backend_b, _dir_b) = make_backend();
+
+        seed_block(&backend_a, "root-a", None, "root-a").await;
+        seed_block(
+            &backend_a,
+            "shared-parent",
+            Some("root-a"),
+            "Shared heading",
+        )
+        .await;
+        seed_block(&backend_b, "root-b", None, "root-b").await;
+
+        let watch = |collab: &Arc<crate::LoroDocument>| {
+            let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let sink = seen.clone();
+            // ALLOW(loro_doc_escape): subscription registration, a blessed use.
+            let sub = collab.doc().subscribe_root(Arc::new(move |event| {
+                sink.lock().unwrap().push(event.origin.to_string());
+            }));
+            (seen, sub)
+        };
+        let collab_a = backend_a.global_doc().await.unwrap();
+        let collab_b = backend_b.global_doc().await.unwrap();
+        let (seen_a, _sub_a) = watch(&collab_a);
+        let (seen_b, _sub_b) = watch(&collab_b);
+
+        let share_response = backend_a
+            .share_subtree("block:shared-parent", "none".into())
+            .await
+            .unwrap();
+        let ticket_json: serde_json::Value = match share_response.response.unwrap() {
+            Value::String(s) => serde_json::from_str(&s).unwrap(),
+            other => panic!("unexpected response type: {other:?}"),
+        };
+        let ticket = ticket_json["ticket"].as_str().unwrap().to_string();
+        backend_b
+            .accept_shared_subtree("block:root-b", ticket)
+            .await
+            .unwrap();
+
+        for (leg, seen) in [("share", &seen_a), ("accept", &seen_b)] {
+            let origins = seen.lock().unwrap().clone();
+            assert!(
+                !origins.is_empty(),
+                "the {leg} leg committed nothing to the global doc, so this proves nothing"
+            );
+            assert!(
+                origins
+                    .iter()
+                    .all(|o| o.starts_with(WriteOrigin::SYSTEM_PREFIX)),
+                "the {leg} leg committed under origin(s) a text-undo manager cannot exclude: \
+                 {origins:?}"
+            );
         }
     }
 

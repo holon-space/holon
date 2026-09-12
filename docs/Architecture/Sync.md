@@ -576,143 +576,77 @@ Step 3 before step 4 ensures Loro's P2P state is "known" before org file diffs a
 
 External systems remain server-authoritative via the QueryableCache pattern above.
 
-### Operation Log (Undo/Redo)
+### Undo and redo
 
-The Operation Log provides persistent undo/redo functionality by storing executed operations with their inverses.
+Two separate things carry the word "operation log" in this tree, and only one
+of them answers cmd-z.
 
-**Location**: `crates/holon/src/core/operation_log.rs` (implementation), `crates/holon-core/src/operation_log.rs` (entity)
+#### What runs: the in-process inverse journal
 
-#### Architecture
+`OperationEngine` keeps an `UndoStack` of `UndoEntry` values in memory
+(`crates/holon/src/api/operation_engine.rs`). Every dispatched operation whose
+`OpOrigin` is `User` journals the ops that reverse it, under the entity write
+guard that produced it, so the journal's order is the write order
+(`journal_step`, ~line 711). `undo()` pops the top entry, checks a precondition
+against current state, and replays the inverse ops; a stale entry is dropped
+with an error rather than approximated.
 
-```rust
-pub struct OperationLogStore {
-    db_handle: DbHandle,
-    max_log_size: usize,  // Default 100, auto-trims oldest
-}
-```
+The stack survives a restart: `OperationEngine::new_persistent` (~line 596)
+loads a JSON snapshot through the `UndoStore` trait and writes one back on
+every journaled step. The scope is the whole replica, and nothing about it is
+synced.
 
-**Key Components:**
+#### What also exists: the `operation` audit table
 
-| Component | Purpose |
-|-----------|---------|
-| `OperationLogEntry` | Entity storing operation, inverse, status, timestamps |
-| `OperationLogStore` | Persistent store implementing `OperationLogOperations` trait |
-| `OperationLogObserver` | Observer that automatically logs operations for undo |
-| `UndoAction` | Enum representing reversible (`Undo(Operation)`) or `Irreversible` |
+`OperationLogStore` and `OperationLogObserver`
+(`crates/holon/src/core/operation_log.rs`, registered in
+`crates/holon/src/di/registration.rs:303,565`) write an `operation` row per
+executed operation, with its inverse, a status and denormalised display
+columns. This table is real and is written in production.
 
-#### Operation Status Lifecycle
+It is **not** what undo reads. Nothing outside that module's own tests calls
+`mark_undone`, `mark_redone` or `clear_redo_stack`, so the status lifecycle
+(`PendingSync` → `Synced` → `Undone` → `Cancelled`) never advances past the
+initial state and the redo semantics the columns describe are unexercised.
+Treat the table as an audit log and a reactive-UI source, not as the undo
+mechanism.
 
-Operations track their status through the following states:
+#### Target: text undo through the CRDT (Option A, ratified)
 
-| Status | Description |
-|--------|-------------|
-| `PendingSync` | Initial state - operation executed but not yet synced (future sync support) |
-| `Synced` | Operation confirmed synced to external system (future sync support) |
-| `Undone` | Operation was undone - available for redo |
-| `Cancelled` | Undone before sync completed - redo history invalidated |
+An inverse journal cannot undo typing safely. Its inverse is a value captured
+at write time, so replaying it after a peer's characters merged into the same
+line deletes the peer's characters as collateral damage. Only the CRDT can
+take back one peer's characters and leave another's in place.
 
-#### OperationLogEntry Schema
+The ratified target (D115.A) therefore keeps ONE user-facing stack — the
+journal — and delegates one entry kind to Loro:
 
-```sql
-CREATE TABLE operation (
-    id INTEGER PRIMARY KEY,
-    operation TEXT NOT NULL,      -- JSON-serialized Operation
-    inverse TEXT,                 -- JSON-serialized inverse Operation (NULL if irreversible)
-    status TEXT NOT NULL,         -- 'pending_sync', 'synced', 'undone', 'cancelled'
-    created_at INTEGER NOT NULL,  -- Unix timestamp (ms)
-    display_name TEXT NOT NULL,   -- Denormalized for UI display
-    entity_name TEXT NOT NULL,    -- Denormalized for filtering
-    op_name TEXT NOT NULL         -- Denormalized for filtering
-)
-```
+- the journal stays the single order across both write legs;
+- a **text-epoch marker** entry stands where a burst of typing happened, and
+  its inverse is "ask the Loro `UndoManager` to undo one step";
+- markers correspond 1:1 to the manager's undo groups (its merge interval),
+  not to keystrokes;
+- undo does **not** survive a restart (D116.a). The persisted journal is
+  cleared at boot with a disclosed banner, which removes the
+  marker-without-manager state by construction.
 
-**Indexes:**
-- `idx_operation_created_at` - For ordering and trimming old entries
-- `idx_operation_entity_name` - For entity-specific queries
+This is **target, not yet built**. The increments:
 
-#### Undo/Redo Logic
+| # | Step |
+|---|---|
+| 0 | Honest Loro write origins: every seam names itself (`WriteOrigin`), so non-user writes can be excluded from an undo manager |
+| 1 | Construct the `UndoManager` over the vault document, exclude the system origin prefix, set a merge interval — wire nothing |
+| 2 | The text-epoch entry kind and the delegation in `OperationEngine::undo`/`redo` |
+| 3 | Un-gate the keystone `undo_last_mutation` transition for Loro slices |
+| 4 | Restart policy: clear the journal at boot, disclosed |
+| 5 | Diagnose the windowed pre-keystroke hang, then flip the production cell leg |
 
-**Undo Candidate**: Most recent operation where `status NOT IN ('undone', 'cancelled')` and `inverse IS NOT NULL`
-
-**Redo Candidate**: Most recent operation where `status = 'undone'`
-
-```rust
-// Core trait for undo/redo operations
-#[async_trait]
-pub trait OperationLogOperations: MaybeSendSync {
-    /// Log operation with inverse, returns entry ID
-    async fn log_operation(&self, operation: Operation, inverse: UndoAction) -> Result<i64>;
-
-    /// Mark operation as undone (moves to redo stack)
-    async fn mark_undone(&self, id: i64) -> Result<()>;
-
-    /// Mark operation as redone (restores to active status)
-    async fn mark_redone(&self, id: i64) -> Result<()>;
-
-    /// Clear redo stack (marks all 'undone' as 'cancelled')
-    async fn clear_redo_stack(&self) -> Result<()>;
-
-    /// Maximum entries to retain (default: 100)
-    fn max_log_size(&self) -> usize { 100 }
-}
-```
-
-#### Key Behaviors
-
-1. **New operation clears redo stack**: When a new operation is logged, all `undone` operations become `cancelled` (can no longer be redone)
-
-2. **Automatic trimming**: When log exceeds `max_log_size`, oldest entries are deleted
-
-3. **Observer pattern**: `OperationLogObserver` implements `OperationObserver` to automatically log all executed operations
-
-4. **Irreversible operations**: Operations can return `UndoAction::Irreversible` if they cannot be undone (e.g., `split_block`)
-
-#### UndoAction Enum
-
-```rust
-pub enum UndoAction {
-    /// Can be undone by executing the inverse operation
-    Undo(Operation),
-    /// Cannot be undone
-    Irreversible,
-}
-```
-
-Operations carry their `UndoAction` inside the `OperationResult` they return (see [Operations](Operations.md)):
-
-```rust
-// Example: a reversible field write
-async fn set_field(&self, ...) -> Result<OperationResult> {
-    // ... execute operation ...
-    Ok(OperationResult::new(changes, inverse_set_field_op))
-}
-
-// Example: split_block is irreversible (crates/holon-core/src/traits.rs)
-async fn split_block(&self, ...) -> Result<OperationResult> {
-    // ... execute operation ...
-    Ok(OperationResult::irreversible(changes).with_response(focus_response(...)))
-}
-```
-
-#### UI Integration
-
-The operation log enables reactive UI updates via PRQL queries:
-
-```prql
-from operation
-filter status != 'cancelled'
-sort {-created_at}
-take 10
-select {id, display_name, status, created_at}
-```
-
-CDC fires automatically when the `operation` table changes, allowing the UI to reactively update undo/redo button states.
-
-#### Future: Offline Sync
-
-The `PendingSync` → `Synced` status flow is designed for future offline sync support:
-- Operations start as `PendingSync`
-- Background worker syncs to external systems
-- On success: status becomes `Synced`
-- On undo before sync: status becomes `Cancelled` (never syncs)
+**Compaction conflict, measured.** `LoroDocument::export_compact_snapshot`
+exports a shallow snapshot and discards operation history before the current
+frontier. A Loro-based undo depends on that history, so the two policies could
+collide. Measured (`crates/holon-loro/tests/undo_history_trim_probe.rs`): they
+do not collide in-process — a live `UndoManager` still reports `can_undo()`
+after a compact export and its `undo()` produces the pre-typing text. A
+manager built after reloading a compacted snapshot starts empty, which is
+exactly the restart case D116.a already rules out of scope.
 

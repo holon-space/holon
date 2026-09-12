@@ -8,6 +8,7 @@ use tracing::debug;
 use tracing::info;
 
 use crate::doc_lock::DocLock;
+use crate::write_origin::WriteOrigin;
 
 pub struct LoroDocument {
     doc: Arc<LoroDoc>,
@@ -20,7 +21,7 @@ pub struct LoroDocument {
 
 /// Proof that the holder is inside the doc's write guard.
 ///
-/// The token cannot be constructed outside [`LoroDocument::with_write_origin`],
+/// The token cannot be constructed outside [`LoroDocument::with_write`],
 /// so a `&WriteTxn` in a signature is a static guarantee that the whole batch
 /// it performs is invisible to readers until the closure's `commit()`.
 ///
@@ -28,14 +29,44 @@ pub struct LoroDocument {
 /// `LoroDoc` through it unchanged while the seam is established. Sealing
 /// continues by growing a mutation vocabulary on `WriteTxn` and removing
 /// `Deref` once no caller needs the raw doc.
+///
+/// The token also carries the scope's [`WriteOrigin`], because Loro's
+/// `set_next_commit_origin` arms only the NEXT commit: a closure that commits
+/// in the middle of its batch consumes the label and everything after it would
+/// commit unlabelled. [`Self::commit`] and [`Self::import`] re-arm before every
+/// commit, so the origin is a property of the scope rather than of one commit.
+/// An inherent method wins over `Deref`, so `txn.commit()` inside a write
+/// closure already resolves here. The remaining way to commit unlabelled is
+/// through [`Self::doc`], which the `loro_doc_escape` allow-list pins.
 pub struct WriteTxn<'a> {
     doc: &'a LoroDoc,
+    origin: WriteOrigin,
 }
 
 impl<'a> WriteTxn<'a> {
     /// The doc this transaction writes to.
     pub fn doc(&self) -> &'a LoroDoc {
         self.doc
+    }
+
+    /// Flush the pending ops under the scope's origin.
+    ///
+    /// Arms the origin immediately before committing, so a mid-batch commit
+    /// carries the same label as the first one.
+    pub fn commit(&self) {
+        self.doc.set_next_commit_origin(&self.origin.as_origin());
+        self.doc.commit();
+    }
+
+    /// Import an update under the scope's origin.
+    ///
+    /// The ops in `update` belong to whichever peer authored them; the origin
+    /// labels the local application of them, which is what a subscriber keys
+    /// on.
+    pub fn import(&self, update: &[u8]) -> Result<()> {
+        self.doc.import_with(update, &self.origin.as_origin())?;
+        self.doc.set_next_commit_origin(&self.origin.as_origin());
+        Ok(())
     }
 }
 
@@ -67,12 +98,6 @@ fn resolve_peer_id(injected: Option<PeerID>) -> Result<PeerID> {
         Err(_) => Ok(rand::random::<u64>()),
     }
 }
-
-/// The commit origin every REMOTE peer's update carries into a replicated
-/// document, on every transport. A subscriber keys on it to tell a peer's write
-/// from this device's own, so both legs must spell it the same way — hence one
-/// constant rather than a literal per call site.
-pub const SYNC_IMPORT_ORIGIN: &str = "sync_import";
 
 impl LoroDocument {
     pub fn new(doc_id: String) -> Result<Self> {
@@ -149,12 +174,12 @@ impl LoroDocument {
     }
 
     pub fn apply_update(&self, update: &[u8]) -> Result<()> {
-        self.apply_update_with_origin("reconcile", update)
+        self.apply_update_with_origin(WriteOrigin::Reconcile, update)
     }
 
-    pub fn apply_update_with_origin(&self, origin: &str, update: &[u8]) -> Result<()> {
+    pub fn apply_update_with_origin(&self, origin: WriteOrigin, update: &[u8]) -> Result<()> {
         self.lock.write(&self.doc_id, || {
-            self.doc.import_with(update, origin)?;
+            self.doc.import_with(update, &origin.as_origin())?;
             debug!("Applied update of {} bytes", update.len());
             Ok(())
         })
@@ -173,14 +198,8 @@ impl LoroDocument {
         self.lock.read(&self.doc_id, || f(&self.doc))
     }
 
-    pub fn with_write<F, R>(&self, f: F) -> Result<R>
-    where
-        F: FnOnce(&WriteTxn) -> Result<R>,
-    {
-        self.with_write_origin("ui_local", f)
-    }
-
-    /// Apply a write batch under the doc's write guard.
+    /// Apply a write batch under the doc's write guard, stamped with the seam
+    /// that made it.
     ///
     /// The guard is held across the whole closure *and* the trailing
     /// `commit()`, so no reader, exporter or saver can observe the batch
@@ -192,7 +211,7 @@ impl LoroDocument {
     /// channel. Re-reading the doc from a callback on another thread's behalf
     /// would block that thread; the doc-lock's timeout reports it rather than
     /// hanging, but the fix is always to keep the callback pure.
-    pub fn with_write_origin<F, R>(&self, origin: &str, f: F) -> Result<R>
+    pub fn with_write<F, R>(&self, origin: WriteOrigin, f: F) -> Result<R>
     where
         F: FnOnce(&WriteTxn) -> Result<R>,
     {
@@ -200,12 +219,15 @@ impl LoroDocument {
             .write(&self.doc_id, || self.write_batch(origin, f))
     }
 
-    fn write_batch<F, R>(&self, origin: &str, f: F) -> Result<R>
+    fn write_batch<F, R>(&self, origin: WriteOrigin, f: F) -> Result<R>
     where
         F: FnOnce(&WriteTxn) -> Result<R>,
     {
-        self.doc.set_next_commit_origin(origin);
-        let result = f(&WriteTxn { doc: &self.doc })?;
+        let txn = WriteTxn {
+            doc: &self.doc,
+            origin,
+        };
+        let result = f(&txn)?;
 
         // Flush the transaction so the origin-tagged commit actually fires and
         // subscribers observe `origin`. Loro batches changes until an explicit
@@ -213,9 +235,9 @@ impl LoroDocument {
         // not commit. This used to happen implicitly via the diagnostic
         // `export` below — once that was gated behind DEBUG (perf), non-debug
         // log levels stopped committing here and silently dropped the origin
-        // tag. Commit explicitly; it is a no-op when the closure already
-        // committed (the pending origin is consumed by that commit).
-        self.doc.commit();
+        // tag. `WriteTxn::commit` arms the origin first, so this flush is
+        // labelled whether or not the closure already committed.
+        txn.commit();
 
         // Diagnostic only: exporting the owned update log is O(doc-size), and
         // this ran on EVERY write purely to log a byte count — making bulk
@@ -426,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn test_origin_tagging_ui_local_via_with_write() -> Result<()> {
+    fn test_origin_tagging_block_ops_via_with_write() -> Result<()> {
         let doc = LoroDocument::new("origin-test".to_string())?;
         let origin_seen = Arc::new(std::sync::Mutex::new(None::<String>));
         let origin_seen_clone = origin_seen.clone();
@@ -440,7 +462,7 @@ mod tests {
             }
         }));
 
-        doc.with_write(|d| {
+        doc.with_write(WriteOrigin::BlockOps, |d| {
             let tree = d.get_tree("test_tree");
             tree.enable_fractional_index(0);
             let _node = tree.create(None)?;
@@ -450,8 +472,8 @@ mod tests {
         let seen = origin_seen.lock().unwrap();
         assert_eq!(
             seen.as_deref(),
-            Some("ui_local"),
-            "with_write should tag origin as 'ui_local'"
+            Some(WriteOrigin::BlockOps.as_origin().as_ref()),
+            "with_write should tag the origin its caller named"
         );
         Ok(())
     }
@@ -462,7 +484,7 @@ mod tests {
         let doc2 = LoroDocument::new("origin-test-2".to_string())?;
 
         // Create content in doc1
-        doc1.with_write(|d| {
+        doc1.with_write(WriteOrigin::BlockOps, |d| {
             let tree = d.get_tree("test_tree");
             tree.enable_fractional_index(0);
             let _node = tree.create(None)?;
@@ -487,14 +509,95 @@ mod tests {
         let seen = origin_seen.lock().unwrap();
         assert_eq!(
             seen.as_deref(),
-            Some("reconcile"),
-            "apply_update should tag origin as 'reconcile'"
+            Some(WriteOrigin::Reconcile.as_origin().as_ref()),
+            "apply_update should tag the reconcile origin"
+        );
+        Ok(())
+    }
+
+    /// Collect the origin of every commit on `doc` for the life of the guard.
+    fn watch_origins(
+        doc: &LoroDocument,
+    ) -> (Arc<std::sync::Mutex<Vec<String>>>, loro::Subscription) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        // ALLOW(loro_doc_escape): subscription registration, a blessed use.
+        let sub = doc.doc().subscribe_root(Arc::new(move |event| {
+            sink.lock().unwrap().push(event.origin.to_string());
+        }));
+        (seen, sub)
+    }
+
+    /// `set_next_commit_origin` arms only the NEXT commit, so a closure that
+    /// commits mid-batch would leave everything after it unlabelled. The origin
+    /// belongs to the scope, not to one commit.
+    #[test]
+    fn every_commit_in_a_batch_carries_the_scope_origin() -> Result<()> {
+        let doc = LoroDocument::new("scope-origin".to_string())?;
+        let (seen, _sub) = watch_origins(&doc);
+
+        doc.with_write(WriteOrigin::BlockOps, |txn| {
+            txn.get_text("content").insert(0, "a")?;
+            txn.commit();
+            txn.get_text("content").insert(1, "b")?;
+            Ok(())
+        })?;
+
+        let want = WriteOrigin::BlockOps.as_origin().to_string();
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got, vec![want.clone(), want], "got {got:?}");
+        Ok(())
+    }
+
+    /// An EMPTY leading commit consumes the armed origin too, which is the
+    /// shape the share seams hit: a helper commits nothing, then the real work
+    /// is flushed afterwards.
+    #[test]
+    fn an_empty_leading_commit_does_not_strip_the_scope_origin() -> Result<()> {
+        let doc = LoroDocument::new("scope-origin-empty".to_string())?;
+        let (seen, _sub) = watch_origins(&doc);
+
+        doc.with_write(WriteOrigin::ShareLifecycle, |txn| {
+            txn.commit();
+            txn.get_text("content").insert(0, "a")?;
+            Ok(())
+        })?;
+
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![WriteOrigin::ShareLifecycle.as_origin().to_string()],
+            "got {got:?}"
+        );
+        Ok(())
+    }
+
+    /// An import inside a write scope is labelled by the scope, so the device
+    /// pairing adoption is not mistaken for local typing.
+    #[test]
+    fn an_import_inside_a_write_scope_carries_the_scope_origin() -> Result<()> {
+        let source = LoroDocument::new("scope-origin-source".to_string())?;
+        source.with_write(WriteOrigin::Probe("source_seed"), |txn| {
+            txn.get_text("content").insert(0, "from the owner")?;
+            Ok(())
+        })?;
+        let updates = source.export_snapshot()?;
+
+        let target = LoroDocument::new("scope-origin-target".to_string())?;
+        let (seen, _sub) = watch_origins(&target);
+        target.with_write(WriteOrigin::DevicePairing, |txn| txn.import(&updates))?;
+
+        assert_eq!(target.get_text("content")?, "from the owner");
+        let got = seen.lock().unwrap().clone();
+        assert!(
+            !got.is_empty() && got.iter().all(|o| o == "sys.device_pairing"),
+            "got {got:?}"
         );
         Ok(())
     }
 
     #[test]
-    fn test_origin_tagging_custom_via_with_write_origin() -> Result<()> {
+    fn test_origin_tagging_probe_seam_passes_through() -> Result<()> {
         let doc = LoroDocument::new("origin-test-custom".to_string())?;
         let origin_seen = Arc::new(std::sync::Mutex::new(None::<String>));
         let origin_seen_clone = origin_seen.clone();
@@ -508,7 +611,7 @@ mod tests {
             }
         }));
 
-        doc.with_write_origin("org_reload", |d| {
+        doc.with_write(WriteOrigin::Probe("org_reload"), |d| {
             let tree = d.get_tree("test_tree_2");
             tree.enable_fractional_index(0);
             let _node = tree.create(None)?;
@@ -518,8 +621,8 @@ mod tests {
         let seen = origin_seen.lock().unwrap();
         assert_eq!(
             seen.as_deref(),
-            Some("org_reload"),
-            "with_write_origin should pass through the custom origin"
+            Some(WriteOrigin::Probe("org_reload").as_origin().as_ref()),
+            "with_write should pass through the seam the caller named"
         );
         Ok(())
     }

@@ -66,6 +66,7 @@ use crate::share_enrollment::CapabilitySecret;
 use crate::share_enrollment::ExpiryTime;
 use crate::share_enrollment::ShareRoster;
 use crate::ticket::Ticket;
+use crate::write_origin::WriteOrigin;
 
 /// The entity the pairing operations dispatch under.
 pub const DEVICE_ENTITY: &str = "device";
@@ -738,11 +739,8 @@ impl DevicePairing {
         self.flush_projection("wipe").await?;
 
         let doc = self.store.get_doc(DocScope::Global).await?;
-        doc.with_write(|txn| {
-            // ALLOW(loro_doc_escape): the import runs under the held write
-            // guard, on the transaction's own document.
-            txn.doc()
-                .import(&updates)
+        doc.with_write(WriteOrigin::DevicePairing, |txn| {
+            txn.import(&updates)
                 .map_err(|e| anyhow::anyhow!("importing the owner's history: {e}"))?;
             Ok(())
         })?;
@@ -760,7 +758,7 @@ impl DevicePairing {
     /// are re-created afterwards under the owner's ids.
     async fn wipe_global_tree(&self) -> anyhow::Result<()> {
         let doc = self.store.get_doc(DocScope::Global).await?;
-        doc.with_write(|txn| {
+        doc.with_write(WriteOrigin::DevicePairing, |txn| {
             let tree = txn.doc().get_tree(crate::loro_backend::TREE_NAME);
             // Deepest first, and EVERY node explicitly. Deleting a root deletes
             // its subtree in the tree, but the downstream projection retracts

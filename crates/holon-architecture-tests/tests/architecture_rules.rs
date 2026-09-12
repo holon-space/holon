@@ -162,9 +162,10 @@ fn latency_target_is_suppressed_by_every_filter_builder() {
 /// per file, so a `txn.doc()` anywhere else still counts as an escape.
 const WRITE_TXN_DOC_SITES: &[(&str, usize)] = &[
     ("crates/holon-loro/src/loro_share_backend.rs", 3),
-    // The pairing wipe and the adoption import reach the tree through the
-    // `WriteTxn` they are handed, i.e. inside the held guard — not an escape.
-    ("crates/holon-loro/src/device_pairing_op.rs", 2),
+    // The pairing wipe reaches the tree through the `WriteTxn` it is handed,
+    // i.e. inside the held guard — not an escape. The adoption import now goes
+    // through `WriteTxn::import`, which needs no `doc()` at all.
+    ("crates/holon-loro/src/device_pairing_op.rs", 1),
 ];
 
 /// Calls of a `doc()` accessor belonging to another type, with that type's
@@ -180,6 +181,8 @@ const UNRELATED_DOC_ACCESSOR_SITES: &[(&str, usize, &str)] = &[
 
 /// The blessed `LoroDocument::doc()` escapes, per file.
 const DOC_ESCAPES: &[(&str, usize)] = &[
+    // The commit-origin subscription the test registers, a blessed use.
+    ("crates/holon-app/tests/loro_write_origins.rs", 1),
     (
         "crates/holon-integration-tests/src/pbt/composed/two_instance.rs",
         3,
@@ -198,6 +201,9 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
         1,
     ),
     ("crates/holon-loro-testing/src/quiescence.rs", 1),
+    // Two `UndoManager::new(&doc)` handoffs. The manager is a long-lived
+    // observer registered on the document, the same shape as a subscription.
+    ("crates/holon-loro/tests/undo_history_trim_probe.rs", 2),
     ("crates/holon-loro-testing/src/sut_loro.rs", 3),
     // +1: the layout doc's retained container handle, same cell-backing rationale
     // as the global one.
@@ -213,14 +219,15 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // existing `Arc<LoroDoc>` via `from_existing` so the wrapper keeps the same
     // boundary lock.
     ("crates/holon-loro/src/loro_backend.rs", 10),
-    ("crates/holon-loro/src/loro_document.rs", 3),
+    // +1: the origin-watching subscription the scope-origin tests register.
+    ("crates/holon-loro/src/loro_document.rs", 4),
     // +1: the `rehydrate_over` test helper. `rehydrate_shared_trees` is async and
     // so cannot run inside `with_read`'s synchronous closure — the same reason
     // the one production caller below (`loro_module.rs`) carries an escape. The
     // four restart tests share this single helper rather than each taking a raw
     // doc; sealing it needs that function split into guarded reads around its
     // awaits, which is the follow-up `loro_module.rs` already names.
-    ("crates/holon-loro/src/loro_share_backend.rs", 15),
+    ("crates/holon-loro/src/loro_share_backend.rs", 16),
     // +1: the layout doc's `subscribe_root` registration, same rationale as the
     // global doc's.
     ("crates/holon-loro/src/loro_sync_controller.rs", 2),
@@ -336,10 +343,12 @@ fn loro_doc_escapes_match_the_allow_list() {
         diffs.is_empty(),
         "the `LoroDocument::doc()` escape allow-list is out of date:\n{}\n\nA new escape hands \
          the raw `Arc<LoroDoc>` out from under the doc-boundary lock. Route the read or mutation \
-         through `LoroDocument::with_read` / `with_write_origin` instead; if the site genuinely \
+         through `LoroDocument::with_read` / `with_write` instead; if the site genuinely \
          belongs outside the lock (a long-lived transport/subscription, or a cell backing's \
          retained container handle), extend DOC_ESCAPES in {} with a comment saying which of \
-         those it is. A count that dropped is just a removed escape — lower the entry. If the \
+         those it is. An escape inside a write closure is also how a commit loses its \
+         `WriteOrigin` label — commit through `WriteTxn::commit`, never through the escaped \
+         doc. A count that dropped is just a removed escape — lower the entry. If the \
          call is not `LoroDocument::doc()` at all, it belongs in WRITE_TXN_DOC_SITES (a \
          `WriteTxn` under the held guard) or UNRELATED_DOC_ACCESSOR_SITES (another type's \
          accessor) instead.\n",

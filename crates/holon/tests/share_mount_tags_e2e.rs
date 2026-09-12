@@ -106,7 +106,7 @@ fn share_backend(dir: &TempDir, handle: DbHandle) -> Arc<LoroShareBackend> {
 async fn seed_page(backend: &LoroShareBackend, id: &str, title: &str, tags: &[&str]) {
     let collab = backend.test_global_doc().await;
     collab
-        .with_write_origin("test_seed_page", |txn| {
+        .with_write(holon_loro::WriteOrigin::Probe("test_seed_page"), |txn| {
             let tree = txn.get_tree(TREE_NAME);
 
             let page = tree.create(None).expect("create page node");

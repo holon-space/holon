@@ -235,7 +235,7 @@ pub async fn pull_once(
                     container
                         .doc
                         .apply_update_with_origin(
-                            holon_loro::loro_document::SYNC_IMPORT_ORIGIN,
+                            holon_loro::WriteOrigin::SyncImport,
                             &envelope.payload,
                         )
                         .with_context(|| {

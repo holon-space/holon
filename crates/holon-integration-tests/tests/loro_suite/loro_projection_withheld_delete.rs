@@ -34,12 +34,16 @@ use crate::projection_harness::insert_root_block;
 /// which makes the snapshot unsettled.
 async fn insert_half_born_node(doc_store: &Arc<RwLock<LoroDocumentStore>>) -> Result<TreeID> {
     let collab = doc_store.read().await.get_doc(DocScope::Global).await?;
-    collab.with_write(|txn| Ok(txn.get_tree(TREE_NAME).create(None)?))
+    collab.with_write(holon_loro::WriteOrigin::Probe("withheld_delete"), |txn| {
+        Ok(txn.get_tree(TREE_NAME).create(None)?)
+    })
 }
 
 async fn delete_node(doc_store: &Arc<RwLock<LoroDocumentStore>>, node: TreeID) -> Result<()> {
     let collab = doc_store.read().await.get_doc(DocScope::Global).await?;
-    collab.with_write(|txn| Ok(txn.get_tree(TREE_NAME).delete(node)?))
+    collab.with_write(holon_loro::WriteOrigin::Probe("withheld_delete"), |txn| {
+        Ok(txn.get_tree(TREE_NAME).delete(node)?)
+    })
 }
 
 #[tokio::test]
