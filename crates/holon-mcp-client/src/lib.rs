@@ -71,6 +71,8 @@ pub use mcp_integration::McpIntegrationConfig;
 pub use mcp_integration::McpTransport;
 pub use mcp_integration::PendingOAuthFlows;
 pub use mcp_integration::SyncEvent;
+pub use mcp_integration::SyncHealth;
+pub use mcp_integration::SyncHealthSignal;
 pub use mcp_integration::SyncLoopTuning;
 pub use mcp_integration::assert_no_cross_sidecar_entity_collisions;
 pub use mcp_integration::build_mcp_integration;

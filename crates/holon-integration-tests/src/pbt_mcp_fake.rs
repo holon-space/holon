@@ -227,6 +227,7 @@ impl PbtMcpIntegration {
                             ..Default::default()
                         },
                     ],
+                    "id",
                 )
                 .expect("the pbt schema names no engine overflow column"),
                 sync: Some(SyncConfig {

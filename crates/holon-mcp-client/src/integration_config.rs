@@ -786,10 +786,23 @@ fn choose_content_for(
             })?;
             match serde_yaml::from_str::<IntegrationFileConfig>(content) {
                 Ok(config) if config.schema_version == Some(SIDECAR_SCHEMA_VERSION) => {
-                    Ok(ResolvedContent::Usable {
-                        config: Box::new(config),
-                        superseded: None,
-                    })
+                    // `IntegrationFileConfig` is the serde shape; the RULES
+                    // over it (identity column is TEXT, the overflow-column
+                    // pair, the write policy) live in `McpSidecar::from_yaml`,
+                    // which the connect path runs later. Running it here too
+                    // costs one extra parse of a small file and buys the user
+                    // the same load-time disclosure as every other file defect
+                    // — the alternative is a connect failure, which reads as
+                    // "the peer is down" rather than "your file is wrong".
+                    match crate::mcp_sidecar::McpSidecar::from_yaml(content) {
+                        Ok(_) => Ok(ResolvedContent::Usable {
+                            config: Box::new(config),
+                            superseded: None,
+                        }),
+                        Err(e) => Ok(ResolvedContent::Unusable {
+                            why: format!("{e:#}"),
+                        }),
+                    }
                 }
                 Ok(config) => Ok(ResolvedContent::Unusable {
                     why: format!(

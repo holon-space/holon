@@ -58,7 +58,10 @@ entities:
       - name: default
         render: 'row(text(col("title")))'
     schema:
-      - { name: id,     sql_type: INTEGER, primary_key: true }
+      # TEXT even though the API's `id` is a JSON number: the mirror stores the
+      # identity column scheme-prefixed (`jp-posts:1`), so its stored type is a
+      # string. The loader refuses any other type here.
+      - { name: id,     sql_type: TEXT,    primary_key: true }
       - { name: userId, sql_type: INTEGER, indexed: true }
       - { name: title,  sql_type: TEXT }
       - { name: body,   sql_type: TEXT }

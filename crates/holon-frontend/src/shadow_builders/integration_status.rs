@@ -7,6 +7,8 @@
 //! | `Pending`     | `◐`   | `muted`   |
 //! | `Needs auth`  | `⚠`   | `warning` |
 //! | `Unavailable` | `○`   | `error`   |
+//! | `Syncing`      | `◌`   | `muted`   |
+//! | `Sync failing` | `◍`   | `warning` |
 //!
 //! A widget rather than a value function, because glyph and colour are two
 //! reads of ONE status and a row that carried them as two independent
@@ -35,6 +37,8 @@ pub fn status_symbol_and_color(status: &str) -> Option<(&'static str, &'static s
         "Pending" => ("◐", "muted"),
         "Needs auth" => ("⚠", "warning"),
         "Unavailable" => ("○", "error"),
+        "Syncing" => ("◌", "muted"),
+        "Sync failing" => ("◍", "warning"),
         _ => return None,
     })
 }
@@ -117,10 +121,17 @@ mod tests {
 
     #[test]
     fn every_status_word_has_its_own_glyph() {
-        let mapped: Vec<&str> = ["Connected", "Pending", "Needs auth", "Unavailable"]
-            .iter()
-            .map(|s| status_symbol_and_color(s).expect("mapped status").0)
-            .collect();
+        let mapped: Vec<&str> = [
+            "Connected",
+            "Pending",
+            "Needs auth",
+            "Unavailable",
+            "Syncing",
+            "Sync failing",
+        ]
+        .iter()
+        .map(|s| status_symbol_and_color(s).expect("mapped status").0)
+        .collect();
         let mut distinct = mapped.clone();
         distinct.sort_unstable();
         distinct.dedup();

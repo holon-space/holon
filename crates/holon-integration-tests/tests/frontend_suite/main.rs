@@ -4,6 +4,7 @@ mod integration_configure_button_visibility;
 mod integration_state_boot_population;
 mod integration_state_boot_records_status;
 mod integration_state_section_refreshes;
+mod integration_state_sync_failing;
 mod integrations_section_renders_every_row;
 mod layout_bridge_smoke;
 mod local_ui_state_precedence;

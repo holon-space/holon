@@ -20,6 +20,12 @@
 //! sidecar declaring `sql_type: INTEGER` on its single primary key would give
 //! Holon this bug with no code change and no other test noticing.
 //!
+//! The loader now refuses a non-TEXT IDENTITY column outright
+//! (`MirrorSchema::parse`, pinned by `sidecar_id_column_is_text.rs`), so the
+//! only way left to reach a rowid-alias cache table is a lone INTEGER primary
+//! key on a column that is NOT the entity's `id_column`. These assertions are
+//! what would catch that.
+//!
 //! `queryable_cache::generate_create_table_sql_with_change_origin` decides the
 //! shape: exactly one `primary_key` field emits an inline `<col> <type> PRIMARY
 //! KEY`, and only `INTEGER` there aliases the rowid. Two or more primary-key
@@ -81,8 +87,9 @@ fn lone_integer_primary_key(
 /// upserts with `INSERT ... ON CONFLICT DO UPDATE`, which is measured correct
 /// on a rowid table with an unchanged value
 /// (`on_conflict_do_update_with_unchanged_value_keeps_a_rowid_table_matview_correct`).
-/// So a sync-only entity may hold an INTEGER primary key safely — as
-/// `jsonplaceholder`'s `jp_posts` does today.
+/// So a sync-only entity may hold an INTEGER primary key safely as far as the
+/// matview hazard goes — though not on its identity column, which the loader
+/// refuses for an unrelated reason (the stored id is a prefixed string).
 #[test]
 fn no_write_through_cache_table_is_a_rowid_alias_table() {
     let mut offenders = Vec::new();
@@ -147,9 +154,12 @@ fn rowid_alias_cache_tables_are_documented() {
     found.sort();
     assert_eq!(
         found,
-        vec!["jsonplaceholder.yaml:jp_posts".to_string()],
-        "the set of rowid-alias cache tables changed. Each one is safe only while its writer is \
-         an ON CONFLICT upsert rather than INSERT OR REPLACE; confirm that for any new entry \
-         before updating this list."
+        Vec::<String>::new(),
+        "the set of rowid-alias cache tables changed. It is empty because the only entry \
+         (`jsonplaceholder.yaml:jp_posts`) declared its INTEGER primary key on the IDENTITY \
+         column, which the loader now refuses. A new entry would have to put a lone INTEGER \
+         primary key on a non-identity column; each such table is safe only while its writer is \
+         an ON CONFLICT upsert rather than INSERT OR REPLACE, so confirm that before updating \
+         this list."
     );
 }

@@ -236,6 +236,7 @@ fn id_and_data_schema(entity: &str) -> MirrorSchema {
                 ..Default::default()
             },
         ],
+        "id",
     )
     .expect("the fake schema names no engine overflow column")
 }

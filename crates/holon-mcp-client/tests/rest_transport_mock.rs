@@ -222,7 +222,7 @@ entities:
   jp_posts:
     id_column: id
     schema:
-      - {{ name: id, sql_type: INTEGER, primary_key: true }}
+      - {{ name: id, sql_type: TEXT, primary_key: true }}
       - {{ name: userId, sql_type: INTEGER }}
       - {{ name: title, sql_type: TEXT }}
       - {{ name: body, sql_type: TEXT }}
@@ -781,7 +781,7 @@ entities:
   jp_posts:
     id_column: id
     schema:
-      - {{ name: id, sql_type: INTEGER, primary_key: true }}
+      - {{ name: id, sql_type: TEXT, primary_key: true }}
       - {{ name: userId, sql_type: INTEGER }}
       - {{ name: title, sql_type: TEXT }}
       - {{ name: body, sql_type: TEXT }}

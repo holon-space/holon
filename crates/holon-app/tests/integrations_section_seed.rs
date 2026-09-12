@@ -406,6 +406,8 @@ fn every_integration_status_word_has_a_glyph() {
         IntegrationStatus::Connected,
         IntegrationStatus::NeedsAuth,
         IntegrationStatus::Unavailable,
+        IntegrationStatus::SyncFailing,
+        IntegrationStatus::Syncing,
     ];
     // Exhaustiveness tripwire: a new variant makes this match — and so this
     // test — fail to compile, which is the point. Extend `all` above with it.
@@ -414,7 +416,9 @@ fn every_integration_status_word_has_a_glyph() {
             IntegrationStatus::Pending
             | IntegrationStatus::Connected
             | IntegrationStatus::NeedsAuth
-            | IntegrationStatus::Unavailable => {}
+            | IntegrationStatus::Unavailable
+            | IntegrationStatus::SyncFailing
+            | IntegrationStatus::Syncing => {}
         }
     }
 

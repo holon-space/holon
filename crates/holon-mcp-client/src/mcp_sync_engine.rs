@@ -35,7 +35,12 @@ use crate::mcp_sync_strategy::match_uri_template;
 /// Scheme-prefix a record id value. Single source of truth for id prefixing so
 /// `record_to_entity` and `record_id` can never diverge (a divergence makes the
 /// full-sync diff delete + recreate every row on every sync).
-fn prefixed_id(scheme: &str, value: &Value) -> Option<String> {
+///
+/// Public because the value it returns decides the SQL type a sidecar may
+/// declare on its identity column, which
+/// `crates/holon-mcp-client/tests/sidecar_id_column_is_text.rs` carries through
+/// to a real cache table rather than restating.
+pub fn prefixed_id(scheme: &str, value: &Value) -> Option<String> {
     match value {
         Value::String(raw) => Some(format!("{scheme}:{raw}")),
         Value::Integer(n) => Some(format!("{scheme}:{n}")),
@@ -281,6 +286,9 @@ pub struct McpSyncEngine {
     /// full-sync diff. Seeded lazily on the first full sync; reset on
     /// full-resync.
     mirrors: HashMap<String, Arc<EntityMirror>>,
+    /// What the serialized sync loop has observed since boot — the fact the
+    /// integration's displayed status is allowed to rest on.
+    health: crate::mcp_integration::SyncHealthSignal,
 }
 
 impl McpSyncEngine {
@@ -341,7 +349,21 @@ impl McpSyncEngine {
             vtable_subscriptions,
             db_handle,
             mirrors,
+            health: crate::mcp_integration::SyncHealthSignal::default(),
         }
+    }
+
+    /// What this integration's sync batches have amounted to since boot. The
+    /// serialized sync loop folds every outcome in; the app's status writer
+    /// reads it, so a connection whose rows never land cannot read Connected.
+    pub fn health(&self) -> &crate::mcp_integration::SyncHealthSignal {
+        &self.health
+    }
+
+    /// Whether any entity syncs at all. An integration with none has nothing
+    /// for [`Self::health`] to report, so connecting IS the whole story.
+    pub fn has_sync_entities(&self) -> bool {
+        !self.strategies.is_empty()
     }
 
     /// Reset every entity mirror to unseeded. Called at the start of a full

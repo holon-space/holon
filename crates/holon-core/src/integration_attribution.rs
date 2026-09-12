@@ -22,13 +22,27 @@ pub enum IntegrationStatus {
     /// Enabled; the registry has not resolved it yet. Every freshly projected
     /// row starts here.
     Pending,
-    /// Connected, operations registered.
+    /// Connected, operations registered, and at least one sync batch has
+    /// completed since boot — the peer answers AND its rows land.
     Connected,
+    /// Connected and its first sync batch has not finished yet.
+    ///
+    /// Distinct from `Pending`, which means the registry has not spoken at all:
+    /// this IS a recorded verdict, so a provider sitting here is waiting for
+    /// data rather than waiting for a status write that was lost.
+    Syncing,
     /// Reachable, but waiting on an OAuth grant.
     NeedsAuth,
     /// Enabled but not running: connect failed, or a `${VAR}` it needs is set
     /// neither in the environment nor in settings.
     Unavailable,
+    /// Connected, but no sync batch has EVER completed since boot and at least
+    /// one has failed — the peer answers and the rows do not land.
+    ///
+    /// Deliberately narrower than "a sync failed": a connection that has synced
+    /// once and then hits a transient failure keeps reading `Connected`, so a
+    /// briefly unreachable peer does not flap the row.
+    SyncFailing,
 }
 
 impl IntegrationStatus {
@@ -39,8 +53,10 @@ impl IntegrationStatus {
         match self {
             Self::Pending => "Pending",
             Self::Connected => "Connected",
+            Self::Syncing => "Syncing",
             Self::NeedsAuth => "Needs auth",
             Self::Unavailable => "Unavailable",
+            Self::SyncFailing => "Sync failing",
         }
     }
 
@@ -50,7 +66,8 @@ impl IntegrationStatus {
     /// `Pending` is not: it means the registry has not spoken yet, so a
     /// failure under it is unexplained and must stay loud rather than claim
     /// "not connected". `Connected` is not either — its missing table is a
-    /// real bug.
+    /// real bug. Neither is `SyncFailing`: the integration IS running and its
+    /// tables exist, so a failure over them is not explained by it.
     pub fn is_settled_inert(self) -> bool {
         matches!(self, Self::Unavailable | Self::NeedsAuth)
     }

@@ -483,18 +483,28 @@ impl ShareUiState {
             }
             ShareDegradedReason::IntegrationNotEnabled {
                 integration,
-                installed_path,
                 state_path,
                 remedy,
+                ..
             } => {
+                // The paths and the enable command stay in the log, where they
+                // can be read and copied. A toast is a notification, not a
+                // terminal: the earlier message was three absolute paths long,
+                // so the cap cut it mid-path, and toast text cannot be
+                // selected — the one actionable clause could only be retyped
+                // from what happened to be visible.
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::IntegrationNotEnabled,
                     shared_tree_id: event.shared_tree_id,
-                    // Remedy first: it is the only clause the user acts on, so
-                    // it must survive both the cap and a hurried read.
+                    // Headline, then the two payloads that must reach the
+                    // user CHARACTER-EXACT, each on its own line and so exempt
+                    // from the detail cap: the command to run (D2 — a remedy
+                    // cut in half reads as complete and does not work) and the
+                    // file it writes (D1). The cap ate both when all three
+                    // shared one string.
                     detail: format!(
-                        "{integration}: run `{remedy}` to write {state_path} — until then \
-                         {installed_path} runs nothing"
+                        "{integration} is installed but switched off, so it runs nothing. Switch \
+                         it on in Settings › Integrations, or run:\n{remedy}\n{state_path}"
                     ),
                     condition: Some(condition.clone()),
                     format: None,
@@ -568,8 +578,21 @@ impl ShareUiState {
         }
     }
 
+    /// Hold every raised degradation.
+    ///
+    /// A KEYED toast — one carrying a bus condition — is never evicted. It
+    /// names a file the user has to go and fix, so dropping it silently is the
+    /// defect this method was rewritten for; the list stays bounded because
+    /// every condition upserts by key, making its length the number of
+    /// DISTINCT conditions in effect. The RENDER caps how many are painted and
+    /// says how many it left out ([`render_toast_stack`]).
+    ///
+    /// An UNKEYED toast is UI-local feedback (a failed command, an undo that
+    /// could not run, an info notice). Nothing clears it and nothing upserts
+    /// it, so it needs its own bound: identical ones coalesce, and the distinct
+    /// ones are capped, evicting the oldest UNKEYED only. A keyed refusal is
+    /// never what makes room.
     pub fn push_toast(&mut self, toast: DegradedToast) {
-        const MAX_TOASTS: usize = 5;
         // A condition can arrive twice — once in a subscription's replayed
         // `current`, once as a live `Raised` — so it upserts rather than stacks.
         if let Some(key) = toast.condition.clone() {
@@ -581,9 +604,24 @@ impl ShareUiState {
                 *existing = toast;
                 return;
             }
+            self.toasts.push(toast);
+            return;
         }
-        if self.toasts.len() >= MAX_TOASTS {
-            self.toasts.remove(0);
+
+        // Coalesce: the same local failure raised in a loop is one thing to
+        // read, not N. Re-raising moves it to the end so it resurfaces.
+        if let Some(at) = self
+            .toasts
+            .iter()
+            .position(|t| t.condition.is_none() && t.kind == toast.kind && t.detail == toast.detail)
+        {
+            self.toasts.remove(at);
+        }
+        while self.toasts.iter().filter(|t| t.condition.is_none()).count() >= MAX_LOCAL_TOASTS {
+            let Some(oldest) = self.toasts.iter().position(|t| t.condition.is_none()) else {
+                break;
+            };
+            self.toasts.remove(oldest);
         }
         self.toasts.push(toast);
     }
@@ -1235,6 +1273,10 @@ pub fn render_overlays(
     pending_store: Option<Arc<PendingWriteStore>>,
     bounds: crate::geometry::BoundsRegistry,
     theme: OverlayTheme,
+    // Viewport height in px. The toast stack sizes itself to it: a stack
+    // taller than the window paints its top entries at zero height, which is a
+    // refusal the user never sees.
+    viewport_height: f32,
 ) -> Vec<AnyElement> {
     let mut overlays: Vec<AnyElement> = Vec::new();
 
@@ -1305,6 +1347,7 @@ pub fn render_overlays(
             share_state,
             bounds.clone(),
             theme,
+            viewport_height,
         ));
     }
 
@@ -2016,16 +2059,43 @@ fn render_quarantine_modal(
         .into_any_element()
 }
 
-/// The single line a toast renders — what the user actually reads.
+/// The stack's inset from the window edge, top and bottom.
+const STACK_INSET: f32 = 16.0;
+/// Vertical gap between two toast boxes (`gap_2`).
+const TOAST_GAP_H: f32 = 8.0;
+/// The "and N more" line, which is reserved before any toast is admitted.
+const OVERFLOW_LINE_H: f32 = 43.5;
+
+/// How many DISTINCT unkeyed (UI-local) toasts the state holds.
 ///
-/// `detail` is capped so one degradation cannot fill the window, but the cap
-/// counts CHARACTERS, not bytes: `detail` carries paths and error text, and
-/// cutting those mid-character panics the render. The budget is wide enough to
-/// hold a disclosure's two absolute paths plus its remedy, because a toast that
-/// truncates away the one actionable clause reads as complete while telling the
-/// user nothing they can act on.
+/// Unkeyed toasts have no all-clear and no key, so nothing else bounds them:
+/// a command failing in a loop would grow the list for the life of the process.
+/// Keyed refusals are bounded by their own key set and are never counted or
+/// evicted here.
+const MAX_LOCAL_TOASTS: usize = 5;
+
+/// How much of a `detail` SENTENCE one toast may spend. Prose can be
+/// summarised by cutting it; the cap exists so one degradation cannot fill the
+/// window. It counts CHARACTERS, not bytes — `detail` carries paths and error
+/// text, and cutting those mid-character panics the render.
+const MAX_DETAIL_CHARS: usize = 320;
+
+/// A `detail`'s prose and the payloads that must survive whole.
+///
+/// A disclosure whose payload is a PATH or a COMMAND cannot be summarised: half
+/// a path is not a path, and toast text cannot be selected, so what the cap
+/// removes is reachable nowhere. Such a disclosure puts the payload on its own
+/// line of `detail`; everything after the first newline is exempt from the cap
+/// and painted verbatim.
+fn split_detail(detail: &str) -> (&str, impl Iterator<Item = &str>) {
+    let mut parts = detail.split('\n');
+    let sentence = parts.next().unwrap_or("");
+    (sentence, parts.filter(|l| !l.trim().is_empty()))
+}
+
+/// The headline a toast renders — icon, label, and the capped first sentence of
+/// its detail.
 fn toast_message(toast: &DegradedToast) -> String {
-    const MAX_DETAIL_CHARS: usize = 320;
     let (_, icon, label) = toast_style(toast.kind);
     // The one kind whose headline is not a constant: it names the format that
     // refused the file.
@@ -2033,21 +2103,23 @@ fn toast_message(toast: &DegradedToast) -> String {
         Some(format) => format!("File sync degraded (bad {format} file)"),
         None => label.to_string(),
     };
-    let detail = match toast.detail.char_indices().nth(MAX_DETAIL_CHARS) {
-        Some((cut, _)) => format!("{}…", &toast.detail[..cut]),
-        None => toast.detail.clone(),
+    let (sentence, _) = split_detail(&toast.detail);
+    let sentence = match sentence.char_indices().nth(MAX_DETAIL_CHARS) {
+        Some((cut, _)) => format!("{}…", &sentence[..cut]),
+        None => sentence.to_string(),
     };
-    format!("{icon}  {label} — {detail}")
+    format!("{icon}  {label} — {sentence}")
 }
 
-/// Every line a toast paints, in order: its capped message, then any line that
-/// must reach the user CHARACTER-EXACT.
+/// Every line a toast paints, in order: its capped headline, then every line
+/// that must reach the user CHARACTER-EXACT.
 ///
 /// A cap and a copyable disclosure cannot share one string: a query cut in half
-/// still reads as a query and does not run. So the verbatim line is its own
-/// element and the cap never sees it.
+/// still reads as a query and does not run. So the verbatim lines are their own
+/// elements and the cap never sees them.
 fn toast_lines(toast: &DegradedToast) -> Vec<String> {
     let mut lines = vec![toast_message(toast)];
+    lines.extend(split_detail(&toast.detail).1.map(str::to_string));
     if toast.kind == DegradedKind::PairingReimported {
         lines.push(format!(
             "Find the copies with: {}",
@@ -2180,20 +2252,116 @@ pub const DEGRADED_TOAST_STACK: &str = "degraded-toast-stack";
 /// judges, not the string it was built from.
 pub const TOAST_LINE: &str = "toast-line";
 
+/// The box a toast line wraps inside: `max_w(420)` less `px_3` either side.
+const TOAST_TEXT_W: f32 = 420.0 - 24.0;
+/// Advance per character, MEASURED rather than derived: a toast box holding
+/// 1380 characters of absolute path painted 694px tall, which is ~39 characters
+/// to a line, not the ~71 a 12px advance would predict. Long unbroken path
+/// segments do not wrap where prose does. Rounded UP so the estimate errs high
+/// and the stack under-fills rather than clipping.
+const TOAST_CHAR_W: f32 = 10.5;
+/// One wrapped line, and the chrome around a box (padding + border + gap).
+const TOAST_LINE_H: f32 = 19.5;
+const TOAST_BOX_CHROME_H: f32 = 24.0;
+
+/// How tall this toast will paint, over-estimated.
+///
+/// The count has to be decided BEFORE layout, so it is computed from character
+/// counts rather than measured. Erring high is the safe direction: it shows one
+/// toast fewer, and the one it drops is still COUNTED — whereas erring low
+/// paints a refusal at zero height, which is the defect this whole cap exists
+/// to prevent.
+fn estimated_toast_height(lines: &[String]) -> f32 {
+    let wrapped: f32 = lines
+        .iter()
+        .map(|l| {
+            let chars = l.chars().count().max(1) as f32;
+            (chars * TOAST_CHAR_W / TOAST_TEXT_W).ceil().max(1.0)
+        })
+        .sum();
+    wrapped * TOAST_LINE_H + TOAST_BOX_CHROME_H
+}
+
 fn render_toast_stack(
     toasts: &[DegradedToast],
     share_state: Entity<ShareUiState>,
     bounds: crate::geometry::BoundsRegistry,
     theme: OverlayTheme,
+    viewport_height: f32,
 ) -> AnyElement {
+    // How many boxes FIT, derived from the window rather than fixed. A fixed
+    // number is a guess about payload length: the not-enabled disclosure
+    // carries two absolute paths on cap-exempt lines, so one refusal can be
+    // 250px tall and another 60px. Guessing wrong paints the top of the stack
+    // at zero height — a refusal the user never sees, which is the defect this
+    // cap exists to prevent, arriving by another route.
+    //
+    // The overflow line is reserved for FIRST, so the count can never be the
+    // thing that gets dropped.
+    let budget = viewport_height - 2.0 * STACK_INSET - OVERFLOW_LINE_H;
+    let mut used = 0.0f32;
+    let mut visible = 0usize;
+    for toast in toasts {
+        let h = estimated_toast_height(&toast_lines(toast)) + TOAST_GAP_H;
+        if used + h > budget {
+            break;
+        }
+        used += h;
+        visible += 1;
+    }
+    // ZERO is a legal answer. A window can be too short for even one of these
+    // disclosures — they carry two absolute paths — and admitting one anyway is
+    // how the COUNT line gets pushed off the top, which loses the only thing
+    // telling the user that refusals exist at all. Showing just the count is
+    // worse than showing a refusal, and far better than showing neither.
+    let hidden = toasts.len() - visible;
+    let toasts = &toasts[..visible];
+
     let messages: Vec<String> = toasts.iter().map(toast_message).collect();
+    let mut messages = messages;
     let mut stack = div()
         .absolute()
-        .bottom(px(16.0))
-        .right(px(16.0))
+        .bottom(px(STACK_INSET))
+        .right(px(STACK_INSET))
         .flex()
         .flex_col()
         .gap_2();
+
+    // FIRST, so it sits at the TOP of a bottom-anchored column. The count is
+    // the one line that must never be the clipped one: it is what tells the
+    // user that refusals exist which they cannot see, and a stack that loses it
+    // is indistinguishable from a stack with nothing hidden.
+    if hidden > 0 {
+        let overflow = if visible == 0 {
+            format!("{hidden} connection refusals — open Settings › Integrations to see them")
+        } else {
+            format!("and {hidden} more not shown — open Settings › Integrations for the full list")
+        };
+        messages.push(overflow.clone());
+        stack = stack.child(
+            div()
+                .px_3()
+                .py_2()
+                .rounded(px(6.0))
+                .bg(theme.border)
+                .text_color(gpui::rgba(0x000000cc))
+                .text_size(px(12.0))
+                .min_w(px(280.0))
+                .max_w(px(420.0))
+                .child(crate::geometry::tracked(
+                    format!("{TOAST_LINE}-overflow"),
+                    div()
+                        .min_w(px(0.0))
+                        .child(overflow.clone())
+                        .into_any_element(),
+                    &bounds,
+                    "toast_line",
+                    None,
+                    true,
+                    Some(std::sync::Arc::from(overflow)),
+                )),
+        );
+    }
 
     for (idx, toast) in toasts.iter().enumerate() {
         let (bg_color, _, _) = toast_style(toast.kind);
@@ -2325,6 +2493,88 @@ mod tests {
     use holon_loro::ShareDegradedReason;
 
     use super::*;
+
+    /// A UI-local toast carries no bus condition, so nothing ever clears it and
+    /// nothing upserts it. Removing the old blanket eviction (so a REFUSAL is
+    /// never silently dropped) left these unbounded: a command that fails in a
+    /// loop grew `toasts` without limit, and the render's overflow count would
+    /// climb forever.
+    ///
+    /// Keyed refusals must stay untouched by whatever bounds them — that is the
+    /// property the eviction was removed for in the first place.
+    fn local(detail: &str) -> DegradedToast {
+        DegradedToast {
+            kind: DegradedKind::CommandFailed,
+            shared_tree_id: String::new(),
+            detail: detail.to_string(),
+            condition: None,
+            format: None,
+        }
+    }
+
+    fn keyed(subject: &str) -> DegradedToast {
+        DegradedToast {
+            kind: DegradedKind::IntegrationNotEnabled,
+            shared_tree_id: subject.to_string(),
+            detail: format!("{subject} is switched off"),
+            condition: Some(holon_loro::DegradedConditionKey {
+                subject: subject.to_string(),
+                kind: ShareDegradedReason::INTEGRATION_NOT_ENABLED,
+            }),
+            format: None,
+        }
+    }
+
+    #[test]
+    fn a_repeated_local_failure_does_not_grow_the_stack() {
+        let mut s = ShareUiState::new();
+        for _ in 0..200 {
+            s.push_toast(local("save failed: disk full"));
+        }
+        assert_eq!(
+            s.toasts.len(),
+            1,
+            "the same local failure raised 200 times is ONE condition the user has to read once, \
+             not 200 entries: {:#?}",
+            s.toasts.iter().map(|t| &t.detail).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn distinct_local_failures_are_bounded() {
+        let mut s = ShareUiState::new();
+        for i in 0..200 {
+            s.push_toast(local(&format!("save failed: reason {i}")));
+        }
+        assert!(
+            s.toasts.len() <= MAX_LOCAL_TOASTS,
+            "unkeyed toasts must be bounded — nothing clears them and the process can raise them \
+             forever. Held {} with a bound of {MAX_LOCAL_TOASTS}",
+            s.toasts.len()
+        );
+        assert!(
+            s.toasts.iter().any(|t| t.detail.contains("reason 199")),
+            "the bound must keep the NEWEST local failure; the one just raised is the one the \
+             user is looking for"
+        );
+    }
+
+    #[test]
+    fn bounding_local_toasts_never_drops_a_refusal() {
+        let mut s = ShareUiState::new();
+        for i in 0..12 {
+            s.push_toast(keyed(&format!("connection-{i}")));
+        }
+        for i in 0..200 {
+            s.push_toast(local(&format!("save failed: reason {i}")));
+        }
+        let refusals = s.toasts.iter().filter(|t| t.condition.is_some()).count();
+        assert_eq!(
+            refusals, 12,
+            "every refusal names a file the user must go and fix, so a flood of unrelated local \
+             failures must not evict one. Held {refusals} of 12"
+        );
+    }
 
     #[test]
     fn apply_degraded_routes_save_failed_to_toast() {
@@ -2726,7 +2976,11 @@ mod tests {
                 remedy: "scripts/holon-integration-enable.sh gcal".into(),
             },
         });
-        let rendered = toast_message(&s.toasts[0]);
+        // `toast_lines`, not `toast_message`: the rendered toast is multi-line
+        // now, and the file to write is on a line the cap cannot reach. The
+        // property D1 pinned is unchanged and asserted more strongly — it must
+        // arrive WHOLE, not merely appear in the first line.
+        let rendered = toast_lines(&s.toasts[0]).join("\n");
         assert!(
             rendered.contains("/Users/martin/.config/holon/integrations/gcal.state.toml"),
             "the rendered toast must name the file to write: {rendered}"
@@ -2779,7 +3033,7 @@ mod tests {
                 remedy: "scripts/holon-integration-enable.sh gcal".into(),
             },
         });
-        let rendered = toast_message(&s.toasts[0]);
+        let rendered = toast_lines(&s.toasts[0]).join("\n");
         assert!(
             !rendered.contains("write `enabled = true`"),
             "a bare `enabled = true` file is REJECTED by the state parser, so this \
@@ -2841,8 +3095,15 @@ mod tests {
         );
     }
 
+    /// This used to assert FIFO eviction at five. That eviction WAS the defect
+    /// (`2026-09-12-refusal-toasts-push-each-other-off-screen-so-some-refusals-are-never-seen`):
+    /// each of these carries a bus condition naming something the user has to
+    /// go and fix, and the ones dropped left no trace on screen.
+    ///
+    /// The contract now: the STATE keeps every keyed condition; the RENDER caps
+    /// what it paints and says how many it left out.
     #[test]
-    fn toast_stack_bounded_to_five() {
+    fn every_keyed_condition_is_kept_and_the_render_counts_the_rest() {
         let mut s = ShareUiState::new();
         for i in 0..8 {
             s.apply_degraded(ShareDegraded {
@@ -2850,10 +3111,28 @@ mod tests {
                 reason: ShareDegradedReason::SnapshotSaveFailed(format!("err{i}")),
             });
         }
-        assert_eq!(s.toasts.len(), 5);
-        // FIFO eviction: the first three were dropped.
-        assert_eq!(s.toasts[0].shared_tree_id, "s3");
-        assert_eq!(s.toasts[4].shared_tree_id, "s7");
+        assert_eq!(
+            s.toasts.len(),
+            8,
+            "all eight are distinct conditions; none may be dropped in the state"
+        );
+        assert_eq!(s.toasts[0].shared_tree_id, "s0", "the oldest is still held");
+        assert_eq!(s.toasts[7].shared_tree_id, "s7");
+
+        // Re-raising a condition upserts rather than stacking, so the list
+        // stays bounded by the number of DISTINCT conditions in effect.
+        for i in 0..8 {
+            s.apply_degraded(ShareDegraded {
+                shared_tree_id: format!("s{i}"),
+                reason: ShareDegradedReason::SnapshotSaveFailed(format!("err{i} again")),
+            });
+        }
+        assert_eq!(
+            s.toasts.len(),
+            8,
+            "a re-raise upserts: {:?}",
+            s.toasts.len()
+        );
     }
 
     #[test]

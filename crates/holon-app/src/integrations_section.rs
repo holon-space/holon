@@ -74,15 +74,22 @@ pub const SIDEBAR_ITEM_TEMPLATE: &str = concat!(
 /// The interactive cells carry their own render-exprs; `table` resolves each
 /// row's entity profile and attaches its operations, so the `enabled` switch
 /// and the `ops_of` op_buttons are wired without a `render_entity` wrapper.
+///
+/// The weights are a BUDGET, not a look: the modal panel gives the table 590px,
+/// and a column narrower than its widest value wraps that value mid-word (a
+/// `text` cell declares no `truncate`, and `unconfigured` offers no break
+/// point). Setup takes the largest share because it holds a whole op row;
+/// `settings_integrations_table_fits_windowed` measures what each column
+/// actually needs and fails if a weight stops covering it.
 pub const SETTINGS_ITEM_TEMPLATE: &str = concat!(
     "table(#{columns: [",
-    "#{header: \"Integration\", cell: text(col(\"provider_name\")), width: flex(2)}, ",
-    "#{header: \"Config\", cell: text(col(\"config_status\"), #{muted: true}), width: flex(1)}, ",
-    "#{header: \"Status\", cell: text(col(\"status\"), #{muted: true}), width: flex(1)}, ",
-    "#{header: \"Enabled\", cell: state_toggle(#{field: \"enabled\", binding: \"bool\", appearance: \"switch\"}), width: fixed(80)}, ",
+    "#{header: \"Integration\", cell: text(col(\"provider_name\")), width: flex(6)}, ",
+    "#{header: \"Config\", cell: text(col(\"config_status\"), #{muted: true}), width: flex(5)}, ",
+    "#{header: \"Status\", cell: text(col(\"status\"), #{muted: true}), width: flex(5)}, ",
+    "#{header: \"Enabled\", cell: state_toggle(#{field: \"enabled\", binding: \"bool\", appearance: \"switch\"}), width: fixed(72)}, ",
     "#{header: \"Setup\", cell: row(#{gap: 6, align: \"center\"}, ",
     "list(#{collection: ops_of(col(\"id\")), item_template: op_button(col(\"name\")), horizontal: true, gap: 8}), ",
-    "text(col(\"configure_progress\"), #{muted: true})), width: flex(2)}",
+    "text(col(\"configure_progress\"), #{muted: true})), width: flex(11)}",
     "]})"
 );
 

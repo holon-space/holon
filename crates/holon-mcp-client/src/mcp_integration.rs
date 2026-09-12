@@ -617,6 +617,7 @@ fn absorb_discovered_entity(
             meta.entity_name, meta.uri_template
         ),
         meta.fields,
+        &id_column,
     )?;
 
     // Match by direct key name first, then by source_name mapping
@@ -1308,6 +1309,58 @@ async fn finish_rest_integration(
     ))
 }
 
+/// What the serialized sync loop has observed for one integration since boot.
+///
+/// Connecting proves the peer answers; it proves nothing about whether the
+/// rows land. This is the second fact, and it is what the row's status is
+/// allowed to claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncHealth {
+    /// No sync batch has finished yet, either way.
+    Untried,
+    /// At least one sync batch has completed since boot.
+    Healthy,
+    /// Sync batches have been attempted, every one failed, and none has ever
+    /// succeeded since boot. A failure AFTER a success leaves `Healthy` alone,
+    /// so a briefly unreachable peer does not flap the row.
+    Failing,
+}
+
+/// The published [`SyncHealth`] of one integration. A watch channel so a
+/// consumer (the app's status writer) sees every transition without polling.
+#[derive(Debug)]
+pub struct SyncHealthSignal(tokio::sync::watch::Sender<SyncHealth>);
+
+impl Default for SyncHealthSignal {
+    fn default() -> Self {
+        Self(tokio::sync::watch::channel(SyncHealth::Untried).0)
+    }
+}
+
+impl SyncHealthSignal {
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<SyncHealth> {
+        self.0.subscribe()
+    }
+
+    pub fn get(&self) -> SyncHealth {
+        *self.0.borrow()
+    }
+
+    /// Fold one sync batch's outcome into the published health.
+    pub fn record(&self, succeeded: bool) {
+        let next = match (self.get(), succeeded) {
+            (_, true) => SyncHealth::Healthy,
+            (SyncHealth::Healthy, false) => SyncHealth::Healthy,
+            (_, false) => SyncHealth::Failing,
+        };
+        self.0.send_if_modified(|cur| {
+            let changed = *cur != next;
+            *cur = next;
+            changed
+        });
+    }
+}
+
 /// The sync operations the serialized loop drives. Abstracted from
 /// [`McpSyncEngine`] so the gate + debounce logic is unit-testable against a
 /// counting fake with no live MCP peer.
@@ -1316,6 +1369,11 @@ pub trait ResyncSink: Send + Sync {
     async fn sync_all(&self) -> anyhow::Result<()>;
     async fn resync_by_uri(&self, uri: &str) -> anyhow::Result<()>;
     async fn sync_entity_by_name(&self, entity: &str) -> anyhow::Result<()>;
+
+    /// Where this sink publishes what became of each batch. The loop records
+    /// every outcome here, so "connected but nothing ever landed" is a fact
+    /// someone outside the loop can read.
+    fn health(&self) -> &SyncHealthSignal;
 }
 
 #[async_trait::async_trait]
@@ -1328,6 +1386,9 @@ impl ResyncSink for McpSyncEngine {
     }
     async fn sync_entity_by_name(&self, entity: &str) -> anyhow::Result<()> {
         McpSyncEngine::sync_entity_by_name(self, entity).await
+    }
+    fn health(&self) -> &SyncHealthSignal {
+        McpSyncEngine::health(self)
     }
 }
 
@@ -1407,9 +1468,11 @@ impl PendingSyncWork {
         if self.sync_all {
             let span = tracing::info_span!("initial_sync");
             async {
-                if let Err(e) = sync_engine.sync_all().await {
+                let outcome = sync_engine.sync_all().await;
+                if let Err(ref e) = outcome {
                     warn!(error = %e, "initial sync failed");
                 }
+                sync_engine.health().record(outcome.is_ok());
             }
             .instrument(span)
             .await;
@@ -1419,9 +1482,11 @@ impl PendingSyncWork {
             let span = tracing::info_span!("subscription_resync", %uri);
             async {
                 info!("resource updated, re-syncing (coalesced)...");
-                if let Err(e) = sync_engine.resync_by_uri(&uri).await {
+                let outcome = sync_engine.resync_by_uri(&uri).await;
+                if let Err(ref e) = outcome {
                     warn!(error = %e, "failed to resync");
                 }
+                sync_engine.health().record(outcome.is_ok());
             }
             .instrument(span)
             .await;
@@ -1429,9 +1494,11 @@ impl PendingSyncWork {
         for entity in self.poll_entities {
             let span = tracing::info_span!("poll_resync", %entity);
             async {
-                if let Err(e) = sync_engine.sync_entity_by_name(&entity).await {
+                let outcome = sync_engine.sync_entity_by_name(&entity).await;
+                if let Err(ref e) = outcome {
                     warn!(error = %e, "poll resync failed");
                 }
+                sync_engine.health().record(outcome.is_ok());
             }
             .instrument(span)
             .await;
@@ -1851,6 +1918,7 @@ mod sync_loop_gate_debounce_tests {
     //! re-sync).
 
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering::SeqCst;
     use std::time::Duration;
@@ -1862,6 +1930,10 @@ mod sync_loop_gate_debounce_tests {
         sync_all: AtomicUsize,
         resyncs: Mutex<Vec<String>>,
         polls: Mutex<Vec<String>>,
+        /// When set, every batch this sink runs fails — the shape of a peer
+        /// that answers but whose rows the schema rejects.
+        fail: AtomicBool,
+        health: SyncHealthSignal,
     }
 
     impl CountingSink {
@@ -1870,22 +1942,93 @@ mod sync_loop_gate_debounce_tests {
                 + self.resyncs.lock().unwrap().len()
                 + self.polls.lock().unwrap().len()
         }
+
+        fn failing() -> Self {
+            let sink = Self::default();
+            sink.fail.store(true, SeqCst);
+            sink
+        }
+
+        fn outcome(&self) -> anyhow::Result<()> {
+            if self.fail.load(SeqCst) {
+                anyhow::bail!("Batch transaction failed: Database error: datatype mismatch");
+            }
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]
     impl ResyncSink for CountingSink {
         async fn sync_all(&self) -> anyhow::Result<()> {
             self.sync_all.fetch_add(1, SeqCst);
-            Ok(())
+            self.outcome()
         }
         async fn resync_by_uri(&self, uri: &str) -> anyhow::Result<()> {
             self.resyncs.lock().unwrap().push(uri.to_string());
-            Ok(())
+            self.outcome()
         }
         async fn sync_entity_by_name(&self, entity: &str) -> anyhow::Result<()> {
             self.polls.lock().unwrap().push(entity.to_string());
-            Ok(())
+            self.outcome()
         }
+        fn health(&self) -> &SyncHealthSignal {
+            &self.health
+        }
+    }
+
+    /// A connection whose every batch fails must not be able to claim it is
+    /// working. Drives the REAL serialized loop, so the reading comes from the
+    /// same code path production runs.
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_whose_every_sync_fails_never_reads_healthy() {
+        let sink = Arc::new(CountingSink::failing());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle =
+            spawn_sync_event_loop(rx, sink.clone(), SyncGate::opened(), SyncLoopTuning::test());
+
+        tx.send(SyncEvent::SyncAll).unwrap();
+        for _ in 0..5 {
+            tx.send(SyncEvent::PollTick("items".to_string())).unwrap();
+        }
+        drop(tx);
+        handle.await.unwrap();
+
+        assert!(
+            sink.total() > 0,
+            "the loop ran no batches, so this proved nothing"
+        );
+        assert_eq!(
+            sink.health().get(),
+            SyncHealth::Failing,
+            "every batch failed, so the integration has never synced and must not read healthy"
+        );
+    }
+
+    /// The other half of the same property: a batch that succeeds is what
+    /// earns `Healthy`, and a later failure does NOT take it away — a briefly
+    /// unreachable peer must not flap the row.
+    #[tokio::test(start_paused = true)]
+    async fn one_success_earns_healthy_and_a_later_failure_does_not_flap_it() {
+        let sink = Arc::new(CountingSink::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle =
+            spawn_sync_event_loop(rx, sink.clone(), SyncGate::opened(), SyncLoopTuning::test());
+
+        tx.send(SyncEvent::SyncAll).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(sink.health().get(), SyncHealth::Healthy);
+
+        sink.fail.store(true, SeqCst);
+        tx.send(SyncEvent::PollTick("items".to_string())).unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        assert!(!sink.polls.lock().unwrap().is_empty(), "the poll never ran");
+        assert_eq!(
+            sink.health().get(),
+            SyncHealth::Healthy,
+            "a failure after a success is a transient peer, not a connection that never worked"
+        );
     }
 
     const PROJECTS: &str = "claude-history://projects";
@@ -2142,5 +2285,80 @@ mod discovered_schema_tests {
             names.dedup();
             assert_eq!(names.len(), total, "a repeated column name is invalid DDL");
         }
+    }
+}
+
+/// The AUTO-DISCOVERED schema path obeys the same identity-column rule as an
+/// authored sidecar.
+///
+/// A server's advertised resource template is untrusted input that becomes a
+/// real cache table, so an INTEGER id declared there fails every sync batch
+/// exactly as one declared in YAML does. Without this, replacing the id-column
+/// argument at the `MirrorSchema::parse` call site with a name that matches
+/// nothing left the whole suite green — the rule was pinned on one producer
+/// only.
+#[cfg(test)]
+mod discovered_schema_id_column_tests {
+    use holon_api::entity::FieldSchema;
+
+    use super::*;
+    use crate::mcp_resource_discovery::ResourceEntityMeta;
+
+    fn meta(id_type: &str) -> ResourceEntityMeta {
+        ResourceEntityMeta {
+            entity_name: "dx_items".to_string(),
+            primary_keys: vec!["id".to_string()],
+            fields: vec![
+                FieldSchema {
+                    name: "id".to_string(),
+                    sql_type: id_type.to_string(),
+                    primary_key: true,
+                    ..Default::default()
+                },
+                FieldSchema {
+                    name: "title".to_string(),
+                    sql_type: "TEXT".to_string(),
+                    ..Default::default()
+                },
+            ],
+            uri_template: "dx://items/{id}".to_string(),
+        }
+    }
+
+    fn empty_sidecar() -> McpSidecar {
+        McpSidecar::from_yaml("schema_version: 2\ndisplay_name: \"Discovered\"\n")
+            .expect("an entity-less sidecar parses")
+    }
+
+    #[test]
+    fn a_discovered_integer_id_column_is_refused() {
+        let err = absorb_discovered_entity(&mut empty_sidecar(), "dx", meta("INTEGER")).expect_err(
+            "a discovered INTEGER identity column must be refused, like an authored one",
+        );
+        let msg = format!("{err:#}");
+        for expected in ["dx_items", "id", "TEXT"] {
+            assert!(
+                msg.contains(expected),
+                "the refusal must name the entity, the column and the remedy type so the reader \
+                 knows which template to fix; `{expected}` is missing from: {msg}"
+            );
+        }
+        assert!(
+            msg.contains("dx://items/{id}"),
+            "a discovered refusal must name the resource TEMPLATE it came from — the author of \
+             the server has no other way to find it: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_discovered_text_id_column_is_absorbed() {
+        let mut sidecar = empty_sidecar();
+        absorb_discovered_entity(&mut sidecar, "dx", meta("TEXT"))
+            .expect("TEXT is the type the mirror stores, so it must be absorbed");
+        assert!(
+            sidecar.entities.contains_key("dx_items"),
+            "the accepted entity must actually land in the sidecar, else the refusal test above \
+             proves nothing about the accept path"
+        );
     }
 }

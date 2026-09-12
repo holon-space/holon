@@ -86,7 +86,24 @@ impl MirrorSchema {
     /// Parse `fields` as the mirror columns of `owner`, which names the
     /// declaration a refusal sends the reader to: a sidecar entity for an
     /// authored schema, a server and resource template for a discovered one.
-    pub fn parse(owner: &str, fields: Vec<FieldSchema>) -> anyhow::Result<Self> {
+    ///
+    /// `id_column` is the column carrying row identity. Both write legs store
+    /// it scheme-prefixed (`mcp_sync_engine::prefixed_id`, and the vtable
+    /// writeback), so the value that reaches SQL is a string whatever the
+    /// source held — a declaration of any other type is refused here rather
+    /// than failing every sync batch with `datatype mismatch` later.
+    pub fn parse(owner: &str, fields: Vec<FieldSchema>, id_column: &str) -> anyhow::Result<Self> {
+        if let Some(id) = fields.iter().find(|f| f.name == id_column)
+            && !id.sql_type.trim().eq_ignore_ascii_case("TEXT")
+        {
+            anyhow::bail!(
+                "{owner} declares its identity column `{id_column}` as `{}`. Mirrored rows carry \
+                 a scheme-prefixed id (`{{entity}}:{{source id}}`), so the value stored in that \
+                 column is always a string — declare it `sql_type: TEXT`. Source ids that are \
+                 numbers are fine; only the declared column type has to match what is stored.",
+                id.sql_type
+            );
+        }
         let bag = FieldSchema::OVERFLOW_PROPERTIES;
         let kinds = FieldSchema::OVERFLOW_PROPERTY_KINDS;
         let declared = |name: &str| fields.iter().find(|f| f.name == name);
@@ -781,8 +798,10 @@ impl McpSidecar {
     /// the entity key the file spelled the offending column under.
     fn parse_entity_schemas(&mut self) -> anyhow::Result<()> {
         for (entity, config) in &mut self.entities {
+            let id_column = config.id_column_or_default();
             let fields = std::mem::take(&mut config.schema).0;
-            config.schema = MirrorSchema::parse(&format!("sidecar entity '{entity}'"), fields)?;
+            config.schema =
+                MirrorSchema::parse(&format!("sidecar entity '{entity}'"), fields, &id_column)?;
         }
         Ok(())
     }

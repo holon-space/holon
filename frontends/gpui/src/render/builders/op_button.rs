@@ -22,6 +22,12 @@ struct OpParamPopup {
     focus: Option<gpui::FocusHandle>,
 }
 
+/// The widest a button's label may make the button. Wide enough that every
+/// single-word op name ("Open", "Configure…") stays on one line, so the wrap it
+/// forces on a multi-word name ("Switch integration") lands on the space and
+/// never inside a word.
+const OP_LABEL_MAX_W: f32 = 64.0;
+
 /// Render a tappable op affordance: icon above an accessible label.
 ///
 /// Tap resolves the operation and either dispatches it (all params satisfied by
@@ -91,9 +97,17 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
                 .child(icon_label),
         )
         .child(
+            // Capped, not truncated: a button sits in a fixed-width column
+            // beside its siblings (the Settings integrations table's Setup
+            // cell), and an uncapped label makes the button as wide as the
+            // words are long — three ops with one long name then out-measure
+            // any share of a 640px modal. The label wraps inside the cap
+            // instead, which costs height the row already has.
             div()
+                .max_w(px(OP_LABEL_MAX_W))
                 .text_size(px(10.0))
                 .line_height(px(12.0))
+                .text_center()
                 .text_color(tc(ctx, |t| t.muted_foreground))
                 .child(display_name.clone()),
         )

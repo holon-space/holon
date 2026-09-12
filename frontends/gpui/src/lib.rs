@@ -1661,6 +1661,7 @@ impl Render for HolonApp {
                 pending_store,
                 self.bounds_registry.clone(),
                 overlay_theme,
+                f32::from(window.viewport_size().height),
             );
             for ov in overlays {
                 page = page.child(ov);

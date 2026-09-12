@@ -124,7 +124,7 @@ holon-api = { workspace = true, optional = true }
 holon-capability = { workspace = true, optional = true }
 # The derived Petri-net projection (ADR 0032) the net-totality invariant reads.
 holon-net = { workspace = true, optional = true }
-tokio ={ workspace = true, features = ["rt-multi-thread", "macros", "time", "fs", "sync"], optional = true }
+tokio ={ workspace = true, features = ["rt-multi-thread", "macros", "time", "fs", "sync", "net"], optional = true }
 tokio-stream = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }

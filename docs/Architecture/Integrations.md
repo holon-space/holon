@@ -345,6 +345,9 @@ entities:
     # source_name: task       # server-side entity name when it differs from the YAML key
     id_column: id             # primary key column (default: "id")
     schema:                   # DDL for the Turso cache table
+      # The identity column is ALWAYS `sql_type: TEXT`, even when the source
+      # system's id is a number: the mirror stores it scheme-prefixed
+      # (`todoist-tasks:42`). The loader refuses any other type here.
       - { name: id,       sql_type: TEXT, primary_key: true }
       - { name: content,  sql_type: TEXT }
       - { name: priority, sql_type: TEXT }

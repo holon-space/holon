@@ -63,6 +63,63 @@ async fn record_status(
     }
 }
 
+/// The status word a sync health reading justifies for a CONNECTED provider.
+///
+/// `Untried` keeps the row at whatever the projector born it as (`Pending`) —
+/// the loop has not spoken, and claiming either verdict would be inventing one.
+pub(crate) fn status_for_sync_health(
+    health: holon_mcp_client::SyncHealth,
+) -> Option<crate::integration_projection::IntegrationStatus> {
+    use crate::integration_projection::IntegrationStatus;
+    match health {
+        holon_mcp_client::SyncHealth::Untried => None,
+        holon_mcp_client::SyncHealth::Healthy => Some(IntegrationStatus::Connected),
+        holon_mcp_client::SyncHealth::Failing => Some(IntegrationStatus::SyncFailing),
+    }
+}
+
+/// Follow one connected integration's sync health for the life of the SESSION,
+/// writing the status its batches actually justify.
+///
+/// A task rather than a one-shot write because the verdict is not available at
+/// connect: the initial sync is only ENQUEUED there, so the first batch has not
+/// run and every status written at that point is a guess.
+///
+/// Registered on `shutdown` because it holds a `DbHandle` and writes through
+/// it — an unregistered task would outlive the store it writes to, the same
+/// contract every other integration watcher keeps
+/// (`IntegrationStateProjector::reproject_on`).
+fn spawn_status_from_sync_health(
+    db: holon::storage::DbHandle,
+    attribution: holon_core::integration_attribution::IntegrationAttribution,
+    name: String,
+    mut health: tokio::sync::watch::Receiver<holon_mcp_client::SyncHealth>,
+    shutdown: &holon_api::lifecycle::SessionShutdown,
+) {
+    let cancelled = shutdown.cancelled();
+    let pump = async move {
+        while health.changed().await.is_ok() {
+            let Some(status) = status_for_sync_health(*health.borrow_and_update()) else {
+                continue;
+            };
+            let cause = match status {
+                crate::integration_projection::IntegrationStatus::SyncFailing => {
+                    "connected, but no sync has succeeded — see the log for the batch error"
+                }
+                _ => "",
+            };
+            record_status(&db, &attribution, &name, status, cause).await;
+        }
+    };
+    shutdown.spawn("integration-sync-status", async move {
+        tokio::select! {
+            biased;
+            () = cancelled => {}
+            () = pump => {}
+        }
+    });
+}
+
 /// Declare the tables `provider` owns BEFORE the connect attempt.
 ///
 /// A sidecar names its entities whether or not the remote ever answers, so
@@ -535,6 +592,10 @@ impl Module for McpIntegrationsModule {
                     .resolve::<holon_core::integration_attribution::IntegrationAttribution>(
                 ))
                 .clone();
+                // Session-scoped home for the per-integration sync-status
+                // watchers spawned below: they write through a `DbHandle` and
+                // must not outlive the store.
+                let shutdown = resolver.resolve::<holon_api::lifecycle::SessionShutdown>();
 
                 for i in inert.iter() {
                     record_status(
@@ -679,14 +740,37 @@ impl Module for McpIntegrationsModule {
                                 );
                             }
 
+                            // Connecting proves the peer answers, not that its
+                            // rows land. An integration that syncs records
+                            // `Syncing` now and earns `Connected` from its
+                            // first successful batch; one that syncs nothing
+                            // has nothing further to prove. Recording SOMETHING
+                            // here either way is what keeps a LOST status write
+                            // distinguishable from a slow first batch — the
+                            // former is the escape the boot-status test exists
+                            // to catch.
+                            let syncs = integration.sync_engine.has_sync_entities();
                             record_status(
                                 &db_handle,
                                 &attribution,
                                 name,
-                                crate::integration_projection::IntegrationStatus::Connected,
+                                if syncs {
+                                    crate::integration_projection::IntegrationStatus::Syncing
+                                } else {
+                                    crate::integration_projection::IntegrationStatus::Connected
+                                },
                                 "",
                             )
                             .await;
+                            if syncs {
+                                spawn_status_from_sync_health(
+                                    db_handle.clone(),
+                                    attribution.clone(),
+                                    name.clone(),
+                                    integration.sync_engine.health().subscribe(),
+                                    &shutdown,
+                                );
+                            }
 
                             names.push(name.clone());
                             integrations.push(integration);
