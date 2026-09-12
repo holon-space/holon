@@ -37,6 +37,7 @@ pub mod integration_projection;
 pub mod integrations_operations;
 pub mod integrations_section;
 pub mod integrations_settings;
+pub mod introduced_secrets;
 pub mod loro_seams;
 pub mod mcp_integrations;
 pub mod move_guard;

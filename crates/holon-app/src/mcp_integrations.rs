@@ -171,6 +171,32 @@ fn disclose_connect_failure(name: &str, error: &anyhow::Error, bus: &DegradedSig
     });
 }
 
+/// Disclose that `name`'s config was refused, so the connection does not run.
+///
+/// Same condition as a file the directory scan refuses
+/// ([`disclose_ignored_sidecar`]'s `Unusable` arm) and deliberately the same
+/// banner: from the user's side both are "this file names a connection that
+/// cannot be used, edit it". The seam differs only in WHEN the rule fires —
+/// the scan reads the text, this one resolves the variables.
+///
+/// `origin` is `None` for a connection this build ships, where the file to fix
+/// is not the user's.
+fn disclose_unusable_config(
+    name: &str,
+    origin: Option<&str>,
+    error: &anyhow::Error,
+    bus: &DegradedSignalBus,
+) {
+    bus.emit(ShareDegraded {
+        shared_tree_id: name.to_string(),
+        reason: ShareDegradedReason::IntegrationSidecarUnusable {
+            provider: name.to_string(),
+            installed_path: origin.unwrap_or("(bundled with this build)").to_string(),
+            why: format!("{error:#}"),
+        },
+    });
+}
+
 /// Disclose that `name` is connectable but waiting on an OAuth grant — same
 /// blank-page consequence as a failed connect, different remedy.
 fn disclose_needs_auth(name: &str, auth_url: &str, bus: &DegradedSignalBus) {
@@ -620,10 +646,14 @@ impl Module for McpIntegrationsModule {
                 // `add_frontend`, opened by the `post_ready` scan barrier.
                 let sync_gate: SyncGate = (*resolver.resolve::<SyncGate>()).clone();
 
-                // The keychain is opened once per boot and consulted between
-                // the environment and the plaintext preference.
-                let secret_keychain =
-                    holon_secrets::platform_keychain(holon_secrets::INTEGRATION_SECRET_SERVICE);
+                // The session's ONE secret store, consulted between the
+                // environment and the plaintext preference. Resolved rather
+                // than opened here: a session running on the in-memory backend
+                // must not have one reader silently talking to the login
+                // keychain instead.
+                let secret_keychain = resolver
+                    .resolve_async::<dyn holon_secrets::KeychainStore>()
+                    .await;
                 let var_lookup = holon_frontend::integration_vars::preference_var_lookup(
                     &resolver
                         .resolve::<holon_frontend::config::HolonConfig>()
@@ -635,10 +665,13 @@ impl Module for McpIntegrationsModule {
                 let mut names = Vec::new();
                 let mut integrations = Vec::new();
 
-                let display_names: HashMap<String, String> = settings_vm
+                // Name and origin together: both come from the same row, and a
+                // refusal needs the file path as much as a banner needs a
+                // readable name.
+                let presentation: HashMap<String, (String, Option<String>)> = settings_vm
                     .rows()
                     .into_iter()
-                    .map(|row| (row.provider.to_string(), row.display_name))
+                    .map(|row| (row.provider.to_string(), (row.display_name, row.origin)))
                     .collect();
 
                 for (name, config) in configs_for_registry.as_ref() {
@@ -646,14 +679,15 @@ impl Module for McpIntegrationsModule {
                     // installed sidecar this build does not bundle) still needs
                     // a name in the banner. The raw provider name is worse
                     // reading than the store's, and never wrong.
-                    let display_name = display_names.get(name).cloned().unwrap_or_else(|| {
-                        warn!(
-                            "[McpIntegrationsModule] provider '{name}' has no row in the \
-                             enablement store — a degraded banner for it will use the raw \
-                             provider name"
-                        );
-                        name.clone()
-                    });
+                    let (display_name, origin) =
+                        presentation.get(name).cloned().unwrap_or_else(|| {
+                            warn!(
+                                "[McpIntegrationsModule] provider '{name}' has no row in the \
+                                 enablement store — a degraded banner for it will use the raw \
+                                 provider name"
+                            );
+                            (name.clone(), None)
+                        });
                     declare_entity_tables(&attribution, name, &display_name, config);
 
                     let mcp_config = match config.clone().into_mcp_config_with(
@@ -665,9 +699,7 @@ impl Module for McpIntegrationsModule {
                         // Disclosed skip: the config references a `${VAR}` that is
                         // set neither in the environment nor in settings — the
                         // integration is simply not configured yet (e.g. missing
-                        // API key). Everything else is an invalid config and must
-                        // fail loud; the DI factory has no Result channel, so
-                        // panic with full context rather than silently skipping.
+                        // API key).
                         Err(e) if e.downcast_ref::<UnresolvedVar>().is_some() => {
                             warn!(
                                 "[McpIntegrationsModule] Provider '{}' is not configured — \
@@ -685,11 +717,28 @@ impl Module for McpIntegrationsModule {
                             .await;
                             continue;
                         }
+                        // Every other refusal: the file names a connection but
+                        // this build will not run it. Installed files are
+                        // user-supplied, so taking the process down would cost
+                        // the user the Settings switch that turns the file off —
+                        // D94.a's ruling for the analogous unsatisfiable
+                        // re-import, applied at the same tier: boot DEGRADED,
+                        // disclose the file and the reason, run everything else.
                         Err(e) => {
-                            panic!(
-                                "[McpIntegrationsModule] Invalid integration config for provider \
-                                 '{name}': {e:#}"
+                            warn!(
+                                "[McpIntegrationsModule] Provider '{name}' is NOT running: {e:#}. \
+                                 Fix the file and restart; the rest of the app is unaffected."
                             );
+                            disclose_unusable_config(name, origin.as_deref(), &e, &degraded_bus);
+                            record_status(
+                                &db_handle,
+                                &attribution,
+                                name,
+                                crate::integration_projection::IntegrationStatus::Unavailable,
+                                &format!("{e}"),
+                            )
+                            .await;
+                            continue;
                         }
                     };
 

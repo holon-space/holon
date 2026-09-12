@@ -37,9 +37,13 @@ pub const SIDEBAR_SQL: &str = "SELECT id, provider_name, display_name, icon, sta
 ///
 /// `configurable` and `configure_progress` are the SETUP axis: whether the
 /// provider has a consent flow, and what the flow running now has to say.
+///
+/// `origin` and `hosts` are the DISCLOSURE axis, and both are empty for every
+/// connection this build ships. They are selected here rather than derived at
+/// render time because this mirror is the only thing the list reads.
 pub const SETTINGS_SQL: &str = "SELECT id, provider_name, enabled, config_status, status, \
-                                configurable, configure_progress FROM integration_state ORDER BY \
-                                provider_name ASC";
+                                configurable, configure_progress, origin, hosts FROM \
+                                integration_state ORDER BY provider_name ASC";
 
 /// One line per integration: its icon, the name a person would use for it, and
 /// its live status as a single glyph held against the row's trailing edge by an
@@ -81,9 +85,23 @@ pub const SIDEBAR_ITEM_TEMPLATE: &str = concat!(
 /// point). Setup takes the largest share because it holds a whole op row;
 /// `settings_integrations_table_fits_windowed` measures what each column
 /// actually needs and fails if a weight stops covering it.
+///
+/// The Integration cell carries the DISCLOSURE for a connection a user file
+/// introduced: the file it came from, and every host its manual calls. Both sit
+/// under the name rather than in columns of their own, because they qualify
+/// that name — it and the icon are the file's own choice, so a hostile
+/// connection can call itself "Calendar" and ask for the same click as a
+/// bundled one. `if_col` on the empty origin keeps a bundled row exactly as it
+/// was: six rows each saying "shipped with Holon" would make the words on the
+/// seventh read as decoration instead of as the warning they are.
 pub const SETTINGS_ITEM_TEMPLATE: &str = concat!(
     "table(#{columns: [",
-    "#{header: \"Integration\", cell: text(col(\"provider_name\")), width: flex(6)}, ",
+    "#{header: \"Integration\", cell: if_col(\"origin\", \"\", ",
+    "text(col(\"provider_name\")), ",
+    "column(#{gap: 2}, text(col(\"provider_name\")), ",
+    "row(#{gap: 4}, text(\"from\", #{muted: true, size: 11.0}), text(col(\"origin\"), #{muted: true, size: 11.0})), ",
+    "row(#{gap: 4}, text(\"calls\", #{muted: true, size: 11.0}), text(col(\"hosts\"), #{muted: true, size: 11.0})))), ",
+    "width: flex(6)}, ",
     "#{header: \"Config\", cell: text(col(\"config_status\"), #{muted: true}), width: flex(5)}, ",
     "#{header: \"Status\", cell: text(col(\"status\"), #{muted: true}), width: flex(5)}, ",
     "#{header: \"Enabled\", cell: state_toggle(#{field: \"enabled\", binding: \"bool\", appearance: \"switch\"}), width: fixed(72)}, ",

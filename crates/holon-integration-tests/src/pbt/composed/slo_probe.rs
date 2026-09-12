@@ -44,6 +44,14 @@ pub const MAX_CONTENTION_MS: f64 = 30.0;
 
 static ARMED: AtomicBool = AtomicBool::new(false);
 static WINDOW: OnceLock<Mutex<SloWindow>> = OnceLock::new();
+/// Every `(stage, action)` seen while armed, `e2e` included.
+///
+/// The window above scores ONE stage, because that is the stage the SLO is
+/// stated in. This records the rest so a rung can assert that a surface is
+/// instrumented AT ALL — a stage nobody reads is a stage that can be deleted
+/// with every test still green, which is how the `dispatch` emission on the
+/// click path went missing without anything noticing.
+static STAGES: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
 /// Every `matview_ddl` duration seen this process, armed or not — the covariate
 /// is a BOOT measurement, so it is collected before any rung arms the window.
 static DDL_MS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
@@ -75,8 +83,21 @@ impl SloProbe {
     /// installed the global subscriber (any `ComposedSut` boot does).
     pub fn arm() -> Self {
         window().lock().expect("slo probe window poisoned").clear();
+        STAGES.lock().expect("slo probe stage log poisoned").clear();
         ARMED.store(true, Ordering::Release);
         Self { _private: () }
+    }
+
+    /// Every `(stage, action)` this window has seen. Ordered as emitted.
+    pub fn stage_samples(&self) -> Vec<(String, Option<String>)> {
+        STAGES.lock().expect("slo probe stage log poisoned").clone()
+    }
+
+    /// Whether `stage` was emitted for `action` while armed.
+    pub fn saw_stage(&self, stage: &str, action: &str) -> bool {
+        self.stage_samples()
+            .iter()
+            .any(|(s, a)| s == stage && a.as_deref() == Some(action))
     }
 
     /// The samples recorded so far, scored as the two SLO rungs.
@@ -157,7 +178,16 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
             }
             return;
         }
-        if !ARMED.load(Ordering::Acquire) || v.stage.as_deref() != Some("e2e") {
+        if !ARMED.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(stage) = &v.stage {
+            STAGES
+                .lock()
+                .expect("slo probe stage log poisoned")
+                .push((stage.clone(), v.action.clone()));
+        }
+        if v.stage.as_deref() != Some("e2e") {
             return;
         }
         // A rung that silently scored an unscoreable sample would be the exact

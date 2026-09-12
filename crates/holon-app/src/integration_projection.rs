@@ -44,6 +44,8 @@ pub const TABLE_COLUMNS: &[&str] = &[
     "display_name",
     "icon",
     "default_view",
+    "origin",
+    "hosts",
     "updated_at",
     "_change_origin",
 ];
@@ -115,8 +117,9 @@ impl IntegrationStateProjector {
                     // column after the row exists.
                     "INSERT INTO integration_state \
                      (id, provider_name, enabled, status, config_status, configurable, \
-                     configure_progress, display_name, icon, default_view, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                     configure_progress, display_name, icon, default_view, origin, hosts, \
+                     updated_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                      ON CONFLICT(id) DO UPDATE SET \
                      enabled = excluded.enabled, \
                      config_status = excluded.config_status, \
@@ -125,6 +128,8 @@ impl IntegrationStateProjector {
                      display_name = excluded.display_name, \
                      icon = excluded.icon, \
                      default_view = excluded.default_view, \
+                     origin = excluded.origin, \
+                     hosts = excluded.hosts, \
                      updated_at = excluded.updated_at",
                     vec![
                         Value::String(integration_row_id(&row.provider)),
@@ -137,6 +142,11 @@ impl IntegrationStateProjector {
                         Value::String(row.display_name.clone()),
                         Value::String(row.icon.as_str().to_string()),
                         row.default_view.clone().map_or(Value::Null, Value::String),
+                        // Empty, not NULL, for a bundled connection — the
+                        // surface reads "no origin" as "shipped with this
+                        // build", and one spelling of nothing is enough.
+                        Value::String(row.origin.clone().unwrap_or_default()),
+                        Value::String(row.hosts.join(", ")),
                         Value::String(updated_at.clone()),
                     ],
                 )

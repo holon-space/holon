@@ -169,7 +169,7 @@ fn the_settings_key_and_the_sidecars_variable_are_the_same_name() {
         "the URL carries the list's capability token, so the field must be masked"
     );
     assert_eq!(
-        def.env_override,
+        def.env_override.as_deref(),
         Some(ENV_VAR),
         "the declared override must be the variable the sidecar references"
     );

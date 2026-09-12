@@ -85,6 +85,10 @@ impl ConnectionRoster {
                 source: ConnectionSource::Bundled(s),
             })
             .collect();
+        // Held back rather than pushed straight into `entries`: whether one is
+        // admissible depends on the OTHER introduced names, so the namespace
+        // boundary below needs the whole set.
+        let mut candidates: Vec<(ProviderName, PathBuf)> = Vec::new();
         // BTreeMap so introduced connections land in file-name order, which is
         // the order the settings list appends them in.
         let by_stem: BTreeMap<&String, &Vec<(PathBuf, String)>> = installed.iter().collect();
@@ -126,13 +130,80 @@ impl ConnectionRoster {
                 }
                 continue;
             }
-            let (path, _) = &files[0];
-            entries.push(ConnectionEntry {
-                name,
-                source: ConnectionSource::Installed { path: path.clone() },
-            });
+            let (path, content) = &files[0];
+            // A connection can collide with ITSELF: `${MY_TOKEN}` and
+            // `${MY.TOKEN}` are two spellings `secret_account` folds onto one
+            // entry, both inside this connection's own namespace, with no
+            // second provider anywhere for the nesting rule below to see.
+            //
+            // Refused rather than served by a single field. The two spellings
+            // do resolve to one credential, so one field would LOOK right —
+            // but a field declares only ONE `env_override`, so an export of
+            // the other spelling would be in force while the field still
+            // rendered as editable. A user typing into a field whose value
+            // nothing reads is the silent-degradation tier; renaming one
+            // reference is the small, obvious fix, and this says which two.
+            if let Some(why) = self_colliding_accounts(content) {
+                rejected.push(RejectedFile {
+                    path: path.clone(),
+                    reason: why,
+                });
+                continue;
+            }
+            candidates.push((name, path.clone()));
         }
 
+        // The secret namespace is a BOUNDARY, and two providers whose prefixes
+        // nest do not have one: `todoist-api` owns `todoist_api_`, which lies
+        // wholly inside the bundled `todoist_`, so every variable it may
+        // legally reference is also a variable the bundled connection's own
+        // check would accept — including the account holding the user's real
+        // token. Refused at admission rather than judged per reference,
+        // because no reference-level test can separate the two once the
+        // prefixes nest.
+        let claimed: Vec<(String, String)> = BUNDLED_SIDECARS
+            .iter()
+            .map(|s| {
+                let name = ProviderName::bundled(s.provider);
+                (secret_namespace_prefix(&name), name.to_string())
+            })
+            .chain(
+                candidates
+                    .iter()
+                    .map(|(name, _)| (secret_namespace_prefix(name), name.to_string())),
+            )
+            .collect();
+
+        for (name, path) in candidates {
+            let mine = secret_namespace_prefix(&name);
+            // The introduced connection always loses. A file the user dropped
+            // must never be able to refuse a connection this build ships, and
+            // two introduced names that nest leave nothing to pick between —
+            // both hit this arm, which is the same answer the two-files-one-
+            // name case gives.
+            let collision = claimed.iter().find(|(prefix, owner)| {
+                *owner != name.to_string()
+                    && (prefix.starts_with(&mine) || mine.starts_with(prefix))
+            });
+            match collision {
+                Some((_, owner)) => rejected.push(RejectedFile {
+                    path,
+                    reason: format!(
+                        "its secret namespace '{}*' overlaps the connection '{owner}', so a \
+                         variable name cannot say which of the two a credential belongs to — and \
+                         one of them could then read the other's. Rename this file to a name that \
+                         is neither an extension nor a shortening of '{owner}'.",
+                        mine.to_uppercase()
+                    ),
+                }),
+                None => entries.push(ConnectionEntry {
+                    name,
+                    source: ConnectionSource::Installed { path },
+                }),
+            }
+        }
+
+        rejected.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(Self { entries, rejected })
     }
 
@@ -195,6 +266,36 @@ pub fn referenced_vars(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Two DIFFERENT `${VAR}` spellings in `text` that address one keychain
+/// account, as a refusal message naming both. `None` when every account the
+/// text reaches is spelled exactly one way.
+///
+/// Repeating the SAME spelling is ordinary authoring and is not a collision —
+/// what is refused is one account reachable under two names.
+fn self_colliding_accounts(text: &str) -> Option<String> {
+    let mut by_account: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for var in referenced_vars(text) {
+        let spellings = by_account
+            .entry(holon_secrets::secret_account(&var))
+            .or_default();
+        if !spellings.contains(&var) {
+            spellings.push(var);
+        }
+    }
+    let (account, spellings) = by_account.iter().find(|(_, s)| s.len() > 1)?;
+    Some(format!(
+        "it references {} for the one credential '{account}' — '.' and '_' are the same \
+         separator in a keychain account, so those are two names for one entry. A settings field \
+         can declare only ONE of them as the variable that overrides it, so the other would take \
+         effect silently while the field still looked editable. Use one spelling throughout.",
+        spellings
+            .iter()
+            .map(|s| format!("${{{s}}}"))
+            .collect::<Vec<_>>()
+            .join(" and ")
+    ))
 }
 
 /// The variable-name prefix an introduced connection owns.

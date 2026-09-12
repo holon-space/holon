@@ -187,6 +187,14 @@ pub enum ShareDegradedReason {
         provider: String,
         installed_path: String,
     },
+    /// This session keeps every secret in RAM and loses it on exit
+    /// (`HOLON_SECRETS_BACKEND=memory`, a fixture mode). A credential field the
+    /// user fills in saves nothing, which is the one thing about it they must
+    /// not have to infer. `shared_tree_id` is the fixed subject `secrets`.
+    ///
+    /// All-clear: none within a session — the backend is chosen once at boot.
+    /// The condition ends when the process restarts without that variable.
+    SecretsHeldInMemory { why: String },
     /// A file NAMES a connection but cannot be used, so the connection does
     /// not exist: a stale `schema_version`, a file that will not parse, a
     /// reference to another connection's secret, or two files claiming one
@@ -280,6 +288,7 @@ impl ShareDegradedReason {
     pub const PAIRING_REIMPORTED_LOCAL_CONTENT: &'static str = "pairing-reimported-local-content";
     pub const PAIRING_REIMPORT_DEFERRED: &'static str = "pairing-reimport-deferred";
     pub const REHYDRATION_FAILED: &'static str = "rehydration-failed";
+    pub const SECRETS_HELD_IN_MEMORY: &'static str = "secrets-held-in-memory";
     pub const SHARED_SUBTREE_NOT_MATERIALIZED: &'static str = "shared-subtree-not-materialized";
     pub const SNAPSHOT_LOAD_FAILED: &'static str = "snapshot-load-failed";
     pub const SNAPSHOT_SAVE_FAILED: &'static str = "snapshot-save-failed";
@@ -304,6 +313,7 @@ impl ShareDegradedReason {
             Self::IntegrationNotEnabled { .. } => Self::INTEGRATION_NOT_ENABLED,
             Self::IntegrationSidecarNotBundled { .. } => Self::INTEGRATION_SIDECAR_NOT_BUNDLED,
             Self::IntegrationSidecarUnusable { .. } => Self::INTEGRATION_SIDECAR_UNUSABLE,
+            Self::SecretsHeldInMemory { .. } => Self::SECRETS_HELD_IN_MEMORY,
             Self::SnapshotSaveFailed(_) => Self::SNAPSHOT_SAVE_FAILED,
             Self::SnapshotLoadFailed(_) => Self::SNAPSHOT_LOAD_FAILED,
             Self::RehydrationFailed(_) => Self::REHYDRATION_FAILED,

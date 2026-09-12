@@ -8,9 +8,9 @@
 //! this rung exists to prevent.
 //!
 //! @pbt kind harness
-//! @pbt covers integration-state-presentation-columns — `display_name`, `icon`
-//! and `default_view` are present after boot on a fresh AND on a pre-existing
-//! database, and the migration is idempotent across reboots
+//! @pbt covers integration-state-presentation-columns — `display_name`, `icon`,
+//! `default_view`, `origin` and `hosts` are present after boot on a fresh AND
+//! on a pre-existing database, and the migration is idempotent across reboots
 
 use std::collections::HashMap;
 
@@ -20,6 +20,18 @@ use holon_turso::turso::TursoBackend;
 use tokio::sync::broadcast;
 
 const PRESENTATION: &[&str] = &["display_name", "icon", "default_view"];
+
+/// The DISCLOSURE axis, added after the presentation one and migrated by the
+/// same additive step. Checked here rather than in a rung of its own because
+/// the failure mode is identical — an un-migrated vault whose projector writes
+/// die on an unknown column — and one rung that names every appended column
+/// cannot fall behind the next addition the way a per-axis copy would.
+const DISCLOSURE: &[&str] = &["origin", "hosts"];
+
+/// Every column the current DDL appends to a database that predates it.
+fn migrated_columns() -> impl Iterator<Item = &'static &'static str> {
+    PRESENTATION.iter().chain(DISCLOSURE.iter())
+}
 
 /// The shape the table had before the presentation axis: the CREATE that
 /// shipped, restated so this rung keeps describing the OLD database after the
@@ -56,12 +68,61 @@ async fn columns(handle: &holon_turso::turso::DbHandle) -> Vec<String> {
 }
 
 fn assert_carries_the_presentation_axis(columns: &[String], context: &str) {
-    for wanted in PRESENTATION {
+    for wanted in migrated_columns() {
         assert!(
             columns.iter().any(|c| c == wanted),
             "{context}: integration_state must carry `{wanted}`; it has {columns:?}"
         );
     }
+}
+
+/// A fresh database and a migrated one must accept the SAME inserts.
+///
+/// They did not. Every appended column is declared `NOT NULL DEFAULT ''` by the
+/// migration, while the CREATE declared `display_name` and `icon` `NOT NULL`
+/// with no default — so an insert that omitted them succeeded on a vault that
+/// had been upgraded and failed on a vault created today. Two fixtures in
+/// `holon-integration-tests` hit exactly that
+/// (`NOT NULL constraint failed: integration_state.display_name`), and the
+/// defect is worse than the fixtures: it makes a bug reproducible only on
+/// machines whose database has the right history.
+///
+/// Asserted as AGREEMENT rather than by restating either DDL — the property is
+/// that the two paths converge, not what they converge on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_and_a_migrated_database_accept_the_same_insert() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let (_fresh_backend, fresh) = open(&dir.path().join("fresh.db")).await;
+    IntegrationStateSchemaModule
+        .ensure_schema(&fresh)
+        .await
+        .expect("fresh schema");
+
+    let (_old_backend, migrated) = open(&dir.path().join("old.db")).await;
+    migrated.execute_ddl(OLD_SHAPE).await.expect("old shape");
+    IntegrationStateSchemaModule
+        .ensure_schema(&migrated)
+        .await
+        .expect("migration");
+
+    // The minimum a caller can name: the columns the ORIGINAL table required.
+    // Everything appended since must carry a default, or this insert is a
+    // coin-flip on the database's history.
+    const MINIMAL: &str = "INSERT INTO integration_state          (id, provider_name, enabled, status, config_status, configurable,          configure_progress, updated_at)          VALUES ('integration:x', 'x', 1, 'Connected', 'configured', 0, '', '2026-01-01')";
+
+    let on_migrated = migrated.execute_values(MINIMAL, vec![]).await;
+    let on_fresh = fresh.execute_values(MINIMAL, vec![]).await;
+
+    assert_eq!(
+        on_fresh.is_ok(),
+        on_migrated.is_ok(),
+        "a fresh database and a migrated one must accept the same insert, or a defect reproduces          only on machines whose vault has the right history. fresh: {:?} / migrated: {:?}",
+        on_fresh.as_ref().err().map(|e| e.to_string()),
+        on_migrated.as_ref().err().map(|e| e.to_string()),
+    );
+    on_fresh
+        .expect("and the shared answer must be `accepted` — every appended column has a default");
 }
 
 #[tokio::test(flavor = "multi_thread")]

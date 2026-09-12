@@ -4050,14 +4050,35 @@ impl BuilderServices for ReactiveEngine {
                 ),
             );
         }
+        // The op's subject for the stage line: the entity it addresses, or the
+        // entity NAME when it addresses none.
+        let latency_block = latency_target
+            .clone()
+            .unwrap_or_else(|| entity_name.as_str().to_string());
         let dispatch_span = interaction_span(entity_name.as_str(), &op_name);
+        // The `dispatch` half of the measurement, which `dispatch_intent_sync`
+        // has emitted all along and this path did not — so every gesture that
+        // reaches the backend through a CLICK (the settings switch, an
+        // op_button) reported its end-to-end sample and nothing about where the
+        // time went. `scripts/measure_latency.py` reads both.
+        let stage_block = latency_block.clone();
+        let stage_action = op_name.clone();
         self.runtime_handle.spawn(
             async move {
+                let t_dispatch = std::time::Instant::now();
                 match session
                     .execute_operation(&entity_name, &op_name, params)
                     .await
                 {
                     Ok(response) => {
+                        tracing::info!(
+                            target: "holon_latency",
+                            stage = "dispatch",
+                            action = %stage_action,
+                            block = %stage_block,
+                            ms = t_dispatch.elapsed().as_millis() as u64,
+                            "holon_latency",
+                        );
                         apply_structural_focus(
                             &focused_block,
                             &caret_seed,

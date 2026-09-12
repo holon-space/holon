@@ -43,6 +43,20 @@
 -- config store, not this cell, so an `UPDATE integration_state SET default_view
 -- = …` changes what a surface SHOWS and nothing about where a click goes. To
 -- move the view page, edit `assets/integrations/<provider>.yaml`.
+-- `origin` and `hosts` are the DISCLOSURE axis, and both are empty for every
+-- connection this build ships. An introduced connection's name and icon are
+-- its own file's choice, so neither discloses anything; the file's path and the
+-- hosts its manual calls are what the author cannot choose away from. They live
+-- here because this mirror is the only thing the Settings list reads.
+--
+-- `hosts` is the display list, ", "-joined, in the row's own order. Joined
+-- rather than a child table because no reader filters on one host — the whole
+-- list IS the disclosure, and a join for a string every surface re-concatenates
+-- buys nothing.
+--
+-- Empty string, never NULL: the surface tells a bundled connection from an
+-- introduced one by the origin being empty, and two spellings of "nothing" is
+-- one branch every reader would have to get right.
 CREATE TABLE IF NOT EXISTS integration_state (
     id TEXT PRIMARY KEY NOT NULL,
     provider_name TEXT NOT NULL,
@@ -51,9 +65,17 @@ CREATE TABLE IF NOT EXISTS integration_state (
     config_status TEXT NOT NULL,
     configurable INTEGER NOT NULL,
     configure_progress TEXT NOT NULL,
-    display_name TEXT NOT NULL,
-    icon TEXT NOT NULL,
+    -- `DEFAULT ''` here is not decoration: the migration that adds these two to
+    -- an older database declares them `NOT NULL DEFAULT ''`, and without the
+    -- same default at CREATE a fresh database and a migrated one accept
+    -- DIFFERENT inserts. An insert omitting `display_name` then works or fails
+    -- depending on how the file came to exist, which is the shape of a defect
+    -- nobody can reproduce.
+    display_name TEXT NOT NULL DEFAULT '',
+    icon TEXT NOT NULL DEFAULT '',
     default_view TEXT,
+    origin TEXT NOT NULL DEFAULT '',
+    hosts TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
     _change_origin TEXT
 );

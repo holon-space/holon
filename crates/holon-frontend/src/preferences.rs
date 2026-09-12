@@ -197,7 +197,10 @@ pub struct PreferenceDef {
     /// matches case-insensitively with `.` and `_` as one separator, so a
     /// derived name would claim that a stray `UI_THEME` shadows the theme,
     /// which nothing reads.
-    pub env_override: Option<&'static str>,
+    ///
+    /// Owned rather than `&'static str`: a connection introduced by a user file
+    /// names its own variables, so this is data now, not a literal.
+    pub env_override: Option<String>,
 }
 
 impl PreferenceDef {
@@ -240,6 +243,7 @@ pub fn env_shadowed_keys(
     defs.iter()
         .filter(|def| {
             def.env_override
+                .as_deref()
                 .and_then(env)
                 .is_some_and(|v| !v.trim().is_empty())
         })
@@ -343,7 +347,7 @@ pub fn define_preferences(theme_registry: &ThemeRegistry) -> Vec<PreferenceDef> 
             pref_type: PrefType::Secret,
             default: toml::Value::String(String::new()),
             requires_restart: true,
-            env_override: Some("TODOIST_API_KEY"),
+            env_override: Some("TODOIST_API_KEY".into()),
         },
         PreferenceDef {
             key: PrefKey::new("shopping.list_url"),
@@ -357,7 +361,7 @@ pub fn define_preferences(theme_registry: &ThemeRegistry) -> Vec<PreferenceDef> 
             pref_type: PrefType::Secret,
             default: toml::Value::String(String::new()),
             requires_restart: true,
-            env_override: Some("SHOPPING_LIST_URL"),
+            env_override: Some("SHOPPING_LIST_URL".into()),
         },
         PreferenceDef {
             key: PrefKey::new("vault.root"),
@@ -372,6 +376,110 @@ pub fn define_preferences(theme_registry: &ThemeRegistry) -> Vec<PreferenceDef> 
             env_override: None,
         },
     ]
+}
+
+/// One `${VAR}` a connection INTRODUCED by a user file references.
+///
+/// Assembled by the composition root, which is the only layer that may read
+/// the integrations directory; this crate turns it into a settings field and
+/// knows nothing about sidecars.
+#[derive(Clone, Debug)]
+pub struct IntroducedSecret {
+    /// The connection's name, as the roster parsed it.
+    pub connection: String,
+    /// The file the connection came from. Named in the field's description
+    /// because the connection's own display name is its file's choice, and a
+    /// credential field is exactly where that matters.
+    pub origin: String,
+    /// The variable as written, e.g. `MY_THING_TOKEN`.
+    pub var: String,
+}
+
+/// Settings fields for the credentials an introduced connection asks for.
+///
+/// Without these, a connection a user installed could be switched on, connect,
+/// and have nowhere in Settings to type its token — the bundled fields are a
+/// compile-time list of two, so every introduced connection was unconfigurable
+/// through the UI that exists to configure connections.
+///
+/// The key is the variable name lowercased, underscores kept, and that is not
+/// cosmetic: the `${VAR}` resolver matches a key to a variable through
+/// [`crate::integration_vars::normalize_var_name`], which folds `.` to `_` and
+/// lowercases. Spelling the key `my-thing.token` to mirror the bundled
+/// `todoist.api_key` would normalize to `my-thing_token` and never match
+/// `MY_THING_TOKEN`, so the field would store a value nothing reads — the
+/// silent-degradation case. The user reads the label, not the key.
+///
+/// This function does not check for colliding accounts, and that is a
+/// PRECONDITION on its caller rather than a property of its input type. The
+/// roster refuses, at admission, both shapes that produce one: two connections
+/// whose secret namespaces nest, and a single connection spelling one account
+/// two ways (`${X_T}` and `${X.T}`). Everything reaching here has come through
+/// that boundary.
+///
+/// An earlier version of this comment claimed the accounts were "disjoint by
+/// construction". They are not — nothing in `IntroducedSecret` encodes it, and
+/// when only the first of those two rules existed a caller could and did hand
+/// this function a colliding pair. Stated as a precondition so the next reader
+/// knows where to look rather than trusting a type that does not carry it.
+pub fn introduced_secret_preferences(introduced: &[IntroducedSecret]) -> Vec<PreferenceDef> {
+    let section = PrefSection::new("Integrations");
+    introduced
+        .iter()
+        .filter_map(|s| {
+            let key = match PrefKey::parse(&s.var.to_ascii_lowercase()) {
+                Ok(key) => key,
+                Err(e) => {
+                    // The roster admits the connection on its file NAME; a
+                    // variable name is separate text and can hold anything.
+                    // Skipping one field is right — the connection still runs
+                    // off an exported variable — but silence is not.
+                    tracing::warn!(
+                        "[preferences] connection '{}' references ${{{}}}, which is not a usable \
+                         preference key ({e}), so Settings offers no field for it; export the \
+                         variable instead, or rename it",
+                        s.connection,
+                        s.var
+                    );
+                    return None;
+                }
+            };
+            Some(PreferenceDef {
+                key,
+                label: humanize_var(&s.var),
+                description: format!(
+                    "The credential the '{}' connection asks for as ${{{}}}. That connection was \
+                     introduced by {}, not shipped with Holon — it reaches the hosts its own file \
+                     names, using whatever you store here. The {} environment variable overrides \
+                     this if set.",
+                    s.connection, s.var, s.origin, s.var
+                ),
+                section: section.clone(),
+                pref_type: PrefType::Secret,
+                default: toml::Value::String(String::new()),
+                requires_restart: true,
+                env_override: Some(s.var.clone()),
+            })
+        })
+        .collect()
+}
+
+/// `MY_THING_TOKEN` -> `My Thing Token`.
+fn humanize_var(var: &str) -> String {
+    var.split('_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>()
+                        + chars.as_str().to_lowercase().as_str()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Convert a `toml::Value` to `holon_api::Value` for use in render data rows.

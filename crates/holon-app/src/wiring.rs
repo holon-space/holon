@@ -147,11 +147,56 @@ impl FrontendInjectorExt for Injector {
         }));
         disclosure.performed(BootStep::WritebackDisclosure);
 
+        // The secret backend, chosen ONCE for the session so every reader —
+        // the settings write path and the integration `${VAR}` resolver — holds
+        // the same store. A fixture asking for the in-memory one gets a banner
+        // with it, because a credential field that saves nothing must say so.
+        // `None` on the platform keychain, which is what `FrontendSession`
+        // binds for itself and what every in-process test fixture overrides.
+        // Binding it here too would take that override away from the fixtures.
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let mut session_secret_store: Option<Arc<dyn holon_secrets::KeychainStore>> = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let selected = holon_secrets::backend_from_env(
+                holon_secrets::INTEGRATION_SECRET_SERVICE,
+                &config_dir,
+            )?;
+            let store: Arc<dyn holon_secrets::KeychainStore> = selected.store.into();
+            if let Some(why) = selected.disclosure {
+                self.resolve::<Arc<holon_loro::DegradedSignalBus>>().emit(
+                    holon_loro::ShareDegraded {
+                        shared_tree_id: "secrets".to_string(),
+                        reason: holon_loro::ShareDegradedReason::SecretsHeldInMemory { why },
+                    },
+                );
+                session_secret_store = Some(store.clone());
+            }
+            self.provide::<dyn holon_secrets::KeychainStore>(Provider::root(move |_| {
+                store.clone()
+            }));
+        }
+
         // ThemeRegistry + PreferenceDefs
         let post_write_hook = holon_config.hooks.post_org_write.clone();
 
         let theme_registry = theme::ThemeRegistry::load(None);
-        let preference_defs = preferences::define_preferences(&theme_registry);
+        let mut preference_defs = preferences::define_preferences(&theme_registry);
+        // A connection a user installed names its own credentials, so its
+        // fields cannot be a compile-time list. Appended here, where the
+        // integrations directory is already known, so the schema the settings
+        // surface renders covers every connection this boot can run.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(dir) = holon_config.resolve_mcp_integrations_dir(&config_dir) {
+            preference_defs.extend(preferences::introduced_secret_preferences(
+                &crate::introduced_secrets::introduced_secret_fields(&dir),
+            ));
+        }
+        // Two secret keys folding onto one keychain account means one
+        // connection authenticates with the other's credential. Bundled keys
+        // are checked by a test; an introduced connection's are data, so the
+        // check has to run at boot.
+        preferences::assert_secret_accounts_are_distinct(&preference_defs)?;
         self.provide::<theme::ThemeRegistry>(Provider::root({
             let tr = Shared::new(theme_registry);
             move |_| tr.clone()
@@ -436,6 +481,7 @@ impl FrontendInjectorExt for Injector {
         let disclosure = disclosure.clone();
         self.provide::<FrontendSession>(Provider::root_async(move |resolver| {
             let disclosure = disclosure.clone();
+            let session_secret_store = session_secret_store.clone();
             use tracing::Instrument;
             async move {
                 tracing::info!("[FrontendSession] factory: entering");
@@ -815,7 +861,7 @@ impl FrontendInjectorExt for Injector {
                     ),
                 )
                     as Arc<dyn holon_core::storage::BlockQuerySource>;
-                Shared::new(FrontendSession::from_parts(SessionParts {
+                let session = FrontendSession::from_parts(SessionParts {
                     query_engine,
                     block_query,
                     operation_engine,
@@ -832,7 +878,14 @@ impl FrontendInjectorExt for Injector {
                     // Closes the ledger and logs every step that never ran.
                     // Required by SessionParts, so it cannot be dropped.
                     boot_report: disclosure.finish(),
-                }))
+                });
+                if let Some(store) = session_secret_store {
+                    session.use_secret_store(store).expect(
+                        "the session is one statement old and cannot have resolved its secret \
+                         store yet",
+                    );
+                }
+                Shared::new(session)
             }
             .instrument(tracing::info_span!("di.factory.FrontendSession"))
         }));

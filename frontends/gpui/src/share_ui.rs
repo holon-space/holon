@@ -207,6 +207,10 @@ pub enum DegradedKind {
     /// connection does not exist. The remedy is to fix the file the toast
     /// points at, which is why the reason travels with it.
     IntegrationSidecarUnusable,
+    /// Yellow — this session keeps every secret in RAM and loses it on exit.
+    /// A credential field that saves nothing is the one thing a user must not
+    /// have to infer, so the banner stands for the whole session.
+    SecretsHeldInMemory,
     /// Yellow — a peer joined a share by proving the ticket's BEARER secret
     /// rather than as a paired device. The share works; what is disclosed is
     /// that its trust rests on a secret that travelled (ADR 0028 R5 stopgap).
@@ -563,6 +567,15 @@ impl ShareUiState {
                     kind: DegradedKind::IntegrationSidecarUnusable,
                     shared_tree_id: event.shared_tree_id,
                     detail: format!("{provider}: {installed_path} cannot be used — {why}"),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ShareDegradedReason::SecretsHeldInMemory { why } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::SecretsHeldInMemory,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: why,
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -2223,6 +2236,11 @@ fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
             gpui::rgba(0xfbbf24ff),
             "⚠",
             "Connection file cannot be used",
+        ),
+        DegradedKind::SecretsHeldInMemory => (
+            gpui::rgba(0xfbbf24ff),
+            crate::icon("🔑"),
+            "Secrets are not being saved",
         ),
         DegradedKind::PairingReimported => {
             (gpui::rgba(0x60a5faff), "i", "Content kept from this device")

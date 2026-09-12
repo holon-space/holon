@@ -31,28 +31,38 @@ DIR="${HOLON_MCP_INTEGRATIONS_DIR:-$HOME/.config/holon/integrations}"
 STATE_FILE="$DIR/${PROVIDER}.state.toml"
 
 # A state file for a name NOTHING provides is read by nothing, so writing one
-# would report success and do nothing. Presence has two sources now: the
-# compiled-in bundle, and a `<provider>.yaml` the user installed in DIR.
-BUNDLED_SRC="$(dirname "$0")/../crates/holon-mcp-client/src/bundled_sidecars.rs"
-[ -r "$BUNDLED_SRC" ] || die "cannot read $BUNDLED_SRC — run this from a Holon checkout"
-BUNDLED="$(sed -n 's/^ *bundled!("\(.*\)"),$/\1/p' "$BUNDLED_SRC")"
-[ -n "$BUNDLED" ] || die "found no bundled providers in $BUNDLED_SRC — its format changed"
-
-INSTALLED=""
-if [ -d "$DIR" ]; then
-  for f in "$DIR"/*.yaml "$DIR"/*.yml; do
-    [ -e "$f" ] || continue
-    base="${f##*/}"
-    INSTALLED="$INSTALLED${base%.*}
-"
-  done
+# would report success and do nothing.
+#
+# The question is ASKED OF THE BINARY rather than answered here. This script
+# used to parse `bundled_sidecars.rs` and glob `*.yaml`, which is a second
+# implementation of the loader's admission rules — and it drifted: the loader
+# refuses a SYMLINKED sidecar and the glob switched one on, so the script and
+# the app disagreed about which connections exist.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -n "${HOLON_CONNECTION_BIN:-}" ]; then
+  ASK=("$HOLON_CONNECTION_BIN")
+elif [ -x "$ROOT/target/release/holon-connection" ]; then
+  ASK=("$ROOT/target/release/holon-connection")
+elif [ -x "$ROOT/target/debug/holon-connection" ]; then
+  ASK=("$ROOT/target/debug/holon-connection")
+elif [ -r "$ROOT/Cargo.toml" ]; then
+  ASK=(cargo run --quiet --manifest-path "$ROOT/Cargo.toml" -p holon-mcp-client \
+       --bin holon-connection --)
+else
+  die "cannot find holon-connection: set HOLON_CONNECTION_BIN to the built binary, or run this \
+from a Holon checkout so it can be built. This script does not decide for itself which \
+connections exist — the loader does, and that is what keeps the two from disagreeing."
 fi
 
-if ! printf '%s\n' "$BUNDLED" | grep -qxF "$PROVIDER" \
-   && ! printf '%s' "$INSTALLED" | grep -qxF "$PROVIDER"; then
-  die "nothing provides an integration '$PROVIDER': this build ships none, and $DIR holds no \
-'$PROVIDER.yaml'. Bundled: $(printf '%s' "$BUNDLED" | tr '\n' ' '). Installed: $(printf '%s' \
-"$INSTALLED" | tr '\n' ' ')"
+# stderr passes through: it names each file the loader ignores and why, which is
+# what tells a user their file is there and still does nothing.
+PROVIDERS="$("${ASK[@]}" list "$DIR")" \
+  || die "holon-connection could not list the connections in $DIR"
+
+if ! printf '%s\n' "$PROVIDERS" | grep -qxF "$PROVIDER"; then
+  die "nothing provides an integration '$PROVIDER'. This build admits: $(printf '%s' \
+"$PROVIDERS" | tr '\n' ' '). If you installed '$PROVIDER.yaml' in $DIR and it is not listed, the \
+reason is on the lines above."
 fi
 
 mkdir -p "$DIR"

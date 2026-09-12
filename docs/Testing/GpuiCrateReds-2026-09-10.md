@@ -95,7 +95,7 @@ rewrite it; where a row's failure has since changed, the `Status` cell says so.
 | 8 | `layout_editor` | `windowed_caret::clicking_an_external_link_opens_the_url_instead_of_navigating` | OPEN | 3/3 | FAIL 0.03s | `830d794f878f` | `layout_editor.rs:413` `clicking an external link should hand the URL to the platform opener; left: None, right: Some("https://example.com")` |
 | 9 | `layout_smoke` | `snapshot_captures_each_widget` | OPEN | 3/3 | FAIL 0.03s | `830d794f878f` | `layout_smoke.rs:199` `expected 1 badge, got 2` |
 | 10 | `nested_page_chevron_gate` | `an_opened_nested_page_paints_its_children` | OPEN | 3/3 | FAIL | `830d794f878f` | `nested_page_chevron_gate.rs:753` `"buy milk" is not among the painted text of the window … painted = ["▼", "A Nested Page"]` |
-| 11 | `settings_integrations_setfield_popup_windowed` | `clicking_multi_param_set_field_opens_param_popup_then_dispatches` | OPEN | 3/3 | FAIL | `830d794f878f` | `…setfield_popup_windowed.rs:288` `the popup's value step must offer "op-param-item-value-true". op-param ids painted now: []` |
+| 11 | `settings_integrations_setfield_popup_windowed` | `clicking_multi_param_set_field_opens_param_popup_then_dispatches` | OPEN — re-confirmed at `f134df9ece6c` 2026-09-12 (`uc-fixes`) | 3/3 | FAIL | `830d794f878f` | `…setfield_popup_windowed.rs:288` `the popup's value step must offer "op-param-item-value-true". op-param ids painted now: []` |
 | 12 | `structural_chord_stale_flush_windowed` | `structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_loro` | OPEN — unchanged by `gpui-driver` | 3/3 | FAIL | `830d794f878f` | `…rs:351` `vacuity guard: the Tab chord changed no parentage, so no structural op was dispatched` |
 | 13 | `structural_chord_stale_flush_windowed` | `structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_sqlonly` | OPEN — unchanged by `gpui-driver` | 3/3 | FAIL | `830d794f878f` | as row 12 |
 | 14 | `task_keyword_blur_windowed` | `promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly` | OPEN — unchanged by `gpui-driver` | 3/3 | FAIL | `830d794f878f` | `…rs:357` `vacuity guard: the blur dispatched NO operation (6 history rows before and after)` |
@@ -301,7 +301,33 @@ tracing subscriber — `action_bar_windowed.rs`,
   failing step. Items present under another prefix ⇒ a stale oracle; nothing
   list-shaped painted ⇒ a real popup wiring defect.
 
-## The load-sensitive register (42 rows)
+#### Re-confirmed 2026-09-12 by lane `uc-fixes`, and the hypothesis narrows
+
+Still deterministic at `f134df9ece6c`, same assertion and same line. Attributed
+by A/B rather than by date: with EVERY source file of that lane reverted to
+`f134df9ece6c` it fails identically (`lane-logs/popup-ab-base-1789181169.log` in
+the `uc-fixes` workspace; the restoration is sha256-proven in
+`lane-logs/ab-restore-sha.txt`). It is not caused by `user-connections` and not
+by the settings-table template change that lane made.
+
+The discriminating check above is ANSWERED, and neither branch of it holds. The
+census printed at the failing step carries **no integration widget of any kind**
+— no `op_button`, no `state_toggle`, no `table-cell-col-*`, nothing of the
+Settings modal:
+
+```
+census: {"column": 3, "divider": 2, "expand_toggle": 3, "icon": 4,
+         "live_block": 4, "live_query": 2, "row": 4, "selectable": 4,
+         "spacer": 3, "text": 5, "tree_item": 3, "view_mode_switcher": 3}
+```
+
+That is the seeded sidebar alone. So the popup's value items are not painted
+under another prefix and the value list is not resolving empty — the MODAL IS
+GONE by that point. The click that picks `field=enabled` in the first step
+dismisses the popup AND closes the modal, which is the behaviour the sibling
+`outside_click_on_inert_space_closes_the_popup_without_dispatching` asserts for
+a click on inert space. The next root-cause pass should ask why the first step's
+own item registers as outside-the-popup, not why the second step paints nothing.
 
 Every name below failed in at least one loaded run and **passed serially**.
 Full per-name rates are in `lane-logs/gpui-reds-rates.txt`; the families are:

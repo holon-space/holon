@@ -317,6 +317,14 @@ fn run_enable(dir: &Path, args: &[&str]) -> std::process::Output {
         // A test must not be able to write into the real config dir if the
         // script falls back to its default location.
         .env("HOME", dir)
+        // The script asks the binary which connections exist rather than
+        // deciding for itself. Named explicitly so the test runs against the
+        // binary THIS build produced, and never falls through to a `cargo run`
+        // inside a test.
+        .env(
+            "HOLON_CONNECTION_BIN",
+            env!("CARGO_BIN_EXE_holon-connection"),
+        )
         .output()
         .expect("run the enable script")
 }
@@ -379,6 +387,62 @@ fn the_enable_script_accepts_a_connection_introduced_by_a_file() {
     assert!(
         loaded.configs.iter().any(|(n, _)| n == "my-own-thing"),
         "and the loader must then run it — the script and the loader must agree on what exists"
+    );
+}
+
+/// The script and the loader must agree on what a file INTRODUCES, not only on
+/// which names exist. The dogfood pass found them disagreeing about a symlink:
+/// the loader refuses one (a link lets a file outside the directory decide what
+/// a connection calls and which secrets it may name) and the script's glob
+/// switched it on, so the user was told their connection was enabled and it
+/// never ran.
+///
+/// Stated as agreement rather than as "refuses a symlink" on purpose: the rule
+/// belongs to the loader, and this asserts the script has no opinion of its
+/// own.
+#[test]
+fn the_enable_script_refuses_what_the_loader_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("elsewhere.yaml.hidden");
+    std::fs::write(
+        &real,
+        format!(
+            "schema_version: {}\nutcp:\n  utcp_version: \"1.1.3\"\n  manual_version: \"1.0.0\"\n  \
+             tools: []\nholon:\n  tools: {{}}\nentities: {{}}\ntools: {{}}\n",
+            holon_mcp_client::SIDECAR_SCHEMA_VERSION
+        ),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&real, dir.path().join("linked-thing.yaml")).unwrap();
+
+    // The loader's verdict first, so the assertion below is about AGREEMENT
+    // and not about a rule this test restates.
+    assert!(
+        !load(dir.path())
+            .expect("load")
+            .configs
+            .iter()
+            .any(|(n, _)| n == "linked-thing"),
+        "precondition: the loader does not admit a symlinked sidecar"
+    );
+
+    let out = run_enable(dir.path(), &["linked-thing"]);
+    assert!(
+        !out.status.success(),
+        "the script must refuse a connection the loader will not run — reporting success here \
+         tells the user their connection is on when it will never start. stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !dir.path().join("linked-thing.state.toml").exists(),
+        "and it must write no state file for a name nothing provides"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("symbolic link"),
+        "and the reason the loader gave must reach the user, since the remedy is to replace the \
+         link with the file; got: {err}"
     );
 }
 

@@ -956,14 +956,14 @@ impl SchemaModule for IntegrationStateSchemaModule {
         for stmt in sql_statements(include_str!("../sql/schema/integration_state.sql")) {
             db_handle.execute_ddl(stmt).await?;
         }
-        add_missing_presentation_columns(db_handle).await?;
+        add_missing_integration_state_columns(db_handle).await?;
         tracing::info!("[IntegrationStateSchemaModule] integration_state table created");
         Ok(())
     }
 }
 
-/// Bring a database created before the presentation axis existed up to the
-/// current shape.
+/// Bring a database created before the presentation and disclosure axes
+/// existed up to the current shape.
 ///
 /// `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so a vault that
 /// booted an earlier build keeps a six-column `integration_state` and every
@@ -973,7 +973,7 @@ impl SchemaModule for IntegrationStateSchemaModule {
 /// until that write lands.
 ///
 /// A no-op on a current-shape database (one `PRAGMA table_info` read).
-async fn add_missing_presentation_columns(db_handle: &DbHandle) -> Result<()> {
+async fn add_missing_integration_state_columns(db_handle: &DbHandle) -> Result<()> {
     // `PRAGMA table_info` rather than the stored DDL: `ALTER TABLE` rewrites
     // `sqlite_master.sql` in its own formatting, so a DDL-text probe would stop
     // recognising the column it had just added and try again on the next boot.
@@ -1002,6 +1002,8 @@ async fn add_missing_presentation_columns(db_handle: &DbHandle) -> Result<()> {
         ("display_name", "TEXT NOT NULL DEFAULT ''"),
         ("icon", "TEXT NOT NULL DEFAULT ''"),
         ("default_view", "TEXT"),
+        ("origin", "TEXT NOT NULL DEFAULT ''"),
+        ("hosts", "TEXT NOT NULL DEFAULT ''"),
     ] {
         if present.iter().any(|c| c == column) {
             continue;

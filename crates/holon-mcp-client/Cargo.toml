@@ -9,6 +9,12 @@ publish = false
 [package.metadata.cargo-machete]
 ignored = ["workspace-hack"]
 
+# The presence question the enable script asks, answered by the loader's own
+# scan instead of a second implementation in bash.
+[[bin]]
+name = "holon-connection"
+path = "src/bin/holon_connection.rs"
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
