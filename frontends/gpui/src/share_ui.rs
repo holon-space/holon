@@ -100,12 +100,89 @@ impl ShareTicket {
     }
 }
 
+/// A toast's text, split where the cap may fall.
+///
+/// A disclosure has two halves and they cannot share one string. The PROSE can
+/// be summarised by cutting it, and is, so that one degradation cannot fill the
+/// window. A PAYLOAD cannot: half a path is not a path, half a command does not
+/// run, and half a remedy reads as complete. Toast text cannot be selected, so
+/// what the cap removes is reachable nowhere but the log.
+///
+/// The split is in the TYPE rather than in a `\n` convention because the
+/// convention only held for the kinds whose author remembered it. Every
+/// refusal this feature raises is `IntegrationSidecarUnusable`, whose whole
+/// disclosure was one sentence, so the cap fell inside it and took the remedy
+/// — while the neighbouring `IntegrationNotEnabled`, which did use the
+/// convention, painted in full on the same screen
+/// (`docs/Testing/bugfunnel/entries/
+/// 2026-09-12-a-refused-connection-file-toast-cuts-its-remedy-at-the-detail-cap.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToastDetail {
+    /// One sentence of prose, capped at [`MAX_DETAIL_CHARS`].
+    pub headline: String,
+    /// The payloads that must reach the user CHARACTER-EXACT. Each is painted
+    /// as its own line, verbatim, and the cap never sees them.
+    pub body: Vec<String>,
+}
+
+impl ToastDetail {
+    /// Prose alone — the shape of a notice that names no path, command or
+    /// remedy the reader has to reproduce.
+    pub fn prose(headline: impl Into<String>) -> Self {
+        Self {
+            headline: headline.into(),
+            body: Vec::new(),
+        }
+    }
+
+    /// Prose, then the payloads that must survive whole.
+    pub fn with_body(headline: impl Into<String>, body: Vec<String>) -> Self {
+        Self {
+            headline: headline.into(),
+            body: body.into_iter().filter(|l| !l.trim().is_empty()).collect(),
+        }
+    }
+
+    /// Whether the disclosure says this anywhere — headline or payload.
+    ///
+    /// The half a string lands in is a rendering decision, so a reader asking
+    /// "does this toast mention the file?" must not have to know which.
+    pub fn contains(&self, needle: &str) -> bool {
+        self.headline.contains(needle) || self.body.iter().any(|l| l.contains(needle))
+    }
+}
+
+impl std::fmt::Display for ToastDetail {
+    /// The whole disclosure as one string, headline first. For a log line or a
+    /// test message — the RENDER never goes through this, because painting the
+    /// body as part of the headline is what the cap then cuts.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.headline)?;
+        for line in &self.body {
+            write!(f, "\n{line}")?;
+        }
+        Ok(())
+    }
+}
+
+impl From<String> for ToastDetail {
+    fn from(headline: String) -> Self {
+        Self::prose(headline)
+    }
+}
+
+impl From<&str> for ToastDetail {
+    fn from(headline: &str) -> Self {
+        Self::prose(headline)
+    }
+}
+
 /// A degraded-mode notification to render as a yellow toast.
 #[derive(Clone, Debug)]
 pub struct DegradedToast {
     pub kind: DegradedKind,
     pub shared_tree_id: String,
-    pub detail: String,
+    pub detail: ToastDetail,
     /// The vault format that refused a file, for the one kind whose headline is
     /// not fixed ([`DegradedKind::VaultIngestFailed`]). `None` for every other
     /// kind, whose headline is a constant.
@@ -307,7 +384,7 @@ impl ShareUiState {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::SnapshotSaveFailed,
                     shared_tree_id: event.shared_tree_id,
-                    detail,
+                    detail: detail.into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -316,7 +393,7 @@ impl ShareUiState {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::RehydrationFailed,
                     shared_tree_id: event.shared_tree_id,
-                    detail,
+                    detail: detail.into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -325,7 +402,7 @@ impl ShareUiState {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::SqlProjectionFailed,
                     shared_tree_id: event.shared_tree_id,
-                    detail,
+                    detail: detail.into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -334,7 +411,7 @@ impl ShareUiState {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::ForeignIdCollision,
                     shared_tree_id: event.shared_tree_id,
-                    detail: block_id,
+                    detail: block_id.into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -362,7 +439,7 @@ impl ShareUiState {
                     kind: DegradedKind::VaultIngestFailed,
                     // The file, so the headline can name it and the condition
                     // clears per file rather than per scan.
-                    detail: format!("{}: {reason}", event.shared_tree_id),
+                    detail: format!("{}: {reason}", event.shared_tree_id).into(),
                     shared_tree_id: event.shared_tree_id,
                     condition: Some(condition.clone()),
                     format: Some(format),
@@ -375,7 +452,8 @@ impl ShareUiState {
                         "{} is empty on disk — Holon kept the document it last read from it, so \
                          what you see is no longer in the file",
                         event.shared_tree_id
-                    ),
+                    )
+                    .into(),
                     shared_tree_id: event.shared_tree_id,
                     condition: Some(condition.clone()),
                     format: None,
@@ -388,7 +466,8 @@ impl ShareUiState {
                         "{} is {format}, which Holon reads but cannot write — edit the file on \
                          disk",
                         event.shared_tree_id
-                    ),
+                    )
+                    .into(),
                     shared_tree_id: event.shared_tree_id,
                     condition: Some(condition.clone()),
                     format: None,
@@ -398,7 +477,7 @@ impl ShareUiState {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::WritebackDegraded,
                     shared_tree_id: event.shared_tree_id,
-                    detail,
+                    detail: detail.into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -415,14 +494,16 @@ impl ShareUiState {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::PairingReimported,
                     shared_tree_id: event.shared_tree_id,
-                    // The query is NOT here: `detail` is capped, and this
-                    // detail carries an absolute archive path, so appending
-                    // the query hands the user a fragment that does not run.
-                    // `toast_lines` paints it as its own uncapped line.
-                    detail: format!(
-                        "{blocks} block(s) written on this device were added to the paired store, \
-                         {conflict_copies} of them kept as a copy under the owner's block of the \
-                         same id; the pre-pair document is in {archive}."
+                    // The archive path and the query are BODY lines: both are
+                    // things the user reproduces character for character, and
+                    // the headline is capped.
+                    detail: ToastDetail::with_body(
+                        format!(
+                            "{blocks} block(s) written on this device were added to the paired \
+                             store, {conflict_copies} of them kept as a copy under the owner's \
+                             block of the same id. The pre-pair document is here:"
+                        ),
+                        vec![archive],
                     ),
                     condition: Some(condition.clone()),
                     format: None,
@@ -440,7 +521,7 @@ impl ShareUiState {
                     shared_tree_id: event.shared_tree_id,
                     // The file the shared content was inlined into — what the
                     // user opens to see the stale projection.
-                    detail: file,
+                    detail: file.into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -451,7 +532,7 @@ impl ShareUiState {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::IntegrationConnectFailed,
                     shared_tree_id: event.shared_tree_id,
-                    detail: format!("{integration}: {error}"),
+                    detail: format!("{integration}: {error}").into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -463,7 +544,10 @@ impl ShareUiState {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::IntegrationNeedsAuth,
                     shared_tree_id: event.shared_tree_id,
-                    detail: format!("{integration}: authorize at {auth_url}"),
+                    detail: ToastDetail::with_body(
+                        format!("{integration} needs authorizing. Open:"),
+                        vec![auth_url],
+                    ),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -477,9 +561,12 @@ impl ShareUiState {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::IntegrationSidecarSuperseded,
                     shared_tree_id: event.shared_tree_id,
-                    detail: format!(
-                        "{integration}: {installed_path} was ignored ({incompatibility}); running \
-                         the bundled {bundled_source}"
+                    detail: ToastDetail::with_body(
+                        format!(
+                            "{integration}: the installed file was ignored ({incompatibility}); \
+                             the bundled {bundled_source} is running instead. The ignored file:"
+                        ),
+                        vec![installed_path],
                     ),
                     condition: Some(condition.clone()),
                     format: None,
@@ -501,14 +588,16 @@ impl ShareUiState {
                     kind: DegradedKind::IntegrationNotEnabled,
                     shared_tree_id: event.shared_tree_id,
                     // Headline, then the two payloads that must reach the
-                    // user CHARACTER-EXACT, each on its own line and so exempt
-                    // from the detail cap: the command to run (D2 — a remedy
-                    // cut in half reads as complete and does not work) and the
-                    // file it writes (D1). The cap ate both when all three
-                    // shared one string.
-                    detail: format!(
-                        "{integration} is installed but switched off, so it runs nothing. Switch \
-                         it on in Settings › Integrations, or run:\n{remedy}\n{state_path}"
+                    // user CHARACTER-EXACT and so never see the cap: the
+                    // command to run (D2 — a remedy cut in half reads as
+                    // complete and does not work) and the file it writes (D1).
+                    // The cap ate both when all three shared one string.
+                    detail: ToastDetail::with_body(
+                        format!(
+                            "{integration} is installed but switched off, so it runs nothing. \
+                             Switch it on in Settings › Integrations, or run:"
+                        ),
+                        vec![remedy, state_path],
                     ),
                     condition: Some(condition.clone()),
                     format: None,
@@ -522,7 +611,8 @@ impl ShareUiState {
                         "peer {peer} joined by presenting the share ticket. Anyone the ticket \
                          was forwarded to could have joined instead — unshare, or revoke the \
                          peer, if that was not intended"
-                    ),
+                    )
+                    .into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -538,7 +628,8 @@ impl ShareUiState {
                              its one-time recovery code could not be shown. Shared content and \
                              peer access are unaffected; if the keychain entry is lost, this \
                              device's shares stop being advertised until it is shared again"
-                        .to_string(),
+                        .to_string()
+                        .into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -550,9 +641,12 @@ impl ShareUiState {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::IntegrationSidecarNotBundled,
                     shared_tree_id: event.shared_tree_id,
-                    detail: format!(
-                        "{provider}: nothing provides a connection by this name — \
-                         {installed_path} runs nothing"
+                    detail: ToastDetail::with_body(
+                        format!(
+                            "{provider}: nothing provides a connection by this name, so this file \
+                             runs nothing:"
+                        ),
+                        vec![installed_path],
                     ),
                     condition: Some(condition.clone()),
                     format: None,
@@ -566,7 +660,14 @@ impl ShareUiState {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::IntegrationSidecarUnusable,
                     shared_tree_id: event.shared_tree_id,
-                    detail: format!("{provider}: {installed_path} cannot be used — {why}"),
+                    // The file and the REASON are both body lines. The reason
+                    // ends in the remedy — the clause saying what to change —
+                    // and it was the half the cap ate, on the same screen where
+                    // the NotEnabled toast above painted in full.
+                    detail: ToastDetail::with_body(
+                        format!("{provider}: this connection file cannot be used."),
+                        vec![installed_path, why],
+                    ),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -575,7 +676,7 @@ impl ShareUiState {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::SecretsHeldInMemory,
                     shared_tree_id: event.shared_tree_id,
-                    detail: why,
+                    detail: why.into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -702,7 +803,7 @@ impl DegradedToastSink {
         } else {
             tracing::error!(
                 "[degraded-toast] sink global missing; toast dropped: {}",
-                toast.detail
+                toast.detail.headline
             );
         }
     }
@@ -810,7 +911,7 @@ pub fn spawn_op_failure_toast_bridge(
                         s.push_toast(DegradedToast {
                             kind: DegradedKind::CommandFailed,
                             shared_tree_id: "command".into(),
-                            detail,
+                            detail: detail.into(),
                             condition: None,
                             format: None,
                         });
@@ -899,7 +1000,8 @@ fn pending_event_toast(event: &PendingWriteEvent) -> DegradedToast {
             detail: format!(
                 "{} ({}) — approve in the pending panel",
                 event.display, event.tool
-            ),
+            )
+            .into(),
             condition: None,
             format: None,
         },
@@ -909,7 +1011,8 @@ fn pending_event_toast(event: &PendingWriteEvent) -> DegradedToast {
             detail: format!(
                 "{} ({}) — {}; verify on the remote",
                 event.display, event.tool, event.detail
-            ),
+            )
+            .into(),
             condition: None,
             format: None,
         },
@@ -970,7 +1073,7 @@ pub fn dispatch_approve(
                         s.push_toast(DegradedToast {
                             kind: DegradedKind::ConnectorWriteOutcomeUnknown,
                             shared_tree_id: "connector-write".into(),
-                            detail: format!("approve failed: {e}"),
+                            detail: format!("approve failed: {e}").into(),
                             condition: None,
                             format: None,
                         });
@@ -1206,7 +1309,7 @@ fn dispatch_undo_redo(
                         s.push_toast(DegradedToast {
                             kind: d.kind,
                             shared_tree_id: "undo".into(),
-                            detail: d.detail,
+                            detail: d.detail.into(),
                             condition: None,
                             format: None,
                         });
@@ -1530,7 +1633,7 @@ pub fn dispatch_retry_reimport(
                     s.push_toast(DegradedToast {
                         kind: DegradedKind::CommandFailed,
                         shared_tree_id: "device".into(),
-                        detail,
+                        detail: detail.into(),
                         condition: None,
                         format: None,
                     });
@@ -2093,19 +2196,6 @@ const MAX_LOCAL_TOASTS: usize = 5;
 /// text, and cutting those mid-character panics the render.
 const MAX_DETAIL_CHARS: usize = 320;
 
-/// A `detail`'s prose and the payloads that must survive whole.
-///
-/// A disclosure whose payload is a PATH or a COMMAND cannot be summarised: half
-/// a path is not a path, and toast text cannot be selected, so what the cap
-/// removes is reachable nowhere. Such a disclosure puts the payload on its own
-/// line of `detail`; everything after the first newline is exempt from the cap
-/// and painted verbatim.
-fn split_detail(detail: &str) -> (&str, impl Iterator<Item = &str>) {
-    let mut parts = detail.split('\n');
-    let sentence = parts.next().unwrap_or("");
-    (sentence, parts.filter(|l| !l.trim().is_empty()))
-}
-
 /// The headline a toast renders — icon, label, and the capped first sentence of
 /// its detail.
 fn toast_message(toast: &DegradedToast) -> String {
@@ -2116,7 +2206,7 @@ fn toast_message(toast: &DegradedToast) -> String {
         Some(format) => format!("File sync degraded (bad {format} file)"),
         None => label.to_string(),
     };
-    let (sentence, _) = split_detail(&toast.detail);
+    let sentence = toast.detail.headline.as_str();
     let sentence = match sentence.char_indices().nth(MAX_DETAIL_CHARS) {
         Some((cut, _)) => format!("{}…", &sentence[..cut]),
         None => sentence.to_string(),
@@ -2132,7 +2222,7 @@ fn toast_message(toast: &DegradedToast) -> String {
 /// elements and the cap never sees them.
 fn toast_lines(toast: &DegradedToast) -> Vec<String> {
     let mut lines = vec![toast_message(toast)];
-    lines.extend(split_detail(&toast.detail).1.map(str::to_string));
+    lines.extend(toast.detail.body.iter().cloned());
     if toast.kind == DegradedKind::PairingReimported {
         lines.push(format!(
             "Find the copies with: {}",
@@ -2524,7 +2614,7 @@ mod tests {
         DegradedToast {
             kind: DegradedKind::CommandFailed,
             shared_tree_id: String::new(),
-            detail: detail.to_string(),
+            detail: detail.to_string().into(),
             condition: None,
             format: None,
         }
@@ -2534,7 +2624,7 @@ mod tests {
         DegradedToast {
             kind: DegradedKind::IntegrationNotEnabled,
             shared_tree_id: subject.to_string(),
-            detail: format!("{subject} is switched off"),
+            detail: format!("{subject} is switched off").into(),
             condition: Some(holon_loro::DegradedConditionKey {
                 subject: subject.to_string(),
                 kind: ShareDegradedReason::INTEGRATION_NOT_ENABLED,
@@ -2750,7 +2840,7 @@ mod tests {
         s.push_toast(DegradedToast {
             kind: d.kind,
             shared_tree_id: "undo".into(),
-            detail: d.detail,
+            detail: d.detail.into(),
             condition: None,
             format: None,
         });
@@ -2893,7 +2983,7 @@ mod tests {
                 error: "x".repeat(200),
             },
         });
-        assert!(s.toasts[0].detail[..80].contains("todoist"));
+        assert!(s.toasts[0].detail.headline[..80].contains("todoist"));
     }
 
     #[test]
@@ -3029,10 +3119,12 @@ mod tests {
             lines.iter().any(|l| l.contains(&query)),
             "the toast must paint the whole query: {lines:?}"
         );
+        // On its OWN line, not in the headline: the archive is a path the user
+        // opens, so it belongs with the query rather than in the prose the cap
+        // may cut. What matters is that it arrives WHOLE.
         assert!(
-            lines[0].contains(archive),
-            "the message must still name the archive: {:?}",
-            lines[0]
+            lines[1..].iter().any(|l| l.contains(archive)),
+            "the toast must paint the whole archive path on a line of its own: {lines:?}"
         );
     }
 

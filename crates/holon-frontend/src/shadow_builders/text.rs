@@ -4,7 +4,7 @@ use super::prelude::*;
 use crate::reactive_view_model::DropTask;
 
 holon_macros::widget_builder! {
-    fn text(content: String, #[default = false] bold: bool, #[default = 14.0] size: f32, color: Option<String>, style: Option<String>, #[default = false] truncate: bool) {
+    fn text(content: String, #[default = false] bold: bool, #[default = 14.0] size: f32, color: Option<String>, style: Option<String>, #[default = false] truncate: bool, ellipsis: Option<String>) {
         // When positional 0 is a `col("foo")` ref, capture the field name so we
         // can re-derive `content` on every CDC write to the row. The macro's
         // auto-extracted `content: String` is just the snapshot at build time;
@@ -43,6 +43,22 @@ holon_macros::widget_builder! {
         // out, while a `table` cell is already inside a column box that sizes
         // it, and making that one nowrap silently retires its wrapping.
         __props.insert("truncate".to_string(), Value::Boolean(truncate));
+        // Which END the mark goes on. Default "end", because a name reads left
+        // to right and its head identifies it. `#{ellipsis: "start"}` is for a
+        // PATH, whose tail is the half that says which file this is — every
+        // connection installed shares the directory above it.
+        //
+        // Validated here, at the build boundary, rather than at render: a typo
+        // that fell back to the default would put the ellipsis on the wrong end
+        // of a disclosure and nothing would say so.
+        if let Some(ref e) = ellipsis {
+            assert!(
+                e == "start" || e == "end",
+                "text(#{{ellipsis: {e:?}}}) names no end. Use \"start\" (for a path) or \"end\" \
+                 (the default)."
+            );
+            __props.insert("ellipsis".to_string(), Value::String(e.clone()));
+        }
         if let Some(ref s) = style {
             __props.insert("style".to_string(), Value::String(s.clone()));
         }

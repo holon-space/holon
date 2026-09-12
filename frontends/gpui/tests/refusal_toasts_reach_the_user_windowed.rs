@@ -16,6 +16,20 @@
 //!   2026-09-12-the-not-switched-on-toast-truncates-the-command-it-tells-the-user-to-run.
 //!   md`)
 //!
+//! The RE-RUN of 2026-09-12 found the same cut on a different reason. This rung
+//! raised only `IntegrationNotEnabled`, whose payloads already sit on
+//! cap-exempt lines — but every refusal the loader itself produces is
+//! `IntegrationSidecarUnusable`, whose detail was ONE sentence, so the cap fell
+//! inside it and took the remedy. So the rung pinned the reason that had been
+//! fixed and not the reason the refusals use.
+//! (`docs/Testing/bugfunnel/entries/
+//! 2026-09-12-a-refused-connection-file-toast-cuts-its-remedy-at-the-detail-cap.md`)
+//!
+//! Both reasons are raised below, and the unusable one's `why` comes from the
+//! REAL loader over a real bad file — a hand-written string would be as long as
+//! whoever wrote the test decided, which is how the first fix came to be
+//! measured against a message that merely got shorter.
+//!
 //! `share_ui`'s own tests judge the STRINGS; only a real window judges how many
 //! of them reach a screen and whether they fit on it.
 //!
@@ -72,6 +86,64 @@ const CONNECTIONS: &[&str] = &[
     "linkedthing",
     "cleartexthost",
 ];
+
+/// The connection refused for its CONTENT, raised as
+/// `IntegrationSidecarUnusable` — the reason every real load refusal uses.
+const UNUSABLE: &str = "intid";
+
+/// The loader's OWN refusal for a file it will not load, taken by running the
+/// real loader over a real bad file in a temp directory.
+///
+/// Not a hand-written sentence: the point of this fixture is that the reason is
+/// as long as the loader actually makes it. A string written here would be as
+/// long as the test author chose, and the property would be about the author.
+fn real_loader_refusal() -> (String, String) {
+    let dir = tempfile::tempdir().expect("tempdir for the bad connection file");
+    let path = dir.path().join(format!("{UNUSABLE}.yaml"));
+    std::fs::write(
+        &path,
+        format!(
+            "schema_version: {}\n\
+             utcp:\n  utcp_version: \"1.1.3\"\n  manual_version: \"1.0.0\"\n  tools: []\n\
+             holon:\n  tools: {{}}\n\
+             tools: {{}}\n\
+             entities:\n  \
+               intid_items:\n    \
+                 id_column: id\n    \
+                 schema:\n      \
+                   - {{ name: id,    sql_type: INTEGER, primary_key: true }}\n      \
+                   - {{ name: title, sql_type: TEXT }}\n",
+            holon_mcp_client::SIDECAR_SCHEMA_VERSION
+        ),
+    )
+    .expect("write the bad connection file");
+
+    let store = holon_mcp_client::IntegrationConfigStore::load(dir.path()).expect("store loads");
+    store
+        .set(
+            UNUSABLE,
+            holon_mcp_client::integration_state::IntegrationState {
+                enabled: true,
+                configuration: holon_mcp_client::integration_state::Configuration::Unconfigured,
+            },
+        )
+        .expect("switch it on, or the loader ignores it for being off");
+    let loaded = holon_mcp_client::load_integration_configs(
+        dir.path(),
+        &store,
+        &holon_mcp_client::CredentialRoot::new(dir.path()),
+    )
+    .expect("one unusable file cannot break the load");
+    let why = loaded
+        .ignored
+        .iter()
+        .find_map(|i| match &i.reason {
+            holon_mcp_client::IgnoredReason::Unusable { why } => Some(why.clone()),
+            _ => None,
+        })
+        .expect("the loader refuses an INTEGER identity column and says why");
+    (path.display().to_string(), why)
+}
 
 /// The real sandbox path from the dogfood pass. The DISCLOSURE it produces is
 /// 601 characters — well past `share_ui`'s 320-character detail cap — which is
@@ -165,6 +237,19 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
 
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
 
+    // The reason every real load refusal uses, with the loader's own words, and
+    // FIRST: the stack paints as many toasts as fit and counts the rest, so a
+    // case raised last would sit in the overflow and be judged by nothing.
+    let (unusable_path, unusable_why) = real_loader_refusal();
+    bus.emit(ShareDegraded {
+        shared_tree_id: UNUSABLE.into(),
+        reason: ShareDegradedReason::IntegrationSidecarUnusable {
+            provider: UNUSABLE.to_string(),
+            installed_path: unusable_path.clone(),
+            why: unusable_why.clone(),
+        },
+    });
+
     // One refusal per connection, over the session's own bus, so the toasts are
     // built by the production bridge.
     for connection in CONNECTIONS {
@@ -230,12 +315,20 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
     // 1. Nothing is lost. A connection is accounted for when it is named on screen;
     //    the ones that are not must be COUNTED on screen, because a user who cannot
     //    see a refusal cannot go and fix the file it names.
-    let shown: Vec<&str> = CONNECTIONS
+    // Every refusal raised, not only the NotEnabled ones: the count line speaks
+    // for the whole stack, so an accounting set that omitted one would compare
+    // the painted number against the wrong total.
+    let raised: Vec<&str> = CONNECTIONS
+        .iter()
+        .copied()
+        .chain(std::iter::once(UNUSABLE))
+        .collect();
+    let shown: Vec<&str> = raised
         .iter()
         .copied()
         .filter(|c| painted.iter().any(|l| l.contains(c)))
         .collect();
-    let hidden = CONNECTIONS.len() - shown.len();
+    let hidden = raised.len() - shown.len();
     // The count lives in its own tracked element, so reading THAT element's
     // text is not the vacuous "some painted line contains a digit" — these
     // messages are full of digits. A missing element is the real failure: it is
@@ -246,7 +339,7 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
             panic!(
                 "{hidden} of {} refusals are not named on screen and NO count line was painted, \
                  so the user is never told they exist. Shown: {shown:?}. Painted: {painted:#?}",
-                CONNECTIONS.len()
+                raised.len()
             )
         });
         let text = info.displayed_text.as_deref().unwrap_or("");
@@ -277,7 +370,7 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
     //     remedy cut in half reads as complete and does not work) and the file
     //     it writes (D1). Together they are longer than the cap, so a toast
     //     that still put them in the capped sentence would fail here.
-    for connection in &shown {
+    for connection in shown.iter().filter(|c| **c != UNUSABLE) {
         for payload in [remedy_for(connection), state_path_of(connection)] {
             assert!(
                 painted.iter().any(|l| l.contains(&payload)),
@@ -287,11 +380,38 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
         }
     }
 
+    // 2c. The reason every real load refusal uses. `IntegrationSidecarUnusable`
+    //     had its whole disclosure — path, reason and remedy — in ONE sentence,
+    //     so the cap fell inside it and the remedy, which is the clause telling
+    //     the user what to change, was never painted. Both payloads must arrive
+    //     whole, exactly as the NotEnabled ones do.
+    let whole = format!("{UNUSABLE}: {unusable_path} cannot be used — {unusable_why}");
+    assert!(
+        whole.chars().count() > MAX_DETAIL_CHARS,
+        "precondition: the loader's own refusal for a bad file ({} chars with its path) must \
+         exceed the {MAX_DETAIL_CHARS}-char cap, else this case cannot tell a real exemption from \
+         a message that happens to fit. It reads: {whole}",
+        whole.chars().count()
+    );
+    assert!(
+        shown.contains(&UNUSABLE),
+        "precondition: the refused file's toast is not on screen, so the assertion below judges \
+         nothing. It is raised first for exactly that reason. Painted: {painted:#?}"
+    );
+    for payload in [&unusable_path, &unusable_why] {
+        assert!(
+            painted.iter().any(|l| l.contains(payload)),
+            "the toast for the refused file '{UNUSABLE}' does not paint this whole:\n  \
+             {payload}\nThe reason carries the remedy — what to change in the file — and a toast \
+             cannot be selected, so a cut clause is reachable nowhere. Painted: {painted:#?}"
+        );
+    }
+
     // 3. A refusal that IS shown says where to act on it. The toast is a
     //    notification, not a terminal — the enable command lives in the log, which
     //    is readable and copyable; what the toast owes the user is the connection's
     //    name and the surface that fixes it.
-    for connection in &shown {
+    for connection in shown.iter().filter(|c| **c != UNUSABLE) {
         assert!(
             painted
                 .iter()

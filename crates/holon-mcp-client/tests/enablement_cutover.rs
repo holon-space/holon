@@ -446,6 +446,86 @@ fn the_enable_script_refuses_what_the_loader_refuses() {
     );
 }
 
+/// A sidecar whose one entity declares its identity column `INTEGER` — a rule
+/// that lives at sidecar LOAD (`McpSidecar::from_yaml`), one seam past the
+/// roster scan.
+fn integer_id_sidecar() -> String {
+    format!(
+        "schema_version: {}\n\
+         utcp:\n  utcp_version: \"1.1.3\"\n  manual_version: \"1.0.0\"\n  tools: []\n\
+         holon:\n  tools: {{}}\n\
+         tools: {{}}\n\
+         entities:\n  \
+           intid_items:\n    \
+             id_column: id\n    \
+             schema:\n      \
+               - {{ name: id,    sql_type: INTEGER, primary_key: true }}\n      \
+               - {{ name: title, sql_type: TEXT }}\n",
+        holon_mcp_client::SIDECAR_SCHEMA_VERSION
+    )
+}
+
+/// The script and the loader must agree about the WHOLE admission decision, not
+/// only about the roster's half of it.
+///
+/// The symlink case above is settled during `ConnectionRoster::scan`, which is
+/// what the script asks. The identity-column rule is settled one seam later, in
+/// `McpSidecar::from_yaml`, so a roster-only answer says the connection exists
+/// while the booted app refuses it — the user is told it is switched on and the
+/// app says it does not exist
+/// (`docs/Testing/bugfunnel/entries/
+/// 2026-09-12-the-enable-script-switches-on-a-connection-whose-id-column-the-loader-refuses.md`).
+///
+/// Stated as agreement, like its neighbour: the rule belongs to the loader, and
+/// this asserts the script has no opinion of its own about either half.
+#[test]
+fn the_enable_script_refuses_a_connection_whose_id_column_the_loader_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("intid.yaml"), integer_id_sidecar()).unwrap();
+
+    // The loader's verdict first, so the assertion below is about AGREEMENT and
+    // not about a rule this test restates. Switched on by hand, because an
+    // integration that is off is ignored for being off and never reaches the
+    // content check that refuses it.
+    enable(dir.path(), "intid");
+    let loaded = load(dir.path()).expect("one unusable file cannot break the load");
+    assert!(
+        !loaded.configs.iter().any(|(n, _)| n == "intid"),
+        "precondition: the loader does not run a connection whose identity column is INTEGER"
+    );
+    let refusal = loaded
+        .ignored
+        .iter()
+        .find(|i| i.provider == "intid")
+        .map(|i| match &i.reason {
+            IgnoredReason::Unusable { why } => why.clone(),
+            other => panic!("precondition: the loader refuses it as unusable, not as {other:?}"),
+        })
+        .expect("precondition: the loader discloses the file it refused");
+    std::fs::remove_file(dir.path().join("intid.state.toml")).unwrap();
+
+    let out = run_enable(dir.path(), &["intid"]);
+    assert!(
+        !out.status.success(),
+        "the script must refuse a connection the loader will not run — reporting success here \
+         tells the user their connection is on when the app says it does not exist. stdout: {} \
+         stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !dir.path().join("intid.state.toml").exists(),
+        "and it must write no state file for a connection that will never run"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("intid_items") && err.contains("TEXT"),
+        "and the LOADER'S OWN reason must reach the user, naming the entity and the type to \
+         declare — the script inventing its own wording is how the two drifted apart. The loader \
+         says: {refusal}\nThe script said: {err}"
+    );
+}
+
 /// D3, other half. Even hand-written, an orphan state file must not sit there
 /// doing nothing in silence — the loader owns the disclosure.
 #[test]

@@ -164,6 +164,32 @@ piping to a JSON parser, or read stdout only with `2>/dev/null`.
 - Invocation surface once loaded: `execute_operation` with the MCP entity name
   (`OperationDispatcher` → `McpOperationProvider`); discover via `list_operations`.
 
+## 1b-secrets. Credentials WITHOUT the native dialog (added 2026-09-12)
+
+Typing a secret into Settings opens a macOS `display dialog`, which needs System
+Events — an automation permission an agent session does not have. Two dogfood
+passes therefore left every flow that starts from a STORED credential undriven,
+including the "Stored in the keychain" row.
+
+Hand the session its secrets at boot instead:
+
+```bash
+printf 'TODOIST_API_KEY = "SYNTHETIC-not-a-real-token"\n' > "$SANDBOX/secrets.toml"
+export HOLON_SECRETS_BACKEND=memory          # throwaway store, never the login keychain
+export HOLON_SECRETS_MEMORY_SEED=$SANDBOX/secrets.toml
+```
+
+The keys are written the way a reference is (`TODOIST_API_KEY` or
+`todoist.api_key`); both fold onto the account the app reads. The boot banner
+says how many were planted, so a screenshot never passes a fixture off as the
+user's own credential.
+
+Two refusals keep this out of a real install, and both are `Err`, never a quiet
+fall back: the memory backend is admitted only over a config directory under the
+system temp dir (or with `HOLON_SECRETS_BACKEND_ALLOW_ANY_CONFIG_DIR` set to the
+sentence it names), and a seed with the platform keychain selected stops the
+boot. Never point the seed at a real config directory.
+
 ## 1c. Android via adb (proven recipe, 2026-07-18)
 
 Driving the real GPUI app on an Android device over `adb`. The MCP server runs inside the app on

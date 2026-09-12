@@ -207,6 +207,49 @@ impl ConnectionRoster {
         Ok(Self { entries, rejected })
     }
 
+    /// The FULL load-time verdict: [`Self::scan`], minus every introduced
+    /// connection whose file the loader would then refuse for its CONTENT.
+    ///
+    /// A scan settles the rules that read a file's name and its neighbours. The
+    /// rules that read what is inside it — the sidecar format, the identity
+    /// column, the secrets a reference may name — are settled one seam later,
+    /// when the content is loaded, and a caller that treats the scan as the
+    /// whole answer disagrees with the booted app about which connections
+    /// exist. That is what the enable script did: it reported an INTEGER-id
+    /// connection switched on and the app refused it
+    /// (`docs/Testing/bugfunnel/entries/
+    /// 2026-09-12-the-enable-script-switches-on-a-connection-whose-id-column-the-loader-refuses.md`).
+    ///
+    /// Separate from `scan` rather than folded into it: the load path needs the
+    /// refused entry to stay in the roster so its Settings row and its refusal
+    /// toast still name the file. This is for the callers that need the verdict
+    /// WITHOUT booting.
+    pub fn scan_loadable(dir: &Path) -> anyhow::Result<Self> {
+        let mut roster = Self::scan(dir)?;
+        let installed = crate::integration_config::scan_installed_sidecars(dir)?;
+        let mut kept: Vec<ConnectionEntry> = Vec::new();
+        for entry in std::mem::take(&mut roster.entries) {
+            let ConnectionSource::Installed { ref path } = entry.source else {
+                kept.push(entry);
+                continue;
+            };
+            let files = installed
+                .get(entry.name.as_str())
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            match crate::integration_config::content_verdict(&entry, files.first())? {
+                Ok(()) => kept.push(entry),
+                Err(reason) => roster.rejected.push(RejectedFile {
+                    path: path.clone(),
+                    reason,
+                }),
+            }
+        }
+        roster.entries = kept;
+        roster.rejected.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(roster)
+    }
+
     /// A roster of the bundle alone — what a caller with no directory to scan
     /// gets, and what every pre-existing bundled-only path still sees.
     pub fn bundled_only() -> Self {

@@ -764,6 +764,33 @@ enum ResolvedContent {
     },
 }
 
+/// Whether an INTRODUCED connection's file survives the content-load rules,
+/// and why not when it does not.
+///
+/// The roster scan settles the rules that read the file NAME and the directory
+/// (symlink, duplicate stem, nesting namespace). The rules that read the file's
+/// CONTENT — the sidecar format, the identity column, the write policy, the
+/// secrets a reference may name — are settled here, by the same
+/// [`choose_content_for`] the load path runs. A caller that needs the whole
+/// load-time verdict before the app boots (the enable script, through
+/// `holon-connection`) asks this, so there is one implementation of the answer
+/// and not a roster-shaped half of it.
+pub(crate) fn content_verdict(
+    entry: &crate::roster::ConnectionEntry,
+    file: Option<&(PathBuf, String)>,
+) -> anyhow::Result<Result<(), String>> {
+    if let Some((_, content)) = file
+        && entry.is_introduced()
+        && let Err(why) = crate::roster::check_secret_namespace(&entry.name, content)
+    {
+        return Ok(Err(why));
+    }
+    match choose_content_for(entry, file)? {
+        ResolvedContent::Usable { .. } => Ok(Ok(())),
+        ResolvedContent::Unusable { why } => Ok(Err(why)),
+    }
+}
+
 fn choose_content_for(
     entry: &crate::roster::ConnectionEntry,
     file: Option<&(PathBuf, String)>,

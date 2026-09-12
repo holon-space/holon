@@ -135,6 +135,16 @@ pub const BACKEND_UNSAFE_ENV: &str = "HOLON_SECRETS_BACKEND_ALLOW_ANY_CONFIG_DIR
 /// read.
 pub const BACKEND_UNSAFE_ACK: &str = "i-know-secrets-will-not-persist";
 
+/// A file of fixture secrets to pre-load into the in-memory backend, so a
+/// session driving the BUILT app reaches the flows that begin with a secret
+/// already stored.
+///
+/// The alternative was typing one into the native masked dialog, which on macOS
+/// is an AppleScript `display dialog` and needs System Events — an automation
+/// permission an agent session does not have. Two dogfood passes therefore left
+/// the "Stored in the keychain" row unverified.
+pub const BACKEND_SEED_ENV: &str = "HOLON_SECRETS_MEMORY_SEED";
+
 /// The backend a boot must use, and what it must say about it.
 pub struct SelectedBackend {
     pub store: Box<dyn KeychainStore>,
@@ -164,12 +174,84 @@ pub struct SelectedBackend {
 /// silently writing to the login keychain is the outcome this whole seam
 /// exists to prevent.
 pub fn backend_from_env(service: &str, config_dir: &std::path::Path) -> Result<SelectedBackend> {
+    let seed = std::env::var_os(BACKEND_SEED_ENV).map(std::path::PathBuf::from);
     select_backend(
         service,
         config_dir,
         std::env::var(BACKEND_ENV).ok().as_deref(),
         std::env::var(BACKEND_UNSAFE_ENV).ok().as_deref(),
+        seed.as_deref(),
     )
+}
+
+/// The (account, secret) pairs a seed file names, in file order.
+///
+/// Each key is filed under [`secret_account`], because the file is written the
+/// way a person writes a reference — `TODOIST_API_KEY` or `todoist.api_key` —
+/// and both of those name ONE entry to every reader in the app. A seed that
+/// landed under a third spelling would read as stored and resolve to nothing.
+///
+/// Every defect in the file is an `Err` naming the key, never a skipped entry:
+/// a fixture that planted three of its four secrets and said nothing is the
+/// failure this whole seam exists to avoid. The error text never carries a
+/// value.
+///
+/// Public and separate from the store write so a fixture that owns its own
+/// store — a windowed rung, which is handed one before the window opens —
+/// plants the SAME accounts a boot would, rather than restating the folding
+/// rule.
+pub fn parse_seed_file(path: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        anyhow::anyhow!(
+            "{BACKEND_SEED_ENV} names '{}', which cannot be read: {e}",
+            path.display()
+        )
+    })?;
+    let table: toml::Table = text.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "{BACKEND_SEED_ENV} file '{}' is not a TOML table of `account = \"secret\"` lines: {e}",
+            path.display()
+        )
+    })?;
+    let mut claimed: std::collections::HashMap<String, &String> = std::collections::HashMap::new();
+    let mut pairs = Vec::with_capacity(table.len());
+    for (key, value) in &table {
+        let secret = value.as_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{BACKEND_SEED_ENV} file '{}' gives '{key}' a {} — a secret is a string, and \
+                 guessing a spelling for one would plant a value nothing can read",
+                path.display(),
+                value.type_str()
+            )
+        })?;
+        let account = secret_account(key);
+        // Two spellings of ONE account. The folding is the point of this file —
+        // `TODOIST_API_KEY` and `todoist.api_key` are one entry to every reader
+        // in the app — so a file naming both plants one value and discards the
+        // other, chosen by map order, while the banner counts two. Refused for
+        // the same reason a self-colliding connection is: there is no rule that
+        // picks, and a session reading a field as configured against a
+        // credential it did not choose is the silent tier.
+        if let Some(first) = claimed.insert(account.clone(), key) {
+            anyhow::bail!(
+                "{BACKEND_SEED_ENV} file '{}' names one account twice: '{first}' and '{key}' both \
+                 fold onto '{account}', so one of the two values would be planted and the other \
+                 silently dropped. Delete whichever spelling you did not mean.",
+                path.display()
+            );
+        }
+        pairs.push((account, secret.as_bytes().to_vec()));
+    }
+    Ok(pairs)
+}
+
+/// Pre-load `store` from a seed file, returning how many entries were planted.
+fn seed_store(store: &dyn KeychainStore, path: &std::path::Path) -> Result<usize> {
+    let pairs = parse_seed_file(path)?;
+    for (account, secret) in &pairs {
+        store.store(account, secret)?;
+    }
+    Ok(pairs.len())
 }
 
 /// The directories a throwaway session may keep its config in, resolved.
@@ -239,12 +321,24 @@ pub fn select_backend(
     config_dir: &std::path::Path,
     requested: Option<&str>,
     acknowledgement: Option<&str>,
+    seed: Option<&std::path::Path>,
 ) -> Result<SelectedBackend> {
     match requested.unwrap_or_default().trim() {
-        "" | "platform" => Ok(SelectedBackend {
-            store: platform_keychain(service),
-            disclosure: None,
-        }),
+        "" | "platform" => {
+            // The one path by which a fixture value could reach a real
+            // keychain, closed here rather than by convention: a seed is
+            // meaningful only for a store that is thrown away.
+            anyhow::ensure!(
+                seed.is_none(),
+                "{BACKEND_SEED_ENV} is set, but this session uses the system keychain — planting \
+                 fixture secrets there would leave them in the login keychain after it exits. Set \
+                 {BACKEND_ENV}=memory to seed a throwaway store, or unset {BACKEND_SEED_ENV}."
+            );
+            Ok(SelectedBackend {
+                store: platform_keychain(service),
+                disclosure: None,
+            })
+        }
         "memory" => {
             let acknowledged = acknowledgement == Some(BACKEND_UNSAFE_ACK);
             let throwaway = is_throwaway(config_dir);
@@ -261,13 +355,26 @@ pub fn select_backend(
                     .map(|r| r.display().to_string())
                     .collect::<Vec<_>>()
             );
+            let store: Box<dyn KeychainStore> = Box::new(InMemoryKeychainStore::new());
+            let mut disclosure = format!(
+                "Secrets are held in memory for this session ({BACKEND_ENV}=memory). Nothing you \
+                 type into a credential field is saved, and every stored secret is gone when \
+                 Holon exits. Unset {BACKEND_ENV} to use the system keychain."
+            );
+            // Said on the same banner, because a credential that is already
+            // there when the session opens is otherwise indistinguishable from
+            // one the user stored — and these are somebody's fixtures.
+            if let Some(path) = seed {
+                let planted = seed_store(store.as_ref(), path)?;
+                disclosure.push_str(&format!(
+                    " {planted} seeded fixture secrets were pre-loaded from '{}' \
+                     ({BACKEND_SEED_ENV}); they are fixtures, not your credentials.",
+                    path.display()
+                ));
+            }
             Ok(SelectedBackend {
-                store: Box::new(InMemoryKeychainStore::new()),
-                disclosure: Some(format!(
-                    "Secrets are held in memory for this session ({BACKEND_ENV}=memory). Nothing \
-                     you type into a credential field is saved, and every stored secret is gone \
-                     when Holon exits. Unset {BACKEND_ENV} to use the system keychain."
-                )),
+                store,
+                disclosure: Some(disclosure),
             })
         }
         other => anyhow::bail!(
@@ -344,7 +451,7 @@ mod tests {
     #[test]
     fn a_temp_config_dir_may_hold_secrets_in_memory_and_must_say_so() {
         let dir = std::env::temp_dir().join("holon-secrets-selection-case");
-        let selected = select_backend(INTEGRATION_SECRET_SERVICE, &dir, Some("memory"), None)
+        let selected = select_backend(INTEGRATION_SECRET_SERVICE, &dir, Some("memory"), None, None)
             .expect("a throwaway config dir admits the in-memory backend");
 
         selected.store.store("todoist_api_key", b"fixture").unwrap();
@@ -388,7 +495,8 @@ mod tests {
             ),
         ];
         for (what, dir) in forms {
-            let selected = select_backend(INTEGRATION_SECRET_SERVICE, &dir, Some("memory"), None);
+            let selected =
+                select_backend(INTEGRATION_SECRET_SERVICE, &dir, Some("memory"), None, None);
             assert!(
                 selected.is_ok(),
                 "{what} names a throwaway directory ({}) and must be admitted; got {:?}",
@@ -409,7 +517,7 @@ mod tests {
             "precondition: this rung is about a path with no directory behind it"
         );
         assert!(
-            select_backend(INTEGRATION_SECRET_SERVICE, &dir, Some("memory"), None).is_ok(),
+            select_backend(INTEGRATION_SECRET_SERVICE, &dir, Some("memory"), None, None).is_ok(),
             "a config dir the boot is about to create must be judged by where it IS, not by \
              whether it exists yet"
         );
@@ -425,6 +533,7 @@ mod tests {
                 INTEGRATION_SECRET_SERVICE,
                 std::path::Path::new("/tmpfoo/holon"),
                 Some("memory"),
+                None,
                 None,
             )
             .map(|_| ())
@@ -442,6 +551,7 @@ mod tests {
             INTEGRATION_SECRET_SERVICE,
             std::path::Path::new("/Users/someone/.config/holon"),
             Some("memory"),
+            None,
             None,
         )
         .map(|_| ())
@@ -461,6 +571,7 @@ mod tests {
             std::path::Path::new("/Users/someone/.config/holon"),
             Some("memory"),
             Some(BACKEND_UNSAFE_ACK),
+            None,
         )
         .expect("the acknowledgement is the documented escape");
         assert!(selected.disclosure.is_some(), "and it still discloses");
@@ -477,9 +588,151 @@ mod tests {
                 std::path::Path::new("/Users/someone/.config/holon"),
                 Some("memory"),
                 Some("1"),
+                None,
             )
             .is_err()
         );
+    }
+
+    /// A seed file names accounts the way a person writes a reference; both
+    /// spellings must land on the entry the app reads back. Filing under a
+    /// third spelling would make the row say "Stored in the keychain" about a
+    /// value the `${VAR}` resolver cannot find.
+    #[test]
+    fn a_seed_file_lands_under_the_accounts_the_app_reads() {
+        let dir = std::env::temp_dir().join("holon-secrets-seed-case");
+        std::fs::create_dir_all(&dir).unwrap();
+        let seed = dir.join("two.toml");
+        std::fs::write(
+            &seed,
+            "TODOIST_API_KEY = \"fixture-a\"\n\"shopping.list_url\" = \"fixture-b\"\n",
+        )
+        .unwrap();
+
+        let selected = select_backend(
+            INTEGRATION_SECRET_SERVICE,
+            &dir,
+            Some("memory"),
+            None,
+            Some(&seed),
+        )
+        .expect("a throwaway session may be handed its fixture secrets");
+
+        assert_eq!(
+            selected
+                .store
+                .load(&secret_account("todoist.api_key"))
+                .unwrap()
+                .unwrap(),
+            b"fixture-a",
+            "`TODOIST_API_KEY` and `todoist.api_key` are one account everywhere else in the app"
+        );
+        assert_eq!(
+            selected
+                .store
+                .load(&secret_account("SHOPPING_LIST_URL"))
+                .unwrap()
+                .unwrap(),
+            b"fixture-b"
+        );
+        let disclosure = selected.disclosure.expect("still disclosed");
+        assert!(
+            disclosure.contains("2 seeded fixture secrets"),
+            "the banner says how many were planted; got {disclosure:?}"
+        );
+        assert!(
+            !disclosure.contains("fixture-a"),
+            "and never quotes one of them"
+        );
+    }
+
+    /// Two spellings of ONE account is a REFUSAL, for the same reason a
+    /// connection that self-collides is: the folding makes them one entry, so
+    /// the second write silently overwrites the first and the banner counts two
+    /// seeded secrets for one stored value. Whichever value survived did so by
+    /// map order, which is the silent choice this crate refuses to make.
+    #[test]
+    fn two_seed_keys_that_fold_to_one_account_are_refused() {
+        let dir = std::env::temp_dir().join("holon-secrets-seed-collision-case");
+        std::fs::create_dir_all(&dir).unwrap();
+        let seed = dir.join("collide.toml");
+        std::fs::write(
+            &seed,
+            "TODOIST_API_KEY = \"fixture-a\"\n\"todoist.api_key\" = \"fixture-b\"\n",
+        )
+        .unwrap();
+
+        let err = parse_seed_file(&seed)
+            .map(|_| ())
+            .expect_err("one account named twice must stop the session, not be resolved by order");
+        let msg = format!("{err:#}");
+        for expected in ["TODOIST_API_KEY", "todoist.api_key", "todoist_api_key"] {
+            assert!(
+                msg.contains(expected),
+                "the refusal must name BOTH spellings and the account they fold onto, because the \
+                 fix is to delete one of them; `{expected}` is missing from: {msg}"
+            );
+        }
+        assert!(
+            !msg.contains("fixture-a") && !msg.contains("fixture-b"),
+            "and must not quote either value: {msg}"
+        );
+    }
+
+    /// A value that is not a string is a REFUSAL, not a skipped line: a fixture
+    /// that planted three of its four secrets and said nothing sends the
+    /// session hunting a bug in the app.
+    #[test]
+    fn a_seed_entry_that_is_not_a_string_is_refused_by_name() {
+        let dir = std::env::temp_dir().join("holon-secrets-seed-bad-case");
+        std::fs::create_dir_all(&dir).unwrap();
+        let seed = dir.join("bad.toml");
+        std::fs::write(&seed, "TODOIST_API_KEY = 12345\n").unwrap();
+
+        let err = select_backend(
+            INTEGRATION_SECRET_SERVICE,
+            &dir,
+            Some("memory"),
+            None,
+            Some(&seed),
+        )
+        .map(|_| ())
+        .expect_err("a non-string secret must stop the session, not be dropped");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("TODOIST_API_KEY"),
+            "and must name the key so the file can be fixed; got {msg}"
+        );
+    }
+
+    /// The rule that keeps a fixture value out of the login keychain. Stated at
+    /// the level of the ANSWER rather than of any caller, because there is no
+    /// admissible way for a platform store to be handed a seed.
+    #[test]
+    fn a_seed_is_refused_outside_the_in_memory_backend() {
+        let dir = std::env::temp_dir().join("holon-secrets-seed-platform-case");
+        std::fs::create_dir_all(&dir).unwrap();
+        let seed = dir.join("one.toml");
+        std::fs::write(&seed, "TODOIST_API_KEY = \"fixture-a\"\n").unwrap();
+
+        for requested in [None, Some("platform")] {
+            let err = select_backend(
+                INTEGRATION_SECRET_SERVICE,
+                &dir,
+                requested,
+                None,
+                Some(&seed),
+            )
+            .map(|_| ())
+            .expect_err(
+                "seeding the system keychain would leave fixture values in it after the session \
+                 exits, so it must refuse rather than plant them",
+            );
+            assert!(
+                format!("{err}").contains(BACKEND_ENV),
+                "and must name the variable that makes the seed admissible"
+            );
+        }
     }
 
     #[test]
@@ -488,6 +741,7 @@ mod tests {
             INTEGRATION_SECRET_SERVICE,
             std::path::Path::new("/tmp"),
             Some("keyring"),
+            None,
             None,
         )
         .map(|_| ())

@@ -94,13 +94,26 @@ pub const SIDEBAR_ITEM_TEMPLATE: &str = concat!(
 /// bundled one. `if_col` on the empty origin keeps a bundled row exactly as it
 /// was: six rows each saying "shipped with Holon" would make the words on the
 /// seventh read as decoration instead of as the warning they are.
+///
+/// Both disclosure lines TRUNCATE, because the Integration column resolves to
+/// ~108px and neither value fits: a path is one word with no break opportunity,
+/// so a line that does not yield is painted straight across Config, Status and
+/// Enabled and all four texts become unreadable
+/// (`settings_introduced_row_fits_windowed`).
+///
+/// The origin truncates from the START. Every installed connection shares the
+/// integrations directory, so a path cut at the tail distinguishes nothing,
+/// while `…/fixturebox.yaml` says which file this is. The full path stays whole
+/// in the refusal toast and in the log, which is where a reader goes to act on
+/// it; the row's job is to say THAT a file introduced this connection, and
+/// which one.
 pub const SETTINGS_ITEM_TEMPLATE: &str = concat!(
     "table(#{columns: [",
     "#{header: \"Integration\", cell: if_col(\"origin\", \"\", ",
     "text(col(\"provider_name\")), ",
     "column(#{gap: 2}, text(col(\"provider_name\")), ",
-    "row(#{gap: 4}, text(\"from\", #{muted: true, size: 11.0}), text(col(\"origin\"), #{muted: true, size: 11.0})), ",
-    "row(#{gap: 4}, text(\"calls\", #{muted: true, size: 11.0}), text(col(\"hosts\"), #{muted: true, size: 11.0})))), ",
+    "row(#{gap: 4}, text(\"from\", #{muted: true, size: 11.0}), text(col(\"origin\"), #{muted: true, size: 11.0, truncate: true, ellipsis: \"start\"})), ",
+    "row(#{gap: 4}, text(\"calls\", #{muted: true, size: 11.0}), text(col(\"hosts\"), #{muted: true, size: 11.0, truncate: true})))), ",
     "width: flex(6)}, ",
     "#{header: \"Config\", cell: text(col(\"config_status\"), #{muted: true}), width: flex(5)}, ",
     "#{header: \"Status\", cell: text(col(\"status\"), #{muted: true}), width: flex(5)}, ",

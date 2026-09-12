@@ -196,7 +196,7 @@ impl InputBoxView {
                     crate::share_ui::DegradedToast {
                         kind: crate::share_ui::DegradedKind::CommandFailed,
                         shared_tree_id: "input_box".into(),
-                        detail,
+                        detail: detail.into(),
                         condition: None,
                         format: None,
                     },

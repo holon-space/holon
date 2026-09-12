@@ -576,7 +576,7 @@ fn failed_submit_toasts_the_provider_error_verbatim(cx: &mut TestAppContext) {
         "a rejected compose submit is a failed command"
     );
     assert_eq!(
-        got[0].detail, FAILURE_TEXT,
+        got[0].detail.headline, FAILURE_TEXT,
         "the provider's error text must reach the toast verbatim"
     );
 }

@@ -16,6 +16,35 @@ use holon_frontend::ReactiveViewModel;
 
 use super::prelude::*;
 
+/// Which end of a label the ellipsis eats when it does not fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TruncateFrom {
+    /// The ordinary case: a name reads left to right, so the head identifies
+    /// it.
+    End,
+    /// A PATH reads the other way. Every connection installed shares the
+    /// directory, and the file name is the half that says which one this is, so
+    /// a path cut at the tail discloses nothing.
+    Start,
+}
+
+/// Whether this label yields, and which end its ellipsis eats.
+///
+/// The two props are separate because they answer different questions:
+/// `truncate` is the layout decision (may this label shrink below its content
+/// width?), `ellipsis` is the reading decision. The spelling of `ellipsis` is
+/// validated at the DSL build boundary (`shadow_builders/text.rs`), so an
+/// unknown one never reaches here.
+fn truncation(node: &ReactiveViewModel) -> Option<TruncateFrom> {
+    if !node.prop_bool("truncate").unwrap_or(false) {
+        return None;
+    }
+    match node.prop_str("ellipsis").as_deref() {
+        Some("start") => Some(TruncateFrom::Start),
+        _ => Some(TruncateFrom::End),
+    }
+}
+
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let content = node.prop_str("content").unwrap_or_default();
     let mut bold = node.prop_bool("bold").unwrap_or(false);
@@ -69,21 +98,25 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     // and sizes to its content as before.
     if let Some(box_width) = node.prop_f64("width") {
         el = el.w(px(box_width as f32)).flex_shrink_0().text_center();
-    } else if node.prop_bool("truncate").unwrap_or(false) {
+    } else if let Some(from) = truncation(node) {
         // A label that DECLARED it yields. A flex item's automatic minimum is
         // its min-content width, so without this a long label takes the room it
         // wants and pushes whatever follows it — in the sidebar's integration
         // row, the status glyph — past the row's edge.
         //
-        // `truncate()` (clip + nowrap + …) rather than a bare clip: a name cut
-        // off mid-glyph with no mark reads as the whole name, so the ellipsis
-        // is what makes the shortening visible instead of silent.
+        // Clip plus an ellipsis rather than a bare clip: a name cut off
+        // mid-glyph with no mark reads as the whole name, so the ellipsis is
+        // what makes the shortening visible instead of silent.
         //
         // Opt-in, NOT inferred from the bound column: every `table` cell is a
         // column-bound label too, and applying this there both retired their
         // wrapping and changed which partially-scrolled rows report painted
         // geometry (`settings_integrations_row_op_alignment_windowed`).
-        el = el.min_w(px(0.0)).truncate();
+        el = el.min_w(px(0.0)).overflow_hidden().whitespace_nowrap();
+        el = match from {
+            TruncateFrom::End => el.text_ellipsis(),
+            TruncateFrom::Start => el.text_ellipsis_start(),
+        };
     }
     if bold {
         el = el.font_weight(FontWeight::SEMIBOLD);

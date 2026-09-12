@@ -223,7 +223,7 @@ impl EditorView {
                                     crate::share_ui::DegradedToast {
                                         kind: crate::share_ui::DegradedKind::Info,
                                         shared_tree_id: bare_for_copy.clone(),
-                                        detail: format!("Copied block ID {bare_for_copy}"),
+                                        detail: format!("Copied block ID {bare_for_copy}").into(),
                                         condition: None,
                                         format: None,
                                     },
@@ -1695,7 +1695,7 @@ impl Render for EditorView {
                                         crate::share_ui::DegradedToast {
                                             kind: crate::share_ui::DegradedKind::CommandFailed,
                                             shared_tree_id: "command".into(),
-                                            detail,
+                                            detail: detail.into(),
                                             condition: None,
                                             format: None,
                                         },
@@ -2103,7 +2103,7 @@ fn apply_popup_action(
                             crate::share_ui::DegradedToast {
                                 kind: crate::share_ui::DegradedKind::CommandFailed,
                                 shared_tree_id: "command".into(),
-                                detail,
+                                detail: detail.into(),
                                 condition: None,
                                 format: None,
                             },
@@ -2152,7 +2152,7 @@ fn apply_popup_action(
                 crate::share_ui::DegradedToast {
                     kind: crate::share_ui::DegradedKind::CommandFailed,
                     shared_tree_id: "command".into(),
-                    detail: message,
+                    detail: message.into(),
                     condition: None,
                     format: None,
                 },

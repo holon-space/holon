@@ -6038,6 +6038,7 @@ dependencies = [
  "anyhow",
  "keyring",
  "security-framework",
+ "toml 0.8.23",
  "workspace-hack 0.1.0",
 ]
 
