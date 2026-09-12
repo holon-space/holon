@@ -233,7 +233,7 @@ fn root_layout_mobile_viewport_has_bottom_dock() {
             });
         assert_eq!(layout.name(), "list", "tier {i} layout");
         assert!(
-            layout.horizontal,
+            layout.flow.is_horizontal(),
             "the action bar lays its ops along one line; a non-horizontal tier stacks them \
              full-width and the bar swallows the screen"
         );

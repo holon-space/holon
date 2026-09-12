@@ -86,6 +86,12 @@ pub const SIDEBAR_ITEM_TEMPLATE: &str = concat!(
 /// `settings_integrations_table_fits_windowed` measures what each column
 /// actually needs and fails if a weight stops covering it.
 ///
+/// Setup is the one column the budget cannot settle on its own: it holds one
+/// button per operation the row's entity advertises, so its content grows with
+/// the catalog and shrinks with the window, and no weight covers every count.
+/// Its op cluster therefore WRAPS, and the weight only decides how many buttons
+/// share a line (`settings_setup_column_wraps_windowed`).
+///
 /// The Integration cell carries the DISCLOSURE for a connection a user file
 /// introduced: the file it came from, and every host its manual calls. Both sit
 /// under the name rather than in columns of their own, because they qualify
@@ -119,7 +125,7 @@ pub const SETTINGS_ITEM_TEMPLATE: &str = concat!(
     "#{header: \"Status\", cell: text(col(\"status\"), #{muted: true}), width: flex(5)}, ",
     "#{header: \"Enabled\", cell: state_toggle(#{field: \"enabled\", binding: \"bool\", appearance: \"switch\"}), width: fixed(72)}, ",
     "#{header: \"Setup\", cell: row(#{gap: 6, align: \"center\"}, ",
-    "list(#{collection: ops_of(col(\"id\")), item_template: op_button(col(\"name\")), horizontal: true, gap: 8}), ",
+    "list(#{collection: ops_of(col(\"id\")), item_template: op_button(col(\"name\")), horizontal: true, gap: 8, wrap: \"wrap\"}), ",
     "text(col(\"configure_progress\"), #{muted: true})), width: flex(11)}",
     "]})"
 );

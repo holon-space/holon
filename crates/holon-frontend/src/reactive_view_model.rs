@@ -92,11 +92,82 @@ impl CollectionData {
 pub struct CollectionVariant {
     pub spec: crate::collection_layout::LayoutSpec,
     pub gap: f32,
-    /// Lay the items out along a row instead of stacking them. A `Flat`
-    /// collection whose call site passes `horizontal: true` (e.g. an
-    /// integration row's op buttons) renders its `item_template` instances
-    /// side by side on one baseline; the default is the stacked column.
-    pub horizontal: bool,
+    /// How the items are laid along the container's main axis.
+    pub flow: ItemFlow,
+}
+
+/// How a collection lays its items out.
+///
+/// One value rather than a `horizontal` flag beside a `wrap` flag: wrapping is
+/// only a question for items placed side by side — a stacked collection already
+/// gives every item its own line — so the pair `(horizontal: false, wrap:
+/// true)` is a state that must not be representable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ItemFlow {
+    /// Stacked full-width, one item per line. A page tree, an outline, a feed.
+    #[default]
+    Stacked,
+    /// Side by side on one baseline, whatever the container's width. An
+    /// integration row's operation buttons read as belonging to their row
+    /// because they share it.
+    Row,
+    /// Side by side, continuing on a new line when the line is full. What a
+    /// container whose item count is not fixed needs: the Settings Setup
+    /// column holds one button per operation the entity advertises, and no
+    /// column width covers every count.
+    WrappingRow,
+}
+
+impl ItemFlow {
+    /// The flow a call site named, from the raw `horizontal:` and `wrap:`
+    /// values — `None` for a keyword the call site did not name.
+    ///
+    /// The ONE place either reader turns those two keywords into a flow, so the
+    /// shadow builder and [`collection_variant_of`] cannot disagree about what
+    /// a source means.
+    ///
+    /// Every value that is not understood is refused here, at the DSL boundary
+    /// — including one of the wrong TYPE. Downstream cannot tell a dropped
+    /// keyword from an absent one, so quietly taking the default would lay the
+    /// collection out the other way and say nothing: the `text(#{style: …})`
+    /// shape, which rendered at body size for a release.
+    pub fn parse(horizontal: Option<&Value>, wrap: Option<&Value>) -> Self {
+        let horizontal = match horizontal {
+            None => false,
+            Some(Value::Boolean(b)) => *b,
+            Some(other) => panic!(
+                "list(#{{horizontal: …}}) takes a boolean, and this call site gave {other:?}. Use \
+                 `true` or `false` (the default)."
+            ),
+        };
+        let Some(wrap) = wrap else {
+            return if horizontal { Self::Row } else { Self::Stacked };
+        };
+        let Some(keyword) = wrap.as_string() else {
+            panic!(
+                "list(#{{wrap: …}}) takes a keyword, and this call site gave {wrap:?}. Use \
+                 \"wrap\" or \"nowrap\" (the default)."
+            )
+        };
+        assert!(
+            horizontal,
+            "list(#{{wrap: {keyword:?}}}) without `horizontal: true` names nothing: a stacked \
+             collection already gives every item its own line."
+        );
+        match keyword {
+            "wrap" => Self::WrappingRow,
+            "nowrap" => Self::Row,
+            other => panic!(
+                "list(#{{wrap: {other:?}}}) names no wrapping mode. Use \"wrap\" or \"nowrap\" \
+                 (the default)."
+            ),
+        }
+    }
+
+    /// Are the items placed side by side rather than stacked?
+    pub fn is_horizontal(self) -> bool {
+        matches!(self, Self::Row | Self::WrappingRow)
+    }
 }
 
 impl CollectionVariant {
@@ -104,7 +175,7 @@ impl CollectionVariant {
         Self {
             spec,
             gap,
-            horizontal: false,
+            flow: ItemFlow::Stacked,
         }
     }
 
@@ -116,7 +187,7 @@ impl CollectionVariant {
         crate::collection_layout::lookup_layout(name).map(|spec| Self {
             spec,
             gap,
-            horizontal: false,
+            flow: ItemFlow::Stacked,
         })
     }
 
@@ -160,6 +231,39 @@ impl CollectionVariant {
     }
 }
 
+/// The literal a call site gave for `name`, or `None` when it named none.
+///
+/// A `name:` whose value is not a literal — a `col(...)`, a nested call — is
+/// refused: a layout keyword is authored once, not read per row, and the
+/// alternative is to drop it and lay the collection out the other way with
+/// nothing said. [`ItemFlow::parse`] judges the literal itself.
+fn literal_arg<'a>(args: &'a [holon_api::render_types::Arg], name: &str) -> Option<&'a Value> {
+    let arg = args.iter().find(|a| a.name.as_deref() == Some(name))?;
+    match &arg.value {
+        RenderExpr::Literal { value } => Some(value),
+        other => panic!(
+            "`{name}:` takes a literal, and this call site gave {other:?}. A layout keyword is \
+             authored, not read from a row."
+        ),
+    }
+}
+
+/// The `gap:` a call site named, in pixels, or `default` when it named none.
+///
+/// The ONE place either reader turns `gap:` into a number, for the reason
+/// [`ItemFlow::parse`] gives: a value of the wrong type used to be dropped, and
+/// the layout's declared default took its place with nothing said.
+pub fn parse_gap(gap: Option<&Value>, default: f32) -> f32 {
+    match gap {
+        None => default,
+        Some(Value::Float(f)) => *f as f32,
+        Some(Value::Integer(i)) => *i as f32,
+        Some(other) => {
+            panic!("a collection's `gap:` takes a number, and this call site gave {other:?}.")
+        }
+    }
+}
+
 /// Determine the `CollectionVariant` from a render expression's function name.
 ///
 /// Returns `None` for non-collection expressions (non-FunctionCall or
@@ -172,38 +276,14 @@ pub fn collection_variant_of(expr: &RenderExpr) -> Option<CollectionVariant> {
 
     let spec = crate::collection_layout::lookup_layout(name)?;
 
-    // Extract `gap:` named arg if the call site overrides it; fall back to
-    // the layout's declared default. Layouts that don't care about gap
-    // (tree, table, …) just see 0.0.
-    let gap = args
-        .iter()
-        .find(|a| a.name.as_deref() == Some("gap"))
-        .and_then(|a| match &a.value {
-            RenderExpr::Literal {
-                value: Value::Float(f),
-            } => Some(*f as f32),
-            RenderExpr::Literal {
-                value: Value::Integer(i),
-            } => Some(*i as f32),
-            _ => None,
-        })
-        .unwrap_or(spec.default_gap);
-
-    let horizontal = args
-        .iter()
-        .find(|a| a.name.as_deref() == Some("horizontal"))
-        .and_then(|a| match &a.value {
-            RenderExpr::Literal {
-                value: Value::Boolean(b),
-            } => Some(*b),
-            _ => None,
-        })
-        .unwrap_or(false);
+    // `gap:` when the call site overrides it, else the layout's declared
+    // default. Layouts that don't care about gap (tree, table, …) see 0.0.
+    let gap = parse_gap(literal_arg(args, "gap"), spec.default_gap);
 
     Some(CollectionVariant {
         spec,
         gap,
-        horizontal,
+        flow: ItemFlow::parse(literal_arg(args, "horizontal"), literal_arg(args, "wrap")),
     })
 }
 
@@ -1808,7 +1888,7 @@ impl ReactiveViewModel {
         item_template: RenderExpr,
         data_source: std::sync::Arc<dyn holon_api::ReactiveRowProvider>,
         gap: f32,
-        horizontal: bool,
+        flow: ItemFlow,
         sort_key: Option<String>,
         parent_space: Option<crate::render_context::AvailableSpace>,
         child_space_fn: Option<std::sync::Arc<crate::reactive_view::ChildSpaceFn>>,
@@ -1820,7 +1900,7 @@ impl ReactiveViewModel {
         if widget == "query_result" {
             return Self::from_widget("query_result", props);
         }
-        let layout = Self::widget_layout(widget, gap, horizontal);
+        let layout = Self::widget_layout(widget, gap, flow);
         let view = crate::reactive_view::ReactiveView::new_collection(
             crate::reactive_view::CollectionConfig {
                 layout,
@@ -1846,7 +1926,7 @@ impl ReactiveViewModel {
         widget: &str,
         items: Vec<ReactiveViewModel>,
         gap: f32,
-        horizontal: bool,
+        flow: ItemFlow,
         props: HashMap<String, Value>,
     ) -> Self {
         if widget == "query_result" {
@@ -1855,7 +1935,7 @@ impl ReactiveViewModel {
                 ..Self::from_widget("query_result", props)
             };
         }
-        let layout = Self::widget_layout(widget, gap, horizontal);
+        let layout = Self::widget_layout(widget, gap, flow);
         let view = crate::reactive_view::ReactiveView::new_static_with_layout(items, layout);
         Self {
             collection: Some(std::sync::Arc::new(view)),
@@ -1863,7 +1943,7 @@ impl ReactiveViewModel {
         }
     }
 
-    fn widget_layout(widget: &str, gap: f32, horizontal: bool) -> CollectionVariant {
+    fn widget_layout(widget: &str, gap: f32, flow: ItemFlow) -> CollectionVariant {
         // Single source of truth: the `collection_layout` registry. Falls
         // back to a `list`-shaped variant for unknown widgets so the
         // streaming runtime stays well-typed even if a frontend forgets
@@ -1872,14 +1952,20 @@ impl ReactiveViewModel {
             CollectionVariant::from_name("list", gap)
                 .expect("`list` layout is registered as a builtin")
         });
-        variant.horizontal = horizontal;
+        variant.flow = flow;
         variant
     }
 
     /// Create a layout node from a widget name and children.
     pub fn layout(widget: &str, children: Vec<ReactiveViewModel>) -> Self {
         if widget == "columns" {
-            return Self::static_collection("columns", children, 16.0, false, Default::default());
+            return Self::static_collection(
+                "columns",
+                children,
+                16.0,
+                ItemFlow::Stacked,
+                Default::default(),
+            );
         }
         let mut props = HashMap::new();
         match widget {

@@ -2,6 +2,7 @@ pub(crate) use std::sync::Arc;
 
 pub(crate) use holon_api::Value;
 
+pub(crate) use crate::reactive_view_model::ItemFlow;
 pub(crate) use crate::reactive_view_model::ReactiveViewModel as ViewModel;
 pub(crate) use crate::render_interpreter::BuilderArgs;
 

@@ -1,6 +1,7 @@
 use holon_frontend::LayoutHint;
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::reactive_view::ReactiveView;
+use holon_frontend::reactive_view_model::ItemFlow;
 
 use super::prelude::*;
 
@@ -108,14 +109,22 @@ pub(crate) fn eager_collection_div(view: &ReactiveView, ctx: &GpuiRenderContext)
     // row's line. The default stacks them full-width — what a page tree or
     // outline wants.
     let layout = view.layout();
-    let mut list_div = if layout.as_ref().is_some_and(|l| l.horizontal) {
-        div()
+    let gap = px(layout.as_ref().map(|l| l.gap).unwrap_or(0.0));
+    let mut list_div = match layout.as_ref().map(|l| l.flow).unwrap_or_default() {
+        ItemFlow::Stacked => div().flex().flex_col().w_full(),
+        ItemFlow::Row => div().flex().flex_row().items_center().gap(gap),
+        // A wrapping row must also be ALLOWED to be narrower than its content:
+        // a flex item's automatic minimum is its min-content width, which for a
+        // nowrap row is the whole line, so a container that only declared
+        // `flex_wrap` would still claim the full width and never reach a second
+        // line. `min_w(0)` is what lets the line break happen.
+        ItemFlow::WrappingRow => div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
-            .gap(px(layout.as_ref().map(|l| l.gap).unwrap_or(0.0)))
-    } else {
-        div().flex().flex_col().w_full()
+            .gap(gap)
+            .min_w(px(0.0)),
     };
     let mut skip_below: Option<usize> = None;
     for item in view.children_snapshot() {
