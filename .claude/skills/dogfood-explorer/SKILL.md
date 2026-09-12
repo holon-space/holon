@@ -133,7 +133,8 @@ piping to a JSON parser, or read stdout only with `2>/dev/null`.
 - **Builds** run as BLOCKING/foreground-style commands with long timeouts (or background with
   completion notification); never `cargo update`. `tee` build and app logs under a per-session
   `/tmp/dogfood-<date>-logs/` dir.
-- **Latency SLO:** p95 interaction→projection-visible > 200ms is itself a bug — triage it.
+- **Latency SLO:** p95 interaction→projection-visible > 200ms is itself a bug — triage it. The
+  threshold judges `origin="ui"` samples; facade samples are reported separately (see §2 step 7).
 - **Vault root is single and launch-time-fixed** (`HOLON_VAULT_ROOT`; `VaultConfig.root` is a
   single `Option<PathBuf>`, `crates/holon-frontend/src/config.rs`). Testing another vault
   (e.g. an Obsidian or LogSeq copy) = a SEPARATE launch on another port with its own sandbox
@@ -291,6 +292,40 @@ deepening it.
    present and the `dispatch` p95 elsewhere, and note which stages were absent. (`action_total`
    is harness-only.) At tiny fresh-boot scale expect single-digit ms (e.g. set_field e2e p95 ~8ms);
    latency bugs need vault scale to surface.
+
+   **Two clock origins — report them on SEPARATE lines (Martin's ruling D119.a, 2026-09-12).**
+   Every `stage=e2e` event carries `origin="ui"` or `origin="facade"`. A `ui` sample is a whole
+   interaction, starting where a platform input event crosses the frontend dispatch seam — this is
+   what a pointer-driven MCP `click{x,y}` produces, and it is the number the 200ms SLO names. A
+   `facade` sample is an operation driven through `HolonService::execute_operation`, which the MCP
+   `execute_operation` tool and every agent-driven op enter through; its clock opens ABOVE the
+   dispatch seam, so it excludes the frontend cost and is systematically shorter.
+   `measure_latency.py` prints them as two tables ("PROD END-TO-END … origin=ui" and
+   "FACADE … origin=facade"). **Never quote one p95 for both, and never compare a facade number to
+   the SLO threshold as if it were a UI number.** In a report, give the UI line first, then the
+   facade line labelled as facade. If the script warns that events carried no `origin`, say so —
+   those samples were scored nowhere.
+
+   **Your own agent traffic contends, and the SLO rung excludes what it touched.** The two
+   populations are separate, but the PIPELINE is shared: a facade op in flight makes a concurrent
+   UI interaction wait. Every `e2e` event therefore also carries `contended_at_dispatch` and
+   `contended_at_delivery` (the OTHER origin's queue depth at each end), and the runtime
+   latency-slo rung scores a sample as service time only when all four depths are clear. Samples
+   dropped for cross-origin contention are counted and named in the rung's own line, e.g.
+   `service p95 42ms < 200ms over n=31 [p50 …] (7 excluded: facade traffic in the shared
+   pipeline)`. **Quote that parenthetical whenever it is present** — an `n` that shrank because
+   you were driving MCP ops at the same time is not a quiet pipeline, and reporting the p95
+   without it invites the reader to trust a population your own traffic thinned.
+
+   **`unjudged` is NOT a pass.** Below 30 service-time samples the rung returns
+   `RungVerdict::Unjudged` and renders no p95 at all. That means the window never held enough
+   evidence to decide — it is not evidence that latency was fine, and it must never be reported
+   as "SLO OK" or left out of a summary. Write it as unjudged, with the sample count AND the
+   exclusion count: "service rung unjudged, n=11 of 30 required, 24 excluded for facade traffic".
+   An agent-heavy session is the usual cause, because your own MCP-driven ops contend with the UI
+   interactions you are trying to measure. **To obtain a UI verdict, pause facade ops for the
+   measured stretch** — drive the app through pointer/keyboard MCP calls only, let it settle, and
+   read the rung afterwards.
 
 **Gotchas from dogfood #3 (2026-07-11):**
 - `screenshot` returns a STALE CACHED FRAME whenever the app window is not OS-frontmost —

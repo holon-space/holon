@@ -29,7 +29,7 @@ def main():
 
     conns = [Mcp(a.port) for _ in range(a.threads)]
     conns[0].call("await_quiescence", {})
-    base = len(read_e2e(a.log))
+    base = len(read_e2e(a.log, "ui"))
 
     work = queue.Queue()
     for i in range(a.n):
@@ -57,7 +57,13 @@ def main():
     conns[0].call("await_quiescence", {})
     time.sleep(3)
 
-    vals = [e["ms"] for e in read_e2e(a.log)[base:] if e["action"] == "set_field"]
+    # UI origin only. This arm drives via MCP `type_text`, which is the frontend
+    # seam, but the same app also serves agent-driven ops through the facade —
+    # pooling those into this p95 would report one number for two different
+    # spans (D119.a).
+    vals = [
+        e["ms"] for e in read_e2e(a.log, "ui")[base:] if e["action"] == "set_field"
+    ]
     res = {"tree": a.tree, "arm": "tight", "requested_n": a.n, "threads": a.threads,
            "wall_s": round(wall, 2), "errors": errs, "stats": stats(vals),
            "samples": vals}

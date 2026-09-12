@@ -20,17 +20,47 @@ sys.path.insert(0, __file__.rsplit("/", 1)[0])
 from mcp import Mcp  # noqa: E402
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
-E2E = re.compile(r'stage="e2e" action=(\w+) block=(\S+) source="(\w+)" ms=(\d+)')
+E2E = re.compile(
+    r'stage="e2e" action=(\w+) block=(\S+) origin="(\w+)" source="(\w+)" ms=(\d+)'
+)
+# The pre-D119.a shape: no `origin` between `block=` and `source=`. Mutually
+# exclusive with E2E above, because `block=(\S+) source=` cannot span the
+# `origin="…"` token. Used only to tell "old log" from "no samples".
+E2E_LEGACY = re.compile(r'stage="e2e" action=(\w+) block=(\S+) source="(\w+)" ms=(\d+)')
 
 
-def read_e2e(log):
-    out = []
+def read_e2e(log, origin):
+    """Every `stage="e2e"` sample of ONE clock origin, in log order.
+
+    `origin` is REQUIRED and positional on purpose. A UI sample times a whole
+    interaction; a facade sample starts above the frontend dispatch seam and is
+    systematically shorter (D119.a). A helper that returned both and left the
+    filtering to the caller is how `tight_arm.py` came to pool them into one
+    p95 — so this helper cannot hand out an unsplit population at all.
+    """
+    if origin not in ("ui", "facade"):
+        raise ValueError(f"unknown clock origin {origin!r} (expected 'ui' or 'facade')")
+    out, legacy = [], 0
     with open(log, errors="replace") as fh:
         for line in fh:
-            m = E2E.search(ANSI.sub("", line))
+            line = ANSI.sub("", line)
+            m = E2E.search(line)
             if m:
-                out.append({"action": m.group(1), "block": m.group(2),
-                            "source": m.group(3), "ms": int(m.group(4))})
+                if m.group(3) == origin:
+                    out.append({"action": m.group(1), "block": m.group(2),
+                                "origin": m.group(3), "source": m.group(4),
+                                "ms": int(m.group(5))})
+            elif E2E_LEGACY.search(line):
+                legacy += 1
+    if legacy:
+        # Fail loud rather than reporting zero samples from a log this parser
+        # cannot attribute to a clock origin.
+        raise SystemExit(
+            f"{log}: {legacy} `stage=e2e` line(s) carry no `origin` field — this log "
+            f"predates D119.a (2026-09-12) and its samples cannot be attributed to a "
+            f"clock origin. Re-measure against a current build, or analyse it with a "
+            f"pre-D119.a checkout. Refusing to report a partial population."
+        )
     return out
 
 
@@ -72,7 +102,7 @@ def main():
     m = Mcp(a.port)
     m.call("click", {"entity_id": a.block})
     m.call("await_quiescence", {})
-    base = len(read_e2e(a.log))
+    base = len(read_e2e(a.log, "ui"))
     inact0 = inactive_count(a.log)
 
     burst_text = "".join("abcdefghij"[i % 10] for i in range(a.n))
@@ -81,7 +111,7 @@ def main():
     burst_wall = time.time() - t0
     m.call("await_quiescence", {})
     time.sleep(2)
-    after_burst = read_e2e(a.log)
+    after_burst = read_e2e(a.log, "ui")
     burst = [e["ms"] for e in after_burst[base:] if e["action"] == "set_field"]
     inact1 = inactive_count(a.log)
 
@@ -93,7 +123,7 @@ def main():
         m.call("await_quiescence", {})
     paced_wall = time.time() - t0
     time.sleep(2)
-    allev = read_e2e(a.log)
+    allev = read_e2e(a.log, "ui")
     paced = [e["ms"] for e in allev[mark:] if e["action"] == "set_field"]
 
     res = {"tree": a.tree, "port": a.port, "log": a.log, "block": a.block,

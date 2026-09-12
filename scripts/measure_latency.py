@@ -227,6 +227,15 @@ def main():
 
     total_by_action = defaultdict(list)
     e2e_by_action = defaultdict(list)
+    # `origin="facade"` samples: an operation driven through
+    # HolonService::execute_operation (the agent/MCP session facade). Its clock
+    # opens ABOVE the frontend dispatch seam, so it measures a shorter span than
+    # a UI interaction and is reported on its own line, never pooled into the
+    # e2e table the ratchet gate scores (Martin's ruling D119.a, 2026-09-12).
+    facade_by_action = defaultdict(list)
+    # An `e2e` event with no `origin` predates the field or lost it. Counted and
+    # disclosed rather than silently filed as UI.
+    originless_e2e = 0
     dispatch_by_action = defaultdict(list)
     proj_ms, proj_snap, proj_blocks = [], [], []
     # mode=full|incremental counts, and per-reason breakdown of the full passes.
@@ -259,7 +268,13 @@ def main():
         elif stage == "e2e":
             v = num(f, "ms")
             if v is not None:
-                e2e_by_action[f.get("action", "?")].append(v)
+                origin = f.get("origin")
+                if origin == "facade":
+                    facade_by_action[f.get("action", "?")].append(v)
+                elif origin == "ui":
+                    e2e_by_action[f.get("action", "?")].append(v)
+                else:
+                    originless_e2e += 1
         elif stage == "dispatch":
             v = num(f, "ms")
             if v is not None:
@@ -312,7 +327,20 @@ def main():
         print("\n(no stage=action_total events - was RUST_LOG=holon_latency=debug set?)")
 
     if e2e_by_action:
-        table("PROD END-TO-END  interaction -> visible  (stage=e2e)", e2e_by_action)
+        table("PROD END-TO-END  interaction -> visible  (stage=e2e, origin=ui)",
+              e2e_by_action)
+
+    if facade_by_action:
+        table("FACADE  agent/MCP op -> visible  (stage=e2e, origin=facade)",
+              facade_by_action)
+        print("  NOTE: facade samples start inside HolonService::execute_operation, "
+              "above the\n  frontend dispatch seam. They are NOT comparable to the "
+              "UI table above and are\n  never pooled with it (D119.a).")
+
+    if originless_e2e:
+        print(f"\nWARNING: {originless_e2e} stage=e2e event(s) carried no `origin` "
+              f"field and were\nSCORED NOWHERE. Either the log predates the field or "
+              f"an emitter lost it.")
 
     if dispatch_by_action:
         table("DISPATCH stage  action -> op applied  (stage=dispatch)", dispatch_by_action)
@@ -399,6 +427,8 @@ def main():
               f"(limit {max_contention:.1f}ms) — run admitted")
 
     if ratchet is not None:
+        # UI-origin samples only: the ceilings were calibrated on whole
+        # interactions, and a facade sample skips part of that span.
         by_stage = {"e2e": e2e_by_action, "total": total_by_action}
         if not ratchet_gate(ratchet, ratchet_report_only, by_stage, min_samples):
             print("\nLATENCY RATCHET GATE FAILED", file=sys.stderr)

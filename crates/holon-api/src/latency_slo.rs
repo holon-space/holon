@@ -28,6 +28,8 @@
 use std::time::Duration;
 use std::time::Instant;
 
+pub use crate::latency_e2e::ClockOrigin;
+
 /// Service-time budget. The project SLO, unchanged — what changed is which
 /// samples are eligible to be scored against it.
 pub const SERVICE_TIME_SLO_MS: u64 = 200;
@@ -130,28 +132,58 @@ pub mod fault_injection {
 #[derive(Clone, Debug)]
 pub struct E2eSample {
     pub action: String,
+    /// The seam that opened this interaction's clock. Decides which window
+    /// scores the sample; a [`SloWindow`] holds exactly one origin.
+    pub origin: ClockOrigin,
     /// Wall time dispatch→projection-visible: service time plus queue wait.
     pub ms: u64,
     /// Interactions in flight when this one was dispatched, itself included.
     pub in_flight: usize,
     /// Interactions still pending after this one was delivered.
     pub backlog: usize,
+    /// Whether any interaction of the OTHER origin overlapped this one's life.
+    /// An event over the whole interval, not a reading at an instant — see
+    /// `holon_api::latency_e2e`'s `Pending::contended`.
+    pub contended: bool,
     /// When the delivery closed. The throughput rung's clock.
     pub delivered_at: Instant,
 }
 
 impl E2eSample {
     /// Whether this sample is service time alone: the interaction was the only
-    /// one in flight for its WHOLE life — nothing queued ahead of it at
-    /// dispatch, nothing still pending when it was delivered.
+    /// one in flight **anywhere in the pipeline** for its WHOLE life — nothing
+    /// queued ahead of it at dispatch, nothing still pending when it was
+    /// delivered, and no traffic of the OTHER origin either.
     ///
-    /// Both halves are load-bearing. `in_flight == 1` alone admits the head of
-    /// a burst, which is dispatched into an empty queue and then overtaken by
-    /// everything behind it: measured at 2150ms in a 40-write burst whose real
-    /// per-write cost was ~62ms. Scoring that as service time is the queue-wait
-    /// contamination this rung exists to exclude.
+    /// Both time halves are load-bearing. `in_flight == 1` alone admits the
+    /// head of a burst, which is dispatched into an empty queue and then
+    /// overtaken by everything behind it: measured at 2150ms in a 40-write
+    /// burst whose real per-write cost was ~62ms. Scoring that as service time
+    /// is the queue-wait contamination this rung exists to exclude.
+    ///
+    /// The cross-origin half is load-bearing for the same reason (D119.a round
+    /// 2). Populations are partitioned by origin so no percentile pools two
+    /// spans — but the PIPELINE is shared, so a facade op in flight really does
+    /// make a concurrent UI interaction wait. Judging that sample as
+    /// uncontended would report queue wait as service time, which is a fake in
+    /// the other direction. It is excluded instead — and, unlike before,
+    /// COUNTED and named: see [`SloWindow::cross_origin_excluded`], which every
+    /// report prints so a thin `n` always says why it is thin.
+    ///
+    /// `contended` is an event recorded over the interaction's whole life, so
+    /// this really does mean what it says. An earlier version sampled the other
+    /// origin's depth at two instants — dispatch and delivery — and a foreign
+    /// clock that opened and closed BETWEEN them was invisible, which is the
+    /// common shape rather than an exotic one (round 3 verification).
     pub fn is_service_time(&self) -> bool {
-        self.in_flight == 1 && self.backlog == 0
+        self.in_flight == 1 && self.backlog == 0 && !self.contended
+    }
+
+    /// Whether this sample would have been service time but for traffic of the
+    /// other origin. Exactly the population
+    /// [`SloWindow::cross_origin_excluded`] counts.
+    pub fn excluded_by_cross_origin(&self) -> bool {
+        self.in_flight == 1 && self.backlog == 0 && self.contended
     }
 }
 
@@ -170,12 +202,24 @@ impl RungVerdict {
     }
 }
 
-/// A rolling window of `stage="e2e"` samples, scored as the two D50.a rungs.
+/// A rolling window of `stage="e2e"` samples **of one [`ClockOrigin`]**, scored
+/// as the two D50.a rungs.
 ///
 /// `capacity` bounds retention so a long-lived process (the runtime oracle)
 /// judges recent behaviour rather than the whole session; a gate rung sizes it
 /// past its own sample count and keeps everything.
+///
+/// # Why the origin is a window property, not a filter
+///
+/// A UI sample times a whole interaction; a facade sample starts above the
+/// frontend dispatch seam and is therefore systematically shorter. Pooling them
+/// makes the p95 depend on the agent/human traffic mix rather than on the
+/// pipeline (Martin's ruling D119.a, 2026-09-12). Every percentile in this
+/// module reads `self.samples`, and [`Self::record`] refuses a sample of any
+/// other origin — so there is no pooled window to take a percentile of, and no
+/// filter a consumer can forget to apply.
 pub struct SloWindow {
+    origin: ClockOrigin,
     samples: Vec<E2eSample>,
     capacity: usize,
     slo_ms: u64,
@@ -184,14 +228,20 @@ pub struct SloWindow {
 
 impl Default for SloWindow {
     fn default() -> Self {
-        Self::new(512, SERVICE_TIME_SLO_MS, THROUGHPUT_FLOOR_WRITES_PER_SEC)
+        Self::new(
+            ClockOrigin::Ui,
+            512,
+            SERVICE_TIME_SLO_MS,
+            THROUGHPUT_FLOOR_WRITES_PER_SEC,
+        )
     }
 }
 
 impl SloWindow {
-    pub fn new(capacity: usize, slo_ms: u64, floor_per_sec: f64) -> Self {
+    pub fn new(origin: ClockOrigin, capacity: usize, slo_ms: u64, floor_per_sec: f64) -> Self {
         assert!(capacity > 0, "SloWindow capacity must be non-zero");
         Self {
+            origin,
             samples: Vec::new(),
             capacity,
             slo_ms,
@@ -199,7 +249,23 @@ impl SloWindow {
         }
     }
 
+    /// The one origin this window scores.
+    pub fn origin(&self) -> ClockOrigin {
+        self.origin
+    }
+
+    /// Record a sample of THIS window's origin.
+    ///
+    /// A foreign origin is a programming error, not data to be filtered: it
+    /// means a caller routed samples by hand and got it wrong, which is exactly
+    /// the pooling D119.a forbids. Route through [`OriginWindows`] instead.
     pub fn record(&mut self, sample: E2eSample) {
+        assert_eq!(
+            sample.origin, self.origin,
+            "a {:?} SloWindow was handed a {:?} sample — origins are scored in separate windows \
+             (D119.a); route samples through OriginWindows",
+            self.origin, sample.origin,
+        );
         if self.samples.len() == self.capacity {
             self.samples.remove(0);
         }
@@ -242,6 +308,20 @@ impl SloWindow {
 
     pub fn service_sample_count(&self) -> usize {
         self.samples.iter().filter(|s| s.is_service_time()).count()
+    }
+
+    /// Samples this window declined to score because the OTHER origin had
+    /// traffic in the shared pipeline at the time.
+    ///
+    /// Reported, never silent. An exclusion shrinks the population a percentile
+    /// rests on, so a reader who sees only `n` cannot tell a quiet stretch from
+    /// one crowded out by agent traffic — and that indistinguishability is what
+    /// made the shared-registry version of this a defect rather than a policy.
+    pub fn cross_origin_excluded(&self) -> usize {
+        self.samples
+            .iter()
+            .filter(|s| s.excluded_by_cross_origin())
+            .count()
     }
 
     /// Median and max of the service-time samples. Not gated — printed beside
@@ -400,6 +480,13 @@ impl SloWindow {
             Some((p50, max)) => format!(" [p50 {p50}ms max {max}ms]"),
             None => String::new(),
         };
+        let excluded = match self.cross_origin_excluded() {
+            0 => String::new(),
+            n => format!(
+                " ({n} excluded: {} traffic in the shared pipeline)",
+                self.origin.other().as_str()
+            ),
+        };
         let throughput = match self.throughput_verdict() {
             RungVerdict::Pass { measured, n } => format!(
                 "drain {measured:.1}/s >= {:.1}/s over {n} saturated intervals ({} deliveries)",
@@ -415,7 +502,70 @@ impl SloWindow {
                 format!("drain rate unjudged ({n} saturated intervals < {needed})")
             }
         };
-        format!("{service}{spread} | {throughput}")
+        format!(
+            "[origin={}] {service}{spread}{excluded} | {throughput}",
+            self.origin.as_str()
+        )
+    }
+}
+
+/// The scoring front door: one [`SloWindow`] per [`ClockOrigin`], with the
+/// routing done here instead of at every call site.
+///
+/// This is what makes pooling unreachable rather than merely discouraged. A
+/// consumer records samples into `OriginWindows`, which files each one by its
+/// own `origin`; to read a statistic it must name an origin and receives that
+/// origin's window. No method on either type returns a number computed over
+/// more than one origin.
+pub struct OriginWindows {
+    ui: SloWindow,
+    facade: SloWindow,
+}
+
+impl OriginWindows {
+    pub fn new(capacity: usize, slo_ms: u64, floor_per_sec: f64) -> Self {
+        Self {
+            ui: SloWindow::new(ClockOrigin::Ui, capacity, slo_ms, floor_per_sec),
+            facade: SloWindow::new(ClockOrigin::Facade, capacity, slo_ms, floor_per_sec),
+        }
+    }
+
+    /// File one sample into the window its own origin names.
+    pub fn record(&mut self, sample: E2eSample) {
+        match sample.origin {
+            ClockOrigin::Ui => self.ui.record(sample),
+            ClockOrigin::Facade => self.facade.record(sample),
+        }
+    }
+
+    pub fn window(&self, origin: ClockOrigin) -> &SloWindow {
+        match origin {
+            ClockOrigin::Ui => &self.ui,
+            ClockOrigin::Facade => &self.facade,
+        }
+    }
+
+    pub fn ui(&self) -> &SloWindow {
+        &self.ui
+    }
+
+    pub fn facade(&self) -> &SloWindow {
+        &self.facade
+    }
+
+    pub fn clear(&mut self) {
+        self.ui.clear();
+        self.facade.clear();
+    }
+
+    /// Both origins, each on its OWN line. Never one merged line: a reader who
+    /// sees a single number has been told the pipeline has a single p95, and it
+    /// does not.
+    pub fn report_lines(&self) -> Vec<String> {
+        [ClockOrigin::Ui, ClockOrigin::Facade]
+            .into_iter()
+            .map(|o| self.window(o).report())
+            .collect()
     }
 }
 
@@ -426,10 +576,20 @@ mod tests {
     fn sample(ms: u64, in_flight: usize, backlog: usize, at: Instant) -> E2eSample {
         E2eSample {
             action: "set_field".to_string(),
+            origin: ClockOrigin::Ui,
             ms,
             in_flight,
             backlog,
+            contended: false,
             delivered_at: at,
+        }
+    }
+
+    /// A paced sample that shared the pipeline with the other origin.
+    fn contended(ms: u64, at: Instant) -> E2eSample {
+        E2eSample {
+            contended: true,
+            ..sample(ms, 1, 0, at)
         }
     }
 
@@ -641,12 +801,110 @@ mod tests {
 
     #[test]
     fn the_window_retains_only_its_capacity() {
-        let mut w = SloWindow::new(4, SERVICE_TIME_SLO_MS, THROUGHPUT_FLOOR_WRITES_PER_SEC);
+        let mut w = SloWindow::new(
+            ClockOrigin::Ui,
+            4,
+            SERVICE_TIME_SLO_MS,
+            THROUGHPUT_FLOOR_WRITES_PER_SEC,
+        );
         let t0 = Instant::now();
         for i in 0..10u64 {
             w.record(sample(i, 1, 0, t0 + Duration::from_millis(i)));
         }
         assert_eq!(w.len(), 4);
         assert_eq!(w.samples()[0].ms, 6);
+    }
+
+    fn facade_sample(ms: u64, at: Instant) -> E2eSample {
+        E2eSample {
+            origin: ClockOrigin::Facade,
+            ..sample(ms, 1, 0, at)
+        }
+    }
+
+    /// **D119.a round 2.** The pipeline is shared even though the populations
+    /// are not: a sample dispatched alongside foreign traffic waited behind it,
+    /// so scoring it as uncontended service time would report queue wait as
+    /// service time. It is excluded.
+    #[test]
+    fn a_sample_that_shared_the_pipeline_is_not_service_time() {
+        let s = contended(100, Instant::now());
+        assert!(!s.is_service_time(), "foreign traffic is real contention");
+        assert!(s.excluded_by_cross_origin());
+    }
+
+    /// And the exclusion is COUNTED and NAMED. A silently shrunk population is
+    /// indistinguishable from a quiet stretch, which is what made the
+    /// shared-registry behaviour a defect rather than a policy.
+    #[test]
+    fn cross_origin_exclusions_are_counted_and_named_in_the_report() {
+        let mut w = SloWindow::default();
+        let t0 = Instant::now();
+        for i in 0..40u64 {
+            w.record(sample(10, 1, 0, t0 + Duration::from_millis(50 * i)));
+        }
+        for i in 0..7u64 {
+            w.record(contended(500, t0 + Duration::from_secs(10 + i)));
+        }
+
+        assert_eq!(
+            w.service_sample_count(),
+            40,
+            "the contended ones are excluded"
+        );
+        assert_eq!(w.cross_origin_excluded(), 7);
+        let report = w.report();
+        assert!(
+            report.contains("7 excluded: facade traffic in the shared pipeline"),
+            "the report must say why the population is thin, got: {report}"
+        );
+    }
+
+    /// The exclusion must not silently empty a rung either: an all-contended
+    /// window reports Unjudged AND says what it dropped.
+    #[test]
+    fn an_all_contended_window_is_unjudged_and_says_why() {
+        let mut w = SloWindow::default();
+        let t0 = Instant::now();
+        for i in 0..40u64 {
+            w.record(contended(500, t0 + Duration::from_millis(50 * i)));
+        }
+        assert!(matches!(
+            w.service_verdict(),
+            RungVerdict::Unjudged { n: 0, .. }
+        ));
+        assert!(w.report().contains("40 excluded: facade traffic"));
+    }
+
+    /// The pooling guard. A window scores one origin, so handing it a foreign
+    /// sample is refused at the door rather than quietly widening the
+    /// population its p95 is taken over.
+    #[test]
+    #[should_panic(expected = "origins are scored in separate windows")]
+    fn a_ui_window_refuses_a_facade_sample() {
+        let mut w = SloWindow::default();
+        w.record(facade_sample(5, Instant::now()));
+    }
+
+    /// The routed front door keeps the two populations apart: a facade sample
+    /// that would dominate the UI p95 changes only the facade one.
+    #[test]
+    fn origin_windows_score_the_two_seams_separately() {
+        let mut w = OriginWindows::new(512, SERVICE_TIME_SLO_MS, THROUGHPUT_FLOOR_WRITES_PER_SEC);
+        let t0 = Instant::now();
+        for i in 0..40u64 {
+            w.record(sample(100, 1, 0, t0 + Duration::from_millis(50 * i)));
+        }
+        w.record(facade_sample(1, t0 + Duration::from_secs(10)));
+
+        assert_eq!(w.ui().len(), 40);
+        assert_eq!(w.facade().len(), 1);
+        assert_eq!(w.ui().service_p95_ms(), Some(100));
+        assert_eq!(w.facade().service_p95_ms(), Some(1));
+        assert_eq!(
+            w.report_lines().len(),
+            2,
+            "each origin is reported on its own line"
+        );
     }
 }

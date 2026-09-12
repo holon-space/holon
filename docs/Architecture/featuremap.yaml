@@ -694,7 +694,7 @@ areas:
   - name: Latency & budgets
     rows:
       - feature: Interaction latency SLO
-        what: p95 interaction → projection-visible under 200ms
+        what: p95 interaction → projection-visible under 200ms, scored per clock origin (UI and facade samples never pooled — D119.a)
         invariants: [inv-settle-budget]
         ruled_by: "Project rule (CLAUDE.md): a breach is a **bug**, triaged into the bug funnel"
         mode_axes: Storage

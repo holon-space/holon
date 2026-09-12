@@ -33,6 +33,17 @@
 //! event. Boundary disclosure: a rung below its sample floor is `Unjudged` and
 //! paints nothing — the window has not seen enough to accuse the pipeline.
 //!
+//! # Two origins, two windows
+//!
+//! Every `e2e` event names the seam that opened its clock
+//! ([`holon_api::latency_slo::ClockOrigin`]). A `facade` sample starts inside
+//! `HolonService::execute_operation`, above the frontend dispatch seam, so it
+//! measures a shorter span than a `ui` sample of the same gesture. Per Martin's
+//! ruling D119.a the two are scored in separate windows and each rung's banner
+//! names its origin; [`holon_api::latency_slo::OriginWindows`] does the
+//! routing, and an event whose origin cannot be parsed is disclosed and dropped
+//! rather than filed under a guess.
+//!
 //! Zero new instrumentation, zero hot-path cost beyond reading an already-
 //! emitted event's fields. Threshold tunable via `HOLON_ORACLES_SLO_MS`.
 //!
@@ -46,9 +57,10 @@ use std::sync::Mutex;
 use std::time::Instant;
 use std::time::SystemTime;
 
+use holon_api::latency_slo::ClockOrigin;
 use holon_api::latency_slo::E2eSample;
+use holon_api::latency_slo::OriginWindows;
 use holon_api::latency_slo::RungVerdict;
-use holon_api::latency_slo::SloWindow;
 use holon_api::latency_slo::THROUGHPUT_FLOOR_WRITES_PER_SEC;
 use tracing::Event;
 use tracing::Metadata;
@@ -71,10 +83,14 @@ const WINDOW_CAPACITY: usize = 512;
 
 pub struct LatencySloLayer {
     slo_ms: u64,
-    window: Mutex<SloWindow>,
-    /// Which rungs were red at the last evaluation, so a sustained breach
-    /// paints one banner rather than one per delivered row.
-    red: Mutex<RedRungs>,
+    /// One window per clock origin. A facade sample never enters the UI
+    /// percentile and vice versa (D119.a) — the routing is the type's job, not
+    /// a filter this layer has to remember.
+    windows: Mutex<OriginWindows>,
+    /// Which rungs were red at the last evaluation, PER ORIGIN, so a sustained
+    /// breach paints one banner rather than one per delivered row — and a
+    /// facade breach cannot suppress the UI banner by sharing its edge.
+    red: Mutex<RedByOrigin>,
 }
 
 #[derive(Default, Clone, Copy, PartialEq)]
@@ -83,16 +99,31 @@ struct RedRungs {
     throughput: bool,
 }
 
+#[derive(Default)]
+struct RedByOrigin {
+    ui: RedRungs,
+    facade: RedRungs,
+}
+
+impl RedByOrigin {
+    fn get_mut(&mut self, origin: ClockOrigin) -> &mut RedRungs {
+        match origin {
+            ClockOrigin::Ui => &mut self.ui,
+            ClockOrigin::Facade => &mut self.facade,
+        }
+    }
+}
+
 impl LatencySloLayer {
     pub fn new(slo_ms: u64) -> Self {
         Self {
             slo_ms,
-            window: Mutex::new(SloWindow::new(
+            windows: Mutex::new(OriginWindows::new(
                 WINDOW_CAPACITY,
                 slo_ms,
                 THROUGHPUT_FLOOR_WRITES_PER_SEC,
             )),
-            red: Mutex::new(RedRungs::default()),
+            red: Mutex::new(RedByOrigin::default()),
         }
     }
 
@@ -100,9 +131,11 @@ impl LatencySloLayer {
     /// has just turned red. A rung already red stays red silently; a rung that
     /// recovers clears its edge so a later breach speaks again.
     fn record_and_judge(&self, sample: E2eSample) {
+        let origin = sample.origin;
         let (service, throughput, report) = {
-            let mut window = self.window.lock().expect("latency-slo window poisoned");
-            window.record(sample);
+            let mut windows = self.windows.lock().expect("latency-slo window poisoned");
+            windows.record(sample);
+            let window = windows.window(origin);
             (
                 window.service_verdict(),
                 window.throughput_verdict(),
@@ -114,17 +147,21 @@ impl LatencySloLayer {
             throughput: throughput.is_fail(),
         };
         let mut red = self.red.lock().expect("latency-slo edge state poisoned");
-        let was = *red;
-        *red = now;
+        let slot = red.get_mut(origin);
+        let was = *slot;
+        *slot = now;
         drop(red);
+        // Named in every banner: a facade sample starts above the frontend
+        // dispatch seam, so its p95 is not comparable to the UI one.
+        let origin_label = origin.as_str();
 
         if now.service && !was.service {
             let RungVerdict::Fail { measured, n } = service else {
                 unreachable!("is_fail() implies Fail")
             };
             self.raise(format!(
-                "[latency-slo] SERVICE TIME p95 {measured:.0}ms over n={n} interactions \
-                 dispatched with an empty queue (SLO: p95 <{}ms). {report}",
+                "[latency-slo] SERVICE TIME (origin={origin_label}) p95 {measured:.0}ms over \
+                 n={n} interactions dispatched with an empty queue (SLO: p95 <{}ms). {report}",
                 self.slo_ms,
             ));
         }
@@ -133,8 +170,9 @@ impl LatencySloLayer {
                 unreachable!("is_fail() implies Fail")
             };
             self.raise(format!(
-                "[latency-slo] THROUGHPUT {measured:.1} writes/s while saturated over {n} \
-                 intervals (floor: {THROUGHPUT_FLOOR_WRITES_PER_SEC:.1}/s). {report}",
+                "[latency-slo] THROUGHPUT (origin={origin_label}) {measured:.1} writes/s while \
+                 saturated over {n} intervals (floor: {THROUGHPUT_FLOOR_WRITES_PER_SEC:.1}/s). \
+                 {report}",
             ));
         }
     }
@@ -176,8 +214,10 @@ struct LatencyFields {
     blocks: Option<u64>,
     action: Option<String>,
     block: Option<String>,
+    origin: Option<String>,
     in_flight: Option<u64>,
     backlog: Option<u64>,
+    contended: Option<bool>,
 }
 
 impl LatencyFields {
@@ -186,6 +226,7 @@ impl LatencyFields {
             "stage" => self.stage = Some(value),
             "action" => self.action = Some(value),
             "block" => self.block = Some(value),
+            "origin" => self.origin = Some(value),
             _ => {}
         }
     }
@@ -199,7 +240,14 @@ impl Visit for LatencyFields {
             "blocks" => self.blocks = Some(value),
             "in_flight" => self.in_flight = Some(value),
             "backlog" => self.backlog = Some(value),
+
             _ => {}
+        }
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        if field.name() == "contended" {
+            self.contended = Some(value);
         }
     }
 
@@ -257,20 +305,40 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
             // every queued sample as service time and restore the exact
             // false-banner behaviour this rung replaces, so an event without
             // the fields is dropped and disclosed rather than guessed at.
-            let (Some(in_flight), Some(backlog)) = (fields.in_flight, fields.backlog) else {
+            let (Some(in_flight), Some(backlog), Some(contended)) =
+                (fields.in_flight, fields.backlog, fields.contended)
+            else {
                 tracing::warn!(
                     target: "holon_oracles",
                     oracle = "latency-slo",
-                    "[latency-slo] an `e2e` event carried no in_flight/backlog — this sample is \
+                    "[latency-slo] an `e2e` event carried no queue depths — this sample is \
                      unscoreable and the SLO rungs are running on partial evidence",
                 );
                 return;
             };
+            // Parsed, never defaulted: an unknown or missing origin would have
+            // to be filed somewhere, and filing it as `ui` is precisely the
+            // pooling D119.a forbids.
+            let origin = match fields.origin.as_deref().map(str::parse::<ClockOrigin>) {
+                Some(Ok(o)) => o,
+                other => {
+                    tracing::warn!(
+                        target: "holon_oracles",
+                        oracle = "latency-slo",
+                        "[latency-slo] an `e2e` event carried no usable `origin` ({other:?}) — \
+                         this sample is unscoreable and the SLO rungs are running on partial \
+                         evidence",
+                    );
+                    return;
+                }
+            };
             self.record_and_judge(E2eSample {
                 action: fields.action.unwrap_or_else(|| "?".to_string()),
+                origin,
                 ms,
                 in_flight: in_flight as usize,
                 backlog: backlog as usize,
+                contended,
                 delivered_at: Instant::now(),
             });
         } else if ms > self.slo_ms {
@@ -327,6 +395,18 @@ mod tests {
     /// Drive `n` `e2e` events through `layer`, each `ms` with the given queue
     /// depths. `in_flight = 1, backlog = 0` is the paced (service-time) shape.
     fn drive_e2e(layer: LatencySloLayer, n: usize, ms: u64, in_flight: usize, backlog: usize) {
+        drive_e2e_from(layer, ClockOrigin::Ui, n, ms, in_flight, backlog);
+    }
+
+    /// [`drive_e2e`] for a named clock origin.
+    fn drive_e2e_from(
+        layer: LatencySloLayer,
+        origin: ClockOrigin,
+        n: usize,
+        ms: u64,
+        in_flight: usize,
+        backlog: usize,
+    ) {
         let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, || {
             for _ in 0..n {
@@ -335,9 +415,11 @@ mod tests {
                     stage = "e2e",
                     action = "set_field",
                     block = "block:x",
+                    origin = origin.as_str(),
                     ms = ms,
                     in_flight = in_flight as u64,
                     backlog = backlog as u64,
+                    contended = false,
                     "holon_latency",
                 );
             }
@@ -391,9 +473,11 @@ mod tests {
                         stage = "e2e",
                         action = "set_field",
                         block = "block:ramp",
+                        origin = "ui",
                         ms = 10 + 10 * i,
                         in_flight = i + 1,
                         backlog = 59 - i,
+                        contended = false,
                         "holon_latency",
                     );
                 }
@@ -421,7 +505,9 @@ mod tests {
 
     /// An `e2e` event without queue depth cannot be scored. Assuming it was
     /// paced would file every queued sample as service time and restore the
-    /// false banners, so it is dropped and disclosed instead.
+    /// false banners, so it is dropped and disclosed instead. Since D119.a
+    /// round 2 the cross-origin depths are part of "queue depth": a sample
+    /// missing them cannot be told uncontended from crowded either.
     #[test]
     fn an_e2e_event_without_queue_depth_is_not_scored() {
         let fired = violations_around("service p95", |layer| {
@@ -433,6 +519,7 @@ mod tests {
                         stage = "e2e",
                         action = "set_field",
                         block = "block:legacy",
+                        origin = "ui",
                         ms = 5000u64,
                         "holon_latency",
                     );
@@ -460,7 +547,9 @@ mod tests {
                         stage = "e2e",
                         action = "set_field",
                         block = "block:slow-drain",
+                        origin = "ui",
                         ms = 40u64,
+                        contended = false,
                         in_flight = i + 2,
                         // Never reaches zero: the queue stays non-empty, so
                         // every gap is a saturated interval.
@@ -487,6 +576,84 @@ mod tests {
             violations_for_stage("rows", "block:oracle-rows-marker"),
             0,
             "component stages warn-diagnose; only e2e is the SLO verdict"
+        );
+    }
+
+    /// **D119.a — the two origins do not pool.** 40 slow FACADE samples plus 40
+    /// fast UI ones: the UI service rung must stay green, because a facade
+    /// sample skips the frontend dispatch seam and belongs to its own
+    /// population. A pooled window would breach and paint a UI banner.
+    #[test]
+    fn facade_samples_do_not_breach_the_ui_rung() {
+        let fired = violations_around("origin=ui", |layer| {
+            let subscriber = tracing_subscriber::registry().with(layer);
+            tracing::subscriber::with_default(subscriber, || {
+                for i in 0..80u64 {
+                    let (origin, ms) = if i % 2 == 0 {
+                        ("facade", 5000u64)
+                    } else {
+                        ("ui", 10u64)
+                    };
+                    tracing::info!(
+                        target: "holon_latency",
+                        stage = "e2e",
+                        action = "set_field",
+                        block = "block:mixed-origin",
+                        origin = origin,
+                        ms = ms,
+                        in_flight = 1u64,
+                        backlog = 0u64,
+                        contended = false,
+                        "holon_latency",
+                    );
+                }
+            });
+        });
+        assert_eq!(
+            fired, 0,
+            "slow facade samples must never appear in the UI percentile"
+        );
+    }
+
+    /// The facade rung is REPORTED, not silently discarded: a slow facade
+    /// pipeline raises its own banner, labelled with its origin.
+    #[test]
+    fn a_slow_facade_pipeline_paints_its_own_labelled_banner() {
+        let fired = violations_around("origin=facade", |layer| {
+            drive_e2e_from(layer, ClockOrigin::Facade, 40, 250, 1, 0);
+        });
+        assert_eq!(
+            fired, 1,
+            "a facade breach is reported on its own line, not folded into the UI one"
+        );
+    }
+
+    /// An `e2e` event with no `origin` cannot be filed. Defaulting it to `ui`
+    /// would put facade samples into the UI percentile the moment the field
+    /// went missing, so it is dropped and disclosed instead.
+    #[test]
+    fn an_e2e_event_without_an_origin_is_not_scored() {
+        let fired = violations_around("service p95", |layer| {
+            let subscriber = tracing_subscriber::registry().with(layer);
+            tracing::subscriber::with_default(subscriber, || {
+                for _ in 0..40 {
+                    tracing::info!(
+                        target: "holon_latency",
+                        stage = "e2e",
+                        action = "set_field",
+                        block = "block:originless",
+                        ms = 5000u64,
+                        in_flight = 1u64,
+                        backlog = 0u64,
+                        contended = false,
+                        "holon_latency",
+                    );
+                }
+            });
+        });
+        assert_eq!(
+            fired, 0,
+            "an unattributable sample must not reach a verdict"
         );
     }
 

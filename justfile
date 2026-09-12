@@ -441,6 +441,13 @@ measure-latency cases='16' *FLAGS:
     echo "raw log: target/gate-logs/holon-latency.log ($(grep -c holon_latency target/gate-logs/holon-latency.log || true) events)"
     python3 scripts/measure_latency.py target/gate-logs/holon-latency.log --max-contention-ms 30
 
+# Self-check for the clock-origin split in the latency log parsers (D119.a).
+# The Rust side keeps UI and facade samples apart with types; these scripts have
+# no type system to lean on, and that is where the split leaked once already
+# (tight_arm.py pooled both origins into one p95). Fast, no build, no app.
+latency-scripts-selfcheck:
+    /usr/bin/python3 scripts/latency/selfcheck.py
+
 # Latency RATCHET gate — per-rung interaction->visible ceilings over two stages:
 # the PROD `stage=e2e` measurement (the exact quantity the runtime
 # `holon_oracles` latency-slo oracle judges — see crates/holon-api/src/

@@ -12,12 +12,18 @@ from datetime import datetime
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TS = re.compile(r"^(\d{4}-\d\d-\d\dT[\d:.]+)Z")
-E2E = re.compile(r'stage="e2e" action=set_field \S+ source="(\w+)" ms=(\d+)')
+# UI-origin only: a `facade` sample (agent/MCP op) starts above the frontend
+# dispatch seam, so it belongs to a different arrival process than the burst
+# this script decomposes (D119.a).
+E2E = re.compile(r'stage="e2e" action=set_field \S+ origin="ui" source="(\w+)" ms=(\d+)')
+# The pre-D119.a shape: no `origin` between `block=` and `source=`. Disjoint
+# from E2E above, so a match here means the log cannot be attributed at all.
+E2E_LEGACY = re.compile(r'stage="e2e" action=set_field \S+ source="(\w+)" ms=(\d+)')
 STAGE = re.compile(r'stage="(\w+)"[^\n]*? ms=(\d+)')
 
 
 def load(path):
-    ev, stages = [], {}
+    ev, stages, legacy = [], {}, 0
     for line in open(path, errors="replace"):
         line = ANSI.sub("", line)
         t = TS.match(line)
@@ -27,9 +33,20 @@ def load(path):
         m = E2E.search(line)
         if m:
             ev.append((ts, int(m.group(2))))
+        elif E2E_LEGACY.search(line):
+            legacy += 1
         s = STAGE.search(line)
         if s and s.group(1) not in ("e2e", "matview_ddl"):
             stages.setdefault(s.group(1), []).append(int(s.group(2)))
+    if legacy:
+        # Never report an empty decomposition from a log this parser cannot
+        # attribute to a clock origin.
+        raise SystemExit(
+            f"{path}: {legacy} `stage=e2e` line(s) carry no `origin` field — this log "
+            f"predates D119.a (2026-09-12) and its samples cannot be attributed to a "
+            f"clock origin. Re-measure against a current build, or analyse it with a "
+            f"pre-D119.a checkout. Refusing to report a partial population."
+        )
     return ev, stages
 
 

@@ -24,6 +24,33 @@
 # Consequence worth knowing: the runtime latency-slo oracle inherits the same
 # blind spot, so it observes only the cold-navigation tail, not every switch.
 #
+# ── WHICH CLOCK ORIGIN THESE RUNGS SCORE (D119.a, 2026-09-12) ───────────────
+# Every `stage=e2e` event names the seam that opened its clock. `origin="ui"` is
+# a whole interaction: a platform input event crossing the frontend dispatch
+# seam. `origin="facade"` is an operation entering through
+# HolonService::execute_operation — the agent/MCP session facade — which sits
+# ABOVE that seam and therefore excludes the frontend's own dispatch cost.
+#
+# The `e2e.*` rungs below are UI-ORIGIN ONLY. measure_latency.py files the two
+# origins into separate tables and hands the ratchet gate the UI one; the
+# facade table is printed beside it and gates nothing. Pooling them would make
+# every rung move with the agent/human traffic mix instead of with the tree,
+# which is why the split is enforced by the type (holon_api::latency_slo's
+# SloWindow holds one origin and refuses a foreign sample) rather than by a
+# filter each consumer has to remember.
+#
+# POPULATIONS are partitioned; the PIPELINE is not. A facade op in flight really
+# does make a concurrent UI interaction wait, so `is_service_time()` also
+# requires the cross-origin depths (`contended_at_dispatch` /
+# `contended_at_delivery`) to be zero — admitting a sample that queued behind
+# agent traffic would report queue wait as service time, the same fake in the
+# other direction. Those exclusions are COUNTED and NAMED in every SloWindow
+# report ("(7 excluded: facade traffic in the shared pipeline)"), because an
+# `n` that shrank silently is indistinguishable from a quiet stretch. The
+# ratchet rungs in this file score raw per-action `e2e` ms and are unaffected;
+# the exclusion applies to the service-time rung the oracle and the land gate
+# judge.
+#
 # ── WHICH STATISTIC IS GATED, AND WHY IT IS p50 ─────────────────────────────
 # Every gated rung below is a p50. This is the central design decision and it
 # was forced by measurement, not preference.

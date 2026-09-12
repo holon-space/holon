@@ -131,6 +131,7 @@ pub fn dispatch_operation(
             holon_api::latency_e2e::Observable::BlockRow(
                 holon_api::latency_e2e::write_seq_from_params(&params),
             ),
+            holon_api::latency_e2e::ClockOrigin::Ui,
         );
     }
     spawner.spawn(Box::pin(async move {
@@ -141,7 +142,11 @@ pub fn dispatch_operation(
             // A refused/failed op writes nothing: retire its latency entry so no
             // later unrelated delivery for the row closes it as a phantom sample.
             if let Some(target) = &latency_target {
-                holon_api::latency_e2e::interaction_failed(&op_name, target);
+                holon_api::latency_e2e::interaction_failed(
+                    &op_name,
+                    target,
+                    holon_api::latency_e2e::ClockOrigin::Ui,
+                );
             }
             session.error_tracker().record_error();
             tracing::error!("Operation {entity_name}.{op_name} failed: {e}");

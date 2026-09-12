@@ -189,7 +189,7 @@ Ratified design; increments 4–6 exist in code, the end-to-end feature does not
 
 | Feature | What it is | Pinned by | Ruled by | Mode axes | Key entry point |
 |---|---|---|---|---|---|
-| Interaction latency SLO | p95 interaction → projection-visible under 200ms | `inv-settle-budget` | Project rule (CLAUDE.md): a breach is a **bug**, triaged into the bug funnel | Storage | `crates/holon-integration-tests/src/pbt/invariants/bodies/settle_budget.rs` |
+| Interaction latency SLO | p95 interaction → projection-visible under 200ms, scored per clock origin (UI and facade samples never pooled — D119.a) | `inv-settle-budget` | Project rule (CLAUDE.md): a breach is a **bug**, triaged into the bug funnel | Storage | `crates/holon-integration-tests/src/pbt/invariants/bodies/settle_budget.rs` |
 | SQL / wall / RSS budget | Per-transition resource ceiling | `inv-sql-budget`; `otel-testing` feature | — | Storage | `crates/holon-integration-tests/src/pbt/transition_budgets.rs` |
 | Complexity-class trend | An O(1)-claiming transition must not grow with sequence position | `inv-complexity-class-trend`; *observe-only until `HOLON_TREND_BUDGET=1`* | — | — | `crates/holon-integration-tests/src/pbt/complexity_trend.rs` |
 | Steady-state reseed | No interactive transition triggers an O(N) full reseed | `inv-no-steady-reseed-leak`; *observe-only until `HOLON_PBT_RESEED_ORACLE=enforce`*; soak rung `soak_reseed_reproduction` | — | Storage | `crates/holon-integration-tests/src/pbt/composed/reseed_observer.rs` |

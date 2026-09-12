@@ -4048,6 +4048,7 @@ impl BuilderServices for ReactiveEngine {
                 holon_api::latency_e2e::Observable::BlockRow(
                     holon_api::latency_e2e::write_seq_from_params(&params),
                 ),
+                holon_api::latency_e2e::ClockOrigin::Ui,
             );
         }
         // The op's subject for the stage line: the entity it addresses, or the
@@ -4098,7 +4099,11 @@ impl BuilderServices for ReactiveEngine {
                         // entry so no later unrelated delivery for the row closes
                         // it as a phantom sample.
                         if let Some(target) = &latency_target {
-                            holon_api::latency_e2e::interaction_failed(&op_name, target);
+                            holon_api::latency_e2e::interaction_failed(
+                                &op_name,
+                                target,
+                                holon_api::latency_e2e::ClockOrigin::Ui,
+                            );
                         }
                         // Disclose the failed write: the UI already reflects the
                         // user's gesture, so a dropped error would silently look
@@ -4216,6 +4221,7 @@ impl BuilderServices for ReactiveEngine {
                         holon_api::latency_e2e::Observable::BlockRow(
                             holon_api::latency_e2e::write_seq_from_params(&intent.params),
                         ),
+                        holon_api::latency_e2e::ClockOrigin::Ui,
                     );
                 }
                 let t_dispatch = std::time::Instant::now();
@@ -4230,7 +4236,11 @@ impl BuilderServices for ReactiveEngine {
                         // entry so no later unrelated delivery for the row closes
                         // it as a phantom sample.
                         if let Some(target) = &latency_target {
-                            holon_api::latency_e2e::interaction_failed(&intent.op_name, target);
+                            holon_api::latency_e2e::interaction_failed(
+                                &intent.op_name,
+                                target,
+                                holon_api::latency_e2e::ClockOrigin::Ui,
+                            );
                         }
                     }
                 }
@@ -4294,6 +4304,7 @@ impl BuilderServices for ReactiveEngine {
                 holon_api::latency_e2e::Observable::BlockRow(
                     holon_api::latency_e2e::write_seq_from_params(&params),
                 ),
+                holon_api::latency_e2e::ClockOrigin::Ui,
             );
         }
         let dispatch_span = interaction_span(entity_name.as_str(), &op_name);
@@ -4322,7 +4333,11 @@ impl BuilderServices for ReactiveEngine {
                         // entry so no later unrelated delivery for the row closes
                         // it as a phantom sample.
                         if let Some(target) = &latency_target {
-                            holon_api::latency_e2e::interaction_failed(&op_name, target);
+                            holon_api::latency_e2e::interaction_failed(
+                                &op_name,
+                                target,
+                                holon_api::latency_e2e::ClockOrigin::Ui,
+                            );
                         }
                         // Disclose the failed write (same seam as `dispatch_intent`);
                         // the caller ALSO surfaces it as a visible toast.
@@ -4365,6 +4380,7 @@ impl BuilderServices for ReactiveEngine {
                 holon_api::latency_e2e::Observable::BlockRow(
                     holon_api::latency_e2e::write_seq_from_params(&params),
                 ),
+                holon_api::latency_e2e::ClockOrigin::Ui,
             );
         }
         let dispatch_span = interaction_span(entity_name.as_str(), &op_name);
@@ -4387,7 +4403,11 @@ impl BuilderServices for ReactiveEngine {
                     Err(e) => {
                         journal.settle(journal_seq, Err(format!("{e:#}")));
                         if let Some(target) = &latency_target {
-                            holon_api::latency_e2e::interaction_failed(&op_name, target);
+                            holon_api::latency_e2e::interaction_failed(
+                                &op_name,
+                                target,
+                                holon_api::latency_e2e::ClockOrigin::Ui,
+                            );
                         }
                         session.error_tracker().record_error();
                         tracing::error!(
@@ -4958,6 +4978,7 @@ fn seat_caret_for_navigation(
                     "navigate",
                     target,
                     holon_api::latency_e2e::Observable::FocusRoot,
+                    holon_api::latency_e2e::ClockOrigin::Ui,
                 );
             }
             // ALLOW(entity_uri_from_raw): block_id from intent.params Value map

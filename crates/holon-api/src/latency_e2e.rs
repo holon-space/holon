@@ -73,12 +73,30 @@
 //!   [`touched_entities`]). Closes the matching entries and emits, per closure:
 //!
 //!   `tracing::info!(target="holon_latency", stage="e2e", action, block,
-//!   source, ms, in_flight, backlog)`
+//!   origin, source, ms, in_flight, backlog)`
+//!
+//! # Two clocks, never one number
+//!
+//! Every clock names its [`ClockOrigin`]. A `ui` clock opens where a platform
+//! input event crosses the frontend dispatch seam; a `facade` clock opens
+//! inside `HolonService::execute_operation`, above that seam, so it excludes
+//! the frontend's own dispatch cost. Their samples measure different spans and
+//! are scored in separate windows (D119.a) — see
+//! [`crate::latency_slo::SloWindow`], which is origin-scoped so no consumer can
+//! pool them by accident.
+//!
+//! The separation reaches deeper than the windows: the pending registry itself
+//! is PARTITIONED by origin (`Registry`). Queue depth, supersession and
+//! overflow eviction are each computed inside one partition, because each of
+//! them otherwise leaks one origin's traffic into the other's measurements —
+//! queue depth decides UI service-time eligibility, a supersession silently
+//! deletes the other origin's clock, and an eviction silently drops it.
 //!
 //! `ms` alone is service time plus queue wait. `in_flight` (queue depth at
-//! dispatch) and `backlog` (queue depth after this delivery) are what let a
-//! consumer separate the two — see [`crate::latency_slo`], which both the
-//! runtime oracle and the land gate score through.
+//! dispatch, **within this origin**) and `backlog` (this origin's depth after
+//! the delivery) are what let a consumer separate the two — see
+//! [`crate::latency_slo`], which both the runtime oracle and the land gate
+//! score through.
 //!
 //! # SLO endpoint: projection-visible, deliberately NOT frame-present
 //!
@@ -126,6 +144,76 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::write_seq::WriteSeq;
+
+/// Which seam opened the interaction clock.
+///
+/// A [`ClockOrigin::Ui`] sample is a whole user interaction: a platform input
+/// event crosses the frontend dispatch seam and the clock starts there. A
+/// [`ClockOrigin::Facade`] sample starts INSIDE
+/// `HolonService::execute_operation` — the session facade agent/MCP-driven
+/// operations enter through — so it never carries the frontend's dispatch cost.
+/// The two therefore measure different spans of the same pipeline and must
+/// never be pooled into one percentile (Martin's ruling D119.a, 2026-09-12);
+/// [`crate::latency_slo::SloWindow`] is origin-scoped so a pooled statistic
+/// cannot be computed at all.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ClockOrigin {
+    /// A frontend dispatch seam (`holon_frontend::operations` / `reactive`).
+    Ui,
+    /// `holon::api::HolonService::execute_operation` — the agent/MCP session
+    /// facade. Above the dispatch seam, so the frontend's own cost is excluded.
+    Facade,
+}
+
+impl ClockOrigin {
+    /// The other seam. Two variants, so cross-origin contention has exactly one
+    /// counterpart and a caller never has to enumerate.
+    pub const fn other(self) -> ClockOrigin {
+        match self {
+            ClockOrigin::Ui => ClockOrigin::Facade,
+            ClockOrigin::Facade => ClockOrigin::Ui,
+        }
+    }
+
+    /// The wire form carried on the `origin` field of every `stage="e2e"`
+    /// event.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ClockOrigin::Ui => "ui",
+            ClockOrigin::Facade => "facade",
+        }
+    }
+}
+
+/// An `origin` field value that names no known clock seam. Parsing fails loudly
+/// rather than defaulting: a defaulted origin is how a facade sample would end
+/// up scored as a UI one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownClockOrigin(pub String);
+
+impl std::fmt::Display for UnknownClockOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unknown latency clock origin {:?} (expected \"ui\" or \"facade\")",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnknownClockOrigin {}
+
+impl std::str::FromStr for ClockOrigin {
+    type Err = UnknownClockOrigin;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ui" => Ok(ClockOrigin::Ui),
+            "facade" => Ok(ClockOrigin::Facade),
+            other => Err(UnknownClockOrigin(other.to_string())),
+        }
+    }
+}
 
 /// What an interaction is waiting to SEE, and what a batch actually delivered —
 /// the same vocabulary on both ends of the correlation.
@@ -175,15 +263,34 @@ impl Observable {
 struct Pending {
     action: String,
     target: String,
+    /// The seam that opened this clock. Carried through to the emitted event so
+    /// a consumer never has to infer it from the action name.
+    origin: ClockOrigin,
     /// What this interaction is waiting to see (and its op-instance token, if
     /// the op carried one).
     observable: Observable,
     t0: Instant,
-    /// Interactions in flight the moment this one was dispatched, itself
-    /// included. `1` means nothing was queued ahead of it, so its measurement
-    /// is service time rather than service time plus queue wait — the
-    /// distinction [`crate::latency_slo`] gates on.
+    /// Interactions of THIS origin in flight the moment this one was
+    /// dispatched, itself included. `1` means nothing of its own kind was
+    /// queued ahead of it. Partitioned so a population never moves with the
+    /// other origin's traffic — see `Registry`.
     in_flight: usize,
+    /// Whether ANY interaction of the OTHER origin overlapped this one's life.
+    ///
+    /// An EVENT over the interval, not a reading at an instant. Set when this
+    /// clock is enrolled into a non-empty other slot, and set again on every
+    /// pending entry of the other slot whenever a clock is enrolled there —
+    /// so an overlap is recorded whichever of the two started first. Never
+    /// cleared: a delivery ends this interaction's life, it does not un-share
+    /// the pipeline it ran in.
+    ///
+    /// Two sampled instants (at dispatch, and after the batch settled) could
+    /// not carry this. A facade clock that opened AFTER a UI clock's dispatch
+    /// and closed BEFORE its delivery left both readings at zero, and the UI
+    /// sample scored as uncontended service time — and containment is the
+    /// EXPECTED shape here, because facade spans are systematically shorter
+    /// than UI spans (23ms vs 29ms p50, measured on this lane's own rung).
+    contended: bool,
 }
 
 /// One closed correlation, ready to emit. Returned by the pure
@@ -192,16 +299,77 @@ struct Pending {
 struct Closed {
     action: String,
     target: String,
+    origin: ClockOrigin,
     ms: u64,
     in_flight: usize,
-    /// Interactions still pending after this one closed. `> 0` means the
-    /// pipeline was saturated at this delivery, so the wait until the next
-    /// delivery is drain time and not the driver idling.
+    /// Interactions of THIS origin still pending after this one closed. `> 0`
+    /// means the pipeline was saturated at this delivery, so the wait until the
+    /// next delivery is drain time and not the driver idling.
     backlog: usize,
+    /// Whether the other origin overlapped this interaction's life, carried
+    /// from [`Pending`].
+    contended: bool,
 }
 
+/// The pending-interaction registry, **partitioned by [`ClockOrigin`]**.
+///
+/// One shared `Vec` was the wrong shape once a second seam existed, and in
+/// three separate ways — all of them cross-origin contamination of the UI
+/// percentile:
+///
+/// * `in_flight` / `backlog` counted BOTH origins, and
+///   [`crate::latency_slo::E2eSample::is_service_time`] gates admission to the
+///   service-time rung on those counters. A facade clock in flight made a
+///   concurrent UI interaction ineligible, so the UI rung's population moved
+///   with the agent traffic mix — the harm D119.a forbids, arriving through the
+///   eligibility filter instead of through the window.
+/// * `close_delivered` deleted older entries of the same `(target, kind)` as
+///   superseded no-ops. A UI clock and a facade clock on one block are not
+///   supersessions of each other, and whichever was older vanished silently.
+/// * overflow eviction dropped the globally-oldest entry, so a burst of facade
+///   clocks could evict pending UI ones.
+///
+/// Partitioning fixes all three at once and by construction rather than by
+/// three remembered filters: every count, every supersession and every eviction
+/// is scoped to one slot because it can only ever see one slot.
+///
+/// A delivery is still offered to BOTH slots (see [`rows_delivered`]): two
+/// interactions of different origins waiting on the same row are both made
+/// visible by it, and each gets its own sample.
+#[derive(Default)]
+struct Registry {
+    ui: Vec<Pending>,
+    facade: Vec<Pending>,
+}
+
+impl Registry {
+    fn slot(&mut self, origin: ClockOrigin) -> &mut Vec<Pending> {
+        match origin {
+            ClockOrigin::Ui => &mut self.ui,
+            ClockOrigin::Facade => &mut self.facade,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.ui.len() + self.facade.len()
+    }
+
+    /// Every pending entry, both origins. For diagnostics and the fast-path
+    /// count ONLY — never for a measurement, which is always slot-scoped.
+    fn iter(&self) -> impl Iterator<Item = &Pending> {
+        self.ui.iter().chain(self.facade.iter())
+    }
+}
+
+/// Every origin, so a loop over the whole registry cannot forget one.
+const ORIGINS: [ClockOrigin; 2] = [ClockOrigin::Ui, ClockOrigin::Facade];
+
 static PENDING_LEN: AtomicUsize = AtomicUsize::new(0);
-static PENDING: Mutex<Vec<Pending>> = Mutex::new(Vec::new());
+static PENDING: Mutex<Registry> = Mutex::new(Registry {
+    ui: Vec::new(),
+    facade: Vec::new(),
+});
+/// Per-ORIGIN capacity: one origin's burst can never evict another's entries.
 const MAX_PENDING: usize = 64;
 const EXPIRY: Duration = Duration::from_secs(30);
 
@@ -209,9 +377,13 @@ const EXPIRY: Duration = Duration::from_secs(30);
 /// (`> 0`) into content-write params; every other op omits it. A `0` value is
 /// the row default (never editor-written) and is treated as absent.
 pub fn write_seq_from_params(params: &HashMap<String, crate::Value>) -> Option<WriteSeq> {
-    params
-        .get("write_seq")
-        .and_then(|v| v.as_i64())
+    write_seq_from_value(params.get("write_seq"))
+}
+
+/// [`write_seq_from_params`] for a params bag that is not keyed by `String` —
+/// the facade dispatches a [`crate::StorageEntity`], whose keys are `Arc<str>`.
+pub fn write_seq_from_value(v: Option<&crate::Value>) -> Option<WriteSeq> {
+    v.and_then(|v| v.as_i64())
         .filter(|&s| s > 0)
         .map(WriteSeq::from_i64)
 }
@@ -221,6 +393,7 @@ pub fn write_seq_from_params(params: &HashMap<String, crate::Value>) -> Option<W
 struct Expired {
     action: String,
     target: String,
+    origin: ClockOrigin,
     waited_ms: u64,
 }
 
@@ -242,11 +415,37 @@ fn prune_expired(pending: &mut Vec<Pending>, now: Instant) -> Vec<Expired> {
         expired.push(Expired {
             action: e.action.clone(),
             target: e.target.clone(),
+            origin: e.origin,
             waited_ms: waited.as_millis() as u64,
         });
         false
     });
     expired
+}
+
+/// One pending entry dropped because its origin's slot was full. Distinct from
+/// [`Expired`] because the cause is different and so is the remedy: an expiry
+/// means no delivery arrived, an eviction means the correlator ran out of room.
+struct Evicted {
+    action: String,
+    target: String,
+    waited_ms: u64,
+}
+
+/// Overflow is a LOST measurement, so it is disclosed like every other one. A
+/// silent `remove(0)` is the "degrades to look fine" case: the interaction
+/// simply never appears in any window and nothing says why.
+fn disclose_evicted(e: &Evicted, origin: ClockOrigin) {
+    tracing::warn!(
+        target: "holon_latency",
+        stage = "e2e_evicted",
+        action = %e.action,
+        block = %e.target,
+        origin = origin.as_str(),
+        waited_ms = e.waited_ms,
+        capacity = MAX_PENDING,
+        "holon_latency: oldest pending interaction of this origin evicted at capacity — its latency is unmeasurable",
+    );
 }
 
 /// The one emission site for an unmeasured interaction. An expiry is the
@@ -258,6 +457,7 @@ fn disclose_expired(e: &Expired) {
         stage = "e2e_expired",
         action = %e.action,
         block = %e.target,
+        origin = e.origin.as_str(),
         waited_ms = e.waited_ms,
         "holon_latency: interaction expired without a delivered row",
     );
@@ -268,24 +468,85 @@ fn disclose_expired(e: &Expired) {
 /// is the delivery this interaction will become visible as — the caller knows
 /// which gesture it dispatched, so it names the observable rather than letting
 /// the correlator guess from the op name.
-pub fn interaction_dispatched(action: &str, target: &str, observable: Observable) {
-    let mut pending = PENDING.lock().expect("latency_e2e mutex poisoned");
-    let now = Instant::now();
-    for e in prune_expired(&mut pending, now) {
+pub fn interaction_dispatched(
+    action: &str,
+    target: &str,
+    observable: Observable,
+    origin: ClockOrigin,
+) {
+    let mut registry = PENDING.lock().expect("latency_e2e mutex poisoned");
+    let (expired, evicted) = enrol(
+        &mut registry,
+        action,
+        target,
+        observable,
+        origin,
+        Instant::now(),
+    );
+    PENDING_LEN.store(registry.len(), Ordering::Release);
+    drop(registry);
+
+    for e in expired {
         disclose_expired(&e);
     }
-    if pending.len() >= MAX_PENDING {
-        pending.remove(0);
+    if let Some(e) = evicted {
+        disclose_evicted(&e, origin);
     }
-    let in_flight = pending.len() + 1;
-    pending.push(Pending {
+}
+
+/// Pure core of [`interaction_dispatched`]: enrol the clock in its origin's
+/// slot, returning what the caller must disclose. Operates on a caller-owned
+/// registry so the counting rules are testable without the process-global one.
+fn enrol(
+    registry: &mut Registry,
+    action: &str,
+    target: &str,
+    observable: Observable,
+    origin: ClockOrigin,
+    now: Instant,
+) -> (Vec<Expired>, Option<Evicted>) {
+    let mut expired = Vec::new();
+    for o in ORIGINS {
+        expired.extend(prune_expired(registry.slot(o), now));
+    }
+    // Cross-origin contention is recorded as an EVENT here, on both sides, so
+    // that it covers the whole overlap rather than two sampled instants:
+    //   * this clock is contended if the other slot already has anything in it;
+    //   * every entry already pending in the other slot becomes contended, because
+    //     this clock now shares the pipeline with it.
+    // Between them, any overlap of two lives is caught by whichever clock
+    // started second — including a foreign clock that opens and closes entirely
+    // INSIDE this one's life, which is the common shape (facade spans are
+    // shorter than UI spans) and which no pair of instant readings can see.
+    let other = registry.slot(origin.other());
+    let contended = !other.is_empty();
+    for p in other.iter_mut() {
+        p.contended = true;
+    }
+    let slot = registry.slot(origin);
+    // Capacity is per origin, so one origin's burst cannot evict the other's
+    // pending clocks.
+    let evicted = (slot.len() >= MAX_PENDING).then(|| {
+        let p = slot.remove(0);
+        Evicted {
+            action: p.action,
+            target: p.target,
+            waited_ms: now.duration_since(p.t0).as_millis() as u64,
+        }
+    });
+    // Counted over THIS origin's slot only: the queue depth that decides a UI
+    // sample's service-time eligibility must not move with agent traffic.
+    let in_flight = slot.len() + 1;
+    slot.push(Pending {
         action: action.to_string(),
         target: target.to_string(),
+        origin,
         observable,
         t0: now,
         in_flight,
+        contended,
     });
-    PENDING_LEN.store(pending.len(), Ordering::Release);
+    (expired, evicted)
 }
 
 /// Retire the pending entry of an interaction that produced no write, because
@@ -299,17 +560,18 @@ pub fn interaction_dispatched(action: &str, target: &str, observable: Observable
 /// No `e2e` sample is emitted: the interaction produced no visible change, so
 /// there is nothing to measure. Called from the `Err` arm of every op-dispatch
 /// seam (`holon_frontend::operations` / `reactive`).
-pub fn interaction_failed(action: &str, target: &str) {
-    let mut pending = PENDING.lock().expect("latency_e2e mutex poisoned");
-    let retired = retire_failed(&mut pending, action, target, Instant::now());
-    PENDING_LEN.store(pending.len(), Ordering::Release);
-    drop(pending);
+pub fn interaction_failed(action: &str, target: &str, origin: ClockOrigin) {
+    let mut registry = PENDING.lock().expect("latency_e2e mutex poisoned");
+    let retired = retire_failed(registry.slot(origin), action, target, Instant::now());
+    PENDING_LEN.store(registry.len(), Ordering::Release);
+    drop(registry);
     if let Some(r) = retired {
         tracing::info!(
             target: "holon_latency",
             stage = "e2e_retired",
             action = %r.action,
             block = %r.target,
+            origin = r.origin.as_str(),
             waited_ms = r.waited_ms,
             reason = "op refused or failed — no write, nothing to measure",
             "holon_latency",
@@ -317,8 +579,10 @@ pub fn interaction_failed(action: &str, target: &str) {
     }
 }
 
-/// Pure core of [`interaction_failed`]: remove and return the newest entry
-/// matching both `action` and `target`.
+/// Pure core of [`interaction_failed`]: remove and return the newest entry of
+/// ONE origin's slot matching `action` and `target`. Origin-scoping is
+/// structural — the caller passes that origin's slot — so a failed facade op
+/// cannot retire a UI interaction still in flight on the same row.
 fn retire_failed(
     pending: &mut Vec<Pending>,
     action: &str,
@@ -339,6 +603,7 @@ fn retire_failed(
     Some(Expired {
         action: p.action,
         target: p.target,
+        origin: p.origin,
         waited_ms: now.duration_since(p.t0).as_millis() as u64,
     })
 }
@@ -480,16 +745,28 @@ pub fn rows_delivered<'a>(
     if deliveries.is_empty() {
         return;
     }
-    let mut pending = PENDING.lock().expect("latency_e2e mutex poisoned");
+    let mut registry = PENDING.lock().expect("latency_e2e mutex poisoned");
     let now = Instant::now();
-    // Reap here too, not only at dispatch: an interaction whose observable never
-    // arrives must be disclosed while the app is still running, and a delivery is
-    // the more frequent event. An entry older than EXPIRY could otherwise close on
-    // this batch and report a >30s "measurement" the SLO oracle would fire on.
-    let expired = prune_expired(&mut pending, now);
-    let closed = close_delivered(&mut pending, &deliveries, now);
-    PENDING_LEN.store(pending.len(), Ordering::Release);
-    drop(pending);
+    // Offered to EVERY origin's slot, each closed on its own. Two interactions
+    // of different origins can wait on the same row — an agent op and a user
+    // edit on one block — and that row makes BOTH visible, so each gets its own
+    // sample. Scoping the close to one slot at a time is also what stops a
+    // cross-origin supersession: an entry is only ever deleted as a superseded
+    // no-op by a newer entry of its OWN origin.
+    let mut expired = Vec::new();
+    let mut closed: Vec<Closed> = Vec::new();
+    for o in ORIGINS {
+        let slot = registry.slot(o);
+        // Reap here too, not only at dispatch: an interaction whose observable
+        // never arrives must be disclosed while the app is still running, and a
+        // delivery is the more frequent event. An entry older than EXPIRY could
+        // otherwise close on this batch and report a >30s "measurement" the SLO
+        // oracle would fire on.
+        expired.extend(prune_expired(slot, now));
+        closed.extend(close_delivered(slot, &deliveries, now));
+    }
+    PENDING_LEN.store(registry.len(), Ordering::Release);
+    drop(registry);
     for e in expired {
         disclose_expired(&e);
     }
@@ -508,10 +785,20 @@ pub fn rows_delivered<'a>(
             stage = "e2e",
             action = %c.action,
             block = %c.target,
+            // Which seam opened the clock. A `facade` sample skips the frontend
+            // dispatch cost, so a consumer must score it in its own window
+            // (D119.a) — never pooled with `ui` into one percentile.
+            origin = c.origin.as_str(),
             source = source,
             ms = c.ms,
             in_flight = c.in_flight,
             backlog = c.backlog,
+            // Cross-origin contention over this interaction's WHOLE life.
+            // `in_flight`/`backlog` are this origin's own queue (partitioned, so
+            // a population cannot move with foreign traffic); this says whether
+            // foreign traffic shared the pipeline anyway, which is what tells an
+            // uncontended sample from a queued one (D119.a rounds 2-3).
+            contended = c.contended,
             "holon_latency",
         );
     }
@@ -520,6 +807,12 @@ pub fn rows_delivered<'a>(
 /// Pure correlation core: close the pending entries a batch's deliveries
 /// identify, returning the measurements to emit. Operates on a caller-owned
 /// `Vec` so it is hermetic under the parallel test runner.
+///
+/// **It sees ONE origin's slot.** [`rows_delivered`] calls it once per origin,
+/// which is what confines the supersession rule below to entries of the same
+/// origin: a facade clock and a UI clock on one block are two interactions, not
+/// one superseding the other, and each closes with its own sample off the same
+/// delivery. `backlog` is likewise this origin's remaining depth.
 ///
 /// Matching is scoped to one **(target, observable kind)** at a time: an entry
 /// closes only on a delivery of the kind it is waiting for. A pending
@@ -541,10 +834,10 @@ pub fn rows_delivered<'a>(
 ///    token, which is what stops a stale no-op re-commit from stealing an
 ///    untracked dispatch's delta.
 ///
-/// The winner and every pending entry of the same (target, kind) **older than**
-/// it are removed (superseded no-ops). Entries newer than the winner remain
-/// pending for their own delta. This guarantees a measurement is never
-/// attributed across a newer completed entry on the same target.
+/// The winner and every pending entry of the same origin and (target, kind)
+/// **older than** it are removed (superseded no-ops). Entries newer than the
+/// winner remain pending for their own delta. This guarantees a measurement is
+/// never attributed across a newer completed entry on the same target.
 fn close_delivered<S: AsRef<str>>(
     pending: &mut Vec<Pending>,
     deliveries: &[(S, Observable)],
@@ -606,9 +899,11 @@ fn close_delivered<S: AsRef<str>>(
         closed.push(Closed {
             action: pending[winner].action.clone(),
             target: pending[winner].target.clone(),
+            origin: pending[winner].origin,
             ms: now.duration_since(winner_t0).as_millis() as u64,
             in_flight: pending[winner].in_flight,
             backlog: 0,
+            contended: pending[winner].contended,
         });
         // Remove the winner and all OLDER entries of the same (target, kind)
         // (superseded). A different kind on the same target is a different
@@ -629,12 +924,24 @@ mod tests {
     use super::*;
 
     fn pend(action: &str, target: &str, seq: Option<i64>, t0: Instant) -> Pending {
+        pend_from(ClockOrigin::Ui, action, target, seq, t0)
+    }
+
+    fn pend_from(
+        origin: ClockOrigin,
+        action: &str,
+        target: &str,
+        seq: Option<i64>,
+        t0: Instant,
+    ) -> Pending {
         Pending {
             action: action.to_string(),
             target: target.to_string(),
+            origin,
             observable: Observable::BlockRow(seq.map(WriteSeq::from_i64)),
             t0,
             in_flight: 1,
+            contended: false,
         }
     }
 
@@ -643,9 +950,11 @@ mod tests {
         Pending {
             action: "navigate".to_string(),
             target: target.to_string(),
+            origin: ClockOrigin::Ui,
             observable: Observable::FocusRoot,
             t0,
             in_flight: 1,
+            contended: false,
         }
     }
 
@@ -662,6 +971,7 @@ mod tests {
         action: Option<String>,
         block: Option<String>,
         change: Option<String>,
+        origin: Option<String>,
         waited_ms: Option<u64>,
     }
 
@@ -689,6 +999,7 @@ mod tests {
                 "action" => self.action = Some(value),
                 "block" => self.block = Some(value),
                 "change" => self.change = Some(value),
+                "origin" => self.origin = Some(value),
                 _ => {}
             }
         }
@@ -771,6 +1082,7 @@ mod tests {
             disclose_expired(&Expired {
                 action: "navigate".to_string(),
                 target: "block:warm-emit".to_string(),
+                origin: ClockOrigin::Ui,
                 waited_ms: 56693,
             });
         });
@@ -1110,7 +1422,12 @@ mod tests {
     /// asserts only on its own target.
     #[test]
     fn global_dispatch_and_delivery_clears_entry() {
-        interaction_dispatched("toggle_state", "block:e2e-test-a", row(None));
+        interaction_dispatched(
+            "toggle_state",
+            "block:e2e-test-a",
+            row(None),
+            ClockOrigin::Ui,
+        );
         rows_delivered(
             "block",
             [("block:other", row(None)), ("block:e2e-test-a", row(None))],
@@ -1124,7 +1441,7 @@ mod tests {
 
     #[test]
     fn global_unmatched_ids_leave_entry_pending() {
-        interaction_dispatched("set_field", "block:e2e-test-b", row(None));
+        interaction_dispatched("set_field", "block:e2e-test-b", row(None), ClockOrigin::Ui);
         rows_delivered("block", [("block:unrelated", row(None))]);
         let pending = PENDING.lock().unwrap();
         assert!(pending.iter().any(|p| p.target == "block:e2e-test-b"));
@@ -1294,7 +1611,12 @@ mod tests {
     /// entry closes).
     #[test]
     fn global_navigation_dispatch_and_delivery_clears_entry() {
-        interaction_dispatched("navigate", "block:e2e-nav-test", Observable::FocusRoot);
+        interaction_dispatched(
+            "navigate",
+            "block:e2e-nav-test",
+            Observable::FocusRoot,
+            ClockOrigin::Ui,
+        );
         rows_delivered(
             FOCUS_ROOTS_SOURCE,
             [("block:e2e-nav-test", Observable::FocusRoot)],
@@ -1370,6 +1692,7 @@ mod tests {
                     "navigate",
                     "block:proj-visible-lock",
                     Observable::FocusRoot,
+                    ClockOrigin::Ui,
                 );
                 // A CDC batch applied to the reactive mirror (projection-visible).
                 rows_delivered(
@@ -1397,5 +1720,358 @@ mod tests {
             "the SLO endpoint stage is projection-visible 'e2e', not a paint stage"
         );
         assert_eq!(mine.action.as_deref(), Some("navigate"));
+        assert_eq!(
+            mine.origin.as_deref(),
+            Some("ui"),
+            "the emitted sample must name the seam that opened its clock, or a \
+             consumer cannot keep the two origins in separate windows"
+        );
+    }
+
+    /// The facade clock reaches the emitted event as `origin="facade"`. Without
+    /// the field surviving open→close, every scorer files facade samples into
+    /// the UI window and the pooled percentile D119.a forbids is back.
+    #[test]
+    fn a_facade_clock_emits_a_facade_origin_sample() {
+        let sink = capture_latency_events(|captured| {
+            for _ in 0..100 {
+                tracing::callsite::rebuild_interest_cache();
+                interaction_dispatched(
+                    "set_field",
+                    "block:facade-origin-lock",
+                    Observable::BlockRow(None),
+                    ClockOrigin::Facade,
+                );
+                rows_delivered(
+                    "blocks",
+                    [("block:facade-origin-lock", Observable::BlockRow(None))],
+                );
+                if captured
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|c: &Captured| c.block.as_deref() == Some("block:facade-origin-lock"))
+                {
+                    break;
+                }
+            }
+        });
+
+        let mine = sink
+            .iter()
+            .find(|c| c.block.as_deref() == Some("block:facade-origin-lock"))
+            .expect("the delivery must emit a holon_latency event for our target");
+        assert_eq!(mine.stage.as_deref(), Some("e2e"));
+        assert_eq!(mine.origin.as_deref(), Some("facade"));
+    }
+
+    // ── D119.a: the registry partition ───────────────────────────────────────
+    // These three pin the leaks a shared registry produced. Each states the
+    // production consequence, because a reader has to be able to tell an
+    // arbitrary bookkeeping choice from a load-bearing one.
+
+    /// **D2.** A UI clock and a facade clock on the SAME block are two
+    /// interactions, not one superseding the other. `close_delivered` sees one
+    /// origin's slot at a time, so the delivery that makes the row visible
+    /// closes BOTH, each with its own sample.
+    ///
+    /// On a shared registry the older of the two was deleted as a "superseded
+    /// no-op" with no sample, no expiry and no disclosure — a real user
+    /// interaction or a real agent op vanishing without trace.
+    #[test]
+    fn a_ui_clock_and_a_facade_clock_on_one_target_both_close() {
+        let base = Instant::now();
+        let mut ui = vec![pend("set_field", "block:shared", None, base)];
+        let mut facade = vec![pend_from(
+            ClockOrigin::Facade,
+            "set_field",
+            "block:shared",
+            None,
+            base + Duration::from_millis(1),
+        )];
+        let delivery = [("block:shared", row(None))];
+        let now = base + Duration::from_millis(10);
+
+        let closed_ui = close_delivered(&mut ui, &delivery, now);
+        let closed_facade = close_delivered(&mut facade, &delivery, now);
+
+        assert_eq!(closed_ui.len(), 1, "the UI interaction must be measured");
+        assert_eq!(closed_ui[0].origin, ClockOrigin::Ui);
+        assert_eq!(
+            closed_facade.len(),
+            1,
+            "the facade interaction must be measured too — the same row made it visible"
+        );
+        assert_eq!(closed_facade[0].origin, ClockOrigin::Facade);
+    }
+
+    /// **D1.** Queue depth is counted within one origin. `in_flight` and
+    /// `backlog` are what `crate::latency_slo::E2eSample::is_service_time`
+    /// gates the UI service-time rung on, so counting a facade clock there
+    /// would drop a concurrent UI sample out of the percentile the 200ms SLO
+    /// scores — the UI population moving with agent traffic, which is the harm
+    /// D119.a names.
+    ///
+    /// Hermetic on a caller-owned registry: the process-global one is shared
+    /// with every sibling test in this binary, and an absolute depth assertion
+    /// against it would flake whenever one of them had a UI clock in flight.
+    #[test]
+    fn a_facade_clock_in_flight_leaves_a_ui_sample_at_depth_one() {
+        let base = Instant::now();
+        let mut registry = Registry::default();
+        for i in 0..5 {
+            enrol(
+                &mut registry,
+                "set_field",
+                &format!("block:agent-{i}"),
+                Observable::BlockRow(None),
+                ClockOrigin::Facade,
+                base,
+            );
+        }
+        enrol(
+            &mut registry,
+            "set_field",
+            "block:human",
+            Observable::BlockRow(None),
+            ClockOrigin::Ui,
+            base + Duration::from_millis(1),
+        );
+
+        let ui = &registry.ui[0];
+        assert_eq!(
+            ui.in_flight, 1,
+            "five facade clocks in flight must not count against the UI queue depth"
+        );
+        // But the overlap IS recorded. Partitioning the COUNTS keeps the
+        // population stable; forgetting the contention entirely would let a
+        // queued sample be scored as uncontended service time, which is the
+        // opposite fake (D119.a round 2).
+        assert!(
+            ui.contended,
+            "the shared pipeline's foreign traffic must be recorded, not discarded"
+        );
+
+        let closed = close_delivered(
+            &mut registry.ui,
+            &[("block:human", row(None))],
+            base + Duration::from_millis(10),
+        );
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].in_flight, 1);
+        assert_eq!(
+            closed[0].backlog, 0,
+            "the facade queue is not this sample's backlog"
+        );
+        assert!(closed[0].contended);
+    }
+
+    /// **D3.** Overflow evicts within one origin, so a burst of facade clocks
+    /// cannot drop pending UI ones.
+    #[test]
+    fn overflow_evicts_within_one_origin() {
+        let base = Instant::now();
+        let mut registry = Registry::default();
+        enrol(
+            &mut registry,
+            "set_field",
+            "block:human",
+            Observable::BlockRow(None),
+            ClockOrigin::Ui,
+            base,
+        );
+        let mut evictions = 0;
+        for i in 0..=MAX_PENDING {
+            let (_, evicted) = enrol(
+                &mut registry,
+                "set_field",
+                &format!("block:agent-{i}"),
+                Observable::BlockRow(None),
+                ClockOrigin::Facade,
+                base,
+            );
+            evictions += usize::from(evicted.is_some());
+        }
+
+        assert_eq!(
+            registry.ui.len(),
+            1,
+            "a facade burst past capacity must not evict a pending UI clock"
+        );
+        assert_eq!(registry.ui[0].target, "block:human");
+        assert_eq!(
+            evictions, 1,
+            "the one entry over capacity is evicted, and the caller is told"
+        );
+    }
+
+    /// **D3, the disclosure half.** An eviction is a LOST measurement, so it
+    /// must reach a subscriber. A silent `remove(0)` makes the interaction
+    /// absent from every window with nothing saying why — the "degrades to look
+    /// fine" case this module exists to prevent.
+    #[test]
+    fn an_eviction_emits_a_warn_a_subscriber_can_see() {
+        let evicted = Evicted {
+            action: "set_field".to_string(),
+            target: "block:evicted-disclosure".to_string(),
+            waited_ms: 12,
+        };
+        let sink = capture_latency_events(|_| {
+            tracing::callsite::rebuild_interest_cache();
+            disclose_evicted(&evicted, ClockOrigin::Facade);
+        });
+
+        let mine = sink
+            .iter()
+            .find(|c| c.block.as_deref() == Some("block:evicted-disclosure"))
+            .expect("the eviction must be disclosed");
+        assert_eq!(mine.stage.as_deref(), Some("e2e_evicted"));
+        assert_eq!(mine.origin.as_deref(), Some("facade"));
+    }
+
+    /// **D6 — contention is an EVENT over the interval, not two readings.**
+    ///
+    /// The verifier's interleaving, verbatim: a UI clock opens into an empty
+    /// pipeline, a facade clock opens 2ms later, the facade clock CLOSES at
+    /// 8ms, and the UI clock closes at 20ms. The facade life is contained
+    /// entirely inside the UI life.
+    ///
+    /// Sampling the other slot's depth at dispatch and again after the delivery
+    /// batch saw zero both times, so the UI sample scored as uncontended
+    /// service time — reporting queue wait as service time on the very shape
+    /// that is most common, since facade spans are systematically shorter than
+    /// UI spans (23ms vs 29ms p50 on this lane's own rung).
+    #[test]
+    fn a_facade_clock_contained_inside_a_ui_clocks_life_still_contends() {
+        let t0 = Instant::now();
+        let mut registry = Registry::default();
+
+        // t0: the UI interaction is dispatched into a completely empty pipeline.
+        enrol(
+            &mut registry,
+            "set_field",
+            "block:human",
+            Observable::BlockRow(None),
+            ClockOrigin::Ui,
+            t0,
+        );
+        assert!(
+            !registry.ui[0].contended,
+            "nothing has shared the pipeline yet"
+        );
+
+        // t0+2ms: a facade op starts. THIS is the moment the UI interaction
+        // stops being alone, and nothing about the UI entry is re-read later.
+        enrol(
+            &mut registry,
+            "set_field",
+            "block:agent",
+            Observable::BlockRow(None),
+            ClockOrigin::Facade,
+            t0 + Duration::from_millis(2),
+        );
+
+        // t0+8ms: the facade op is delivered and leaves the registry.
+        let facade_closed = close_delivered(
+            &mut registry.facade,
+            &[("block:agent", row(None))],
+            t0 + Duration::from_millis(8),
+        );
+        assert_eq!(facade_closed.len(), 1);
+        assert!(
+            facade_closed[0].contended,
+            "the facade op shared the pipeline too — contention is symmetric"
+        );
+        assert!(registry.facade.is_empty(), "the facade slot is empty again");
+
+        // t0+20ms: the UI interaction is delivered. Its own queue was empty at
+        // both ends and the other slot is empty NOW, so every instant reading
+        // available at this point says "alone".
+        let closed = close_delivered(
+            &mut registry.ui,
+            &[("block:human", row(None))],
+            t0 + Duration::from_millis(20),
+        );
+        assert_eq!(closed.len(), 1);
+        assert_eq!((closed[0].in_flight, closed[0].backlog), (1, 0));
+        assert!(
+            closed[0].contended,
+            "a facade clock that opened and closed INSIDE this interaction's life still shared \
+             the pipeline with it — the overlap must be recorded when it happens, because no \
+             reading taken at dispatch or at delivery can see it afterwards"
+        );
+    }
+
+    /// The symmetric case, so the marking is not one-directional: a clock
+    /// enrolled into a slot whose counterpart is already busy is contended from
+    /// the start.
+    #[test]
+    fn a_clock_enrolled_into_a_busy_pipeline_is_contended_from_the_start() {
+        let t0 = Instant::now();
+        let mut registry = Registry::default();
+        enrol(
+            &mut registry,
+            "set_field",
+            "block:agent",
+            Observable::BlockRow(None),
+            ClockOrigin::Facade,
+            t0,
+        );
+        enrol(
+            &mut registry,
+            "set_field",
+            "block:human",
+            Observable::BlockRow(None),
+            ClockOrigin::Ui,
+            t0 + Duration::from_millis(1),
+        );
+        assert!(registry.ui[0].contended);
+        assert!(registry.facade[0].contended);
+    }
+
+    /// And a genuinely solitary interaction is NOT marked — otherwise the rule
+    /// would exclude everything and the rung would never judge anything.
+    #[test]
+    fn a_solitary_interaction_is_not_contended() {
+        let t0 = Instant::now();
+        let mut registry = Registry::default();
+        enrol(
+            &mut registry,
+            "set_field",
+            "block:human",
+            Observable::BlockRow(None),
+            ClockOrigin::Ui,
+            t0,
+        );
+        let closed = close_delivered(
+            &mut registry.ui,
+            &[("block:human", row(None))],
+            t0 + Duration::from_millis(10),
+        );
+        assert_eq!(closed.len(), 1);
+        assert!(!closed[0].contended);
+    }
+
+    /// **D7.** An expiry names its origin, like an eviction does. Without it a
+    /// reader of a `stage="e2e_expired"` warning cannot tell which seam lost a
+    /// measurement, and the two seams fail for different reasons.
+    #[test]
+    fn an_expiry_names_its_origin() {
+        let expired = Expired {
+            action: "set_field".to_string(),
+            target: "block:expiry-origin".to_string(),
+            origin: ClockOrigin::Facade,
+            waited_ms: 30_001,
+        };
+        let sink = capture_latency_events(|_| {
+            tracing::callsite::rebuild_interest_cache();
+            disclose_expired(&expired);
+        });
+        let mine = sink
+            .iter()
+            .find(|c| c.block.as_deref() == Some("block:expiry-origin"))
+            .expect("the expiry must be disclosed");
+        assert_eq!(mine.stage.as_deref(), Some("e2e_expired"));
+        assert_eq!(mine.origin.as_deref(), Some("facade"));
     }
 }

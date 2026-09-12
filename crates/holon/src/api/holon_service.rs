@@ -226,15 +226,54 @@ impl HolonService {
         op_name: &str,
         params: StorageEntity,
     ) -> Result<holon_api::OpOutcome> {
+        // End-to-end latency: the facade is a dispatch entry point of its own,
+        // so it opens an interaction clock exactly as the frontend seams do.
+        // Without it every agent/MCP-driven operation is absent from the SLO.
+        // The clock closes where the UI's does — `rows_delivered`, on the CDC
+        // actor, at projection-visible — because the correlator registry is
+        // process-global; the facade never closes it itself.
+        //
+        // Tagged `ClockOrigin::Facade`: this clock starts ABOVE the frontend
+        // dispatch seam, so its samples are shorter than a UI interaction's and
+        // are scored in their own window (D119.a).
+        let latency_target = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .map(String::from);
+        if let Some(target) = &latency_target {
+            holon_api::latency_e2e::interaction_dispatched(
+                op_name,
+                target,
+                holon_api::latency_e2e::Observable::BlockRow(
+                    holon_api::latency_e2e::write_seq_from_value(params.get("write_seq")),
+                ),
+                holon_api::latency_e2e::ClockOrigin::Facade,
+            );
+        }
+
         // HolonService is a session facade (human web-worker/UI, or the MCP
         // server acting for an agent); its configured `origin` states which.
         // Rule/sync/ingest ops do not route through it.
         // No `.context` naming the operation: `DispatchingOperationEngine`
         // already prefixes every failure with the entity and operation, and a
         // second copy buries the cause underneath repeated names.
-        self.engine
+        let outcome = self
+            .engine
             .execute_operation(entity_name, op_name, params, self.origin.clone())
-            .await
+            .await;
+
+        // A refused/failed op writes nothing: retire its entry so no later
+        // unrelated delivery for the row closes it as a phantom sample.
+        if outcome.is_err()
+            && let Some(target) = &latency_target
+        {
+            holon_api::latency_e2e::interaction_failed(
+                op_name,
+                target,
+                holon_api::latency_e2e::ClockOrigin::Facade,
+            );
+        }
+        outcome
     }
 
     /// List available operations for an entity.

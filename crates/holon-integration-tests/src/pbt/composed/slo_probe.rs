@@ -23,7 +23,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use holon_api::latency_slo::ClockOrigin;
 use holon_api::latency_slo::E2eSample;
+use holon_api::latency_slo::OriginWindows;
 use holon_api::latency_slo::SERVICE_TIME_SLO_MS;
 use holon_api::latency_slo::SloWindow;
 use holon_api::latency_slo::THROUGHPUT_FLOOR_WRITES_PER_SEC;
@@ -43,7 +45,7 @@ const PROBE_CAPACITY: usize = 4096;
 pub const MAX_CONTENTION_MS: f64 = 30.0;
 
 static ARMED: AtomicBool = AtomicBool::new(false);
-static WINDOW: OnceLock<Mutex<SloWindow>> = OnceLock::new();
+static WINDOW: OnceLock<Mutex<OriginWindows>> = OnceLock::new();
 /// Every `(stage, action)` seen while armed, `e2e` included.
 ///
 /// The window above scores ONE stage, because that is the stage the SLO is
@@ -56,9 +58,9 @@ static STAGES: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
 /// is a BOOT measurement, so it is collected before any rung arms the window.
 static DDL_MS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
-fn window() -> &'static Mutex<SloWindow> {
+fn window() -> &'static Mutex<OriginWindows> {
     WINDOW.get_or_init(|| {
-        Mutex::new(SloWindow::new(
+        Mutex::new(OriginWindows::new(
             PROBE_CAPACITY,
             SERVICE_TIME_SLO_MS,
             THROUGHPUT_FLOOR_WRITES_PER_SEC,
@@ -100,15 +102,21 @@ impl SloProbe {
             .any(|(s, a)| s == stage && a.as_deref() == Some(action))
     }
 
-    /// The samples recorded so far, scored as the two SLO rungs.
-    pub fn snapshot(&self) -> SloWindow {
+    /// The samples of ONE clock origin recorded so far, scored as the two SLO
+    /// rungs.
+    ///
+    /// A rung must name the origin it means to judge: a `ui` sample times a
+    /// whole interaction, a `facade` one starts above the frontend dispatch
+    /// seam, and no percentile spans both (D119.a).
+    pub fn snapshot(&self, origin: ClockOrigin) -> SloWindow {
         let live = window().lock().expect("slo probe window poisoned");
         let mut out = SloWindow::new(
+            origin,
             PROBE_CAPACITY,
             SERVICE_TIME_SLO_MS,
             THROUGHPUT_FLOOR_WRITES_PER_SEC,
         );
-        for s in live.samples() {
+        for s in live.window(origin).samples() {
             out.record(s.clone());
         }
         out
@@ -128,9 +136,11 @@ pub struct SloProbeLayer;
 struct E2eVisitor {
     stage: Option<String>,
     action: Option<String>,
+    origin: Option<String>,
     ms: Option<u64>,
     in_flight: Option<u64>,
     backlog: Option<u64>,
+    contended: Option<bool>,
 }
 
 impl tracing::field::Visit for E2eVisitor {
@@ -139,7 +149,14 @@ impl tracing::field::Visit for E2eVisitor {
             "ms" => self.ms = Some(value),
             "in_flight" => self.in_flight = Some(value),
             "backlog" => self.backlog = Some(value),
+
             _ => {}
+        }
+    }
+
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        if field.name() == "contended" {
+            self.contended = Some(value);
         }
     }
 
@@ -153,6 +170,7 @@ impl tracing::field::Visit for E2eVisitor {
         match field.name() {
             "stage" => self.stage = Some(value.to_string()),
             "action" => self.action = Some(value.to_string()),
+            "origin" => self.origin = Some(value.to_string()),
             _ => {}
         }
     }
@@ -193,21 +211,36 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
         // A rung that silently scored an unscoreable sample would be the exact
         // vacuous-pass this gate exists to prevent, so a missing queue depth is
         // a panic on the emitting thread rather than a defaulted `1`.
-        let (Some(ms), Some(in_flight), Some(backlog)) = (v.ms, v.in_flight, v.backlog) else {
+        let (Some(ms), Some(in_flight), Some(backlog), Some(contended)) =
+            (v.ms, v.in_flight, v.backlog, v.contended)
+        else {
             panic!(
-                "slo probe: an `e2e` event lacked ms/in_flight/backlog (ms={:?} in_flight={:?} \
-                 backlog={:?}) — the correlator's emission and this probe have diverged",
-                v.ms, v.in_flight, v.backlog
+                "slo probe: an `e2e` event lacked ms/in_flight/backlog/contended (ms={:?} \
+                 in_flight={:?} backlog={:?} contended={:?}) — the correlator's emission and \
+                 this probe have diverged",
+                v.ms, v.in_flight, v.backlog, v.contended
             );
+        };
+        // Same reasoning as the queue depths: a sample nobody can attribute to a
+        // clock seam would have to be filed under a guess, and a guess here is
+        // the pooled percentile D119.a forbids.
+        let origin: ClockOrigin = match v.origin.as_deref().map(str::parse) {
+            Some(Ok(o)) => o,
+            other => panic!(
+                "slo probe: an `e2e` event carried no usable `origin` ({other:?}) — the \
+                 correlator's emission and this probe have diverged"
+            ),
         };
         window()
             .lock()
             .expect("slo probe window poisoned")
             .record(E2eSample {
                 action: v.action.unwrap_or_else(|| "?".to_string()),
+                origin,
                 ms,
                 in_flight: in_flight as usize,
                 backlog: backlog as usize,
+                contended,
                 delivered_at: Instant::now(),
             });
     }
