@@ -63,6 +63,18 @@ pub struct BlockCellRegistry {
     /// answers both). Resolution is async and `live_field_any` is not, hence
     /// the handle.
     write_tier: Option<(Arc<dyn WriteTierAuthority>, tokio::runtime::Handle)>,
+    /// Arms the vault's text-undo manager the first time an EDITOR cell is
+    /// handed out, and a runtime to do it on.
+    ///
+    /// An editor cell is live exactly when typing becomes possible, which is
+    /// the first moment a manager can have anything to record. Arming at
+    /// document-open instead would put a Loro subscriber on the whole boot
+    /// ingest, where there is no typing — measured as roughly double the
+    /// vault-scale wall time (see `LoroDocumentStore::ensure_text_undo`).
+    text_undo_arm: Option<(
+        crate::loro_document_store::LoroDocumentStore,
+        tokio::runtime::Handle,
+    )>,
 }
 
 impl BlockCellRegistry {
@@ -84,6 +96,7 @@ impl BlockCellRegistry {
             layout_doc: Some(layout_doc),
             backend,
             write_tier: None,
+            text_undo_arm: None,
         }
     }
 
@@ -97,6 +110,42 @@ impl BlockCellRegistry {
     ) -> Self {
         self.write_tier = Some((authority, runtime));
         self
+    }
+
+    /// Arm the vault's text-undo manager when the first editor cell is handed
+    /// out. Without this the registry hands out editable cells and nothing
+    /// records the typing.
+    pub fn with_text_undo_arming(
+        mut self,
+        store: crate::loro_document_store::LoroDocumentStore,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
+        self.text_undo_arm = Some((store, runtime));
+        self
+    }
+
+    /// Build the manager if it is not built yet. Idempotent and cheap after
+    /// the first call (one read lock).
+    fn arm_text_undo(&self) {
+        let Some((store, runtime)) = self.text_undo_arm.as_ref() else {
+            return;
+        };
+        let store = store.clone();
+        // Own thread, same reason as `write_tier_refusal` below: this runs on a
+        // reactor worker, where a bare `block_on` panics.
+        let armed = std::thread::scope(|s| {
+            s.spawn(|| runtime.block_on(store.ensure_text_undo()))
+                .join()
+                .expect("the text-undo arming thread panicked")
+        });
+        if let Err(e) = armed {
+            // Disclosed, not swallowed: typing still works, undo does not.
+            tracing::error!(
+                error = %format!("{e:#}"),
+                "[BlockCellRegistry] could not arm the text-undo manager; typing will not be \
+                 undoable in this session"
+            );
+        }
     }
 
     /// The refusal a USER's write to `uri` earns, per the dispatcher's own
@@ -137,6 +186,7 @@ impl BlockCellRegistry {
             layout_doc: None,
             backend,
             write_tier: None,
+            text_undo_arm: None,
         }
     }
 
@@ -347,6 +397,9 @@ impl EntityCellRegistry for BlockCellRegistry {
         if field != "content" {
             return Ok(cell_any);
         }
+        // A content cell was asked for by the EDITOR, so typing is now
+        // possible: this is the moment the undo manager must exist.
+        self.arm_text_undo();
         let Some(refusal) = self.write_tier_refusal(uri)? else {
             return Ok(cell_any);
         };

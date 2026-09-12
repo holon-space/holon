@@ -122,8 +122,11 @@ pub use traits::{
     __operations_move_operations, __operations_rename_operations, __operations_task_operations,
     __operations_text_operations,
 };
+pub use undo::EntryKind;
 pub use undo::FieldFingerprint;
 pub use undo::Precondition;
+pub use undo::TEXT_UNDO_MAX_GROUPS;
+pub use undo::TextUndoDelegate;
 pub use undo::UndoEntry;
 pub use undo::UndoStack;
 pub use undo::UndoStateReader;

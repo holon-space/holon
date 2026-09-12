@@ -165,16 +165,82 @@ fn merge_fingerprints<'a>(
     }
 }
 
+/// The text half of the user's one undo stack.
+///
+/// Implemented by the CRDT's undo manager. The engine holds it as `Option`:
+/// a wiring without a CRDT (SqlOnly) has no text manager, and there every
+/// entry is an ordinary inverse-op entry — which is exactly why the journal,
+/// not the manager, stays the single user-facing stack.
+///
+/// The engine owns the ORDER; this trait only moves one step at a time.
+pub trait TextUndoDelegate: Send + Sync {
+    /// How many undo steps the manager holds. The journal keeps one
+    /// text-epoch marker per step, and tops the difference up before it
+    /// journals or replays anything.
+    fn undo_depth(&self) -> anyhow::Result<usize>;
+
+    /// Take back one step. `Ok(false)` means the manager had nothing, which
+    /// for a marker that exists is a contradiction the caller must surface.
+    fn undo_one(&self) -> anyhow::Result<bool>;
+
+    /// Reapply one step. `Ok(false)` as above.
+    fn redo_one(&self) -> anyhow::Result<bool>;
+}
+
+/// How many text-undo groups the manager may hold.
+///
+/// Equal to the journal's default operation cap, and enforced on the manager
+/// itself (`set_max_undo_steps`), which evicts its oldest group exactly as the
+/// journal evicts its oldest entry. Without it the manager is unbounded
+/// (`usize::MAX` in the pinned fork) while the journal is not, and the two
+/// counts drift apart the moment the journal trims.
+pub const TEXT_UNDO_MAX_GROUPS: usize = 100;
+
+/// What an entry's inverse IS.
+///
+/// The user has ONE undo stack, but two mechanisms sit under it: an inverse
+/// journal that replays operations, and the CRDT's undo manager that takes back
+/// this peer's characters without touching a peer's. A marker occupies the
+/// position the typing had in real time, so ordering is free — there is no
+/// second stack and no second clock (D115.A, Option A).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum EntryKind {
+    /// Replay the inverse operations. The only kind before the cell leg
+    /// existed.
+    Ops {
+        /// Forward operations (a Vec so a compound split/join is one entry; a
+        /// single-op edit is a Vec-of-1). Redo re-executes these in order.
+        ops: Vec<Operation>,
+        /// Inverse operations. Undo executes these in order. Frozen at group
+        /// open ("first pre-state wins") so one undo restores the pre-group
+        /// state.
+        inverse_ops: Vec<Operation>,
+    },
+    /// Ask the text-undo manager for one step.
+    ///
+    /// There is nowhere to put operations, so a marker cannot carry any — by
+    /// the shape of the type, not by a constructor's discipline. That is what
+    /// keeps a marker out of word-boundary coalescing
+    /// ([`UndoEntry::coalescible_edit`] needs exactly one op on each side) and
+    /// out of `compose`, however it is built: by a literal, by `Default`, or
+    /// by deserializing attacker-shaped JSON.
+    TextEpoch,
+}
+
 /// A single reversible history step. Serializable so it survives a restart and
 /// is re-verified against live state (the same staleness policy) at replay.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `Deserialize` is hand-written ([`UndoEntryOnDisk`]) because the operations
+/// USED to live at the top level, beside `kind`. A derived impl with
+/// `#[serde(default)]` would read such a row as an empty `Ops` — an entry that
+/// loads successfully and undoes nothing, which is worse than refusing. The
+/// hand-written one reads both shapes and keeps the operations.
+#[derive(Clone, Debug, Serialize)]
 pub struct UndoEntry {
-    /// Forward operations (Vec so a future compound split/join is one entry;
-    /// a single-op edit is a Vec-of-1). Redo re-executes these in order.
-    pub ops: Vec<Operation>,
-    /// Inverse operations. Undo executes these in order. Frozen at group open
-    /// ("first pre-state wins") so one undo restores the pre-group state.
-    pub inverse_ops: Vec<Operation>,
+    /// Whether undo replays this entry's operations or delegates one step to
+    /// the text manager. Rows that predate the marker are handled by the
+    /// hand-written `Deserialize` above, not by a serde default.
+    pub kind: EntryKind,
     /// Who caused this step. Only [`OpOrigin::User`] entries are ever stored.
     pub origin: OpOrigin,
     /// Coalescing group identity (stable across a coalesced run).
@@ -186,10 +252,142 @@ pub struct UndoEntry {
     pub redo_precondition: Precondition,
 }
 
+impl Default for EntryKind {
+    fn default() -> Self {
+        Self::Ops {
+            ops: Vec::new(),
+            inverse_ops: Vec::new(),
+        }
+    }
+}
+
+/// The on-disk shape, old and new. `kind` is absent in rows written before the
+/// cell leg; those carry `ops`/`inverse_ops` at the top level instead.
+#[derive(Deserialize)]
+struct UndoEntryOnDisk {
+    #[serde(default)]
+    kind: Option<EntryKind>,
+    #[serde(default)]
+    ops: Vec<Operation>,
+    #[serde(default)]
+    inverse_ops: Vec<Operation>,
+    origin: OpOrigin,
+    group_id: u64,
+    precondition: Precondition,
+    redo_precondition: Precondition,
+}
+
+impl<'de> Deserialize<'de> for UndoEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = UndoEntryOnDisk::deserialize(d)?;
+        Ok(Self {
+            kind: raw.kind.unwrap_or(EntryKind::Ops {
+                ops: raw.ops,
+                inverse_ops: raw.inverse_ops,
+            }),
+            origin: raw.origin,
+            group_id: raw.group_id,
+            precondition: raw.precondition,
+            redo_precondition: raw.redo_precondition,
+        })
+    }
+}
+
 impl UndoEntry {
+    /// A marker standing where one text-undo group happened.
+    ///
+    /// That a marker cannot carry operations is enforced by the SHAPE of
+    /// [`EntryKind`], not by this constructor: the `TextEpoch` variant has no
+    /// field to put them in. So a literal, a `Default`, and deserialized JSON
+    /// are all equally unable to forge one — which a private token could not
+    /// promise, because `Default` and `Deserialize` reconstruct it.
+    ///
+    /// ```compile_fail
+    /// # use holon_core::undo::{EntryKind, UndoEntry};
+    /// # use holon_api::Operation;
+    /// # use std::collections::HashMap;
+    /// // A text-epoch marker carrying operations is unrepresentable.
+    /// let forged = EntryKind::TextEpoch {
+    ///     ops: vec![Operation::new("block", "delete", "Delete", HashMap::new())],
+    ///     inverse_ops: vec![],
+    /// };
+    /// ```
+    ///
+    /// ```compile_fail
+    /// # use holon_core::undo::EntryKind;
+    /// // And it takes no payload at all, so no token can be smuggled in.
+    /// let forged = EntryKind::TextEpoch(Default::default());
+    /// ```
+    ///
+    /// Both operation vectors are empty, which is what keeps a marker out of
+    /// word-boundary coalescing ([`Self::coalescible_edit`] needs exactly one
+    /// op on each side) and out of `compose`. Constructing one any other way
+    /// would be able to carry operations it must not have, so this is the only
+    /// way to make one.
+    pub fn text_epoch(group_id: u64) -> Self {
+        Self {
+            kind: EntryKind::TextEpoch,
+            origin: OpOrigin::User,
+            group_id,
+            precondition: Precondition::default(),
+            redo_precondition: Precondition::default(),
+        }
+    }
+
+    /// An ordinary journalled step.
+    pub fn of_ops(
+        ops: Vec<Operation>,
+        inverse_ops: Vec<Operation>,
+        origin: OpOrigin,
+        group_id: u64,
+        precondition: Precondition,
+        redo_precondition: Precondition,
+    ) -> Self {
+        Self {
+            kind: EntryKind::Ops { ops, inverse_ops },
+            origin,
+            group_id,
+            precondition,
+            redo_precondition,
+        }
+    }
+
+    /// Whether undo must delegate this entry to the text-undo manager.
+    pub fn is_text_epoch(&self) -> bool {
+        matches!(self.kind, EntryKind::TextEpoch)
+    }
+
+    /// Forward operations. Empty for a marker, which holds none by type.
+    pub fn ops(&self) -> &[Operation] {
+        match &self.kind {
+            EntryKind::Ops { ops, .. } => ops,
+            EntryKind::TextEpoch => &[],
+        }
+    }
+
+    /// Inverse operations. Empty for a marker.
+    pub fn inverse_ops(&self) -> &[Operation] {
+        match &self.kind {
+            EntryKind::Ops { inverse_ops, .. } => inverse_ops,
+            EntryKind::TextEpoch => &[],
+        }
+    }
+
+    /// Mutable access to both vectors, for coalescing. `None` for a marker —
+    /// there is nothing to coalesce into.
+    fn ops_mut(&mut self) -> Option<(&mut Vec<Operation>, &mut Vec<Operation>)> {
+        match &mut self.kind {
+            EntryKind::Ops { ops, inverse_ops } => Some((ops, inverse_ops)),
+            EntryKind::TextEpoch => None,
+        }
+    }
+
     /// Human-readable label for the undo direction (UI).
     pub fn undo_display_name(&self) -> &str {
-        self.inverse_ops
+        if self.is_text_epoch() {
+            return "Typing";
+        }
+        self.inverse_ops()
             .first()
             .map(|o| o.display_name.as_str())
             .unwrap_or("")
@@ -197,7 +395,10 @@ impl UndoEntry {
 
     /// Human-readable label for the redo direction (UI).
     pub fn redo_display_name(&self) -> &str {
-        self.ops
+        if self.is_text_epoch() {
+            return "Typing";
+        }
+        self.ops()
             .first()
             .map(|o| o.display_name.as_str())
             .unwrap_or("")
@@ -207,11 +408,11 @@ impl UndoEntry {
     /// return `(entity_id, field, old_text, new_text)`. Only such entries
     /// participate in word-boundary coalescing.
     fn coalescible_edit(&self) -> Option<(String, String, String, String)> {
-        if self.ops.len() != 1 || self.inverse_ops.len() != 1 {
+        if self.ops().len() != 1 || self.inverse_ops().len() != 1 {
             return None;
         }
-        let fwd = &self.ops[0];
-        let inv = &self.inverse_ops[0];
+        let fwd = &self.ops()[0];
+        let inv = &self.inverse_ops()[0];
         if fwd.op_name != "set_field" {
             return None;
         }
@@ -352,6 +553,22 @@ impl UndoStack {
         }
     }
 
+    /// How many text-epoch markers the UNDO side holds.
+    ///
+    /// The lane's invariant is that this equals the text-undo manager's step
+    /// count at every observation point; the engine tops the difference up
+    /// before it journals or replays anything.
+    pub fn text_epoch_count(&self) -> usize {
+        self.undo.iter().filter(|e| e.is_text_epoch()).count()
+    }
+
+    /// The next group id, for a caller building an entry outside `push`.
+    pub fn next_group_id(&mut self) -> u64 {
+        let id = self.next_group_id;
+        self.next_group_id += 1;
+        id
+    }
+
     /// Push a freshly-executed User entry, applying word-boundary grouping.
     ///
     /// Coalescing extends the open entry's `ops` and advances its forward
@@ -422,10 +639,37 @@ impl UndoStack {
     }
 
     /// Append a distinct entry, trimming to `max_size`.
+    ///
+    /// `max_size` bounds the OPERATION entries only. A text-epoch marker is a
+    /// pointer into the text-undo manager, and the manager has its own cap
+    /// ([`TEXT_UNDO_MAX_GROUPS`]) with the same evict-oldest discipline; if
+    /// operation pressure could evict a marker, the journal would hold fewer
+    /// markers than the manager holds groups and the top-up in
+    /// `sync_text_epochs` would push a replacement, evicting another operation
+    /// entry, for ever. Counting only operation entries makes that
+    /// unrepresentable: the two caps bound the two kinds independently, and
+    /// the total is bounded by their sum.
     fn append(&mut self, entry: UndoEntry) {
         self.undo.push(entry);
-        if self.undo.len() > self.max_size {
-            self.undo.remove(0);
+        while self.undo.iter().filter(|e| !e.is_text_epoch()).count() > self.max_size {
+            let oldest_op = self
+                .undo
+                .iter()
+                .position(|e| !e.is_text_epoch())
+                .expect("the count above found at least one operation entry");
+            self.undo.remove(oldest_op);
+        }
+    }
+
+    /// Drop the OLDEST text-epoch marker, mirroring the manager dropping its
+    /// oldest group. Returns whether one was removed.
+    pub fn drop_oldest_text_epoch(&mut self) -> bool {
+        match self.undo.iter().position(|e| e.is_text_epoch()) {
+            Some(at) => {
+                self.undo.remove(at);
+                true
+            }
+            None => false,
         }
     }
 
@@ -437,7 +681,10 @@ impl UndoStack {
             .undo
             .last_mut()
             .expect("open group implies a top undo entry");
-        top.ops.extend(entry.ops);
+        let (top_ops, _) = top
+            .ops_mut()
+            .expect("only a coalescible edit opens a group, and a marker is never one");
+        top_ops.extend(entry.ops().iter().cloned());
         top.precondition = entry.precondition;
         if close {
             self.open = None;
@@ -508,15 +755,14 @@ impl UndoStack {
     fn compose(entries: Vec<UndoEntry>) -> UndoEntry {
         let mut ops: Vec<Operation> = Vec::new();
         for e in &entries {
-            ops.extend(e.ops.iter().cloned());
+            ops.extend(e.ops().iter().cloned());
         }
         let mut inverse_ops: Vec<Operation> = Vec::new();
         for e in entries.iter().rev() {
-            inverse_ops.extend(e.inverse_ops.iter().cloned());
+            inverse_ops.extend(e.inverse_ops().iter().cloned());
         }
         UndoEntry {
-            ops,
-            inverse_ops,
+            kind: EntryKind::Ops { ops, inverse_ops },
             origin: OpOrigin::User,
             group_id: 0,
             precondition: merge_fingerprints(entries.iter().map(|e| &e.precondition), true),
@@ -602,6 +848,33 @@ impl Default for UndoStack {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A row written before the cell leg has `ops`/`inverse_ops` at the TOP
+    /// level and no `kind`. A derived `Deserialize` with `#[serde(default)]`
+    /// would read it as an empty `Ops` — an entry that loads and undoes
+    /// nothing. It must keep its operations.
+    #[test]
+    fn a_pre_marker_row_keeps_its_operations() {
+        let legacy = r#"{
+            "ops": [{"entity_name":"block","op_name":"create","display_name":"Create","params":{}}],
+            "inverse_ops": [{"entity_name":"block","op_name":"delete","display_name":"Delete","params":{}}],
+            "origin": "User",
+            "group_id": 7,
+            "precondition": {"fields": []},
+            "redo_precondition": {"fields": []}
+        }"#;
+        let entry: UndoEntry = serde_json::from_str(legacy)
+            .unwrap_or_else(|e| panic!("a pre-marker row must still load: {e}"));
+        assert!(!entry.is_text_epoch(), "a legacy row is an ordinary entry");
+        assert_eq!(entry.ops().len(), 1, "the forward op was dropped");
+        assert_eq!(entry.inverse_ops().len(), 1, "the inverse op was dropped");
+        assert_eq!(entry.group_id, 7);
+    }
+}
+
+#[cfg(test)]
+mod tests_original {
     use std::collections::HashMap;
 
     use super::*;
@@ -661,27 +934,27 @@ mod tests {
             Value::String(old.to_string()),
             Value::String(new.to_string()),
         )];
-        UndoEntry {
-            ops: vec![set_field_op(id, field, new)],
-            inverse_ops: vec![set_field_op(id, field, old)],
-            origin: OpOrigin::User,
-            group_id: 0,
-            precondition: Precondition::forward(&changes),
-            redo_precondition: Precondition::inverse(&changes),
-        }
+        UndoEntry::of_ops(
+            vec![set_field_op(id, field, new)],
+            vec![set_field_op(id, field, old)],
+            OpOrigin::User,
+            0,
+            Precondition::forward(&changes),
+            Precondition::inverse(&changes),
+        )
     }
 
     fn structural_entry(id: &str) -> UndoEntry {
         let mut p = HashMap::new();
         p.insert("id".to_string(), Value::String(id.to_string()));
-        UndoEntry {
-            ops: vec![Operation::new("block", "indent", "Indent", p.clone())],
-            inverse_ops: vec![Operation::new("block", "outdent", "Outdent", p)],
-            origin: OpOrigin::User,
-            group_id: 0,
-            precondition: Precondition::default(),
-            redo_precondition: Precondition::default(),
-        }
+        UndoEntry::of_ops(
+            vec![Operation::new("block", "indent", "Indent", p.clone())],
+            vec![Operation::new("block", "outdent", "Outdent", p)],
+            OpOrigin::User,
+            0,
+            Precondition::default(),
+            Precondition::default(),
+        )
     }
 
     /// Type a string one alnum char at a time as consecutive set_field entries.
@@ -701,9 +974,9 @@ mod tests {
         assert_eq!(stack.undo_len(), 1, "hello = one group");
         // The single group's inverse restores the pre-group (empty) state.
         let entry = stack.peek_undo().unwrap();
-        assert_eq!(entry.inverse_ops.len(), 1);
+        assert_eq!(entry.inverse_ops().len(), 1);
         assert_eq!(
-            entry.inverse_ops[0]
+            entry.inverse_ops()[0]
                 .params
                 .get("value")
                 .unwrap()
@@ -798,14 +1071,14 @@ mod tests {
     fn create_entry(id: &str) -> UndoEntry {
         let mut p = HashMap::new();
         p.insert("id".to_string(), Value::String(id.to_string()));
-        UndoEntry {
-            ops: vec![Operation::new("block", "create", "Create", p.clone())],
-            inverse_ops: vec![Operation::new("block", "delete", "Delete", p)],
-            origin: OpOrigin::User,
-            group_id: 0,
-            precondition: Precondition::default(),
-            redo_precondition: Precondition::default(),
-        }
+        UndoEntry::of_ops(
+            vec![Operation::new("block", "create", "Create", p.clone())],
+            vec![Operation::new("block", "delete", "Delete", p)],
+            OpOrigin::User,
+            0,
+            Precondition::default(),
+            Precondition::default(),
+        )
     }
 
     /// The `id` param of each op, in order.
@@ -836,12 +1109,15 @@ mod tests {
         assert_eq!(stack.undo_len(), 1, "the whole group is ONE undo entry");
         let e = stack.peek_undo().unwrap();
         // Forward ops in execution order (redo replays forward).
-        assert_eq!(op_names(&e.ops), vec!["create", "create", "create"]);
-        assert_eq!(ids_of(&e.ops), vec!["block:a", "block:b", "block:c"]);
+        assert_eq!(op_names(e.ops()), vec!["create", "create", "create"]);
+        assert_eq!(ids_of(e.ops()), vec!["block:a", "block:b", "block:c"]);
         // Inverse ops reversed (leaf-first / FK-safe: delete c, b, a).
-        assert_eq!(op_names(&e.inverse_ops), vec!["delete", "delete", "delete"]);
         assert_eq!(
-            ids_of(&e.inverse_ops),
+            op_names(e.inverse_ops()),
+            vec!["delete", "delete", "delete"]
+        );
+        assert_eq!(
+            ids_of(e.inverse_ops()),
             vec!["block:c", "block:b", "block:a"]
         );
     }
@@ -881,8 +1157,8 @@ mod tests {
         );
 
         // The two set_field forwards survive in order; inverses reversed.
-        assert_eq!(e.ops.len(), 2);
-        assert_eq!(e.inverse_ops.len(), 2);
+        assert_eq!(e.ops().len(), 2);
+        assert_eq!(e.inverse_ops().len(), 2);
     }
 
     /// The derived order key never enters a composite precondition (it is
@@ -899,14 +1175,14 @@ mod tests {
                 Value::Null,
                 Value::String(val.to_string()),
             )];
-            UndoEntry {
-                ops: vec![set_field_op(id, field, val)],
-                inverse_ops: vec![set_field_op(id, field, "")],
-                origin: OpOrigin::User,
-                group_id: 0,
-                precondition: Precondition::forward(&changes),
-                redo_precondition: Precondition::inverse(&changes),
-            }
+            UndoEntry::of_ops(
+                vec![set_field_op(id, field, val)],
+                vec![set_field_op(id, field, "")],
+                OpOrigin::User,
+                0,
+                Precondition::forward(&changes),
+                Precondition::inverse(&changes),
+            )
         };
         let mut stack = UndoStack::new();
         stack.begin_group();
@@ -937,9 +1213,9 @@ mod tests {
 
         assert_eq!(stack.undo_len(), 1);
         let e = stack.peek_undo().unwrap();
-        assert_eq!(ids_of(&e.ops), vec!["block:a", "block:b", "block:c"]);
+        assert_eq!(ids_of(e.ops()), vec!["block:a", "block:b", "block:c"]);
         assert_eq!(
-            ids_of(&e.inverse_ops),
+            ids_of(e.inverse_ops()),
             vec!["block:c", "block:b", "block:a"]
         );
     }
@@ -988,8 +1264,8 @@ mod tests {
         let restored: UndoStack = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.undo_len(), 1);
         let e = restored.peek_undo().unwrap();
-        assert_eq!(ids_of(&e.ops), vec!["block:a", "block:b"]);
-        assert_eq!(ids_of(&e.inverse_ops), vec!["block:b", "block:a"]);
+        assert_eq!(ids_of(e.ops()), vec!["block:a", "block:b"]);
+        assert_eq!(ids_of(e.inverse_ops()), vec!["block:b", "block:a"]);
     }
 
     /// An in-flight (open) group is transient: it is never serialized, so a

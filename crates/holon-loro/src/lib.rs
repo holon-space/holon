@@ -128,6 +128,7 @@ pub mod shared_tree;
 /// pure-Rust: Android builds it.
 pub mod sync_transport;
 pub mod text_merge_provider;
+pub mod text_undo;
 #[cfg(all(
     feature = "iroh-sync",
     not(all(target_arch = "wasm32", target_os = "unknown"))
@@ -193,4 +194,6 @@ pub use loro_sync_controller::projection_stats;
 pub use text_merge_provider::TextHandle;
 pub use text_merge_provider::TextMergeProvider;
 pub use text_merge_provider::TransientLoroTextMerge;
+pub use text_undo::LazyTextUndo;
+pub use text_undo::TextUndo;
 pub use write_origin::WriteOrigin;

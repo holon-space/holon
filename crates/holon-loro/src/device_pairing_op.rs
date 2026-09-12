@@ -759,7 +759,7 @@ impl DevicePairing {
     async fn wipe_global_tree(&self) -> anyhow::Result<()> {
         let doc = self.store.get_doc(DocScope::Global).await?;
         doc.with_write(WriteOrigin::DevicePairing, |txn| {
-            let tree = txn.doc().get_tree(crate::loro_backend::TREE_NAME);
+            let tree = txn.get_tree(crate::loro_backend::TREE_NAME);
             // Deepest first, and EVERY node explicitly. Deleting a root deletes
             // its subtree in the tree, but the downstream projection retracts
             // by the ids the delete NAMES: an implicit subtree delete leaves

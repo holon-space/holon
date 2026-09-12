@@ -1096,6 +1096,28 @@ impl BackendEngine {
     /// replica DB: the `undo_log` snapshot table plus a live-state reader for
     /// precondition (staleness) verification. Called once during DI init while
     /// the engine is still owned (before it is shared behind `Arc`).
+    /// Hand the operation engine the text half of the undo stack (D115.A).
+    ///
+    /// Must run AFTER [`Self::enable_undo_persistence`], which replaces the
+    /// operation engine wholesale.
+    pub fn install_text_undo(
+        &self,
+        text_undo: Arc<dyn holon_core::TextUndoDelegate>,
+    ) -> Result<()> {
+        self.op_engine.install_text_undo(text_undo)
+    }
+
+    /// Materialise any text groups the manager has recorded since the last
+    /// journal write, so the two counts can be compared.
+    pub async fn sync_text_epochs(&self) -> Result<()> {
+        self.op_engine.sync_text_epochs().await
+    }
+
+    /// How many text-epoch markers the journal holds.
+    pub async fn text_epoch_count(&self) -> usize {
+        self.op_engine.text_epoch_count().await
+    }
+
     pub async fn enable_undo_persistence(&mut self) -> Result<()> {
         use crate::api::undo_persistence::SqlUndoStateReader;
         use crate::api::undo_persistence::SqlUndoStore;

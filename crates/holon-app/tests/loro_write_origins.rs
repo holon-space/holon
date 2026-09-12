@@ -124,10 +124,20 @@ async fn a_keystroke_through_the_cell_is_the_only_undoable_origin() {
     .expect("a keystroke into the content cell");
 
     let origins = drain(&seen);
-    assert_eq!(
-        origins,
-        vec![WriteOrigin::UiEditorKeystroke.as_origin().to_string()],
-        "a keystroke must commit under exactly the keystroke origin"
+    // The property is that the keystroke is the ONLY write escaping the system
+    // prefix — not that nothing else commits meanwhile. Boot ingest can still
+    // be settling, and asserting quiescence would assert something the session
+    // never promised.
+    let keystroke = WriteOrigin::UiEditorKeystroke.as_origin().to_string();
+    assert!(
+        origins.contains(&keystroke),
+        "the keystroke did not commit under the keystroke origin; saw {origins:?}"
+    );
+    assert!(
+        origins
+            .iter()
+            .all(|o| *o == keystroke || o.starts_with(WriteOrigin::SYSTEM_PREFIX)),
+        "a write other than the keystroke escaped the system prefix: {origins:?}"
     );
     assert!(
         !WriteOrigin::UiEditorKeystroke

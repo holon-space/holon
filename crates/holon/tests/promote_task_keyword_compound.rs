@@ -150,7 +150,10 @@ async fn undo_entry_fields(engine: &BackendEngine, half: &str) -> Vec<String> {
         .as_array()
         .and_then(|entries| entries.last())
         .unwrap_or_else(|| panic!("the undo stack must hold an entry; snapshot={json}"));
-    entry[half]
+    // The operations live inside the entry's `kind`: a text-epoch marker has
+    // nowhere to put them, which is what makes a marker carrying operations
+    // unrepresentable.
+    entry["kind"]["Ops"][half]
         .as_array()
         .unwrap_or_else(|| panic!("{half} must be an array; entry={entry}"))
         .iter()
@@ -191,7 +194,10 @@ async fn undo_entry_values(engine: &BackendEngine, half: &str, field: &str) -> O
         .flatten()
         .next_back()
         .unwrap_or_else(|| panic!("a journaled entry must exist; snapshot={json}"));
-    entry[half]
+    // The operations live inside the entry's `kind`: a text-epoch marker has
+    // nowhere to put them, which is what makes a marker carrying operations
+    // unrepresentable.
+    entry["kind"]["Ops"][half]
         .as_array()
         .unwrap_or_else(|| panic!("{half} must be an array; entry={entry}"))
         .iter()

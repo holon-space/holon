@@ -492,6 +492,24 @@ impl FrontendInjectorExt for Injector {
                     .await;
                 tracing::info!("[FrontendSession] factory: BackendEngine resolved");
 
+                // The text half of the user's one undo stack (D115.A). Only a
+                // CRDT session has one; on SqlOnly the journal replays inverse
+                // operations for everything, which is why undo keeps working
+                // there at all.
+                if let Ok(store) = resolver.try_resolve::<holon_loro::LoroDocumentStore>() {
+                    // A HANDLE, not the manager: the manager does not exist at
+                    // boot and must not, because a Loro subscriber on the
+                    // ingest path costs roughly double the vault-scale wall
+                    // time. The first editor cell arms it; this resolves it
+                    // whenever the journal asks.
+                    let delegate: std::sync::Arc<dyn holon_core::TextUndoDelegate> =
+                        std::sync::Arc::new(holon_loro::LazyTextUndo::new((*store).clone()));
+                    engine
+                        .install_text_undo(delegate)
+                        .expect("the text-undo delegate is installed exactly once per session");
+                    tracing::info!("[FrontendSession] factory: text-undo delegate installed");
+                }
+
                 // Option B: dir/file caches are fed directly from the
                 // OrgModeSyncProvider broadcast in holon-orgmode's DI wiring —
                 // no EventBus subscription here anymore.

@@ -283,10 +283,21 @@ impl LoroDocument {
     /// Peers whose version vector predates the trim cannot receive an
     /// incremental delta; `export_delta_or_full_snapshot` detects that and
     /// ships a full snapshot instead.
-    /// Takes the WRITE guard, not the read guard: the leading `commit()`
-    /// flushes a pending batch and fires subscribers.
+    /// Takes the WRITE guard, not the read guard, so no write batch can be in
+    /// flight while the frontier is read.
     pub fn export_compact_snapshot(&self) -> Result<Vec<u8>> {
         self.lock.write(&self.doc_id, || {
+            // By the write-scope contract nothing is pending here: this holds
+            // the write guard, and every scope flushes before releasing it. The
+            // label is for the case that contract is ever broken — a stray
+            // batch then lands excluded from undo instead of under the empty
+            // origin. Loro offers no way to ASSERT emptiness instead: the
+            // frontiers do not distinguish a pending batch (measured — an
+            // uncommitted insert leaves `state_frontiers` equal to
+            // `oplog_frontiers`), and the export would commit implicitly
+            // anyway.
+            self.doc
+                .set_next_commit_origin(&WriteOrigin::SnapshotFlush.as_origin());
             self.doc.commit();
             let frontiers = self.doc.oplog_frontiers();
             Ok(self
@@ -592,6 +603,31 @@ mod tests {
         assert!(
             !got.is_empty() && got.iter().all(|o| o == "sys.device_pairing"),
             "got {got:?}"
+        );
+        Ok(())
+    }
+
+    /// If a write path ever leaves ops behind, the exporter's flush must not
+    /// hand them to the user as something they can undo.
+    #[test]
+    fn a_snapshot_export_flushes_a_stray_batch_under_a_system_origin() -> Result<()> {
+        let doc = LoroDocument::new("export-pending".to_string())?;
+        let (seen, _sub) = watch_origins(&doc);
+        // ALLOW(loro_doc_escape): the point of this test is to build the state
+        // a broken write path would leave behind, which needs the raw doc
+        // precisely because `with_write` always flushes.
+        doc.doc().get_text("content").insert(0, "unflushed")?;
+
+        assert!(!doc.export_compact_snapshot()?.is_empty());
+
+        let got = seen.lock().unwrap().clone();
+        assert!(
+            !got.is_empty()
+                && got
+                    .iter()
+                    .all(|o| o.starts_with(WriteOrigin::SYSTEM_PREFIX)),
+            "the exporter's flush landed under an origin a text-undo manager cannot exclude: \
+             {got:?}"
         );
         Ok(())
     }

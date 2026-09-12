@@ -125,6 +125,13 @@ pub struct DispatchingOperationEngine {
     /// op appends its field deltas to the stream. `None` on a wiring without a
     /// query substrate (the block `_provenance` stamp still lands regardless).
     history: Option<Arc<dyn HistoryStore>>,
+    /// The text half of the user's undo stack (D115.A, Option A). Empty on a
+    /// wiring without a CRDT, where every entry replays inverse operations.
+    ///
+    /// A `OnceLock` because the engine is already shared behind an `Arc` when
+    /// the CRDT's manager becomes available: `enable_undo_persistence` REPLACES
+    /// this engine, so the delegate cannot be a constructor argument.
+    text_undo: std::sync::OnceLock<Arc<dyn holon_core::TextUndoDelegate>>,
     /// Read capability for `instantiate_template`
     /// (docs/Proposals/Templating-2026-07-12.md). `None` on a wiring without a
     /// queryable block projection — the operation then fails loud, disclosed.
@@ -525,6 +532,7 @@ impl DispatchingOperationEngine {
             store: None,
             seq: AtomicI64::new(0),
             clock: Arc::new(SystemClock),
+            text_undo: std::sync::OnceLock::new(),
             history: None,
             template_source: None,
             vocabulary_source: None,
@@ -538,6 +546,21 @@ impl DispatchingOperationEngine {
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
         self
+    }
+
+    /// Wire the text half of the undo stack (D115.A). Without it, a session
+    /// journals no text-epoch markers and cmd-z takes back only operations —
+    /// which is the correct behaviour on a leg with no CRDT.
+    pub fn install_text_undo(
+        &self,
+        text_undo: Arc<dyn holon_core::TextUndoDelegate>,
+    ) -> Result<()> {
+        self.text_undo.set(text_undo).map_err(|_| {
+            anyhow::anyhow!(
+                "a text-undo delegate is already installed on this engine; a second one would \
+                 give the journal two managers to count markers against"
+            )
+        })
     }
 
     /// Wire the op/effect history relation (C2b). Every successful op then
@@ -606,6 +629,7 @@ impl DispatchingOperationEngine {
             store: Some(store),
             seq: AtomicI64::new(seq),
             clock: Arc::new(SystemClock),
+            text_undo: std::sync::OnceLock::new(),
             history: None,
             template_source: None,
             vocabulary_source: None,
@@ -708,6 +732,149 @@ impl DispatchingOperationEngine {
     /// before journaling stops compiling rather than silently reintroducing the
     /// reorder. `None` is for ops that name no entity — a `create` that mints
     /// its own id has no prior state to order against.
+    /// Bring the journal's text-epoch markers level with the text manager.
+    ///
+    /// The manager decides what one undo step IS — it merges keystrokes that
+    /// land inside its merge interval — so the journal cannot count steps for
+    /// itself without re-implementing that policy and drifting from it. It
+    /// reads the manager's own count instead, which makes *markers ↔ manager
+    /// steps, 1:1* true by construction rather than by agreement.
+    ///
+    /// Called before journaling and before replaying, which is what puts a
+    /// marker in the right PLACE: typing that happened before an operation is
+    /// materialised before that operation's entry goes on the stack.
+    ///
+    /// A count that went DOWN needs no work: the only thing that lowers it is
+    /// an undo this engine delegated, which popped the marker in the same
+    /// gesture.
+    pub async fn sync_text_epochs(&self) -> Result<()> {
+        let Some(text_undo) = self.text_undo.get() else {
+            return Ok(());
+        };
+        let depth = text_undo.undo_depth().map_err(|e| {
+            anyhow::anyhow!("reading the text-undo manager's depth to place journal markers: {e:#}")
+        })?;
+        let mut stack = self.undo_stack.write().await;
+        let markers = stack.text_epoch_count();
+        if depth == markers {
+            return Ok(());
+        }
+        if depth > markers {
+            for _ in markers..depth {
+                let group_id = stack.next_group_id();
+                stack.push(UndoEntry::text_epoch(group_id));
+            }
+        } else {
+            // The manager evicted its oldest groups at its cap. Their markers
+            // now point at nothing, and the oldest markers are the ones that
+            // lost their groups — the manager pops from the front too.
+            let dropped = markers - depth;
+            for _ in depth..markers {
+                assert!(
+                    stack.drop_oldest_text_epoch(),
+                    "the marker count exceeded the manager depth but no marker was found to drop"
+                );
+            }
+            // Disclosed, never silent: the user loses reachable undo steps
+            // here. Ordinarily it is the oldest typing ageing out at the
+            // manager's cap; it is also how a manager that lost groups it
+            // should not have (a rebuilt manager, a peer-id change) stops
+            // wedging the stack instead of erroring on every press.
+            tracing::info!(
+                target: "undo.superseded",
+                dropped,
+                depth,
+                "dropped {dropped} text-undo marker(s) whose groups the manager no longer holds"
+            );
+        }
+        drop(stack);
+        self.persist().await
+    }
+
+    /// How many text-epoch markers the undo side currently holds.
+    ///
+    /// Does NOT sync first: a caller checking the 1:1 invariant must be able to
+    /// read the two counts independently.
+    pub async fn text_epoch_count(&self) -> usize {
+        self.undo_stack.read().await.text_epoch_count()
+    }
+
+    /// Undo one text group and consume its marker.
+    ///
+    /// `Ok(None)` means the group was already SUPERSEDED — the manager popped
+    /// it and reported nothing undone, because something else replaced that
+    /// text since it was typed (a file change, or a field write). That is not
+    /// an error: the user's edit really is gone, and the honest response is to
+    /// consume the marker, say so, and carry on to the next entry. Refusing
+    /// here instead would leave the marker on the stack and every later cmd-z
+    /// would hit the same refusal — the stack would never move again.
+    ///
+    /// The genuinely impossible case is a marker with NO group behind it at
+    /// all: that is a journal/manager desync, and it stays loud.
+    async fn undo_text_epoch(&self) -> Result<Option<UndoOutcome>> {
+        let text_undo = self.text_undo.get().ok_or_else(|| {
+            anyhow::anyhow!(
+                "undo: the top of the journal is a text-epoch marker but this session has no \
+                 text-undo manager. The marker was written by a session that had one, so the \
+                 typing it stands for cannot be taken back here."
+            )
+        })?;
+        let depth = text_undo
+            .undo_depth()
+            .map_err(|e| anyhow::anyhow!("undo: reading the text-undo depth: {e:#}"))?;
+        // Unreachable by construction: `sync_text_epochs` runs first on every
+        // undo and drops markers whose groups are gone, so a marker can only be
+        // on top when the manager still holds a group. Kept as the loud floor
+        // for a future caller that reaches here without syncing.
+        anyhow::ensure!(
+            depth > 0,
+            "undo: the journal holds a text-epoch marker but the text-undo manager holds no \
+             groups at all. The journal and the manager have desynchronised; refusing rather \
+             than reporting an undo that did nothing."
+        );
+        let undone = text_undo
+            .undo_one()
+            .map_err(|e| anyhow::anyhow!("undo: text-epoch marker: {e:#}"))?;
+        // The marker is consumed either way: the group it stood for is gone
+        // from the manager in both branches, so leaving it would desynchronise
+        // the 1:1 invariant AND wedge the stack.
+        self.undo_stack.write().await.commit_undo();
+        self.persist().await?;
+        if !undone {
+            tracing::info!(
+                target: "undo.superseded",
+                "that edit was already replaced by a later change, so there was nothing to take \
+                 back; continuing to the previous step"
+            );
+            return Ok(None);
+        }
+        Ok(Some(UndoOutcome::Applied))
+    }
+
+    /// Redo one text group, then restore its marker.
+    async fn redo_text_epoch(&self) -> Result<Option<UndoOutcome>> {
+        let text_undo = self.text_undo.get().ok_or_else(|| {
+            anyhow::anyhow!(
+                "redo: the top of the redo stack is a text-epoch marker but this session has no \
+                 text-undo manager."
+            )
+        })?;
+        let redone = text_undo
+            .redo_one()
+            .map_err(|e| anyhow::anyhow!("redo: text-epoch marker: {e:#}"))?;
+        self.undo_stack.write().await.commit_redo();
+        self.persist().await?;
+        if !redone {
+            tracing::info!(
+                target: "undo.superseded",
+                "that edit had already been replaced, so there was nothing to reapply; \
+                 continuing to the next step"
+            );
+            return Ok(None);
+        }
+        Ok(Some(UndoOutcome::Applied))
+    }
+
     async fn journal_step(
         &self,
         // ALLOW(unused_param): the held guard IS the compile-time evidence the
@@ -716,6 +883,9 @@ impl DispatchingOperationEngine {
         _held: Option<&tokio::sync::MutexGuard<'_, ()>>,
         entry: UndoEntry,
     ) -> Result<()> {
+        // Before this entry lands, materialise any typing that happened before
+        // it, so the stack's order is the order the user worked in.
+        self.sync_text_epochs().await?;
         self.undo_stack.write().await.push(entry);
         self.persist().await
     }
@@ -1182,8 +1352,10 @@ impl DispatchingOperationEngine {
                 .cloned()
                 .collect();
             let entry = UndoEntry {
-                ops: forwards,
-                inverse_ops,
+                kind: holon_core::EntryKind::Ops {
+                    ops: forwards,
+                    inverse_ops,
+                },
                 origin: OpOrigin::User,
                 group_id: 0,
                 precondition: Precondition::forward(&fp_changes),
@@ -1615,8 +1787,10 @@ impl DispatchingOperationEngine {
 
         if origin.is_user() && (keyword_changed || !Self::changes_are_vacuous(&changes)) {
             let entry = UndoEntry {
-                ops: forwards,
-                inverse_ops: inverses,
+                kind: holon_core::EntryKind::Ops {
+                    ops: forwards,
+                    inverse_ops: inverses,
+                },
                 origin: OpOrigin::User,
                 group_id: 0,
                 precondition: Precondition::forward(&changes),
@@ -1686,8 +1860,10 @@ impl DispatchingOperationEngine {
 
         if origin.is_user() {
             let entry = UndoEntry {
-                ops: vec![forward],
-                inverse_ops: vec![inverse],
+                kind: holon_core::EntryKind::Ops {
+                    ops: vec![forward],
+                    inverse_ops: vec![inverse],
+                },
                 origin: OpOrigin::User,
                 group_id: 0,
                 precondition: Precondition::forward(&changes),
@@ -2013,8 +2189,10 @@ impl DispatchingOperationEngine {
                 .cloned()
                 .collect();
             let entry = UndoEntry {
-                ops: forwards,
-                inverse_ops,
+                kind: holon_core::EntryKind::Ops {
+                    ops: forwards,
+                    inverse_ops,
+                },
                 origin: OpOrigin::User,
                 group_id: 0,
                 precondition: Precondition::forward(&fp_changes),
@@ -2782,8 +2960,7 @@ impl OperationEngine for DispatchingOperationEngine {
             let mut inverse_ops = converge_inverses;
             inverse_ops.push(inverse_op.clone());
             let entry = UndoEntry {
-                ops,
-                inverse_ops,
+                kind: holon_core::EntryKind::Ops { ops, inverse_ops },
                 origin: OpOrigin::User,
                 group_id: 0,
                 precondition: Precondition::forward(&result.changes),
@@ -2851,15 +3028,27 @@ impl OperationEngine for DispatchingOperationEngine {
     }
 
     async fn undo(&self) -> Result<UndoOutcome> {
-        let entry = match self.undo_stack.read().await.peek_undo().cloned() {
-            Some(e) => e,
-            None => return Ok(UndoOutcome::Empty),
+        self.sync_text_epochs().await?;
+        // A superseded text marker is consumed without undoing anything, so
+        // one gesture may have to walk past it to the step the user meant.
+        // The loop is bounded by the stack: every iteration consumes an entry.
+        let entry = loop {
+            let peeked = match self.undo_stack.read().await.peek_undo().cloned() {
+                Some(e) => e,
+                None => return Ok(UndoOutcome::Empty),
+            };
+            if !peeked.is_text_epoch() {
+                break peeked;
+            }
+            if let Some(outcome) = self.undo_text_epoch().await? {
+                return Ok(outcome);
+            }
         };
 
         // One gesture, one hold: the stripes are taken BEFORE the staleness
         // check and released only after the entry is committed, so no external
         // write can land between the check and the replay (task #47).
-        let held = self.lock_entry(&entry.inverse_ops).await;
+        let held = self.lock_entry(entry.inverse_ops()).await;
 
         // Ruling #4: verify BEFORE replaying; a stale entry is dropped loudly,
         // never silently skipped to the next entry.
@@ -2877,8 +3066,8 @@ impl OperationEngine for DispatchingOperationEngine {
         // (The already-replayed inverses are NOT rolled back; the entry stays on
         // the undo stack, un-committed, so the loud error is the single source of
         // truth about the partial state.)
-        let inverse_count = entry.inverse_ops.len();
-        for (idx, op) in entry.inverse_ops.iter().enumerate() {
+        let inverse_count = entry.inverse_ops().len();
+        for (idx, op) in entry.inverse_ops().iter().enumerate() {
             let replayed = self.replay(op, &held).await.map_err(|e| {
                 anyhow::anyhow!(
                     "undo: composite inverse op {idx} of {inverse_count} ('{}' on '{}') failed — \
@@ -2904,14 +3093,23 @@ impl OperationEngine for DispatchingOperationEngine {
     }
 
     async fn redo(&self) -> Result<UndoOutcome> {
-        let entry = match self.undo_stack.read().await.peek_redo().cloned() {
-            Some(e) => e,
-            None => return Ok(UndoOutcome::Empty),
+        self.sync_text_epochs().await?;
+        let entry = loop {
+            let peeked = match self.undo_stack.read().await.peek_redo().cloned() {
+                Some(e) => e,
+                None => return Ok(UndoOutcome::Empty),
+            };
+            if !peeked.is_text_epoch() {
+                break peeked;
+            }
+            if let Some(outcome) = self.redo_text_epoch().await? {
+                return Ok(outcome);
+            }
         };
 
         // Symmetric one-gesture-one-hold (task #47); a redo replays the FORWARD
         // ops, so those name the stripes.
-        let held = self.lock_entry(&entry.ops).await;
+        let held = self.lock_entry(entry.ops()).await;
 
         if let Some(reason) = self.check_stale(&entry.redo_precondition).await? {
             self.undo_stack.write().await.drop_redo();
@@ -2923,8 +3121,8 @@ impl OperationEngine for DispatchingOperationEngine {
         let mut changes = Vec::new();
         // Symmetric partial-failure discipline (Inc1): a composite redo replays
         // N forwards in order; the first failure stops and names its index.
-        let forward_count = entry.ops.len();
-        for (idx, op) in entry.ops.iter().enumerate() {
+        let forward_count = entry.ops().len();
+        for (idx, op) in entry.ops().iter().enumerate() {
             let replayed = self.replay(op, &held).await.map_err(|e| {
                 anyhow::anyhow!(
                     "redo: composite forward op {idx} of {forward_count} ('{}' on '{}') failed — \
@@ -3433,11 +3631,13 @@ mod instantiate_template_tests {
         // with NO `id` param ⇒ the provider rejects it loud ("Missing 'id'
         // parameter"). undo() must stop at index 1.
         let entry = UndoEntry {
-            ops: vec![id_op("block", "create", "block:keep")],
-            inverse_ops: vec![
-                id_op("block", "delete", "block:keep"),
-                Operation::new("block", "delete", "Delete", HashMap::new()),
-            ],
+            kind: holon_core::EntryKind::Ops {
+                ops: vec![id_op("block", "create", "block:keep")],
+                inverse_ops: vec![
+                    id_op("block", "delete", "block:keep"),
+                    Operation::new("block", "delete", "Delete", HashMap::new()),
+                ],
+            },
             origin: OpOrigin::User,
             group_id: 0,
             precondition: Precondition::default(),

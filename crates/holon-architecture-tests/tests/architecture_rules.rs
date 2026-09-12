@@ -160,13 +160,7 @@ fn latency_target_is_suppressed_by_every_filter_builder() {
 
 /// Calls of `WriteTxn::doc()`, which runs under the held write guard. Pinned
 /// per file, so a `txn.doc()` anywhere else still counts as an escape.
-const WRITE_TXN_DOC_SITES: &[(&str, usize)] = &[
-    ("crates/holon-loro/src/loro_share_backend.rs", 3),
-    // The pairing wipe reaches the tree through the `WriteTxn` it is handed,
-    // i.e. inside the held guard — not an escape. The adoption import now goes
-    // through `WriteTxn::import`, which needs no `doc()` at all.
-    ("crates/holon-loro/src/device_pairing_op.rs", 1),
-];
+const WRITE_TXN_DOC_SITES: &[(&str, usize)] = &[("crates/holon-loro/src/loro_share_backend.rs", 3)];
 
 /// Calls of a `doc()` accessor belonging to another type, with that type's
 /// name. Pinned per file, so an escape added alongside them still counts.
@@ -201,6 +195,12 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
         1,
     ),
     ("crates/holon-loro-testing/src/quiescence.rs", 1),
+    // The vault's `UndoManager`: a long-lived observer registered on the doc,
+    // the same shape as a subscription.
+    ("crates/holon-loro/src/text_undo.rs", 2),
+    // The peer-id guard drives Loro's id directly: reading it through the
+    // wrapper's cache is the bug the test exists to catch.
+    ("crates/holon-loro/tests/text_undo_contract.rs", 3),
     // Two `UndoManager::new(&doc)` handoffs. The manager is a long-lived
     // observer registered on the document, the same shape as a subscription.
     ("crates/holon-loro/tests/undo_history_trim_probe.rs", 2),
@@ -220,7 +220,9 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // boundary lock.
     ("crates/holon-loro/src/loro_backend.rs", 10),
     // +1: the origin-watching subscription the scope-origin tests register.
-    ("crates/holon-loro/src/loro_document.rs", 4),
+    // +1: the stray-batch pin, which must build the state a broken write path
+    // would leave behind and so cannot go through `with_write`.
+    ("crates/holon-loro/src/loro_document.rs", 5),
     // +1: the `rehydrate_over` test helper. `rehydrate_shared_trees` is async and
     // so cannot run inside `with_read`'s synchronous closure — the same reason
     // the one production caller below (`loro_module.rs`) carries an escape. The

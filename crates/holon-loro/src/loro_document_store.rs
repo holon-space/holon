@@ -23,6 +23,7 @@ use tracing::info;
 use crate::CanonicalPath;
 use crate::LoroDocument;
 use crate::loro_backend::LoroBackend;
+use crate::text_undo::TextUndo;
 
 /// Which of the store's two LoroDocuments a caller means.
 ///
@@ -76,6 +77,12 @@ pub struct LoroDocumentStore {
     /// in `LoroDocument::new`. Two instances in ONE process must each
     /// inject their own — the env var is process-global and would collide.
     peer_id: Option<u64>,
+    /// The vault document's text-undo manager, built with the global doc.
+    /// Layout has none: a device-local UI arrangement is not the user's typing.
+    /// Install-once, and readable WITHOUT an executor: the journal asks for the
+    /// text side from inside other runtimes, where an async read would have to
+    /// block on one executor from within another.
+    text_undo: Arc<std::sync::OnceLock<Arc<TextUndo>>>,
 }
 
 /// The replicated document's id and file name — the one document a device
@@ -94,6 +101,7 @@ impl LoroDocumentStore {
             doc_id_aliases: Arc::new(RwLock::new(HashMap::new())),
             save_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             peer_id: None,
+            text_undo: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -102,6 +110,50 @@ impl LoroDocumentStore {
     pub fn with_peer_id(mut self, peer_id: Option<u64>) -> Self {
         self.peer_id = peer_id;
         self
+    }
+
+    /// The vault document's text-undo manager, once the global doc exists.
+    ///
+    /// `None` before the first `get_doc(DocScope::Global)`, and on a build that
+    /// never opens the vault document. Callers that need it must say so rather
+    /// than silently doing nothing.
+    pub fn text_undo(&self) -> Option<Arc<TextUndo>> {
+        self.text_undo.get().cloned()
+    }
+
+    /// Build the vault document's undo manager if it does not exist yet.
+    ///
+    /// Deliberately NOT done when the document is opened. A Loro manager is a
+    /// subscriber, and a subscriber makes Loro materialise an event for every
+    /// commit — a cost paid on the whole boot ingest, where there is no typing
+    /// to record. Measured on `quick_open_search_at_vault_scale`: 42-54 s with
+    /// a manager installed at open against 23-31 s without, on one host.
+    ///
+    /// So the manager is armed by the first EDITOR cell instead: an editor is
+    /// live exactly when typing becomes possible, and ingest never asks for
+    /// one. The layout document never gets a manager at all.
+    pub async fn ensure_text_undo(&self) -> Result<Arc<TextUndo>> {
+        if let Some(existing) = self.text_undo.get() {
+            return Ok(existing.clone());
+        }
+        let doc = self.get_doc(DocScope::Global).await?;
+        // Built INSIDE the document's write scope. Loro panics if a subscriber
+        // is registered while the document is emitting
+        // (`loro-internal/src/utils/subscription.rs` `unwrap_left` on the
+        // mid-emit marker), and since increment 0 every commit and import on
+        // this document happens inside a write scope — so holding that scope
+        // is exactly the mutual exclusion the registration needs. The scope
+        // commits nothing; `DocLock` passes reentrant writes through, so a
+        // caller that already holds it cannot deadlock here.
+        let undo = doc.with_write(crate::write_origin::WriteOrigin::UndoArm, |_txn| {
+            Ok(Arc::new(TextUndo::install(doc.clone())))
+        })?;
+        let _ = self.text_undo.set(undo);
+        Ok(self
+            .text_undo
+            .get()
+            .expect("the slot is set above or was already set")
+            .clone())
     }
 
     /// The pinned peer id, if any.

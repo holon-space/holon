@@ -54,6 +54,26 @@ pub enum WriteOrigin {
     ShareLifecycle,
     /// Device pairing: adopting a staged document, wiping the tree.
     DevicePairing,
+    /// The text-undo manager taking a step back or forward.
+    ///
+    /// System-prefixed, so the manager does not re-record its own undo as a
+    /// fresh undoable action. Redo is unaffected: Loro moves the step onto the
+    /// redo stack internally rather than through the origin-recording path
+    /// (pinned by `an_undo_is_not_recorded_as_a_new_undo_step`).
+    UiUndo,
+    /// Building the text-undo manager.
+    ///
+    /// Registers subscriptions and commits nothing. It takes the write scope
+    /// only for mutual exclusion: Loro panics if a subscriber is registered
+    /// while the document is emitting, and emission happens only inside a
+    /// write scope.
+    UndoArm,
+    /// The flush a snapshot export performs before reading the frontier.
+    ///
+    /// It flushes whatever was pending, which by the write-scope contract is
+    /// nothing. The label exists so that if a stray batch ever DOES reach it,
+    /// those ops land excluded from undo rather than under the empty origin.
+    SnapshotFlush,
     /// A test or probe write. Production code never produces this; the label
     /// is what the probe calls itself, so a stray origin in a log names its
     /// test.
@@ -85,6 +105,9 @@ impl WriteOrigin {
         match self {
             Self::UiEditorKeystroke => "ui_editor_keystroke",
             Self::UiValueSet => "ui_value_set",
+            Self::UiUndo => "ui_undo",
+            Self::SnapshotFlush => "snapshot_flush",
+            Self::UndoArm => "undo_arm",
             Self::BlockOps => "block_ops",
             Self::SchemaInit => "schema_init",
             Self::Reconcile => "reconcile",
@@ -105,6 +128,9 @@ mod tests {
         let every = [
             WriteOrigin::UiEditorKeystroke,
             WriteOrigin::UiValueSet,
+            WriteOrigin::UiUndo,
+            WriteOrigin::SnapshotFlush,
+            WriteOrigin::UndoArm,
             WriteOrigin::BlockOps,
             WriteOrigin::SchemaInit,
             WriteOrigin::Reconcile,
@@ -128,6 +154,9 @@ mod tests {
         let every = [
             WriteOrigin::UiEditorKeystroke,
             WriteOrigin::UiValueSet,
+            WriteOrigin::UiUndo,
+            WriteOrigin::SnapshotFlush,
+            WriteOrigin::UndoArm,
             WriteOrigin::BlockOps,
             WriteOrigin::SchemaInit,
             WriteOrigin::Reconcile,

@@ -160,7 +160,11 @@ impl Module for LoroModule {
                     .await
                     .expect("LoroDocumentStore::get_doc(Layout) failed for BlockCellRegistry");
                 let mut registry =
-                    holon_loro::block_cell_registry::BlockCellRegistry::with_loro(collab, layout);
+                    holon_loro::block_cell_registry::BlockCellRegistry::with_loro(collab, layout)
+                        .with_text_undo_arming(
+                            (*doc_store).clone(),
+                            tokio::runtime::Handle::current(),
+                        );
                 // A content cell writes the block's `LoroText` directly, so it
                 // needs the dispatcher's write-tier decision or it becomes a
                 // second, ungated writer (Model.md invariant 4).

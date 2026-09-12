@@ -35,7 +35,6 @@ fn compaction_leaves_an_in_process_undo_manager_able_to_undo() -> Result<()> {
         d.get_text("content").insert(5, "typed")?;
         Ok(())
     })?;
-    undo.record_new_checkpoint()?;
     assert_eq!(doc.get_text("content")?, "seed typed");
     assert!(undo.can_undo(), "the manager must see the typing at all");
 

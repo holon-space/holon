@@ -44,6 +44,7 @@ tokio-stream.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
 holon = { workspace = true, features = ["test-helpers"] }
 holon-block-roundtrip-testing.workspace = true
 holon-org-format.workspace = true
