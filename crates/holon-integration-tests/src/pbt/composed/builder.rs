@@ -579,6 +579,17 @@ async fn compose_sut_seeded_impl(
             comp.engine(),
             resolver.clone(),
         )) as Arc<dyn SutTemplateInstantiate>);
+        // Read-only-home write attempts (`AttemptReadOnlyEdit`,
+        // `AttemptIngestCompoundOnReadOnly`) — registered HERE, in `compose_sut`,
+        // and not after the boot ingest, because `cap_set_for_wiring` is what
+        // `aggregate_transitions` narrows the alphabet with. A cap that appears
+        // only in `boot_and_seed_wide`'s post-ingest insert is invisible to
+        // generation, so both transitions were registered in the alphabet and
+        // never drawn — the silent vacuity `every_transition_is_drawable_in_a_
+        // shipped_composition` exists to catch. The component answers both
+        // methods off its own engine and store, so nothing here needs the
+        // ingest baseline (`SutReadOnlyHomes` does, and stays where it is).
+        caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutReadOnlyEditAttempt>);
         // Runtime entity-type registration (`RegisterEntityScheme`) — the
         // component serves the `create_entity_type` MCP tool over its OWN engine
         // and `TypeRegistry`, i.e. the container the link classifier reads. This

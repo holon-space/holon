@@ -2362,6 +2362,13 @@ pub trait SutReadOnlyHomes {
 
     /// The `condition_kind`s the degraded-signal bus raised over the run.
     async fn raised_degraded_conditions(&self) -> Vec<String>;
+
+    /// How many NON-user-origin compounds this run aimed at a read-only-homed
+    /// block, and how many of them the write-tier gate refused. The gate
+    /// exempts those origins, so a refusal here means a compound's constituent
+    /// was re-judged as a user's edit instead of carrying the compound's own
+    /// provenance down.
+    async fn read_only_ingest_compound_attempts(&self) -> (usize, usize);
 }
 
 #[holon_macros::capmap_adapter]
@@ -2370,6 +2377,17 @@ pub trait SutReadOnlyEditAttempt {
     /// operation dispatcher and record how it went. `Err` carries the
     /// dispatcher's refusal message.
     async fn attempt_read_only_edit(&self, block_id: &str, content: &str) -> Result<(), String>;
+
+    /// Dispatch an INGEST-origin compound at `block_id` through the production
+    /// engine and record how it went.
+    ///
+    /// A compound decomposes into constituent writes the engine sends straight
+    /// to the dispatcher. Each of those must be judged under the compound's
+    /// origin: ingest is the file telling the store what it says, and the
+    /// write-tier gate exempts it. The compound writes the block's own stored
+    /// source back, so an accepted one leaves the store exactly as the file
+    /// left it — the outcome is the tier verdict, not a mutation.
+    async fn attempt_ingest_compound(&self, block_id: &str) -> Result<(), String>;
 }
 
 /// Reference-side twin: which blocks the oracle believes are homed in a

@@ -595,6 +595,7 @@ fn register_subtree_share(injector: &Injector) {
     // second ordering built here would be a Loro-blind writer.
     let ordering_injector = injector.clone();
     let projection_injector = injector.clone();
+    let write_tier_injector = injector.clone();
     injector.provide::<Arc<holon_loro::device_pairing_op::DevicePairing>>(Provider::root(
         move |resolver| {
             let doc_store = resolver.resolve::<LoroDocumentStore>();
@@ -615,11 +616,27 @@ fn register_subtree_share(injector: &Injector) {
                             .await
                     })
                 });
+            // The third import seam's write-tier authority. The re-import
+            // writes through `BlockOrdering`, bypassing the dispatcher's gate,
+            // so it asks the same authority itself. Lazy for the same reason
+            // as `ordering`, and optional for the same reason as the share
+            // backend's: a composition with no vault root registers none.
+            let write_tier_injector = write_tier_injector.clone();
+            let write_tier: holon_loro::device_pairing_op::WriteTierResolver =
+                Arc::new(move || {
+                    let injector = write_tier_injector.clone();
+                    Box::pin(async move {
+                        injector
+                            .optional_resolve_async::<dyn holon_core::WriteTierAuthority>()
+                            .await
+                    })
+                });
             Shared::new(Arc::new(holon_loro::device_pairing_op::DevicePairing::new(
                 (*doc_store).clone(),
                 (*advertiser).clone(),
                 ordering,
                 projection,
+                write_tier,
                 (*bus).clone(),
             )))
         },

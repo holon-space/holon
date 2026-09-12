@@ -489,6 +489,18 @@ pub type OrderingResolver = std::sync::Arc<
         + Sync,
 >;
 
+/// Resolves the write-tier authority the re-import must consult, lazily and
+/// for the same reason as [`OrderingResolver`]. `None` where the composition
+/// registered none — a session with no vault root, which therefore holds no
+/// read-only-format document either.
+pub type WriteTierResolver = std::sync::Arc<
+    dyn Fn() -> futures::future::BoxFuture<
+            'static,
+            Option<std::sync::Arc<dyn holon_core::WriteTierAuthority>>,
+        > + Send
+        + Sync,
+>;
+
 /// Resolves the downstream SQL projection, lazily and for the same reason as
 /// [`OrderingResolver`].
 pub type ProjectionResolver = std::sync::Arc<
@@ -506,6 +518,7 @@ pub struct DevicePairing {
     offer: tokio::sync::Mutex<Option<LiveOffer>>,
     ordering: OrderingResolver,
     projection: ProjectionResolver,
+    write_tier: WriteTierResolver,
     bus: std::sync::Arc<DegradedSignalBus>,
 }
 
@@ -515,6 +528,7 @@ impl DevicePairing {
         advertiser: std::sync::Arc<IrohAdvertiser>,
         ordering: OrderingResolver,
         projection: ProjectionResolver,
+        write_tier: WriteTierResolver,
         bus: std::sync::Arc<DegradedSignalBus>,
     ) -> Self {
         Self {
@@ -523,6 +537,7 @@ impl DevicePairing {
             offer: tokio::sync::Mutex::new(None),
             ordering,
             projection,
+            write_tier,
             bus,
         }
     }
@@ -807,6 +822,7 @@ impl DevicePairing {
     ) -> anyhow::Result<Reimport> {
         let plan = plan_reimport(own, &self.live_blocks().await?);
         if !plan.requests.is_empty() {
+            self.adopt_into_read_only_homes(&plan.requests).await?;
             (self.ordering)()
                 .await
                 .create_in_tree_batch(&plan.requests)
@@ -820,6 +836,53 @@ impl DevicePairing {
             divergent: plan.divergent,
             orphans: plan.orphans,
         })
+    }
+
+    /// The write-tier decision for the blocks this re-import is about to
+    /// write — the third seam that turns a remote fact into a local row.
+    ///
+    /// The re-import writes through [`BlockOrdering`], never the operation
+    /// dispatcher, so the dispatcher's gate never sees it. A block the archive
+    /// hung under a document homed in a read-only format must earn that
+    /// document's refusal here, or the pair leaves this device holding text
+    /// that is editable and that no writer can ever put into the authoritative
+    /// file.
+    ///
+    /// Asked BEFORE the creates, so no window exists in which the rows are
+    /// live and editable. Requests are parent-before-child, so a chain of them
+    /// adopts as a chain: [`ReadOnlyDocuments::adopt`] reads the bindings its
+    /// earlier calls made.
+    async fn adopt_into_read_only_homes(
+        &self,
+        requests: &[BlockCreateRequest],
+    ) -> anyhow::Result<()> {
+        let Some(authority) = (self.write_tier)().await else {
+            return Ok(());
+        };
+        if !authority.any_read_only_documents() {
+            return Ok(());
+        }
+        for request in requests {
+            let adopted = authority
+                .adopt_sync_import(request.id.as_str(), request.parent_id.as_str())
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "write-tier adoption of the re-imported block {}: {e}",
+                        request.id
+                    )
+                })?;
+            if adopted {
+                tracing::warn!(
+                    block = %request.id,
+                    parent = %request.parent_id,
+                    "[DevicePairing] the pairing re-import placed a block under a \
+                     read-only-homed document. It is stored and it is uneditable: no writer can \
+                     ever put it into the authoritative file."
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Fail loud when an id names more than one live node.

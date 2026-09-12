@@ -211,6 +211,11 @@ async fn interrupted_pair(also_archived: Vec<NewBlockWithProperties>) -> Result<
                 Arc::new(CountingProjection(Mutex::new(0))) as Arc<dyn DownstreamProjection>
             })
         }),
+        // No vault, so no read-only-format document to inherit a home from.
+        // The seam itself is pinned by
+        // `holon-integration-tests/tests/pairing_reimport_read_only_home.rs`,
+        // which boots a real vault holding one.
+        Arc::new(|| Box::pin(async { None })),
         bus.clone(),
     );
 

@@ -285,6 +285,9 @@ pub struct HeadlessFrontendComponent {
     /// refused)`. Counted separately so a run that attempted nothing is
     /// distinguishable from a run whose refusals all fired.
     read_only_attempts: Mutex<(usize, usize)>,
+    /// `(attempts, refusals)` for the ingest-origin compound rung — the
+    /// constituent-provenance half of the same gate.
+    read_only_ingest_compound: Mutex<(usize, usize)>,
 }
 
 /// Does this defining SELECT carry a real BIND PLACEHOLDER (so
@@ -767,6 +770,7 @@ impl HeadlessFrontendComponent {
             render_cache_enabled: std::sync::atomic::AtomicBool::new(false),
             read_only_ingest: Mutex::new(None),
             read_only_attempts: Mutex::new((0, 0)),
+            read_only_ingest_compound: Mutex::new((0, 0)),
         }
     }
 
@@ -6884,7 +6888,11 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
 // second rule that could agree while production's diverges.
 
 impl HeadlessFrontendComponent {
-    async fn write_tier_authority(&self) -> Option<Arc<dyn holon_core::WriteTierAuthority>> {
+    /// The production authority every writer in this session consults — the
+    /// same object the operation dispatcher, the content cell and the pairing
+    /// re-import hold. Public so a two-instance oracle can ask the RECEIVING
+    /// device for its own verdict rather than re-deriving one.
+    pub async fn write_tier_authority(&self) -> Option<Arc<dyn holon_core::WriteTierAuthority>> {
         self.injector()
             .optional_resolve_async::<dyn holon_core::WriteTierAuthority>()
             .await
@@ -6956,6 +6964,13 @@ impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponen
             .expect("read_only_attempts poisoned")
     }
 
+    async fn read_only_ingest_compound_attempts(&self) -> (usize, usize) {
+        *self
+            .read_only_ingest_compound
+            .lock()
+            .expect("read_only_ingest_compound poisoned")
+    }
+
     async fn raised_degraded_conditions(&self) -> Vec<String> {
         let Some(bus) = self
             .injector()
@@ -6997,6 +7012,52 @@ impl holon_pbt_core::capabilities::SutReadOnlyEditAttempt for HeadlessFrontendCo
             .read_only_attempts
             .lock()
             .expect("read_only_attempts poisoned");
+        counts.0 += 1;
+        if outcome.is_err() {
+            counts.1 += 1;
+        }
+        outcome
+    }
+
+    async fn attempt_ingest_compound(&self, block_id: &str) -> Result<(), String> {
+        // The block's OWN stored source, so an accepted compound writes back
+        // what the file already said: the verdict is what this measures, and
+        // the store is left exactly as the ingest left it.
+        let source = self
+            .sql_query(&format!(
+                "SELECT content FROM block_raw WHERE id = '{block_id}'"
+            ))
+            .await
+            .first()
+            .and_then(|row| Self::cell(row, "content"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "[read-only homes] {block_id} is declared read-only-homed but has no \
+                     block_raw row to re-write"
+                )
+            });
+        let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
+        params.insert("id".into(), holon_api::Value::String(block_id.to_string()));
+        params.insert(
+            "field".into(),
+            holon_api::Value::String(holon_api::SOURCE_TEXT_FIELD.into()),
+        );
+        params.insert("value".into(), holon_api::Value::String(source));
+        let outcome = self
+            .engine()
+            .execute_operation(
+                &holon_api::EntityName::from("block".to_string()),
+                "set_field",
+                params,
+                holon_api::OpOrigin::Ingest,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        let mut counts = self
+            .read_only_ingest_compound
+            .lock()
+            .expect("read_only_ingest_compound poisoned");
         counts.0 += 1;
         if outcome.is_err() {
             counts.1 += 1;

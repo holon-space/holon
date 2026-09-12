@@ -976,12 +976,16 @@ impl DispatchingOperationEngine {
             .execute_operation(&op.entity_name, &op.op_name, params)
             .await
             .map_err(|e| anyhow::anyhow!("undo/redo replay of '{}' failed: {e}", op.op_name))?;
+        // A replay is the user taking their own gesture back, so its
+        // convergence repairs are judged as the user's too.
         if let Some((id, promotion)) = &converged {
-            let (_, _, ch) = self.write_converged_task_state(id, promotion).await?;
+            let (_, _, ch) = self
+                .write_converged_task_state(id, promotion, &OpOrigin::User)
+                .await?;
             result.changes.extend(ch);
         }
         let (_, _, post_ch) = self
-            .converge_after_write(&op.entity_name, &result.changes)
+            .converge_after_write(&op.entity_name, &result.changes, &OpOrigin::User)
             .await?;
         result.changes.extend(post_ch);
         Ok(result.changes)
@@ -1096,6 +1100,33 @@ impl DispatchingOperationEngine {
         Ok(Some(Value::String(root_id)))
     }
 
+    /// Route ONE constituent write of a compound to the dispatcher under the
+    /// COMPOUND's origin.
+    ///
+    /// A constituent is not a gesture of its own: it is part of the operation
+    /// that entered the engine, so every gate below — the write tier's above
+    /// all — must judge it by that operation's provenance. Dispatching it as a
+    /// user's edit would let an ingest-origin compound be refused for a rule
+    /// no ingest is subject to. `Verbatim` because the compound computed these
+    /// bytes; nothing here was freshly authored.
+    async fn dispatch_constituent_op(
+        &self,
+        op_name: &str,
+        params: StorageEntity,
+        origin: &OpOrigin,
+    ) -> Result<holon_core::OperationResult> {
+        self.dispatcher
+            .execute_operation_with_provenance(
+                &EntityName::new("block"),
+                op_name,
+                params,
+                AuthoredInput::Verbatim,
+                origin.clone(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     /// Dispatch ONE constituent write of the block→page compound through the
     /// normal dispatcher path (exactly as the UI would), returning the stored
     /// FORWARD op (for redo), its exact op-level INVERSE (for undo), and the
@@ -1105,6 +1136,7 @@ impl DispatchingOperationEngine {
         &self,
         op_name: &str,
         params: StorageEntity,
+        origin: &OpOrigin,
     ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
         let block = EntityName::new("block");
         let forward = Operation::new(
@@ -1117,8 +1149,7 @@ impl DispatchingOperationEngine {
                 .collect(),
         );
         let result = self
-            .dispatcher
-            .execute_operation(&block, op_name, params)
+            .dispatch_constituent_op(op_name, params, origin)
             .await
             .map_err(|e| {
                 anyhow::anyhow!("convert_block_to_page: constituent '{op_name}' failed: {e}")
@@ -1240,7 +1271,7 @@ impl DispatchingOperationEngine {
             p.insert("parent_id".into(), Value::String(seg.parent_id.clone()));
             p.insert("tags".into(), page_tag());
             let p = self.stamp_provenance("create", p, origin)?;
-            let (fwd, inv, ch) = self.dispatch_constituent("create", p).await?;
+            let (fwd, inv, ch) = self.dispatch_constituent("create", p, origin).await?;
             forwards.push(fwd);
             seg_invs.push(inv);
             all_changes.extend(ch);
@@ -1264,7 +1295,7 @@ impl DispatchingOperationEngine {
             pc.insert("marks".into(), Value::String(marks.clone()));
         }
         let pc = self.stamp_provenance("create", pc, origin)?;
-        let (fwd, p_inv, ch) = self.dispatch_constituent("create", pc).await?;
+        let (fwd, p_inv, ch) = self.dispatch_constituent("create", pc, origin).await?;
         forwards.push(fwd);
         all_changes.extend(ch);
 
@@ -1296,7 +1327,7 @@ impl DispatchingOperationEngine {
                     mp.insert("after_block_id".into(), Value::Null);
                 }
             }
-            let (fwd, inv, ch) = self.dispatch_constituent("move_block", mp).await?;
+            let (fwd, inv, ch) = self.dispatch_constituent("move_block", mp, origin).await?;
             forwards.push(fwd);
             child_invs.push(inv);
             all_changes.extend(ch);
@@ -1342,7 +1373,7 @@ impl DispatchingOperationEngine {
         sf.insert("id".into(), Value::String(plan.origin_id.clone()));
         sf.insert("field".into(), Value::String("marks".into()));
         sf.insert("value".into(), Value::String(marks_to_json(&link_marks)));
-        let (fwd, marks_inv, ch) = self.dispatch_constituent("set_field", sf).await?;
+        let (fwd, marks_inv, ch) = self.dispatch_constituent("set_field", sf, origin).await?;
         forwards.push(fwd);
         all_changes.extend(ch);
 
@@ -1352,7 +1383,7 @@ impl DispatchingOperationEngine {
         rw.insert("from".into(), Value::String(plan.origin_id.clone()));
         rw.insert("to".into(), Value::String(plan.page_id.clone()));
         let (fwd, rewrite_inv, ch) = self
-            .dispatch_constituent("rewrite_link_resolution", rw)
+            .dispatch_constituent("rewrite_link_resolution", rw, origin)
             .await?;
         forwards.push(fwd);
         all_changes.extend(ch);
@@ -1427,6 +1458,7 @@ impl DispatchingOperationEngine {
         &self,
         op: &str,
         params: StorageEntity,
+        origin: &OpOrigin,
     ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
         let block = EntityName::new("block");
         let forward = Operation::new(
@@ -1439,8 +1471,7 @@ impl DispatchingOperationEngine {
                 .collect(),
         );
         let result = self
-            .dispatcher
-            .execute_operation(&block, "set_field", params)
+            .dispatch_constituent_op("set_field", params, origin)
             .await
             .map_err(|e| anyhow::anyhow!("{op}: constituent set_field failed: {e}"))?;
         let inverse = match result.undo {
@@ -1666,6 +1697,7 @@ impl DispatchingOperationEngine {
         &self,
         entity_name: &EntityName,
         changes: &[FieldDelta],
+        origin: &OpOrigin,
     ) -> Result<(Vec<Operation>, Vec<Operation>, Vec<FieldDelta>)> {
         let mut forwards = Vec::new();
         let mut inverses = Vec::new();
@@ -1695,7 +1727,7 @@ impl DispatchingOperationEngine {
                 p.insert("field".into(), Value::String(field.to_string()));
                 p.insert("value".into(), Value::String(value));
                 let (fwd, inv, ch) = self
-                    .dispatch_task_keyword_constituent(CONVERGE_TASK_KEYWORD_OP, p)
+                    .dispatch_task_keyword_constituent(CONVERGE_TASK_KEYWORD_OP, p, origin)
                     .await?;
                 forwards.push(fwd);
                 // Leaf-first: undo drops the task state before restoring the
@@ -1712,6 +1744,7 @@ impl DispatchingOperationEngine {
         &self,
         id: &str,
         promotion: &holon_org_format::Promotion,
+        origin: &OpOrigin,
     ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
         let mut p = StorageEntity::new();
         p.insert("id".into(), Value::String(id.to_string()));
@@ -1720,7 +1753,7 @@ impl DispatchingOperationEngine {
             "value".into(),
             Value::String(promotion.keyword.keyword.clone()),
         );
-        self.dispatch_task_keyword_constituent(CONVERGE_TASK_KEYWORD_OP, p)
+        self.dispatch_task_keyword_constituent(CONVERGE_TASK_KEYWORD_OP, p, origin)
             .await
     }
 
@@ -1800,7 +1833,11 @@ impl DispatchingOperationEngine {
         let keyword_changed = prior_keyword.unwrap_or_default() != keyword;
 
         let (c_fwd, c_inv, mut changes) = self
-            .dispatch_task_keyword_constituent(SOURCE_TEXT_FIELD, constituent("content", &content))
+            .dispatch_task_keyword_constituent(
+                SOURCE_TEXT_FIELD,
+                constituent("content", &content),
+                origin,
+            )
             .await?;
         let mut forwards = vec![c_fwd];
         // Leaf-first: undo drops the task state before restoring the text it
@@ -1811,6 +1848,7 @@ impl DispatchingOperationEngine {
                 .dispatch_task_keyword_constituent(
                     SOURCE_TEXT_FIELD,
                     constituent("task_state", &keyword),
+                    origin,
                 )
                 .await?;
             changes.extend(t_changes);
@@ -1888,7 +1926,7 @@ impl DispatchingOperationEngine {
         // `set_field("task_state")` pairs the `task_state_category` sidecar in
         // the same write, so the pair invariant holds without a second op.
         let (forward, inverse, changes) = self
-            .dispatch_task_keyword_constituent(CYCLE_TASK_STATE_OP, set_field_params)
+            .dispatch_task_keyword_constituent(CYCLE_TASK_STATE_OP, set_field_params, origin)
             .await?;
 
         if origin.is_user() {
@@ -2001,7 +2039,9 @@ impl DispatchingOperationEngine {
                 "value".into(),
                 Value::String(plan.duplicate_content.clone()),
             );
-            let (fwd, inv, ch) = self.dispatch_merge_constituent("set_field", sf).await?;
+            let (fwd, inv, ch) = self
+                .dispatch_merge_constituent("set_field", sf, origin)
+                .await?;
             forwards.push(fwd);
             field_invs.push(inv);
             all_changes.extend(ch);
@@ -2021,7 +2061,9 @@ impl DispatchingOperationEngine {
             cp.insert("parent_id".into(), Value::String(plan.canonical_id.clone()));
             cp.insert("after_block_id".into(), Value::Null);
             let cp = self.stamp_provenance("create", cp, origin)?;
-            let (fwd, inv, ch) = self.dispatch_merge_constituent("create", cp).await?;
+            let (fwd, inv, ch) = self
+                .dispatch_merge_constituent("create", cp, origin)
+                .await?;
             forwards.push(fwd);
             field_invs.push(inv);
             all_changes.extend(ch);
@@ -2067,7 +2109,9 @@ impl DispatchingOperationEngine {
                         .to_string(),
                 ),
             );
-            let (fwd, inv, ch) = self.dispatch_merge_constituent("move_block", mp).await?;
+            let (fwd, inv, ch) = self
+                .dispatch_merge_constituent("move_block", mp, origin)
+                .await?;
             forwards.push(fwd);
             move_invs.push(inv);
             all_changes.extend(ch);
@@ -2105,7 +2149,9 @@ impl DispatchingOperationEngine {
                                 .to_string(),
                         ),
                     );
-                    let (fwd, inv, ch) = self.dispatch_merge_constituent("move_block", mp).await?;
+                    let (fwd, inv, ch) = self
+                        .dispatch_merge_constituent("move_block", mp, origin)
+                        .await?;
                     forwards.push(fwd);
                     dedupe_move_invs.push(inv);
                     all_changes.extend(ch);
@@ -2117,14 +2163,18 @@ impl DispatchingOperationEngine {
                 }
                 // The loser's id keeps resolving, to the keeper.
                 absorbed.push((loser.id.clone(), plan.merged_at));
-                let (fwd, inv, ch) = self.write_merged_from(&group.keeper, &absorbed).await?;
+                let (fwd, inv, ch) = self
+                    .write_merged_from(&group.keeper, &absorbed, origin)
+                    .await?;
                 forwards.push(fwd);
                 dedupe_field_invs.push(inv);
                 all_changes.extend(ch);
 
                 let mut dp = StorageEntity::new();
                 dp.insert("id".into(), Value::String(loser.id.clone()));
-                let (fwd, inv, ch) = self.dispatch_merge_constituent("delete", dp).await?;
+                let (fwd, inv, ch) = self
+                    .dispatch_merge_constituent("delete", dp, origin)
+                    .await?;
                 forwards.push(fwd);
                 dedupe_delete_invs.push(inv);
                 all_changes.extend(ch);
@@ -2146,7 +2196,9 @@ impl DispatchingOperationEngine {
                     .collect(),
             ),
         );
-        let (fwd, inv, ch) = self.dispatch_merge_constituent("set_field", tp).await?;
+        let (fwd, inv, ch) = self
+            .dispatch_merge_constituent("set_field", tp, origin)
+            .await?;
         forwards.push(fwd);
         field_invs.push(inv);
         all_changes.extend(ch);
@@ -2156,7 +2208,9 @@ impl DispatchingOperationEngine {
             pp.insert("id".into(), Value::String(plan.canonical_id.clone()));
             pp.insert("field".into(), Value::String(key.clone()));
             pp.insert("value".into(), value.clone());
-            let (fwd, inv, ch) = self.dispatch_merge_constituent("set_field", pp).await?;
+            let (fwd, inv, ch) = self
+                .dispatch_merge_constituent("set_field", pp, origin)
+                .await?;
             forwards.push(fwd);
             field_invs.push(inv);
             all_changes.extend(ch);
@@ -2168,7 +2222,7 @@ impl DispatchingOperationEngine {
         let mut absorbed = plan.existing_merged_from.clone();
         absorbed.push((plan.duplicate_id.clone(), plan.merged_at));
         let (fwd, redirect_inv, ch) = self
-            .write_merged_from(&plan.canonical_id, &absorbed)
+            .write_merged_from(&plan.canonical_id, &absorbed, origin)
             .await?;
         forwards.push(fwd);
         all_changes.extend(ch);
@@ -2179,7 +2233,7 @@ impl DispatchingOperationEngine {
         rw.insert("from".into(), Value::String(plan.duplicate_id.clone()));
         rw.insert("to".into(), Value::String(plan.canonical_id.clone()));
         let (fwd, rewrite_inv, ch) = self
-            .dispatch_merge_constituent("rewrite_link_resolution", rw)
+            .dispatch_merge_constituent("rewrite_link_resolution", rw, origin)
             .await?;
         forwards.push(fwd);
         all_changes.extend(ch);
@@ -2187,7 +2241,9 @@ impl DispatchingOperationEngine {
         // 8. The duplicate is now childless and its id redirects; delete it.
         let mut dp = StorageEntity::new();
         dp.insert("id".into(), Value::String(plan.duplicate_id.clone()));
-        let (fwd, delete_inv, ch) = self.dispatch_merge_constituent("delete", dp).await?;
+        let (fwd, delete_inv, ch) = self
+            .dispatch_merge_constituent("delete", dp, origin)
+            .await?;
         forwards.push(fwd);
         all_changes.extend(ch);
 
@@ -2261,6 +2317,7 @@ impl DispatchingOperationEngine {
         &self,
         op_name: &str,
         params: StorageEntity,
+        origin: &OpOrigin,
     ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
         let block = EntityName::new("block");
         let forward = Operation::new(
@@ -2273,8 +2330,7 @@ impl DispatchingOperationEngine {
                 .collect(),
         );
         let result = self
-            .dispatcher
-            .execute_operation(&block, op_name, params)
+            .dispatch_constituent_op(op_name, params, origin)
             .await
             .map_err(|e| anyhow::anyhow!("merge_blocks: constituent '{op_name}' failed: {e}"))?;
         let inverse = match result.undo {
@@ -2298,6 +2354,7 @@ impl DispatchingOperationEngine {
         &self,
         to_id: &str,
         absorbed: &[(String, i64)],
+        origin: &OpOrigin,
     ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
         use crate::core::merge_blocks_plan::MERGED_FROM_FIELD;
         use crate::core::merge_blocks_plan::render_merged_from;
@@ -2306,7 +2363,8 @@ impl DispatchingOperationEngine {
         p.insert("id".into(), Value::String(to_id.to_string()));
         p.insert("field".into(), Value::String(MERGED_FROM_FIELD.into()));
         p.insert("value".into(), Value::String(render_merged_from(absorbed)));
-        self.dispatch_merge_constituent("set_field", p).await
+        self.dispatch_merge_constituent("set_field", p, origin)
+            .await
     }
 
     /// The synthetic descriptor advertising the engine-level `merge_blocks` op
@@ -2561,8 +2619,7 @@ impl DispatchingOperationEngine {
         let create = self.stamp_provenance("create", create, origin)?;
 
         let result = self
-            .dispatcher
-            .execute_operation(&EntityName::new("block"), "create", create)
+            .dispatch_constituent_op("create", create, origin)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -2604,8 +2661,7 @@ impl DispatchingOperationEngine {
         );
         create.insert("content".into(), Value::String("Proposals".to_string()));
         let create = self.stamp_provenance("create", create, origin)?;
-        self.dispatcher
-            .execute_operation(&EntityName::new("block"), "create", create)
+        self.dispatch_constituent_op("create", create, origin)
             .await
             .map_err(|e| anyhow::anyhow!("trust gate: creating proposals root failed: {e}"))?;
         Ok(())
@@ -2719,8 +2775,7 @@ impl DispatchingOperationEngine {
         let mut update: StorageEntity = StorageEntity::new();
         update.insert("id".into(), Value::String(proposal_id.clone()));
         update.insert(Arc::from(PROPOSAL_PROPERTY), resolved.to_value());
-        self.dispatcher
-            .execute_operation(&EntityName::new("block"), "update", update)
+        self.dispatch_constituent_op("update", update, origin)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -2936,13 +2991,15 @@ impl OperationEngine for DispatchingOperationEngine {
         let mut converge_forwards = Vec::new();
         let mut converge_inverses = Vec::new();
         if let Some((id, promotion)) = &converged {
-            let (fwd, inv, ch) = self.write_converged_task_state(id, promotion).await?;
+            let (fwd, inv, ch) = self
+                .write_converged_task_state(id, promotion, &origin)
+                .await?;
             result.changes.extend(ch);
             converge_forwards.push(fwd);
             converge_inverses.push(inv);
         }
         let (post_fwd, post_inv, post_ch) = self
-            .converge_after_write(entity_name, &result.changes)
+            .converge_after_write(entity_name, &result.changes, &origin)
             .await?;
         result.changes.extend(post_ch);
         converge_forwards.extend(post_fwd);

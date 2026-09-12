@@ -1936,6 +1936,223 @@ async fn solo_then_pair(
     (day, accepted, handle)
 }
 
+/// The recipe step the receiver's OWN `.cook` file ingests as, and the block
+/// this device hung under it before it was ever paired. `CookFormatAdapter`
+/// derives the step id from the file path, so the owner minted the same one.
+const RECEIVER_RECIPE_STEP: &str = "block:keystone-recipe.cook::b::0";
+const SOLO_RECIPE_NOTE: &str = "block:solo-recipe-note";
+/// The negative control's block: same device, same pre-pair seeding route,
+/// same re-import — only the parent's home differs.
+const SOLO_ORDINARY_NOTE: &str = "block:solo-ordinary-note";
+
+/// The production write-tier authority of ONE side — the object that device's
+/// own dispatcher, content cell and pairing re-import all consult. Asking the
+/// receiver for its verdict is the point: a re-import that skipped the
+/// authority leaves this answering `None`.
+async fn write_tier_of(
+    handle: &std::sync::Arc<
+        holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    >,
+    owner: bool,
+) -> std::sync::Arc<dyn holon_core::WriteTierAuthority> {
+    let side = if owner {
+        handle.owner()
+    } else {
+        handle.receiver()
+    };
+    side.frontend()
+        .expect("both instances boot the full_headless frontend")
+        .write_tier_authority()
+        .await
+        .expect("a vault-rooted composition registers the write-tier authority")
+}
+
+/// Put TWO blocks in the receiver's Loro tree directly: one under the
+/// read-only-homed recipe step, one under an ordinary parent.
+///
+/// Directly, because the production dispatcher REFUSES a user create under the
+/// recipe — correctly, and that refusal is already pinned. What this models is
+/// the block being present before the pair for any other reason (an earlier
+/// sync, a file that was writable when it was written), which is all the
+/// re-import needs to meet.
+///
+/// The second block is the negative control, and it is seeded by the SAME
+/// route through the SAME re-import so that the parent's home is the only
+/// thing that differs between them. Without it, both oracles below would also
+/// pass against an authority that refused every block in the store.
+async fn seed_the_receivers_pre_pair_notes(
+    handle: &std::sync::Arc<
+        holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    >,
+    ordinary_parent: &holon_api::EntityUri,
+) {
+    let store = handle
+        .receiver()
+        .frontend()
+        .expect("the receiver boots the full_headless frontend")
+        .loro_doc_store()
+        .expect("the receiver boots with Loro as the block authority");
+    let doc = store
+        .get_doc(holon_loro::DocScope::Global)
+        .await
+        .expect("the receiver's global document");
+    let note = |parent: holon_api::EntityUri, id: &str, text: &str| {
+        holon_loro::loro_backend::NewBlockWithProperties {
+            parent_id: parent,
+            id: holon_api::EntityUri::parse(id).expect("a literal note uri"),
+            content: holon_api::BlockContent::text(text),
+            properties: std::collections::HashMap::new(),
+            edges: holon_api::BlockEdges::default(),
+        }
+    };
+    holon_loro::loro_backend::LoroBackend::from_document(doc)
+        .create_blocks_with_properties(vec![
+            note(
+                holon_api::EntityUri::parse(RECEIVER_RECIPE_STEP)
+                    .expect("a literal recipe-step uri"),
+                SOLO_RECIPE_NOTE,
+                "use duck eggs next time",
+            ),
+            note(ordinary_parent.clone(), SOLO_ORDINARY_NOTE, "bought milk"),
+        ])
+        .await
+        .expect("seeding the receiver's pre-pair notes");
+}
+
+/// The block `id` as the receiver holds it after the pair, with the parent the
+/// re-import gave it — or a failure naming which of the two went missing, so
+/// an oracle below can never read as satisfied because its subject is absent.
+fn reimported<'a>(
+    tree: &'a std::collections::BTreeMap<String, holon_api::SnapshotBlock>,
+    id: &str,
+    expected_parent: &str,
+) -> &'a holon_api::SnapshotBlock {
+    let block = tree.get(id).unwrap_or_else(|| {
+        panic!(
+            "`{id}` is absent after the pair, so the tier oracle over it would be vacuous — the \
+             re-import did not carry it into the adopted store"
+        )
+    });
+    assert_eq!(
+        block.block.parent_id.as_str(),
+        expected_parent,
+        "`{id}` was re-imported under {:?}, not under `{expected_parent}`, so this run measures a \
+         different placement than the one under test",
+        block.block.parent_id.as_str()
+    );
+    block
+}
+
+/// **The third write-tier seam, in the composed two-instance slice (D118.a).**
+///
+/// The whole-store pairing re-import writes through `BlockOrdering`, never the
+/// operation dispatcher, so nothing it does is judged by the dispatcher's
+/// write-tier gate. A block it places under a document homed in a
+/// `WriteTier::ReadOnly` file must inherit that home's refusal, or the pair
+/// leaves this device holding text it can edit and no writer can ever put into
+/// the authoritative file.
+///
+/// Driven through the shipping path: `device.pair_offer` on the owner and
+/// `device.pair_with_owner` on the receiver, both dispatched on their own
+/// production engines, and the verdict read off the RECEIVER's own authority.
+///
+/// Two oracles and a standing negative control:
+/// (a) the re-imported block earns the recipe's refusal;
+/// (b) a user edit aimed at it through the receiver's production engine is
+///     refused, and names the format;
+/// (c) a second block, re-imported the same way under an ORDINARY parent, is
+///     NOT refused and DOES take a user edit — so (a) and (b) cannot be
+///     satisfied by an authority that refuses everything, which is the way
+///     this rung would otherwise rot into a tautology.
+#[test]
+fn a_pairing_reimport_under_a_read_only_home_inherits_its_refusal() {
+    use holon_pbt_core::capabilities::SutReadOnlyEditAttempt;
+
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    rt.block_on(async {
+        let resolver = IdResolver::default();
+        let (_caps, handle, _) = holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_a_read_only_homed_receiver_on(&resolver, &ref_state, TransportChoice::Relay).await;
+
+        // The premise: this run armed the seam. Without it (b) could pass
+        // because nothing on this device is read-only-homed at all.
+        let receiver_tier = write_tier_of(&handle, false).await;
+        assert!(
+            receiver_tier
+                .refusal_for(RECEIVER_RECIPE_STEP)
+                .await
+                .expect("the receiver's authority answers")
+                .is_some(),
+            "the receiver's boot did not record `{RECEIVER_RECIPE_STEP}` as read-only-homed, so \
+             this run never armed the pairing seam under test"
+        );
+
+        let day = receiver_day_block(&handle).await;
+        seed_the_receivers_pre_pair_notes(&handle, &day).await;
+        let (_, accepted) = run_production_pairing(&handle).await;
+        accepted.unwrap_or_else(|e| {
+            panic!("pairing a receiver that holds its own content was REFUSED: {e}")
+        });
+
+        let receiver_tree = handle.loro_tree_state(false, &BTreeSet::new()).await;
+        reimported(&receiver_tree, SOLO_RECIPE_NOTE, RECEIVER_RECIPE_STEP);
+        reimported(&receiver_tree, SOLO_ORDINARY_NOTE, day.as_str());
+
+        // (a) the tier verdict, from the receiving device's own authority.
+        assert!(
+            receiver_tier
+                .refusal_for(SOLO_RECIPE_NOTE)
+                .await
+                .expect("the receiver's authority answers")
+                .is_some(),
+            "`{SOLO_RECIPE_NOTE}` was re-imported under `{RECEIVER_RECIPE_STEP}`, a block of the \
+             read-only-format recipe, yet the receiver's production WriteTierAuthority still \
+             lets it be edited. The pair reopened the hole the refusal closed."
+        );
+
+        // (b) and the writer that reads that verdict actually refuses.
+        let refusal = handle
+            .receiver()
+            .frontend()
+            .expect("the receiver boots the full_headless frontend")
+            .attempt_read_only_edit(SOLO_RECIPE_NOTE, "rewritten")
+            .await
+            .expect_err(
+                "a user edit to the re-imported block was ACCEPTED; the store would hold text no \
+                 writer can ever put into the recipe file",
+            );
+        assert!(
+            refusal.contains("read-only format"),
+            "the refusal must name the tier so the UI can disclose it; got: {refusal}"
+        );
+
+        // (c) the control. Same device, same seeding route, same re-import,
+        // ordinary parent — so a `Some` here would mean the authority refuses
+        // by something other than the home, and (a) and (b) above would prove
+        // nothing about the recipe.
+        assert_eq!(
+            receiver_tier
+                .refusal_for(SOLO_ORDINARY_NOTE)
+                .await
+                .expect("the receiver's authority answers"),
+            None,
+            "`{SOLO_ORDINARY_NOTE}` hangs under an ordinary parent, yet the receiver's authority \
+             refuses it too — the tier verdict is not reading the home, so the oracles above are \
+             satisfied by a gate that refuses everything"
+        );
+        handle
+            .receiver()
+            .frontend()
+            .expect("the receiver boots the full_headless frontend")
+            .attempt_read_only_edit(SOLO_ORDINARY_NOTE, "two litres")
+            .await
+            .expect(
+                "a user edit to an ordinary re-imported block was REFUSED; the write-tier gate is \
+                 refusing beyond the read-only home, which makes the refusal above meaningless",
+            );
+    });
+}
+
 /// **Pairing a phone that was already used standalone (D78.d).**
 ///
 /// The ruling: pairing a non-empty receiver does NOT merge two CRDT histories.

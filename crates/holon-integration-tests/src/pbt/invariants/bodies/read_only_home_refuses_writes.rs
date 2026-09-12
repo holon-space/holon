@@ -5,6 +5,11 @@
 //!   disclosed
 //! @pbt covers read-only-home-write-boundary — a store-origin write against a
 //!   block whose document is homed in a `WriteTier::ReadOnly` file
+//! @pbt covers compound-constituent-origin — an ingest-origin compound against
+//!   the same block, which the gate exempts and must keep exempt through the
+//!   compound's decomposition
+//! @pbt slips-if-removed a compound's constituents are re-judged as a user's
+//!   edit, so an ingest cannot re-write the blocks of the file it is reading
 //! @pbt slips-if-removed a write to a `.cook`-homed block lands in `block_raw`
 //!   with no writer able to put it on disk, so the store says one thing and the
 //!   authoritative file another, and the user is never told
@@ -73,6 +78,23 @@ where
                 "block `{id}` is homed in a read-only file, yet `block_raw` no longer holds what \
                  the ingest wrote: ingested {ingested:?}, stored {stored:?}. A write reached the \
                  store that the disk can never take."
+            ));
+        }
+
+        // The other side of the same gate: an origin it EXEMPTS must stay
+        // exempt through a compound's decomposition. The constituents of a
+        // compound go straight to the dispatcher, so one dispatched as a
+        // user's edit turns the boundary into a refusal of the ingest itself —
+        // the file telling the store what it says, rejected because the store
+        // may not tell the file.
+        let (compounds, compound_refusals) = sut.read_only_ingest_compound_attempts().await;
+        if compound_refusals > 0 {
+            return InvariantResult::Fail(format!(
+                "{compound_refusals} of {compounds} INGEST-origin compound(s) aimed at a \
+                 read-only-homed block were refused by the write-tier gate, which exempts that \
+                 origin. Their constituents were judged as a user's edit instead of carrying the \
+                 compound's own provenance down, so an ingest cannot re-write the blocks of the \
+                 very file it is reading."
             ));
         }
 

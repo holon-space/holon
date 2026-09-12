@@ -745,6 +745,33 @@ pub async fn boot_two_instances_with_an_empty_receiver_on(
     (owner_caps, handle, scaffold)
 }
 
+/// Boot both instances on a NAMED wire with a receiver whose OWN vault holds
+/// the read-only-format recipe, so the receiving device's `ReadOnlyDocuments`
+/// registry — the one the pairing re-import consults — has an entry to inherit
+/// from.
+///
+/// The owner boots the same file from the wide fixture, so the recipe's blocks
+/// carry the SAME path-derived ids on both sides: the re-import skips the steps
+/// themselves and hangs whatever the receiver put under one beneath the owner's
+/// node of that id, which is the shape the write-tier seam has to judge.
+pub async fn boot_two_instances_with_a_read_only_homed_receiver_on(
+    resolver: &IdResolver,
+    ref_state: &ReferenceState,
+    transport: TransportChoice,
+) -> (CapMap, Arc<TwoInstanceHandle>, BTreeSet<EntityUri>) {
+    let (owner_caps, _receiver_caps, handle, scaffold) = boot_two_instances_seeded_on(
+        resolver,
+        ref_state,
+        transport,
+        &[(
+            crate::pbt::composed::wide_e2e::READ_ONLY_RECIPE_FILE,
+            crate::pbt::composed::wide_e2e::KEYSTONE_RECIPE_COOK,
+        )],
+    )
+    .await;
+    (owner_caps, handle, scaffold)
+}
+
 /// The receiver's vault holds ONE block the owner also holds under the same id
 /// with different text — the divergence a device used solo brings to a pair,
 /// and the only thing pairing can turn into a conflict copy here. The page

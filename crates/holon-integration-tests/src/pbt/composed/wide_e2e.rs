@@ -1263,11 +1263,13 @@ pub async fn boot_and_seed_wide_with_peer_id(
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         frontend.snapshot_read_only_ingest().await;
+        // Only the invariant's read cap is inserted here: it reports against the
+        // baseline the line above takes, so it cannot exist before the ingest
+        // settles. The write-attempt cap is registered in `compose_sut`, where
+        // generation can see it.
         caps.insert(
             frontend.clone() as std::sync::Arc<dyn holon_pbt_core::capabilities::SutReadOnlyHomes>
         );
-        caps.insert(frontend.clone()
-            as std::sync::Arc<dyn holon_pbt_core::capabilities::SutReadOnlyEditAttempt>);
     }
 
     install_observability_caps(&mut caps, None);
