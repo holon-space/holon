@@ -14,6 +14,7 @@
 //! is its own entry and closes the open group. Deterministic — no clocks.
 
 use async_trait::async_trait;
+use holon_api::EntityUri;
 use holon_api::OpOrigin;
 use holon_api::Operation;
 use holon_api::Value;
@@ -26,9 +27,15 @@ use crate::traits::FieldDelta;
 /// Read the current value of a projected (entity, field) so a stored
 /// [`Precondition`] can be verified against live state at replay time.
 /// Implemented in the `holon` crate over the replica's projection table.
+///
+/// The entity is typed, not a string: the projection keys its rows by the
+/// SCHEME-QUALIFIED id, while the write leg accepts an unschemed one and
+/// normalizes it. A `&str` parameter let the two forms drift apart silently —
+/// a read addressed by the bare form matched no row, and the caller could not
+/// tell "this entity has no such value" from "I asked the wrong question".
 #[async_trait]
 pub trait UndoStateReader: Send + Sync {
-    async fn field_value(&self, entity_id: &str, field: &str) -> anyhow::Result<Option<Value>>;
+    async fn field_value(&self, entity: &EntityUri, field: &str) -> anyhow::Result<Option<Value>>;
 }
 
 /// Persist the undo/redo history per replica DB so it survives a restart.
@@ -70,9 +77,22 @@ pub async fn verify_precondition(
 /// [`Precondition`] fingerprint.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FieldFingerprint {
-    pub entity_id: String,
+    /// Parsed once, where the fingerprint is taken from a [`FieldDelta`], so
+    /// the replay-time read cannot be addressed by a form the projection does
+    /// not key on. A persisted snapshot is the other entry point, hence the
+    /// healing deserializer.
+    #[serde(deserialize_with = "entity_uri_from_stored")]
+    pub entity_id: EntityUri,
     pub field: String,
     pub expected: Value,
+}
+
+/// Parse the entity id of a fingerprint read back from a persisted undo
+/// snapshot. Snapshots written before the id was typed can carry an unschemed
+/// id, which is a `block` id — the same reading the write leg gives it.
+fn entity_uri_from_stored<'de, D: serde::Deserializer<'de>>(d: D) -> Result<EntityUri, D::Error> {
+    let raw = String::deserialize(d)?;
+    EntityUri::try_from_raw(&raw).map_err(serde::de::Error::custom)
 }
 
 /// A fingerprint of the state an inverse (or forward) replay was computed
@@ -93,7 +113,10 @@ impl Precondition {
                 .iter()
                 .filter(|d| d.fingerprint == DeltaFingerprint::Readable)
                 .map(|d| FieldFingerprint {
-                    entity_id: d.entity_id.clone(),
+                    // ALLOW(entity_uri_from_raw): the delta's entity id enters
+                    // from an operation param, where an unschemed id names the
+                    // block — the reading the write leg already gave it.
+                    entity_id: EntityUri::from_raw(&d.entity_id),
                     field: d.field.clone(),
                     expected: d.new_value.clone(),
                 })
@@ -109,7 +132,8 @@ impl Precondition {
                 .iter()
                 .filter(|d| d.fingerprint == DeltaFingerprint::Readable)
                 .map(|d| FieldFingerprint {
-                    entity_id: d.entity_id.clone(),
+                    // ALLOW(entity_uri_from_raw): see `forward`.
+                    entity_id: EntityUri::from_raw(&d.entity_id),
                     field: d.field.clone(),
                     expected: d.old_value.clone(),
                 })
@@ -135,7 +159,7 @@ fn merge_fingerprints<'a>(
     use std::collections::BTreeMap;
     use std::collections::btree_map::Entry;
 
-    let mut by_key: BTreeMap<(String, String), Value> = BTreeMap::new();
+    let mut by_key: BTreeMap<(EntityUri, String), Value> = BTreeMap::new();
     for pre in preconditions {
         for fp in &pre.fields {
             if is_derived_positional_field(&fp.field) {
@@ -405,9 +429,9 @@ impl UndoEntry {
     }
 
     /// If this entry is a single-character text edit on one (entity, field),
-    /// return `(entity_id, field, old_text, new_text)`. Only such entries
+    /// return `(entity, field, old_text, new_text)`. Only such entries
     /// participate in word-boundary coalescing.
-    fn coalescible_edit(&self) -> Option<(String, String, String, String)> {
+    fn coalescible_edit(&self) -> Option<(EntityUri, String, String, String)> {
         if self.ops().len() != 1 || self.inverse_ops().len() != 1 {
             return None;
         }
@@ -416,7 +440,12 @@ impl UndoEntry {
         if fwd.op_name != "set_field" {
             return None;
         }
-        let entity_id = fwd.params.get("id").and_then(Value::as_string_owned)?;
+        let raw_id = fwd.params.get("id").and_then(Value::as_string_owned)?;
+        // Parsed here for the same reason the fingerprint is: the raw param
+        // carries either id form, and two spellings of one block must not open
+        // two coalescing groups. The journalled ops keep their raw strings.
+        // ALLOW(entity_uri_from_raw): `fwd.params["id"]` is an operation param.
+        let entity_id = EntityUri::from_raw(&raw_id);
         let field = fwd.params.get("field").and_then(Value::as_string_owned)?;
         let new_text = fwd.params.get("value").and_then(Value::as_string_owned)?;
         let old_text = inv.params.get("value").and_then(restored_text)?;
@@ -492,7 +521,7 @@ fn classify_delta(old: &str, new: &str) -> EditDelta {
 /// Grouping state for the top-of-stack open group.
 #[derive(Clone, Debug)]
 struct OpenGroup {
-    key: (String, String),
+    key: (EntityUri, String),
     mode: GroupMode,
 }
 
@@ -1140,7 +1169,10 @@ mod tests_original {
 
         // Forward precondition = LAST op's post-state (C).
         assert_eq!(e.precondition.fields.len(), 1, "one merged field");
-        assert_eq!(e.precondition.fields[0].entity_id, "b1");
+        assert_eq!(
+            e.precondition.fields[0].entity_id,
+            holon_api::EntityUri::block("b1")
+        );
         assert_eq!(e.precondition.fields[0].field, "content");
         assert_eq!(
             e.precondition.fields[0].expected.as_string_owned(),

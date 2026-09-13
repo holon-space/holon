@@ -147,7 +147,12 @@ impl PresenceReader {
 
 #[async_trait]
 impl UndoStateReader for PresenceReader {
-    async fn field_value(&self, entity_id: &str, field: &str) -> anyhow::Result<Option<Value>> {
+    async fn field_value(
+        &self,
+        entity: &holon_api::EntityUri,
+        field: &str,
+    ) -> anyhow::Result<Option<Value>> {
+        let entity_id = entity.as_str();
         // The create's fingerprint is on the `id` column: present → Some(id),
         // absent → None.
         if field == "id"

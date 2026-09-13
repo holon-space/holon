@@ -194,7 +194,12 @@ struct StoreReader {
 
 #[async_trait]
 impl UndoStateReader for StoreReader {
-    async fn field_value(&self, entity_id: &str, field: &str) -> anyhow::Result<Option<Value>> {
+    async fn field_value(
+        &self,
+        entity: &holon_api::EntityUri,
+        field: &str,
+    ) -> anyhow::Result<Option<Value>> {
+        let entity_id = entity.as_str();
         if field == "properties" {
             return Ok(self.store.properties(entity_id).map(Value::Object));
         }

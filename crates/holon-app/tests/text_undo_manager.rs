@@ -557,49 +557,15 @@ async fn interleaved_typing_and_operations_walk_back_in_one_order() {
         0,
         "markers survived a full walk back: {outcomes:?}"
     );
-    // Recorded, not asserted: which mechanism answered each press. The
-    // journalled entries' outcomes are the R1b measurement (see the report).
-    eprintln!("[ONE-STACK] outcomes in order: {outcomes:?}");
-}
-
-/// CONTROL for the above: a journalled `set_field` alone, no typing, no
-/// manager armed. Isolates whether increment 2 causes the stale-drop.
-///
-/// MEASURED: it stale-drops here too, with `found None` — the precondition
-/// reader cannot read the field at all, rather than finding a changed value.
-/// So the cause is this harness's live-state reader, not the text markers:
-/// nothing in this test arms a manager or writes a marker. Asserted rather
-/// than merely noted so that fixing the harness turns this red and whoever
-/// fixes it revisits the interleaving test above, which is currently unable to
-/// observe journalled restoration.
-#[tokio::test(flavor = "multi_thread")]
-async fn control_a_journalled_set_field_alone_stale_drops_on_this_harness() {
-    let booted = harness::boot_a_working_session().await;
-
-    let mut params: holon_api::StorageEntity = HashMap::new();
-    params.insert("id".into(), Value::String(PROBE_CHILD.to_string()));
-    params.insert("field".into(), Value::String("content".to_string()));
-    params.insert("value".into(), Value::String("set by the user".to_string()));
-    booted
-        .engine
-        .execute_operation(
-            &holon_api::EntityName::from("block"),
-            "set_field",
-            params,
-            OpOrigin::User,
-        )
-        .await
-        .expect("a user set_field through the production dispatcher");
-
-    let outcome = booted.engine.undo().await.expect("undo must not refuse");
-    match outcome {
-        holon_api::UndoOutcome::StaleDropped { reason } => assert!(
-            reason.contains("found None"),
-            "the stale-drop should be the reader finding nothing; got: {reason}"
-        ),
-        other => panic!(
-            "the harness gap this control documents is fixed — got {other:?}. Re-enable \
-             end-state assertions in interleaved_typing_and_operations_walk_back_in_one_order."
-        ),
+    // A stale-drop is legitimate here — the ingest rewrite genuinely moves the
+    // content out from under the second journalled entry. What may never
+    // happen again is a drop because the reader could not see the field at all.
+    for outcome in &outcomes {
+        assert!(
+            !outcome.contains("found None"),
+            "a press dropped because the precondition reader found nothing, not because the \
+             state diverged: {outcomes:?}"
+        );
     }
+    eprintln!("[ONE-STACK] outcomes in order: {outcomes:?}");
 }

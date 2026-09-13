@@ -1237,12 +1237,12 @@ impl DispatchingOperationEngine {
         // unchanged content). The reference mirrors this refusal with the SAME
         // `recognize_derived_id`; the SUT driver tolerates the `IdentityCollision`.
         if let Some(reader) = &self.reader {
-            let holder_title = reader
-                .field_value(&plan.page_id, "content")
-                .await?
-                .and_then(|v| v.as_string().map(str::to_string));
             // ALLOW(entity_uri_from_raw): plan.page_id is a derived PageId::for_path id.
             let page_uri = holon_api::EntityUri::from_raw(&plan.page_id);
+            let holder_title = reader
+                .field_value(&page_uri, "content")
+                .await?
+                .and_then(|v| v.as_string().map(str::to_string));
             if let holon_api::Recognition::Collision(collision) = holon_api::recognize_derived_id(
                 &page_uri,
                 holder_title.as_deref(),
@@ -1501,15 +1501,17 @@ impl DispatchingOperationEngine {
                  engine was built without one"
             )
         })?;
-        if reader.field_value(id, "id").await?.is_none() {
+        // ALLOW(entity_uri_from_raw): `id` is the operation's own `id` param.
+        let uri = holon_api::EntityUri::from_raw(id);
+        if reader.field_value(&uri, "id").await?.is_none() {
             bail!("{op}: block {id} does not exist");
         }
         let content = reader
-            .field_value(id, "content")
+            .field_value(&uri, "content")
             .await?
             .and_then(|v| v.as_string().map(str::to_string))
             .unwrap_or_default();
-        let keyword = match reader.field_value(id, "properties").await? {
+        let keyword = match reader.field_value(&uri, "properties").await? {
             None | Some(Value::Null) => None,
             Some(Value::Object(map)) => map
                 .get("task_state")
@@ -1560,7 +1562,9 @@ impl DispatchingOperationEngine {
         let Some(reader) = self.reader.as_ref() else {
             return Ok(None);
         };
-        let keyword = match reader.field_value(id, "properties").await? {
+        // ALLOW(entity_uri_from_raw): `id` is the operation's own `id` param.
+        let uri = holon_api::EntityUri::from_raw(id);
+        let keyword = match reader.field_value(&uri, "properties").await? {
             None | Some(Value::Null) => None,
             Some(Value::Object(map)) => map
                 .get("task_state")
@@ -2582,7 +2586,7 @@ impl DispatchingOperationEngine {
         // (Loro upsert semantics), so the check is skipped, disclosed by type.
         if let Some(reader) = &self.reader
             && reader
-                .field_value(proposal_id.as_str(), "id")
+                .field_value(&proposal_id, "id")
                 .await
                 .context("trust gate: proposal existence check")?
                 .is_some()
@@ -2646,7 +2650,7 @@ impl DispatchingOperationEngine {
         let root_uri = EntityUri::block(PROPOSALS_ROOT_ID);
         if let Some(reader) = &self.reader
             && reader
-                .field_value(root_uri.as_str(), "id")
+                .field_value(&root_uri, "id")
                 .await
                 .context("trust gate: proposals root existence check")?
                 .is_some()
@@ -2693,8 +2697,10 @@ impl DispatchingOperationEngine {
             )
         })?;
 
+        // ALLOW(entity_uri_from_raw): `proposal_id` is the operation's `id` param.
+        let proposal_uri = holon_api::EntityUri::from_raw(&proposal_id);
         let properties = reader
-            .field_value(&proposal_id, "properties")
+            .field_value(&proposal_uri, "properties")
             .await
             .with_context(|| format!("{verb}_proposal: reading proposal '{proposal_id}'"))?
             .ok_or_else(|| {

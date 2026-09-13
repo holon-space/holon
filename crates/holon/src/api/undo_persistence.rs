@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
+use holon_api::EntityUri;
 use holon_api::Value;
 use holon_core::UndoStateReader;
 use holon_core::UndoStore;
@@ -113,10 +114,13 @@ fn assert_identifier(name: &str, kind: &str) -> Result<()> {
 
 #[async_trait]
 impl UndoStateReader for SqlUndoStateReader {
-    async fn field_value(&self, entity_id: &str, field: &str) -> Result<Option<Value>> {
+    async fn field_value(&self, entity: &EntityUri, field: &str) -> Result<Option<Value>> {
         assert_identifier(field, "field")?;
         assert_identifier(&self.table, "table")?;
-        let escaped = entity_id.replace('\'', "''");
+        // The write table keys its rows by the SCHEME-QUALIFIED id, which is
+        // what `EntityUri::as_str` renders. This is the one place the id
+        // becomes SQL text.
+        let escaped = entity.as_str().replace('\'', "''");
         let sql = format!("SELECT {field} FROM {} WHERE id = '{escaped}'", self.table);
         let rows = self
             .db
