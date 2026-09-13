@@ -273,7 +273,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 
 ### Known reds
 
-- `bulk-add-sibling-order-under-journals`
+- `bulk-add-sibling-order`
 - `cooklang-read-only-split-block-refusal`
 - `deletebackward-sql-reads-budget`
 - `drawer-open-matches-ref`
