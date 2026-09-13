@@ -288,6 +288,11 @@ pub enum DegradedKind {
     /// A credential field that saves nothing is the one thing a user must not
     /// have to infer, so the banner stands for the whole session.
     SecretsHeldInMemory,
+    /// Yellow — the previous session's undo history was discarded at boot
+    /// (D116.a). Undo deliberately does not survive a restart, and a person
+    /// who typed before it would otherwise press cmd-z and get nothing with no
+    /// explanation.
+    UndoHistoryClearedAtBoot,
     /// Yellow — a peer joined a share by proving the ticket's BEARER secret
     /// rather than as a paired device. The share works; what is disclosed is
     /// that its trust rests on a secret that travelled (ADR 0028 R5 stopgap).
@@ -677,6 +682,19 @@ impl ShareUiState {
                     kind: DegradedKind::SecretsHeldInMemory,
                     shared_tree_id: event.shared_tree_id,
                     detail: why.into(),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ShareDegradedReason::UndoHistoryClearedAtBoot { entries } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::UndoHistoryClearedAtBoot,
+                    shared_tree_id: event.shared_tree_id,
+                    detail: format!(
+                        "{entries} step{} from the previous session were discarded",
+                        if entries == 1 { "" } else { "s" }
+                    )
+                    .into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
@@ -2331,6 +2349,11 @@ fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
             gpui::rgba(0xfbbf24ff),
             crate::icon("🔑"),
             "Secrets are not being saved",
+        ),
+        DegradedKind::UndoHistoryClearedAtBoot => (
+            gpui::rgba(0xfbbf24ff),
+            crate::icon("↩"),
+            "Undo history did not survive the restart",
         ),
         DegradedKind::PairingReimported => {
             (gpui::rgba(0x60a5faff), "i", "Content kept from this device")

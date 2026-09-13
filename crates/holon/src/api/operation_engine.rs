@@ -132,6 +132,10 @@ pub struct DispatchingOperationEngine {
     /// the CRDT's manager becomes available: `enable_undo_persistence` REPLACES
     /// this engine, so the delegate cannot be a constructor argument.
     text_undo: std::sync::OnceLock<Arc<dyn holon_core::TextUndoDelegate>>,
+    /// How many undo entries the previous session left behind and this boot
+    /// discarded (D116.a). Non-zero is disclosed on the degraded bus by the
+    /// session wiring; zero is the ordinary case.
+    discarded_at_boot: usize,
     /// Read capability for `instantiate_template`
     /// (docs/Proposals/Templating-2026-07-12.md). `None` on a wiring without a
     /// queryable block projection — the operation then fails loud, disclosed.
@@ -533,6 +537,7 @@ impl DispatchingOperationEngine {
             seq: AtomicI64::new(0),
             clock: Arc::new(SystemClock),
             text_undo: std::sync::OnceLock::new(),
+            discarded_at_boot: 0,
             history: None,
             template_source: None,
             vocabulary_source: None,
@@ -614,15 +619,36 @@ impl DispatchingOperationEngine {
         reader: Arc<dyn UndoStateReader>,
         store: Arc<dyn UndoStore>,
     ) -> Result<Self> {
-        let (stack, seq) = match store.load().await? {
-            Some(json) => {
-                let stack: UndoStack = serde_json::from_str(&json)
-                    .map_err(|e| anyhow::anyhow!("undo snapshot deserialize: {e}"))?;
-                (stack, 1)
-            }
-            None => (UndoStack::default(), 0),
+        // D116.a: undo does NOT survive a restart. The CRDT's text-undo manager
+        // is rebuilt empty at every boot, so a text-epoch marker from a previous
+        // session stands for typing nothing can take back; and a journal half
+        // restored (operations kept, typing dropped) would replay out of the
+        // order the user worked in. Clearing the whole thing is the only shape
+        // that keeps ONE honest order. The previous session's snapshot is read
+        // ONLY to count what is being discarded, so the boot can disclose it.
+        let discarded = match store.load().await? {
+            Some(json) => serde_json::from_str::<UndoStack>(&json)
+                // An unreadable snapshot still means a previous session left
+                // history here; report at least one rather than none.
+                .map_or(1, |prior| prior.undo_len()),
+            None => 0,
+        };
+        let stack = UndoStack::default();
+        let seq = if discarded > 0 {
+            // Overwrite the stale snapshot now, so a crash before the first
+            // journalled step cannot resurrect it on the next boot.
+            store
+                .save(&serde_json::to_string(&stack)?, 1)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("clearing the previous session's undo journal: {e}")
+                })?;
+            1
+        } else {
+            0
         };
         Ok(Self {
+            discarded_at_boot: discarded,
             dispatcher,
             undo_stack: Arc::new(RwLock::new(stack)),
             reader: Some(reader),
@@ -789,6 +815,13 @@ impl DispatchingOperationEngine {
         }
         drop(stack);
         self.persist().await
+    }
+
+    /// How many undo entries the previous session left behind and this boot
+    /// discarded (D116.a). Zero on a fresh replica and on every boot after the
+    /// first, because the journal is cleared as it is read.
+    pub fn discarded_at_boot(&self) -> usize {
+        self.discarded_at_boot
     }
 
     /// How many text-epoch markers the undo side currently holds.

@@ -429,8 +429,14 @@ async fn empty_stack_reports_empty() {
     assert_eq!(fx.engine.redo().await.unwrap(), UndoOutcome::Empty);
 }
 
+/// D116.a REVERSED THIS. Undo deliberately does NOT survive a restart: the
+/// CRDT's text-undo manager is rebuilt empty, so a text-epoch marker from a
+/// previous session stands for typing nothing can take back, and a journal half
+/// restored would replay out of the order the user worked in. The whole journal
+/// goes, and the boot reports how much it discarded so the session can disclose
+/// it.
 #[tokio::test]
-async fn persistence_survives_reload() {
+async fn a_restart_discards_the_journal_and_counts_what_it_dropped() {
     let fx = fixture().await;
     fx.reader.set(BLOCK_ID, FIELD, NEW);
     execute_edit(&fx.engine, OpOrigin::User).await;
@@ -444,29 +450,32 @@ async fn persistence_survives_reload() {
     )
     .await
     .expect("reloaded engine");
-    assert!(
-        engine2.can_undo().await,
-        "undo history must survive a restart"
-    );
 
-    let outcome = engine2.undo().await.expect("undo after reload");
-    assert_eq!(outcome, UndoOutcome::Applied);
-    let last = fx.log.lock().unwrap().last().cloned().unwrap();
-    assert_eq!(
-        last,
-        ("set_field".to_string(), Some(OLD.to_string())),
-        "reloaded entry must replay the stored inverse"
+    assert!(
+        !engine2.can_undo().await,
+        "undo history survived a restart (D116.a says it must not)"
     );
+    assert_eq!(
+        engine2.discarded_at_boot(),
+        1,
+        "the boot must count what it discarded, or the session cannot disclose it"
+    );
+    assert_eq!(
+        engine2.undo().await.unwrap(),
+        UndoOutcome::Empty,
+        "a discarded journal reports an empty stack, not a stale drop"
+    );
+    assert_eq!(replay_count(&fx.log), 0, "nothing may be replayed");
 }
 
+/// And a SECOND restart discards nothing, because the first one overwrote the
+/// stale snapshot as it read it — otherwise every later boot would keep
+/// re-announcing the same lost history.
 #[tokio::test]
-async fn stale_after_reload_drops_loudly() {
+async fn a_second_restart_has_nothing_left_to_discard() {
     let fx = fixture().await;
     fx.reader.set(BLOCK_ID, FIELD, NEW);
     execute_edit(&fx.engine, OpOrigin::User).await;
-
-    // Mutate underneath between "restart"s.
-    fx.reader.set(BLOCK_ID, FIELD, "changed-while-down");
 
     let engine2 = DispatchingOperationEngine::new_persistent(
         fx.dispatcher.clone(),
@@ -474,14 +483,22 @@ async fn stale_after_reload_drops_loudly() {
         fx.store.clone(),
     )
     .await
-    .expect("reloaded engine");
-    let outcome = engine2.undo().await.expect("undo after reload");
-    assert!(
-        matches!(outcome, UndoOutcome::StaleDropped { .. }),
-        "stale persisted entry must drop loudly, got {outcome:?}"
+    .expect("second boot");
+    assert_eq!(engine2.discarded_at_boot(), 1);
+
+    let engine3 = DispatchingOperationEngine::new_persistent(
+        fx.dispatcher.clone(),
+        fx.reader.clone(),
+        fx.store.clone(),
+    )
+    .await
+    .expect("third boot");
+    assert_eq!(
+        engine3.discarded_at_boot(),
+        0,
+        "the cleared snapshot was not written back, so the loss is announced again every boot"
     );
-    assert_eq!(replay_count(&fx.log), 0);
-    assert!(!engine2.can_undo().await);
+    assert!(!engine3.can_undo().await);
 }
 
 /// BugFunnel 2026-07-13 undo row, part 2 — a provably-vacuous forward write (a

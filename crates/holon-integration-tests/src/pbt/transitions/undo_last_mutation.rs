@@ -41,10 +41,14 @@ impl<R: RefLifecycle + RefBlockTreeMut> TransitionFactory<R> for UndoLastMutatio
 
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
-        // Turso-only: undo routes through `ctx.engine().undo()` (the Turso
-        // `BackendEngine`); the no-Turso wiring has no engine and no Loro undo
-        // path is wired for a1. Gate it out of {Loro} slices.
-        ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
+        // Undo routes through `ctx.engine().undo()`, which now answers on both
+        // legs: the journal replays inverse operations, and a text-epoch marker
+        // delegates one step to the CRDT's undo manager (D115.A increment 2).
+        // A slice with neither block store has nothing to undo against.
+        ::holon_pbt_core::RequiredWiring::any_storage_of([
+            ::holon_pbt_core::StorageAdapter::Loro,
+            ::holon_pbt_core::StorageAdapter::Turso,
+        ])
     }
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         UndoLastMutation

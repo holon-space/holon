@@ -1113,6 +1113,12 @@ impl BackendEngine {
         self.op_engine.sync_text_epochs().await
     }
 
+    /// How many undo entries the previous session left behind and this boot
+    /// discarded (D116.a).
+    pub fn undo_entries_discarded_at_boot(&self) -> usize {
+        self.op_engine.discarded_at_boot()
+    }
+
     /// How many text-epoch markers the journal holds.
     pub async fn text_epoch_count(&self) -> usize {
         self.op_engine.text_epoch_count().await

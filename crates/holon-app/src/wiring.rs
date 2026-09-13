@@ -492,6 +492,21 @@ impl FrontendInjectorExt for Injector {
                     .await;
                 tracing::info!("[FrontendSession] factory: BackendEngine resolved");
 
+                // D116.a: undo does not survive a restart. The engine cleared
+                // the previous session's journal as it read it; disclose that,
+                // because a person who typed before the restart would otherwise
+                // press cmd-z and get nothing with no explanation.
+                let discarded = engine.undo_entries_discarded_at_boot();
+                if discarded > 0 {
+                    let bus = resolver.resolve::<Arc<holon_loro::DegradedSignalBus>>();
+                    bus.emit(holon_loro::ShareDegraded {
+                        shared_tree_id: "undo".to_string(),
+                        reason: holon_loro::ShareDegradedReason::UndoHistoryClearedAtBoot {
+                            entries: discarded,
+                        },
+                    });
+                }
+
                 // The text half of the user's one undo stack (D115.A). Only a
                 // CRDT session has one; on SqlOnly the journal replays inverse
                 // operations for everything, which is why undo keeps working

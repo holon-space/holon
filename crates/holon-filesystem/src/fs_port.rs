@@ -75,14 +75,44 @@ pub trait FileSystem: Send + Sync {
 /// Production adapter: thin passthrough to `tokio::fs` / `std::fs`.
 pub struct RealFileSystem;
 
+/// Name the path in an io error.
+///
+/// A bare `No such file or directory (os error 2)` travelling up through an
+/// operation dispatch says nothing about WHICH file was missing, and the
+/// operation error that wraps it can only add the operation and the entity —
+/// it never knew the path. Naming it here, at the syscall, is the only place
+/// the information exists. Also says whether the parent directory is there,
+/// which separates "the vault went away" from "this document's folder was
+/// never created".
+fn at_path(op: &str, path: &Path, e: std::io::Error) -> std::io::Error {
+    let parent = path.parent();
+    std::io::Error::new(
+        e.kind(),
+        format!(
+            "{e} while {op} {} (parent {}: {})",
+            path.display(),
+            parent.map_or_else(|| "<none>".to_string(), |p| p.display().to_string()),
+            match parent {
+                Some(p) if p.is_dir() => "exists",
+                Some(_) => "MISSING",
+                None => "n/a",
+            }
+        ),
+    )
+}
+
 #[async_trait]
 impl FileSystem for RealFileSystem {
     async fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
-        tokio::fs::read_to_string(path).await
+        tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| at_path("reading", path, e))
     }
 
     async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
-        tokio::fs::read(path).await
+        tokio::fs::read(path)
+            .await
+            .map_err(|e| at_path("reading", path, e))
     }
 
     async fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
@@ -209,11 +239,19 @@ pub fn write_atomic_blocking(path: &Path, contents: &[u8]) -> std::io::Result<()
         }
         std::fs::rename(&temp, path)
     };
-    replace().inspect_err(|_| {
-        // The write's own error is what the caller acts on; a leftover temp
-        // would be dead weight in the vault, so drop it best-effort.
-        let _ = std::fs::remove_file(&temp);
-    })
+    replace()
+        .inspect_err(|_| {
+            // The write's own error is what the caller acts on; a leftover temp
+            // would be dead weight in the vault, so drop it best-effort.
+            let _ = std::fs::remove_file(&temp);
+        })
+        // A bare `No such file or directory (os error 2)` names neither the
+        // file nor the missing parent, so a write-back failure reaches the
+        // caller — and the operation error a user or a gate sees — with no way
+        // to tell WHICH path was absent. Say which, and whether the parent
+        // exists: that distinguishes "the vault directory went away" from "the
+        // document's folder was never created".
+        .map_err(|e| at_path("atomically writing", path, e))
 }
 
 /// Synchronous gitignore-aware recursive walk — the single source of truth

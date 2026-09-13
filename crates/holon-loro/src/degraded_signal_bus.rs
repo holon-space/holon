@@ -195,6 +195,16 @@ pub enum ShareDegradedReason {
     /// All-clear: none within a session — the backend is chosen once at boot.
     /// The condition ends when the process restarts without that variable.
     SecretsHeldInMemory { why: String },
+    /// The undo history from the previous session was discarded at boot
+    /// (D116.a): undo deliberately does NOT survive a restart, because the
+    /// CRDT's text-undo manager is rebuilt empty and a journal entry standing
+    /// for typing it no longer holds could not be honoured. Cleared rather
+    /// than half-kept, and disclosed rather than silently absent — a person
+    /// who typed before the restart would otherwise press cmd-z and get
+    /// nothing with no explanation.
+    ///
+    /// All-clear: none — it is a one-shot notice about this boot.
+    UndoHistoryClearedAtBoot { entries: usize },
     /// A file NAMES a connection but cannot be used, so the connection does
     /// not exist: a stale `schema_version`, a file that will not parse, a
     /// reference to another connection's secret, or two files claiming one
@@ -289,6 +299,7 @@ impl ShareDegradedReason {
     pub const PAIRING_REIMPORT_DEFERRED: &'static str = "pairing-reimport-deferred";
     pub const REHYDRATION_FAILED: &'static str = "rehydration-failed";
     pub const SECRETS_HELD_IN_MEMORY: &'static str = "secrets-held-in-memory";
+    pub const UNDO_HISTORY_CLEARED_AT_BOOT: &'static str = "undo-history-cleared-at-boot";
     pub const SHARED_SUBTREE_NOT_MATERIALIZED: &'static str = "shared-subtree-not-materialized";
     pub const SNAPSHOT_LOAD_FAILED: &'static str = "snapshot-load-failed";
     pub const SNAPSHOT_SAVE_FAILED: &'static str = "snapshot-save-failed";
@@ -314,6 +325,7 @@ impl ShareDegradedReason {
             Self::IntegrationSidecarNotBundled { .. } => Self::INTEGRATION_SIDECAR_NOT_BUNDLED,
             Self::IntegrationSidecarUnusable { .. } => Self::INTEGRATION_SIDECAR_UNUSABLE,
             Self::SecretsHeldInMemory { .. } => Self::SECRETS_HELD_IN_MEMORY,
+            Self::UndoHistoryClearedAtBoot { .. } => Self::UNDO_HISTORY_CLEARED_AT_BOOT,
             Self::SnapshotSaveFailed(_) => Self::SNAPSHOT_SAVE_FAILED,
             Self::SnapshotLoadFailed(_) => Self::SNAPSHOT_LOAD_FAILED,
             Self::RehydrationFailed(_) => Self::REHYDRATION_FAILED,
