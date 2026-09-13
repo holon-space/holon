@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 77 transitions; the repo declares 76 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 78 transitions; the repo declares 76 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -56,7 +56,7 @@ The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-inte
 | Slash commands | Slash-menu keystroke sequence resolving to a command | `TriggerSlashCommand`; `inv-viewmodel-editable-text-triggers` | [0024](../adr/0024-unified-action-execution.md) | — | `crates/holon-frontend/src/popup_menu.rs` |
 | Templates | A canned inline template instantiates into real blocks | `InstantiateTemplate` | [0024](../adr/0024-unified-action-execution.md) | — | `crates/holon-frontend/src/popup_menu.rs` |
 
-Open reds here: `editor-text-mirror`, `movecursor-unopened-editor`, `split-id-no-pairing`, `syn-real-mint`.
+Open reds here: `editor-text-mirror`, `editor-caret-mirror`, `movecursor-unopened-editor`, `split-id-no-pairing`, `syn-real-mint`.
 
 `syn-real-mint` is a block-loss detector, not a minting defect.
 
@@ -137,7 +137,7 @@ Open reds here: `task-state-storage-coherence`, `state-toggle-row-absent`.
 | P2P sync | Iroh transport carrying Loro deltas between devices | `AddPeer`, `PeerEdit`, `PeerCharEdit`, `SyncWithPeer`, `MergeFromPeer`, `SyncNow` | [0001](../adr/0001-hybrid-sync-architecture.md); Model.md inv 11 | Transport | `crates/holon-loro/src/iroh_sync_adapter.rs` |
 | Git / jj vault init | Initializing version control over the vault directory | `GitInit`, `JjGitInit` | — | File adapter | `crates/holon-filesystem/src/` |
 
-Open reds here: `org-blocks-ref-diverge`, `page-without-own-file`, `loro-frontier-height`.
+Open reds here: `org-blocks-ref-diverge`, `page-without-own-file`, `loro-frontier-height`, `lib-seed-wide-drift`.
 
 `org-blocks-ref-diverge` is half fixed — cause A (undo over-reverting file-ingested content) is locked by a keystone regression; cause B, the `::img::0` sub-block id remap, is open.
 
@@ -241,6 +241,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 ### Transitions
 
 - `ApplyMutation` — org vs Loro ingress the shrinker can localize
+- `AttemptIngestCompoundOnReadOnly` — a compound's constituents must be judged under the COMPOUND's provenance, not re-judged as a user's edit
 - `AttemptReadOnlyEdit` — the write the dispatcher must refuse, without which `inv-read-only-home-refuses-writes` can only prove that nothing tried
 - `CreateBlockUnderFocus` — creation-slot gesture mint under focus root
 - `JumpToSearchHit` — after a jump the caret is live INSIDE the new root: on the destination's first child, or on the destination's creation affordance when it has no children. Never on the destination itself, which renders through the editor-less `page_title` variant and leaves the keyboard dead (docs/Testing/bugfunnel/entries/ 2026-09-08-quick-open-enter-navigation-leaves-no-editable-focus.md).
