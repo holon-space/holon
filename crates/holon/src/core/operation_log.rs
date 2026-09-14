@@ -2,6 +2,11 @@
 //!
 //! This module provides `OperationLogStore`, which implements the
 //! `OperationLogOperations` trait for persistent operation logging.
+//!
+//! The `operation` table it appends to is the today-side stub of the
+//! append-only command outbox specified in
+//! `docs/Architecture/Replication.md`, section "The durable form of this
+//! channel (offline, future)"; its reader arrives with offline support.
 
 use std::collections::HashMap;
 use std::sync::Arc;

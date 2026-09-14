@@ -126,6 +126,8 @@ pub struct UndoStack {
 
 > **Status: write-only today.** `OperationLogObserver` is registered (`crates/holon/src/di/registration.rs`) and appends every executed operation to the log, but nothing reads the log back: `mark_undone`/`mark_redone` have no production callers and no frontend queries the `operation` table. Undo/redo itself is served by the persisted `UndoStack` above, not by this store.
 
+Write-only is not obsolete: the `operation` table is the kept-warm today-side stub of the append-only `commands` outbox described in [Replication — The durable form of this channel (offline, future)](Replication.md#the-durable-form-of-this-channel-offline-future), and its reader arrives when offline support lands.
+
 `OperationLogStore` stores operations in a database table:
 
 **Location**: `crates/holon/src/core/operation_log.rs`
