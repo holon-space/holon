@@ -18,7 +18,12 @@
 //! documents its all-clear; a variant that cannot name one does not belong on
 //! this bus.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use tokio::sync::broadcast;
+
+use crate::live_data::LiveData;
 
 /// Why a share is in a degraded state.
 #[derive(Clone, Debug)]
@@ -360,12 +365,24 @@ impl Condition {
     }
 }
 
-/// Identity of a sticky degraded condition. `subject` is the
-/// `subject` — for integrations, the integration name.
+/// Identity of a sticky degraded condition. `subject` is what the condition is
+/// about — for integrations, the integration name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConditionKey {
     pub subject: String,
     pub kind: &'static str,
+}
+
+impl ConditionKey {
+    /// The key this condition occupies in the bus's mirror.
+    ///
+    /// Subject FIRST, so the mirror's key order groups a subject's conditions
+    /// together: `entries_signal_vec` emits in key order, which is how the
+    /// per-subject view of the `conditions` row source comes out contiguous
+    /// without a second, accumulating mirror.
+    pub fn mirror_key(&self) -> String {
+        format!("{}\u{1F}{}", self.subject, self.kind)
+    }
 }
 
 /// A change to the degraded state.
@@ -403,10 +420,26 @@ pub struct ConditionSubscription {
 /// their next `recv()` and must catch up — they do not stall producers.
 pub struct ConditionBus {
     tx: broadcast::Sender<ConditionChange>,
-    /// Insertion order makes the replay in `subscribe` deterministic. N is
-    /// bounded by degraded subjects times kinds — single digits in practice —
-    /// so linear search beats a map.
-    conditions: std::sync::Mutex<Vec<Condition>>,
+    /// The conditions in effect, as the sanctioned holder rather than a
+    /// private `Vec`. Being a [`LiveData`] is what lets a collection widget
+    /// render the set directly (the `conditions` row source) instead of every
+    /// frontend keeping its own mirror of it — which is what let a glyph and a
+    /// banner disagree. Nothing in it touches storage, so the bus is the
+    /// authority in every configuration.
+    conditions: Arc<LiveData<Condition>>,
+    /// When each condition in effect was first raised.
+    ///
+    /// The holder is keyed by subject-then-kind, so ITS order is alphabetical,
+    /// not chronological. Replay order is what a reader sees as toast stack
+    /// order, and a stack that reshuffles itself by subject name when a window
+    /// opens is not the order anything happened in — so the raise order is
+    /// kept here and [`subscribe`](Self::subscribe) sorts by it.
+    ///
+    /// Re-raising an existing condition KEEPS its original position, matching
+    /// the in-place replacement this bus has always done: a repeated failure
+    /// must not make its toast jump the queue.
+    raised_at: std::sync::Mutex<HashMap<String, u64>>,
+    next_raise: std::sync::atomic::AtomicU64,
 }
 
 impl ConditionBus {
@@ -419,20 +452,35 @@ impl ConditionBus {
         let (tx, _rx) = broadcast::channel(Self::CAPACITY);
         Self {
             tx,
-            conditions: std::sync::Mutex::new(Vec::new()),
+            conditions: LiveData::in_memory(),
+            raised_at: std::sync::Mutex::new(HashMap::new()),
+            next_raise: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// The conditions in effect, as the live holder. This is what the
+    /// `conditions` row source is registered over, so a rendered collection
+    /// and a bus subscriber read the same set by construction.
+    pub fn conditions(&self) -> Arc<LiveData<Condition>> {
+        Arc::clone(&self.conditions)
     }
 
     /// Raise a condition: recorded as current state (replacing any prior entry
     /// with the same key) and broadcast.
     pub fn emit(&self, event: Condition) {
         let key = event.condition_key();
+        let mirror_key = key.mirror_key();
         {
-            let mut conditions = self.conditions.lock().unwrap();
-            match conditions.iter_mut().find(|c| c.condition_key() == key) {
-                Some(existing) => *existing = event.clone(),
-                None => conditions.push(event.clone()),
-            }
+            // `raised_at` before the holder, the same order `subscribe` takes
+            // them in, so the two can never deadlock against each other — and
+            // so a subscriber's snapshot cannot catch a condition that is in
+            // the holder but not yet in the order.
+            let mut raised_at = self.raised_at.lock().unwrap();
+            raised_at.entry(mirror_key.clone()).or_insert_with(|| {
+                self.next_raise
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            });
+            self.conditions.insert(mirror_key, Arc::new(event.clone()));
         }
         let _ = self.tx.send(ConditionChange::Raised(event));
     }
@@ -440,11 +488,12 @@ impl ConditionBus {
     /// Clear a condition. Broadcasts only if the condition was actually in
     /// effect, so consumers never see a phantom clear.
     pub fn clear(&self, key: &ConditionKey) {
-        let mut conditions = self.conditions.lock().unwrap();
-        let before = conditions.len();
-        conditions.retain(|c| &c.condition_key() != key);
-        let removed = conditions.len() != before;
-        drop(conditions);
+        let mirror_key = key.mirror_key();
+        let removed = {
+            let mut raised_at = self.raised_at.lock().unwrap();
+            raised_at.remove(&mirror_key);
+            self.conditions.remove(&mirror_key)
+        };
         if removed {
             let _ = self.tx.send(ConditionChange::Cleared(key.clone()));
         }
@@ -458,15 +507,44 @@ impl ConditionBus {
         self.tx.receiver_count()
     }
 
+    /// The conditions in effect, in the order they were RAISED.
+    ///
+    /// The same snapshot [`subscribe`](Self::subscribe) replays, without
+    /// opening a broadcast receiver — for a reader that wants to look once
+    /// (the MCP `conditions_list` tool) rather than follow along.
+    pub fn current(&self) -> Vec<Condition> {
+        let raised_at = self.raised_at.lock().unwrap();
+        Self::in_raise_order(&self.conditions, &raised_at)
+    }
+
+    fn in_raise_order(
+        conditions: &LiveData<Condition>,
+        raised_at: &HashMap<String, u64>,
+    ) -> Vec<Condition> {
+        let mut current: Vec<(u64, Condition)> = conditions
+            .read()
+            .iter()
+            .map(|(key, condition)| {
+                let seq = raised_at.get(key).copied().unwrap_or(u64::MAX);
+                (seq, (**condition).clone())
+            })
+            .collect();
+        // The holder is keyed subject-first, so its own order is alphabetical;
+        // replaying in that order would reshuffle a reader's toast stack by
+        // subject name.
+        current.sort_by_key(|(seq, _)| *seq);
+        current.into_iter().map(|(_, c)| c).collect()
+    }
+
     pub fn subscribe(&self) -> ConditionSubscription {
-        // Hold the conditions lock across `tx.subscribe()` so snapshot and
-        // subscription are atomic against `emit`, which takes the same lock:
+        // Hold `raised_at` across the snapshot AND `tx.subscribe()` so the two
+        // are atomic against `emit`, which takes the same lock first:
         // subscribing first can at worst deliver a condition twice (consumers
         // upsert by key), whereas snapshotting first could lose one entirely.
-        let conditions = self.conditions.lock().unwrap();
+        let raised_at = self.raised_at.lock().unwrap();
         let changes = self.tx.subscribe();
-        let current = conditions.clone();
-        drop(conditions);
+        let current = Self::in_raise_order(&self.conditions, &raised_at);
+        drop(raised_at);
         ConditionSubscription { current, changes }
     }
 }

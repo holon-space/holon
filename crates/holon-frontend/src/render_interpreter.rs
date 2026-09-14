@@ -653,35 +653,60 @@ pub fn shared_live_block_build<W>(ba: &BuilderArgs<'_, W>) -> Result<W, String> 
 /// metadata needed for reactive subscriptions.
 pub struct LiveQueryResult<W> {
     pub content: W,
-    /// Source query text (PRQL/GQL/SQL) — compilation to SQL happens behind
-    /// the query capability when the platform layer subscribes.
-    pub query: String,
-    pub query_lang: holon_api::QueryLanguage,
+    /// Where the rows come from, parsed once from the builder's arguments.
+    /// The `Query` arm's text is the SOURCE language (PRQL/GQL/SQL);
+    /// compilation to SQL happens behind the query capability when the
+    /// platform layer subscribes.
+    pub spec: holon_api::row_source::RowSourceSpec,
+    /// The `context:` id as the node props carry it. Kept as the string the
+    /// builder read rather than re-rendered from the spec's `EntityUri`,
+    /// because the platform layer's cache key is built from it. `None` for a
+    /// named source, which has no context block.
     pub query_context_id: Option<String>,
     pub render_expr: holon_api::render_types::RenderExpr,
 }
 
-/// `live_query` builder: compiles + executes a query, then interprets the
-/// result.
+/// Parse the builder's arguments into a [`RowSourceSpec`] plus the raw
+/// `context:` id the props carry.
 ///
-/// Returns `Ok(LiveQueryResult)` on success or `Err(message)` for the frontend
-/// to render as error text.
+/// `source:` selects the `Named` arm and is checked against the services'
+/// registry HERE, at the boundary: an unknown source, or a filter over a
+/// column the source does not declare, is a build error the widget paints —
+/// never an empty collection, which cannot be told apart from a source that
+/// matched nothing.
 ///
-/// `item_template` is the expression each result row is rendered through,
-/// supplied by the calling widget (`None` → `table()`). Passing it in rather
-/// than reading it off the arg bag keeps the name-to-templateness decision
-/// with the widget that declares the param.
-pub fn shared_live_query_build<W>(
+/// [`RowSourceSpec`]: holon_api::row_source::RowSourceSpec
+fn parse_row_source<W>(
     ba: &BuilderArgs<'_, W>,
-    item_template: Option<&RenderExpr>,
-) -> Result<LiveQueryResult<W>, String> {
+) -> Result<(holon_api::row_source::RowSourceSpec, Option<String>), String> {
     use holon_api::QueryLanguage;
 
-    if ba.ctx.query_depth >= MAX_QUERY_DEPTH {
-        return Err(format!(
-            "[query recursion limit reached (depth {})]",
-            ba.ctx.query_depth
-        ));
+    if let Some(source) = ba.args.get_string("source") {
+        let filter = match (
+            ba.args.get_string("where_column"),
+            ba.args.get_string("where_equals"),
+        ) {
+            (None, None) => None,
+            (Some(column), Some(equals)) => Some((column, equals)),
+            (Some(column), None) => {
+                return Err(format!(
+                    "[live_query: where_column: \"{column}\" needs a where_equals: to compare it \
+                     against]"
+                ));
+            }
+            (None, Some(equals)) => {
+                return Err(format!(
+                    "[live_query: where_equals: \"{equals}\" needs a where_column: naming what to \
+                     compare]"
+                ));
+            }
+        };
+        let spec = ba
+            .services
+            .row_sources()
+            .parse_named(source, filter)
+            .map_err(|e| e.to_string())?;
+        return Ok((spec, None));
     }
 
     let (query, language) = if let Some(gql) = ba.args.get_string("gql") {
@@ -711,7 +736,7 @@ pub fn shared_live_query_build<W>(
                 .map(|s| s.to_string())
         });
 
-    let query_context = context_id.as_ref().map(|id| {
+    let context = context_id.as_ref().map(|id| {
         // ALLOW(entity_uri_from_raw): context_id from render-spec arg or matview row
         // 'id' field
         let uri = holon_api::EntityUri::from_raw(id);
@@ -724,30 +749,55 @@ pub fn shared_live_query_build<W>(
         }
     });
 
-    // The builder's arguments, parsed once. Everything below reads the spec
-    // rather than re-reading `args`, so adding a `Named` arm does not mean
-    // another pass over the same arguments with a different answer.
-    let spec = holon_api::row_source::RowSourceSpec::Query {
-        lang: language,
-        text: query.clone(),
-        context: query_context.clone(),
-    };
+    Ok((
+        holon_api::row_source::RowSourceSpec::Query {
+            lang: language,
+            text: query,
+            context,
+        },
+        context_id,
+    ))
+}
 
-    // Validate-by-doing: start (and immediately drop) a watch. Compilation
-    // errors and missing-live-query capability both surface as an error
-    // render node, exactly as the old compile + start_query pair did. The
-    // platform layer starts the *real* watcher from the node props.
-    let holon_api::row_source::RowSourceSpec::Query {
-        lang: spec_lang,
-        text: spec_text,
-        context: spec_context,
+/// `live_query` builder: compiles + executes a query, then interprets the
+/// result.
+///
+/// Returns `Ok(LiveQueryResult)` on success or `Err(message)` for the frontend
+/// to render as error text.
+///
+/// `item_template` is the expression each result row is rendered through,
+/// supplied by the calling widget (`None` → `table()`). Passing it in rather
+/// than reading it off the arg bag keeps the name-to-templateness decision
+/// with the widget that declares the param.
+pub fn shared_live_query_build<W>(
+    ba: &BuilderArgs<'_, W>,
+    item_template: Option<&RenderExpr>,
+) -> Result<LiveQueryResult<W>, String> {
+    if ba.ctx.query_depth >= MAX_QUERY_DEPTH {
+        return Err(format!(
+            "[query recursion limit reached (depth {})]",
+            ba.ctx.query_depth
+        ));
+    }
+
+    let (spec, context_id) = parse_row_source(ba)?;
+
+    // Validate-by-doing for the `Query` arm: start (and immediately drop) a
+    // watch. A compilation error and a missing live-query capability both
+    // surface as an error render node, exactly as the old compile +
+    // start_query pair did; the platform layer starts the *real* watcher from
+    // the node props. A named source has nothing to start — its holder is
+    // already live — so it skips this.
+    if let holon_api::row_source::RowSourceSpec::Query {
+        lang,
+        text,
+        context,
     } = &spec
-    else {
-        unreachable!("the Query arm is the only arm this builder constructs today");
-    };
-    let result = ba
-        .services
-        .watch_query(spec_text, *spec_lang, spec_context.clone());
+    {
+        if let Err(e) = ba.services.watch_query(text, *lang, context.clone()) {
+            return Err(format!("Query error: {e}"));
+        }
+    }
 
     let deeper_ctx = ba.ctx.deeper_query();
 
@@ -792,23 +842,17 @@ pub fn shared_live_query_build<W>(
     // here, so the stored expression survives signal re-interpretation.
     let live_query_render_expr = resolve_virtual_parent(live_query_render_expr, &context_id);
 
-    match result {
-        Ok(_stream) => {
-            let mut child_ctx = deeper_ctx.with_data_rows(vec![]);
-            if let Some(id) = &context_id {
-                child_ctx = child_ctx.with_context_entity(id.clone());
-            }
-            let content = (ba.interpret)(&live_query_render_expr, &child_ctx);
-            Ok(LiveQueryResult {
-                content,
-                query,
-                query_lang: language,
-                query_context_id: context_id,
-                render_expr: live_query_render_expr,
-            })
-        }
-        Err(e) => Err(format!("Query error: {e}")),
+    let mut child_ctx = deeper_ctx.with_data_rows(vec![]);
+    if let Some(id) = &context_id {
+        child_ctx = child_ctx.with_context_entity(id.clone());
     }
+    let content = (ba.interpret)(&live_query_render_expr, &child_ctx);
+    Ok(LiveQueryResult {
+        content,
+        spec,
+        query_context_id: context_id,
+        render_expr: live_query_render_expr,
+    })
 }
 
 /// Resolve `virtual_parent: true` sentinels in a render expression.

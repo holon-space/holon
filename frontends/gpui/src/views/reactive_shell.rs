@@ -24,6 +24,7 @@ use crate::geometry::BoundsRegistry;
 use crate::navigation_state::NavigationState;
 use crate::render::builders::GpuiRenderContext;
 use crate::render::builders::live_query_key;
+use crate::render::builders::named_source_key;
 use crate::render::builders::{self};
 use crate::views::RenderEntityView;
 
@@ -1087,7 +1088,12 @@ fn collect_referenced_cache_keys(node: &ReactiveViewModel, out: &mut HashSet<Cac
             }
         }
         Some("live_query") => {
-            if let Some(query) = node.prop_str("query") {
+            if let Some(source) = node.prop_str("source") {
+                out.insert(CacheKey::LiveQuery(named_source_key(
+                    &source,
+                    node.prop_str("where_equals").as_deref(),
+                )));
+            } else if let Some(query) = node.prop_str("query") {
                 let ctx_id = node.prop_str("query_context_id");
                 out.insert(CacheKey::LiveQuery(live_query_key(
                     &query,

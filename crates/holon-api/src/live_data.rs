@@ -284,6 +284,45 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
         self.items.entries_cloned()
     }
 
+    /// A mirror with no storage behind it — the holder itself is the
+    /// authority, and [`insert`](Self::insert) / [`remove`](Self::remove) are
+    /// the only ways in.
+    ///
+    /// [`new`](Self::new) is for a matview mirror, where rows arrive as
+    /// `StorageEntity` and the two parse functions are that boundary. A holder
+    /// written directly has no such boundary; giving it parse functions it can
+    /// never legitimately reach would invite a `subscribe` that silently did
+    /// the wrong thing, so they refuse instead.
+    pub fn in_memory() -> Arc<Self> {
+        Self::new(
+            Vec::new(),
+            |_| {
+                anyhow::bail!(
+                    "this LiveData has no storage behind it — nothing can be ingested into it"
+                )
+            },
+            |_| {
+                anyhow::bail!(
+                    "this LiveData has no storage behind it — nothing can be ingested into it"
+                )
+            },
+        )
+    }
+
+    /// Drop `key`, reporting whether it was there.
+    ///
+    /// The counterpart of [`insert`](Self::insert) for a directly-written
+    /// holder. Returning the answer rather than swallowing it lets the caller
+    /// avoid broadcasting a removal that removed nothing — a phantom clear
+    /// tells a subscriber a condition ended that was never in effect.
+    pub fn remove(&self, key: &str) -> bool {
+        let existed = self.items.lock_mut().remove(&key.to_string()).is_some();
+        if existed {
+            self.items_changed.notify_waiters();
+        }
+        existed
+    }
+
     /// Insert or update an item directly (bypasses CDC).
     ///
     /// Use this for optimistic cache updates after a write to ensure

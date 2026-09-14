@@ -41,6 +41,10 @@ pub struct HeadlessBuilderServices {
     /// The `describe_ui` path holds a bare engine, not a DI container, so no
     /// registry-backed classifier is reachable: built-in schemes only.
     link_classifier: holon_api::link_parser::LinkTargetClassifier,
+    /// Named row sources a collection built through these services may use.
+    /// Empty unless a caller declares them ([`Self::with_row_sources`]), so a
+    /// `source:` argument is refused by name rather than rendering nothing.
+    row_sources: Arc<holon_api::row_source::RowSourceRegistry>,
 }
 
 impl HeadlessBuilderServices {
@@ -56,11 +60,47 @@ impl HeadlessBuilderServices {
             interpreter: Arc::new(holon_frontend::shadow_builders::build_shadow_interpreter()),
             rt_handle,
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
+            row_sources: Arc::new(holon_api::row_source::RowSourceRegistry::new()),
         }
+    }
+
+    /// Declare the named row sources these services can build collections over.
+    pub fn with_row_sources(
+        mut self,
+        registry: Arc<holon_api::row_source::RowSourceRegistry>,
+    ) -> Self {
+        self.row_sources = registry;
+        self
     }
 }
 
 impl BuilderServices for HeadlessBuilderServices {
+    fn row_sources(&self) -> Arc<holon_api::row_source::RowSourceRegistry> {
+        Arc::clone(&self.row_sources)
+    }
+
+    /// The same tree a live frontend gets: the template interpreted once over
+    /// the source's provider. No structural stream — nothing here re-renders.
+    fn named_source_live(
+        &self,
+        named: &holon_api::row_source::NamedSource,
+        render_expr: RenderExpr,
+        services: Arc<dyn BuilderServices>,
+    ) -> holon_frontend::reactive::LiveBlock {
+        let provider = named.provider();
+        let ctx = RenderContext {
+            data_rows: provider.rows_snapshot().into(),
+            data_source: Some(provider),
+            ..Default::default()
+        };
+        let tree = services.interpret(&render_expr, &ctx);
+        holon_frontend::reactive::LiveBlock {
+            tree,
+            structural_changes: Box::pin(tokio_stream::pending()),
+            watch_guard: None,
+        }
+    }
+
     /// HeadlessBuilderServices is a test double with no backend to await: it
     /// dispatches and reports that nothing was proven, rather than
     /// inheriting a claim it cannot make.
@@ -92,6 +132,7 @@ impl BuilderServices for HeadlessBuilderServices {
             interpreter: self.interpreter.clone(),
             rt_handle: self.rt_handle.clone(),
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
+            row_sources: Arc::clone(&self.row_sources),
         })
     }
 

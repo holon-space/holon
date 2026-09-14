@@ -42,9 +42,6 @@ use holon_api::ConditionKey;
 use holon_api::ConditionKind;
 use holon_api::EntityName;
 use holon_api::Value;
-use holon_api::condition_profile::ConditionPlacement;
-use holon_api::condition_profile::ConditionProfile;
-use holon_api::condition_profile::ConditionSeverity;
 use holon_app::PendingState;
 use holon_app::PendingWriteEvent;
 use holon_app::PendingWriteEventKind;
@@ -183,15 +180,12 @@ impl From<&str> for ToastDetail {
 /// A degraded-mode notification to render as a yellow toast.
 #[derive(Clone, Debug)]
 pub struct DegradedToast {
-    pub kind: ToastKind,
-    /// What the toast is about — a file, an integration, a share. Named for the
-    /// condition's `subject`, because most toasts have no shared tree behind
-    /// them at all.
-    pub subject: String,
+    pub kind: DegradedKind,
+    pub shared_tree_id: String,
     pub detail: ToastDetail,
     /// The vault format that refused a file, for the one kind whose headline is
-    /// not fixed ([`ConditionKind::VaultIngestFailed`]). `None` for every
-    /// other kind, whose headline is its profile's constant.
+    /// not fixed ([`DegradedKind::VaultIngestFailed`]). `None` for every other
+    /// kind, whose headline is a constant.
     pub format: Option<String>,
     /// Set for toasts sourced from the degraded bus, where every degradation is
     /// a sticky condition — upserted on re-raise, removed on clear. `None` for
@@ -200,94 +194,123 @@ pub struct DegradedToast {
     pub condition: Option<ConditionKey>,
 }
 
-/// How a toast is drawn, and where that decision comes from.
-///
-/// A bus condition carries its own `ConditionProfile`, so this frontend keeps
-/// no table for those: severity, label and icon are read off the profile. What
-/// remains is UI-LOCAL feedback — a failed command, an undo that could not run,
-/// an info notice — which has no condition behind it and so must say for
-/// itself how it is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToastKind {
-    Condition(ConditionProfile),
-    Local(LocalToastKind),
-}
-
-/// Feedback with no bus condition behind it.
-///
-/// These are NOT degradations of a subject that stays degraded: nothing clears
-/// them and nothing upserts them, which is exactly why they are bounded and
-/// evicted separately (see [`ShareUiState::push_toast`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LocalToastKind {
-    /// An undo/redo request reached the engine but failed (e.g. no operation
-    /// engine wired, or the underlying apply errored). Fail-loud: undo/redo
-    /// must never look like a silent no-op when it actually blew up.
+pub enum DegradedKind {
+    /// Yellow — save will retry on next commit.
+    SnapshotSaveFailed,
+    /// Yellow — rehydration hiccup at startup, share may lag.
+    RehydrationFailed,
+    /// Yellow — a shared doc edit failed to project into SQL; the UI (which
+    /// reads SQL) is stale until the next successful projection.
+    SqlProjectionFailed,
+    /// Blue — this device was paired with an owner's store and the content it
+    /// wrote before the pair was carried across. Its own kind because it is
+    /// the one toast that also discloses a query the user must copy VERBATIM:
+    /// see [`toast_lines`].
+    PairingReimported,
+    /// Red — a shared doc tried to shadow a LOCAL block id; the projection was
+    /// refused to protect the recipient's own content.
+    ForeignIdCollision,
+    /// Red — one vault file was refused by its format adapter. Other files
+    /// keep syncing; this one needs fixing. Surfaced so a bad file is visible
+    /// instead of silently killing file sync. The headline names the refusing
+    /// FORMAT, which only the toast's detail knows — see [`toast_message`].
+    VaultIngestFailed,
+    /// Yellow — a vault file is empty on disk and stayed empty, so the
+    /// document Holon still shows no longer exists in the file. Kept rather
+    /// than deleted, which is why the user has to be told.
+    VaultFileEmptied,
+    /// Red — an undo/redo request reached the engine but failed (e.g. no
+    /// operation engine wired, or the underlying apply errored). Fail-loud:
+    /// undo/redo must never look like a silent no-op when it actually blew
+    /// up, so this is always surfaced instead of just logged.
     UndoFailed,
-    /// A history entry no longer matched the state it was recorded against, so
-    /// it was DROPPED: that edit can never be undone again. A data-trust event,
-    /// not a failed request, so it says what was lost rather than that the
-    /// press did not work.
+    /// Red — a history entry no longer matched the state it was recorded
+    /// against, so it was DROPPED: that edit can never be undone again. This is
+    /// a data-trust event, not a failed request, so it says what was lost
+    /// rather than that the press did not work.
     UndoStepDropped,
-    /// A slash-menu command was selected but failed. Fail-loud: the selection
-    /// consumed the key, so it must never look like a silent no-op or a stray
-    /// block-split.
+    /// Red — a slash-menu command was selected but failed (e.g. a template
+    /// insert whose target block couldn't be resolved, or an empty page-root
+    /// placement). Fail-loud: the selection consumed the key, so it must never
+    /// look like a silent no-op or a stray block-split.
     CommandFailed,
-    /// A preference write reached the config layer but could not be persisted.
-    /// The in-memory value applied for this session but will NOT survive a
+    /// Red — a preference write reached the config layer but could not be
+    /// persisted (e.g. the config dir is on a read-only filesystem). Fail-loud:
+    /// the in-memory value applied for this session, but it will NOT survive a
     /// restart, and the process must stay alive — never SIGABRT on a failed
     /// settings write.
     PreferenceSaveFailed,
-    /// A `once_only` connector write was queued and needs human confirmation.
-    /// Disclosed on enqueue; the write never fires unattended.
+    /// Yellow — a `once_only` connector write was queued and needs human
+    /// confirmation (leases/read-write ruling, increment 4). Disclosed on
+    /// enqueue; the write never fires unattended. Approve it in the
+    /// pending-writes panel.
     ConnectorWritePending,
-    /// A dispatched `once_only` connector write's outcome is unknown
+    /// Red — a dispatched `once_only` connector write's outcome is unknown
     /// (post-dispatch failure / lost ack). Fail-loud: it is NOT auto-retried;
     /// the human must verify on the remote before resending.
     ConnectorWriteOutcomeUnknown,
-    /// A plain info notice (used for "ticket copied").
+    /// Yellow — a write inside a shared/mounted subtree reached Loro+SQL but
+    /// its org materialization is pending (mount not yet a page on disk).
+    /// Disclosed degrade per the share write-back track (inc 1): the edit is
+    /// NOT lost, only the file projection lags.
+    SharedSubtreeNotMaterialized,
+    /// Red — an edit named a block of a file whose format Holon cannot write,
+    /// so the operation was refused and nothing changed. Without this the edit
+    /// would live in the store and never on disk.
+    EditRefusedReadOnlyFormat,
+    /// Red — the org write-back stream died and its supervisor could not keep
+    /// it alive. Edits still reach Loro + SQL, but they stop reaching disk, so
+    /// the vault on disk silently falls behind the app until this clears.
+    WritebackDegraded,
+    /// Red — an MCP integration provider failed to connect at boot. Its cache
+    /// tables were never created, so dependent pages render blank; this names
+    /// the integration and the connect error so the blankness is attributable.
+    IntegrationConnectFailed,
+    /// Red — an MCP integration provider is waiting on an OAuth grant. Same
+    /// blank-page consequence, but the user can fix it via the carried URL.
+    IntegrationNeedsAuth,
+    /// Yellow — an installed sidecar was not honored and the copy bundled with
+    /// this build was used instead. The integration works; the file the user
+    /// installed does not, so the detail names both paths and the mismatch.
+    IntegrationSidecarSuperseded,
+    /// Yellow — a sidecar file is installed for an integration that is not
+    /// switched on, so it runs nothing. Names the state file to write.
+    IntegrationNotEnabled,
+    /// Yellow — a state file refers to a connection nothing provides: no
+    /// bundled sidecar and no usable file introduces one.
+    IntegrationSidecarNotBundled,
+    /// Yellow — a file NAMES a connection but cannot be used, so that
+    /// connection does not exist. The remedy is to fix the file the toast
+    /// points at, which is why the reason travels with it.
+    IntegrationSidecarUnusable,
+    /// Yellow — this session keeps every secret in RAM and loses it on exit.
+    /// A credential field that saves nothing is the one thing a user must not
+    /// have to infer, so the banner stands for the whole session.
+    SecretsHeldInMemory,
+    /// Yellow — the previous session's undo history was discarded at boot
+    /// (D116.a). Undo deliberately does not survive a restart, and a person
+    /// who typed before it would otherwise press cmd-z and get nothing with no
+    /// explanation.
+    UndoHistoryClearedAtBoot,
+    /// Yellow — a peer joined a share by proving the ticket's BEARER secret
+    /// rather than as a paired device. The share works; what is disclosed is
+    /// that its trust rests on a secret that travelled (ADR 0028 R5 stopgap).
+    BearerTicketEnrollment,
+    /// Yellow — this device minted its owner identity key on the first share
+    /// and there was no surface to show the one-time recovery code, so it was
+    /// dropped. Sharing works; what is disclosed is that the keychain entry is
+    /// now the only copy.
+    OwnerRecoveryCodeNotShown,
+    /// A plain info-style toast (used for "ticket copied").
     Info,
-}
-
-impl LocalToastKind {
-    /// How loudly this is drawn, and with what mark and headline — the same
-    /// three facts a `ConditionProfile` carries, for the kinds that have no
-    /// profile.
-    const fn style(self) -> (ConditionSeverity, &'static str, &'static str) {
-        use holon_api::condition_profile::icons;
-        match self {
-            Self::UndoFailed => (ConditionSeverity::Error, icons::BLOCKED, "Undo/redo failed"),
-            Self::UndoStepDropped => (
-                ConditionSeverity::Error,
-                icons::BLOCKED,
-                "History step dropped — that edit can no longer be undone",
-            ),
-            Self::CommandFailed => (ConditionSeverity::Error, icons::BLOCKED, "Command failed"),
-            Self::PreferenceSaveFailed => (
-                ConditionSeverity::Error,
-                icons::BLOCKED,
-                "Preference not saved",
-            ),
-            Self::ConnectorWritePending => (
-                ConditionSeverity::Warning,
-                icons::WARN,
-                "Connector write needs approval",
-            ),
-            Self::ConnectorWriteOutcomeUnknown => (
-                ConditionSeverity::Error,
-                icons::BLOCKED,
-                "Connector write outcome unknown",
-            ),
-            Self::Info => (ConditionSeverity::Info, icons::INFO, "Info"),
-        }
-    }
 }
 
 /// A red-modal quarantine event. Separate from `DegradedToast` because it
 /// needs a distinct, persistent, full-screen treatment.
 #[derive(Clone, Debug)]
 pub struct QuarantineEvent {
-    pub subject: String,
+    pub shared_tree_id: String,
     pub quarantine_path: String,
 }
 
@@ -359,57 +382,321 @@ impl ShareUiState {
     }
 
     /// Route a broadcast event from the degraded bus into the right field.
-    ///
-    /// Generic: the condition's profile says where it goes and how it is drawn,
-    /// and its own `detail` says what it reads. Nothing here is per-kind except
-    /// the two placements that are not a toast, and the one kind whose HEADLINE
-    /// is instance data rather than a constant.
     pub fn apply_degraded(&mut self, event: Condition) {
         let condition = event.condition_key();
-        let profile = event.reason.profile();
-        let detail = event.reason.detail(&event.subject);
-
-        match profile.placement() {
-            // A full-screen modal, not a toast: this names content that is not
-            // in the store, and a toast has a ✕.
-            ConditionPlacement::Modal => {
+        match event.reason {
+            ConditionKind::SnapshotSaveFailed(detail) => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::SnapshotSaveFailed,
+                    shared_tree_id: event.subject,
+                    detail: detail.into(),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::RehydrationFailed(detail) => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::RehydrationFailed,
+                    shared_tree_id: event.subject,
+                    detail: detail.into(),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::SqlProjectionFailed(detail) => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::SqlProjectionFailed,
+                    shared_tree_id: event.subject,
+                    detail: detail.into(),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::ForeignIdCollision(block_id) => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::ForeignIdCollision,
+                    shared_tree_id: event.subject,
+                    detail: block_id.into(),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::SnapshotLoadFailed(path) => {
                 // Upsert, like `push_toast`: a sticky condition can arrive
                 // twice (once replayed in `current`, once live), and two
-                // identical quarantine modals for one subject is a dismissal
-                // treadmill.
+                // identical full-screen quarantine modals for one share is a
+                // dismissal treadmill.
                 let quarantine = QuarantineEvent {
-                    subject: event.subject,
-                    quarantine_path: detail.headline,
+                    shared_tree_id: event.subject,
+                    quarantine_path: path,
                 };
                 match self
                     .quarantines
                     .iter_mut()
-                    .find(|q| q.subject == quarantine.subject)
+                    .find(|q| q.shared_tree_id == quarantine.shared_tree_id)
                 {
                     Some(existing) => *existing = quarantine,
                     None => self.quarantines.push(quarantine),
                 }
             }
-            // A banner, because the condition offers a remedy the user has to
-            // reach: a toast's ✕ would dismiss the only way back.
-            ConditionPlacement::Banner => {
-                if let ConditionKind::PairingReimportDeferred { orphans, archive } = event.reason {
-                    self.deferred_reimport = Some(DeferredReimport { orphans, archive });
-                }
-            }
-            ConditionPlacement::Toast | ConditionPlacement::Section(_) => {
-                // The one kind whose headline names instance data — the format
-                // that refused the file — instead of the profile's constant.
-                let format = match &event.reason {
-                    ConditionKind::VaultIngestFailed { format, .. } => Some(format.clone()),
-                    _ => None,
-                };
+            ConditionKind::VaultIngestFailed { format, reason } => {
                 self.push_toast(DegradedToast {
-                    kind: ToastKind::Condition(profile),
-                    subject: event.subject,
-                    detail: ToastDetail::with_body(detail.headline, detail.body),
-                    condition: Some(condition),
-                    format,
+                    kind: DegradedKind::VaultIngestFailed,
+                    // The file, so the headline can name it and the condition
+                    // clears per file rather than per scan.
+                    detail: format!("{}: {reason}", event.subject).into(),
+                    shared_tree_id: event.subject,
+                    condition: Some(condition.clone()),
+                    format: Some(format),
+                });
+            }
+            ConditionKind::VaultFileEmptied => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::VaultFileEmptied,
+                    detail: format!(
+                        "{} is empty on disk — Holon kept the document it last read from it, so \
+                         what you see is no longer in the file",
+                        event.subject
+                    )
+                    .into(),
+                    shared_tree_id: event.subject,
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::EditRefusedReadOnlyFormat { format } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::EditRefusedReadOnlyFormat,
+                    detail: format!(
+                        "{} is {format}, which Holon reads but cannot write — edit the file on \
+                         disk",
+                        event.subject
+                    )
+                    .into(),
+                    shared_tree_id: event.subject,
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::WritebackDegraded(detail) => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::WritebackDegraded,
+                    shared_tree_id: event.subject,
+                    detail: detail.into(),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            // Informational, and `Info` rather than a warning colour on
+            // purpose: nothing is degraded, and nothing is being asked. The
+            // user is told what this device contributed to the store it just
+            // adopted, and where its pre-pair documents went.
+            ConditionKind::PairingReimportedLocalContent {
+                blocks,
+                conflict_copies,
+                archive,
+            } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::PairingReimported,
+                    shared_tree_id: event.subject,
+                    // The archive path and the query are BODY lines: both are
+                    // things the user reproduces character for character, and
+                    // the headline is capped.
+                    detail: ToastDetail::with_body(
+                        format!(
+                            "{blocks} block(s) written on this device were added to the paired \
+                             store, {conflict_copies} of them kept as a copy under the owner's \
+                             block of the same id. The pre-pair document is here:"
+                        ),
+                        vec![archive],
+                    ),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            // Not a toast: a toast has a ✕, and this condition names content
+            // that is not in the store and that only the retry beside it can
+            // bring in.
+            ConditionKind::PairingReimportDeferred { orphans, archive } => {
+                self.deferred_reimport = Some(DeferredReimport { orphans, archive });
+            }
+            ConditionKind::SharedSubtreeNotMaterialized { file } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::SharedSubtreeNotMaterialized,
+                    shared_tree_id: event.subject,
+                    // The file the shared content was inlined into — what the
+                    // user opens to see the stale projection.
+                    detail: file.into(),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            // The toast body truncates `detail` at 80 chars, so both of these
+            // lead with the integration name.
+            ConditionKind::IntegrationConnectFailed { integration, error } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationConnectFailed,
+                    shared_tree_id: event.subject,
+                    detail: format!("{integration}: {error}").into(),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::IntegrationNeedsAuth {
+                integration,
+                auth_url,
+            } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationNeedsAuth,
+                    shared_tree_id: event.subject,
+                    detail: ToastDetail::with_body(
+                        format!("{integration} needs authorizing. Open:"),
+                        vec![auth_url],
+                    ),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::IntegrationSidecarSuperseded {
+                integration,
+                installed_path,
+                bundled_source,
+                incompatibility,
+            } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationSidecarSuperseded,
+                    shared_tree_id: event.subject,
+                    detail: ToastDetail::with_body(
+                        format!(
+                            "{integration}: the installed file was ignored ({incompatibility}); \
+                             the bundled {bundled_source} is running instead. The ignored file:"
+                        ),
+                        vec![installed_path],
+                    ),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::IntegrationNotEnabled {
+                integration,
+                state_path,
+                remedy,
+                ..
+            } => {
+                // The paths and the enable command stay in the log, where they
+                // can be read and copied. A toast is a notification, not a
+                // terminal: the earlier message was three absolute paths long,
+                // so the cap cut it mid-path, and toast text cannot be
+                // selected — the one actionable clause could only be retyped
+                // from what happened to be visible.
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationNotEnabled,
+                    shared_tree_id: event.subject,
+                    // Headline, then the two payloads that must reach the
+                    // user CHARACTER-EXACT and so never see the cap: the
+                    // command to run (D2 — a remedy cut in half reads as
+                    // complete and does not work) and the file it writes (D1).
+                    // The cap ate both when all three shared one string.
+                    detail: ToastDetail::with_body(
+                        format!(
+                            "{integration} is installed but switched off, so it runs nothing. \
+                             Switch it on in Settings › Integrations, or run:"
+                        ),
+                        vec![remedy, state_path],
+                    ),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::BearerTicketEnrollment { peer } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::BearerTicketEnrollment,
+                    shared_tree_id: event.subject,
+                    detail: format!(
+                        "peer {peer} joined by presenting the share ticket. Anyone the ticket \
+                         was forwarded to could have joined instead — unshare, or revoke the \
+                         peer, if that was not intended"
+                    )
+                    .into(),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::OwnerRecoveryCodeNotShown => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::OwnerRecoveryCodeNotShown,
+                    shared_tree_id: event.subject,
+                    // Says what is and is not at risk, because "no recovery
+                    // code" reads as "my data is one keychain away from gone"
+                    // and that is not what happened.
+                    detail: "this device made its sharing identity key on the first share, and \
+                             its one-time recovery code could not be shown. Shared content and \
+                             peer access are unaffected; if the keychain entry is lost, this \
+                             device's shares stop being advertised until it is shared again"
+                        .to_string()
+                        .into(),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::IntegrationSidecarNotBundled {
+                provider,
+                installed_path,
+            } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationSidecarNotBundled,
+                    shared_tree_id: event.subject,
+                    detail: ToastDetail::with_body(
+                        format!(
+                            "{provider}: nothing provides a connection by this name, so this file \
+                             runs nothing:"
+                        ),
+                        vec![installed_path],
+                    ),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::IntegrationSidecarUnusable {
+                provider,
+                installed_path,
+                why,
+            } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::IntegrationSidecarUnusable,
+                    shared_tree_id: event.subject,
+                    // The file and the REASON are both body lines. The reason
+                    // ends in the remedy — the clause saying what to change —
+                    // and it was the half the cap ate, on the same screen where
+                    // the NotEnabled toast above painted in full.
+                    detail: ToastDetail::with_body(
+                        format!("{provider}: this connection file cannot be used."),
+                        vec![installed_path, why],
+                    ),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::SecretsHeldInMemory { why } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::SecretsHeldInMemory,
+                    shared_tree_id: event.subject,
+                    detail: why.into(),
+                    condition: Some(condition.clone()),
+                    format: None,
+                });
+            }
+            ConditionKind::UndoHistoryClearedAtBoot { entries } => {
+                self.push_toast(DegradedToast {
+                    kind: DegradedKind::UndoHistoryClearedAtBoot,
+                    shared_tree_id: event.subject,
+                    detail: format!(
+                        "{entries} step{} from the previous session were discarded",
+                        if entries == 1 { "" } else { "s" }
+                    )
+                    .into(),
+                    condition: Some(condition.clone()),
+                    format: None,
                 });
             }
         }
@@ -640,8 +927,8 @@ pub fn spawn_op_failure_toast_bridge(
                 let _ = cx.update_window(window_handle, |_, _window, cx| {
                     toast_state.update(cx, |s, cx| {
                         s.push_toast(DegradedToast {
-                            kind: ToastKind::Local(LocalToastKind::CommandFailed),
-                            subject: "command".into(),
+                            kind: DegradedKind::CommandFailed,
+                            shared_tree_id: "command".into(),
                             detail: detail.into(),
                             condition: None,
                             format: None,
@@ -726,8 +1013,8 @@ pub fn spawn_pending_writes_bridge(
 fn pending_event_toast(event: &PendingWriteEvent) -> DegradedToast {
     match event.kind {
         PendingWriteEventKind::AwaitingConfirmation => DegradedToast {
-            kind: ToastKind::Local(LocalToastKind::ConnectorWritePending),
-            subject: event.connector.clone(),
+            kind: DegradedKind::ConnectorWritePending,
+            shared_tree_id: event.connector.clone(),
             detail: format!(
                 "{} ({}) — approve in the pending panel",
                 event.display, event.tool
@@ -737,8 +1024,8 @@ fn pending_event_toast(event: &PendingWriteEvent) -> DegradedToast {
             format: None,
         },
         PendingWriteEventKind::OutcomeUnknown => DegradedToast {
-            kind: ToastKind::Local(LocalToastKind::ConnectorWriteOutcomeUnknown),
-            subject: event.connector.clone(),
+            kind: DegradedKind::ConnectorWriteOutcomeUnknown,
+            shared_tree_id: event.connector.clone(),
             detail: format!(
                 "{} ({}) — {}; verify on the remote",
                 event.display, event.tool, event.detail
@@ -802,8 +1089,8 @@ pub fn dispatch_approve(
                 share_state.update(cx, |s, cx| {
                     if let Ok(Err(e)) = outcome {
                         s.push_toast(DegradedToast {
-                            kind: ToastKind::Local(LocalToastKind::ConnectorWriteOutcomeUnknown),
-                            subject: "connector-write".into(),
+                            kind: DegradedKind::ConnectorWriteOutcomeUnknown,
+                            shared_tree_id: "connector-write".into(),
                             detail: format!("approve failed: {e}").into(),
                             condition: None,
                             format: None,
@@ -919,7 +1206,7 @@ pub fn dispatch_accept(
 
 /// What one undo/redo press owes the user, if anything.
 struct UndoDisclosure {
-    kind: LocalToastKind,
+    kind: DegradedKind,
     detail: String,
     /// A consumed no-op entry is a degraded press; a DROPPED step and a failed
     /// request are errors.
@@ -941,22 +1228,22 @@ fn undo_disclosure(
     match outcome {
         Ok(Ok(holon_api::UndoOutcome::Applied | holon_api::UndoOutcome::Empty)) => None,
         Ok(Ok(holon_api::UndoOutcome::NoChange)) => Some(UndoDisclosure {
-            kind: LocalToastKind::UndoFailed,
+            kind: DegradedKind::UndoFailed,
             detail: format!("{label}: entry made no change (no-op)"),
             warn_only: true,
         }),
         Ok(Ok(holon_api::UndoOutcome::StaleDropped { reason })) => Some(UndoDisclosure {
-            kind: LocalToastKind::UndoStepDropped,
+            kind: DegradedKind::UndoStepDropped,
             detail: holon_api::undo_step_dropped_detail(label, reason),
             warn_only: false,
         }),
         Ok(Err(e)) => Some(UndoDisclosure {
-            kind: LocalToastKind::UndoFailed,
+            kind: DegradedKind::UndoFailed,
             detail: format!("{label}: {e}"),
             warn_only: false,
         }),
         Err(_cancelled) => Some(UndoDisclosure {
-            kind: LocalToastKind::UndoFailed,
+            kind: DegradedKind::UndoFailed,
             detail: format!("{label}: task dropped before responding"),
             warn_only: false,
         }),
@@ -1038,8 +1325,8 @@ fn dispatch_undo_redo(
                 let _ = cx.update_window(window_handle, |_, _window, cx| {
                     share_state.update(cx, |s, cx| {
                         s.push_toast(DegradedToast {
-                            kind: ToastKind::Local(d.kind),
-                            subject: "undo".into(),
+                            kind: d.kind,
+                            shared_tree_id: "undo".into(),
                             detail: d.detail.into(),
                             condition: None,
                             format: None,
@@ -1362,8 +1649,8 @@ pub fn dispatch_retry_reimport(
             let _ = cx.update_window(window_handle, |_, _window, cx| {
                 share_state.update(cx, |s, cx| {
                     s.push_toast(DegradedToast {
-                        kind: ToastKind::Local(LocalToastKind::CommandFailed),
-                        subject: "device".into(),
+                        kind: DegradedKind::CommandFailed,
+                        shared_tree_id: "device".into(),
                         detail: detail.into(),
                         condition: None,
                         format: None,
@@ -1629,8 +1916,8 @@ fn render_share_modal(
                                     ));
                                     copy_state.update(cx, |s, cx| {
                                         s.push_toast(DegradedToast {
-                                            kind: ToastKind::Local(LocalToastKind::Info),
-                                            subject: "ui".into(),
+                                            kind: DegradedKind::Info,
+                                            shared_tree_id: "ui".into(),
                                             detail: "Ticket copied to clipboard".into(),
                                             condition: None,
                                             format: None,
@@ -1830,7 +2117,7 @@ fn render_quarantine_modal(
     share_state: Entity<ShareUiState>,
     theme: OverlayTheme,
 ) -> AnyElement {
-    let shared_tree_id = q.subject.clone();
+    let shared_tree_id = q.shared_tree_id.clone();
     let quarantine_path = q.quarantine_path.clone();
     let quarantine_path_copy = quarantine_path.clone();
 
@@ -1954,11 +2241,7 @@ fn toast_message(toast: &DegradedToast) -> String {
 fn toast_lines(toast: &DegradedToast) -> Vec<String> {
     let mut lines = vec![toast_message(toast)];
     lines.extend(toast.detail.body.iter().cloned());
-    let reimported = toast
-        .condition
-        .as_ref()
-        .is_some_and(|c| c.kind == ConditionKind::PAIRING_REIMPORTED_LOCAL_CONTENT);
-    if reimported {
+    if toast.kind == DegradedKind::PairingReimported {
         lines.push(format!(
             "Find the copies with: {}",
             holon_loro::device_pairing_op::conflict_copies_query()
@@ -1967,27 +2250,126 @@ fn toast_lines(toast: &DegradedToast) -> Vec<String> {
     lines
 }
 
-/// The colour a severity is painted in. The ONE place severity becomes a
-/// pixel value, so a new condition inherits it rather than choosing.
-fn severity_color(severity: ConditionSeverity) -> gpui::Rgba {
-    match severity {
-        ConditionSeverity::Error => gpui::rgba(0xef4444ff),
-        ConditionSeverity::Warning => gpui::rgba(0xfbbf24ff),
-        ConditionSeverity::Info => gpui::rgba(0x60a5faff),
-    }
-}
-
 /// Background, icon and headline for a toast kind. Split from the render so
 /// [`toast_message`] — the string the user actually reads — is testable.
-///
-/// A condition reads all three off its profile; only UI-local feedback has a
-/// table here, and only because it has no profile to read.
-fn toast_style(kind: ToastKind) -> (gpui::Rgba, &'static str, &'static str) {
-    let (severity, icon, label) = match kind {
-        ToastKind::Condition(profile) => (profile.severity(), profile.icon(), profile.label()),
-        ToastKind::Local(local) => local.style(),
-    };
-    (severity_color(severity), crate::icon(icon), label)
+fn toast_style(kind: DegradedKind) -> (gpui::Rgba, &'static str, &'static str) {
+    match kind {
+        DegradedKind::SnapshotSaveFailed => (gpui::rgba(0xfbbf24ff), "⚠", "Snapshot save failed"),
+        DegradedKind::RehydrationFailed => (gpui::rgba(0xfbbf24ff), "↻", "Rehydration failed"),
+        DegradedKind::SqlProjectionFailed => (gpui::rgba(0xfbbf24ff), "⚠", "Shared edit not shown"),
+        DegradedKind::ForeignIdCollision => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Blocked shared write (id collision)",
+        ),
+        DegradedKind::VaultIngestFailed => (
+            gpui::rgba(0xef4444ff),
+            "⚠",
+            // `toast_message` replaces this with a format-naming headline
+            // whenever the toast carries a `format`.
+            "File sync degraded (bad vault file)",
+        ),
+        DegradedKind::VaultFileEmptied => (
+            gpui::rgba(0xfbbf24ff),
+            "⚠",
+            "Vault file is empty — the document shown is stale",
+        ),
+        DegradedKind::EditRefusedReadOnlyFormat => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Edit refused — read-only file",
+        ),
+        DegradedKind::UndoFailed => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Undo/redo failed",
+        ),
+        DegradedKind::UndoStepDropped => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "History step dropped — that edit can no longer be undone",
+        ),
+        DegradedKind::CommandFailed => {
+            (gpui::rgba(0xef4444ff), crate::icon("⛔"), "Command failed")
+        }
+        DegradedKind::PreferenceSaveFailed => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Preference not saved",
+        ),
+        DegradedKind::ConnectorWritePending => (
+            gpui::rgba(0xfbbf24ff),
+            "⚠",
+            "Connector write needs approval",
+        ),
+        DegradedKind::ConnectorWriteOutcomeUnknown => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Connector write outcome unknown",
+        ),
+        DegradedKind::SharedSubtreeNotMaterialized => (
+            gpui::rgba(0xfbbf24ff),
+            "⚠",
+            "Shared subtree not materialized",
+        ),
+        DegradedKind::WritebackDegraded => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Edits are not reaching disk",
+        ),
+        DegradedKind::IntegrationConnectFailed => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Integration unavailable",
+        ),
+        DegradedKind::IntegrationNeedsAuth => (
+            gpui::rgba(0xef4444ff),
+            crate::icon("⛔"),
+            "Integration needs authorization",
+        ),
+        DegradedKind::IntegrationSidecarSuperseded => (
+            gpui::rgba(0xfbbf24ff),
+            "⚠",
+            "Installed integration file ignored — using the bundled one",
+        ),
+        DegradedKind::IntegrationNotEnabled => (
+            gpui::rgba(0xfbbf24ff),
+            "⚠",
+            "Integration is not switched on",
+        ),
+        DegradedKind::IntegrationSidecarNotBundled => {
+            (gpui::rgba(0xfbbf24ff), "⚠", "No connection by this name")
+        }
+        DegradedKind::IntegrationSidecarUnusable => (
+            gpui::rgba(0xfbbf24ff),
+            "⚠",
+            "Connection file cannot be used",
+        ),
+        DegradedKind::SecretsHeldInMemory => (
+            gpui::rgba(0xfbbf24ff),
+            crate::icon("🔑"),
+            "Secrets are not being saved",
+        ),
+        DegradedKind::UndoHistoryClearedAtBoot => (
+            gpui::rgba(0xfbbf24ff),
+            crate::icon("↩"),
+            "Undo history did not survive the restart",
+        ),
+        DegradedKind::PairingReimported => {
+            (gpui::rgba(0x60a5faff), "i", "Content kept from this device")
+        }
+        DegradedKind::BearerTicketEnrollment => (
+            gpui::rgba(0xfbbf24ff),
+            crate::icon("🎟"),
+            "Peer joined with a share ticket",
+        ),
+        DegradedKind::OwnerRecoveryCodeNotShown => (
+            gpui::rgba(0xfbbf24ff),
+            crate::icon("🔑"),
+            "Sharing key has no recovery code",
+        ),
+        DegradedKind::Info => (gpui::rgba(0x60a5faff), "i", "Info"),
+    }
 }
 
 /// Every toast the stack is showing, in order. The tracked text is what the
@@ -2253,8 +2635,8 @@ mod tests {
     /// property the eviction was removed for in the first place.
     fn local(detail: &str) -> DegradedToast {
         DegradedToast {
-            kind: ToastKind::Local(LocalToastKind::CommandFailed),
-            subject: String::new(),
+            kind: DegradedKind::CommandFailed,
+            shared_tree_id: String::new(),
             detail: detail.to_string().into(),
             condition: None,
             format: None,
@@ -2263,16 +2645,8 @@ mod tests {
 
     fn keyed(subject: &str) -> DegradedToast {
         DegradedToast {
-            kind: ToastKind::Condition(
-                ConditionKind::IntegrationNotEnabled {
-                    integration: subject.to_string(),
-                    installed_path: String::new(),
-                    state_path: String::new(),
-                    remedy: String::new(),
-                }
-                .profile(),
-            ),
-            subject: subject.to_string(),
+            kind: DegradedKind::IntegrationNotEnabled,
+            shared_tree_id: subject.to_string(),
             detail: format!("{subject} is switched off").into(),
             condition: Some(holon_api::ConditionKey {
                 subject: subject.to_string(),
@@ -2341,11 +2715,8 @@ mod tests {
             reason: ConditionKind::SnapshotSaveFailed("disk full".into()),
         });
         assert_eq!(s.toasts.len(), 1);
-        assert_eq!(
-            s.toasts[0].condition.as_ref().map(|c| c.kind),
-            Some(ConditionKind::SNAPSHOT_SAVE_FAILED)
-        );
-        assert_eq!(s.toasts[0].subject, "abc");
+        assert_eq!(s.toasts[0].kind, DegradedKind::SnapshotSaveFailed);
+        assert_eq!(s.toasts[0].shared_tree_id, "abc");
         assert!(s.quarantines.is_empty());
     }
 
@@ -2430,10 +2801,7 @@ mod tests {
             reason: ConditionKind::RehydrationFailed("endpoint".into()),
         });
         assert_eq!(s.toasts.len(), 1);
-        assert_eq!(
-            s.toasts[0].condition.as_ref().map(|c| c.kind),
-            Some(ConditionKind::REHYDRATION_FAILED)
-        );
+        assert_eq!(s.toasts[0].kind, DegradedKind::RehydrationFailed);
     }
 
     /// `dispatch_undo`/`dispatch_redo` (below) route a genuine engine `Err`
@@ -2444,8 +2812,8 @@ mod tests {
     fn undo_failed_toast_is_pushed_and_bounded_like_other_kinds() {
         let mut s = ShareUiState::new();
         s.push_toast(DegradedToast {
-            kind: ToastKind::Local(LocalToastKind::UndoFailed),
-            subject: "undo".into(),
+            kind: DegradedKind::UndoFailed,
+            shared_tree_id: "undo".into(),
             detail: "undo: this operation requires an operation engine, which is not wired in \
                      this (no-Turso) session"
                 .into(),
@@ -2453,10 +2821,7 @@ mod tests {
             format: None,
         });
         assert_eq!(s.toasts.len(), 1);
-        assert_eq!(
-            s.toasts[0].kind,
-            ToastKind::Local(LocalToastKind::UndoFailed)
-        );
+        assert_eq!(s.toasts[0].kind, DegradedKind::UndoFailed);
         assert!(s.toasts[0].detail.contains("operation engine"));
     }
 
@@ -2478,7 +2843,7 @@ mod tests {
         let d = super::undo_disclosure("undo", &outcome).expect("a dropped step must disclose");
         assert_eq!(
             d.kind,
-            LocalToastKind::UndoStepDropped,
+            DegradedKind::UndoStepDropped,
             "a lost step must not share a toast kind with a failed press"
         );
         assert!(
@@ -2496,17 +2861,14 @@ mod tests {
         // …and the routed disclosure is what reaches the toast stack.
         let mut s = ShareUiState::new();
         s.push_toast(DegradedToast {
-            kind: ToastKind::Local(d.kind),
-            subject: "undo".into(),
+            kind: d.kind,
+            shared_tree_id: "undo".into(),
             detail: d.detail.into(),
             condition: None,
             format: None,
         });
         assert_eq!(s.toasts.len(), 1);
-        assert_eq!(
-            s.toasts[0].kind,
-            ToastKind::Local(LocalToastKind::UndoStepDropped)
-        );
+        assert_eq!(s.toasts[0].kind, DegradedKind::UndoStepDropped);
     }
 
     /// The arms that must stay silent, and the arms that must not: a press that
@@ -2535,7 +2897,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{outcome:?} must disclose"));
             assert_eq!(
                 d.kind,
-                LocalToastKind::UndoFailed,
+                DegradedKind::UndoFailed,
                 "{outcome:?} is a failed press, not a lost step"
             );
         }
@@ -2552,10 +2914,7 @@ mod tests {
             },
         });
         assert_eq!(s.toasts.len(), 1);
-        assert_eq!(
-            s.toasts[0].condition.as_ref().map(|c| c.kind),
-            Some(ConditionKind::INTEGRATION_CONNECT_FAILED)
-        );
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationConnectFailed);
         assert!(
             s.toasts[0].detail.contains("todoist"),
             "detail must name the integration: {}",
@@ -2589,10 +2948,7 @@ mod tests {
         }
 
         assert_eq!(s.toasts.len(), 1);
-        assert_eq!(
-            s.toasts[0].condition.as_ref().map(|c| c.kind),
-            Some(ConditionKind::INTEGRATION_CONNECT_FAILED)
-        );
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationConnectFailed);
         assert!(s.toasts[0].detail.contains("todoist"));
     }
 
@@ -2635,10 +2991,7 @@ mod tests {
             kind: "integration-connect-failed",
         });
         assert_eq!(s.toasts.len(), 1);
-        assert_eq!(
-            s.toasts[0].condition.as_ref().map(|c| c.kind),
-            Some(ConditionKind::SNAPSHOT_SAVE_FAILED)
-        );
+        assert_eq!(s.toasts[0].kind, DegradedKind::SnapshotSaveFailed);
     }
 
     /// The toast body truncates `detail` at 80 chars, so the integration name
@@ -2667,10 +3020,7 @@ mod tests {
             },
         });
         assert_eq!(s.toasts.len(), 1);
-        assert_eq!(
-            s.toasts[0].condition.as_ref().map(|c| c.kind),
-            Some(ConditionKind::INTEGRATION_NEEDS_AUTH)
-        );
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationNeedsAuth);
         assert!(s.toasts[0].detail.contains("linear"));
         assert!(s.toasts[0].detail.contains("https://linear.app/oauth"));
     }
@@ -2694,10 +3044,7 @@ mod tests {
             },
         });
         assert_eq!(s.toasts.len(), 1);
-        assert_eq!(
-            s.toasts[0].condition.as_ref().map(|c| c.kind),
-            Some(ConditionKind::INTEGRATION_SIDECAR_SUPERSEDED)
-        );
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationSidecarSuperseded);
         let detail = &s.toasts[0].detail;
         assert!(detail.contains("claude-history"), "provider: {detail}");
         assert!(
@@ -2732,10 +3079,7 @@ mod tests {
             },
         });
         assert_eq!(s.toasts.len(), 1);
-        assert_eq!(
-            s.toasts[0].condition.as_ref().map(|c| c.kind),
-            Some(ConditionKind::INTEGRATION_NOT_ENABLED)
-        );
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationNotEnabled);
         let detail = &s.toasts[0].detail;
         assert!(detail.contains("gcal"), "provider: {detail}");
         assert!(
@@ -2876,10 +3220,7 @@ mod tests {
             },
         });
         assert_eq!(s.toasts.len(), 1);
-        assert_eq!(
-            s.toasts[0].condition.as_ref().map(|c| c.kind),
-            Some(ConditionKind::INTEGRATION_SIDECAR_NOT_BUNDLED)
-        );
+        assert_eq!(s.toasts[0].kind, DegradedKind::IntegrationSidecarNotBundled);
         let detail = &s.toasts[0].detail;
         assert!(
             detail.contains("/home/u/.config/holon/integrations/my-own-thing.yaml"),
@@ -2908,8 +3249,8 @@ mod tests {
             8,
             "all eight are distinct conditions; none may be dropped in the state"
         );
-        assert_eq!(s.toasts[0].subject, "s0", "the oldest is still held");
-        assert_eq!(s.toasts[7].subject, "s7");
+        assert_eq!(s.toasts[0].shared_tree_id, "s0", "the oldest is still held");
+        assert_eq!(s.toasts[7].shared_tree_id, "s7");
 
         // Re-raising a condition upserts rather than stacking, so the list
         // stays bounded by the number of DISTINCT conditions in effect.

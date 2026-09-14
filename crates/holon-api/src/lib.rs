@@ -25,7 +25,9 @@ pub mod computation;
 pub mod computed;
 /// flutter_rust_bridge:ignore
 pub mod condition_bus;
+pub mod condition_detail;
 pub mod condition_profile;
+pub mod condition_source;
 pub mod content_canonical;
 pub mod edge_field;
 pub mod effect_id;
@@ -49,6 +51,7 @@ pub mod lifecycle;
 pub mod link_candidate;
 pub mod link_parser;
 pub mod live_data;
+pub mod live_data_source;
 pub mod operation_engine;
 pub mod perspective;
 pub mod predicate;

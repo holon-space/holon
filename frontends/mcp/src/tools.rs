@@ -3613,6 +3613,19 @@ impl HolonMcpServer {
     }
 
     #[tool(
+        description = "List the conditions the app is currently disclosing — every degradation \
+                       that has been raised and not yet cleared, oldest first, with its severity, \
+                       its fixed label, the instance detail the user is shown, and where it is \
+                       placed (toast / banner / modal / section). Read-only. Use it to check what \
+                       a run is complaining about instead of inferring degradation from blank \
+                       pages. A server with no bus wired SAYS SO — that is not an all-clear."
+    )]
+    async fn conditions_list(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        let report = crate::conditions_report::report(self.debug.conditions.get().map(|b| &**b));
+        Ok(CallToolResult::success(vec![Content::text(report)]))
+    }
+
+    #[tool(
         description = "List the live keybinding registry as action → key chord (e.g. `move_up` → \
                        [\"alt\",\"up\"]). Unions BOTH registries and tags each entry with its \
                        source: `structural` (chords wired to reactive operations — indent, \

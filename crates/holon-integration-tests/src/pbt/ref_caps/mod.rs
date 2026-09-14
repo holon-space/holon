@@ -64,6 +64,7 @@ mod audience;
 mod blocks;
 mod boot;
 mod clock;
+mod conditions;
 mod docs;
 mod editor;
 mod entity_schemes;
@@ -227,6 +228,11 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // fixture seeds no second format, which narrows the transition out
         // rather than aiming it at a writable block.
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefReadOnlyHomes>);
+        //  carries what the model expects to be DISCLOSED. It
+        // governs only the kinds a transition has spoken about, so a draw that
+        // exercises no failing transition deselects the invariant rather than
+        // asserting the app is silent.
+        caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefConditions>);
         caps.insert(self as Arc<dyn holon_pbt_core::capabilities::RefSharedView>);
     }
 }

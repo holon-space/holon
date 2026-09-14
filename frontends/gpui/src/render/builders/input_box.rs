@@ -194,8 +194,10 @@ impl InputBoxView {
             let _ = cx.update_window(window_handle, |_, _window, cx| {
                 crate::share_ui::DegradedToastSink::push(
                     crate::share_ui::DegradedToast {
-                        kind: crate::share_ui::DegradedKind::CommandFailed,
-                        shared_tree_id: "input_box".into(),
+                        kind: crate::share_ui::ToastKind::Local(
+                            crate::share_ui::LocalToastKind::CommandFailed,
+                        ),
+                        subject: "input_box".into(),
                         detail: detail.into(),
                         condition: None,
                         format: None,

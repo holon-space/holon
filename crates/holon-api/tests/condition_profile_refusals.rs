@@ -15,6 +15,7 @@ use holon_api::RemedySlot;
 use holon_api::SettingsSection;
 
 const LABEL: &str = "test condition";
+const ICON: &str = holon_api::condition_profile::icons::WARN;
 const PLACEMENT: ConditionPlacement = ConditionPlacement::Banner;
 
 #[test]
@@ -23,6 +24,7 @@ fn elapsed_is_refused_for_warning() {
     let _ = ConditionProfile::new(
         ConditionSeverity::Warning,
         LABEL,
+        ICON,
         PLACEMENT,
         AllClear::Elapsed(Duration::from_secs(5)),
         &[],
@@ -35,6 +37,7 @@ fn elapsed_is_refused_for_error() {
     let _ = ConditionProfile::new(
         ConditionSeverity::Error,
         LABEL,
+        ICON,
         PLACEMENT,
         AllClear::Elapsed(Duration::from_secs(5)),
         &[],
@@ -47,6 +50,7 @@ fn dismiss_is_refused_for_until_restart() {
     let _ = ConditionProfile::new(
         ConditionSeverity::Info,
         LABEL,
+        ICON,
         PLACEMENT,
         AllClear::UntilRestart,
         &[RemedySlot::Dismiss],
@@ -59,6 +63,7 @@ fn dismiss_is_refused_for_next_clean_ingest() {
     let _ = ConditionProfile::new(
         ConditionSeverity::Info,
         LABEL,
+        ICON,
         PLACEMENT,
         AllClear::NextCleanIngest,
         &[
@@ -73,6 +78,7 @@ fn dismiss_is_accepted_where_the_remedy_resolves_it() {
     let profile = ConditionProfile::new(
         ConditionSeverity::Error,
         LABEL,
+        ICON,
         PLACEMENT,
         AllClear::RemedyApplied,
         &[
@@ -94,6 +100,7 @@ fn elapsed_is_accepted_for_info() {
     let profile = ConditionProfile::new(
         ConditionSeverity::Info,
         LABEL,
+        ICON,
         PLACEMENT,
         AllClear::Elapsed(Duration::from_secs(5)),
         &[RemedySlot::Dismiss],
@@ -106,6 +113,7 @@ fn a_placement_section_carries_its_section() {
     let profile = ConditionProfile::new(
         ConditionSeverity::Warning,
         LABEL,
+        ICON,
         ConditionPlacement::Section(SettingsSection::Integrations),
         AllClear::UntilRestart,
         &[],

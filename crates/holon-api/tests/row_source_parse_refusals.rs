@@ -73,11 +73,11 @@ fn a_declared_column_parses_and_carries_the_registrys_own_name() {
     let spec = registry()
         .parse_named("stub", Some(("state", "failing")))
         .expect("a declared column parses");
-    let RowSourceSpec::Named { source, filter } = spec else {
+    let RowSourceSpec::Named(named) = spec else {
         panic!("expected a Named spec");
     };
-    assert_eq!(source.as_str(), "stub");
-    let filter = filter.expect("the filter survives the parse");
+    assert_eq!(named.name().as_str(), "stub");
+    let filter = named.filter().expect("the filter survives the parse");
     assert_eq!(filter.column().as_str(), "state");
     assert_eq!(filter.equals(), "failing");
 }

@@ -1120,9 +1120,11 @@ pub fn render_overlays(
     pending_store: Option<Arc<PendingWriteStore>>,
     bounds: crate::geometry::BoundsRegistry,
     theme: OverlayTheme,
-    // Viewport height in px. The toast stack sizes itself to it: a stack
-    // taller than the window paints its top entries at zero height, which is a
-    // refusal the user never sees.
+    // Viewport size in px. The toast stack sizes itself to BOTH: a stack taller
+    // than the window paints its top entries at zero height, and a box wider
+    // than the window starts at a negative x — it is anchored right, so what
+    // overflows is the left of every line, headline first.
+    viewport_width: f32,
     viewport_height: f32,
 ) -> Vec<AnyElement> {
     let mut overlays: Vec<AnyElement> = Vec::new();
@@ -1194,6 +1196,7 @@ pub fn render_overlays(
             share_state,
             bounds.clone(),
             theme,
+            viewport_width,
             viewport_height,
         ));
     }
@@ -2001,8 +2004,30 @@ pub const DEGRADED_TOAST_STACK: &str = "degraded-toast-stack";
 /// judges, not the string it was built from.
 pub const TOAST_LINE: &str = "toast-line";
 
-/// The box a toast line wraps inside: `max_w(420)` less `px_3` either side.
-const TOAST_TEXT_W: f32 = 420.0 - 24.0;
+/// The widths a toast box wants when the window lets it have them.
+const TOAST_MIN_W: f32 = 280.0;
+const TOAST_MAX_W: f32 = 420.0;
+/// `px_3` either side of a toast's text.
+const TOAST_PAD_W: f32 = 24.0;
+
+/// How wide a toast box may be in a viewport `viewport_width` wide.
+///
+/// The stack is anchored to the RIGHT edge, so a box wider than the viewport
+/// does not overflow on the right where it would be noticed — it starts at a
+/// negative x and the left of every line, the icon and the first words of the
+/// headline included, is painted off the surface. At `MIN_WIDTH` (300) the
+/// window is narrower than the box's own minimum, so the minimum yields too:
+/// a disclosure wrapped tighter is readable, and one drawn outside the window
+/// is not there at all.
+fn toast_box_width(viewport_width: f32) -> f32 {
+    let available = viewport_width - 2.0 * STACK_INSET;
+    TOAST_MAX_W.min(available).max(0.0)
+}
+
+/// The text column inside a box of `box_width`.
+fn toast_text_width(box_width: f32) -> f32 {
+    (box_width - TOAST_PAD_W).max(1.0)
+}
 /// Advance per character, MEASURED rather than derived: a toast box holding
 /// 1380 characters of absolute path painted 694px tall, which is ~39 characters
 /// to a line, not the ~71 a 12px advance would predict. Long unbroken path
@@ -2020,12 +2045,12 @@ const TOAST_BOX_CHROME_H: f32 = 24.0;
 /// toast fewer, and the one it drops is still COUNTED — whereas erring low
 /// paints a refusal at zero height, which is the defect this whole cap exists
 /// to prevent.
-fn estimated_toast_height(lines: &[String]) -> f32 {
+fn estimated_toast_height(lines: &[String], text_width: f32) -> f32 {
     let wrapped: f32 = lines
         .iter()
         .map(|l| {
             let chars = l.chars().count().max(1) as f32;
-            (chars * TOAST_CHAR_W / TOAST_TEXT_W).ceil().max(1.0)
+            (chars * TOAST_CHAR_W / text_width).ceil().max(1.0)
         })
         .sum();
     wrapped * TOAST_LINE_H + TOAST_BOX_CHROME_H
@@ -2036,8 +2061,13 @@ fn render_toast_stack(
     share_state: Entity<ShareUiState>,
     bounds: crate::geometry::BoundsRegistry,
     theme: OverlayTheme,
+    viewport_width: f32,
     viewport_height: f32,
 ) -> AnyElement {
+    // Every box in the stack is this wide, so the height estimate below and the
+    // boxes it is estimating cannot disagree about how far a line wraps.
+    let box_w = toast_box_width(viewport_width);
+    let text_w = toast_text_width(box_w);
     // How many boxes FIT, derived from the window rather than fixed. A fixed
     // number is a guess about payload length: the not-enabled disclosure
     // carries two absolute paths on cap-exempt lines, so one refusal can be
@@ -2051,7 +2081,7 @@ fn render_toast_stack(
     let mut used = 0.0f32;
     let mut visible = 0usize;
     for toast in toasts {
-        let h = estimated_toast_height(&toast_lines(toast)) + TOAST_GAP_H;
+        let h = estimated_toast_height(&toast_lines(toast), text_w) + TOAST_GAP_H;
         if used + h > budget {
             break;
         }
@@ -2095,8 +2125,8 @@ fn render_toast_stack(
                 .bg(theme.border)
                 .text_color(gpui::rgba(0x000000cc))
                 .text_size(px(12.0))
-                .min_w(px(280.0))
-                .max_w(px(420.0))
+                .min_w(px(TOAST_MIN_W.min(box_w)))
+                .max_w(px(box_w))
                 .child(crate::geometry::tracked(
                     format!("{TOAST_LINE}-overflow"),
                     div()
@@ -2127,8 +2157,8 @@ fn render_toast_stack(
                 .border_color(theme.border)
                 .text_color(gpui::rgba(0x000000cc))
                 .text_size(px(12.0))
-                .min_w(px(280.0))
-                .max_w(px(420.0))
+                .min_w(px(TOAST_MIN_W.min(box_w)))
+                .max_w(px(box_w))
                 .flex()
                 .flex_row()
                 .items_center()

@@ -41,8 +41,13 @@ pub(crate) fn cached_shell(
     node: &ReactiveViewModel,
     ctx: &GpuiRenderContext,
 ) -> Option<gpui::Entity<ReactiveShell>> {
-    let query = node.prop_str("query")?;
-    let key = super::live_query_key(&query, node.prop_str("query_context_id").as_deref());
+    let key = match node.prop_str("source") {
+        Some(source) => super::named_source_key(&source, node.prop_str("where_equals").as_deref()),
+        None => super::live_query_key(
+            &node.prop_str("query")?,
+            node.prop_str("query_context_id").as_deref(),
+        ),
+    };
     ctx.local
         .get_typed::<ReactiveShell>(&crate::entity_view_registry::CacheKey::LiveQuery(key))
 }
@@ -91,6 +96,80 @@ fn error_element(message: &str, ctx: &GpuiRenderContext) -> AnyElement {
         .into_any_element()
 }
 
+/// The shell for a node whose rows come from a registered named source.
+///
+/// Its own path because a named source has no watcher to start and no context
+/// path to resolve: the holder behind it is already live, so the only work is
+/// resolving the name against this services tree's registry and interpreting
+/// the template over the resulting provider. An unknown name paints the
+/// registry's refusal, which names the sources that DO exist.
+fn render_named(
+    node: &ReactiveViewModel,
+    ctx: &GpuiRenderContext,
+    placement: crate::views::reactive_shell::ShellPlacement,
+    source: String,
+    render_expr: holon_api::render_types::RenderExpr,
+) -> AnyElement {
+    let filter = match (node.prop_str("where_column"), node.prop_str("where_equals")) {
+        (Some(column), Some(equals)) => Some((column, equals)),
+        _ => None,
+    };
+    let spec = ctx.services.row_sources().parse_named(
+        &source,
+        filter.as_ref().map(|(c, e)| (c.as_str(), e.as_str())),
+    );
+    let named = match spec {
+        Ok(holon_api::row_source::RowSourceSpec::Named(named)) => named,
+        Ok(_) => unreachable!("parse_named only builds the Named arm"),
+        Err(e) => return error_element(&e.to_string(), ctx),
+    };
+
+    let cache_key = crate::entity_view_registry::CacheKey::LiveQuery(super::named_source_key(
+        &source,
+        filter.as_ref().map(|(_, e)| e.as_str()),
+    ));
+    let services = ctx.services.clone();
+    let nav = ctx.nav.clone();
+    let bounds = ctx.bounds_registry.clone();
+    let ancestors = ctx.live_block_ancestors.clone();
+
+    let entity = ctx.local.get_or_create_typed(cache_key, || {
+        let live_block = services.named_source_live(&named, render_expr, services.clone());
+        let render_ctx = holon_frontend::RenderContext::default();
+        ctx.with_gpui(|_window, cx| {
+            cx.new(|cx| {
+                ReactiveShell::new_for_block(
+                    format!("named:{source}"),
+                    render_ctx,
+                    services,
+                    live_block,
+                    nav,
+                    bounds,
+                    ancestors,
+                    placement,
+                    cx,
+                )
+            })
+        })
+    });
+
+    match placement {
+        crate::views::reactive_shell::ShellPlacement::Panel => {
+            let mut s = StyleRefinement {
+                flex_grow: Some(1.0),
+                ..Default::default()
+            };
+            s.size.width = Some(gpui::relative(1.0).into());
+            s.size.height = Some(gpui::relative(1.0).into());
+            AnyView::from(entity).cached(s).into_any_element()
+        }
+        crate::views::reactive_shell::ShellPlacement::Nested => div()
+            .w_full()
+            .child(AnyView::from(entity))
+            .into_any_element(),
+    }
+}
+
 fn render_placed(
     node: &ReactiveViewModel,
     ctx: &GpuiRenderContext,
@@ -101,6 +180,18 @@ fn render_placed(
     let query_lang = node.prop_str("query_lang");
     let query_context_id = node.prop_str("query_context_id");
     let render_expr_str = node.prop_str("render_expr");
+
+    if let (Some(source), Some(re_str)) = (node.prop_str("source"), render_expr_str.as_ref()) {
+        match serde_json::from_str::<holon_api::render_types::RenderExpr>(re_str) {
+            Ok(re) => return render_named(node, ctx, placement, source, re),
+            Err(e) => {
+                return error_element(
+                    &format!("live_query(source: {source}): unreadable render_expr: {e}"),
+                    ctx,
+                );
+            }
+        }
+    }
 
     if let (Some(query), Some(lang_str), Some(re_str)) = (query, query_lang, render_expr_str) {
         let lang: holon_api::QueryLanguage = lang_str

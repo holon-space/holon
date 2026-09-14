@@ -110,6 +110,14 @@ impl TransitionRef<ReferenceState> for AttemptReadOnlyEdit {
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         state.read_only.record_attempt();
+        // The refusal is only half the contract. `read_only_format_gate`
+        // discloses it against the refused FILE's path, so the model expects a
+        // condition whose subject ends in the fixture's recipe file — the part
+        // of an absolute temp-vault path a constant can own.
+        state.conditions.raise(
+            crate::pbt::composed::wide_e2e::READ_ONLY_RECIPE_FILE,
+            holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT,
+        );
     }
 }
 

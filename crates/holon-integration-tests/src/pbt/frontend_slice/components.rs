@@ -6939,6 +6939,27 @@ impl HeadlessFrontendComponent {
     }
 }
 
+/// The conditions this session's production writers have actually raised.
+///
+/// Reads `ConditionBus::current()` — the very object the frontends subscribe
+/// to — rather than re-deriving degradation from the store, so a bus nothing
+/// raises on shows up as a missing disclosure instead of a quiet pass.
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutConditions for HeadlessFrontendComponent {
+    async fn conditions_now(&self) -> Vec<holon_pbt_core::capabilities::RaisedCondition> {
+        let Some(bus) = self.degraded_bus() else {
+            return Vec::new();
+        };
+        bus.current()
+            .into_iter()
+            .map(|c| holon_pbt_core::capabilities::RaisedCondition {
+                subject: c.subject,
+                kind: c.reason.condition_kind().to_string(),
+            })
+            .collect()
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponent {
     async fn read_only_blocks_at_ingest(&self) -> Vec<(String, String)> {

@@ -201,6 +201,11 @@ pub struct DebugServices {
     /// unset in a headless run, where the tool then reports the structural
     /// registry alone and says so.
     pub window_key_bindings: std::sync::OnceLock<Vec<WindowKeyBinding>>,
+    /// The live condition bus, so `conditions_list` reports what the app is
+    /// actually disclosing instead of re-deriving it from storage. Set by the
+    /// frontend; unset in a headless run, where the tool SAYS it is unwired
+    /// rather than reporting an all-clear it cannot vouch for.
+    pub conditions: std::sync::OnceLock<Arc<holon_api::ConditionBus>>,
     /// Channel for injecting raw input events into the GPUI window.
     /// Set by the GPUI frontend after window creation.
     /// Uses `futures::channel::mpsc` so the pump awaits messages instead of
@@ -327,6 +332,7 @@ impl Default for DebugServices {
             navigation_state: Arc::new(std::sync::RwLock::new(NavigationDebugState::default())),
             input_router: Arc::new(InputRouter::new()),
             window_key_bindings: std::sync::OnceLock::new(),
+            conditions: std::sync::OnceLock::new(),
             interaction_tx: std::sync::OnceLock::new(),
             user_driver: std::sync::OnceLock::new(),
             geometry: std::sync::OnceLock::new(),

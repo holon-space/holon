@@ -221,8 +221,10 @@ impl EditorView {
                                 ));
                                 crate::share_ui::DegradedToastSink::push(
                                     crate::share_ui::DegradedToast {
-                                        kind: crate::share_ui::DegradedKind::Info,
-                                        shared_tree_id: bare_for_copy.clone(),
+                                        kind: crate::share_ui::ToastKind::Local(
+                                            crate::share_ui::LocalToastKind::Info,
+                                        ),
+                                        subject: bare_for_copy.clone(),
                                         detail: format!("Copied block ID {bare_for_copy}").into(),
                                         condition: None,
                                         format: None,
@@ -1693,8 +1695,10 @@ impl Render for EditorView {
                                 let _ = cx.update_window(window_handle, |_, _window, cx| {
                                     crate::share_ui::DegradedToastSink::push(
                                         crate::share_ui::DegradedToast {
-                                            kind: crate::share_ui::DegradedKind::CommandFailed,
-                                            shared_tree_id: "command".into(),
+                                            kind: crate::share_ui::ToastKind::Local(
+                                                crate::share_ui::LocalToastKind::CommandFailed,
+                                            ),
+                                            subject: "command".into(),
                                             detail: detail.into(),
                                             condition: None,
                                             format: None,
@@ -2101,8 +2105,10 @@ fn apply_popup_action(
                     let _ = cx.update_window(window_handle, |_, _window, cx| {
                         crate::share_ui::DegradedToastSink::push(
                             crate::share_ui::DegradedToast {
-                                kind: crate::share_ui::DegradedKind::CommandFailed,
-                                shared_tree_id: "command".into(),
+                                kind: crate::share_ui::ToastKind::Local(
+                                    crate::share_ui::LocalToastKind::CommandFailed,
+                                ),
+                                subject: "command".into(),
                                 detail: detail.into(),
                                 condition: None,
                                 format: None,
@@ -2150,8 +2156,10 @@ fn apply_popup_action(
             }
             crate::share_ui::DegradedToastSink::push(
                 crate::share_ui::DegradedToast {
-                    kind: crate::share_ui::DegradedKind::CommandFailed,
-                    shared_tree_id: "command".into(),
+                    kind: crate::share_ui::ToastKind::Local(
+                        crate::share_ui::LocalToastKind::CommandFailed,
+                    ),
+                    subject: "command".into(),
                     detail: message.into(),
                     condition: None,
                     format: None,

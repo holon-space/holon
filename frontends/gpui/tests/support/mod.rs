@@ -74,6 +74,28 @@ pub const CANNED_LIVE_QUERY_ROWS: usize = 40;
 /// `props.field == "content"` makes its bounds appear in `BoundsRegistry`
 /// keyed by `entity_id` (`{prefix}-{ix}`), so a windowed test can locate the
 /// rows a canned `watch_query_live` produced.
+/// One row of a named source, as the fixture paints it: the row's own
+/// `subject` column as the visible text, and the whole row as its data.
+fn named_source_row(row: &std::sync::Arc<holon_api::widget_spec::DataRow>) -> ReactiveViewModel {
+    let subject = row
+        .get("subject")
+        .and_then(holon_api::Value::as_string)
+        .unwrap_or_default()
+        .to_string();
+    let mut props = std::collections::HashMap::new();
+    props.insert(
+        "content".to_string(),
+        holon_api::Value::String(subject.clone()),
+    );
+    props.insert(
+        "field".to_string(),
+        holon_api::Value::String("subject".to_string()),
+    );
+    let mut vm = ReactiveViewModel::from_widget("text", props);
+    vm.data = futures_signals::signal::Mutable::new(std::sync::Arc::clone(row)).read_only();
+    vm
+}
+
 fn canned_live_query_row(prefix: &str, ix: usize) -> ReactiveViewModel {
     let id = format!("{prefix}-{ix}");
     let label = format!("{prefix} reference {ix}");
@@ -235,9 +257,22 @@ pub struct TestServices {
     /// `None` reproduces the pre-first-frame state, where the shell has not
     /// pushed a viewport yet.
     viewport: std::sync::Mutex<Option<holon_frontend::AvailableSpace>>,
+    /// Named row sources a `live_query(#{source: ...})` in this fixture can be
+    /// built over. Empty by default, so a fixture that does not declare one
+    /// gets the production refusal (the source is unknown) rather than a
+    /// silently empty collection.
+    row_sources: Arc<holon_api::row_source::RowSourceRegistry>,
 }
 
 impl TestServices {
+    /// A fixture that can build collections over `registry`'s named sources.
+    pub fn with_row_sources(registry: Arc<holon_api::row_source::RowSourceRegistry>) -> Arc<Self> {
+        let mut services = Arc::try_unwrap(Self::new())
+            .unwrap_or_else(|_| unreachable!("TestServices::new hands back a unique Arc"));
+        services.row_sources = registry;
+        Arc::new(services)
+    }
+
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             query_engine: None,
@@ -253,6 +288,7 @@ impl TestServices {
             editable_cell: None,
             live_query_rows: std::sync::Mutex::new(None),
             viewport: std::sync::Mutex::new(None),
+            row_sources: Arc::new(holon_api::row_source::RowSourceRegistry::new()),
         })
     }
 
@@ -285,6 +321,7 @@ impl TestServices {
             editable_cell: Some(cell),
             live_query_rows: std::sync::Mutex::new(None),
             viewport: std::sync::Mutex::new(None),
+            row_sources: Arc::new(holon_api::row_source::RowSourceRegistry::new()),
         })
     }
 
@@ -314,6 +351,7 @@ impl TestServices {
             editable_cell: None,
             live_query_rows: std::sync::Mutex::new(None),
             viewport: std::sync::Mutex::new(None),
+            row_sources: Arc::new(holon_api::row_source::RowSourceRegistry::new()),
         })
     }
 
@@ -335,6 +373,7 @@ impl TestServices {
             editable_cell: None,
             live_query_rows: std::sync::Mutex::new(None),
             viewport: std::sync::Mutex::new(None),
+            row_sources: Arc::new(holon_api::row_source::RowSourceRegistry::new()),
         })
     }
 
@@ -382,6 +421,54 @@ impl TestServices {
 }
 
 impl BuilderServices for TestServices {
+    fn row_sources(&self) -> Arc<holon_api::row_source::RowSourceRegistry> {
+        Arc::clone(&self.row_sources)
+    }
+
+    /// The named source's OWN rows, as a static `list` collection.
+    ///
+    /// Production interprets the template and then calls
+    /// `start_reactive_views`, which needs a running runtime to materialise the
+    /// collection from `data_source`. This fixture is deliberately QUIESCENT —
+    /// driver spawns queue and never run — so that path would render an empty
+    /// shell here for reasons that have nothing to do with the named source.
+    /// The canned `watch_query_live` above sidesteps the same problem the same
+    /// way.
+    ///
+    /// What it keeps real: the rows come from the REGISTERED source's provider,
+    /// so a window rendered through this still proves the `source` prop reached
+    /// `render_named`, the registry resolved the name, and the holder's rows
+    /// arrived. What it does NOT cover is the template interpretation — that
+    /// needs the composed windowed harness.
+    fn named_source_live(
+        &self,
+        named: &holon_api::row_source::NamedSource,
+        _: holon_api::render_types::RenderExpr,
+        _: Arc<dyn BuilderServices>,
+    ) -> holon_frontend::reactive::LiveBlock {
+        let rows: Vec<ReactiveViewModel> = named
+            .provider()
+            .rows_snapshot()
+            .iter()
+            .map(named_source_row)
+            .collect();
+        let view = std::sync::Arc::new(
+            holon_frontend::reactive_view::ReactiveView::new_static_with_layout(
+                rows,
+                holon_frontend::reactive_view_model::CollectionVariant::list(0.0),
+            ),
+        );
+        let tree = ReactiveViewModel {
+            collection: Some(view),
+            ..ReactiveViewModel::from_widget("list", std::collections::HashMap::new())
+        };
+        holon_frontend::reactive::LiveBlock {
+            tree,
+            structural_changes: Box::pin(futures::stream::pending()),
+            watch_guard: None,
+        }
+    }
+
     /// TestServices is a test double with no backend to await: it dispatches
     /// and reports that nothing was proven, rather than inheriting a claim
     /// it cannot make.

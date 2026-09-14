@@ -45,6 +45,7 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // every refusal is disclosed on the degraded bus. Needs the production
         // write-tier authority (`SutReadOnlyHomes`) plus the fixture's declared
         // homes, so an org-only draw deselects it instead of passing vacuously.
+        invariants::conditions_match_ref::wire(),
         invariants::read_only_home_refuses_writes::wire(),
         invariants::source_language::wire(),
         // FLT-1.b: every `holon_filter` source block resolves to a typed

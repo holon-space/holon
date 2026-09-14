@@ -125,6 +125,44 @@ pub enum AllClear {
     UntilRestart,
 }
 
+/// The glyphs a condition can be drawn with.
+///
+/// Severity decides the COLOUR, but not the mark: five different Warnings wear
+/// ⚠, ↻, 🔑, ↩ and 🎟, and which one is a fact about the kind, exactly like its
+/// label. Named constants rather than inline literals so the frontend's
+/// icon-font coverage test can sweep [`CONDITION_ICONS`] instead of a
+/// hand-maintained list that drifts when a profile is added.
+pub mod icons {
+    /// The general degradation mark. Most Warnings, and the Errors that are
+    /// not refusals.
+    pub const WARN: &str = "⚠";
+    /// A refusal: the operation was blocked, nothing changed.
+    pub const BLOCKED: &str = "⛔";
+    /// A retry is what recovers this.
+    pub const RETRY: &str = "↻";
+    /// About a credential or a key.
+    pub const KEY: &str = "🔑";
+    /// About undo history.
+    pub const UNDO: &str = "↩";
+    /// About a share ticket.
+    pub const TICKET: &str = "🎟";
+    /// Not a degradation — feedback.
+    pub const INFO: &str = "i";
+}
+
+/// Every distinct glyph a profile can carry. The frontend's icon-font coverage
+/// test sweeps this, so a new profile's glyph is checked for renderability
+/// without anyone remembering to add it anywhere.
+pub const CONDITION_ICONS: &[&str] = &[
+    icons::WARN,
+    icons::BLOCKED,
+    icons::RETRY,
+    icons::KEY,
+    icons::UNDO,
+    icons::TICKET,
+    icons::INFO,
+];
+
 /// Everything about a condition that does not vary by instance.
 ///
 /// The fields are private so that [`ConditionProfile::new`] really is the only
@@ -136,6 +174,9 @@ pub struct ConditionProfile {
     /// The fixed headline. Instance detail is carried by the condition, never
     /// by this string.
     label: &'static str,
+    /// The mark drawn beside the label, from [`icons`]. Not derivable from
+    /// severity — see that module.
+    icon: &'static str,
     placement: ConditionPlacement,
     all_clear: AllClear,
     remedies: &'static [RemedySlot],
@@ -148,6 +189,10 @@ impl ConditionProfile {
 
     pub const fn label(self) -> &'static str {
         self.label
+    }
+
+    pub const fn icon(self) -> &'static str {
+        self.icon
     }
 
     pub const fn placement(self) -> ConditionPlacement {
@@ -175,6 +220,7 @@ impl ConditionProfile {
     pub const fn new(
         severity: ConditionSeverity,
         label: &'static str,
+        icon: &'static str,
         placement: ConditionPlacement,
         all_clear: AllClear,
         remedies: &'static [RemedySlot],
@@ -203,6 +249,7 @@ impl ConditionProfile {
         Self {
             severity,
             label,
+            icon,
             placement,
             all_clear,
             remedies,
@@ -218,6 +265,7 @@ impl ConditionProfile {
 const SNAPSHOT_SAVE_FAILED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Snapshot save failed",
+    icons::WARN,
     ConditionPlacement::Toast,
     AllClear::NextSuccessOf(ClearingEvent::SnapshotSave),
     &[],
@@ -226,6 +274,7 @@ const SNAPSHOT_SAVE_FAILED: ConditionProfile = ConditionProfile::new(
 const SNAPSHOT_LOAD_FAILED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Shared snapshot could not be read",
+    icons::BLOCKED,
     ConditionPlacement::Modal,
     AllClear::UntilRestart,
     &[],
@@ -234,6 +283,7 @@ const SNAPSHOT_LOAD_FAILED: ConditionProfile = ConditionProfile::new(
 const REHYDRATION_FAILED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Rehydration failed",
+    icons::RETRY,
     ConditionPlacement::Toast,
     AllClear::UntilRestart,
     &[],
@@ -242,6 +292,7 @@ const REHYDRATION_FAILED: ConditionProfile = ConditionProfile::new(
 const SQL_PROJECTION_FAILED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Shared edit not shown",
+    icons::WARN,
     ConditionPlacement::Toast,
     AllClear::NextSuccessOf(ClearingEvent::SqlProjection),
     &[],
@@ -250,6 +301,7 @@ const SQL_PROJECTION_FAILED: ConditionProfile = ConditionProfile::new(
 const FOREIGN_ID_COLLISION: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Blocked shared write (id collision)",
+    icons::BLOCKED,
     ConditionPlacement::Toast,
     AllClear::NextSuccessOf(ClearingEvent::SqlProjection),
     &[],
@@ -258,6 +310,7 @@ const FOREIGN_ID_COLLISION: ConditionProfile = ConditionProfile::new(
 const VAULT_INGEST_FAILED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "File sync degraded (bad vault file)",
+    icons::WARN,
     ConditionPlacement::Toast,
     AllClear::NextCleanIngest,
     &[],
@@ -266,6 +319,7 @@ const VAULT_INGEST_FAILED: ConditionProfile = ConditionProfile::new(
 const VAULT_FILE_EMPTIED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Vault file is empty — the document shown is stale",
+    icons::WARN,
     ConditionPlacement::Toast,
     AllClear::NextCleanIngest,
     &[],
@@ -274,6 +328,7 @@ const VAULT_FILE_EMPTIED: ConditionProfile = ConditionProfile::new(
 const SHARED_SUBTREE_NOT_MATERIALIZED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Shared subtree not materialized",
+    icons::WARN,
     ConditionPlacement::Toast,
     AllClear::NextSuccessOf(ClearingEvent::ShareMaterialize),
     &[],
@@ -282,6 +337,7 @@ const SHARED_SUBTREE_NOT_MATERIALIZED: ConditionProfile = ConditionProfile::new(
 const EDIT_REFUSED_READ_ONLY_FORMAT: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Edit refused — read-only file",
+    icons::BLOCKED,
     ConditionPlacement::Toast,
     AllClear::UntilRestart,
     &[],
@@ -290,6 +346,7 @@ const EDIT_REFUSED_READ_ONLY_FORMAT: ConditionProfile = ConditionProfile::new(
 const WRITEBACK_DEGRADED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Edits are not reaching disk",
+    icons::BLOCKED,
     ConditionPlacement::Toast,
     AllClear::NextSuccessOf(ClearingEvent::WritebackRespawn),
     &[],
@@ -298,6 +355,7 @@ const WRITEBACK_DEGRADED: ConditionProfile = ConditionProfile::new(
 const INTEGRATION_CONNECT_FAILED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Integration unavailable",
+    icons::BLOCKED,
     ConditionPlacement::Toast,
     AllClear::NextSuccessOf(ClearingEvent::IntegrationConnect),
     &[],
@@ -306,6 +364,7 @@ const INTEGRATION_CONNECT_FAILED: ConditionProfile = ConditionProfile::new(
 const INTEGRATION_NEEDS_AUTH: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Integration needs authorization",
+    icons::BLOCKED,
     ConditionPlacement::Toast,
     AllClear::NextSuccessOf(ClearingEvent::IntegrationConnect),
     &[],
@@ -314,6 +373,7 @@ const INTEGRATION_NEEDS_AUTH: ConditionProfile = ConditionProfile::new(
 const INTEGRATION_SIDECAR_SUPERSEDED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Installed integration file ignored — using the bundled one",
+    icons::WARN,
     ConditionPlacement::Toast,
     AllClear::UntilRestart,
     &[],
@@ -322,6 +382,7 @@ const INTEGRATION_SIDECAR_SUPERSEDED: ConditionProfile = ConditionProfile::new(
 const INTEGRATION_NOT_ENABLED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Integration is not switched on",
+    icons::WARN,
     ConditionPlacement::Toast,
     AllClear::UntilRestart,
     &[],
@@ -330,6 +391,7 @@ const INTEGRATION_NOT_ENABLED: ConditionProfile = ConditionProfile::new(
 const INTEGRATION_SIDECAR_NOT_BUNDLED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "No connection by this name",
+    icons::WARN,
     ConditionPlacement::Toast,
     AllClear::UntilRestart,
     &[],
@@ -338,6 +400,7 @@ const INTEGRATION_SIDECAR_NOT_BUNDLED: ConditionProfile = ConditionProfile::new(
 const INTEGRATION_SIDECAR_UNUSABLE: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Connection file cannot be used",
+    icons::WARN,
     ConditionPlacement::Toast,
     AllClear::UntilRestart,
     &[],
@@ -346,6 +409,7 @@ const INTEGRATION_SIDECAR_UNUSABLE: ConditionProfile = ConditionProfile::new(
 const SECRETS_HELD_IN_MEMORY: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Secrets are not being saved",
+    icons::KEY,
     ConditionPlacement::Toast,
     AllClear::UntilRestart,
     &[],
@@ -354,6 +418,7 @@ const SECRETS_HELD_IN_MEMORY: ConditionProfile = ConditionProfile::new(
 const UNDO_HISTORY_CLEARED_AT_BOOT: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Undo history did not survive the restart",
+    icons::UNDO,
     ConditionPlacement::Toast,
     AllClear::UntilRestart,
     &[],
@@ -362,6 +427,7 @@ const UNDO_HISTORY_CLEARED_AT_BOOT: ConditionProfile = ConditionProfile::new(
 const PAIRING_REIMPORTED_LOCAL_CONTENT: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Info,
     "Content kept from this device",
+    icons::INFO,
     ConditionPlacement::Toast,
     AllClear::UntilRestart,
     &[],
@@ -373,6 +439,7 @@ const PAIRING_REIMPORTED_LOCAL_CONTENT: ConditionProfile = ConditionProfile::new
 const PAIRING_REIMPORT_DEFERRED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Some blocks could not be re-imported",
+    icons::WARN,
     ConditionPlacement::Banner,
     AllClear::NextSuccessOf(ClearingEvent::PairReimport),
     &[RemedySlot::Retry(OpId::PairRetryReimport)],
@@ -381,6 +448,7 @@ const PAIRING_REIMPORT_DEFERRED: ConditionProfile = ConditionProfile::new(
 const BEARER_TICKET_ENROLLMENT: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Peer joined with a share ticket",
+    icons::TICKET,
     ConditionPlacement::Toast,
     AllClear::UntilRestart,
     &[],
@@ -389,6 +457,7 @@ const BEARER_TICKET_ENROLLMENT: ConditionProfile = ConditionProfile::new(
 const OWNER_RECOVERY_CODE_NOT_SHOWN: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Sharing key has no recovery code",
+    icons::KEY,
     ConditionPlacement::Toast,
     AllClear::UntilRestart,
     &[],

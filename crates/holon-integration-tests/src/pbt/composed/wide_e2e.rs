@@ -1270,6 +1270,11 @@ pub async fn boot_and_seed_wide_with_peer_id(
         caps.insert(
             frontend.clone() as std::sync::Arc<dyn holon_pbt_core::capabilities::SutReadOnlyHomes>
         );
+        // The disclosure side of the same story: the write-tier gate refuses,
+        // and `inv-conditions-match-ref` judges whether it also TOLD anyone.
+        caps.insert(
+            frontend.clone() as std::sync::Arc<dyn holon_pbt_core::capabilities::SutConditions>
+        );
     }
 
     install_observability_caps(&mut caps, None);

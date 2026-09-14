@@ -49,8 +49,10 @@ fn set_preference_or_toast(
     if let Err(e) = services.set_preference(key, value) {
         crate::share_ui::DegradedToastSink::push(
             crate::share_ui::DegradedToast {
-                kind: crate::share_ui::DegradedKind::PreferenceSaveFailed,
-                shared_tree_id: format!("preference:{key}"),
+                kind: crate::share_ui::ToastKind::Local(
+                    crate::share_ui::LocalToastKind::PreferenceSaveFailed,
+                ),
+                subject: format!("preference:{key}"),
                 detail: format!("Couldn't save '{key}': {e:#}").into(),
                 condition: None,
                 format: None,

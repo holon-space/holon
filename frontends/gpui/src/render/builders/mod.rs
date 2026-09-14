@@ -387,6 +387,13 @@ fn render_unsupported(name: &str, _: &GpuiRenderContext) -> Div {
     div().child(format!("[unsupported: {name}]"))
 }
 
+/// Stable key for a collection over a named row source. Its own prefix, so a
+/// query whose text happens to read like a source name cannot land on the same
+/// cache entry.
+pub(crate) fn named_source_key(source: &str, filter_equals: Option<&str>) -> String {
+    live_query_key(&format!("named:{source}"), filter_equals)
+}
+
 /// Stable key for a live query, used to look up its Entity<ReactiveShell> in
 /// the registry.
 pub(crate) fn live_query_key(sql: &str, context_id: Option<&str>) -> String {

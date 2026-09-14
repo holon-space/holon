@@ -19,12 +19,13 @@ use crate::QueryContext;
 use crate::QueryLanguage;
 use crate::interp_value::ReactiveRowProvider;
 
-/// The name of a registered named source.
+/// The name of a registered named source, for display and equality.
 ///
-/// Constructible only by [`RowSourceRegistry::parse_named`], so a
-/// `SourceName` in hand is proof the source is registered. Holding the
-/// `&'static str` from the registry's own definition — not a caller's string —
-/// means the name cannot drift from what was looked up.
+/// Constructible only by [`RowSourceRegistry::parse_named`], and it holds the
+/// `&'static str` from the source's own declaration rather than the caller's
+/// string, so it cannot drift from what was looked up. It carries no lookup
+/// obligation of its own: the resolved source travels beside it in
+/// [`NamedSource`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SourceName(&'static str);
 
@@ -87,10 +88,54 @@ pub enum RowSourceSpec {
         context: Option<QueryContext>,
     },
     /// A registered in-process holder, mapped to rows.
-    Named {
-        source: SourceName,
-        filter: Option<RowFilter>,
-    },
+    Named(NamedSource),
+}
+
+/// A named source already resolved against the registry that declared it.
+///
+/// The resolved `Arc` travels inside the spec instead of being looked up again
+/// downstream. A name plus a later lookup is proof only within one registry
+/// instance, and [`RowSourceRegistry::new`] is public — so a lookup against a
+/// second registry is the illegal state this shape removes rather than asserts
+/// against.
+#[derive(Clone)]
+pub struct NamedSource {
+    name: SourceName,
+    source: Arc<dyn RowSource>,
+    filter: Option<RowFilter>,
+}
+
+impl NamedSource {
+    pub const fn name(&self) -> SourceName {
+        self.name
+    }
+
+    pub fn filter(&self) -> Option<&RowFilter> {
+        self.filter.as_ref()
+    }
+
+    /// The rows this source produces under this spec's filter.
+    pub fn provider(&self) -> Arc<dyn ReactiveRowProvider> {
+        self.source.provider(self.filter.as_ref())
+    }
+}
+
+impl std::fmt::Debug for NamedSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NamedSource")
+            .field("name", &self.name)
+            .field("filter", &self.filter)
+            .finish()
+    }
+}
+
+/// Two specs are the same collection when they name the same source under the
+/// same filter. Comparing the resolved `Arc` as well would only distinguish two
+/// registries holding one source.
+impl PartialEq for NamedSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.filter == other.filter
+    }
 }
 
 /// What a named source promises about itself.
@@ -180,12 +225,6 @@ impl RowSourceRegistry {
         self.sources.keys().copied().collect()
     }
 
-    pub fn get(&self, name: SourceName) -> &Arc<dyn RowSource> {
-        self.sources
-            .get(name.as_str())
-            .expect("a SourceName is only constructible from this registry")
-    }
-
     /// Parse a builder's `source:` (and optional `where_column:` /
     /// `where_equals:`) arguments into a [`RowSourceSpec::Named`].
     pub fn parse_named(
@@ -201,6 +240,7 @@ impl RowSourceRegistry {
         };
         let def = registered.def();
         let name = SourceName(def.name);
+        let source = Arc::clone(registered);
 
         let filter = match filter {
             None => None,
@@ -219,9 +259,10 @@ impl RowSourceRegistry {
             }
         };
 
-        Ok(RowSourceSpec::Named {
-            source: name,
+        Ok(RowSourceSpec::Named(NamedSource {
+            name,
+            source,
             filter,
-        })
+        }))
     }
 }

@@ -509,6 +509,10 @@ pub struct ReferenceState {
     /// them. Empty on an org-only draw; read by `AttemptReadOnlyEdit`
     /// through the `RefReadOnlyHomes` cap.
     pub read_only: super::read_only_state::ReadOnlyRefState,
+    /// What the model expects the app to be DISCLOSING. A transition that
+    /// fails on purpose records its condition here, so the keystone can judge
+    /// whether the user was told — not only whether the write was refused.
+    pub conditions: super::conditions_state::ConditionsRefState,
 
     /// C2 history-oracle expectation (NOT model state proper): populated by the
     /// harness `run_report` from the id-reconcile map. `history_ever_created`
@@ -940,6 +944,7 @@ impl ReferenceState {
             clock: ClockState::new(),
             sharing: super::sharing_state::SharingRefState::default(),
             read_only: super::read_only_state::ReadOnlyRefState::default(),
+            conditions: super::conditions_state::ConditionsRefState::default(),
             history_ever_created: BTreeSet::new(),
             history_min_op_groups: 0,
             undo_redo_burned_ids: BTreeSet::new(),

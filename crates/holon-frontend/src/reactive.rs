@@ -619,6 +619,38 @@ pub trait BuilderServices: Send + Sync {
         panic!("watch_query_live not supported by this BuilderServices implementation")
     }
 
+    /// Every named row source a collection in this services tree can be built
+    /// over ([`holon_api::row_source`]).
+    ///
+    /// Default: the empty registry. An impl that registers no named source HAS
+    /// none, so `parse_named` refuses every name and says the registered set is
+    /// empty — the builder paints that refusal rather than an empty collection,
+    /// which would be indistinguishable from a source that matched nothing.
+    fn row_sources(&self) -> Arc<holon_api::row_source::RowSourceRegistry> {
+        static EMPTY: std::sync::OnceLock<Arc<holon_api::row_source::RowSourceRegistry>> =
+            std::sync::OnceLock::new();
+        EMPTY
+            .get_or_init(|| Arc::new(holon_api::row_source::RowSourceRegistry::new()))
+            .clone()
+    }
+
+    /// Build a live tree over a named source's rows — the `Named` counterpart
+    /// of [`Self::watch_query_live`].
+    ///
+    /// No watcher key and no `WatchGuard`: the rows come from a holder this
+    /// process already owns, so there is nothing to start and nothing to
+    /// release. Panics by default for the reason `watch_query_live` does — an
+    /// impl that cannot serve a named source must say so rather than hand back
+    /// an empty tree.
+    fn named_source_live(
+        &self,
+        _: &holon_api::row_source::NamedSource,
+        _: holon_api::render_types::RenderExpr,
+        _: Arc<dyn BuilderServices>,
+    ) -> crate::LiveBlock {
+        panic!("named_source_live not supported by this BuilderServices implementation")
+    }
+
     /// Tokio runtime handle for spawning subscriptions (editor/popup providers,
     /// reactive watchers). Replaces the side-channel `rt_handle` field that
     /// used to live on `GpuiRenderContext`. Impls without a runtime must still
@@ -2529,6 +2561,14 @@ pub struct ReactiveEngine {
     /// this epoch to hold steady — alongside the CDC/Loro/org signals — so the
     /// consumer is proven drained before invariants read the ViewModel.
     apply_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// The named row sources collections in this engine may be built over.
+    ///
+    /// Filled in after construction, because the holders behind the sources
+    /// (the condition bus, integration state) are wired later than the engine
+    /// itself. Until then the registry is absent and every `source:` argument
+    /// is refused by name — the disclosure a silently-empty collection would
+    /// not give.
+    row_sources: Arc<std::sync::OnceLock<Arc<holon_api::row_source::RowSourceRegistry>>>,
 }
 
 impl ReactiveEngine {
@@ -2586,6 +2626,7 @@ impl ReactiveEngine {
             advice_sidecar: Arc::new(Mutex::new(HashMap::new())),
             advice_weaver_started: std::sync::atomic::AtomicBool::new(false),
             apply_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            row_sources: Arc::new(std::sync::OnceLock::new()),
         };
         engine.register_memstats();
         engine
@@ -3503,6 +3544,51 @@ impl ReactiveEngine {
             task,
             command_tx: proxy_cmd_tx,
             refcount,
+        }
+    }
+
+    /// Declare the named row sources for this engine. Called once by the
+    /// frontend's DI, after the holders behind them exist.
+    ///
+    /// A second call is a wiring bug — two registries answering one engine
+    /// makes which sources a collection can see depend on call order — so it is
+    /// an `Err` rather than a replacement.
+    pub fn set_row_sources(
+        &self,
+        registry: Arc<holon_api::row_source::RowSourceRegistry>,
+    ) -> Result<(), &'static str> {
+        self.row_sources
+            .set(registry)
+            .map_err(|_| "row sources were already declared for this engine")
+    }
+
+    /// Build the live tree for a named source. See
+    /// [`BuilderServices::named_source_live`].
+    ///
+    /// No structural-change stream: a named source's render expression is
+    /// fixed at build time, and its ROWS change through the collection's own
+    /// per-row streaming off `data_source`. A structural stream here would
+    /// re-interpret the whole tree per row change — the cost the streaming
+    /// collection exists to avoid.
+    pub fn named_source_live(
+        &self,
+        named: &holon_api::row_source::NamedSource,
+        render_expr: RenderExpr,
+        services: Arc<dyn BuilderServices>,
+    ) -> LiveBlock {
+        let provider = named.provider();
+        let ctx = RenderContext {
+            data_rows: provider.rows_snapshot().into(),
+            data_source: Some(provider),
+            available_space: services.viewport_snapshot(),
+            ..Default::default()
+        };
+        let tree = services.interpret(&render_expr, &ctx);
+        crate::reactive_view::start_reactive_views(&tree, &services, &self.runtime_handle);
+        LiveBlock {
+            tree,
+            structural_changes: Box::pin(futures::stream::pending()),
+            watch_guard: None,
         }
     }
 
@@ -4583,6 +4669,22 @@ impl BuilderServices for ReactiveEngine {
         services: Arc<dyn BuilderServices>,
     ) -> (EntityUri, crate::LiveBlock) {
         ReactiveEngine::watch_query_live(self, query, lang, render_expr, query_context, services)
+    }
+
+    fn named_source_live(
+        &self,
+        named: &holon_api::row_source::NamedSource,
+        render_expr: holon_api::render_types::RenderExpr,
+        services: Arc<dyn BuilderServices>,
+    ) -> crate::LiveBlock {
+        ReactiveEngine::named_source_live(self, named, render_expr, services)
+    }
+
+    fn row_sources(&self) -> Arc<holon_api::row_source::RowSourceRegistry> {
+        self.row_sources
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(holon_api::row_source::RowSourceRegistry::new()))
     }
 
     fn unwatch(&self, block_id: &EntityUri) {

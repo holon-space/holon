@@ -4,7 +4,7 @@
 //!
 //! Probed against the `focus_roots` mirror, because it is a real
 //! `LiveData<FocusRoot>` in production whose `id_fn` builds a COMPOSITE key
-//! (`"{region}\u{1F}{root_id}"`, `turso_block_query_source.rs:143-149`). If the
+//! (`"{region}\u{1F}{root_id}"`, `turso_block_query_source.rs:137-148`). If the
 //! composite key orders stably, a single-field key trivially does.
 
 use std::sync::Arc;

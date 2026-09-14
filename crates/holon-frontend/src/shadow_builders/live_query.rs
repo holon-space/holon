@@ -9,9 +9,26 @@ holon_macros::widget_builder! {
         match shared_live_query_build(&ba, __item_template) {
             Ok(result) => {
                 let mut __props = std::collections::HashMap::new();
-                __props.insert("query".to_string(), Value::String(result.query));
-                __props.insert("query_lang".to_string(),
-                    Value::String(result.query_lang.to_string()));
+                // The spec decides which props the node carries, so the
+                // platform layer reads one arm or the other and never has to
+                // guess which subscription a node wants.
+                match &result.spec {
+                    holon_api::row_source::RowSourceSpec::Query { lang, text, .. } => {
+                        __props.insert("query".to_string(), Value::String(text.clone()));
+                        __props.insert("query_lang".to_string(),
+                            Value::String(lang.to_string()));
+                    }
+                    holon_api::row_source::RowSourceSpec::Named(named) => {
+                        __props.insert("source".to_string(),
+                            Value::String(named.name().as_str().to_string()));
+                        if let Some(filter) = named.filter() {
+                            __props.insert("where_column".to_string(),
+                                Value::String(filter.column().as_str().to_string()));
+                            __props.insert("where_equals".to_string(),
+                                Value::String(filter.equals().to_string()));
+                        }
+                    }
+                }
                 if let Some(ref ctx_id) = result.query_context_id {
                     __props.insert("query_context_id".to_string(), Value::String(ctx_id.clone()));
                 }

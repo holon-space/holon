@@ -91,6 +91,8 @@ pub(crate) const ICON_SUBSTITUTES: &[(&str, &str)] = &[
     ("🔍", "⚲"), // inspector       → magnifier-like symbol
     ("🔎", "⚲"), // search field    → magnifier-like symbol
     ("⛔", "⊘"), // degraded banner → circled slash (blocked)
+    ("🔑", "⚷"), // secrets/recovery → Chiron, the key-shaped astrological sign
+    ("🎟", "▭"),  // share ticket    → an empty rectangle (a ticket stub)
     ("🗑", "⌦"),  // delete op       → erase-to-the-right (delete)
     ("⧉", "❐"),  // embed op        → shadowed square (overlay/embed)
 ];
@@ -120,9 +122,6 @@ pub(crate) const INLINE_UI_GLYPHS: &[&str] = &[
     "🔎", // lib.rs search field
     "🔍", // inspector.rs
     "✕",  // lib.rs / share_ui.rs / oracles_ui.rs close/dismiss
-    "⚠",  // share_ui.rs degraded banner
-    "↻",  // share_ui.rs rehydration banner
-    "⛔", // share_ui.rs blocked banner
     "▸",  // collapsible.rs collapsed chevron
     "▾",  // collapsible.rs expanded chevron
     "▼",  // expand_toggle.rs / reactive_vm_poc.rs expanded
@@ -2520,6 +2519,7 @@ fn launch_holon_window_impl(
         })
     });
     let entity_cache_for_view = entity_cache.clone();
+    let degraded_bus_for_sources = degraded_bus.clone();
     let window_result = cx.open_window(window_options, move |window, cx| {
         tracing::debug!("[GPUI] Inside open_window callback — building root view");
         let close_persist_dir = persist_config_dir.clone();
@@ -2554,6 +2554,21 @@ fn launch_holon_window_impl(
 
             let services: Arc<dyn BuilderServices> = engine.clone();
             services_slot.set(services).ok();
+
+            // The named row sources this window's collections may be built
+            // over. Declared here rather than in `ReactiveEngine::new` because
+            // the holders behind them are wired by DI, which runs after the
+            // engine exists. Without a bus there are no sources, and a
+            // `source:` argument is then refused by name.
+            if let Some(bus) = degraded_bus_for_sources.as_ref() {
+                let mut sources = holon_api::row_source::RowSourceRegistry::new();
+                sources
+                    .register(holon_api::condition_source::conditions_source(bus))
+                    .expect("the first registration on a fresh registry cannot collide");
+                engine
+                    .set_row_sources(Arc::new(sources))
+                    .expect("this engine was constructed on the line above");
+            }
             engine
         };
 
@@ -3040,6 +3055,12 @@ fn launch_holon_window_impl(
     // every consolidator mode, and gating the only subscriber on a Loro-only
     // handle is what made the shipped SqlOnly build render blank pages with no
     // banner.
+    // The MCP `conditions_list` tool reads the bus directly, so an agent sees
+    // what the window sees rather than a second derivation of it.
+    if let (Some(debug), Some(bus)) = (debug.as_ref(), degraded_bus.as_ref()) {
+        let _ = debug.conditions.set(bus.clone());
+    }
+
     if let Some(bus) = degraded_bus {
         let async_cx = cx.to_async();
         let share_ui_entity = app_model.read(cx).share_ui.clone();
@@ -4016,6 +4037,18 @@ mod icon_font_tests {
     fn inline_ui_glyphs_render_on_android() {
         for glyph in INLINE_UI_GLYPHS {
             super::assert_icon_renderable_on_android(glyph, "INLINE_UI_GLYPHS");
+        }
+    }
+
+    /// Every glyph a condition profile can be drawn with. These used to be
+    /// inline literals in the GPUI toast table and only three of them were
+    /// swept; now the vocabulary is declared in  and this sweeps all
+    /// of it, so a profile added there cannot reach a device with a glyph
+    /// nothing can render.
+    #[test]
+    fn condition_icons_render_on_android() {
+        for glyph in holon_api::condition_profile::CONDITION_ICONS {
+            super::assert_icon_renderable_on_android(glyph, "CONDITION_ICONS");
         }
     }
 
