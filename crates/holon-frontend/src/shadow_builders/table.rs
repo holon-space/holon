@@ -34,6 +34,33 @@ struct ColumnDef {
     header: String,
     cell: RenderExpr,
     width: ColumnWidth,
+    /// Whether this column's cell breaks its own content across lines. Parsed
+    /// once here rather than re-derived where the floors are computed.
+    wraps: bool,
+}
+
+/// Whether `cell` contains a collection that wraps — `list(#{…, wrap: "wrap"})`
+/// at any depth.
+///
+/// A column like that has no smallest width it can be read at: give it less
+/// room and its items take another line, which is the shape `wrap` exists to
+/// produce. A column of text has one, because a word cannot break.
+fn cell_wraps(cell: &RenderExpr) -> bool {
+    match cell {
+        RenderExpr::FunctionCall { args, .. } => {
+            let wraps_here = args.iter().any(|a| {
+                a.name.as_deref() == Some("wrap")
+                    && matches!(&a.value, RenderExpr::Literal { value } if value.as_string() == Some("wrap"))
+            });
+            wraps_here || args.iter().any(|a| cell_wraps(&a.value))
+        }
+        RenderExpr::Array { items } => items.iter().any(cell_wraps),
+        RenderExpr::Object { fields } => fields.values().any(cell_wraps),
+        RenderExpr::BinaryOp { left, right, .. } => cell_wraps(left) || cell_wraps(right),
+        RenderExpr::Literal { .. }
+        | RenderExpr::ColumnRef { .. }
+        | RenderExpr::LiveBlock { .. } => false,
+    }
 }
 
 fn parse_width(expr: Option<&RenderExpr>) -> ColumnWidth {
@@ -93,10 +120,12 @@ fn parse_columns(expr: &RenderExpr) -> Vec<ColumnDef> {
                 .cloned()
                 .unwrap_or_else(|| panic!("table column `{header}` is missing `cell`"));
             let width = parse_width(fields.get("width"));
+            let wraps = cell_wraps(&cell);
             ColumnDef {
                 header,
                 cell,
                 width,
+                wraps,
             }
         })
         .collect()
@@ -109,18 +138,112 @@ fn width_prop(w: &ColumnWidth) -> String {
     }
 }
 
-fn geometry_props(columns: &[ColumnDef]) -> std::collections::HashMap<String, Value> {
+/// Each column's FLOOR, in px: the width it would have in a container
+/// `authored_w` wide.
+///
+/// Flex shares are proportional all the way down, so in a narrow container
+/// every column ends up narrower than its own words and every cell breaks
+/// mid-word. The floor turns the weights into what their author meant — a
+/// budget for a container of a known size — and the renderer lets the row wrap
+/// once the floors no longer fit side by side.
+///
+/// A fixed column's floor is its own px. A flex column's is its share of what
+/// is left after the fixed columns and the gaps, which is the same arithmetic
+/// the renderer does at `authored_w` — so at that width and above, nothing
+/// about the layout changes.
+///
+/// A column that wraps its own content has NO floor. The floor exists because a
+/// column cannot break its words; a column that breaks them is the case it was
+/// never for, and giving it one both over-provisions it in a narrow container
+/// and makes its own wrapping unreachable. Its share is still taken out of the
+/// budget, so the columns that do have floors keep the widths they were
+/// authored with.
+fn column_minimums(columns: &[ColumnDef], authored_w: f32, gap: f32) -> Vec<Option<f32>> {
+    let fixed_total: f32 = columns
+        .iter()
+        .filter_map(|c| match c.width {
+            ColumnWidth::Fixed(px) => Some(px),
+            ColumnWidth::Flex(_) => None,
+        })
+        .sum();
+    let gaps = gap * columns.len().saturating_sub(1) as f32;
+    let weight_total: f32 = columns
+        .iter()
+        .filter_map(|c| match c.width {
+            ColumnWidth::Flex(w) => Some(w),
+            ColumnWidth::Fixed(_) => None,
+        })
+        .sum();
+    let flex_room = (authored_w - fixed_total - gaps).max(0.0);
+    columns
+        .iter()
+        .map(|c| {
+            if c.wraps {
+                return None;
+            }
+            Some(match c.width {
+                ColumnWidth::Fixed(px) => px,
+                ColumnWidth::Flex(w) if weight_total > 0.0 => flex_room * w / weight_total,
+                ColumnWidth::Flex(_) => 0.0,
+            })
+        })
+        .collect()
+}
+
+/// The container width a `min_width:` names, refused rather than guessed.
+///
+/// Absent is a legal answer and means no floor — a table that never declared
+/// the width it was sized for has no budget to hold its columns to.
+fn parse_min_width(value: Option<&Value>) -> Option<f32> {
+    let value = value?;
+    let n = value
+        .as_f64()
+        .unwrap_or_else(|| panic!("table `min_width` must be a number of px, got {value:?}"));
+    assert!(
+        n > 0.0,
+        "table `min_width` is the container width the column weights were authored against, so it \
+         must be positive; got {n}"
+    );
+    Some(n as f32)
+}
+
+/// The gap BETWEEN columns. Shipped to the renderer as a prop rather than
+/// hard-coded at both ends, because the column floors are computed from it here
+/// and applied there — two copies of the number would put the floors and the
+/// layout they are floors for quietly out of step.
+const COLUMN_GAP: f32 = 8.0;
+
+fn geometry_props(
+    columns: &[ColumnDef],
+    min_width: Option<f32>,
+) -> std::collections::HashMap<String, Value> {
     let mut props = std::collections::HashMap::new();
     props.insert(
         "col_count".to_string(),
         Value::String(columns.len().to_string()),
     );
+    props.insert("col_gap".to_string(), Value::Float(COLUMN_GAP as f64));
+    let minimums = min_width.map(|w| column_minimums(columns, w, COLUMN_GAP));
     for (k, col) in columns.iter().enumerate() {
         props.insert(format!("col{k}_header"), Value::String(col.header.clone()));
         props.insert(
             format!("col{k}_width"),
             Value::String(width_prop(&col.width)),
         );
+        // Three answers, not two. A floored column ships its px. A wrapping
+        // column ships `col{k}_min_content`, which asks the renderer for the
+        // flex default — as narrow as the column's own header word, and no
+        // narrower, because a header is text and text does not wrap mid-word.
+        // A table that declared no budget at all ships neither.
+        match minimums.as_ref().map(|mins| mins[k]) {
+            Some(Some(min)) => {
+                props.insert(format!("col{k}_min"), Value::Float(min as f64));
+            }
+            Some(None) => {
+                props.insert(format!("col{k}_min_content"), Value::Boolean(true));
+            }
+            None => {}
+        }
     }
     props
 }
@@ -174,7 +297,7 @@ holon_macros::widget_builder! {
         // `Collection` param anyway is what makes the bare arm above provably
         // the original widget.
         let columns = parse_columns(spec);
-        let props = geometry_props(&columns);
+        let props = geometry_props(&columns, parse_min_width(ba.args.named.get("min_width")));
         let item_template = row_template(&columns);
         let sort_key = holon_api::render_eval::sort_key_column(ba.args).map(|s| s.to_string());
         let rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));

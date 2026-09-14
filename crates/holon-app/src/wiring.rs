@@ -163,11 +163,14 @@ impl FrontendInjectorExt for Injector {
                 &config_dir,
             )?;
             let store: Arc<dyn holon_secrets::KeychainStore> = selected.store.into();
-            if let Some(why) = selected.disclosure {
+            if let Some(disclosure) = selected.disclosure {
                 self.resolve::<Arc<holon_api::ConditionBus>>()
                     .emit(holon_api::Condition {
                         subject: "secrets".to_string(),
-                        reason: holon_api::ConditionKind::SecretsHeldInMemory { why },
+                        reason: holon_api::ConditionKind::SecretsHeldInMemory {
+                            why: disclosure.headline,
+                            seed_path: disclosure.seed_path,
+                        },
                     });
                 session_secret_store = Some(store.clone());
             }

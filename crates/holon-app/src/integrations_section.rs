@@ -79,7 +79,23 @@ pub const SIDEBAR_ITEM_TEMPLATE: &str = concat!(
 /// row's entity profile and attaches its operations, so the `enabled` switch
 /// and the `ops_of` op_buttons are wired without a `render_entity` wrapper.
 ///
-/// The weights are a BUDGET, not a look: the modal panel gives the table 590px,
+/// `min_width` is the container width the weights below were AUTHORED against —
+/// the modal panel's 640px less its padding and border either side. It is the
+/// SAME number the weights are shared out over at full width, not a hedge below
+/// it: a floor even a few px under the true share lets every floored column sit
+/// just beneath the width it was authored with, which is the shaving the floor
+/// exists to stop. Each flex
+/// column's share of it is that column's floor, and a container narrower than
+/// their sum makes the row WRAP instead of shrinking every column past its own
+/// words. Without a floor the shares are proportional all the way down: at the
+/// app's own 300px minimum the five columns took 25px each, every cell broke
+/// mid-word, and one row read as a vertical stack of syllables
+/// (`docs/Testing/bugfunnel/entries/
+/// 2026-09-12-the-settings-integrations-table-collapses-at-the-minimum-window-width.md`).
+/// Swept from `MIN_WIDTH` to 1512 by
+/// `settings_integrations_table_fits_windowed`.
+///
+/// The weights are a BUDGET, not a look: the modal panel gives the table 592px,
 /// and a column narrower than its widest value wraps that value mid-word (a
 /// `text` cell declares no `truncate`, and `unconfigured` offers no break
 /// point). Setup takes the largest share because it holds a whole op row;
@@ -107,6 +123,14 @@ pub const SIDEBAR_ITEM_TEMPLATE: &str = concat!(
 /// Enabled and all four texts become unreadable
 /// (`settings_introduced_row_fits_windowed`).
 ///
+/// The `calls` line is switched on its OWN value, not on the origin. A
+/// connection can have a file and no hosts — a refused one does — and the line
+/// then painted the bare label with empty space after it: a label promising a
+/// value that never comes
+/// (`docs/Testing/bugfunnel/entries/
+/// 2026-09-12-the-hosts-disclosure-line-elides-a-host-that-fits-its-column.
+/// md`).
+///
 /// The origin truncates from the START. Every installed connection shares the
 /// integrations directory, so a path cut at the tail distinguishes nothing,
 /// while `…/fixturebox.yaml` says which file this is. The full path stays whole
@@ -117,9 +141,12 @@ pub const SETTINGS_ITEM_TEMPLATE: &str = concat!(
     "table(#{columns: [",
     "#{header: \"Integration\", cell: if_col(\"origin\", \"\", ",
     "text(col(\"provider_name\")), ",
+    "if_col(\"hosts\", \"\", ",
+    "column(#{gap: 2}, text(col(\"provider_name\")), ",
+    "row(#{gap: 4}, text(\"from\", #{muted: true, size: 11.0}), text(col(\"origin\"), #{muted: true, size: 11.0, truncate: true, ellipsis: \"start\"}))), ",
     "column(#{gap: 2}, text(col(\"provider_name\")), ",
     "row(#{gap: 4}, text(\"from\", #{muted: true, size: 11.0}), text(col(\"origin\"), #{muted: true, size: 11.0, truncate: true, ellipsis: \"start\"})), ",
-    "row(#{gap: 4}, text(\"calls\", #{muted: true, size: 11.0}), text(col(\"hosts\"), #{muted: true, size: 11.0, truncate: true})))), ",
+    "row(#{gap: 4}, text(\"calls\", #{muted: true, size: 11.0}), text(col(\"hosts\"), #{muted: true, size: 11.0, truncate: true}))))), ",
     "width: flex(6)}, ",
     "#{header: \"Config\", cell: text(col(\"config_status\"), #{muted: true}), width: flex(5)}, ",
     "#{header: \"Status\", cell: text(col(\"status\"), #{muted: true}), width: flex(5)}, ",
@@ -127,7 +154,7 @@ pub const SETTINGS_ITEM_TEMPLATE: &str = concat!(
     "#{header: \"Setup\", cell: row(#{gap: 6, align: \"center\"}, ",
     "list(#{collection: ops_of(col(\"id\")), item_template: op_button(col(\"name\")), horizontal: true, gap: 8, wrap: \"wrap\"}), ",
     "text(col(\"configure_progress\"), #{muted: true})), width: flex(11)}",
-    "]})"
+    "], min_width: 592})"
 );
 
 /// The words beside the switches. The switch stores a decision and does not act

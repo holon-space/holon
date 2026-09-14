@@ -3,7 +3,7 @@ id: 2026-09-12-the-hosts-disclosure-line-elides-a-host-that-fits-its-column
 date: 2026-09-12
 gap: PERCEPTION
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   An introduced connection's `calls` line elides a nine-character host to
   `127.0.` with a third of its column still empty, and when the connection has
@@ -79,3 +79,35 @@ Open. Candidates, in the order I would try them:
 3. A windowed pin with a short hosts value asserting the painted text equals
    the stored value — and one with an empty hosts value asserting no bare
    label.
+
+## Fix
+
+Two separate things were wrong and only one of them was the elision.
+
+The bare label is fixed: the `calls` line is now switched on its OWN value
+(`if_col("hosts", "", ...)` in `crates/holon-app/src/integrations_section.rs`)
+rather than on the origin, so a connection with a file and no hosts paints no
+line at all instead of a label with empty space after it.
+
+The `calls 127.0.` cut does NOT reproduce in the harness at the width the
+re-check read it at: measured, a nine-character host paints 45px inside a 108px
+cell with ~35px to spare, whether or not a long path sits above it. What DOES
+reproduce is both values eliding to nothing in a narrow window, and that is the
+column collapse recorded in
+`2026-09-12-the-settings-integrations-table-collapses-at-the-minimum-window-width`
+and fixed by the same `min_width` budget. The rung keeps the standing claim —
+the cell must have room to spare for a host this short — so the defect would be
+caught if the column's budget were ever spent elsewhere.
+
+Covered by `frontends/gpui/tests/settings_introduced_row_fits_windowed.rs`,
+which now SWEEPS 300..1200px through `resize_window` in two row
+configurations. Measured across the sweep: the disclosure block is not painted
+at all below 640px (the Integration cell is 15px tall with a host and without
+one), and the hosts line appears at 900px and above.
+
+- RED `lane-logs/red2-settings_introduced_row_fits_windowed-1789381089.log`.
+- GREEN `lane-logs/introduced-sweep-1789390349.log`.
+- TEETH `lane-logs/teeth-hosts-settings_introduced_row_fits_windowed-1789390623.log`
+  — the `if_col` guard neutered so it never fires; red with
+  "the connection stores no hosts and its Integration cell is still 75.0px tall
+  against 75.0px"; restored byte-for-byte.

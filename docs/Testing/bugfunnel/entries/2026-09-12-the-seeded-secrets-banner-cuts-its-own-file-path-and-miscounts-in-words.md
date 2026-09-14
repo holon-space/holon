@@ -3,7 +3,7 @@ id: 2026-09-12-the-seeded-secrets-banner-cuts-its-own-file-path-and-miscounts-in
 date: 2026-09-12
 gap: PERCEPTION
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   The in-memory-secrets banner names how many fixture secrets were planted but
   ellipsises the file they came from, and says "1 seeded fixture secrets" — so
@@ -74,3 +74,28 @@ Severity is low — this banner appears only in a throwaway session that opted
 into `HOLON_SECRETS_BACKEND=memory` — but it is the disclosure that stops a
 screenshot passing a fixture off as a real credential, so it should say which
 fixture.
+
+## Fix
+
+The seed path left the sentence. `crates/holon-secrets/src/lib.rs` returns a
+`MemoryDisclosure { headline, seed_path }` instead of one string: prose can be
+summarised by cutting it and a path cannot, and while the path sat inside the
+capped sentence the cap landed mid-path, leaving the directory half that every
+temp path on the machine shares and never the file name. The path now travels
+beside the sentence, verbatim and uncapped.
+
+`ShareDegradedReason::SecretsHeldInMemory` carries both halves
+(`crates/holon-loro/src/degraded_signal_bus.rs`) and `crates/holon-app/src/wiring.rs`
+passes them through.
+
+The miscount is fixed in the same sentence: the count agrees with its noun and
+verb (`1 seeded fixture secret was`, `3 seeded fixture secrets were`).
+
+Covered by `frontends/gpui/tests/secrets_in_memory_banner_windowed.rs`.
+
+- RED `lane-logs/red-secrets_in_memory_banner_windowed-1789379944.log`.
+- GREEN `lane-logs/green-secrets_in_memory_banner_windowed-1789389949.log`.
+- TEETH `lane-logs/teeth-secrets-secrets_in_memory_banner_windowed-1789390664.log`
+  — the seed path dropped from the payload; red demanding
+  `windowed-seed-fixture.toml` somewhere in the painted text; restored
+  byte-for-byte.

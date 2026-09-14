@@ -91,7 +91,12 @@ fn a_throwaway_session_holds_secrets_in_memory_and_discloses_it() {
     let disclosure = current
         .iter()
         .find_map(|c| match &c.reason {
-            ConditionKind::SecretsHeldInMemory { why } => Some(why.clone()),
+            // Sentence and payload rejoined: the seed file travels beside the
+            // sentence now (a cap on prose must never land inside a path), and
+            // what these assertions are about is what the banner SAYS in total.
+            ConditionKind::SecretsHeldInMemory { why, seed_path } => {
+                Some(format!("{why} {}", seed_path.clone().unwrap_or_default()))
+            }
             _ => None,
         })
         .unwrap_or_else(|| {
@@ -175,7 +180,12 @@ fn a_seeded_throwaway_session_holds_the_fixture_secrets_and_says_how_many() {
         .current
         .iter()
         .find_map(|c| match &c.reason {
-            ConditionKind::SecretsHeldInMemory { why } => Some(why.clone()),
+            // Sentence and payload rejoined: the seed file travels beside the
+            // sentence now (a cap on prose must never land inside a path), and
+            // what these assertions are about is what the banner SAYS in total.
+            ConditionKind::SecretsHeldInMemory { why, seed_path } => {
+                Some(format!("{why} {}", seed_path.clone().unwrap_or_default()))
+            }
             _ => None,
         })
         .expect("the in-memory banner is still raised");

@@ -266,9 +266,34 @@ pub const BACKEND_SEED_ENV: &str = "HOLON_SECRETS_MEMORY_SEED";
 /// The backend a boot must use, and what it must say about it.
 pub struct SelectedBackend {
     pub store: Box<dyn KeychainStore>,
-    /// The words a degraded-mode banner shows. `None` for the platform
-    /// keychain, which is the undegraded case and needs no banner.
-    pub disclosure: Option<String>,
+    /// What a degraded-mode banner shows. `None` for the platform keychain,
+    /// which is the undegraded case and needs no banner.
+    pub disclosure: Option<MemoryDisclosure>,
+}
+
+/// What the in-memory backend owes the user, split by how it must be READ.
+///
+/// Prose can be summarised by cutting it; a path cannot. The banner carries a
+/// character cap on its sentence, and while the seed file sat inside that
+/// sentence the cap landed in the middle of the path — leaving only
+/// `/private/var/folders/hc/…`, the half every temp path on the machine shares,
+/// and never the file name, which is the half that says WHICH fixture planted
+/// the credentials (`docs/Testing/bugfunnel/entries/
+/// 2026-09-12-the-seeded-secrets-banner-cuts-its-own-file-path-and-miscounts-in-words.md`).
+#[derive(Debug)]
+pub struct MemoryDisclosure {
+    /// The sentence. May be shortened.
+    pub headline: String,
+    /// The seed file, verbatim and uncapped. `None` when nothing was seeded.
+    pub seed_path: Option<String>,
+}
+
+impl MemoryDisclosure {
+    /// Whether the disclosure says this anywhere — sentence or payload.
+    pub fn contains(&self, needle: &str) -> bool {
+        self.headline.contains(needle)
+            || self.seed_path.as_ref().is_some_and(|p| p.contains(needle))
+    }
 }
 
 /// The backend for this process: the platform keychain, or the in-memory one
@@ -481,18 +506,27 @@ pub fn select_backend(
             );
             // Said on the same banner, because a credential that is already
             // there when the session opens is otherwise indistinguishable from
-            // one the user stored — and these are somebody's fixtures.
+            // one the user stored — and these are somebody's fixtures. The
+            // PATH leaves the sentence and travels on its own, so a cap on the
+            // prose cannot eat the file name.
+            let mut seed_path = None;
             if let Some(path) = seed {
                 let planted = seed_store(store.as_ref(), path)?;
+                let plural = if planted == 1 { "" } else { "s" };
+                let verb = if planted == 1 { "was" } else { "were" };
                 disclosure.push_str(&format!(
-                    " {planted} seeded fixture secrets were pre-loaded from '{}' \
-                     ({BACKEND_SEED_ENV}); they are fixtures, not your credentials.",
-                    path.display()
+                    " {planted} seeded fixture secret{plural} {verb} pre-loaded \
+                     ({BACKEND_SEED_ENV}) from this file; they are fixtures, not your \
+                     credentials:"
                 ));
+                seed_path = Some(path.display().to_string());
             }
             Ok(SelectedBackend {
                 store,
-                disclosure: Some(disclosure),
+                disclosure: Some(MemoryDisclosure {
+                    headline: disclosure,
+                    seed_path,
+                }),
             })
         }
         other => anyhow::bail!(

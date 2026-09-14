@@ -43,6 +43,34 @@ pub fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_platform(true).text_system()
 }
 
+/// Resize a live window and return the viewport width the window reports back.
+///
+/// `Window::resize` alone is INERT on the headless platform:
+/// `TestWindow::resize` stores the new bounds but never fires the platform
+/// resize callback, so `Window::viewport_size` keeps serving its cached value
+/// and no relayout runs. `Window::bounds_changed` is the public re-read gpui
+/// exposes for exactly this, so a width sweep must pair the two or it measures
+/// one layout N times.
+///
+/// The caller still has to settle afterwards: `bounds_changed` only schedules a
+/// refresh.
+pub fn resize_window(
+    app: &mut HeadlessAppContext,
+    window: gpui::AnyWindowHandle,
+    width: f32,
+    height: f32,
+) -> f32 {
+    app.update(|cx| {
+        window
+            .update(cx, |_, win, cx| {
+                win.resize(gpui::size(gpui::px(width), gpui::px(height)));
+                win.bounds_changed(cx);
+                f32::from(win.viewport_size().width)
+            })
+            .expect("the window being resized is alive")
+    })
+}
+
 /// Cross-runtime fixed-point settle (the proven `gpui_window_slice` pattern):
 /// pump until the element count is stable and no `"loading"` placeholders
 /// remain.

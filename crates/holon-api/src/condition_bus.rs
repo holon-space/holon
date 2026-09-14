@@ -199,7 +199,14 @@ pub enum ConditionKind {
     ///
     /// All-clear: none within a session — the backend is chosen once at boot.
     /// The condition ends when the process restarts without that variable.
-    SecretsHeldInMemory { why: String },
+    ///
+    /// `seed_path` is the fixture file this session was pre-loaded from, when
+    /// it was. It travels beside the sentence rather than inside it because the
+    /// toast caps the sentence and a path cut in half names nothing.
+    SecretsHeldInMemory {
+        why: String,
+        seed_path: Option<String>,
+    },
     /// The undo history from the previous session was discarded at boot
     /// (D116.a): undo deliberately does NOT survive a restart, because the
     /// CRDT's text-undo manager is rebuilt empty and a journal entry standing

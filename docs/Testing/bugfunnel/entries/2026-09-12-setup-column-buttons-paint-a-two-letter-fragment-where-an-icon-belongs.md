@@ -3,7 +3,7 @@ id: 2026-09-12-setup-column-buttons-paint-a-two-letter-fragment-where-an-icon-be
 date: 2026-09-12
 gap: PERCEPTION
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   Every Settings › Integrations action button paints a large "OP" or "CO" above
   its own label, because the op-icon table has no glyph for `open` or
@@ -65,3 +65,22 @@ Open. Two pieces:
 2. Turn the coverage test around: enumerate the ops the shipped surfaces offer
    and assert each resolves to a glyph, so the fallback stays the emergency it
    was meant to be rather than the normal case for a whole column.
+
+## Fix
+
+The glyph an op button paints is now tracked in its own right.
+`frontends/gpui/src/render/builders/op_button.rs` registers it as
+`op-icon-{op}-{target}` with its displayed text, so a window can tell a real
+glyph from the emergency two-letter short label. Before this, the button's only
+tracked text was its LABEL, which is the same string either way — so a whole
+column rendering `CO` over `Configure…` passed every rung there was.
+
+`begin_oauth` was the op with no entry in `OP_ICONS`; it has a glyph now.
+
+Covered by `frontends/gpui/tests/settings_integrations_ops_windowed.rs`.
+
+- RED `lane-logs/red-settings_integrations_ops_windowed-1789379944.log`.
+- GREEN `lane-logs/green-settings_integrations_ops_windowed-1789389949.log`.
+- TEETH `lane-logs/teeth-icon-settings_integrations_ops_windowed-1789390571.log`
+  — the tracked glyph text blanked; red naming `begin_oauth` and listing every
+  painted glyph; restored byte-for-byte.

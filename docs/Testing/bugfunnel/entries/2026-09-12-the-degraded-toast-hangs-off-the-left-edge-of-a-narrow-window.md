@@ -3,7 +3,7 @@ id: 2026-09-12-the-degraded-toast-hangs-off-the-left-edge-of-a-narrow-window
 date: 2026-09-12
 gap: PERCEPTION
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   In a 300-point-wide window the degraded-disclosure toast keeps its full width
   and is anchored right, so it runs off the left edge and the first words of
@@ -73,3 +73,22 @@ judges a table row, not a toast.
 Open. Clamp the toast's width to the viewport (minus its inset) and let it wrap
 further, then extend the toast rung with a case at `MIN_WIDTH` asserting that
 every painted toast line's left edge is inside the window.
+
+## Fix
+
+The degraded toast stack is clamped against the viewport instead of only
+against its own minimum. `frontends/gpui/src/share_ui.rs` takes the window
+width (passed in from `lib.rs`, which reads `Window::viewport_size`) and sizes
+the stack to fit inside it with the 16px inset intact on both sides, so a
+right-anchored box can no longer start at a negative x.
+
+Covered by `frontends/gpui/tests/refusal_toasts_reach_the_user_windowed.rs`,
+which boots a fresh app at each of seven viewports from `MIN_WIDTH` up — a
+clamp is exactly the shape that is right at one width and wrong at the next, so
+the floor alone would not have held it.
+
+- RED `lane-logs/red2-refusal_toasts_reach_the_user_windowed-1789381089.log` —
+  `toast-line-0-1 ... sits at x=0` in the 300x900 window.
+- GREEN `lane-logs/green-refusal_toasts_reach_the_user_windowed-1789389949.log`.
+- TEETH `lane-logs/teeth-toast-refusal_toasts_reach_the_user_windowed-1789384699.log`
+  — the clamp reverted in place, red again, restored byte-for-byte.

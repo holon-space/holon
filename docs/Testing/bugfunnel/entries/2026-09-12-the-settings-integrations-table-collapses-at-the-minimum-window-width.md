@@ -3,7 +3,7 @@ id: 2026-09-12-the-settings-integrations-table-collapses-at-the-minimum-window-w
 date: 2026-09-12
 gap: PERCEPTION
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   At the app's own minimum window width the Settings integrations table wraps
   every header and cell to two or three characters per line, so a row reads as
@@ -68,3 +68,47 @@ minimum column widths and scrolls horizontally, or it changes shape below some
 width (one row per connection becomes a stacked card). Whichever is chosen, the
 narrow rung should be re-pointed at `MIN_WIDTH` rather than 800 so the floor is
 the thing under test.
+
+## Fix
+
+The table's flex weights now carry the container width they were AUTHORED
+against. `crates/holon-app/src/integrations_section.rs` declares
+`min_width: 584` — the modal panel's 640px less its padding and border — and
+`crates/holon-frontend/src/shadow_builders/table.rs` turns each column's share
+of that width into that column's FLOOR (`column_minimums`). Flex shares are
+proportional all the way down; a floor makes the row WRAP once the columns no
+longer fit side by side, instead of shrinking every one of them past its own
+words. At the authored width and above nothing about the layout changes.
+
+`parse_min_width` refuses a non-numeric or non-positive value rather than
+guessing. Absent is legal and means no floor.
+
+Covered by `frontends/gpui/tests/settings_integrations_table_fits_windowed.rs`,
+which sweeps 300..1512px through `resize_window`.
+
+- RED `lane-logs/red3-settings_integrations_table_fits_windowed-1789381398.log`.
+- GREEN `lane-logs/sweep-1789389884.log` — five distinct geometries over the
+  seven widths (900, 1200 and 1512 coincide because the modal panel is capped at
+  640px, so every window at or above the cap hands the table the same
+  container).
+
+**What the green does NOT cover, at the width this entry is named for.** At 300
+and 360 the sweep observes `rows=0 cols=0`: no data row is painted at all, so at
+the two narrowest widths the claim rests on HEADER geometry alone — the headers
+wrap into whole words instead of breaking mid-word, which is the collapse this
+entry reports, and which the live pass confirmed. The per-CELL half of the claim
+is judged from 480px up.
+
+The rows are not merely below the fold; they cannot be reached, which is the
+separate defect recorded in
+`2026-09-14-the-settings-modal-clips-its-lower-sections-at-the-minimum-window-width`.
+Until that one is fixed, no rung can assert cell geometry at 300 or 360, because
+there is no cell to measure.
+- TEETH `lane-logs/teeth-minwidth-settings_integrations_table_fits_windowed-1789390428.log`
+  — `min_width` removed; 6 violations over the 7 widths, the first being the
+  "Integration" header broken across lines at 360px; restored byte-for-byte.
+
+Note: the first teeth run of this fix (12:18) predates the harness fix recorded
+in `2026-09-14-a-windowed-resize-never-reached-the-window-so-width-sweeps-measured-one-layout`
+and was therefore judging the boot layout seven times. The run cited above is
+the one against a sweep that really sweeps.

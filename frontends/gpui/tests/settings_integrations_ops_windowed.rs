@@ -164,6 +164,25 @@ fn painted_op_buttons(bounds: &BoundsRegistry) -> Vec<String> {
         .collect()
 }
 
+/// Element-id prefix of the glyph an op button paints above its label
+/// (`render/builders/op_button.rs`).
+const OP_ICON_PREFIX: &str = "op-icon-";
+
+/// Every op glyph the window painted: `(op name, the string in the icon slot)`.
+fn painted_op_icons(bounds: &BoundsRegistry) -> Vec<(String, String)> {
+    bounds
+        .all_elements()
+        .into_iter()
+        .filter_map(|(id, info)| {
+            let rest = id.strip_prefix(OP_ICON_PREFIX)?;
+            // `op-icon-{op}-{scheme}:{target}`; the target always carries a
+            // scheme, so the LAST `-` before it separates the two.
+            let op = rest.rsplit_once('-').map(|(op, _)| op).unwrap_or(rest);
+            Some((op.to_string(), info.displayed_text.as_deref()?.to_string()))
+        })
+        .collect()
+}
+
 /// Every widget tag the window painted, with counts — the evidence a reader
 /// needs to tell "the modal never opened" from "it opened and the operations
 /// are missing".
@@ -306,6 +325,36 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
         "the modal's preferences half must still render alongside the integrations section: \
          {census}"
     );
+
+    // ── Every op this surface offers paints a GLYPH ────────────────────────
+    // `op_icon_char` returns nothing for an op that is not in `OP_ICONS`, and
+    // the button then paints the first two alphanumerics of its display name at
+    // the glyph's size and weight. That emergency was designed for a button
+    // whose label is elsewhere; here the label is directly underneath, so
+    // `Configure…` painted a large `CO` over a small `Configure…` and the whole
+    // Setup column read as a rendering failure
+    // (`docs/Testing/bugfunnel/entries/
+    // 2026-09-12-setup-column-buttons-paint-a-two-letter-fragment-where-an-icon-belongs.md`).
+    //
+    // The claim is on the SHAPE of what was painted rather than on a list of
+    // op names: every glyph in the table is one non-alphanumeric character, and
+    // every short label is two alphanumerics, so "one character, not a letter"
+    // separates them without this rung keeping a second copy of the table.
+    let icons = painted_op_icons(&bounds);
+    assert!(
+        !icons.is_empty(),
+        "precondition: no op glyph was painted at all, so the claim below judges nothing: {census}"
+    );
+    for (op, glyph) in &icons {
+        assert!(
+            glyph.chars().count() == 1 && !glyph.chars().all(char::is_alphanumeric),
+            "the op {op:?} paints {glyph:?} where its icon belongs — the emergency short label, \
+             because {op:?} has no entry in `OP_ICONS`. It is drawn at the icon's size and weight \
+             directly above the same words in small grey type, which reads as a broken render \
+             rather than as a button. Give the op a glyph; the short label is meant to be the \
+             case that never happens. Painted glyphs: {icons:?}"
+        );
+    }
 
     // What the user's eyes get. The stored list URL is a credential, so the row
     // must paint the mask and nothing that contains the token.

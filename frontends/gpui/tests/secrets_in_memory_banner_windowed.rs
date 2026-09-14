@@ -10,6 +10,14 @@
 //! So this rung asserts the words, painted, in a real window over a real boot —
 //! the half a headless bus assertion structurally cannot see.
 //!
+//! It also seeds ONE fixture secret, which is what the 2026-09-12 re-check was
+//! looking at: the banner named the seed file on the same capped prose line as
+//! its standing sentence, so the cap fell inside the path and only the
+//! `/private/var/folders/hc/…` prefix — the half every macOS temp path shares —
+//! ever painted. The banner exists to stop a screenshot passing a fixture off
+//! as a real credential, so it owes the reader WHICH fixture. The same sentence
+//! read "1 seeded fixture secrets".
+//!
 //! The bus is handed to the launcher explicitly. `launch_holon_window_*` takes
 //! it as an `Option`, and passing `None` (which the other windowed rungs in
 //! this lane do, having nothing to disclose) renders no banner at all — so a
@@ -42,6 +50,25 @@ use pbt_harness::windowed_wide::settle_to_fixed_point;
 /// from the mode's name, which tells them nothing.
 const MUST_SAY: &str = "gone when Holon exits";
 
+/// The seed file's own name. Distinctive, and deliberately at the TAIL of a
+/// long temp path: the 2026-09-12 re-check saw the banner cut inside
+/// `/private/var/folders/hc/…`, which is the half every macOS temp path shares,
+/// so the half that says WHICH fixture planted the credentials was the half
+/// that never painted
+/// (`docs/Testing/bugfunnel/entries/
+/// 2026-09-12-the-seeded-secrets-banner-cuts-its-own-file-path-and-miscounts-in-words.md`).
+const SEED_FILE: &str = "windowed-seed-fixture.toml";
+
+/// ONE entry, because the count's singular arm is the second half of the same
+/// finding: the banner read "1 seeded fixture secrets".
+const SEED_KEY: &str = "windowed.fixture.token";
+const SEED_VALUE: &str = "synthetic-not-a-real-credential";
+
+/// What a correctly-numbered banner says about one planted secret. The plural
+/// form is what shipped.
+const SINGULAR: &str = "1 seeded fixture secret was";
+const MISCOUNT: &str = "1 seeded fixture secrets";
+
 fn painted_text(bounds: &BoundsRegistry) -> Vec<String> {
     let mut out: Vec<String> = bounds
         .all_elements()
@@ -64,13 +91,29 @@ fn an_in_memory_secret_session_paints_the_banner_that_admits_it() {
     });
 
     let home = tempfile::tempdir().expect("tempdir for HOME");
-    // SAFETY: single-threaded test binary (`--test-threads=1`), both set before
+
+    // The seed lives DEEP, under the machine's own temp root, because the
+    // finding is about a path long enough for a cap to land inside it. A short
+    // fixture path would fit whole and the case would prove nothing.
+    let seed_dir = tempfile::tempdir().expect("tempdir for the seed fixture");
+    let seed_path = seed_dir
+        .path()
+        .join("a-directory-nested-deeply-enough-that-the-whole-path-is-long")
+        .join("and-another-segment-so-a-three-hundred-and-twenty-char-cap-bites")
+        .join(SEED_FILE);
+    std::fs::create_dir_all(seed_path.parent().expect("the seed path has a parent"))
+        .expect("create the seed fixture's directory");
+    std::fs::write(&seed_path, format!("\"{SEED_KEY}\" = \"{SEED_VALUE}\"\n"))
+        .expect("write the one-entry seed fixture");
+
+    // SAFETY: single-threaded test binary (`--test-threads=1`), all set before
     // the app boots and before any thread reads the environment. The backend
     // variable is what this rung is about; `TestEnvironment`'s config dir is a
     // `TempDir`, so the admission rule accepts it.
     unsafe {
         std::env::set_var("HOME", home.path());
         std::env::set_var(holon_secrets::BACKEND_ENV, "memory");
+        std::env::set_var(holon_secrets::BACKEND_SEED_ENV, &seed_path);
     }
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
@@ -138,6 +181,38 @@ fn an_in_memory_secret_session_paints_the_banner_that_admits_it() {
         "a session holding every secret in RAM must SAY so on screen — that disclosure is the \
          whole reason the mode is allowed to exist, and a user who types a token into a field \
          that discards it has been told nothing. Painted text: {painted:#?}"
+    );
+
+    // ── The seed disclosure names the fixture ──────────────────────────────
+    // Non-vacuity first: a path short enough to survive the cap would make the
+    // claim below free.
+    let path_str = seed_path.display().to_string();
+    assert!(
+        path_str.chars().count() > 120,
+        "precondition: the seed path ({} chars) must be long enough that a prose cap can land \
+         inside it — {path_str}",
+        path_str.chars().count()
+    );
+    assert!(
+        painted.iter().any(|t| t.contains(SEED_FILE)),
+        "the banner must name WHICH file planted the credentials this session will read as \
+         configured. The directory half is shared by every temp path on the machine; the file \
+         name is the only distinguishing part, and it sits at the tail — so a path carried on a \
+         capped prose line loses exactly the half that matters. Expected {SEED_FILE:?} somewhere \
+         in the painted text: {painted:#?}"
+    );
+
+    // ── The count agrees with itself ───────────────────────────────────────
+    assert!(
+        !painted.iter().any(|t| t.contains(MISCOUNT)),
+        "the banner says {MISCOUNT:?} about a one-entry fixture. A disclosure that cannot count \
+         the thing it is disclosing reads as machine noise rather than as a warning. Painted \
+         text: {painted:#?}"
+    );
+    assert!(
+        painted.iter().any(|t| t.contains(SINGULAR)),
+        "one planted secret must be announced in the singular ({SINGULAR:?}). Painted text: \
+         {painted:#?}"
     );
 }
 

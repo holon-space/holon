@@ -28,6 +28,11 @@ struct OpParamPopup {
 /// never inside a word.
 const OP_LABEL_MAX_W: f32 = 64.0;
 
+/// Element-id prefix of the glyph an op button paints above its label —
+/// `{OP_BUTTON_ICON}-{op}-{target}`. What a windowed rung reads to tell a real
+/// icon from the emergency short label.
+pub const OP_BUTTON_ICON: &str = "op-icon";
+
 /// Render a tappable op affordance: icon above an accessible label.
 ///
 /// Tap resolves the operation and either dispatches it (all params satisfied by
@@ -78,6 +83,24 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     let tracked_id = element_id.clone();
     let tracked_label = display_name.clone();
     let popup_click = popup.clone();
+    // ALLOW(fallback): names the emergency short label, not error swallowing
+    // The glyph is tracked separately from the button. The button's tracked
+    // text is its LABEL, which is the same string whether the icon above it is
+    // a glyph or the two-letter fallback — so nothing a window could read
+    // distinguished the two, and a whole column rendering `CO` over
+    // `Configure…` passed every rung there was.
+    let icon_tracked = crate::geometry::TransparentTracker::new(
+        format!("{OP_BUTTON_ICON}-{op_name}-{target_id}"),
+        "op_button_icon",
+        ctx.bounds_registry.clone(),
+        div()
+            .text_size(px(icon_size))
+            .line_height(px(icon_size))
+            .text_color(tc(ctx, |t| t.foreground))
+            .child(icon_label.clone())
+            .into_any_element(),
+    )
+    .with_displayed_text(icon_label);
     let inner = div()
         .id(hashed_id(&element_id))
         .flex_shrink_0()
@@ -89,13 +112,7 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         .px(px(box_padding))
         .py(px(4.0))
         .cursor_pointer()
-        .child(
-            div()
-                .text_size(px(icon_size))
-                .line_height(px(icon_size))
-                .text_color(tc(ctx, |t| t.foreground))
-                .child(icon_label),
-        )
+        .child(icon_tracked)
         .child(
             // Capped, not truncated: a button sits in a fixed-width column
             // beside its siblings (the Settings integrations table's Setup
@@ -405,6 +422,11 @@ pub(crate) const OP_ICONS: &[(&str, &str)] = &[
     ("go_back", "\u{2190}"),      // ←
     ("go_forward", "\u{2192}"),   // →
     ("go_home", "\u{2302}"),      // ⌂
+    // The integration row's two ops. Without them the Setup column was a
+    // column of two-letter fragments: the short label is drawn at the icon's
+    // size directly above the same words in small grey type.
+    ("open_default_view", "\u{2197}"), // ↗ (open the integration's own view)
+    ("begin_oauth", "\u{2699}"),       // ⚙ (run the provider's consent flow)
 ];
 
 /// Op-name → icon glyph, already routed through `crate::icon` so glyphs the
@@ -439,6 +461,37 @@ mod op_icon_coverage {
     fn every_op_glyph_renders_on_android() {
         for (op_name, glyph) in OP_ICONS {
             crate::assert_icon_renderable_on_android(glyph, &format!("op_button::{op_name}"));
+        }
+    }
+
+    /// The other direction: every op a shipped surface OFFERS has a glyph.
+    ///
+    /// The sweep above only ever visited ops that were already in the table, so
+    /// adding an operation opted it into the emergency short label with nothing
+    /// going red — which is how a whole Settings column came to paint `CO` and
+    /// `OP` at icon size above the same words in small grey type.
+    ///
+    /// The integration entity is the surface this is asserted for because its
+    /// row paints its ops with their labels directly underneath, which is the
+    /// arrangement the short label was never designed for.
+    #[test]
+    fn every_integration_op_the_settings_row_offers_has_a_glyph() {
+        let offered: Vec<String> =
+            holon_app::integrations_operations::integration_operation_descriptors()
+                .into_iter()
+                .map(|d| d.name)
+                .collect();
+        assert!(
+            !offered.is_empty(),
+            "the integration entity must advertise operations, else this sweep judges nothing"
+        );
+        for op in &offered {
+            assert!(
+                OP_ICONS.iter().any(|(name, _)| name == op),
+                "the integration row offers {op:?} and `OP_ICONS` has no glyph for it, so the \
+                 button paints the first two letters of its label at the glyph's size, directly \
+                 above the same label in small grey type. Give it a glyph. Offered: {offered:?}"
+            );
         }
     }
 }

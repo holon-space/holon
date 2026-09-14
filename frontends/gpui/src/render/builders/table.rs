@@ -22,11 +22,35 @@ use holon_frontend::reactive_view_model::ReactiveViewModel;
 use super::prelude::*;
 use crate::geometry::TransparentTracker;
 
-const COLUMN_GAP: f32 = 8.0;
+struct ColWidth {
+    kind: ColKind,
+    min: ColMin,
+}
 
-enum ColWidth {
+/// The width a column may never go below.
+enum ColMin {
+    /// The table declared no budget. Nothing stops the column shrinking, which
+    /// is what every table did before floors existed.
+    Unbounded,
+    /// This column's share of the declared budget, in px.
+    Floor(f32),
+    /// As narrow as the column's own content will go and no narrower — the flex
+    /// default. What a column whose cells WRAP asks for: a floor would
+    /// over-provision it in a narrow container, and zero would let its header
+    /// word break in half.
+    Content,
+}
+
+enum ColKind {
     Flex(f32),
     Fixed(f32),
+}
+
+/// The gap between columns, from the shadow builder that computed the floors
+/// with it.
+fn column_gap(node: &ReactiveViewModel) -> f32 {
+    node.prop_f64("col_gap")
+        .unwrap_or_else(|| panic!("table node is missing a `col_gap` prop")) as f32
 }
 
 fn parse_widths(node: &ReactiveViewModel) -> Vec<ColWidth> {
@@ -47,11 +71,23 @@ fn parse_widths(node: &ReactiveViewModel) -> Vec<ColWidth> {
             let n: f32 = n
                 .parse()
                 .unwrap_or_else(|_| panic!("non-numeric table width {raw:?}"));
-            match kind {
-                "flex" => ColWidth::Flex(n),
-                "fixed" => ColWidth::Fixed(n),
+            let kind = match kind {
+                "flex" => ColKind::Flex(n),
+                "fixed" => ColKind::Fixed(n),
                 other => panic!("unknown table width kind {other:?}"),
-            }
+            };
+            let min = match (
+                node.prop_f64(&format!("col{k}_min")),
+                node.prop_bool(&format!("col{k}_min_content")),
+            ) {
+                (Some(px_w), None) => ColMin::Floor(px_w as f32),
+                (None, Some(true)) => ColMin::Content,
+                (None, None) => ColMin::Unbounded,
+                (a, b) => panic!(
+                    "table column {k} declares both a floor ({a:?}) and a min-content minimum                      ({b:?}); the shadow builder ships exactly one"
+                ),
+            };
+            ColWidth { kind, min }
         })
         .collect()
 }
@@ -63,33 +99,49 @@ fn header_label(node: &ReactiveViewModel, k: usize) -> String {
 
 /// Apply a column's width to the flex item that carries the cell content.
 fn sized(mut cell: Div, width: &ColWidth) -> Div {
-    match width {
-        ColWidth::Fixed(px_w) => cell.flex_shrink_0().w(px(*px_w)),
+    match width.kind {
+        ColKind::Fixed(px_w) => cell.flex_shrink_0().w(px(px_w)),
         // `Styled`'s flex helpers are weightless (grow is always 1), so the
         // per-column weight goes onto the style refinement directly.
         //
-        // `min_size.width = 0` is what makes the column a pure function of its
-        // weight: a flex item's automatic minimum is its MIN-CONTENT width, so
-        // without this the widest cell in a column widens that column for its
-        // row alone and the columns come out ragged.
-        ColWidth::Flex(weight) => {
+        // The automatic minimum — a flex item's MIN-CONTENT width — is replaced
+        // for most columns: left alone, the widest cell in a column widens that
+        // column for its row alone and the columns come out ragged. The
+        // minimum is also what makes the row WRAP: a flex line breaks when the
+        // items' base sizes, clamped up to their minimums, no longer fit, and
+        // with a minimum of 0 no line ever breaks however narrow the container
+        // gets.
+        ColKind::Flex(weight) => {
             let style = cell.style();
-            style.flex_grow = Some(*weight);
+            style.flex_grow = Some(weight);
             style.flex_shrink = Some(1.0);
             style.flex_basis = Some(px(0.0).into());
-            style.min_size.width = Some(px(0.0).into());
+            style.min_size.width = match width.min {
+                ColMin::Unbounded => Some(px(0.0).into()),
+                ColMin::Floor(px_w) => Some(px(px_w).into()),
+                ColMin::Content => None,
+            };
             cell
         }
     }
 }
 
-fn row_container() -> Div {
+/// One line of the table — header or data row.
+///
+/// It WRAPS. Above the table's declared budget every column clears its floor
+/// and the line never breaks, so the layout is exactly what it was. Below it
+/// the columns would otherwise keep shrinking proportionally until each is
+/// narrower than its own words; instead the line breaks and the row reads as a
+/// stacked card. Header and rows are fed the same width vector, so they break
+/// in the same places and the columns stay aligned line by line.
+fn row_container(gap: f32) -> Div {
     div()
         .flex()
         .flex_row()
+        .flex_wrap()
         .items_center()
         .w_full()
-        .gap(px(COLUMN_GAP))
+        .gap(px(gap))
 }
 
 /// The rows the table draws: the collection's current items.
@@ -110,9 +162,10 @@ fn row_key(row: &ReactiveViewModel, index: usize) -> String {
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let widths = parse_widths(node);
+    let gap = column_gap(node);
     let fg = tc(ctx, |c| c.foreground);
 
-    let mut header = row_container();
+    let mut header = row_container(gap);
     for (k, width) in widths.iter().enumerate() {
         let label = header_label(node, k);
         let cell = sized(
@@ -151,7 +204,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             row.children.len(),
             widths.len(),
         );
-        let mut row_div = row_container();
+        let mut row_div = row_container(gap);
         for (k, width) in widths.iter().enumerate() {
             let inner = super::render(&row.children[k], ctx);
             let cell = sized(div().child(inner), width);

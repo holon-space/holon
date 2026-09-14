@@ -62,9 +62,35 @@ use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
 
-/// Both heights the stack must survive: the default, and a short window where
+/// Every viewport the stack must survive, swept from the app's own floor
+/// upwards.
+///
+/// The heights carry the original claim: the default, and a short window where
 /// far fewer refusals fit and the count line carries more of the load.
-const WINDOWS: &[(&str, f32, f32)] = &[("1512x900", 1512.0, 900.0), ("1512x720", 1512.0, 720.0)];
+///
+/// The WIDTHS carry the one the 2026-09-12 re-check found. At 300 — `MIN_WIDTH`
+/// in `window_state.rs`, the width the app itself will open at — a right-
+/// anchored box that keeps a 280px minimum and a 420px maximum starts at a
+/// NEGATIVE x, and the first words of every line, the headline included, are
+/// painted outside the surface. Every windowed rung that had ever judged a
+/// toast used a generous viewport, so "a toast is inside the window" was only
+/// ever asserted where it could not be otherwise
+/// (`docs/Testing/bugfunnel/entries/
+/// 2026-09-12-the-degraded-toast-hangs-off-the-left-edge-of-a-narrow-window.
+/// md`).
+///
+/// A SWEEP, not the floor alone: the fix is a clamp against the viewport, and a
+/// clamp is exactly the shape that can be right at one width and wrong at the
+/// next.
+const WINDOWS: &[(&str, f32, f32)] = &[
+    ("300x900", 300.0, 900.0),
+    ("360x900", 360.0, 900.0),
+    ("480x900", 480.0, 900.0),
+    ("700x900", 700.0, 900.0),
+    ("1200x900", 1200.0, 900.0),
+    ("1512x900", 1512.0, 900.0),
+    ("1512x720", 1512.0, 720.0),
+];
 
 /// One unwrapped line of toast text. A line painted shorter than this has been
 /// clipped, whatever its `y` says.
@@ -447,16 +473,29 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
     //    in the element tree and on nobody's screen — the failure mode a text-only
     //    assertion cannot see. A line that runs off the edge is the disclosure not
     //    arriving, the same failure by a different route.
+    //
+    //    The LEFT bound is the stack's own inset, not zero, and that is the whole
+    //    of the narrow-window case. The stack is anchored to the right edge at a
+    //    fixed width; when the window is narrower than that width the box starts
+    //    at a NEGATIVE x and the first words of every line are drawn outside the
+    //    surface. `BoundsRegistry` reports the CLIPPED rect, so the overflowing
+    //    box comes back sitting at x=0 with a shortened width — an `x >= 0` test
+    //    sees a tidy box and passes, which is what it did. A box that fits has
+    //    its declared 16px of air on the left exactly as it has on every other
+    //    side; a box that does not fit has none.
     for (id, info) in &lines {
         assert!(
             info.width > 0.0
                 && info.height > 0.0
-                && info.x >= 0.0
+                && info.x >= STACK_INSET
                 && info.y >= STACK_INSET
                 && info.x + info.width <= window_w - STACK_INSET
                 && info.y + info.height <= window_h - STACK_INSET,
-            "the toast line {id} must lie inside the {window} window. It sits at x={} y={} w={} \
-             h={} and reads {:?}",
+            "the toast line {id} must lie inside the {window} window with the stack's own \
+             {STACK_INSET:.0}px inset intact on every side. It sits at x={} y={} w={} h={} and \
+             reads {:?}. Flush against the left edge means the box is wider than the viewport and \
+             its left half — the icon and the first words of the headline — is painted off the \
+             surface.",
             info.x,
             info.y,
             info.width,
