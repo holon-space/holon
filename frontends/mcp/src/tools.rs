@@ -322,12 +322,15 @@ fn resolve_agent_id(param: Option<String>) -> Result<String, rmcp::ErrorData> {
 
 /// Accept bare slugs (`now-query`) as well as fully-qualified ids
 /// (`block:now-query`) — the org file stores the bare form.
+///
+/// The operation dispatcher refuses an unschemed entity reference, so this is
+/// where a task tool's agent-supplied id is parsed. It shares
+/// [`EntityUri::schemed`] with that refusal, so the two agree on which strings
+/// already name their entity.
 fn ensure_block_prefix(s: &str) -> String {
-    if s.starts_with("block:") {
-        s.to_string()
-    } else {
-        format!("block:{s}")
-    }
+    // ALLOW(entity_uri_from_raw): the agent-supplied `task_id` / `parent_id`
+    // MCP tool params.
+    EntityUri::from_raw(s).as_str().to_string()
 }
 
 /// Build a filesystem-safe slug from a task id (lowercase alphanumeric +
@@ -4957,10 +4960,13 @@ mod tests {
     #[test]
     fn json_map_to_storage_entity_converts_all_fields() {
         let mut map = HashMap::new();
-        map.insert("id".into(), serde_json::json!("block-1"));
+        map.insert("id".into(), serde_json::json!("block:block-1"));
         map.insert("priority".into(), serde_json::json!(3));
         let entity = json_map_to_storage_entity(map).expect("ordinary keys are accepted");
-        assert_eq!(entity.get("id").unwrap(), &Value::String("block-1".into()));
+        assert_eq!(
+            entity.get("id").unwrap(),
+            &Value::String("block:block-1".into())
+        );
         assert_eq!(entity.get("priority").unwrap(), &Value::Integer(3));
     }
 

@@ -48,7 +48,7 @@ async fn editor_cell(booted: &harness::Booted) -> Cell<String> {
 /// org ingest takes, and a `sys.`-origin write the editor must converge to.
 async fn authoritative_write(booted: &harness::Booted, text: &str) {
     let mut params: holon_api::StorageEntity = HashMap::new();
-    params.insert("id".into(), Value::String(PROBE_CHILD.to_string()));
+    params.insert("id".into(), Value::String(format!("block:{PROBE_CHILD}")));
     params.insert("field".into(), Value::String("content".to_string()));
     params.insert("value".into(), Value::String(text.to_string()));
     booted

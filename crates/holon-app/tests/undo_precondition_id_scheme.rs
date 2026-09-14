@@ -1,13 +1,11 @@
-//! The undo precondition reader must answer for EVERY block-id form the
-//! operation boundary accepts.
+//! The operation boundary accepts exactly ONE block-id form, and an undo of a
+//! write through it applies.
 //!
-//! The block-write leg normalizes an unschemed id (`EntityUri::from_raw`, the
-//! form org files store on disk) before it reaches Loro, so a `set_field`
-//! addressed by a bare id lands on the right block. The undo precondition took
-//! the same id as a raw string into `SELECT … FROM block_raw WHERE id = '…'`,
-//! where rows are keyed scheme-qualified — so the read matched nothing, the
-//! precondition read `found None`, and the undo was dropped as stale while the
-//! user saw no change and no message.
+//! Org files on disk store bare ids and the org parser adds the scheme; a
+//! caller reaching the dispatcher is past that parse. So the dispatcher parses
+//! every entity reference once and refuses a bare one, and the precondition
+//! reader — which keys on the scheme-qualified id `block_raw` rows carry — can
+//! never be handed a spelling it does not key on.
 
 #[path = "undo_precondition_id_scheme/harness.rs"]
 mod harness;
@@ -56,7 +54,11 @@ async fn await_projected(engine: &holon::api::BackendEngine, bare: &str, want: &
     );
 }
 
-async fn set_content(engine: &holon::api::BackendEngine, id: &str, value: &str) {
+async fn dispatch_set_content(
+    engine: &holon::api::BackendEngine,
+    id: &str,
+    value: &str,
+) -> anyhow::Result<holon_api::OpOutcome> {
     let mut params: holon_api::StorageEntity = HashMap::new();
     params.insert("id".into(), Value::String(id.to_string()));
     params.insert("field".into(), Value::String("content".to_string()));
@@ -69,36 +71,53 @@ async fn set_content(engine: &holon::api::BackendEngine, id: &str, value: &str) 
             OpOrigin::User,
         )
         .await
+}
+
+async fn set_content(engine: &holon::api::BackendEngine, id: &str, value: &str) {
+    dispatch_set_content(engine, id, value)
+        .await
         .unwrap_or_else(|e| {
             panic!("a user set_field on {id} through the production dispatcher: {e:#}")
         });
 }
 
-/// The pin. A `set_field` addressed by the block's BARE id — the id form the
-/// vault file on disk carries and the write leg accepts — must be undoable.
+/// The pin. A `set_field` addressed by the block's BARE id is refused at the
+/// operation boundary, naming the parameter and the offending value — and the
+/// block it named keeps its content.
 #[tokio::test(flavor = "multi_thread")]
-async fn undo_restores_content_written_through_a_bare_block_id() {
+async fn a_bare_block_id_is_refused_at_the_operation_boundary() {
     let booted = harness::boot_a_working_session().await;
     let engine = booted.engine.clone();
 
     // Vacuity guard: without the ingested block projected, the gesture below
-    // would edit nothing and every later assertion would be about an absence.
+    // would name an absent block and the refusal could be about that instead.
     await_projected(&engine, PROBE_CHILD, ORIGINAL).await;
 
-    set_content(&engine, PROBE_CHILD, TYPED).await;
-    await_projected(&engine, PROBE_CHILD, TYPED).await;
-
-    let outcome = booted.engine.undo().await.expect("undo must not refuse");
+    let refusal = dispatch_set_content(&engine, PROBE_CHILD, TYPED)
+        .await
+        .expect_err("a bare block id must be refused at the operation boundary");
+    let expected = holon_api::UnschemedEntityReference {
+        param: "id".to_string(),
+        operation: "block/set_field".to_string(),
+        value: PROBE_CHILD.to_string(),
+        expected_scheme: "block".to_string(),
+    }
+    .to_string();
     assert!(
-        matches!(outcome, UndoOutcome::Applied),
-        "undo of a bare-id set_field must apply; got {outcome:?}"
+        format!("{refusal:#}").contains(&expected),
+        "the refusal must name the parameter and the value.\n expected: {expected}\n got: \
+         {refusal:#}"
     );
-    await_projected(&engine, PROBE_CHILD, ORIGINAL).await;
+    assert_eq!(
+        projected_content(&engine, PROBE_CHILD).await.as_deref(),
+        Some(ORIGINAL),
+        "the refused write must leave the block's content alone"
+    );
 }
 
-/// Control: the SAME gesture addressed by the scheme-qualified id. Green both
-/// before and after the fix — it is what isolates the id scheme as the
-/// discriminator rather than the wiring, the projection, or the journal.
+/// Control: the SAME gesture addressed by the scheme-qualified id lands and is
+/// undoable — what isolates the id scheme as the discriminator rather than the
+/// wiring, the projection, or the journal.
 #[tokio::test(flavor = "multi_thread")]
 async fn control_undo_restores_content_written_through_a_qualified_block_id() {
     let booted = harness::boot_a_working_session().await;

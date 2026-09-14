@@ -118,7 +118,7 @@ async fn a_boundary_ingest_write_is_not_undoable() {
     let before = booted.undo.undo_count().unwrap();
 
     let mut params: holon_api::StorageEntity = HashMap::new();
-    params.insert("id".into(), Value::String(PROBE_CHILD.to_string()));
+    params.insert("id".into(), Value::String(format!("block:{PROBE_CHILD}")));
     params.insert("field".into(), Value::String("content".to_string()));
     params.insert(
         "value".into(),
@@ -386,7 +386,7 @@ async fn opening_the_vault_document_does_not_arm_the_manager() {
 
 async fn ingest_rewrite(booted: &harness::Booted, text: &str) {
     let mut params: holon_api::StorageEntity = HashMap::new();
-    params.insert("id".into(), Value::String(PROBE_CHILD.to_string()));
+    params.insert("id".into(), Value::String(format!("block:{PROBE_CHILD}")));
     params.insert("field".into(), Value::String("content".to_string()));
     params.insert("value".into(), Value::String(text.to_string()));
     booted
@@ -496,7 +496,7 @@ async fn interleaved_typing_and_operations_walk_back_in_one_order() {
 
     async fn user_set_field(booted: &harness::Booted, value: &str) {
         let mut params: holon_api::StorageEntity = HashMap::new();
-        params.insert("id".into(), Value::String(PROBE_CHILD.to_string()));
+        params.insert("id".into(), Value::String(format!("block:{PROBE_CHILD}")));
         params.insert("field".into(), Value::String("content".to_string()));
         params.insert("value".into(), Value::String(value.to_string()));
         booted

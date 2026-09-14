@@ -4,6 +4,8 @@
 
 Org files store IDs **without** scheme prefixes (`block:`, `sentinel:`).
 The parser adds the correct `EntityUri` scheme when reading; the renderer strips it when writing.
+Past that parse the scheme is mandatory: the operation boundary refuses an unschemed entity
+reference (see [Operations.md](../Architecture/Operations.md#entity-references-are-parsed-once-at-the-dispatcher)).
 
 ### Link targets are the documented exception: they DO carry schemes
 

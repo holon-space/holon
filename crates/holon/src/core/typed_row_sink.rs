@@ -20,6 +20,7 @@ use anyhow::bail;
 use async_trait::async_trait;
 use fluxdi::Injector;
 use holon_api::EntityName;
+use holon_api::EntityUri;
 use holon_api::OpOrigin;
 use holon_api::StorageEntity;
 use holon_api::Value;
@@ -128,13 +129,25 @@ impl TypedRowSink for DispatchingTypedRowSink {
         for owned in sets {
             let entity = self.checked_entity(owned).await?;
 
-            // Every row must carry the id the replacement below keys on.
+            // Every row must carry the id the replacement below keys on, and
+            // it must already NAME its entity: the file's keyspace is bare and
+            // the scheme is added by the parse that produced these rows
+            // (`holon_rows::parse_local_id`, called from the format adapter).
+            // An unschemed id here means a producer skipped that parse, which
+            // the dispatcher would refuse further down with less context.
             for row in &owned.rows {
-                if row.get("id").and_then(|v| v.as_string()).is_none() {
-                    bail!(
+                match row.get("id").and_then(|v| v.as_string()) {
+                    Some(id) if EntityUri::schemed(id).is_some() => {}
+                    Some(bare) => bail!(
+                        "a {} row carries the unschemed id {bare:?}; a row producer must parse \
+                         its file-local ids into entity references before they reach the write \
+                         path",
+                        owned.type_name
+                    ),
+                    None => bail!(
                         "a {} row carries no id — a file's rows must be keyed by the file itself",
                         owned.type_name
-                    );
+                    ),
                 }
             }
 

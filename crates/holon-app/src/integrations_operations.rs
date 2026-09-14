@@ -77,7 +77,9 @@ fn open_default_view_descriptor() -> OperationDescriptor {
         description: "Show this integration's view page in the main panel".to_string(),
         required_params: vec![OperationParam {
             name: "id".to_string(),
-            type_hint: TypeHint::String,
+            type_hint: TypeHint::EntityId {
+                entity_name: EntityName::new(ENTITY_NAME),
+            },
             description: "Integration row id, 'integration:<provider>'".to_string(),
         }],
         affected_fields: vec![],
@@ -122,7 +124,9 @@ fn set_field_descriptor() -> OperationDescriptor {
         required_params: vec![
             OperationParam {
                 name: "id".to_string(),
-                type_hint: TypeHint::String,
+                type_hint: TypeHint::EntityId {
+                    entity_name: EntityName::new(ENTITY_NAME),
+                },
                 description: "Integration row id, 'integration:<provider>'".to_string(),
             },
             OperationParam {
@@ -191,7 +195,9 @@ fn begin_oauth_descriptor() -> OperationDescriptor {
             .to_string(),
         required_params: vec![OperationParam {
             name: "id".to_string(),
-            type_hint: TypeHint::String,
+            type_hint: TypeHint::EntityId {
+                entity_name: EntityName::new(ENTITY_NAME),
+            },
             description: "Integration row id, 'integration:<provider>'".to_string(),
         }],
         affected_fields: vec![],

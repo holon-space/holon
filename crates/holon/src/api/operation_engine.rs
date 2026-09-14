@@ -2428,7 +2428,9 @@ impl DispatchingOperationEngine {
                 .to_string(),
             required_params: vec![holon_api::OperationParam {
                 name: "target".to_string(),
-                type_hint: TypeHint::String,
+                type_hint: TypeHint::EntityId {
+                    entity_name: EntityName::new("block"),
+                },
                 description: "Origin block id to convert".to_string(),
             }],
             // Resolve `target` from the focused block's `id` (the only key live

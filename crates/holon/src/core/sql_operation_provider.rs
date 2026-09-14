@@ -947,28 +947,44 @@ impl SqlOperationProvider {
         // because a create must ACT differently on a free id and on a
         // recognized re-create, a distinction a blessed `MintedId` cannot
         // carry.
-        let minter =
-            self.identity_minter()
-                .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
-                    "SqlOnly create requires an IdentityMinting seam (the Turso mint authority)"
-                        .into()
-                })?;
-        let create_id: holon_api::identity_minting::CreateId =
-            match params.get("id").and_then(|v| v.as_string()) {
-                Some(existing) => holon_api::identity_minting::CreateId::Carried(
-                    holon_api::identity_minting::CarriedId::from_stored(
-                        // Schemed against THIS entity: a create knows what it is
-                        // creating, so an unschemed id must not take the raw
-                        // parse's block default.
-                        EntityUri::from_raw_for(&self.entity_name, existing),
-                    ),
-                ),
-                None => holon_api::identity_minting::CreateId::Minted(
+        // The supplied id is parsed BEFORE the mint authority is reached for,
+        // so a malformed request is refused on its own terms instead of
+        // depending on whether this embedder wired a minter.
+        let scheme = EntityName::new(&self.entity_name);
+        let supplied = match params.get("id").and_then(|v| v.as_string()) {
+            // A supplied id has already crossed a parse boundary — it is a
+            // caller-DERIVED value (a page's `PageId::for_path`, an id a read
+            // leg handed back). Scheming it here would store the row under an
+            // id the caller never wrote, and the write leg would then key on a
+            // spelling the read legs had to guess back.
+            Some(existing) => Some(EntityUri::schemed(existing).ok_or_else(|| {
+                format!(
+                    "{scheme}/create: the supplied id {existing:?} carries no scheme. An entity \
+                     reference names its entity (e.g. \"{scheme}:{existing}\"); see \
+                     docs/Reference/ORG_SYNTAX.md."
+                )
+            })?),
+            None => None,
+        };
+        let create_id: holon_api::identity_minting::CreateId = match supplied {
+            Some(uri) => holon_api::identity_minting::CreateId::Carried(
+                holon_api::identity_minting::CarriedId::from_stored(uri),
+            ),
+            None => {
+                let minter = self.identity_minter().ok_or_else(
+                    || -> Box<dyn std::error::Error + Send + Sync> {
+                        "SqlOnly create requires an IdentityMinting seam (the Turso mint \
+                             authority)"
+                            .into()
+                    },
+                )?;
+                holon_api::identity_minting::CreateId::Minted(
                     minter
                         .mint(holon_api::identity_minting::IdentityInput::UniqueRandom)
                         .await?,
-                ),
-            };
+                )
+            }
+        };
         let id = create_id.as_str().to_string();
         params.insert("id".into(), Value::String(id.clone()));
         // Recognition BEFORE anything is minted or placed, so a refused
@@ -3002,7 +3018,9 @@ impl OperationProvider for SqlOperationProvider {
                 required_params: vec![
                     OperationParam {
                         name: "id".to_string(),
-                        type_hint: TypeHint::String,
+                        type_hint: TypeHint::EntityId {
+                            entity_name: EntityName::new(&self.entity_name),
+                        },
                         description: "Entity ID".to_string(),
                     },
                     OperationParam {
@@ -3069,7 +3087,9 @@ impl OperationProvider for SqlOperationProvider {
                 description: format!("Update {}", self.entity_short_name),
                 required_params: vec![OperationParam {
                     name: "id".to_string(),
-                    type_hint: TypeHint::String,
+                    type_hint: TypeHint::EntityId {
+                        entity_name: EntityName::new(&self.entity_name),
+                    },
                     description: "Entity ID".to_string(),
                 }],
                 id_column: "id".to_string(),
@@ -3094,7 +3114,9 @@ impl OperationProvider for SqlOperationProvider {
                 description: format!("Delete {}", self.entity_short_name),
                 required_params: vec![OperationParam {
                     name: "id".to_string(),
-                    type_hint: TypeHint::String,
+                    type_hint: TypeHint::EntityId {
+                        entity_name: EntityName::new(&self.entity_name),
+                    },
                     description: "Entity ID".to_string(),
                 }],
                 id_column: "id".to_string(),
@@ -3125,7 +3147,9 @@ impl OperationProvider for SqlOperationProvider {
                 description: format!("Remove a tombstoned {} for good", self.entity_short_name),
                 required_params: vec![OperationParam {
                     name: "id".to_string(),
-                    type_hint: TypeHint::String,
+                    type_hint: TypeHint::EntityId {
+                        entity_name: EntityName::new(&self.entity_name),
+                    },
                     description: "Entity ID".to_string(),
                 }],
                 id_column: "id".to_string(),
@@ -3160,7 +3184,9 @@ impl OperationProvider for SqlOperationProvider {
                     description: "Cycle to the next task state".to_string(),
                     required_params: vec![OperationParam {
                         name: "id".to_string(),
-                        type_hint: TypeHint::String,
+                        type_hint: TypeHint::EntityId {
+                            entity_name: EntityName::new(&self.entity_name),
+                        },
                         description: "Entity ID".to_string(),
                     }],
                     affected_fields: vec!["task_state".to_string()],
@@ -3212,14 +3238,21 @@ impl OperationProvider for SqlOperationProvider {
                     display_name: "Rewrite Link Resolution".to_string(),
                     description: "Re-point block_links resolved from one id to another".to_string(),
                     required_params: vec![
+                        // `block_links.resolved_id` on both sides — a block of
+                        // THIS entity under a name the reference rule cannot
+                        // see.
                         OperationParam {
                             name: "from".to_string(),
-                            type_hint: TypeHint::String,
+                            type_hint: TypeHint::EntityId {
+                                entity_name: EntityName::new(&self.entity_name),
+                            },
                             description: "Current resolved_id to rewrite".to_string(),
                         },
                         OperationParam {
                             name: "to".to_string(),
-                            type_hint: TypeHint::String,
+                            type_hint: TypeHint::EntityId {
+                                entity_name: EntityName::new(&self.entity_name),
+                            },
                             description: "New resolved_id".to_string(),
                         },
                     ],
@@ -3273,7 +3306,9 @@ impl OperationProvider for SqlOperationProvider {
                         .to_string(),
                     required_params: vec![OperationParam {
                         name: "target".to_string(),
-                        type_hint: TypeHint::String,
+                        type_hint: TypeHint::EntityId {
+                            entity_name: EntityName::new("block"),
+                        },
                         description: "Origin block id to convert".to_string(),
                     }],
                     id_column: "id".to_string(),
@@ -3297,14 +3332,22 @@ impl OperationProvider for SqlOperationProvider {
                     display_name: "Merge Blocks Plan".to_string(),
                     description: "Read-only planner for the merge_blocks compound".to_string(),
                     required_params: vec![
+                        // Both name a block of THIS entity — the name rule
+                        // cannot see them (neither is `id` or `*_id`), so the
+                        // declaration is what puts them under the boundary's
+                        // parse.
                         OperationParam {
                             name: "canonical".to_string(),
-                            type_hint: TypeHint::String,
+                            type_hint: TypeHint::EntityId {
+                                entity_name: EntityName::new(&self.entity_name),
+                            },
                             description: "The surviving block id".to_string(),
                         },
                         OperationParam {
                             name: "duplicate".to_string(),
-                            type_hint: TypeHint::String,
+                            type_hint: TypeHint::EntityId {
+                                entity_name: EntityName::new(&self.entity_name),
+                            },
                             description: "The block id folded away".to_string(),
                         },
                     ],

@@ -22,6 +22,82 @@ use crate::Value;
 #[derive(Clone, Ord, PartialOrd)]
 pub struct EntityUri(Uri<String>);
 
+/// An entity-reference operation parameter whose value carries no scheme.
+///
+/// The operation boundary parses every entity reference into an [`EntityUri`]
+/// once; a value that forms no URI names no entity and is refused there. Org
+/// files on disk store bare ids (`docs/Reference/ORG_SYNTAX.md`) — the org
+/// parser adds the scheme, and a caller reaching the dispatcher has already
+/// crossed that boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnschemedEntityReference {
+    /// The operation parameter that carried the value (`id`, `parent_id`, …).
+    pub param: String,
+    /// `<entity>/<operation>` the parameter was dispatched to.
+    pub operation: String,
+    /// The value as the caller sent it.
+    pub value: String,
+    /// The scheme the parameter's declared entity implies.
+    pub expected_scheme: String,
+}
+
+impl fmt::Display for UnschemedEntityReference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "operation boundary: parameter '{}' of '{}' carries the unschemed entity reference \
+             {:?} — entity references must be scheme-qualified, e.g. \"{}:{}\" (see \
+             docs/Reference/ORG_SYNTAX.md)",
+            self.param, self.operation, self.value, self.expected_scheme, self.value
+        )
+    }
+}
+
+impl std::error::Error for UnschemedEntityReference {}
+
+/// An entity-reference operation parameter whose scheme names a DIFFERENT
+/// entity than the one the operation declared it for.
+///
+/// A scheme that merely exists is not a reference to the right thing: a
+/// `block:` id handed to a `test-item` operation, or an `https:` URL handed to
+/// either, forms a URI and then matches no row — the write reports success and
+/// changes nothing. The boundary compares the parsed scheme against the
+/// declaration so the write leg and the read legs cannot key on different
+/// entities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignEntityReference {
+    /// The operation parameter that carried the value (`id`, `parent_id`, …).
+    pub param: String,
+    /// `<entity>/<operation>` the parameter was dispatched to.
+    pub operation: String,
+    /// The value as the caller sent it.
+    pub value: String,
+    /// The scheme the value actually carries.
+    pub found_scheme: String,
+    /// The scheme the parameter's declared entity implies.
+    pub expected_scheme: String,
+}
+
+impl fmt::Display for ForeignEntityReference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "operation boundary: parameter '{}' of '{}' carries {:?}, which names the entity \
+             '{}' — this parameter references a '{}', so the value must be spelled \"{}:<id>\". A \
+             reference to another entity matches no row, and the write would report success \
+             having changed nothing.",
+            self.param,
+            self.operation,
+            self.value,
+            self.found_scheme,
+            self.expected_scheme,
+            self.expected_scheme
+        )
+    }
+}
+
+impl std::error::Error for ForeignEntityReference {}
+
 impl EntityUri {
     /// Parse a raw string into an EntityUri. Validates as RFC 3986 URI.
     pub fn parse(raw: &str) -> anyhow::Result<Self> {
@@ -192,7 +268,7 @@ impl EntityUri {
     /// When the scheme is known statically prefer `EntityUri::block(..)` /
     /// `EntityUri::parse(..)`.
     pub fn from_raw(s: &str) -> Self {
-        Self::already_schemed(s).unwrap_or_else(|| Self::block(s))
+        Self::schemed(s).unwrap_or_else(|| Self::block(s))
     }
 
     /// [`from_raw`] for a boundary that KNOWS which entity it is parsing for:
@@ -204,7 +280,7 @@ impl EntityUri {
     /// files the row under a scheme the entity does not have — a free-standing
     /// `person` create landing as `block:person-0`.
     pub fn from_raw_for(scheme: &str, s: &str) -> Self {
-        Self::already_schemed(s).unwrap_or_else(|| Self::new(scheme, s))
+        Self::schemed(s).unwrap_or_else(|| Self::new(scheme, s))
     }
 
     /// Fallible [`from_raw`], for boundaries that ingest text authored outside
@@ -212,13 +288,16 @@ impl EntityUri {
     /// is a content error belonging to one file — not the internal
     /// double-scheme bug that `from_raw`'s panic asserts against.
     pub fn try_from_raw(s: &str) -> anyhow::Result<Self> {
-        match Self::already_schemed(s) {
+        match Self::schemed(s) {
             Some(uri) => Ok(uri),
             None => Self::parse(&format!("block:{s}")),
         }
     }
 
-    fn already_schemed(s: &str) -> Option<Self> {
+    /// THE predicate for "this raw string already names its entity": `Some`
+    /// iff `s` parses as a URI whose scheme is its own, `None` for a bare id.
+    /// Every boundary that must tell the two apart asks here.
+    pub fn schemed(s: &str) -> Option<Self> {
         if let Ok(uri) = Self::parse(s) {
             // A bare synthetic id containing `::` separators (e.g.
             // `root-layout::src::0`, `default-main-panel::render::0`) is a

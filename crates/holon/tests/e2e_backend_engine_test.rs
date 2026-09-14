@@ -70,7 +70,9 @@ impl OperationProvider for SqlOperationProvider {
                 required_params: vec![
                     holon_api::OperationParam {
                         name: "id".to_string(),
-                        type_hint: holon_api::TypeHint::String,
+                        type_hint: holon_api::TypeHint::EntityId {
+                            entity_name: self.entity_name.clone(),
+                        },
                         description: "Entity ID".to_string(),
                     },
                     holon_api::OperationParam {
@@ -127,7 +129,9 @@ impl OperationProvider for SqlOperationProvider {
                 description: format!("Delete {}", self.entity_short_name),
                 required_params: vec![holon_api::OperationParam {
                     name: "id".to_string(),
-                    type_hint: holon_api::TypeHint::String,
+                    type_hint: holon_api::TypeHint::EntityId {
+                        entity_name: self.entity_name.clone(),
+                    },
                     description: "Entity ID".to_string(),
                 }],
                 id_column: "id".to_string(),

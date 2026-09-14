@@ -145,9 +145,19 @@ Pinned by `crates/holon-app/tests/undo_precondition_id_scheme.rs`: the
 unschemed-id gesture must be undoable (red before, green after) with a
 qualified-id control that isolates the id scheme as the discriminator.
 
-OPEN, escalated to Martin: the covering rung is an integration test, not a
-keystone transition. A `EditContentByStoredId` transition was built and backed
-out because it panics on any seed holding a read-only document. The deeper
-question it raises — whether the operation boundary should accept an unschemed
-block id at all, or parse and refuse it once for every write leg — is an
-architecture decision, not a lane call.
+RULED (D125.a, 2026-09-14): the operation boundary does not accept an unschemed
+block id at all. `OperationDispatcher::parse_entity_references` parses every
+param the descriptor types `TypeHint::EntityId` — the subject `id` included,
+which the `#[operations_trait]` macro now declares — into an `EntityUri` once,
+and refuses an unschemed value with a typed
+`holon_api::UnschemedEntityReference`. The two spellings can no longer reach two
+legs.
+
+The covering rung is now a keystone transition, `DispatchUnschemedBlockId`,
+replayed deterministically as the hand-authored case
+`operation-boundary-refuses-unschemed-block-id`. It names a block that does not
+exist, so the refusal is a property of the id form alone and the rung draws on
+every seed — including the read-only-document seeds that made the earlier
+`EditContentByStoredId` attempt panic. `crates/holon-app/tests/undo_precondition_id_scheme.rs`
+keeps its qualified-id control and now pins the refusal in place of the
+bare-id undo.

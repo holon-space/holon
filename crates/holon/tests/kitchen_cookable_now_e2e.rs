@@ -48,7 +48,7 @@ async fn add_recipe(ctx: &E2ETestContext, id: &str, title: &str) -> Result<()> {
         "recipe",
         "create",
         params(&[
-            ("id", Value::String(id.to_string())),
+            ("id", Value::String(minted("recipe", id))),
             ("title", Value::String(title.to_string())),
             ("source_path", Value::String(format!("{title}.cook"))),
         ]),
@@ -70,7 +70,7 @@ async fn require(
         "ingredient_use",
         "create",
         params(&[
-            ("id", Value::String(id.to_string())),
+            ("id", Value::String(minted("ingredient_use", id))),
             ("recipe_id", Value::String(minted("recipe", recipe_id))),
             ("raw_name", Value::String(raw_name.to_string())),
             (
@@ -101,7 +101,7 @@ async fn stock(
         "pantry_item",
         "create",
         params(&[
-            ("id", Value::String(id.to_string())),
+            ("id", Value::String(minted("pantry_item", id))),
             ("name", Value::String(name.to_string())),
             ("quantity", Value::Float(quantity)),
             (

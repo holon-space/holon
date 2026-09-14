@@ -300,7 +300,9 @@ fn default_block_operations() -> Vec<holon_api::render_types::OperationDescripto
     let entity_short_name = "block".to_string();
     let id_param = OperationParam {
         name: "id".to_string(),
-        type_hint: TypeHint::String,
+        type_hint: TypeHint::EntityId {
+            entity_name: holon_api::EntityName::new("block"),
+        },
         description: "Entity ID".to_string(),
     };
 

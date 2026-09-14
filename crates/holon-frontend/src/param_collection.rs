@@ -181,6 +181,8 @@ fn type_hint_label(hint: &TypeHint) -> &'static str {
         TypeHint::String => "text",
         TypeHint::Number => "number",
         TypeHint::EntityId { .. } => "entity reference",
+        TypeHint::EntityIdOrRoot { .. } => "entity reference or root",
+        TypeHint::RowKey => "row key",
         TypeHint::OneOf { .. } => "one-of",
         TypeHint::Object { .. } => "object",
         TypeHint::Expr => "expression",

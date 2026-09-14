@@ -299,6 +299,14 @@ impl OperationDispatcher {
                 .into());
             }
         }
+        // The declarations this provider adds are ones the operation boundary
+        // will parse. Check them where they arrive rather than at the first
+        // dispatch: a `String`-typed entity reference, or two descriptors
+        // disagreeing about one parameter, is a wiring error the caller can
+        // still fix.
+        let mut declared = self.operations();
+        declared.extend(provider.operations());
+        holon_api::validate_entity_references(&declared)?;
         self.declared_providers
             .write()
             .expect("declared-provider registry poisoned")
@@ -379,6 +387,85 @@ impl OperationDispatcher {
              `{entity}` ops: {present:?}"
         )
         .into())
+    }
+
+    /// Parse every entity-reference parameter of one dispatched operation into
+    /// an [`holon_api::EntityUri`], and refuse an unschemed value.
+    ///
+    /// The descriptors name them: an entity reference is a param declared
+    /// [`holon_api::TypeHint::EntityId`], which includes the operation's own
+    /// subject. Org files on disk store bare ids and the org parser adds the
+    /// scheme (`docs/Reference/ORG_SYNTAX.md`); a caller that reached the
+    /// dispatcher is past that parse, so a bare id here is a caller that never
+    /// did one.
+    ///
+    /// The pair's declarations are read as a UNION
+    /// ([`holon_api::entity_reference_params`]), so which provider answers is
+    /// not decided by registration order, and two descriptors that disagree
+    /// about one parameter are refused by name rather than resolved silently.
+    ///
+    /// An unroutable operation is left to the routing error below, which names
+    /// the missing provider.
+    fn parse_entity_references(
+        available_ops: &[OperationDescriptor],
+        resolved_entity_name: &str,
+        op_name: &str,
+        params: &StorageEntity,
+    ) -> Result<()> {
+        let references =
+            holon_api::entity_reference_params(available_ops, resolved_entity_name, op_name)?;
+
+        for reference in references {
+            let param = reference.name;
+            let expected_scheme = reference.entity_name;
+            let Some(holon_api::Value::String(raw)) = params.get(param) else {
+                continue;
+            };
+            // An empty reference is an absent one — `Value::Null` and `""` both
+            // reach providers that read the param as optional.
+            if raw.is_empty() {
+                continue;
+            }
+            let Some(uri) = holon_api::EntityUri::schemed(raw) else {
+                return Err(Box::new(holon_api::UnschemedEntityReference {
+                    param: param.to_string(),
+                    operation: format!("{resolved_entity_name}/{op_name}"),
+                    value: raw.clone(),
+                    expected_scheme: expected_scheme.as_str().to_string(),
+                }));
+            };
+            // The root is the stored sentinel, never NULL — legal in a
+            // position that DECLARES it (`parent_id` of a top-level block) and
+            // nowhere else. As the subject of a write it names no row, so
+            // letting it through there is the same silent no-op as a foreign
+            // reference.
+            if uri == holon_api::EntityUri::no_parent() {
+                if reference.admits_root {
+                    continue;
+                }
+                return Err(Box::new(holon_api::ForeignEntityReference {
+                    param: param.to_string(),
+                    operation: format!("{resolved_entity_name}/{op_name}"),
+                    value: raw.clone(),
+                    found_scheme: uri.scheme().to_string(),
+                    expected_scheme: expected_scheme.as_str().to_string(),
+                }));
+            }
+            // A scheme that merely EXISTS is not a reference to the right
+            // thing. `https://example.com/x` and a `block:` id handed to a
+            // `test-item` operation both parse, then match no row — and a write
+            // matching no row reports success having changed nothing.
+            if uri.scheme() != expected_scheme.as_str() {
+                return Err(Box::new(holon_api::ForeignEntityReference {
+                    param: param.to_string(),
+                    operation: format!("{resolved_entity_name}/{op_name}"),
+                    value: raw.clone(),
+                    found_scheme: uri.scheme().to_string(),
+                    expected_scheme: expected_scheme.as_str().to_string(),
+                }));
+            }
+        }
+        Ok(())
     }
 
     /// The ADR 0028 C3 boundary/authz decision for one dispatched operation.
@@ -948,6 +1035,15 @@ impl OperationDispatcher {
                     entity_name_str
                 };
                 tracing::Span::current().record("operation.resolved_entity", resolved_entity_name);
+
+                // THE entity-reference seam: every id this operation names is
+                // parsed here, once, and an unschemed one is refused.
+                Self::parse_entity_references(
+                    &available_ops,
+                    resolved_entity_name,
+                    op_name,
+                    &params,
+                )?;
 
                 // Intent boundary (Model.md invariant 3): parse the field of a
                 // block `set_field` intent into the closed `BlockWriteField`

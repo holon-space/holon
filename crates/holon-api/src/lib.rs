@@ -33,6 +33,7 @@ pub mod edge_field;
 pub mod effect_id;
 pub mod entity;
 pub mod entity_profile;
+pub mod entity_reference;
 pub mod entity_uri;
 pub mod expr_parser;
 pub mod filter;
@@ -231,7 +232,14 @@ pub use entity::{
     ROUTING_DOC_URI_KEY, StorageEntity, TryFromEntity, TypeDefinition, TypeSource, WriteAuthority,
 };
 // Re-export entity URI type
+pub use entity_reference::EntityReferenceParam;
+pub use entity_reference::description_calls_it_an_id;
+pub use entity_reference::entity_reference_params;
+pub use entity_reference::names_an_entity_reference;
+pub use entity_reference::validate_entity_references;
 pub use entity_uri::EntityUri;
+pub use entity_uri::ForeignEntityReference;
+pub use entity_uri::UnschemedEntityReference;
 // Re-export CompiledExpr from holon-expr for FieldLifetime::Computed
 pub use holon_expr::CompiledExpr;
 // The engine `ComputedSpec::parse` expects, re-exported so a caller declaring a

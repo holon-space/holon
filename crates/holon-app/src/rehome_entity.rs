@@ -175,7 +175,9 @@ pub fn rehome_entity_descriptor() -> OperationDescriptor {
         required_params: vec![
             OperationParam {
                 name: "id".to_string(),
-                type_hint: TypeHint::String,
+                type_hint: TypeHint::EntityId {
+                    entity_name: EntityName::new("block"),
+                },
                 description: "The leaf block to re-home".to_string(),
             },
             OperationParam {

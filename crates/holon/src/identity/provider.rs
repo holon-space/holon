@@ -472,6 +472,18 @@ impl IdentityProvider {
         d
     }
 
+    /// A key in `canonical_entity` / `merge_proposal` — the registry's own
+    /// tables. A canonical id is bare (`kind` carries what sort of thing it
+    /// is) and a proposal id is an integer; either way it names a row HERE,
+    /// not an entity elsewhere, which is what `RowKey` states.
+    fn row_key_param(name: &str, description: &str) -> OperationParam {
+        OperationParam {
+            name: name.to_string(),
+            type_hint: TypeHint::RowKey,
+            description: description.to_string(),
+        }
+    }
+
     fn string_param(name: &str, description: &str) -> OperationParam {
         OperationParam {
             name: name.to_string(),
@@ -500,11 +512,16 @@ impl OperationProvider for IdentityProvider {
                 "Merge canonical_a into canonical_b: rewrite aliases and delete the merged-from \
                  canonical.",
                 vec![
-                    Self::string_param(
+                    // `canonical_entity` primary keys, like every other
+                    // canonical id this provider takes: the value is bare and
+                    // `kind` says what sort of thing the row describes, so it
+                    // names a row HERE and not an entity elsewhere. NOT an
+                    // `EntityId`: there is no single entity it references.
+                    Self::row_key_param(
                         "canonical_a",
                         "Canonical id to merge from (will be deleted)",
                     ),
-                    Self::string_param("canonical_b", "Canonical id to merge into"),
+                    Self::row_key_param("canonical_b", "Canonical id to merge into"),
                 ],
             ),
             Self::descriptor(
@@ -512,7 +529,7 @@ impl OperationProvider for IdentityProvider {
                 "Propose merge",
                 "Append a merge proposal to proposal_queue (status='pending').",
                 vec![
-                    Self::integer_param(
+                    Self::row_key_param(
                         "id",
                         "Proposal id (caller-provided to keep replay deterministic)",
                     ),
@@ -525,13 +542,13 @@ impl OperationProvider for IdentityProvider {
                 "accept_proposal",
                 "Accept proposal",
                 "Mark a proposal as accepted.",
-                vec![Self::integer_param("id", "Proposal id")],
+                vec![Self::row_key_param("id", "Proposal id")],
             ),
             Self::descriptor(
                 "reject_proposal",
                 "Reject proposal",
                 "Mark a proposal as rejected.",
-                vec![Self::integer_param("id", "Proposal id")],
+                vec![Self::row_key_param("id", "Proposal id")],
             ),
             // -- Internal undo primitives (registered so the dispatcher routes
             //    inverse executions; not intended as user surfaces). --
@@ -540,11 +557,11 @@ impl OperationProvider for IdentityProvider {
                 "Restore canonical after merge",
                 "Internal: undo of merge_entities. Re-inserts canonical and rewrites aliases.",
                 vec![
-                    Self::string_param("id", "Canonical id to restore"),
+                    Self::row_key_param("id", "Canonical id to restore"),
                     Self::string_param("kind", "Original kind"),
                     Self::string_param("primary_label", "Original primary label"),
                     Self::integer_param("created_at", "Original created_at"),
-                    Self::string_param(
+                    Self::row_key_param(
                         "merged_into_id",
                         "The canonical_b that the original merge targeted",
                     ),
@@ -559,7 +576,7 @@ impl OperationProvider for IdentityProvider {
                 "Delete proposal",
                 "Internal: undo of propose_merge / restore_proposal. Removes a row from \
                  proposal_queue.",
-                vec![Self::integer_param("id", "Proposal id")],
+                vec![Self::row_key_param("id", "Proposal id")],
             ),
             Self::descriptor(
                 "restore_proposal",
@@ -567,7 +584,7 @@ impl OperationProvider for IdentityProvider {
                 "Internal: undo of delete_proposal. Re-inserts a proposal row with original \
                  status.",
                 vec![
-                    Self::integer_param("id", "Proposal id"),
+                    Self::row_key_param("id", "Proposal id"),
                     Self::string_param("kind", "Proposal kind"),
                     Self::string_param("evidence_json", "Evidence payload"),
                     Self::string_param("status", "Original status"),
@@ -580,7 +597,7 @@ impl OperationProvider for IdentityProvider {
                 "Internal: self-inverse of accept_proposal / reject_proposal. Sets a specific \
                  status.",
                 vec![
-                    Self::integer_param("id", "Proposal id"),
+                    Self::row_key_param("id", "Proposal id"),
                     Self::string_param("status", "Status to set"),
                 ],
             ),

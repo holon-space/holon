@@ -1853,15 +1853,38 @@ mod tests {
         engine
             .db_handle()
             .execute(
-                "INSERT INTO test_item (id, content, completed) VALUES ('item-1', 'Test task', 0)",
+                "INSERT INTO test_item (id, content, completed) VALUES ('test-item:item-1', \
+                 'Test task', 0)",
                 vec![],
             )
             .await
             .unwrap();
 
+        // An entity reference names its entity. The bare id the row is keyed
+        // by on disk is what an org file holds; a caller that reaches the
+        // dispatcher with one never crossed the parse that adds the scheme, so
+        // the boundary refuses it (`tests/entity_reference_boundary.rs`).
+        let mut bare: StorageEntity = holon_api::StorageEntity::new();
+        bare.insert("id".into(), Value::String("item-1".to_string()));
+        bare.insert("field".into(), Value::String("completed".to_string()));
+        bare.insert("value".into(), Value::Boolean(true));
+        let refused = engine
+            .execute_operation(
+                &EntityName::new("test_item"),
+                "set_field",
+                bare,
+                holon_api::OpOrigin::User,
+            )
+            .await;
+        assert!(
+            refused.is_err(),
+            "an unschemed entity reference must be refused: {:?}",
+            refused
+        );
+
         // Execute operation to update completed field
         let mut params: StorageEntity = holon_api::StorageEntity::new();
-        params.insert("id".into(), Value::String("item-1".to_string()));
+        params.insert("id".into(), Value::String("test-item:item-1".to_string()));
         params.insert("field".into(), Value::String("completed".to_string()));
         params.insert("value".into(), Value::Boolean(true));
 
@@ -1876,14 +1899,17 @@ mod tests {
         assert!(result.is_ok(), "Operation should succeed: {:?}", result);
 
         // Verify the update
-        let sql = "SELECT id, completed FROM test_item WHERE id = 'item-1'";
+        let sql = "SELECT id, completed FROM test_item WHERE id = 'test-item:item-1'";
         let results = engine
             .execute_query(sql.to_string(), HashMap::new(), None)
             .await
             .unwrap();
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].get("id").unwrap().as_string(), Some("item-1"));
+        assert_eq!(
+            results[0].get("id").unwrap().as_string(),
+            Some("test-item:item-1")
+        );
 
         // SQLite stores booleans as integers (0/1), so check for Integer value
         match results[0].get("completed").unwrap() {

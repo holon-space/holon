@@ -121,10 +121,14 @@ impl TransitionFactory<ReferenceState> for CreateTypedEntity {
         .map(move |_| {
             let strat = proptest::sample::select(declared)
                 .prop_flat_map(|(type_name, columns, existing)| {
-                    // A fresh, deterministic id unique within the type
-                    // (`<type>-N`), reproducible under proptest replay unlike a
-                    // uuid.
-                    let id = format!("{type_name}-{existing}");
+                    // A fresh, deterministic id unique within the type,
+                    // reproducible under proptest replay unlike a uuid — and
+                    // scheme-qualified, because a create SUPPLIES an entity
+                    // reference and the operation boundary refuses one that
+                    // names no entity. It is also the id the row is STORED
+                    // under, so the oracle and the matview compare one string.
+                    let scheme = type_name.replace('_', "-");
+                    let id = format!("{scheme}:{scheme}-{existing}");
                     // Short org-safe ASCII words: no quotes/markup, round-trip
                     // clean.
                     proptest::collection::vec(

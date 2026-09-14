@@ -53,7 +53,9 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
                 region_param(),
                 OperationParam {
                     name: "block_id".to_string(),
-                    type_hint: TypeHint::String,
+                    type_hint: TypeHint::EntityId {
+                        entity_name: EntityName::new("block"),
+                    },
                     description: "Block ID to focus on".to_string(),
                 },
             ],
@@ -82,7 +84,9 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
                 region_param(),
                 OperationParam {
                     name: "block_id".to_string(),
-                    type_hint: TypeHint::String,
+                    type_hint: TypeHint::EntityId {
+                        entity_name: EntityName::new("block"),
+                    },
                     description: "Block ID to pin".to_string(),
                 },
             ],
@@ -108,7 +112,9 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             description: "Soft-close a navigation_history row by id (sidebar X button)".to_string(),
             required_params: vec![OperationParam {
                 name: "history_id".to_string(),
-                type_hint: TypeHint::Number,
+                // `navigation_history.id`, this provider's own row key — not a
+                // reference to an entity called "history".
+                type_hint: TypeHint::RowKey,
                 description: "navigation_history.id to close".to_string(),
             }],
             affected_fields: vec!["closed_at".to_string()],
@@ -233,7 +239,8 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
                 region_param(),
                 OperationParam {
                     name: "history_id".to_string(),
-                    type_hint: TypeHint::Number,
+                    // This provider's own row key (see `close` above).
+                    type_hint: TypeHint::RowKey,
                     description: "navigation_history.id of the open tab to activate".to_string(),
                 },
             ],
@@ -265,7 +272,9 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
                 region_param(),
                 OperationParam {
                     name: "block_id".to_string(),
-                    type_hint: TypeHint::String,
+                    type_hint: TypeHint::EntityId {
+                        entity_name: EntityName::new("block"),
+                    },
                     description: "Block ID to open in a new tab".to_string(),
                 },
             ],

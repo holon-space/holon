@@ -59,6 +59,12 @@ const LORO_LEG: Carrier = Carrier {
 };
 
 /// FK anchor the production core schema seeds; every root block needs it.
+/// The probes carry the bare local id — it is also the key their readbacks
+/// use — and address the operation boundary with the reference it names.
+fn block_uri(id: &str) -> String {
+    format!("block:{id}")
+}
+
 const ROOT_PARENT: &str = "sentinel:no_parent";
 
 struct HolonNative {
@@ -142,7 +148,7 @@ impl HolonNative {
     /// place.
     async fn tags_after_write(&self, id: &str, tags: &[&str]) -> anyhow::Result<Vec<String>> {
         let mut params: holon_api::StorageEntity = HashMap::new();
-        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("id".into(), Value::String(block_uri(id)));
         params.insert("content".into(), Value::String("certify".to_string()));
         params.insert("parent_id".into(), Value::String(ROOT_PARENT.to_string()));
         // An ARRAY, not a CSV string: `tags` is an edge field and the provider
@@ -222,7 +228,7 @@ impl HolonNative {
         value: &Value,
     ) -> anyhow::Result<Readback> {
         let mut params: holon_api::StorageEntity = HashMap::new();
-        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("id".into(), Value::String(block_uri(id)));
         params.insert("content".into(), Value::String("certify".to_string()));
         params.insert("parent_id".into(), Value::String(ROOT_PARENT.to_string()));
         params.insert(key.into(), value.clone());
@@ -251,7 +257,7 @@ impl HolonNative {
         // the probe report a refusal that is about the absent block, not the
         // key — so the anchor's own failure is a harness fault, loudly.
         let mut anchor: holon_api::StorageEntity = HashMap::new();
-        anchor.insert("id".into(), Value::String(id.to_string()));
+        anchor.insert("id".into(), Value::String(block_uri(id)));
         anchor.insert("content".into(), Value::String("certify".to_string()));
         anchor.insert("parent_id".into(), Value::String(ROOT_PARENT.to_string()));
         self.ctx
@@ -262,7 +268,7 @@ impl HolonNative {
             })?;
 
         let mut params: holon_api::StorageEntity = HashMap::new();
-        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("id".into(), Value::String(block_uri(id)));
         params.insert("field".into(), Value::String(key.to_string()));
         params.insert("value".into(), value.clone());
         if let Err(e) = self.ctx.execute_op("block", "set_field", params).await {
@@ -285,7 +291,7 @@ impl HolonNative {
         value: &Value,
     ) -> anyhow::Result<Readback> {
         let mut anchor: holon_api::StorageEntity = HashMap::new();
-        anchor.insert("id".into(), Value::String(id.to_string()));
+        anchor.insert("id".into(), Value::String(block_uri(id)));
         anchor.insert("content".into(), Value::String("certify".to_string()));
         anchor.insert("parent_id".into(), Value::String(ROOT_PARENT.to_string()));
         self.ctx
@@ -298,7 +304,7 @@ impl HolonNative {
         let json: serde_json::Value = value.clone().into();
         let bag = serde_json::json!({ key: json });
         let mut params: holon_api::StorageEntity = HashMap::new();
-        params.insert("id".into(), Value::String(id.to_string()));
+        params.insert("id".into(), Value::String(block_uri(id)));
         params.insert("field".into(), Value::String("properties".to_string()));
         params.insert("value".into(), Value::String(bag.to_string()));
         if let Err(e) = self.ctx.execute_op("block", "set_field", params).await {
@@ -388,9 +394,6 @@ impl HolonNative {
 
     /// Read one property back out of the stored blob.
     async fn read_stored(&self, id: &str, key: &str) -> anyhow::Result<Readback> {
-        // The write path promotes a bare id to its `block:` URI at the
-        // boundary (MEASURED: the first read missed every row), so the read
-        // must ask for the stored form.
         let sql = format!(
             "SELECT properties, property_kinds FROM block_raw WHERE id = 'block:{}'",
             id.replace('\'', "''")
@@ -943,7 +946,7 @@ async fn a_kind_map_disagreeing_with_its_bag_fails_the_read_loudly() -> anyhow::
     Ok(())
 }
 
-/// The routes this wiring CANNOT drive, pinned exactly.
+/// The routes this wiring CANNOT drive, pinned exactly — now none of them.
 ///
 /// `undriven_routes` is printed with the report, and an ordinary captured
 /// `cargo nextest` run swallows a passing test's stdout — so the disclosure is
@@ -951,13 +954,15 @@ async fn a_kind_map_disagreeing_with_its_bag_fails_the_read_loudly() -> anyhow::
 /// that silently stops writing later, and so stops certifying the types clause,
 /// turns this red instead of quietly shrinking coverage.
 ///
-/// `set_field` and the bag form both reach `SqlBlockOperations`, which offers
-/// the write to the `BlockCellRegistry` and returns `Ok` with no synchronous
-/// SQL write, so `SqlOperationProvider::set_field` is never reached here. That
-/// leg is driven directly in
-/// `holon::core::sql_operation_provider::set_field_property_kinds_test`.
+/// Both `set_field` routes were undriven for one reason: the probes addressed
+/// blocks by a BARE id while the rows are keyed by the `block:` reference, so
+/// every `set_field` matched no row and observed nothing. The operation
+/// boundary now refuses an unschemed reference instead of letting the two legs
+/// key on different strings
+/// (`crates/holon/tests/entity_reference_boundary.rs`), the probes name the
+/// reference, and both routes reach the substrate.
 #[tokio::test(flavor = "multi_thread")]
-async fn exactly_the_two_set_field_routes_are_undriven() -> anyhow::Result<()> {
+async fn every_certified_route_is_driven() -> anyhow::Result<()> {
     let format = HolonNative::load().await?;
     let report = certify(&format).context("the certification harness must run")?;
 
@@ -970,13 +975,9 @@ async fn exactly_the_two_set_field_routes_are_undriven() -> anyhow::Result<()> {
 
     assert_eq!(
         got,
-        vec![
-            "block_properties_json/set_field".to_string(),
-            "block_properties_json/set_field(properties bag)".to_string(),
-        ],
-        "the undriven-route set changed. A route that GAINED coverage is good news — update \
-         this list. A route that LOST it means the types clause is now certified over fewer \
-         author paths than the profile claims:\n{}",
+        Vec::<String>::new(),
+        "a route LOST coverage: the types clause is now certified over fewer author paths than \
+         the profile claims:\n{}",
         report.render()
     );
     Ok(())

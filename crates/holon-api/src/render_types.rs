@@ -566,6 +566,27 @@ pub enum TypeHint {
     /// Example: `EntityId { entity_name: "project" }` means this parameter
     /// must be the ID of a "project" entity.
     EntityId { entity_name: EntityName },
+    /// An entity reference in a position where the ROOT is a legal answer:
+    /// `parent_id` on a top-level block, a move destination that is the tree
+    /// root. The root is the stored sentinel [`EntityUri::no_parent`], never
+    /// NULL, so it is a value the boundary must let through — and it is a value
+    /// no OTHER reference position may carry, because as the subject of a write
+    /// it names no row.
+    ///
+    /// Stated per parameter rather than inferred from its name: whether the
+    /// root is meaningful is a property of the position, and a name like
+    /// `parent_id` says where the value goes, not what may be in it.
+    EntityIdOrRoot { entity_name: EntityName },
+    /// A key in the provider's OWN table rather than a reference to an entity:
+    /// the identity registry's canonical row id, a proposal row id. It names a
+    /// row, forms no [`EntityUri`](crate::EntityUri), and the operation
+    /// boundary passes it through unparsed.
+    ///
+    /// The distinction is STATED here because a parameter cannot be told apart
+    /// from an entity reference by its name — both are spelled `id` /
+    /// `<role>_id`, and registration refuses a reference-named parameter that
+    /// declares neither this nor [`TypeHint::EntityId`].
+    RowKey,
     /// One-of constraint: parameter must be one of the provided values
     ///
     /// Example: `OneOf { values: [...] }` means this parameter must be one of

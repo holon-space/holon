@@ -1209,7 +1209,7 @@ where
     async fn move_block(
         &self,
         id: &EntityUri,
-        parent_id: &EntityUri,
+        #[may_be_root] parent_id: &EntityUri,
         after_block_id: Option<&EntityUri>,
     ) -> Result<OperationResult> {
         self.move_block_prefetched(id, parent_id, after_block_id, MovePrefetch::default())

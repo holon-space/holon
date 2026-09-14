@@ -28,7 +28,7 @@ use holon_core::file_format::FileFormatParseResult;
 use holon_core::file_format::TypedRowSet;
 use holon_core::file_format::WriteTier;
 use holon_core::file_format::WritebackDropVerdict;
-use holon_rows::checked_local_id;
+use holon_rows::parse_local_id;
 
 use crate::PluginHost;
 use crate::PluginLimits;
@@ -211,10 +211,7 @@ impl FileFormatAdapter for PluginFormatAdapter {
                     document = Some(self.document_block(set, &file_id, parent_dir_id)?);
                 }
                 BLOCK_SCOPE => blocks = self.child_blocks(set, &file_id)?,
-                _ => {
-                    self.check_declared(&set)?;
-                    typed_rows.push(set);
-                }
+                _ => typed_rows.push(self.parse_typed_rows(set)?),
             }
         }
 
@@ -404,57 +401,64 @@ impl PluginFormatAdapter {
     }
 
     /// A row set the sidecar must have declared, cell for cell.
-    fn check_declared(&self, set: &TypedRowSet) -> Result<()> {
-        let declared = self.format.scope(&set.type_name).with_context(|| {
+    /// Check one emitted scope against its declaration and PARSE its row ids
+    /// into the references they are stored as.
+    ///
+    /// The scheme is added here because here is where the entity is known: the
+    /// sidecar's scope declares `id_entity`. Downstream — the typed-row sink,
+    /// the dispatcher — a row id already names its entity.
+    fn parse_typed_rows(&self, mut owned: TypedRowSet) -> Result<TypedRowSet> {
+        let declared = self.format.scope(&owned.type_name).with_context(|| {
             format!(
                 "the {} plugin emitted scope {:?}, which its sidecar does not declare",
-                self.format.format_name, set.type_name
+                self.format.format_name, owned.type_name
             )
         })?;
 
-        if set.owner_column != declared.owner_column {
+        if owned.owner_column != declared.owner_column {
             bail!(
                 "the {} plugin scoped {:?} by owner column {:?}, but its sidecar declares {:?} — \
                  re-ingest sweeps by the DECLARED column, so rows would be replaced outside the \
                  scope they were written in",
                 self.format.format_name,
-                set.type_name,
-                set.owner_column,
+                owned.type_name,
+                owned.owner_column,
                 declared.owner_column
             );
         }
 
-        for row in &set.rows {
+        for row in &mut owned.rows {
             for column in row.keys() {
                 if !declared.columns.contains(column.as_ref()) {
                     bail!(
                         "the {} plugin emitted column {column:?} on a {:?} row, which its sidecar \
                          does not declare",
                         self.format.format_name,
-                        set.type_name
+                        owned.type_name
                     );
                 }
             }
             match row.get(declared.owner_column.as_str()) {
-                Some(Value::String(owner)) if *owner == set.owner_value => {}
+                Some(Value::String(owner)) if *owner == owned.owner_value => {}
                 other => bail!(
                     "a {:?} row carries owner column {:?} = {other:?} while its scope owns {:?}; \
                      the row would be written outside the scope its own replacement sweeps",
-                    set.type_name,
+                    owned.type_name,
                     declared.owner_column,
-                    set.owner_value
+                    owned.owner_value
                 ),
             }
-            match row.get(ID_CELL) {
-                Some(Value::String(id)) => checked_local_id(&declared.id_entity, id)?,
+            let id = match row.get(ID_CELL) {
+                Some(Value::String(local)) => parse_local_id(&declared.id_entity, local)?,
                 other => bail!(
                     "a {:?} row carries id {other:?}; ids are derived from content and every row \
                      must have one, because the replacement on re-ingest keys on it",
-                    set.type_name
+                    owned.type_name
                 ),
-            }
+            };
+            row.insert(ID_CELL.into(), Value::String(id.to_string()));
         }
-        Ok(())
+        Ok(owned)
     }
 }
 

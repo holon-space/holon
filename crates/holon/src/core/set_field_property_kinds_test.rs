@@ -41,7 +41,7 @@ async fn provider_with_block() -> (
         "block".to_string(),
         "block".to_string(),
     );
-    let id = "kinds-block".to_string();
+    let id = "block:kinds-block".to_string();
     let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
     params.insert("id".into(), Value::String(id.clone()));
     params.insert("content".into(), Value::String("anchor".to_string()));
@@ -50,9 +50,8 @@ async fn provider_with_block() -> (
         .await
         .expect("the anchor block must be creatable");
 
-    // The write path promotes a bare id to its `block:` URI, so later
-    // operations must name the STORED form or they update nothing and every
-    // assertion below reads an untouched row.
+    // Read the id back rather than reusing `id`: the assertions below must
+    // address the row as it is STORED, or they update nothing.
     let stored_id = db_handle
         .query("SELECT id FROM block_raw", HashMap::new())
         .await

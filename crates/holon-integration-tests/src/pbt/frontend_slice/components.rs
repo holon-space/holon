@@ -7011,6 +7011,44 @@ impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponen
 }
 
 #[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutUnschemedIdDispatch for HeadlessFrontendComponent {
+    async fn assert_unschemed_block_id_refused(&self, bare_id: &str) {
+        let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
+        params.insert("id".into(), holon_api::Value::String(bare_id.to_string()));
+        params.insert("field".into(), holon_api::Value::String("content".into()));
+        params.insert("value".into(), holon_api::Value::String("edited".into()));
+        let outcome = self
+            .engine()
+            .execute_operation(
+                &holon_api::EntityName::from("block".to_string()),
+                "set_field",
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await;
+        let message = match outcome {
+            Ok(_) => panic!(
+                "[unschemed id] block/set_field on {bare_id:?} was ACCEPTED; the operation \
+                 boundary must refuse an entity reference that carries no scheme"
+            ),
+            Err(e) => format!("{e:#}"),
+        };
+        let expected = holon_api::UnschemedEntityReference {
+            param: "id".to_string(),
+            operation: "block/set_field".to_string(),
+            value: bare_id.to_string(),
+            expected_scheme: "block".to_string(),
+        }
+        .to_string();
+        assert!(
+            message.contains(&expected),
+            "[unschemed id] block/set_field on {bare_id:?} was refused for the wrong reason.\n \
+             expected the boundary refusal: {expected}\n got: {message}"
+        );
+    }
+}
+
+#[async_trait::async_trait(?Send)]
 impl holon_pbt_core::capabilities::SutReadOnlyEditAttempt for HeadlessFrontendComponent {
     async fn attempt_read_only_edit(&self, block_id: &str, content: &str) -> Result<(), String> {
         let mut params: holon_api::StorageEntity = std::collections::HashMap::new();

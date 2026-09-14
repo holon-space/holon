@@ -69,7 +69,7 @@ async fn journal_one_user_edit(booted: &Booted, value: &str) {
     let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
     params.insert(
         "id".into(),
-        Value::String("restart-probe-child".to_string()),
+        Value::String("block:restart-probe-child".to_string()),
     );
     params.insert("field".into(), Value::String("content".to_string()));
     params.insert("value".into(), Value::String(value.to_string()));

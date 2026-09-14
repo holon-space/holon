@@ -67,7 +67,7 @@ async fn a_boundary_ingest_write_does_not_look_like_typing() {
     // The shape `holon_app::seed` and the org-ingest leg both use: a block
     // operation dispatched with `OpOrigin::Ingest`.
     let mut params: holon_api::StorageEntity = HashMap::new();
-    params.insert("id".into(), Value::String(PROBE_CHILD.to_string()));
+    params.insert("id".into(), Value::String(format!("block:{PROBE_CHILD}")));
     params.insert("field".into(), Value::String("content".to_string()));
     params.insert(
         "value".into(),

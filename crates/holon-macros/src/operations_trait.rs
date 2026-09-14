@@ -977,7 +977,9 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
             for arg in &mut method.sig.inputs {
                 if let syn::FnArg::Typed(pat_type) = arg {
                     pat_type.attrs.retain(|a| {
-                        !a.path().is_ident("entity_ref") && !a.path().is_ident("not_entity")
+                        !a.path().is_ident("entity_ref")
+                            && !a.path().is_ident("not_entity")
+                            && !a.path().is_ident("may_be_root")
                     });
                 }
             }
@@ -1868,6 +1870,18 @@ fn infer_type_string(type_str: &str) -> String {
     }
 }
 
+/// Whether `param_name` names an entity reference rather than a value.
+///
+/// The subject `id`, or a `<role>_id` role name (`parent_id`, `after_id`,
+/// `anchor_id`) — the two spellings every operation surface uses for "this
+/// parameter addresses an entity".
+fn is_entity_reference_name(param_name: &str) -> bool {
+    param_name == "id"
+        || param_name
+            .strip_suffix("_id")
+            .is_some_and(|role| !role.is_empty())
+}
+
 /// Parse parameter type hint with entity ID detection
 fn parse_param_type_hint(
     param_name: &str,
@@ -1876,6 +1890,7 @@ fn parse_param_type_hint(
 ) -> proc_macro2::TokenStream {
     let mut entity_ref_override: Option<String> = None;
     let mut not_entity = false;
+    let mut may_be_root = false;
 
     for attr in attrs {
         if attr.path().is_ident("entity_ref")
@@ -1894,6 +1909,10 @@ fn parse_param_type_hint(
         if attr.path().is_ident("not_entity") {
             not_entity = true;
         }
+
+        if attr.path().is_ident("may_be_root") {
+            may_be_root = true;
+        }
     }
 
     if let Some(entity_name) = entity_ref_override {
@@ -1903,12 +1922,40 @@ fn parse_param_type_hint(
             }
         }
     } else if not_entity {
-        infer_type_hint_from_rust_type(rust_type_str)
-    } else if let Some(entity_name) = param_name.strip_suffix("_id").filter(|s| !s.is_empty()) {
-        let entity_name_lit = entity_name.to_string();
+        // A reference-NAMED parameter that opts out still has to say what it is
+        // instead: registration refuses a `TypeHint::String` under one of these
+        // names, because the boundary would then pass it through unparsed.
+        if is_entity_reference_name(param_name) {
+            quote! { holon_api::TypeHint::RowKey }
+        } else {
+            infer_type_hint_from_rust_type(rust_type_str)
+        }
+    } else if may_be_root {
+        // The ROOT is a legal value in this position. Stated on the parameter
+        // because whether the root is meaningful is a property of the position,
+        // not of the name: `parent_id` says where the value goes, and only the
+        // operation knows whether the top of the tree is an answer there.
+        quote! {
+            holon_api::TypeHint::EntityIdOrRoot {
+                entity_name: holon_api::EntityName::new(entity_name),
+            }
+        }
+    } else if is_entity_reference_name(param_name) {
+        // The entity the descriptor is generated FOR. `entity_name` is the
+        // generator function's own parameter, in scope wherever this token
+        // stream is emitted.
+        //
+        // Both the subject `id` and a `*_id` reference name a position in the
+        // SAME entity's own vocabulary: `move_entity`'s `parent_id` and
+        // `after_id` are neighbours in the tree being moved, not entities
+        // named "parent"/"after". Reading the referenced entity off the name
+        // suffix invented schemes that do not exist (`parent:<id>`), which the
+        // operation boundary then repeated in user-facing refusal text. A
+        // reference to a DIFFERENT entity is stated, not guessed — that is
+        // what `#[entity_ref("project")]` is for.
         quote! {
             holon_api::TypeHint::EntityId {
-                entity_name: holon_api::EntityName::new(#entity_name_lit),
+                entity_name: holon_api::EntityName::new(entity_name),
             }
         }
     } else {

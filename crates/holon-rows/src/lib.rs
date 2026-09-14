@@ -21,6 +21,6 @@ pub use emit::emit_row_sets;
 pub use envelope::CONTRACT_VERSION;
 pub use envelope::Envelope;
 pub use envelope::ScopeHeader;
-pub use ids::checked_local_id;
+pub use ids::parse_local_id;
 pub use mapping::RowMapper;
 pub use parse::parse_row_sets;

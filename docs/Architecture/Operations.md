@@ -55,6 +55,29 @@ pub struct OperationDispatcher {
 // "orgmode.sync"   → OrgModeSyncProvider   (single sync-trigger op; rejects any other entity/op)
 ```
 
+### Entity references are parsed once, at the dispatcher
+
+Every operation parameter the descriptor types `TypeHint::EntityId` — the
+operation's own subject `id` included — is parsed into an `EntityUri` at
+`OperationDispatcher::parse_entity_references`, before any gate and before the
+provider runs. An **unschemed** value (`now-query` rather than
+`block:now-query`) is refused with a typed
+`holon_api::UnschemedEntityReference` naming the parameter, the value and the
+expected form; the dispatcher never normalises it.
+
+Org files on disk store bare ids and the org parser adds the scheme
+(`docs/Reference/ORG_SYNTAX.md`), so a caller reaching the dispatcher is past
+that parse. The rule exists because a normalising write leg and a
+non-normalising read leg keyed on two different spellings of one block, and the
+undo precondition read matched no row
+(`docs/Testing/bugfunnel/entries/2026-09-13-undo-precondition-reader-finds-no-content.md`).
+Downstream code may rely on the qualified form.
+
+An agent-facing tool that wants to accept bare slugs parses them at its own
+boundary — the MCP task tools do, through `EntityUri::from_raw`. The generic
+`execute_operation` tool forwards the agent's params unchanged, so the agent
+receives the dispatcher's refusal verbatim.
+
 ### Operation Metadata via Macros
 
 ```rust

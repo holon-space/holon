@@ -66,7 +66,7 @@ impl<P: OperationProvider> GenericProviderState<P> {
     fn can_satisfy_params(&self, op: &OperationDescriptor) -> bool {
         op.required_params.iter().all(|param| {
             match &param.type_hint {
-                TypeHint::EntityId { entity_name } => {
+                TypeHint::EntityId { entity_name } | TypeHint::EntityIdOrRoot { entity_name } => {
                     // Need at least one entity of this type
                     self.entities
                         .get(entity_name.as_str())
@@ -75,6 +75,7 @@ impl<P: OperationProvider> GenericProviderState<P> {
                 }
                 // Primitives, one-of, objects, expr, and collection can always be generated
                 TypeHint::Bool | TypeHint::String | TypeHint::Number => true,
+                TypeHint::RowKey => true,
                 TypeHint::OneOf { .. } | TypeHint::Object { .. } => true,
                 TypeHint::Expr | TypeHint::Collection => true,
             }
@@ -92,7 +93,8 @@ impl<P: OperationProvider> GenericProviderState<P> {
             .map(|param| {
                 let name = param.name.clone();
                 let strategy: BoxedStrategy<Value> = match &param.type_hint {
-                    TypeHint::EntityId { entity_name } => {
+                    TypeHint::EntityId { entity_name }
+                    | TypeHint::EntityIdOrRoot { entity_name } => {
                         // Get existing entity IDs
                         let ids: Vec<String> = self
                             .entities
@@ -110,7 +112,9 @@ impl<P: OperationProvider> GenericProviderState<P> {
                         prop::sample::select(ids).prop_map(Value::String).boxed()
                     }
                     TypeHint::Bool => any::<bool>().prop_map(Value::Boolean).boxed(),
-                    TypeHint::String => any::<String>().prop_map(Value::String).boxed(),
+                    TypeHint::String | TypeHint::RowKey => {
+                        any::<String>().prop_map(Value::String).boxed()
+                    }
                     TypeHint::Number => any::<i64>().prop_map(Value::Integer).boxed(),
                     TypeHint::OneOf { values } => {
                         // Randomly select from valid one-of values
