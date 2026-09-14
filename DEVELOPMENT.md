@@ -424,6 +424,77 @@ and deletes the rest. Dry run by default; `just target-gc` itself passes
 Run `python3 scripts/target-gc.py <dir>` directly for a dry-run report without
 deleting anything.
 
+## Gatekeeper "Verifying ..." windows during test runs
+
+While a test suite runs, macOS may stack up progress windows titled
+`Verifying "<test binary>-<hash>"`. Each one is a Gatekeeper first-launch
+assessment of a binary the system has never seen, and during a full run the
+machine can become unusable.
+
+### Why it happens
+
+Every test binary cargo links is ad-hoc (linker) signed: no Developer ID, no
+team identifier, no notarization ticket. macOS records the app that started
+the process chain as *responsible* for it, and exempts binaries whose
+responsible app holds the **Developer Tools** privacy grant. Without that
+grant, `syspolicyd` assesses every binary on first exec:
+
+```
+syspolicyd  GK evaluateScanResult: 2, PST: (team: (null)),
+            (id: action_bar_windowed-caf19069fbfe470b), (bundle_id: NOT_A_BUNDLE)
+tccd        AUTHREQ_ATTRIBUTION: responsible={identifier=com.stablyai.orca,
+            responsible_path=/Applications/Orca.app/Contents/MacOS/Orca, ...},
+            requesting={identifier=com.apple.syspolicyd}
+tccd        Service kTCCServiceDeveloperTool does not allow prompting; returning denied.
+syspolicyd  Error Domain=GatekeeperPolicyScanError "Code did not match any
+            currently allowed policy"
+```
+
+The assessment hashes the whole file, so its cost tracks binary size, and our
+binaries are large (`holon-gpui` is ~482 MB, of which ~293 MB is `__LINKEDIT`
+symbols). The verdict is cached per code-directory hash, so the cost is paid
+once per binary and then again after every relink.
+
+Windowed GPUI tests are the ones that produce a *visible* window: they attach
+to the window server, so `CoreServicesUIAgent` shows the assessment progress
+UI. Headless binaries pay the same delay silently.
+
+### The fix (one-time, per launching app)
+
+Grant **Developer Tools** to the application that launches the test run, in
+System Settings > Privacy & Security > Developer Tools. Add the app with `+`
+if it is not already listed, switch it on, and restart it. Apple describes the
+setting as allowing the app "to run software locally that does not meet the
+system's security policy", which is exactly what a freshly linked test binary
+is.
+
+Grant it to whatever actually launches cargo, which is the app at the top of
+the process chain, not the shell. Check with:
+
+```bash
+p=$(pgrep -x cargo-nextest | head -1)
+while [ -n "$p" ] && [ "$p" != 1 ]; do
+  ps -o comm= -p "$p"; p=$(ps -o ppid= -p "$p" | tr -d ' ')
+done
+```
+
+The grant is scoped to that one app. It does not disable Gatekeeper, and it
+does not change how anything outside that app is assessed.
+
+### Measuring it
+
+`scripts/gatekeeper-assessment-cost.sh` links ad-hoc-signed binaries at our
+test-binary sizes with a fresh hash each run, then times the first exec
+against the second:
+
+```bash
+scripts/gatekeeper-assessment-cost.sh
+```
+
+Without the grant, the first exec of a 405 MB binary costs about 4.7 s against
+66 ms for the second. With the grant, the two columns should agree. Run it
+before and after so the change is measured rather than assumed.
+
 ## Log Analysis
 
 The application logs to `/tmp/holon.log` using the `tracing` crate (format: `timestamp LEVEL module: [Component] message`).
