@@ -242,7 +242,7 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
     // offers no way to read a credential back out. Without the fixture's
     // injection the session would have stopped before reaching here.
     assert!(
-        session.secret_is_stored("todoist_api_key"),
+        session.secret_is_stored("todoist_api_key").unwrap(),
         "the secret a test wrote must live in the in-memory store, never on the machine"
     );
 

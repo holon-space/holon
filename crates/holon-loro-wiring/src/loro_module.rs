@@ -553,7 +553,20 @@ fn register_subtree_share(injector: &Injector) {
         // Share secrets go to the OS keychain: the per-share capability that
         // gates the advertiser's roster, and the owner key that signs the
         // roster sidecar. Both are minted lazily on the first share.
-        let credentials = Arc::new(holon_loro::share_credentials::ShareCredentials::platform());
+        //
+        // Injectable, because a harness driving the share transitions needs
+        // custody that OUTLIVES one session without being the developer's
+        // login keychain. The platform default refuses every operation in a
+        // process that never granted the keychain, so a harness that forgets
+        // to inject stops loudly instead of filing fixture secrets on the
+        // developer's machine.
+        let credentials = match resolver
+            .optional_resolve_async::<holon_loro::share_credentials::ShareCredentials>()
+            .await
+        {
+            Some(injected) => injected,
+            None => Arc::new(holon_loro::share_credentials::ShareCredentials::platform()),
+        };
 
         // The write-tier authority for imported blocks. The share projection
         // legs write straight to `sql_ops`, bypassing the dispatcher's

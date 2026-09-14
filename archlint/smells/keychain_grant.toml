@@ -1,0 +1,40 @@
+# The machine's keychain (login keychain / Credential Manager / Secret Service)
+# is a capability, not an ambient fact: `holon_secrets::platform_keychain`
+# refuses every operation until a production entry point grants it. The grant
+# is what makes "no test touches the developer's keychain" structural rather
+# than a habit, so the set of callers is closed — see DEVELOPMENT.md
+# "The machine's keychain is a capability" and the bug-funnel entry
+# 2026-09-14-the-test-suite-files-share-secrets-in-the-developers-login-keychain.
+
+[[smell]]
+id = "login_keychain_grant_callers"
+pattern = 'grant_login_keychain\s*\('
+case_sensitive = true
+files = "**/*.rs"
+# Tests are exactly what this rule exists to cover, and `/tests/`, `/pbt/` and
+# `integration-tests/` are all default-skipped.
+default_skips = false
+exclude = [
+    # `**/` prefix: the hook also lints files inside git worktrees
+    # (.claude/worktrees/<name>/frontends/...), where a bare frontends/ prefix
+    # would not match and the sanctioned callers would false-positive.
+    # The shipped entry points, each a process a user started deliberately:
+    "**/frontends/gpui/src/main.rs",
+    "**/frontends/mcp/src/main.rs",
+    "**/frontends/tui/src/main.rs",
+    # Filing a secret in the user's keychain IS this tool's job:
+    "**/crates/holon-secrets/src/bin/holon_secret.rs",
+    # The definition, its doc comments, and the test that proves a test binary
+    # does NOT hold the grant:
+    "**/crates/holon-secrets/src/lib.rs",
+]
+message = """
+`grant_login_keychain` may only be called by a shipped entry point \
+(frontends/*/src/main.rs, crates/holon-secrets/src/bin/holon_secret.rs). \
+A call anywhere else — above all in a test or a harness — hands that process \
+the developer's login keychain, which is what filed fixture share secrets in \
+it and raised the authorization dialog on every build. A test needs an \
+INJECTED store instead: `InMemoryKeychainStore` for a session, \
+`ShareCredentials::in_memory(<namespace>)` for share custody. \
+To suppress: // ALLOW(login_keychain_grant_callers): <reason>
+"""

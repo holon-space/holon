@@ -23,6 +23,7 @@ holon-api = { workspace = true }
 holon-core = { workspace = true }
 holon-profiles = { workspace = true }
 holon-frontend = { workspace = true }
+holon-secrets = { workspace = true }
 holon-app.workspace = true
 holon-orgmode = { workspace = true, features = ["di"] }
 holon-org-format = { workspace = true }

@@ -241,6 +241,10 @@ async fn run_http_server_standalone(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // This process serves a user's own vault, so it may hold the user's
+    // credentials. Nothing below reaches the login keychain without it.
+    holon_secrets::grant_login_keychain();
+
     // Parse arguments first to determine transport mode
     let config = parse_args()?;
 

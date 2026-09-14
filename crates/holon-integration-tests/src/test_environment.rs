@@ -71,30 +71,24 @@ fn populate_debug_services(injector: &fluxdi::Injector) -> Arc<holon_mcp::server
     debug
 }
 
-/// Build a pre-filled `OnceCell` for a struct literal. Infallible: the cell is
-/// fresh, so `set` cannot fail.
-/// Give `session` an in-memory secret store, and refuse the OS keychain for
-/// the rest of this process.
+/// Give `session` an in-memory secret store, so its secret writes have
+/// somewhere to go.
 ///
 /// Called at EVERY point a test session is latched, so no individual test has
-/// to remember. `session.set_preference` on a secret key writes the secret
-/// store, so a test session bound to the machine's real login keychain leaves
-/// the developer's credentials behind on every run — silently, because a
-/// keychain write looks like a successful save.
-///
-/// The refusal half is what makes forgetting impossible rather than merely
-/// unlikely: a session built through some future path that skips this stops
-/// loudly instead of binding the machine's keychain.
+/// to remember. Without it a `set_preference` on a secret key has nowhere to
+/// land: a test binary never calls `grant_login_keychain`, so the platform
+/// store refuses every operation instead of filing the value in the developer's
+/// login keychain.
 pub(crate) fn bind_test_secret_store(session: &FrontendSession) {
-    holon_frontend::forbid_platform_keychain();
     // Already-injected is fine: a test that seeded its own store before
-    // latching keeps it. The guard above is what enforces that SOMETHING was
-    // injected.
+    // latching keeps it.
     let _ = session.use_secret_store(std::sync::Arc::new(
         holon_secrets::InMemoryKeychainStore::new(),
     ));
 }
 
+/// Build a pre-filled `OnceCell` for a struct literal. Infallible: the cell is
+/// fresh, so `set` cannot fail.
 fn filled_once_cell<T>(value: T) -> OnceCell<T> {
     let cell = OnceCell::new();
     if cell.set(value).is_err() {
@@ -453,6 +447,7 @@ impl TestEnvironmentBuilder {
         }
         let enable_fake_mcp = self.enable_fake_mcp;
         let org_fs_for_di = org_fs.clone();
+        let secret_namespace = config_dir.clone();
         let clock_for_di = self.clock.clone();
 
         let (
@@ -465,7 +460,7 @@ impl TestEnvironmentBuilder {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
-                install_headless_render_interpreter(injector, &org_fs_for_di);
+                install_headless_render_interpreter(injector, &org_fs_for_di, &secret_namespace);
                 holon_mcp::di::register_debug_services(injector);
                 if enable_fake_mcp {
                     crate::fake_mcp_module::register_fake_mcp(injector);
@@ -596,11 +591,30 @@ pub(crate) fn override_org_fs_bindings(
 pub(crate) fn install_headless_render_interpreter(
     injector: &fluxdi::Injector,
     org_fs: &Arc<holon_filesystem::InMemoryFileSystem>,
+    secret_namespace: &std::path::Path,
 ) {
     use holon_frontend::reactive::RenderInterpreterInjectorExt;
     override_org_fs_bindings(injector, org_fs);
+    install_test_share_credentials(injector, secret_namespace);
     let slot = injector.resolve::<BuilderServicesSlot>();
     injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(slot.0.clone()));
+}
+
+/// Share custody for a headless boot: in-memory, keyed by this instance's
+/// config directory.
+///
+/// Keyed rather than fresh, because a share flow's custody outlives one session
+/// — a reboot over the same directory must find the owner key its predecessor
+/// minted — and keyed by DIRECTORY rather than process-globally, because the
+/// two-instance harness's owner and receiver are two devices. Without it the
+/// module falls back to the platform store, which a test binary is refused.
+fn install_test_share_credentials(injector: &fluxdi::Injector, namespace: &std::path::Path) {
+    let credentials = Arc::new(holon_loro::share_credentials::ShareCredentials::in_memory(
+        &namespace.to_string_lossy(),
+    ));
+    injector.provide::<holon_loro::share_credentials::ShareCredentials>(fluxdi::Provider::root(
+        move |_| credentials.clone(),
+    ));
 }
 
 /// The CapMap↔fluxdi bridge, `build` half (ADR 0019 §5): resolve the production
@@ -959,6 +973,7 @@ impl TestEnvironment {
         }
         let enable_fake_mcp = self.enable_fake_mcp.get();
         let org_fs_for_di = self.org_fs.clone();
+        let secret_namespace = config_dir.clone();
 
         let enable_loro = self.enable_loro.get();
         let (
@@ -971,7 +986,7 @@ impl TestEnvironment {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
-                install_headless_render_interpreter(injector, &org_fs_for_di);
+                install_headless_render_interpreter(injector, &org_fs_for_di, &secret_namespace);
                 holon_mcp::di::register_debug_services(injector);
                 if enable_fake_mcp {
                     crate::fake_mcp_module::register_fake_mcp(injector);

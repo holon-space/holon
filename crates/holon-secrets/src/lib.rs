@@ -35,6 +35,17 @@ pub trait KeychainStore: Send + Sync {
     fn load(&self, account: &str) -> Result<Option<Vec<u8>>>;
     /// Remove the secret for `account`. Absence is not an error.
     fn delete(&self, account: &str) -> Result<()>;
+
+    /// Whether operations on this store reach the machine's keychain — the
+    /// login keychain, Credential Manager, or the Secret Service — which is
+    /// what [`grant_login_keychain`] gates.
+    ///
+    /// A store with no backend compiled in for the platform answers `false`,
+    /// so it keeps refusing in its own words rather than being reported as a
+    /// missing grant that would not have helped.
+    fn reaches_machine_keychain(&self) -> bool {
+        true
+    }
 }
 
 /// Fail-loud stand-in for platforms whose keychain is not wired. Every
@@ -90,6 +101,9 @@ impl KeychainStore for UnavailableKeychainStore {
     fn delete(&self, _: &str) -> Result<()> {
         self.refuse("delete")
     }
+    fn reaches_machine_keychain(&self) -> bool {
+        false
+    }
 }
 
 /// Keychain service holding the `${VAR}` secrets an integration sidecar
@@ -111,16 +125,120 @@ pub fn secret_account(var: &str) -> String {
     var.to_ascii_lowercase().replace('.', "_")
 }
 
+/// Whether this process may reach the machine's real login keychain.
+///
+/// Default-deny: a process reaches the user's keychain only after a production
+/// entry point granted it. A test binary has no way to grant it, which is the
+/// point — the property holds for every wiring path, including ones written
+/// after this line.
+static LOGIN_KEYCHAIN_GRANTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Grant this process the machine's login keychain, from a production `main`.
+///
+/// The machine's keychain is a capability, not an ambient fact, because the
+/// alternative was ambient and cost a developer twelve stray items and an
+/// unclosable authorisation dialog. Every `main` that ships to a user calls
+/// this once, before any wiring; nothing else may.
+///
+/// One-way and process-wide: a granted process never wants it back, and
+/// `cfg(test)` does not reach across crates, so the arming cannot be a
+/// compile-time condition.
+pub fn grant_login_keychain() {
+    LOGIN_KEYCHAIN_GRANTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether [`grant_login_keychain`] has been called in this process.
+pub fn login_keychain_granted() -> bool {
+    LOGIN_KEYCHAIN_GRANTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+static MACHINE_KEYCHAIN_ATTEMPTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// How many operations this process has asked the machine's keychain to
+/// perform, admitted or refused.
+///
+/// A process without the grant is refused every one of them, so a non-zero
+/// count says the wiring resolved the platform store instead of an injected
+/// one. That is a leak with no symptom until the flow that uses the store runs,
+/// which is why the count is a value a harness asserts on rather than a
+/// debugging aid.
+pub fn machine_keychain_attempts() -> u64 {
+    MACHINE_KEYCHAIN_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The platform backend behind the grant.
+///
+/// Every operation is refused with an `Err` until a production entry point
+/// calls [`grant_login_keychain`]. Refusing at the OPERATION rather than at
+/// construction is deliberate: a lazy DI provider that builds a store it never
+/// uses is not a keychain access, and turning it into one would make the rule
+/// fire on wiring shape instead of on behaviour.
+struct GrantedKeychain {
+    service: String,
+    inner: Box<dyn KeychainStore>,
+}
+
+impl GrantedKeychain {
+    fn admit(&self, op: &str, account: &str) -> Result<()> {
+        MACHINE_KEYCHAIN_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if login_keychain_granted() {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "refusing to {op} {:?}/{account:?} in the machine's keychain: this process never \
+             called `holon_secrets::grant_login_keychain`, which only a production entry point \
+             does. A test that reaches this resolved the platform store instead of an injected \
+             one — inject an `InMemoryKeychainStore`, or `ShareCredentials::in_memory` for \
+             share custody, at the seam that built it.",
+            self.service
+        )
+    }
+}
+
+impl KeychainStore for GrantedKeychain {
+    fn reaches_machine_keychain(&self) -> bool {
+        self.inner.reaches_machine_keychain()
+    }
+
+    fn store(&self, account: &str, secret: &[u8]) -> Result<()> {
+        self.admit("store", account)?;
+        self.inner.store(account, secret)
+    }
+
+    fn load(&self, account: &str) -> Result<Option<Vec<u8>>> {
+        self.admit("load", account)?;
+        self.inner.load(account)
+    }
+
+    fn delete(&self, account: &str) -> Result<()> {
+        self.admit("delete", account)?;
+        self.inner.delete(account)
+    }
+}
+
 /// The backend for the current platform, filing every secret under `service`.
+///
+/// The ONE seam through which the machine's keychain is reachable, so the grant
+/// above covers every caller — the share capability store, the owner key, the
+/// OAuth2 credential resolver, the integration secrets — rather than each of
+/// them carrying its own guard. On a platform with no backend compiled in the
+/// store is returned unwrapped: it reaches nothing, and its own message is the
+/// accurate one.
 pub fn platform_keychain(service: &str) -> Box<dyn KeychainStore> {
     #[cfg(target_os = "macos")]
-    {
-        Box::new(mac::MacKeychainStore::new(service))
-    }
+    let inner: Box<dyn KeychainStore> = Box::new(mac::MacKeychainStore::new(service));
     #[cfg(not(target_os = "macos"))]
-    {
-        non_mac::platform_store(service)
+    let inner: Box<dyn KeychainStore> = non_mac::platform_store(service);
+
+    if !inner.reaches_machine_keychain() {
+        return inner;
     }
+    Box::new(GrantedKeychain {
+        service: service.to_string(),
+        inner,
+    })
 }
 
 /// Select the in-memory backend for a session. Fixture use only.
@@ -400,6 +518,9 @@ impl InMemoryKeychainStore {
 }
 
 impl KeychainStore for InMemoryKeychainStore {
+    fn reaches_machine_keychain(&self) -> bool {
+        false
+    }
     fn store(&self, account: &str, secret: &[u8]) -> Result<()> {
         self.entries
             .lock()
@@ -419,6 +540,38 @@ impl KeychainStore for InMemoryKeychainStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pin for "no test reaches the developer's login keychain". Stated
+    /// over the ONE seam that can reach it, so it holds for every caller —
+    /// including wiring paths written after this test.
+    ///
+    /// This test binary cannot call `grant_login_keychain`, so the account
+    /// below is never looked up: the refusal happens before the backend call.
+    #[test]
+    fn every_login_keychain_operation_is_refused_without_a_grant() {
+        assert!(
+            !login_keychain_granted(),
+            "a test binary must never hold the login-keychain grant; something called \
+             grant_login_keychain, which only a production entry point may do"
+        );
+
+        let store = platform_keychain("space.holon.test-must-never-reach-this");
+        for err in [
+            store.load("founding-device").unwrap_err(),
+            store.store("founding-device", b"x").unwrap_err(),
+            store.delete("founding-device").unwrap_err(),
+        ] {
+            let msg = err.to_string();
+            assert!(
+                msg.contains("grant_login_keychain"),
+                "the refusal must name the grant so the reader knows why: {msg}"
+            );
+            assert!(
+                msg.contains("space.holon.test-must-never-reach-this"),
+                "the refusal must name the service it refused: {msg}"
+            );
+        }
+    }
 
     #[test]
     fn in_memory_round_trips() {

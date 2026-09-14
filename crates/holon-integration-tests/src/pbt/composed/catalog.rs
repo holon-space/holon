@@ -35,6 +35,13 @@ use super::invariants;
 fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
     let mut catalog: Vec<Box<dyn CapInvariant>> = vec![
         invariants::no_parent_cycles::wire(),
+        // Credential isolation: no test process asks the machine's keychain
+        // for anything. Needs no capability — the subject is the process, so it
+        // selects on every slice — and catches a harness that binds the
+        // platform store instead of an injected in-memory one, which raises the
+        // system authorization dialog and files fixture secrets in the
+        // developer's login keychain.
+        invariants::no_machine_keychain_access::wire(),
         // Vault write boundary: every path the FS was asked to write or create
         // must lie under the run's vault root. Needs `SutFsWrites`, no ref —
         // catches a traversal in ANY derived path (name chain, image content,

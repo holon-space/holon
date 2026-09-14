@@ -117,6 +117,7 @@ gpui-component = { git = "https://github.com/holon-space/gpui-component", branch
 # Holon workspace crates
 holon.workspace = true
 holon-frontend = { workspace = true, features = ["otel"] }
+holon-secrets.workspace = true
 holon-app.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
@@ -174,7 +175,6 @@ log = "0.4"
 tracing-oslog = "0.3"
 
 [dev-dependencies]
-holon-secrets.workspace = true
 tempfile = "3"
 # The settings window rung stores a preference before the modal renders.
 toml.workspace = true

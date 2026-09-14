@@ -36,6 +36,9 @@ service alone on every platform. It prints names and presence, never values.
 ";
 
 fn main() -> Result<()> {
+    // Filing a secret in the user's keychain IS this tool's job.
+    holon_secrets::grant_login_keychain();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     match refs.as_slice() {

@@ -755,6 +755,47 @@ expires. To reach green the live driver must navigate the target block's page
 into `main` (or focus it) before geometry-driving it. Re-run the script to
 reproduce and to re-check once that harness gap closes.
 
+## The machine's keychain is a capability
+
+A process reaches the macOS login keychain (or Credential Manager, or the Secret
+Service) only after a production `main` calls
+`holon_secrets::grant_login_keychain`. The three native frontends and the
+`holon_secret` CLI do; nothing else can. Every other process — every test
+binary, every PBT harness — is refused at the operation with an error naming the
+service and account it tried.
+
+So a test that needs a secret store injects one: `InMemoryKeychainStore` for a
+session's secrets, `ShareCredentials::in_memory(<namespace>)` for share custody
+that has to survive a simulated restart. The headless harnesses already do it.
+
+`inv-no-machine-keychain-access` runs on every composed case and reports any
+process that asked the machine for a credential. It cannot fail on its own,
+though, because no drawn transition performs a keychain operation: the seam that
+does is `assert_no_machine_keychain_access` in the two-instance keystone target,
+which runs the same invariant body right after `share_subtree`.
+
+Why it is a runtime grant and not `cfg(test)`: `cfg(test)` does not reach across
+crates, so an integration-test binary linking production wiring is
+indistinguishable from the app at compile time.
+
+The dialog this replaced came back on every build because a Rust test binary is
+ad-hoc signed with a per-build code identity, and a keychain ACL entry
+("Always allow") is keyed on the applicant's identity. Nothing you click makes
+it stick. The installed, Developer-ID-signed app has ONE stable identity, so the
+user authorises it once.
+
+If you must clear the items earlier runs left behind, list them first — they are
+service `space.holon.share-capability` (accounts `share/<uuid>`) and
+`space.holon.owner-identity` (account `founding-device`):
+
+```
+security dump-keychain ~/Library/Keychains/login.keychain-db \
+  | grep -o '"svce"<blob>="space.holon[^"]*"' | sort | uniq -c
+```
+
+Delete only the ones you recognise as fixture runs; a real share you accepted
+lives under the same service.
+
 ## Android cross-compilation
 
 Always cross-compile for Android through **`cargo ndk`**, never bare

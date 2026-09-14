@@ -30,6 +30,7 @@ r3bl_tui.workspace = true
 # Holon workspace crates
 holon.workspace = true
 holon-frontend = { workspace = true, features = ["otel"] }
+holon-secrets = { workspace = true }
 holon-app.workspace = true
 holon-api.workspace = true
 holon-mcp = { path = "../mcp" }

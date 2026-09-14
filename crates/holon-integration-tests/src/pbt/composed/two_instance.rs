@@ -960,6 +960,13 @@ impl ComposedSlice for TwoInstanceE2E {
         "inv-two-instance-convergence",
         "inv-boundary-respected",
         "inv-two-writer-peer-writes-land",
+        // Engagement only. Capability-free, so it can never deselect, and
+        // listing it proves nothing more than that the credential-isolation
+        // invariant RUNS in this slice: no drawn transition reaches a keychain
+        // operation, so this entry cannot catch a leak. What catches one is
+        // `assert_no_machine_keychain_access` at the `share_subtree` seam in
+        // `tests/two_instance_composed_pbt.rs`.
+        "inv-no-machine-keychain-access",
     ];
     const SETTLE: Duration = SETTLE;
     const MULTI_THREAD: bool = true;

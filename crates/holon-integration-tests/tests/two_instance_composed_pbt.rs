@@ -1449,7 +1449,28 @@ async fn run_production_pairing(
         }
     };
     let accepted = consume_pairing_invite(handle, &invite).await;
+    assert_no_machine_keychain_access().await;
     (Ok(invite), accepted)
+}
+
+/// Judge this process's keychain custody with the catalog's own invariant, at
+/// the one seam in this file that drives the PRODUCTION pairing op.
+///
+/// The catalog entry runs on every composed case but can never fail: no
+/// drawable transition mints a share secret — `ShareContainer` grants a
+/// membership cert inside the slice's sharing runtime and never reaches
+/// `share_subtree`. The production pairing op does, so THIS call, not the
+/// catalog entry, is what turns a leak red.
+async fn assert_no_machine_keychain_access() {
+    use holon_integration_tests::pbt::invariants::bodies::no_machine_keychain_access::InvNoMachineKeychainAccess;
+    use holon_pbt_core::invariant::Invariant;
+    use holon_pbt_core::invariant::InvariantResult;
+
+    if let InvariantResult::Fail(why) =
+        Invariant::<(), ()>::check(&InvNoMachineKeychainAccess, &(), &()).await
+    {
+        panic!("{why}");
+    }
 }
 
 /// Mint one invite on the owner. `Err` carries why no invite exists.
@@ -1815,8 +1836,13 @@ async fn mount_the_owners_subtree_on_the_receiver(
     let mut share = holon_api::StorageEntity::new();
     share.insert("id".into(), holon_api::Value::String(shareable));
     share.insert("retention".into(), holon_api::Value::String("none".into()));
-    let shared = dispatch_tree_op(handle.owner(), "owner", "share_subtree", share)
-        .await
+    let shared = dispatch_tree_op(handle.owner(), "owner", "share_subtree", share).await;
+    // Judged BEFORE the result is unwrapped: `share_subtree` files the share's
+    // capability secret, so this is the one seam in the keystone family that
+    // can move the counter, and the invariant has to win the race against the
+    // op's own error for its verdict to be the one the reader sees.
+    assert_no_machine_keychain_access().await;
+    let shared = shared
         .expect("share_subtree")
         .response
         .and_then(|v| v.as_string().map(str::to_string))

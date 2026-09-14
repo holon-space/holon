@@ -21,6 +21,10 @@ use r3bl_tui::log::try_initialize_logging_global;
 
 #[tokio::main]
 async fn main() -> CommonResult<()> {
+    // This process is a user's installed app, so it may hold the user's
+    // credentials. Nothing below reaches the login keychain without it.
+    holon_secrets::grant_login_keychain();
+
     // Disable r3bl logging to prevent breaking TUI display
     try_initialize_logging_global(tracing_core::LevelFilter::OFF).ok(); // ALLOW(ok): best-effort logging init
 

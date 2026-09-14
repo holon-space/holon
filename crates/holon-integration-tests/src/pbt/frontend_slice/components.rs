@@ -802,6 +802,7 @@ impl HeadlessFrontendComponent {
         let mut session_config = SessionConfig::new(holon_api::UiInfo::permissive()).without_wait();
         session_config.loro_peer_id = params.peer_id;
         let org_fs_for_di = org_fs.clone();
+        let secret_namespace = config_dir.clone();
         // Capture the DI injector (for `SutOrgRender`'s `QueryableCache<Block>` →
         // `CacheBlockReader`, the production ordered doc-scoped read).
         let injector_slot: Arc<std::sync::OnceLock<fluxdi::Injector>> =
@@ -824,6 +825,7 @@ impl HeadlessFrontendComponent {
                 crate::test_environment::install_headless_render_interpreter(
                     injector,
                     &org_fs_for_di,
+                    &secret_namespace,
                 );
                 // Image bytes for every image block, so the write-back's
                 // `materialize_images` actually reaches disk — the seat that

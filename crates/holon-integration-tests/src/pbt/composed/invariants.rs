@@ -71,6 +71,7 @@ pub mod wheel_two_mode_motion_law;
 pub mod conditions_match_ref;
 pub mod net_totality;
 pub mod no_errors;
+pub mod no_machine_keychain_access;
 pub mod no_orphan;
 pub mod no_page_under_non_page;
 pub mod no_parent_cycles;

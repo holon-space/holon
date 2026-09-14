@@ -81,7 +81,9 @@ fn a_throwaway_session_holds_secrets_in_memory_and_discloses_it() {
         .set_preference(&key, toml::Value::String(FIXTURE_SECRET.to_string()))
         .expect("a secret preference must be storable on the in-memory backend");
     assert!(
-        session.secret_is_stored(&holon_secrets::secret_account(key.as_str())),
+        session
+            .secret_is_stored(&holon_secrets::secret_account(key.as_str()))
+            .unwrap(),
         "and must read back as stored, or the mode exercises nothing"
     );
 
@@ -155,12 +157,16 @@ fn a_seeded_throwaway_session_holds_the_fixture_secrets_and_says_how_many() {
     // one entry, and a seed that landed under a third spelling would look
     // stored and resolve to nothing.
     assert!(
-        session.secret_is_stored(&holon_secrets::secret_account("TODOIST_API_KEY")),
+        session
+            .secret_is_stored(&holon_secrets::secret_account("TODOIST_API_KEY"))
+            .unwrap(),
         "a seeded account must read back as stored, or the seam pre-loads nothing a surface can \
          see"
     );
     assert!(
-        session.secret_is_stored(&holon_secrets::secret_account("shopping.list_url")),
+        session
+            .secret_is_stored(&holon_secrets::secret_account("shopping.list_url"))
+            .unwrap(),
         "and every entry the file names is seeded, not just the first"
     );
 

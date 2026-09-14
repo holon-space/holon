@@ -258,6 +258,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use anyhow::Context;
 use anyhow::Result;
 pub use config::HolonConfig;
 pub use config::SessionConfig;
@@ -391,26 +392,13 @@ pub struct FrontendSession<T = ()> {
     boot_report: platform::BootReport,
 }
 
-/// Whether this process refuses the OS keychain outright.
-static FORBID_PLATFORM_KEYCHAIN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Refuse the machine's real login keychain in this process.
+/// Whether this process refuses the machine's real login keychain.
 ///
-/// Armed by every harness that constructs a [`FrontendSession`]. After this, a
-/// session with no injected secret store STOPS instead of quietly binding the
-/// developer's keychain and writing credentials into it — which is what a test
-/// that forgot to inject one did, silently, for as long as nobody looked.
-///
-/// Process-wide rather than per-session, and one-way: a test binary never
-/// wants the real keychain back, and `cfg(test)` does not reach across crates.
-pub fn forbid_platform_keychain() {
-    FORBID_PLATFORM_KEYCHAIN.store(true, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// Whether [`forbid_platform_keychain`] has been called.
+/// Derived from the grant rather than latched separately: two independent
+/// switches over one property is how they drift apart, and the grant is the
+/// one every reader of a secret already answers to.
 pub fn platform_keychain_forbidden() -> bool {
-    FORBID_PLATFORM_KEYCHAIN.load(std::sync::atomic::Ordering::SeqCst)
+    !holon_secrets::login_keychain_granted()
 }
 
 /// Everything a wiring crate (holon-app) supplies to construct a
@@ -787,8 +775,8 @@ impl<T> FrontendSession<T> {
         }
         // Binding here would reach the machine's REAL login keychain. A test
         // that does so writes credentials into the developer's keychain and
-        // leaves them there, silently. Any harness that builds sessions
-        // refuses it up front, so forgetting to inject is a loud stop.
+        // leaves them there, silently. Only a production `main` grants the
+        // keychain, so forgetting to inject is a loud stop everywhere else.
         assert!(
             !platform_keychain_forbidden(),
             "[FrontendSession] this process refuses the OS keychain, and this session had no \
@@ -846,10 +834,16 @@ impl<T> FrontendSession<T> {
 
     /// Whether a credential is stored under `account`. Presence only — the
     /// value never leaves the store through this.
-    pub fn secret_is_stored(&self, account: &str) -> bool {
-        self.secret_store()
+    ///
+    /// A store that cannot be read is an `Err`, not a `false`: the caller is a
+    /// fixture asserting on custody, and "no credential" versus "the store
+    /// refused me" are the two outcomes it exists to tell apart.
+    pub fn secret_is_stored(&self, account: &str) -> anyhow::Result<bool> {
+        let found = self
+            .secret_store()
             .load(account)
-            .is_ok_and(|v| v.is_some_and(|v| !v.is_empty()))
+            .with_context(|| format!("read the secret store for account {account:?}"))?;
+        Ok(found.is_some_and(|v| !v.is_empty()))
     }
 
     /// The secret preferences this profile actually holds a value for.

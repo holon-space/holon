@@ -13,6 +13,10 @@ use holon_gpui::launch_holon_window_with_engine_and_share;
 use holon_mcp::server::DebugServices;
 
 fn main() -> Result<()> {
+    // This process is a user's installed app, so it may hold the user's
+    // credentials. Nothing below reaches the login keychain without it.
+    holon_secrets::grant_login_keychain();
+
     #[cfg(feature = "heap-profile")]
     let _heap_guard = holon_frontend::memory_monitor::heap_profile::start();
 
