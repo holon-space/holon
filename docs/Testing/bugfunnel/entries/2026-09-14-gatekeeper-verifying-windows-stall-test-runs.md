@@ -3,7 +3,7 @@ id: 2026-09-14-gatekeeper-verifying-windows-stall-test-runs
 date: 2026-09-14
 gap: ENVIRONMENT
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   Running the suites makes macOS stack up Gatekeeper "Verifying ..." windows,
   one per freshly linked test binary, because the app responsible for the test
@@ -82,14 +82,50 @@ Settings > Privacy & Security > Developer Tools, add and enable
 does not disable Gatekeeper. Agents must not apply it; changing the system
 security posture is the owner's decision.
 
-STATUS stays OPEN until the grant is in place and a second run of the script
-shows first-exec collapsing onto second-exec.
+STATUS is FIXED: with the grant in place the `Verifying` windows and the
+policy-scan storm are gone (see "After the grant" below). The first exec of a
+large binary does not collapse onto the second exec, and that residual cost is
+tracked as parity work.
+
+## After the grant (2026-09-15)
+
+Martin granted Developer Tools to `/Applications/Orca.app` and restarted it.
+The orchestrator then re-ran `scripts/gatekeeper-assessment-cost.sh` from the
+integration workspace (01:37, 6 s window).
+
+| Signal                             | Before grant | After grant |
+| ---------------------------------- | ------------ | ----------- |
+| `Verifying` windows shown          | 5            | 0           |
+| Gatekeeper policy scans            | 56           | 1           |
+| `kTCCServiceDeveloperTool` queries | 54           | 1           |
+| measurement window                 | 15 s         | 6 s         |
+| 405.8 MB binary, first exec        | 4674 ms      | 2296 ms     |
+| 405.8 MB binary, second exec       | 399 ms       | 25 ms       |
+
+The reported symptom is gone. The machine no longer stalls under a cascade of
+`Verifying` windows, and the policy scans fell from 56 to 1 in a comparable
+window. The fix therefore confirms the root cause: the missing Developer Tools
+grant on the responsible app produced both the windows and the scan storm.
+
+The earlier FIXED criterion in this entry, that first exec collapses onto
+second exec, is not met. A fresh 405.8 MB binary still costs about 2.3 s on
+first exec against about 25 ms when its verdict is cached. The measurement does
+not separate an assessment cost from the page-in cost of a 405.8 MB file, so
+that residual cost is recorded as parity work below and stays unexplained
+here.
+
+Raw log: `scratchpad gatekeeper-after-1789426647.log`, the orchestrator's
+scratchpad copy of the run, not tracked in the repository.
 
 ## Parity work
-Two levers would cut the residual cost even with the grant, neither taken here:
+Three levers would cut the residual cost even with the grant, none taken here:
 
 - **Binary count.** 315 integration-test source files under `crates/*/tests`
   each link their own binary, so each relink re-triggers the per-binary cost.
 - **Binary size.** `__LINKEDIT` symbols are 58% of `holon-gpui`. Stripping them
   would shrink the hashed region, but it would also cost symbolicated
   backtraces in a PBT-heavy suite, so it needs Martin's ruling.
+- **Separate assessment cost from page-in cost.** The after-grant run leaves the
+  first exec of a 405.8 MB binary at about 2.3 s against about 25 ms cached, and
+  it does not say how much of that is Gatekeeper. Run the probe with the file
+  cache dropped, or compare against a notarised binary of the same size.

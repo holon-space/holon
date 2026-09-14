@@ -67,8 +67,9 @@ denials=$(log show --last "${elapsed}s" \
   echo
   echo "Machine-wide counts: other concurrent builds inflate them. The"
   echo "first-vs-second exec columns are per-binary and stay attributable."
-  echo "Expected once the launching app holds Developer Tools: first_exec_ms"
-  echo "falls to roughly second_exec_ms. Compare two runs rather than assume it."
+  echo "The grant removes the Verifying windows and the scan storm, which the"
+  echo "three counters above show. On large binaries first_exec_ms stays above"
+  echo "second_exec_ms for reasons not yet separated, assessment against page-in."
 } | tee -a "$OUT"
 
 echo "log: $OUT"

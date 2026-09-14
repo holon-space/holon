@@ -492,8 +492,10 @@ scripts/gatekeeper-assessment-cost.sh
 ```
 
 Without the grant, the first exec of a 405 MB binary costs about 4.7 s against
-66 ms for the second. With the grant, the two columns should agree. Run it
-before and after so the change is measured rather than assumed.
+400 ms for the second. With the grant it costs about 2.3 s against 25 ms, so
+the two columns do not agree. The grant removes the `Verifying` windows and the
+policy-scan storm; the first-exec cost that remains is not explained yet. Run
+it before and after so the change is measured rather than assumed.
 
 ## Log Analysis
 
