@@ -21,9 +21,11 @@ pub mod block_write_field;
 pub mod capability;
 pub mod change_set;
 pub mod clock;
-/// flutter_rust_bridge:ignore
 pub mod computation;
 pub mod computed;
+/// flutter_rust_bridge:ignore
+pub mod condition_bus;
+pub mod condition_profile;
 pub mod content_canonical;
 pub mod edge_field;
 pub mod effect_id;
@@ -75,6 +77,20 @@ pub mod widget_meta;
 pub mod widget_spec;
 pub mod write_seq;
 
+pub use condition_bus::Condition;
+pub use condition_bus::ConditionBus;
+pub use condition_bus::ConditionChange;
+pub use condition_bus::ConditionKey;
+pub use condition_bus::ConditionKind;
+pub use condition_bus::ConditionSubscription;
+pub use condition_profile::AllClear;
+pub use condition_profile::ClearingEvent;
+pub use condition_profile::ConditionPlacement;
+pub use condition_profile::ConditionProfile;
+pub use condition_profile::ConditionSeverity;
+pub use condition_profile::OpId;
+pub use condition_profile::RemedySlot;
+pub use condition_profile::SettingsSection;
 pub use entity_profile::EntityProfile;
 pub use entity_profile::ProfileCache;
 pub use entity_profile::ProfileResolving;

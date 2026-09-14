@@ -1003,7 +1003,7 @@ fn a_refused_recipe_edit_raises_a_degraded_condition() {
         let bus = env
             .injector()
             .expect("a booted app has an injector")
-            .resolve_async::<std::sync::Arc<holon_loro::DegradedSignalBus>>()
+            .resolve_async::<std::sync::Arc<holon_api::ConditionBus>>()
             .await;
 
         let _ = env
@@ -1024,15 +1024,15 @@ fn a_refused_recipe_edit_raises_a_degraded_condition() {
 
         let raised = bus.subscribe().current;
         let disclosed = raised.iter().any(|d| {
-            d.condition_key().kind == holon_loro::ShareDegradedReason::EDIT_REFUSED_READ_ONLY_FORMAT
-                && d.shared_tree_id.contains("Pancakes.cook")
+            d.condition_key().kind == holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT
+                && d.subject.contains("Pancakes.cook")
         });
         assert!(
             disclosed,
             "the refusal was not disclosed to the window; raised conditions: {:?}",
             raised
                 .iter()
-                .map(|d| (d.condition_key().kind, d.shared_tree_id.clone()))
+                .map(|d| (d.condition_key().kind, d.subject.clone()))
                 .collect::<Vec<_>>()
         );
     });
@@ -1124,7 +1124,7 @@ fn a_keystroke_on_a_recipe_block_is_refused_at_the_cell() {
         };
 
         let bus = injector
-            .resolve_async::<std::sync::Arc<holon_loro::DegradedSignalBus>>()
+            .resolve_async::<std::sync::Arc<holon_api::ConditionBus>>()
             .await;
 
         let refusal = cell
@@ -1159,15 +1159,15 @@ fn a_keystroke_on_a_recipe_block_is_refused_at_the_cell() {
 
         let raised = bus.subscribe().current;
         let disclosed = raised.iter().any(|d| {
-            d.condition_key().kind == holon_loro::ShareDegradedReason::EDIT_REFUSED_READ_ONLY_FORMAT
-                && d.shared_tree_id.contains("Pancakes.cook")
+            d.condition_key().kind == holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT
+                && d.subject.contains("Pancakes.cook")
         });
         assert!(
             disclosed,
             "the cell refused silently; raised conditions: {:?}",
             raised
                 .iter()
-                .map(|d| (d.condition_key().kind, d.shared_tree_id.clone()))
+                .map(|d| (d.condition_key().kind, d.subject.clone()))
                 .collect::<Vec<_>>()
         );
 

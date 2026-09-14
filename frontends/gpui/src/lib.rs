@@ -1742,7 +1742,7 @@ pub fn launch_holon_window_with_engine(
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
     debug: Arc<holon_mcp::server::DebugServices>,
-    degraded_bus: Arc<holon_loro::DegradedSignalBus>,
+    degraded_bus: Arc<holon_api::ConditionBus>,
     rt_handle: tokio::runtime::Handle,
     cx: &mut App,
 ) -> BoundsRegistry {
@@ -1768,7 +1768,7 @@ pub fn launch_holon_window_with_engine_and_share(
     engine: Arc<ReactiveEngine>,
     debug: Arc<holon_mcp::server::DebugServices>,
     share_backend: Option<Arc<holon_loro::loro_share_backend::LoroShareBackend>>,
-    degraded_bus: Arc<holon_loro::DegradedSignalBus>,
+    degraded_bus: Arc<holon_api::ConditionBus>,
     rt_handle: tokio::runtime::Handle,
     cx: &mut App,
 ) -> BoundsRegistry {
@@ -2074,7 +2074,7 @@ pub fn launch_holon_window_rebindable(
     nav: NavigationState,
     bounds_registry: BoundsRegistry,
     debug: Option<Arc<holon_mcp::server::DebugServices>>,
-    degraded_bus: Option<Arc<holon_loro::DegradedSignalBus>>,
+    degraded_bus: Option<Arc<holon_api::ConditionBus>>,
     title: &str,
     cx: &mut App,
 ) -> Option<RebindHandle> {
@@ -2316,7 +2316,7 @@ fn launch_holon_window_impl(
     existing_engine: Option<Arc<ReactiveEngine>>,
     debug: Option<Arc<holon_mcp::server::DebugServices>>,
     share_backend: Option<Arc<holon_loro::loro_share_backend::LoroShareBackend>>,
-    degraded_bus: Option<Arc<holon_loro::DegradedSignalBus>>,
+    degraded_bus: Option<Arc<holon_api::ConditionBus>>,
     rt_handle: tokio::runtime::Handle,
     nav: NavigationState,
     bounds_registry: BoundsRegistry,

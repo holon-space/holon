@@ -481,7 +481,7 @@ pub trait ThreeWayTextMerge: Send + Sync {
 /// for the shared content — so on-disk org is stale. That gap must be
 /// DISCLOSED, never silently dropped (`docs/Architecture/Model.md` inv-11 +
 /// CLAUDE.md fail-loud). The concrete impl lives in the app wiring layer and
-/// forwards to `holon-loro`'s `DegradedSignalBus`; holon-filesystem /
+/// forwards to `holon-loro`'s `ConditionBus`; holon-filesystem /
 /// holon-orgmode stay storage-agnostic (they do not depend on holon-loro — the
 /// reverse would be a cycle), mirroring [`ThreeWayTextMerge`].
 pub trait ShareWritebackDisclosure: Send + Sync {

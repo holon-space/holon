@@ -23,6 +23,8 @@ use std::time::Duration;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
+use holon_api::Condition;
+use holon_api::ConditionKind;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
@@ -31,8 +33,6 @@ use holon_gpui::navigation_state::NavigationState;
 use holon_gpui::share_ui::TOAST_LINE;
 use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base_seeded;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
-use holon_loro::ShareDegraded;
-use holon_loro::ShareDegradedReason;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
@@ -107,9 +107,9 @@ fn every_pairing_toast_line_is_inside_the_window() {
 
     // The disclosure a real pair raises (`device_pairing_op`), carried over the
     // session's own bus so the toast is built by the production bridge.
-    bus.emit(ShareDegraded {
-        shared_tree_id: "device".into(),
-        reason: ShareDegradedReason::PairingReimportedLocalContent {
+    bus.emit(Condition {
+        subject: "device".into(),
+        reason: ConditionKind::PairingReimportedLocalContent {
             blocks: 4,
             conflict_copies: 1,
             archive: ARCHIVE.into(),

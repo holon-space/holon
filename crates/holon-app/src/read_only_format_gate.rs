@@ -6,24 +6,24 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use holon_api::Condition;
+use holon_api::ConditionBus;
+use holon_api::ConditionKind;
 use holon_api::EntityUri;
 use holon_core::EditRefused;
 use holon_core::ReadOnlyDocuments;
 use holon_core::Result;
 use holon_core::WriteTierAuthority;
-use holon_loro::DegradedSignalBus;
-use holon_loro::ShareDegraded;
-use holon_loro::ShareDegradedReason;
 
 /// Refuses writes to blocks of documents homed in a read-only format, and
 /// raises the refusal on the degraded bus so the window shows it.
 pub struct ReadOnlyFormatGate {
     documents: Arc<ReadOnlyDocuments>,
-    bus: Arc<DegradedSignalBus>,
+    bus: Arc<ConditionBus>,
 }
 
 impl ReadOnlyFormatGate {
-    pub fn new(documents: Arc<ReadOnlyDocuments>, bus: Arc<DegradedSignalBus>) -> Self {
+    pub fn new(documents: Arc<ReadOnlyDocuments>, bus: Arc<ConditionBus>) -> Self {
         Self { documents, bus }
     }
 }
@@ -61,9 +61,9 @@ impl WriteTierAuthority for ReadOnlyFormatGate {
 
     fn disclose(&self, refusal: &EditRefused) {
         let EditRefused::ReadOnlyFormat { format, path } = refusal;
-        self.bus.emit(ShareDegraded {
-            shared_tree_id: path.display().to_string(),
-            reason: ShareDegradedReason::EditRefusedReadOnlyFormat {
+        self.bus.emit(Condition {
+            subject: path.display().to_string(),
+            reason: ConditionKind::EditRefusedReadOnlyFormat {
                 format: format.clone(),
             },
         });

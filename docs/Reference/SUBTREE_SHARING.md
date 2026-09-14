@@ -243,7 +243,7 @@ descendants are pruned from the global tree on share — so under honest
 operation no projected id is alive in the global tree. Any projected op whose
 id **is** alive in the global tree is therefore a shadow attempt: the initial
 projection **rejects the whole accept** loudly, and the ongoing worker
-**refuses the op**, emits `ShareDegraded::ForeignIdCollision` (red banner), and
+**refuses the op**, emits `Condition::ForeignIdCollision` (red banner), and
 freezes the projection watermark so no clobbering write reaches SQL. Covered by
 `projection_worker_refuses_local_id_collision`. Residual (deferred): collisions
 between two *different* shared docs' ids are not yet guarded (both are foreign);
@@ -355,7 +355,7 @@ divergent edits.
   every pruned descendant → on the sharing peer the UI loses the shared subtree
   until the next restart repairs it.
 - **Projection failure is invisible.** When `execute_batch_with_origin` fails,
-  the worker only `tracing::error!`s — no `DegradedSignalBus` emit (unlike the
+  the worker only `tracing::error!`s — no `ConditionBus` emit (unlike the
   save worker). If the user stops editing, Loro and SQL diverge silently with
   no banner — the exact failure class "fail loud, never fake" targets.
 - **`sync_with_peers` swallows every per-peer failure** (`warn!` then

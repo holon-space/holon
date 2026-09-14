@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use holon::storage::turso::DbHandle;
 use holon::storage::turso::TursoBackend;
-use holon_loro::degraded_signal_bus::DegradedSignalBus;
+use holon_api::condition_bus::ConditionBus;
 use holon_loro::device_key_store::load_or_create_device_key;
 use holon_loro::iroh_advertiser::IrohAdvertiser;
 use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
@@ -75,7 +75,7 @@ fn share_backend(dir: &TempDir, handle: DbHandle) -> Arc<LoroShareBackend> {
     let store = Arc::new(RwLock::new(LoroDocumentStore::new(
         dir.path().to_path_buf(),
     )));
-    let bus = Arc::new(DegradedSignalBus::new());
+    let bus = Arc::new(ConditionBus::new());
     let snapshot_store = Arc::new(holon_loro::shared_snapshot_store::SharedSnapshotStore::new(
         dir.path().to_path_buf(),
         bus.clone(),

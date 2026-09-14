@@ -4,12 +4,12 @@
 //! desktop binary logged, under `di.factory.FrontendSession.resolve_engine`,
 //!
 //! ```text
-//! [McpIntegrationsModule] No DegradedSignalBus in this container
+//! [McpIntegrationsModule] No ConditionBus in this container
 //! ((ServiceNotProvided) … integration connect failures will be LOG-ONLY and
 //!  their pages will render blank with no banner)
 //! ```
 //!
-//! Root cause: `Arc<DegradedSignalBus>` was registered ONLY by `LoroModule`,
+//! Root cause: `Arc<ConditionBus>` was registered ONLY by `LoroModule`,
 //! which `add_frontend` configures iff `crdt.enabled`. A SqlOnly container
 //! therefore had no bus, and every failed MCP integration degraded to an
 //! unattributable blank page.
@@ -21,7 +21,7 @@
 //!
 //! @pbt kind harness
 //! @pbt covers degraded-disclosure-registration — the shipped GPUI DI
-//! container provides `Arc<DegradedSignalBus>` in BOTH consolidator modes.
+//! container provides `Arc<ConditionBus>` in BOTH consolidator modes.
 //! Registration only; that a subscriber exists is
 //! `degraded_bus_bridge_windowed.rs` (BugFunnel 2026-08-04 ENVIRONMENT)
 //! @pbt overlaps general_e2e_composed_pbt — kept: the keystone never
@@ -32,13 +32,13 @@ use std::sync::Arc;
 
 use fluxdi::Injector;
 use fluxdi::Module;
+use holon_api::ConditionBus;
 use holon_frontend::config::CrdtPreferences;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::McpConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;
 use holon_gpui::di::GpuiModule;
-use holon_loro::DegradedSignalBus;
 
 fn shipped_module(dir: &std::path::Path, crdt_enabled: Option<bool>) -> GpuiModule {
     GpuiModule {
@@ -66,21 +66,21 @@ fn shipped_module(dir: &std::path::Path, crdt_enabled: Option<bool>) -> GpuiModu
 
 /// `crdt.enabled = false` — SqlOnly, the configuration the dogfood boot ran in.
 #[test]
-fn shipped_gpui_container_provides_degraded_signal_bus_in_sql_only_mode() {
+fn shipped_gpui_container_provides_condition_bus_in_sql_only_mode() {
     assert_bus_resolves(Some(false));
 }
 
 /// `crdt.enabled` absent: the resolver picks the shipped default. Asserted as
 /// its own arm so the two explicit arms above cannot both stand in for it.
 #[test]
-fn shipped_gpui_container_provides_degraded_signal_bus_on_the_default() {
+fn shipped_gpui_container_provides_condition_bus_on_the_default() {
     assert_bus_resolves(None);
 }
 
 /// Loro mode must keep working too — the bus moved out of `LoroModule`, and a
 /// double registration or a lost one would show up here.
 #[test]
-fn shipped_gpui_container_provides_degraded_signal_bus_in_loro_mode() {
+fn shipped_gpui_container_provides_condition_bus_in_loro_mode() {
     assert_bus_resolves(Some(true));
 }
 
@@ -99,12 +99,12 @@ fn assert_bus_resolves(crdt_enabled: Option<bool>) {
         // The exact resolve `McpIntegrationsModule` performs when it decides
         // whether a failed integration can be disclosed.
         injector
-            .try_resolve_async::<Arc<DegradedSignalBus>>()
+            .try_resolve_async::<Arc<ConditionBus>>()
             .await
             .unwrap_or_else(|e| {
                 panic!(
                     "shipped GPUI container (crdt.enabled = {crdt_enabled:?}) must provide \
-                     Arc<DegradedSignalBus> — without it there is no channel on which an \
+                     Arc<ConditionBus> — without it there is no channel on which an \
                      integration connect failure can be disclosed at all: {e}"
                 )
             });

@@ -13,6 +13,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use holon_api::condition_bus::Condition;
+use holon_api::condition_bus::ConditionBus;
+use holon_api::condition_bus::ConditionKind;
 use holon_api::sharing::Capabilities;
 /// The iroh transport handles this module's public API already speaks
 /// ([`IrohAdvertiser::endpoint_for`], [`IrohAdvertiser::start_share`]'s return,
@@ -27,9 +30,6 @@ use tokio::task::JoinHandle;
 use tracing::debug;
 use tracing::warn;
 
-use crate::degraded_signal_bus::DegradedSignalBus;
-use crate::degraded_signal_bus::ShareDegraded;
-use crate::degraded_signal_bus::ShareDegradedReason;
 use crate::iroh_sync_adapter::connection_remote_addr;
 use crate::iroh_sync_adapter::create_endpoint;
 use crate::iroh_sync_adapter::create_endpoint_with_key;
@@ -112,7 +112,7 @@ pub struct IrohAdvertiser {
     /// Where a bearer-ticket admission is DISCLOSED. `None` in standalone
     /// transport tests, which have no frontend to disclose to; the `warn!` in
     /// the accept loop fires either way, so the stopgap is never silent.
-    degraded_bus: Option<Arc<DegradedSignalBus>>,
+    degraded_bus: Option<Arc<ConditionBus>>,
     /// Optional stable secret key used to bind every share's
     /// `Endpoint`. When `Some`, iroh endpoint identity is stable
     /// across process restarts — critical for `known_peers` dedup on
@@ -144,7 +144,7 @@ impl IrohAdvertiser {
     /// Publish this advertiser's admission disclosures on `bus`. The one
     /// disclosure today is `BearerTicketEnrollment`: a peer joined by proving a
     /// secret that travelled, not by being a paired device (ADR 0028 R5).
-    pub fn with_degraded_bus(mut self, bus: Arc<DegradedSignalBus>) -> Self {
+    pub fn with_degraded_bus(mut self, bus: Arc<ConditionBus>) -> Self {
         self.degraded_bus = Some(bus);
         self
     }
@@ -348,7 +348,7 @@ impl Default for IrohAdvertiser {
 fn disclose_bearer_admission(
     shared_tree_id: &str,
     authorized: &AuthorizedPeer,
-    bus: Option<&Arc<DegradedSignalBus>>,
+    bus: Option<&Arc<ConditionBus>>,
 ) {
     if authorized.basis() != AdmissionBasis::BearerCapability {
         return;
@@ -362,9 +362,9 @@ fn disclose_bearer_admission(
          until enrollment binds a device key (ADR 0028 R5)"
     );
     if let Some(bus) = bus {
-        bus.emit(ShareDegraded {
-            shared_tree_id: shared_tree_id.to_string(),
-            reason: ShareDegradedReason::BearerTicketEnrollment { peer },
+        bus.emit(Condition {
+            subject: shared_tree_id.to_string(),
+            reason: ConditionKind::BearerTicketEnrollment { peer },
         });
     }
 }
@@ -375,7 +375,7 @@ async fn accept_loop(
     shared_tree_id: String,
     on_peer_connected: Option<OnPeerConnected>,
     admission: ShareAdmission,
-    degraded_bus: Option<Arc<DegradedSignalBus>>,
+    degraded_bus: Option<Arc<ConditionBus>>,
 ) {
     debug!("[advertiser:{shared_tree_id}] accept loop started");
     while let Some(incoming) = endpoint.accept().await {
@@ -683,7 +683,7 @@ mod tests {
     /// The bearer-ticket path is a STOPGAP (ADR 0028 R5), so it must be
     /// disclosed rather than merely working: a peer that joins by proving a
     /// secret that travelled raises a sticky
-    /// `ShareDegradedReason::BearerTicketEnrollment` naming the share.
+    /// `ConditionKind::BearerTicketEnrollment` naming the share.
     ///
     /// The negative half is the point of the test: a RECONNECT of the same
     /// peer, admitted off the pin rather than off a fresh proof, must not
@@ -692,14 +692,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn a_bearer_ticket_admission_is_disclosed_once_on_the_degraded_bus() -> Result<()> {
-        use crate::degraded_signal_bus::DegradedSignalBus;
-        use crate::degraded_signal_bus::ShareDegradedReason;
+        use holon_api::condition_bus::ConditionBus;
+        use holon_api::condition_bus::ConditionKind;
+
         use crate::share_enrollment::CapabilitySecret;
         use crate::share_enrollment::ExpiryTime;
         use crate::share_enrollment::ShareRoster;
 
         let tree_id = "bearerDisclosure";
-        let bus = Arc::new(DegradedSignalBus::new());
+        let bus = Arc::new(ConditionBus::new());
         let mut changes = bus.subscribe().changes;
 
         let server_doc = Arc::new(LoroDoc::new());
@@ -750,12 +751,9 @@ mod tests {
         let mut disclosures = 0usize;
         while let Ok(change) = changes.try_recv() {
             if let Some(event) = change.raised()
-                && matches!(
-                    event.reason,
-                    ShareDegradedReason::BearerTicketEnrollment { .. }
-                )
+                && matches!(event.reason, ConditionKind::BearerTicketEnrollment { .. })
             {
-                assert_eq!(event.shared_tree_id, tree_id);
+                assert_eq!(event.subject, tree_id);
                 disclosures += 1;
             }
         }

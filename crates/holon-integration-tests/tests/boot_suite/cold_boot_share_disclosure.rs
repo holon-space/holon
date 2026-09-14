@@ -93,24 +93,24 @@ const PLAIN_FILE: &str = "\
 ";
 
 /// Every `SharedSubtreeNotMaterialized` condition currently raised on the bus.
-/// The bus is sticky by design (`degraded_signal_bus.rs`: "a condition raised
+/// The bus is sticky by design (`condition_bus.rs`: "a condition raised
 /// during boot DI still reaches a window that launches later"), so subscribing
 /// after boot sees whatever the boot raised.
 fn not_materialized_subjects(env: &holon_integration_tests::TestEnvironment) -> Vec<String> {
     let injector = env
         .injector()
         .expect("test environment must expose its injector");
-    let bus = injector.resolve::<Arc<holon_loro::DegradedSignalBus>>();
+    let bus = injector.resolve::<Arc<holon_api::ConditionBus>>();
     bus.subscribe()
         .current
         .into_iter()
         .filter(|c| {
             matches!(
                 c.reason,
-                holon_loro::ShareDegradedReason::SharedSubtreeNotMaterialized { .. }
+                holon_api::ConditionKind::SharedSubtreeNotMaterialized { .. }
             )
         })
-        .map(|c| c.shared_tree_id)
+        .map(|c| c.subject)
         .collect()
 }
 

@@ -23,11 +23,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use holon_api::ConditionBus;
+use holon_api::ConditionKind;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;
-use holon_loro::DegradedSignalBus;
-use holon_loro::ShareDegradedReason;
 
 /// A value that could only come from this test, so a leak into the real
 /// keychain would be findable. Nothing here ever reaches a platform backend:
@@ -41,9 +41,7 @@ fn runtime() -> tokio::runtime::Runtime {
         .expect("build test runtime")
 }
 
-async fn boot(
-    dir: &std::path::Path,
-) -> (Arc<holon_frontend::FrontendSession>, Arc<DegradedSignalBus>) {
+async fn boot(dir: &std::path::Path) -> (Arc<holon_frontend::FrontendSession>, Arc<ConditionBus>) {
     let holon_config = HolonConfig {
         db_path: Some(dir.join("secrets.db")),
         vault: VaultConfig {
@@ -59,9 +57,9 @@ async fn boot(
         |_| Ok(()),
         |injector| {
             injector
-                .try_resolve::<Arc<DegradedSignalBus>>()
+                .try_resolve::<Arc<ConditionBus>>()
                 .map(|b| (*b).clone())
-                .expect("the composition root registers a DegradedSignalBus")
+                .expect("the composition root registers a ConditionBus")
         },
     )
     .await
@@ -91,7 +89,7 @@ fn a_throwaway_session_holds_secrets_in_memory_and_discloses_it() {
     let disclosure = current
         .iter()
         .find_map(|c| match &c.reason {
-            ShareDegradedReason::SecretsHeldInMemory { why } => Some(why.clone()),
+            ConditionKind::SecretsHeldInMemory { why } => Some(why.clone()),
             _ => None,
         })
         .unwrap_or_else(|| {
@@ -171,7 +169,7 @@ fn a_seeded_throwaway_session_holds_the_fixture_secrets_and_says_how_many() {
         .current
         .iter()
         .find_map(|c| match &c.reason {
-            ShareDegradedReason::SecretsHeldInMemory { why } => Some(why.clone()),
+            ConditionKind::SecretsHeldInMemory { why } => Some(why.clone()),
             _ => None,
         })
         .expect("the in-memory banner is still raised");

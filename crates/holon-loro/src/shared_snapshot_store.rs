@@ -14,7 +14,7 @@
 //!   each other's tmp — see [`SharedSnapshotStore::stage_tmp`].
 //! - **Quarantine on corrupt**: if `LoroDoc::import` fails we move the file to
 //!   `<id>.loro.corrupt-<rfc3339-ts>` and emit
-//!   [`ShareDegraded::SnapshotLoadFailed`], rather than deleting. The
+//!   [`Condition::SnapshotLoadFailed`], rather than deleting. The
 //!   `LoroDocumentStore` "delete on decode error" pattern would be
 //!   unrecoverable data loss here.
 //!
@@ -29,19 +29,18 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use holon_api::condition_bus::Condition;
+use holon_api::condition_bus::ConditionBus;
+use holon_api::condition_bus::ConditionKind;
 use iroh::EndpointAddr;
 use loro::ExportMode;
 use loro::LoroDoc;
 use tracing::debug;
 use tracing::warn;
 
-use crate::degraded_signal_bus::DegradedSignalBus;
-use crate::degraded_signal_bus::ShareDegraded;
-use crate::degraded_signal_bus::ShareDegradedReason;
-
 pub struct SharedSnapshotStore {
     shares_dir: PathBuf,
-    bus: Arc<DegradedSignalBus>,
+    bus: Arc<ConditionBus>,
     /// Test-only counter so `test_save_worker_burst_coalescing` can
     /// observe how many times the file was actually written.
     #[cfg(test)]
@@ -63,7 +62,7 @@ impl SharedSnapshotStore {
     /// `base_storage_dir` is the Loro storage root (same dir that
     /// holds `holon_tree.loro` and `device.key`). Snapshots live under
     /// `<base_storage_dir>/shares/`.
-    pub fn new(base_storage_dir: PathBuf, bus: Arc<DegradedSignalBus>) -> Self {
+    pub fn new(base_storage_dir: PathBuf, bus: Arc<ConditionBus>) -> Self {
         Self {
             shares_dir: base_storage_dir.join("shares"),
             bus,
@@ -297,7 +296,7 @@ impl SharedSnapshotStore {
 
     /// Load `<id>.loro`. On decode error, quarantine the file (rename
     /// to `<id>.loro.corrupt-<rfc3339-ts>`) and emit
-    /// [`ShareDegraded::SnapshotLoadFailed`] on the bus. Returns `Err`
+    /// [`Condition::SnapshotLoadFailed`] on the bus. Returns `Err`
     /// — the caller skips this share.
     pub fn load(&self, shared_tree_id: &str) -> Result<LoroDoc> {
         let path = self.snapshot_path(shared_tree_id);
@@ -331,11 +330,9 @@ impl SharedSnapshotStore {
                         quarantine.display()
                     ),
                 }
-                self.bus.emit(ShareDegraded {
-                    shared_tree_id: shared_tree_id.to_string(),
-                    reason: ShareDegradedReason::SnapshotLoadFailed(
-                        quarantine.display().to_string(),
-                    ),
+                self.bus.emit(Condition {
+                    subject: shared_tree_id.to_string(),
+                    reason: ConditionKind::SnapshotLoadFailed(quarantine.display().to_string()),
                 });
                 Err(anyhow!(
                     "shared snapshot {shared_tree_id} is corrupt; quarantined at {}: {e}",
@@ -459,8 +456,8 @@ mod tests {
 
     use super::*;
 
-    fn store_in(dir: &Path) -> (SharedSnapshotStore, Arc<DegradedSignalBus>) {
-        let bus = Arc::new(DegradedSignalBus::new());
+    fn store_in(dir: &Path) -> (SharedSnapshotStore, Arc<ConditionBus>) {
+        let bus = Arc::new(ConditionBus::new());
         let store = SharedSnapshotStore::new(dir.to_path_buf(), bus.clone());
         (store, bus)
     }
@@ -617,10 +614,10 @@ mod tests {
             .expect("no event on bus")
             .raised()
             .expect("expected Raised");
-        assert_eq!(ev.shared_tree_id, "bad");
+        assert_eq!(ev.subject, "bad");
         assert!(matches!(
             ev.reason,
-            ShareDegradedReason::SnapshotLoadFailed(ref p) if p.contains("corrupt-")
+            ConditionKind::SnapshotLoadFailed(ref p) if p.contains("corrupt-")
         ));
     }
 

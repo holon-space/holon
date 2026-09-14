@@ -15,14 +15,14 @@ use async_trait::async_trait;
 use holon_api::BlockContent;
 use holon_api::BlockEdges;
 use holon_api::EntityUri;
+use holon_api::condition_bus::Condition;
+use holon_api::condition_bus::ConditionBus;
 use holon_core::DownstreamProjection;
 use holon_core::ProjectionPass;
 use holon_core::block_ordering::BlockCreateRequest;
 use holon_core::block_ordering::BlockOrdering;
 use holon_loro::DocScope;
 use holon_loro::LoroDocumentStore;
-use holon_loro::degraded_signal_bus::DegradedSignalBus;
-use holon_loro::degraded_signal_bus::ShareDegraded;
 use holon_loro::device_pairing_op::DevicePairing;
 use holon_loro::device_pairing_op::DevicePairingOperations;
 use holon_loro::device_pairing_op::PairingCompletion;
@@ -146,7 +146,7 @@ impl DownstreamProjection for CountingProjection {
 
 struct Fixture {
     pairing: DevicePairing,
-    bus: Arc<DegradedSignalBus>,
+    bus: Arc<ConditionBus>,
     store: LoroDocumentStore,
     marker: PairingMarker,
     _dir: tempfile::TempDir,
@@ -197,7 +197,7 @@ async fn interrupted_pair(also_archived: Vec<NewBlockWithProperties>) -> Result<
     };
     holon_loro::pairing_swap::write_marker(&store_dir, &marker)?;
 
-    let bus = Arc::new(DegradedSignalBus::new());
+    let bus = Arc::new(ConditionBus::new());
     let ordering_store = store.clone();
     let pairing = DevicePairing::new(
         store.clone(),
@@ -228,7 +228,7 @@ async fn interrupted_pair(also_archived: Vec<NewBlockWithProperties>) -> Result<
     })
 }
 
-fn conditions(bus: &DegradedSignalBus) -> Vec<ShareDegraded> {
+fn conditions(bus: &ConditionBus) -> Vec<Condition> {
     bus.subscribe().current
 }
 
@@ -284,7 +284,7 @@ async fn a_mixed_archive_reimports_what_has_a_home_and_defers_only_the_orphans()
     assert!(
         raised.iter().any(|c| matches!(
             &c.reason,
-            holon_loro::degraded_signal_bus::ShareDegradedReason::PairingReimportDeferred {
+            holon_api::condition_bus::ConditionKind::PairingReimportDeferred {
                 orphans: count,
                 archive,
             } if *count == absent.len()
@@ -348,7 +348,7 @@ async fn a_pre_pair_top_level_page_is_reimported_and_only_the_parentless_defer()
     assert!(
         raised.iter().any(|c| matches!(
             &c.reason,
-            holon_loro::degraded_signal_bus::ShareDegradedReason::PairingReimportDeferred {
+            holon_api::condition_bus::ConditionKind::PairingReimportDeferred {
                 orphans: count,
                 ..
             } if *count == 2
@@ -447,8 +447,7 @@ async fn the_reimport_completes_once_its_parent_appears_and_lifts_the_banner() -
             format!("{:?}", c.reason).contains(&f.marker.archive.display().to_string())
                 && !matches!(
                     c.reason,
-                    holon_loro::degraded_signal_bus::ShareDegradedReason::
-                        PairingReimportedLocalContent { .. }
+                    holon_api::condition_bus::ConditionKind::PairingReimportedLocalContent { .. }
                 )
         }),
         "the deferred-re-import banner must be lifted once the re-import ran: {still_raised:?}"

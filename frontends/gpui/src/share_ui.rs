@@ -36,6 +36,10 @@ use gpui::Stateful;
 use gpui::div;
 use gpui::prelude::*;
 use gpui::px;
+use holon_api::Condition;
+use holon_api::ConditionChange;
+use holon_api::ConditionKey;
+use holon_api::ConditionKind;
 use holon_api::EntityName;
 use holon_api::Value;
 use holon_app::PendingState;
@@ -47,10 +51,6 @@ use holon_frontend::FrontendSession;
 use holon_frontend::dispatch_journal::DispatchJournal;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
-use holon_loro::DegradedChange;
-use holon_loro::DegradedConditionKey;
-use holon_loro::ShareDegraded;
-use holon_loro::ShareDegradedReason;
 
 /// Threat-model sentences from `docs/Reference/SUBTREE_SHARING.md` (lines
 /// 34–35). Quoted verbatim — users of the share UI must see the exact wording
@@ -191,7 +191,7 @@ pub struct DegradedToast {
     /// a sticky condition — upserted on re-raise, removed on clear. `None` for
     /// UI-local toasts (undo/command/preference failures, info) that have no
     /// bus condition behind them.
-    pub condition: Option<DegradedConditionKey>,
+    pub condition: Option<ConditionKey>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -382,52 +382,52 @@ impl ShareUiState {
     }
 
     /// Route a broadcast event from the degraded bus into the right field.
-    pub fn apply_degraded(&mut self, event: ShareDegraded) {
+    pub fn apply_degraded(&mut self, event: Condition) {
         let condition = event.condition_key();
         match event.reason {
-            ShareDegradedReason::SnapshotSaveFailed(detail) => {
+            ConditionKind::SnapshotSaveFailed(detail) => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::SnapshotSaveFailed,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     detail: detail.into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
             }
-            ShareDegradedReason::RehydrationFailed(detail) => {
+            ConditionKind::RehydrationFailed(detail) => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::RehydrationFailed,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     detail: detail.into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
             }
-            ShareDegradedReason::SqlProjectionFailed(detail) => {
+            ConditionKind::SqlProjectionFailed(detail) => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::SqlProjectionFailed,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     detail: detail.into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
             }
-            ShareDegradedReason::ForeignIdCollision(block_id) => {
+            ConditionKind::ForeignIdCollision(block_id) => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::ForeignIdCollision,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     detail: block_id.into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
             }
-            ShareDegradedReason::SnapshotLoadFailed(path) => {
+            ConditionKind::SnapshotLoadFailed(path) => {
                 // Upsert, like `push_toast`: a sticky condition can arrive
                 // twice (once replayed in `current`, once live), and two
                 // identical full-screen quarantine modals for one share is a
                 // dismissal treadmill.
                 let quarantine = QuarantineEvent {
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     quarantine_path: path,
                 };
                 match self
@@ -439,49 +439,49 @@ impl ShareUiState {
                     None => self.quarantines.push(quarantine),
                 }
             }
-            ShareDegradedReason::VaultIngestFailed { format, reason } => {
+            ConditionKind::VaultIngestFailed { format, reason } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::VaultIngestFailed,
                     // The file, so the headline can name it and the condition
                     // clears per file rather than per scan.
-                    detail: format!("{}: {reason}", event.shared_tree_id).into(),
-                    shared_tree_id: event.shared_tree_id,
+                    detail: format!("{}: {reason}", event.subject).into(),
+                    shared_tree_id: event.subject,
                     condition: Some(condition.clone()),
                     format: Some(format),
                 });
             }
-            ShareDegradedReason::VaultFileEmptied => {
+            ConditionKind::VaultFileEmptied => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::VaultFileEmptied,
                     detail: format!(
                         "{} is empty on disk — Holon kept the document it last read from it, so \
                          what you see is no longer in the file",
-                        event.shared_tree_id
+                        event.subject
                     )
                     .into(),
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     condition: Some(condition.clone()),
                     format: None,
                 });
             }
-            ShareDegradedReason::EditRefusedReadOnlyFormat { format } => {
+            ConditionKind::EditRefusedReadOnlyFormat { format } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::EditRefusedReadOnlyFormat,
                     detail: format!(
                         "{} is {format}, which Holon reads but cannot write — edit the file on \
                          disk",
-                        event.shared_tree_id
+                        event.subject
                     )
                     .into(),
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     condition: Some(condition.clone()),
                     format: None,
                 });
             }
-            ShareDegradedReason::WritebackDegraded(detail) => {
+            ConditionKind::WritebackDegraded(detail) => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::WritebackDegraded,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     detail: detail.into(),
                     condition: Some(condition.clone()),
                     format: None,
@@ -491,14 +491,14 @@ impl ShareUiState {
             // purpose: nothing is degraded, and nothing is being asked. The
             // user is told what this device contributed to the store it just
             // adopted, and where its pre-pair documents went.
-            ShareDegradedReason::PairingReimportedLocalContent {
+            ConditionKind::PairingReimportedLocalContent {
                 blocks,
                 conflict_copies,
                 archive,
             } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::PairingReimported,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     // The archive path and the query are BODY lines: both are
                     // things the user reproduces character for character, and
                     // the headline is capped.
@@ -517,13 +517,13 @@ impl ShareUiState {
             // Not a toast: a toast has a ✕, and this condition names content
             // that is not in the store and that only the retry beside it can
             // bring in.
-            ShareDegradedReason::PairingReimportDeferred { orphans, archive } => {
+            ConditionKind::PairingReimportDeferred { orphans, archive } => {
                 self.deferred_reimport = Some(DeferredReimport { orphans, archive });
             }
-            ShareDegradedReason::SharedSubtreeNotMaterialized { file } => {
+            ConditionKind::SharedSubtreeNotMaterialized { file } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::SharedSubtreeNotMaterialized,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     // The file the shared content was inlined into — what the
                     // user opens to see the stale projection.
                     detail: file.into(),
@@ -533,22 +533,22 @@ impl ShareUiState {
             }
             // The toast body truncates `detail` at 80 chars, so both of these
             // lead with the integration name.
-            ShareDegradedReason::IntegrationConnectFailed { integration, error } => {
+            ConditionKind::IntegrationConnectFailed { integration, error } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::IntegrationConnectFailed,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     detail: format!("{integration}: {error}").into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
             }
-            ShareDegradedReason::IntegrationNeedsAuth {
+            ConditionKind::IntegrationNeedsAuth {
                 integration,
                 auth_url,
             } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::IntegrationNeedsAuth,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     detail: ToastDetail::with_body(
                         format!("{integration} needs authorizing. Open:"),
                         vec![auth_url],
@@ -557,7 +557,7 @@ impl ShareUiState {
                     format: None,
                 });
             }
-            ShareDegradedReason::IntegrationSidecarSuperseded {
+            ConditionKind::IntegrationSidecarSuperseded {
                 integration,
                 installed_path,
                 bundled_source,
@@ -565,7 +565,7 @@ impl ShareUiState {
             } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::IntegrationSidecarSuperseded,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     detail: ToastDetail::with_body(
                         format!(
                             "{integration}: the installed file was ignored ({incompatibility}); \
@@ -577,7 +577,7 @@ impl ShareUiState {
                     format: None,
                 });
             }
-            ShareDegradedReason::IntegrationNotEnabled {
+            ConditionKind::IntegrationNotEnabled {
                 integration,
                 state_path,
                 remedy,
@@ -591,7 +591,7 @@ impl ShareUiState {
                 // from what happened to be visible.
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::IntegrationNotEnabled,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     // Headline, then the two payloads that must reach the
                     // user CHARACTER-EXACT and so never see the cap: the
                     // command to run (D2 — a remedy cut in half reads as
@@ -608,10 +608,10 @@ impl ShareUiState {
                     format: None,
                 });
             }
-            ShareDegradedReason::BearerTicketEnrollment { peer } => {
+            ConditionKind::BearerTicketEnrollment { peer } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::BearerTicketEnrollment,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     detail: format!(
                         "peer {peer} joined by presenting the share ticket. Anyone the ticket \
                          was forwarded to could have joined instead — unshare, or revoke the \
@@ -622,10 +622,10 @@ impl ShareUiState {
                     format: None,
                 });
             }
-            ShareDegradedReason::OwnerRecoveryCodeNotShown => {
+            ConditionKind::OwnerRecoveryCodeNotShown => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::OwnerRecoveryCodeNotShown,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     // Says what is and is not at risk, because "no recovery
                     // code" reads as "my data is one keychain away from gone"
                     // and that is not what happened.
@@ -639,13 +639,13 @@ impl ShareUiState {
                     format: None,
                 });
             }
-            ShareDegradedReason::IntegrationSidecarNotBundled {
+            ConditionKind::IntegrationSidecarNotBundled {
                 provider,
                 installed_path,
             } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::IntegrationSidecarNotBundled,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     detail: ToastDetail::with_body(
                         format!(
                             "{provider}: nothing provides a connection by this name, so this file \
@@ -657,14 +657,14 @@ impl ShareUiState {
                     format: None,
                 });
             }
-            ShareDegradedReason::IntegrationSidecarUnusable {
+            ConditionKind::IntegrationSidecarUnusable {
                 provider,
                 installed_path,
                 why,
             } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::IntegrationSidecarUnusable,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     // The file and the REASON are both body lines. The reason
                     // ends in the remedy — the clause saying what to change —
                     // and it was the half the cap ate, on the same screen where
@@ -677,19 +677,19 @@ impl ShareUiState {
                     format: None,
                 });
             }
-            ShareDegradedReason::SecretsHeldInMemory { why } => {
+            ConditionKind::SecretsHeldInMemory { why } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::SecretsHeldInMemory,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     detail: why.into(),
                     condition: Some(condition.clone()),
                     format: None,
                 });
             }
-            ShareDegradedReason::UndoHistoryClearedAtBoot { entries } => {
+            ConditionKind::UndoHistoryClearedAtBoot { entries } => {
                 self.push_toast(DegradedToast {
                     kind: DegradedKind::UndoHistoryClearedAtBoot,
-                    shared_tree_id: event.shared_tree_id,
+                    shared_tree_id: event.subject,
                     detail: format!(
                         "{entries} step{} from the previous session were discarded",
                         if entries == 1 { "" } else { "s" }
@@ -703,9 +703,9 @@ impl ShareUiState {
     }
 
     /// Drop the toast for a condition the bus reports as no longer in effect.
-    pub fn apply_degraded_cleared(&mut self, key: &DegradedConditionKey) {
+    pub fn apply_degraded_cleared(&mut self, key: &ConditionKey) {
         self.toasts.retain(|t| t.condition.as_ref() != Some(key));
-        if key.kind == ShareDegradedReason::PAIRING_REIMPORT_DEFERRED {
+        if key.kind == ConditionKind::PAIRING_REIMPORT_DEFERRED {
             self.deferred_reimport = None;
         }
     }
@@ -834,7 +834,7 @@ impl gpui::Global for DegradedToastSink {}
 /// Spawn the tokio-broadcast → GPUI-entity bridge.
 ///
 /// The `recv()` loop runs inside the tokio runtime (`rt_handle.spawn`). Each
-/// received `ShareDegraded` is forwarded through an unbounded `mpsc` channel
+/// received `Condition` is forwarded through an unbounded `mpsc` channel
 /// to a pump running on GPUI's executor, which calls `cx.update_window` to
 /// mutate the `ShareUiState`.
 /// Takes the bus itself, NOT the share backend: degraded conditions are raised
@@ -842,13 +842,13 @@ impl gpui::Global for DegradedToastSink {}
 /// must exist in every consolidator mode — keying it off a Loro-only handle
 /// left the shipped SqlOnly build raising conditions nobody listened to.
 pub fn spawn_degraded_bus_bridge(
-    bus: Arc<holon_loro::DegradedSignalBus>,
+    bus: Arc<holon_api::ConditionBus>,
     rt_handle: tokio::runtime::Handle,
     share_state: Entity<ShareUiState>,
     window_handle: AnyWindowHandle,
     async_cx: &AsyncApp,
 ) {
-    let (tx, mut rx) = futures::channel::mpsc::unbounded::<DegradedChange>();
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<ConditionChange>();
 
     // Subscribe SYNCHRONOUSLY, before the pump task is scheduled: a condition
     // raised between this call and the task's first poll would otherwise be
@@ -861,7 +861,7 @@ pub fn spawn_degraded_bus_bridge(
     rt_handle.spawn(async move {
         let mut bus_rx = subscription.changes;
         for event in subscription.current {
-            if tx.unbounded_send(DegradedChange::Raised(event)).is_err() {
+            if tx.unbounded_send(ConditionChange::Raised(event)).is_err() {
                 return;
             }
         }
@@ -891,8 +891,8 @@ pub fn spawn_degraded_bus_bridge(
                 let _ = cx.update_window(window_handle, |_, _window, cx| {
                     share_state.update(cx, |s, cx| {
                         match change.clone() {
-                            DegradedChange::Raised(event) => s.apply_degraded(event),
-                            DegradedChange::Cleared(key) => s.apply_degraded_cleared(&key),
+                            ConditionChange::Raised(event) => s.apply_degraded(event),
+                            ConditionChange::Cleared(key) => s.apply_degraded_cleared(&key),
                         }
                         cx.emit(NotifyShareUi);
                         cx.notify();
@@ -2620,8 +2620,8 @@ fn render_error_modal(
 #[cfg(test)]
 mod tests {
     use futures::channel::oneshot;
-    use holon_loro::ShareDegraded;
-    use holon_loro::ShareDegradedReason;
+    use holon_api::Condition;
+    use holon_api::ConditionKind;
 
     use super::*;
 
@@ -2648,9 +2648,9 @@ mod tests {
             kind: DegradedKind::IntegrationNotEnabled,
             shared_tree_id: subject.to_string(),
             detail: format!("{subject} is switched off").into(),
-            condition: Some(holon_loro::DegradedConditionKey {
+            condition: Some(holon_api::ConditionKey {
                 subject: subject.to_string(),
-                kind: ShareDegradedReason::INTEGRATION_NOT_ENABLED,
+                kind: ConditionKind::INTEGRATION_NOT_ENABLED,
             }),
             format: None,
         }
@@ -2710,9 +2710,9 @@ mod tests {
     #[test]
     fn apply_degraded_routes_save_failed_to_toast() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "abc".into(),
-            reason: ShareDegradedReason::SnapshotSaveFailed("disk full".into()),
+        s.apply_degraded(Condition {
+            subject: "abc".into(),
+            reason: ConditionKind::SnapshotSaveFailed("disk full".into()),
         });
         assert_eq!(s.toasts.len(), 1);
         assert_eq!(s.toasts[0].kind, DegradedKind::SnapshotSaveFailed);
@@ -2723,9 +2723,9 @@ mod tests {
     #[test]
     fn apply_degraded_routes_load_failed_to_quarantine() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "xyz".into(),
-            reason: ShareDegradedReason::SnapshotLoadFailed("/tmp/x.corrupt-1".into()),
+        s.apply_degraded(Condition {
+            subject: "xyz".into(),
+            reason: ConditionKind::SnapshotLoadFailed("/tmp/x.corrupt-1".into()),
         });
         assert!(s.toasts.is_empty());
         assert_eq!(s.quarantines.len(), 1);
@@ -2738,9 +2738,9 @@ mod tests {
     #[test]
     fn a_double_delivered_quarantine_stays_one_modal() {
         let mut s = ShareUiState::new();
-        let event = ShareDegraded {
-            shared_tree_id: "xyz".into(),
-            reason: ShareDegradedReason::SnapshotLoadFailed("/tmp/x.corrupt-1".into()),
+        let event = Condition {
+            subject: "xyz".into(),
+            reason: ConditionKind::SnapshotLoadFailed("/tmp/x.corrupt-1".into()),
         };
         s.apply_degraded(event.clone());
         s.apply_degraded(event);
@@ -2750,9 +2750,9 @@ mod tests {
     #[test]
     fn the_ingest_headline_names_the_refusing_format() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "/vault/Resources/Rezepte/Linsensuppe.cook".into(),
-            reason: ShareDegradedReason::VaultIngestFailed {
+        s.apply_degraded(Condition {
+            subject: "/vault/Resources/Rezepte/Linsensuppe.cook".into(),
+            reason: ConditionKind::VaultIngestFailed {
                 format: "cooklang".into(),
                 reason: "unknown timer unit".into(),
             },
@@ -2777,9 +2777,9 @@ mod tests {
     #[test]
     fn a_vault_ingest_failure_is_a_clearable_condition() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "/vault/notes.org".into(),
-            reason: ShareDegradedReason::VaultIngestFailed {
+        s.apply_degraded(Condition {
+            subject: "/vault/notes.org".into(),
+            reason: ConditionKind::VaultIngestFailed {
                 format: "org".into(),
                 reason: "unparseable".into(),
             },
@@ -2796,9 +2796,9 @@ mod tests {
     #[test]
     fn apply_degraded_routes_rehydration_failed_to_toast() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "r".into(),
-            reason: ShareDegradedReason::RehydrationFailed("endpoint".into()),
+        s.apply_degraded(Condition {
+            subject: "r".into(),
+            reason: ConditionKind::RehydrationFailed("endpoint".into()),
         });
         assert_eq!(s.toasts.len(), 1);
         assert_eq!(s.toasts[0].kind, DegradedKind::RehydrationFailed);
@@ -2806,7 +2806,7 @@ mod tests {
 
     /// `dispatch_undo`/`dispatch_redo` (below) route a genuine engine `Err`
     /// through exactly this `push_toast` call — this pins the toast-kind
-    /// plumbing on its own (undo/redo never gets a `ShareDegraded` broadcast
+    /// plumbing on its own (undo/redo never gets a `Condition` broadcast
     /// event, so it can't go through `apply_degraded` like the other kinds).
     #[test]
     fn undo_failed_toast_is_pushed_and_bounded_like_other_kinds() {
@@ -2906,9 +2906,9 @@ mod tests {
     #[test]
     fn apply_degraded_routes_integration_connect_failed_to_toast() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "todoist".into(),
-            reason: ShareDegradedReason::IntegrationConnectFailed {
+        s.apply_degraded(Condition {
+            subject: "todoist".into(),
+            reason: ConditionKind::IntegrationConnectFailed {
                 integration: "todoist".into(),
                 error: "No such file or directory (os error 2)".into(),
             },
@@ -2933,10 +2933,10 @@ mod tests {
     /// `current` — that replay must render a toast just like a live event.
     #[test]
     fn replayed_boot_condition_renders_a_toast() {
-        let bus = holon_loro::DegradedSignalBus::new();
-        bus.emit(ShareDegraded {
-            shared_tree_id: "todoist".into(),
-            reason: ShareDegradedReason::IntegrationConnectFailed {
+        let bus = holon_api::ConditionBus::new();
+        bus.emit(Condition {
+            subject: "todoist".into(),
+            reason: ConditionKind::IntegrationConnectFailed {
                 integration: "todoist".into(),
                 error: "No such file or directory (os error 2)".into(),
             },
@@ -2956,9 +2956,9 @@ mod tests {
     /// `Raised` racing it). That must upsert, not stack two banners.
     #[test]
     fn replayed_then_live_duplicate_yields_one_toast() {
-        let event = ShareDegraded {
-            shared_tree_id: "todoist".into(),
-            reason: ShareDegradedReason::IntegrationConnectFailed {
+        let event = Condition {
+            subject: "todoist".into(),
+            reason: ConditionKind::IntegrationConnectFailed {
                 integration: "todoist".into(),
                 error: "os error 2".into(),
             },
@@ -2972,21 +2972,21 @@ mod tests {
     #[test]
     fn cleared_condition_removes_its_toast() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "todoist".into(),
-            reason: ShareDegradedReason::IntegrationConnectFailed {
+        s.apply_degraded(Condition {
+            subject: "todoist".into(),
+            reason: ConditionKind::IntegrationConnectFailed {
                 integration: "todoist".into(),
                 error: "os error 2".into(),
             },
         });
         // A transient toast alongside it must survive the clear.
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "share".into(),
-            reason: ShareDegradedReason::SnapshotSaveFailed("disk full".into()),
+        s.apply_degraded(Condition {
+            subject: "share".into(),
+            reason: ConditionKind::SnapshotSaveFailed("disk full".into()),
         });
         assert_eq!(s.toasts.len(), 2);
 
-        s.apply_degraded_cleared(&DegradedConditionKey {
+        s.apply_degraded_cleared(&ConditionKey {
             subject: "todoist".into(),
             kind: "integration-connect-failed",
         });
@@ -2999,9 +2999,9 @@ mod tests {
     #[test]
     fn integration_connect_failed_detail_leads_with_the_integration_name() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "todoist".into(),
-            reason: ShareDegradedReason::IntegrationConnectFailed {
+        s.apply_degraded(Condition {
+            subject: "todoist".into(),
+            reason: ConditionKind::IntegrationConnectFailed {
                 integration: "todoist".into(),
                 error: "x".repeat(200),
             },
@@ -3012,9 +3012,9 @@ mod tests {
     #[test]
     fn apply_degraded_routes_integration_needs_auth_to_toast() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "linear".into(),
-            reason: ShareDegradedReason::IntegrationNeedsAuth {
+        s.apply_degraded(Condition {
+            subject: "linear".into(),
+            reason: ConditionKind::IntegrationNeedsAuth {
                 integration: "linear".into(),
                 auth_url: "https://linear.app/oauth/authorize?x=1".into(),
             },
@@ -3032,9 +3032,9 @@ mod tests {
     #[test]
     fn apply_degraded_routes_sidecar_superseded_to_toast() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "claude-history".into(),
-            reason: ShareDegradedReason::IntegrationSidecarSuperseded {
+        s.apply_degraded(Condition {
+            subject: "claude-history".into(),
+            reason: ConditionKind::IntegrationSidecarSuperseded {
                 integration: "claude-history".into(),
                 installed_path: "/home/u/.config/holon/integrations/claude-history.yaml".into(),
                 bundled_source: "assets/integrations/claude-history.yaml".into(),
@@ -3069,9 +3069,9 @@ mod tests {
     #[test]
     fn apply_degraded_routes_integration_not_enabled_to_toast() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "gcal".into(),
-            reason: ShareDegradedReason::IntegrationNotEnabled {
+        s.apply_degraded(Condition {
+            subject: "gcal".into(),
+            reason: ConditionKind::IntegrationNotEnabled {
                 integration: "gcal".into(),
                 installed_path: "/home/u/.config/holon/integrations/gcal.yaml".into(),
                 state_path: "/home/u/.config/holon/integrations/gcal.state.toml".into(),
@@ -3098,9 +3098,9 @@ mod tests {
     #[test]
     fn the_rendered_not_enabled_toast_still_carries_the_remedy() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "gcal".into(),
-            reason: ShareDegradedReason::IntegrationNotEnabled {
+        s.apply_degraded(Condition {
+            subject: "gcal".into(),
+            reason: ConditionKind::IntegrationNotEnabled {
                 integration: "gcal".into(),
                 installed_path: "/Users/martin/.config/holon/integrations/gcal.yaml".into(),
                 state_path: "/Users/martin/.config/holon/integrations/gcal.state.toml".into(),
@@ -3128,9 +3128,9 @@ mod tests {
             "/Users/martin/Library/Application Support/holon/loro-store/archive/20260908-011500";
         assert_eq!(archive.chars().count(), 82, "the pinned path length");
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "device".into(),
-            reason: ShareDegradedReason::PairingReimportedLocalContent {
+        s.apply_degraded(Condition {
+            subject: "device".into(),
+            reason: ConditionKind::PairingReimportedLocalContent {
                 blocks: 4,
                 conflict_copies: 1,
                 archive: archive.into(),
@@ -3157,9 +3157,9 @@ mod tests {
     #[test]
     fn the_rendered_remedy_is_one_that_actually_works() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "gcal".into(),
-            reason: ShareDegradedReason::IntegrationNotEnabled {
+        s.apply_degraded(Condition {
+            subject: "gcal".into(),
+            reason: ConditionKind::IntegrationNotEnabled {
                 integration: "gcal".into(),
                 installed_path: "/Users/martin/.config/holon/integrations/gcal.yaml".into(),
                 state_path: "/Users/martin/.config/holon/integrations/gcal.state.toml".into(),
@@ -3192,9 +3192,9 @@ mod tests {
         for len in 1..400 {
             for state_path in [&"s".repeat(len), &"é".repeat(len)] {
                 let mut s = ShareUiState::new();
-                s.apply_degraded(ShareDegraded {
-                    shared_tree_id: "gcal".into(),
-                    reason: ShareDegradedReason::IntegrationNotEnabled {
+                s.apply_degraded(Condition {
+                    subject: "gcal".into(),
+                    reason: ConditionKind::IntegrationNotEnabled {
                         integration: "gcal".into(),
                         installed_path: "/p/gcal.yaml".into(),
                         state_path: state_path.clone(),
@@ -3212,9 +3212,9 @@ mod tests {
     #[test]
     fn apply_degraded_routes_sidecar_not_bundled_to_toast() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(ShareDegraded {
-            shared_tree_id: "my-own-thing".into(),
-            reason: ShareDegradedReason::IntegrationSidecarNotBundled {
+        s.apply_degraded(Condition {
+            subject: "my-own-thing".into(),
+            reason: ConditionKind::IntegrationSidecarNotBundled {
                 provider: "my-own-thing".into(),
                 installed_path: "/home/u/.config/holon/integrations/my-own-thing.yaml".into(),
             },
@@ -3239,9 +3239,9 @@ mod tests {
     fn every_keyed_condition_is_kept_and_the_render_counts_the_rest() {
         let mut s = ShareUiState::new();
         for i in 0..8 {
-            s.apply_degraded(ShareDegraded {
-                shared_tree_id: format!("s{i}"),
-                reason: ShareDegradedReason::SnapshotSaveFailed(format!("err{i}")),
+            s.apply_degraded(Condition {
+                subject: format!("s{i}"),
+                reason: ConditionKind::SnapshotSaveFailed(format!("err{i}")),
             });
         }
         assert_eq!(
@@ -3255,9 +3255,9 @@ mod tests {
         // Re-raising a condition upserts rather than stacking, so the list
         // stays bounded by the number of DISTINCT conditions in effect.
         for i in 0..8 {
-            s.apply_degraded(ShareDegraded {
-                shared_tree_id: format!("s{i}"),
-                reason: ShareDegradedReason::SnapshotSaveFailed(format!("err{i} again")),
+            s.apply_degraded(Condition {
+                subject: format!("s{i}"),
+                reason: ConditionKind::SnapshotSaveFailed(format!("err{i} again")),
             });
         }
         assert_eq!(

@@ -584,7 +584,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     .await;
 
                 // Disclosure seam for shared-subtree write-back gaps (Inc 1).
-                // Present in the app container (forwards to `DegradedSignalBus`);
+                // Present in the app container (forwards to `ConditionBus`);
                 // absent in test/no-Turso containers — then shared-subtree edits
                 // that fail to materialize log at WARN instead of a banner.
                 let share_disclosure = resolver

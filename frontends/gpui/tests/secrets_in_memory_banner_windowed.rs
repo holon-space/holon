@@ -28,12 +28,12 @@ use std::time::Duration;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
+use holon_api::ConditionBus;
 use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::test_environment::TestEnvironment;
-use holon_loro::DegradedSignalBus;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
 
@@ -89,10 +89,10 @@ fn an_in_memory_secret_session_paints_the_banner_that_admits_it() {
         .get()
         .cloned()
         .expect("reactive engine after start_app");
-    let bus: Arc<DegradedSignalBus> = (*env
+    let bus: Arc<ConditionBus> = (*env
         .injector()
         .expect("injector after start_app")
-        .resolve::<Arc<DegradedSignalBus>>())
+        .resolve::<Arc<ConditionBus>>())
     .clone();
 
     // The condition is raised during boot DI, before any window exists. It is
@@ -101,7 +101,7 @@ fn an_in_memory_secret_session_paints_the_banner_that_admits_it() {
     assert!(
         bus.subscribe().current.iter().any(|c| matches!(
             c.reason,
-            holon_loro::ShareDegradedReason::SecretsHeldInMemory { .. }
+            holon_api::ConditionKind::SecretsHeldInMemory { .. }
         )),
         "precondition: the boot raised the condition — without it this rung would be asserting \
          that a window paints a banner nobody sent"

@@ -1,6 +1,6 @@
 //! Somebody must actually be LISTENING to the degraded bus.
 //!
-//! Registering the bus (see `degraded_signal_bus_container.rs`) only creates a
+//! Registering the bus (see `condition_bus_container.rs`) only creates a
 //! channel. The shipped desktop build additionally has to subscribe to it, or
 //! a dead MCP integration still renders a blank page with no banner — the bus
 //! is merely written to and nobody reads.
@@ -15,7 +15,7 @@
 //! @pbt kind windowed
 //! @pbt covers degraded-disclosure-subscriber — after the production GPUI
 //! window launch over a SqlOnly container, the
-//! `DegradedSignalBus` has a live subscriber, so a raised condition reaches
+//! `ConditionBus` has a live subscriber, so a raised condition reaches
 //! `ShareUiState` and can be rendered as a banner (BugFunnel 2026-08-04
 //! ENVIRONMENT)
 //! @pbt overlaps general_e2e_composed_pbt — kept: the keystone is headless and
@@ -27,11 +27,11 @@ use std::time::Duration;
 use gpui::AssetSource;
 use gpui::PlatformTextSystem;
 use gpui::TestApp;
+use holon_api::Condition;
+use holon_api::ConditionBus;
+use holon_api::ConditionKind;
 use holon_gpui::launch_holon_window_with_engine_and_share;
 use holon_integration_tests::test_environment::TestEnvironment;
-use holon_loro::DegradedSignalBus;
-use holon_loro::ShareDegraded;
-use holon_loro::ShareDegradedReason;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     let platform = gpui_platform::current_platform(true);
@@ -63,10 +63,10 @@ fn shipped_window_launch_subscribes_to_the_degraded_bus_in_sql_only_mode() {
         .cloned()
         .expect("reactive engine after start_app");
     let debug_services = env.debug_services().cloned().expect("debug services");
-    let bus: Arc<DegradedSignalBus> = (*env
+    let bus: Arc<ConditionBus> = (*env
         .injector()
         .expect("injector after start_app")
-        .resolve::<Arc<DegradedSignalBus>>())
+        .resolve::<Arc<ConditionBus>>())
     .clone();
 
     assert_eq!(
@@ -94,15 +94,15 @@ fn shipped_window_launch_subscribes_to_the_degraded_bus_in_sql_only_mode() {
 
     assert!(
         bus.subscriber_count() > 0,
-        "the production window launch must subscribe to the DegradedSignalBus in SqlOnly mode — \
+        "the production window launch must subscribe to the ConditionBus in SqlOnly mode — \
          with no subscriber every raised condition (dead MCP integration, failed org ingest) is \
          written to a channel nobody reads, and the page renders blank with no banner"
     );
 
     // The subscriber must survive delivery, not unsubscribe on the first event.
-    bus.emit(ShareDegraded {
-        shared_tree_id: "integration:probe".to_string(),
-        reason: ShareDegradedReason::IntegrationConnectFailed {
+    bus.emit(Condition {
+        subject: "integration:probe".to_string(),
+        reason: ConditionKind::IntegrationConnectFailed {
             integration: "probe".to_string(),
             error: "sidecar not found".to_string(),
         },

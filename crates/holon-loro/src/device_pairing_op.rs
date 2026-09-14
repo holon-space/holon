@@ -40,6 +40,9 @@ use holon_api::EntityName;
 use holon_api::OperationDescriptor;
 use holon_api::StorageEntity;
 use holon_api::Value;
+use holon_api::condition_bus::Condition;
+use holon_api::condition_bus::ConditionBus;
+use holon_api::condition_bus::ConditionKind;
 use holon_api::sharing::Capabilities;
 use holon_core::MaybeSendSync;
 use holon_core::OperationProvider;
@@ -51,9 +54,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::container_registry::ContainerRegistry;
-use crate::degraded_signal_bus::DegradedSignalBus;
-use crate::degraded_signal_bus::ShareDegraded;
-use crate::degraded_signal_bus::ShareDegradedReason;
 use crate::iroh_advertiser::ALPN_PREFIX;
 use crate::iroh_advertiser::IrohAdvertiser;
 use crate::iroh_advertiser::SharedRoster;
@@ -519,7 +519,7 @@ pub struct DevicePairing {
     ordering: OrderingResolver,
     projection: ProjectionResolver,
     write_tier: WriteTierResolver,
-    bus: std::sync::Arc<DegradedSignalBus>,
+    bus: std::sync::Arc<ConditionBus>,
 }
 
 impl DevicePairing {
@@ -529,7 +529,7 @@ impl DevicePairing {
         ordering: OrderingResolver,
         projection: ProjectionResolver,
         write_tier: WriteTierResolver,
-        bus: std::sync::Arc<DegradedSignalBus>,
+        bus: std::sync::Arc<ConditionBus>,
     ) -> Self {
         Self {
             store,
@@ -973,9 +973,9 @@ impl DevicePairing {
         if reimported.blocks == 0 {
             return;
         }
-        self.bus.emit(ShareDegraded {
-            shared_tree_id: DEVICE_ENTITY.to_string(),
-            reason: ShareDegradedReason::PairingReimportedLocalContent {
+        self.bus.emit(Condition {
+            subject: DEVICE_ENTITY.to_string(),
+            reason: ConditionKind::PairingReimportedLocalContent {
                 blocks: reimported.blocks,
                 conflict_copies: reimported.divergent.len(),
                 archive: archive.display().to_string(),
@@ -985,10 +985,10 @@ impl DevicePairing {
 
     /// The sticky condition a deferred re-import raises, so the site that
     /// lifts it names it through the compiler.
-    fn deferred_condition() -> crate::degraded_signal_bus::DegradedConditionKey {
-        crate::degraded_signal_bus::DegradedConditionKey {
+    fn deferred_condition() -> holon_api::condition_bus::ConditionKey {
+        holon_api::condition_bus::ConditionKey {
             subject: DEVICE_ENTITY.to_string(),
-            kind: ShareDegradedReason::PAIRING_REIMPORT_DEFERRED,
+            kind: ConditionKind::PAIRING_REIMPORT_DEFERRED,
         }
     }
 
@@ -1004,9 +1004,9 @@ impl DevicePairing {
         marker: &crate::pairing_swap::PairingMarker,
         orphans: Vec<String>,
     ) -> PairingCompletion {
-        self.bus.emit(ShareDegraded {
-            shared_tree_id: DEVICE_ENTITY.to_string(),
-            reason: ShareDegradedReason::PairingReimportDeferred {
+        self.bus.emit(Condition {
+            subject: DEVICE_ENTITY.to_string(),
+            reason: ConditionKind::PairingReimportDeferred {
                 orphans: orphans.len(),
                 archive: marker.archive.display().to_string(),
             },

@@ -24,13 +24,13 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
+use holon_api::condition_bus::Condition;
+use holon_api::condition_bus::ConditionBus;
+use holon_api::condition_bus::ConditionKind;
+use holon_api::condition_bus::OWNER_IDENTITY_SUBJECT;
 use holon_secrets::KeychainStore;
 use tracing::warn;
 
-use crate::degraded_signal_bus::DegradedSignalBus;
-use crate::degraded_signal_bus::OWNER_IDENTITY_SUBJECT;
-use crate::degraded_signal_bus::ShareDegraded;
-use crate::degraded_signal_bus::ShareDegradedReason;
 use crate::owner_identity::OwnerCustody;
 use crate::owner_identity::OwnerIdentityKey;
 use crate::share_enrollment::CapabilitySecret;
@@ -99,14 +99,14 @@ impl ShareCredentials {
     ///
     /// A freshly minted key's recovery code has nowhere to go from here — no
     /// surface in the backend can show it to the user — so the mint raises
-    /// [`ShareDegradedReason::OwnerRecoveryCodeNotShown`] on `degraded_bus`,
+    /// [`ConditionKind::OwnerRecoveryCodeNotShown`] on `degraded_bus`,
     /// which draws a banner. The bus is a required argument rather than an
     /// optional field precisely so that no caller can obtain an owner key
     /// without giving the disclosure somewhere to land.
     ///
     /// The recovery code itself is dropped here and never logged, carried on
     /// the bus, or rendered.
-    pub fn owner_key(&self, degraded_bus: &DegradedSignalBus) -> Result<OwnerIdentityKey> {
+    pub fn owner_key(&self, degraded_bus: &ConditionBus) -> Result<OwnerIdentityKey> {
         let (key, minted) = self
             .owner
             .load_or_first_enroll()
@@ -117,9 +117,9 @@ impl ShareCredentials {
                  recovery code was NOT shown to the user — losing the keychain entry loses the \
                  ability to verify this device's roster sidecars"
             );
-            degraded_bus.emit(ShareDegraded {
-                shared_tree_id: OWNER_IDENTITY_SUBJECT.to_string(),
-                reason: ShareDegradedReason::OwnerRecoveryCodeNotShown,
+            degraded_bus.emit(Condition {
+                subject: OWNER_IDENTITY_SUBJECT.to_string(),
+                reason: ConditionKind::OwnerRecoveryCodeNotShown,
             });
         }
         Ok(key)
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn the_owner_key_is_minted_once_and_then_reloaded() {
         let creds = credentials();
-        let bus = DegradedSignalBus::new();
+        let bus = ConditionBus::new();
         let first = creds.owner_key(&bus).unwrap().public();
         assert_eq!(creds.owner_key(&bus).unwrap().public(), first);
     }
@@ -247,16 +247,16 @@ mod tests {
     #[test]
     fn minting_the_owner_key_discloses_that_its_recovery_code_went_unshown() {
         let creds = credentials();
-        let bus = DegradedSignalBus::new();
+        let bus = ConditionBus::new();
         let mut changes = bus.subscribe().changes;
 
         creds.owner_key(&bus).unwrap();
         creds.owner_key(&bus).unwrap();
 
-        let mut disclosures: Vec<ShareDegraded> = Vec::new();
+        let mut disclosures: Vec<Condition> = Vec::new();
         while let Ok(change) = changes.try_recv() {
             if let Some(event) = change.raised()
-                && matches!(event.reason, ShareDegradedReason::OwnerRecoveryCodeNotShown)
+                && matches!(event.reason, ConditionKind::OwnerRecoveryCodeNotShown)
             {
                 disclosures.push(event);
             }
@@ -266,7 +266,7 @@ mod tests {
             1,
             "the mint is disclosed once; reloading the same key discloses nothing new"
         );
-        assert_eq!(disclosures[0].shared_tree_id, OWNER_IDENTITY_SUBJECT);
+        assert_eq!(disclosures[0].subject, OWNER_IDENTITY_SUBJECT);
     }
 
     /// The code is show-once and has no surface, so the only safe thing to do
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn the_recovery_code_never_reaches_the_bus_or_a_log() {
         let creds = credentials();
-        let bus = DegradedSignalBus::new();
+        let bus = ConditionBus::new();
         let mut changes = bus.subscribe().changes;
         let key = creds.owner_key(&bus).unwrap();
 
@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(
             format!("{event:?}"),
             format!(
-                "ShareDegraded {{ shared_tree_id: {OWNER_IDENTITY_SUBJECT:?}, reason: \
+                "Condition {{ subject: {OWNER_IDENTITY_SUBJECT:?}, reason: \
                  OwnerRecoveryCodeNotShown }}"
             )
         );

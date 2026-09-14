@@ -48,6 +48,8 @@ use std::time::Duration;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
+use holon_api::Condition;
+use holon_api::ConditionKind;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
@@ -56,8 +58,6 @@ use holon_gpui::navigation_state::NavigationState;
 use holon_gpui::share_ui::TOAST_LINE;
 use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base_seeded;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
-use holon_loro::ShareDegraded;
-use holon_loro::ShareDegradedReason;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
@@ -241,9 +241,9 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
     // FIRST: the stack paints as many toasts as fit and counts the rest, so a
     // case raised last would sit in the overflow and be judged by nothing.
     let (unusable_path, unusable_why) = real_loader_refusal();
-    bus.emit(ShareDegraded {
-        shared_tree_id: UNUSABLE.into(),
-        reason: ShareDegradedReason::IntegrationSidecarUnusable {
+    bus.emit(Condition {
+        subject: UNUSABLE.into(),
+        reason: ConditionKind::IntegrationSidecarUnusable {
             provider: UNUSABLE.to_string(),
             installed_path: unusable_path.clone(),
             why: unusable_why.clone(),
@@ -253,9 +253,9 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
     // One refusal per connection, over the session's own bus, so the toasts are
     // built by the production bridge.
     for connection in CONNECTIONS {
-        bus.emit(ShareDegraded {
-            shared_tree_id: (*connection).into(),
-            reason: ShareDegradedReason::IntegrationNotEnabled {
+        bus.emit(Condition {
+            subject: (*connection).into(),
+            reason: ConditionKind::IntegrationNotEnabled {
                 integration: (*connection).to_string(),
                 installed_path: format!("{DIR}/{connection}.yaml"),
                 state_path: state_path_of(connection),

@@ -1275,9 +1275,9 @@ impl HeadlessFrontendComponent {
     /// The bus this session's production writers raise degraded conditions on.
     /// A windowed harness launches its window with THIS bus, or the overlay it
     /// paints is fed by a bus nothing production writes to.
-    pub fn degraded_bus(&self) -> Option<Arc<holon_loro::DegradedSignalBus>> {
+    pub fn degraded_bus(&self) -> Option<Arc<holon_api::ConditionBus>> {
         self.injector()
-            .try_resolve::<Arc<holon_loro::DegradedSignalBus>>()
+            .try_resolve::<Arc<holon_api::ConditionBus>>()
             .ok() // ALLOW(ok): optional DI service — absent when Loro is disabled
             .map(|bus| (*bus).clone())
     }
@@ -6974,7 +6974,7 @@ impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponen
     async fn raised_degraded_conditions(&self) -> Vec<String> {
         let Some(bus) = self
             .injector()
-            .optional_resolve_async::<Arc<holon_loro::DegradedSignalBus>>()
+            .optional_resolve_async::<Arc<holon_api::ConditionBus>>()
             .await
         else {
             return Vec::new();

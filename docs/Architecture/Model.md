@@ -182,7 +182,7 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     is the file telling the store what it says and `OpOrigin::Sync` is a peer's
     merged history, and refusing either would break the replica it came from.
     A refusal is always DISCLOSED (`EDIT_REFUSED_READ_ONLY_FORMAT` on the
-    degraded bus): an edit that silently lands only in the store is the failure
+    condition bus, below): an edit that silently lands only in the store is the failure
     mode this project ranks last. Pinned by
     `inv-read-only-home-refuses-writes` in the composed keystone, whose fixture
     seeds a `.cook` document, and end-to-end by
@@ -195,6 +195,46 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     document only through a write naming its root or one of its blocks, which
     is exactly what this invariant refuses — and a boot that skips a file's
     ingest loads it from that row rather than rebuilding it.
+
+## Conditions: how a degradation reaches the user (ADR 0035)
+
+Every abnormal state a user must know about is a **condition**, and there is one
+vocabulary for all of them
+([`holon-api::condition_bus`](../../crates/holon-api/src/condition_bus.rs),
+[`condition_profile`](../../crates/holon-api/src/condition_profile.rs)).
+
+- **A condition is always local.** It describes this process, now. It is not a
+  replica, so it has no base, never syncs, and is never persisted. Nothing
+  re-raises it at boot; whatever is still true raises itself again.
+- **Every condition is sticky, and names the moment it ends.** It is raised, it
+  stays in effect, and a named all-clear removes it. There is no transient
+  class: a transient emit is lost whenever it wins the race against the
+  subscriber, and the emitters that race hardest (boot DI, the detached vault
+  scan) are the ones whose failures matter most. A late subscriber is replayed
+  the conditions already in effect.
+- **The moment is typed, not prose.** `AllClear` is a `ClearingEvent`, a clean
+  ingest, a remedy applied, an elapsed duration, or `UntilRestart`. The last is
+  legal and disclosed: a condition true for the whole session should say so
+  rather than vanish and look resolved.
+- **How a condition is drawn is declared per kind, never per frontend.**
+  `ConditionKind::profile()` is a total match giving severity, label, placement
+  and the legal remedies, so a second frontend inherits them instead of
+  re-deriving them. A frontend with no surface for the declared placement falls
+  back to a toast and logs the substitution; it never drops the disclosure.
+- **A remedy is an operation.** `RemedySlot::Retry` carries an `OpId` from a
+  closed vocabulary, resolves to an `OperationIntent`, and travels the one
+  dispatch path (ADR 0024) — which is also what lets the keystone drive a remedy
+  with the existing driver.
+- **Two combinations are unrepresentable,** enforced at compile time because
+  every profile is a `const`: `Elapsed` on anything but `Severity::Info`, and
+  `Dismiss` where nothing else would ever clear the condition. Both hide a
+  degradation that is still true, which invariant 14 already calls the failure
+  mode this project ranks last.
+
+`holon-api` carries this vocabulary and must import neither a storage backend
+nor a frontend toolkit — the `api-storage-backend` and `api-frontend-dep`
+arch-lint rules. That is what keeps conditions usable in a configuration with
+no Turso.
 
 ## Page identity: name-chains derive only through page ancestors
 

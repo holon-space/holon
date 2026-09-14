@@ -126,9 +126,7 @@ async fn a_restart_clears_the_journal_and_discloses_it() {
     );
 
     // The disclosure reached the bus.
-    let bus = second
-        .injector
-        .resolve::<Arc<holon_loro::DegradedSignalBus>>();
+    let bus = second.injector.resolve::<Arc<holon_api::ConditionBus>>();
     // `subscribe` snapshots the conditions currently in effect, so a condition
     // raised during boot is still observable after it.
     let raised: Vec<String> = bus
@@ -140,7 +138,7 @@ async fn a_restart_clears_the_journal_and_discloses_it() {
     assert!(
         raised
             .iter()
-            .any(|k| k == holon_loro::ShareDegradedReason::UNDO_HISTORY_CLEARED_AT_BOOT),
+            .any(|k| k == holon_api::ConditionKind::UNDO_HISTORY_CLEARED_AT_BOOT),
         "the boot cleared the journal without disclosing it; a silent loss is exactly what the \
          error policy forbids. Conditions raised: {raised:?}"
     );

@@ -618,19 +618,19 @@ impl AliasRegistrar for LoroAliasRegistrar {
 }
 
 /// `ShareWritebackDisclosure` (Inc 1) that forwards a shared-subtree
-/// write-back gap to the `DegradedSignalBus`, so the frontend renders a
+/// write-back gap to the `ConditionBus`, so the frontend renders a
 /// degraded banner instead of the edit silently failing to reach disk. Lives
 /// in the wiring crate because it bridges the storage-agnostic port
-/// (holon-filesystem) to the concrete bus (holon-loro/holon).
-pub struct ShareDegradedDisclosure {
-    pub bus: Arc<holon_loro::DegradedSignalBus>,
+/// (holon-filesystem) to the concrete bus (holon-api).
+pub struct SharedSubtreeNotMaterializedDisclosure {
+    pub bus: Arc<holon_api::ConditionBus>,
 }
 
-impl holon_filesystem::ShareWritebackDisclosure for ShareDegradedDisclosure {
+impl holon_filesystem::ShareWritebackDisclosure for SharedSubtreeNotMaterializedDisclosure {
     fn shared_subtree_not_materialized(&self, shared_tree_id: &str, file: &Path) {
-        self.bus.emit(holon_loro::ShareDegraded {
-            shared_tree_id: shared_tree_id.to_string(),
-            reason: holon_loro::ShareDegradedReason::SharedSubtreeNotMaterialized {
+        self.bus.emit(holon_api::Condition {
+            subject: shared_tree_id.to_string(),
+            reason: holon_api::ConditionKind::SharedSubtreeNotMaterialized {
                 file: file.display().to_string(),
             },
         });
@@ -639,27 +639,27 @@ impl holon_filesystem::ShareWritebackDisclosure for ShareDegradedDisclosure {
 
 /// `WritebackDisclosure` that turns the write-back supervisor's give-up into
 /// the `WritebackDegraded` banner. Same bridging role as
-/// [`ShareDegradedDisclosure`]: the supervisor lives in holon-orgmode, which
+/// [`SharedSubtreeNotMaterializedDisclosure`]: the supervisor lives in holon-orgmode, which
 /// has no view of the concrete bus.
 pub struct WritebackDegradedDisclosure {
-    pub bus: Arc<holon_loro::DegradedSignalBus>,
+    pub bus: Arc<holon_api::ConditionBus>,
 }
 
 impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
     fn writeback_degraded(&self, detail: &str) {
-        self.bus.emit(holon_loro::ShareDegraded {
+        self.bus.emit(holon_api::Condition {
             // Not a share condition; the sentinel subject the
             // `WritebackDegraded` variant documents keeps one process-wide
             // banner instead of one per share.
-            shared_tree_id: "org-writeback".to_string(),
-            reason: holon_loro::ShareDegradedReason::WritebackDegraded(detail.to_string()),
+            subject: "org-writeback".to_string(),
+            reason: holon_api::ConditionKind::WritebackDegraded(detail.to_string()),
         });
     }
 
     fn ingest_refused(&self, path: &Path, format: &str, reason: &str) {
-        self.bus.emit(holon_loro::ShareDegraded {
-            shared_tree_id: ingest_subject(path),
-            reason: holon_loro::ShareDegradedReason::VaultIngestFailed {
+        self.bus.emit(holon_api::Condition {
+            subject: ingest_subject(path),
+            reason: holon_api::ConditionKind::VaultIngestFailed {
                 format: format.to_string(),
                 reason: reason.to_string(),
             },
@@ -668,10 +668,10 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
 
     fn ingest_recovered(&self, path: &Path) {
         for kind in [
-            holon_loro::ShareDegradedReason::VAULT_INGEST_FAILED,
-            holon_loro::ShareDegradedReason::VAULT_FILE_EMPTIED,
+            holon_api::ConditionKind::VAULT_INGEST_FAILED,
+            holon_api::ConditionKind::VAULT_FILE_EMPTIED,
         ] {
-            self.bus.clear(&holon_loro::DegradedConditionKey {
+            self.bus.clear(&holon_api::ConditionKey {
                 subject: ingest_subject(path),
                 kind,
             });
@@ -679,9 +679,9 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
     }
 
     fn vault_file_emptied(&self, path: &Path) {
-        self.bus.emit(holon_loro::ShareDegraded {
-            shared_tree_id: ingest_subject(path),
-            reason: holon_loro::ShareDegradedReason::VaultFileEmptied,
+        self.bus.emit(holon_api::Condition {
+            subject: ingest_subject(path),
+            reason: holon_api::ConditionKind::VaultFileEmptied,
         });
     }
 }

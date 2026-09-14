@@ -6,13 +6,13 @@ use fluxdi::Injector;
 use fluxdi::Module;
 use fluxdi::Provider;
 use fluxdi::Shared;
+use holon_api::Condition;
+use holon_api::ConditionBus;
+use holon_api::ConditionKind;
 use holon_api::EntityName;
 use holon_core::OperationProvider;
 use holon_core::SyncGate;
 use holon_core::SyncTokenStore;
-use holon_loro::DegradedSignalBus;
-use holon_loro::ShareDegraded;
-use holon_loro::ShareDegradedReason;
 use holon_mcp_client::CredentialRoot;
 use holon_mcp_client::IgnoredReason;
 use holon_mcp_client::IgnoredSidecar;
@@ -161,10 +161,10 @@ fn boot_cause(error: &anyhow::Error) -> String {
     }
 }
 
-fn disclose_connect_failure(name: &str, error: &anyhow::Error, bus: &DegradedSignalBus) {
-    bus.emit(ShareDegraded {
-        shared_tree_id: name.to_string(),
-        reason: ShareDegradedReason::IntegrationConnectFailed {
+fn disclose_connect_failure(name: &str, error: &anyhow::Error, bus: &ConditionBus) {
+    bus.emit(Condition {
+        subject: name.to_string(),
+        reason: ConditionKind::IntegrationConnectFailed {
             integration: name.to_string(),
             error: format!("{error:#}"),
         },
@@ -185,11 +185,11 @@ fn disclose_unusable_config(
     name: &str,
     origin: Option<&str>,
     error: &anyhow::Error,
-    bus: &DegradedSignalBus,
+    bus: &ConditionBus,
 ) {
-    bus.emit(ShareDegraded {
-        shared_tree_id: name.to_string(),
-        reason: ShareDegradedReason::IntegrationSidecarUnusable {
+    bus.emit(Condition {
+        subject: name.to_string(),
+        reason: ConditionKind::IntegrationSidecarUnusable {
             provider: name.to_string(),
             installed_path: origin.unwrap_or("(bundled with this build)").to_string(),
             why: format!("{error:#}"),
@@ -199,10 +199,10 @@ fn disclose_unusable_config(
 
 /// Disclose that `name` is connectable but waiting on an OAuth grant — same
 /// blank-page consequence as a failed connect, different remedy.
-fn disclose_needs_auth(name: &str, auth_url: &str, bus: &DegradedSignalBus) {
-    bus.emit(ShareDegraded {
-        shared_tree_id: name.to_string(),
-        reason: ShareDegradedReason::IntegrationNeedsAuth {
+fn disclose_needs_auth(name: &str, auth_url: &str, bus: &ConditionBus) {
+    bus.emit(Condition {
+        subject: name.to_string(),
+        reason: ConditionKind::IntegrationNeedsAuth {
             integration: name.to_string(),
             auth_url: auth_url.to_string(),
         },
@@ -212,10 +212,10 @@ fn disclose_needs_auth(name: &str, auth_url: &str, bus: &DegradedSignalBus) {
 /// Disclose that an installed sidecar was ignored in favour of the bundled
 /// one. The integration works, so nothing else in the boot path would ever say
 /// that the file on disk is not what is running.
-fn disclose_superseded_sidecar(s: &SupersededSidecar, bus: &DegradedSignalBus) {
-    bus.emit(ShareDegraded {
-        shared_tree_id: s.provider.clone(),
-        reason: ShareDegradedReason::IntegrationSidecarSuperseded {
+fn disclose_superseded_sidecar(s: &SupersededSidecar, bus: &ConditionBus) {
+    bus.emit(Condition {
+        subject: s.provider.clone(),
+        reason: ConditionKind::IntegrationSidecarSuperseded {
             integration: s.provider.clone(),
             installed_path: s.installed_path.display().to_string(),
             bundled_source: s.bundled_source.to_string(),
@@ -228,28 +228,28 @@ fn disclose_superseded_sidecar(s: &SupersededSidecar, bus: &DegradedSignalBus) {
 /// render blank exactly like a failed connect, but nothing else in the boot
 /// path would say why — the file is present, so from the user's side it looks
 /// like the integration should be running.
-fn disclose_ignored_sidecar(s: &IgnoredSidecar, bus: &DegradedSignalBus) {
+fn disclose_ignored_sidecar(s: &IgnoredSidecar, bus: &ConditionBus) {
     let reason = match &s.reason {
         IgnoredReason::NotEnabled {
             state_path, remedy, ..
-        } => ShareDegradedReason::IntegrationNotEnabled {
+        } => ConditionKind::IntegrationNotEnabled {
             integration: s.provider.clone(),
             installed_path: s.installed_path.display().to_string(),
             state_path: state_path.display().to_string(),
             remedy: remedy.clone(),
         },
-        IgnoredReason::NotBundled => ShareDegradedReason::IntegrationSidecarNotBundled {
+        IgnoredReason::NotBundled => ConditionKind::IntegrationSidecarNotBundled {
             provider: s.provider.clone(),
             installed_path: s.installed_path.display().to_string(),
         },
-        IgnoredReason::Unusable { why } => ShareDegradedReason::IntegrationSidecarUnusable {
+        IgnoredReason::Unusable { why } => ConditionKind::IntegrationSidecarUnusable {
             provider: s.provider.clone(),
             installed_path: s.installed_path.display().to_string(),
             why: why.clone(),
         },
     };
-    bus.emit(ShareDegraded {
-        shared_tree_id: s.provider.clone(),
+    bus.emit(Condition {
+        subject: s.provider.clone(),
         reason,
     });
 }
@@ -306,10 +306,10 @@ fn log_inert_integration(i: &InertIntegration) {
     );
 }
 
-fn disclose_inert_integration(i: &InertIntegration, bus: &DegradedSignalBus) {
-    bus.emit(ShareDegraded {
-        shared_tree_id: i.provider.clone(),
-        reason: ShareDegradedReason::IntegrationConnectFailed {
+fn disclose_inert_integration(i: &InertIntegration, bus: &ConditionBus) {
+    bus.emit(Condition {
+        subject: i.provider.clone(),
+        reason: ConditionKind::IntegrationConnectFailed {
             integration: i.provider.clone(),
             error: format!("{} Remedy: {}", i.reason, i.remedy),
         },
@@ -553,12 +553,12 @@ impl Module for McpIntegrationsModule {
                 // registers integrations but no bus can never tell the user
                 // anything is wrong, so its absence is a wiring bug, not a mode
                 // — fail the boot rather than ship a mute build.
-                let degraded_bus: Arc<DegradedSignalBus> = (*resolver
-                    .try_resolve_async::<Arc<DegradedSignalBus>>()
+                let degraded_bus: Arc<ConditionBus> = (*resolver
+                    .try_resolve_async::<Arc<ConditionBus>>()
                     .await
                     .unwrap_or_else(|e| {
                         panic!(
-                            "[McpIntegrationsModule] No DegradedSignalBus in this container ({e}) \
+                            "[McpIntegrationsModule] No ConditionBus in this container ({e}) \
                              — integration connect failures would have no disclosure channel at \
                              all and their pages would render blank. Register it in the \
                              composition root (holon-app `add_frontend`)."
@@ -1030,8 +1030,8 @@ impl OperationProvider for EmptyOperationProvider {
 
 #[cfg(test)]
 mod tests {
-    use holon_loro::DegradedSignalBus;
-    use holon_loro::ShareDegradedReason;
+    use holon_api::ConditionBus;
+    use holon_api::ConditionKind;
 
     use super::*;
 
@@ -1052,14 +1052,14 @@ mod tests {
 
         // Disclose BEFORE subscribing — the registry factory runs in boot DI,
         // the only consumer subscribes at window launch.
-        let bus = DegradedSignalBus::new();
+        let bus = ConditionBus::new();
         disclose_connect_failure("todoist", &err, &bus);
 
         let mut current = bus.subscribe().current;
         assert_eq!(current.len(), 1);
         let ev = current.remove(0);
-        assert_eq!(ev.shared_tree_id, "todoist");
-        let ShareDegradedReason::IntegrationConnectFailed { integration, error } = ev.reason else {
+        assert_eq!(ev.subject, "todoist");
+        let ConditionKind::IntegrationConnectFailed { integration, error } = ev.reason else {
             panic!("expected IntegrationConnectFailed, got {:?}", ev.reason);
         };
         assert_eq!(integration, "todoist");
@@ -1103,14 +1103,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn pending_oauth_is_disclosed_on_the_degraded_bus() {
-        let bus = DegradedSignalBus::new();
+        let bus = ConditionBus::new();
         disclose_needs_auth("linear", "https://linear.app/oauth/authorize", &bus);
 
         let mut current = bus.subscribe().current;
         assert_eq!(current.len(), 1);
         let ev = current.remove(0);
-        assert_eq!(ev.shared_tree_id, "linear");
-        let ShareDegradedReason::IntegrationNeedsAuth {
+        assert_eq!(ev.subject, "linear");
+        let ConditionKind::IntegrationNeedsAuth {
             integration,
             auth_url,
         } = ev.reason

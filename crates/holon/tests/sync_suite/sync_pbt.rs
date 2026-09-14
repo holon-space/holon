@@ -192,12 +192,12 @@ mod tests {
         use holon_api::InlineMark;
         use holon_api::StorageEntity;
         use holon_api::Value;
+        use holon_api::condition_bus::Condition;
+        use holon_api::condition_bus::ConditionBus;
+        use holon_api::condition_bus::ConditionChange;
+        use holon_api::condition_bus::ConditionKind;
         use holon_core::OperationProvider;
         use holon_loro::LoroBlockOperations;
-        use holon_loro::degraded_signal_bus::DegradedChange;
-        use holon_loro::degraded_signal_bus::DegradedSignalBus;
-        use holon_loro::degraded_signal_bus::ShareDegraded;
-        use holon_loro::degraded_signal_bus::ShareDegradedReason;
         use holon_loro::device_key_store::load_or_create_device_key;
         use holon_loro::iroh_advertiser::IrohAdvertiser;
         use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
@@ -389,7 +389,7 @@ mod tests {
             }
         }
 
-        async fn backend_fresh(dir_path: &Path, bus: Arc<DegradedSignalBus>) -> Peer {
+        async fn backend_fresh(dir_path: &Path, bus: Arc<ConditionBus>) -> Peer {
             let store = Arc::new(RwLock::new(LoroDocumentStore::new(dir_path.to_path_buf())));
             let snapshot_store = Arc::new(SharedSnapshotStore::new(
                 dir_path.to_path_buf(),
@@ -421,7 +421,7 @@ mod tests {
             Peer { be, store }
         }
 
-        async fn backend_at(dir_path: &Path, bus: Arc<DegradedSignalBus>) -> Peer {
+        async fn backend_at(dir_path: &Path, bus: Arc<ConditionBus>) -> Peer {
             let peer = backend_fresh(dir_path, bus).await;
             let be = &peer.be;
             let collab = be.test_global_doc().await;
@@ -434,9 +434,9 @@ mod tests {
 
         /// Initial backend — creates a fresh `TempDir`. Skips
         /// rehydration (nothing to rehydrate on a fresh dir).
-        async fn backend() -> (Peer, Arc<DegradedSignalBus>, TempDir) {
+        async fn backend() -> (Peer, Arc<ConditionBus>, TempDir) {
             let dir = TempDir::new().unwrap();
-            let bus = Arc::new(DegradedSignalBus::new());
+            let bus = Arc::new(ConditionBus::new());
             let peer = backend_fresh(dir.path(), bus.clone()).await;
             (peer, bus, dir)
         }
@@ -673,10 +673,10 @@ mod tests {
             false
         }
 
-        /// Drain any queued `ShareDegraded` events from a receiver
+        /// Drain any queued `Condition` events from a receiver
         /// without blocking. Used between actions to observe which
         /// degraded signals fired.
-        fn drain_bus(rx: &mut broadcast::Receiver<DegradedChange>) -> Vec<ShareDegraded> {
+        fn drain_bus(rx: &mut broadcast::Receiver<ConditionChange>) -> Vec<Condition> {
             let mut out = Vec::new();
             while let Ok(change) = rx.try_recv() {
                 if let Some(ev) = change.raised() {
@@ -1469,7 +1469,7 @@ mod tests {
             let evs = drain_bus(&mut rx_a);
             let load_failures = evs
                 .iter()
-                .filter(|e| matches!(e.reason, ShareDegradedReason::SnapshotLoadFailed(_)))
+                .filter(|e| matches!(e.reason, ConditionKind::SnapshotLoadFailed(_)))
                 .count();
             assert!(
                 load_failures >= expected_load_failures_on_a,
@@ -1896,7 +1896,7 @@ mod tests {
             use holon_sharing::types::UnverifiedAuthority;
 
             let dir_a = TempDir::new().unwrap();
-            let bus_a = Arc::new(DegradedSignalBus::new());
+            let bus_a = Arc::new(ConditionBus::new());
             let a = backend_fresh(dir_a.path(), bus_a.clone()).await;
             seed(&a, "root-a", None, "root-a").await;
             seed(&a, "p1", Some("root-a"), "Parent one").await;
@@ -2292,7 +2292,7 @@ mod tests {
         /// and what base it carries, so the answer is measured, not inferred.
         async fn run_empty_receiver_bootstrap() -> (Vec<String>, Vec<String>, bool, String) {
             let dir_a = TempDir::new().unwrap();
-            let bus_a = Arc::new(DegradedSignalBus::new());
+            let bus_a = Arc::new(ConditionBus::new());
             let a = backend_fresh(dir_a.path(), bus_a.clone()).await;
             seed(&a, "root-a", None, "root-a").await;
             seed(&a, "p1", Some("root-a"), "Parent one").await;

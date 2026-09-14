@@ -420,8 +420,7 @@ impl Module for LoroModule {
             // The projection's disclosure channel: a Loro→SQL reconcile that
             // will not converge leaves the UI reading stale rows, so it becomes
             // a banner rather than a log line.
-            let degraded =
-                resolver.resolve::<Arc<holon_loro::degraded_signal_bus::DegradedSignalBus>>();
+            let degraded = resolver.resolve::<Arc<holon_api::condition_bus::ConditionBus>>();
             let controller = LoroSyncController::new(projection, (*degraded).clone());
 
             // Phase 4: resolve the shared convergent block feed (built once in
@@ -501,19 +500,19 @@ fn register_subtree_share(injector: &Injector) {
         let key = resolver.resolve::<Arc<SecretKey>>();
         // The bus is where a BEARER-ticket admission is disclosed to the user
         // (ADR 0028 R5 stopgap); without it the advertiser can only log.
-        let bus = resolver.resolve::<Arc<holon_loro::degraded_signal_bus::DegradedSignalBus>>();
+        let bus = resolver.resolve::<Arc<holon_api::condition_bus::ConditionBus>>();
         Shared::new(Arc::new(
             IrohAdvertiser::new_with_key((**key).clone()).with_degraded_bus((*bus).clone()),
         ))
     }));
-    // `Arc<DegradedSignalBus>` is NOT registered here. Disclosure must exist in
+    // `Arc<ConditionBus>` is NOT registered here. Disclosure must exist in
     // every container, not only the Loro one, so the composition root
     // (`holon-app`'s `add_frontend`) owns it; resolving it below therefore also
     // asserts this module was configured by a root that provides it.
     injector.provide::<Arc<holon_loro::shared_snapshot_store::SharedSnapshotStore>>(
         Provider::root(|resolver| {
             let config = resolver.resolve::<LoroConfig>();
-            let bus = resolver.resolve::<Arc<holon_loro::degraded_signal_bus::DegradedSignalBus>>();
+            let bus = resolver.resolve::<Arc<holon_api::condition_bus::ConditionBus>>();
             Shared::new(Arc::new(
                 holon_loro::shared_snapshot_store::SharedSnapshotStore::new(
                     config.storage_dir.clone(),
@@ -529,7 +528,7 @@ fn register_subtree_share(injector: &Injector) {
             resolver.resolve::<Arc<holon_loro::shared_snapshot_store::SharedSnapshotStore>>();
         let manager = resolver.resolve::<Arc<SharedTreeSyncManager>>();
         let advertiser = resolver.resolve::<Arc<IrohAdvertiser>>();
-        let bus = resolver.resolve::<Arc<holon_loro::degraded_signal_bus::DegradedSignalBus>>();
+        let bus = resolver.resolve::<Arc<holon_api::condition_bus::ConditionBus>>();
         let key = resolver.resolve::<Arc<SecretKey>>();
         let store_arc = Arc::new(RwLock::new((*doc_store).clone()));
 
@@ -600,7 +599,7 @@ fn register_subtree_share(injector: &Injector) {
         move |resolver| {
             let doc_store = resolver.resolve::<LoroDocumentStore>();
             let advertiser = resolver.resolve::<Arc<IrohAdvertiser>>();
-            let bus = resolver.resolve::<Arc<holon_loro::degraded_signal_bus::DegradedSignalBus>>();
+            let bus = resolver.resolve::<Arc<holon_api::condition_bus::ConditionBus>>();
             let ordering_injector = ordering_injector.clone();
             let ordering: holon_loro::device_pairing_op::OrderingResolver = Arc::new(move || {
                 let injector = ordering_injector.clone();

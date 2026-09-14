@@ -17,6 +17,10 @@ use holon_api::EntityUri;
 use holon_api::OperationDescriptor;
 use holon_api::StorageEntity;
 use holon_api::Value;
+use holon_api::condition_bus::Condition;
+use holon_api::condition_bus::ConditionBus;
+use holon_api::condition_bus::ConditionKey;
+use holon_api::condition_bus::ConditionKind;
 use holon_api::sharing::Capabilities;
 use holon_core::DownstreamProjection;
 use holon_core::MaybeSendSync;
@@ -41,10 +45,6 @@ use crate::debounced_commit_worker::DebouncedCommitWorkerHandle;
 use crate::debounced_commit_worker::any_commit;
 use crate::debounced_commit_worker::local_only;
 use crate::debounced_commit_worker::{self};
-use crate::degraded_signal_bus::DegradedConditionKey;
-use crate::degraded_signal_bus::DegradedSignalBus;
-use crate::degraded_signal_bus::ShareDegraded;
-use crate::degraded_signal_bus::ShareDegradedReason;
 use crate::iroh_advertiser::ALPN_PREFIX;
 use crate::iroh_advertiser::IrohAdvertiser;
 use crate::iroh_advertiser::OnPeerConnected;
@@ -232,7 +232,7 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(150);
 
 fn spawn_save_worker(
     store: Arc<SharedSnapshotStore>,
-    bus: Arc<DegradedSignalBus>,
+    bus: Arc<ConditionBus>,
     shared_tree_id: String,
     doc: Arc<LoroDoc>,
 ) -> SaveWorker {
@@ -256,9 +256,9 @@ fn spawn_save_worker(
                     // `Err` return also surfaces in the worker's
                     // tracing::error so both the bus-listener and the
                     // operator log the same failure — no swallowing.
-                    bus.emit(ShareDegraded {
-                        shared_tree_id: id.clone(),
-                        reason: ShareDegradedReason::SnapshotSaveFailed(format!("{e:#}")),
+                    bus.emit(Condition {
+                        subject: id.clone(),
+                        reason: ConditionKind::SnapshotSaveFailed(format!("{e:#}")),
                     });
                     return Err(Box::<dyn std::error::Error + Send + Sync>::from(format!(
                         "snapshot save for {id} failed: {e:#}"
@@ -266,9 +266,9 @@ fn spawn_save_worker(
                 }
                 // The save condition's all-clear: the snapshot is on disk, so a
                 // banner from a previous failure is no longer true.
-                bus.clear(&DegradedConditionKey {
+                bus.clear(&ConditionKey {
                     subject: id.clone(),
-                    kind: ShareDegradedReason::SNAPSHOT_SAVE_FAILED,
+                    kind: ConditionKind::SNAPSHOT_SAVE_FAILED,
                 });
                 Ok(())
             }
@@ -286,7 +286,7 @@ pub struct LoroShareBackend {
     snapshot_store: Arc<SharedSnapshotStore>,
     manager: Arc<SharedTreeSyncManager>,
     advertiser: Arc<IrohAdvertiser>,
-    degraded_bus: Arc<DegradedSignalBus>,
+    degraded_bus: Arc<ConditionBus>,
     device_key: SecretKey,
     /// Handle to the SQL `block` table. Used to project mount nodes into
     /// Block rows after `accept_shared_subtree` / `rehydrate_shared_trees`
@@ -436,7 +436,7 @@ const PROJECTION_DEBOUNCE: Duration = Duration::from_millis(150);
 fn spawn_projection_worker(
     doc: Arc<LoroDoc>,
     sql_ops: Arc<dyn OriginTaggedWrites>,
-    bus: Arc<DegradedSignalBus>,
+    bus: Arc<ConditionBus>,
     mount_block_uri: String,
     shared_tree_id: String,
     global_doc: Arc<crate::loro_document::LoroDocument>,
@@ -512,9 +512,9 @@ fn spawn_projection_worker(
                             ))
                         })?
                     {
-                        bus.emit(ShareDegraded {
-                            shared_tree_id: stid.clone(),
-                            reason: ShareDegradedReason::ForeignIdCollision(bad.clone()),
+                        bus.emit(Condition {
+                            subject: stid.clone(),
+                            reason: ConditionKind::ForeignIdCollision(bad.clone()),
                         });
                         return Err(Box::<dyn std::error::Error + Send + Sync>::from(format!(
                             "shared doc {stid} projection refused: block id {bad:?} collides with \
@@ -546,9 +546,9 @@ fn spawn_projection_worker(
                         // next commit retries. Mirrors the save worker's
                         // fail-loud contract; the generic worker loop also
                         // logs the `Err`.
-                        bus.emit(ShareDegraded {
-                            shared_tree_id: stid.clone(),
-                            reason: ShareDegradedReason::SqlProjectionFailed(format!("{e:#}")),
+                        bus.emit(Condition {
+                            subject: stid.clone(),
+                            reason: ConditionKind::SqlProjectionFailed(format!("{e:#}")),
                         });
                         return Err(Box::<dyn std::error::Error + Send + Sync>::from(format!(
                             "shared doc projection for {stid} failed: {e:#}"
@@ -559,10 +559,10 @@ fn spawn_projection_worker(
                 // Reaching here means the collision guard passed AND SQL took
                 // the batch — the all-clear for both projection conditions.
                 for kind in [
-                    ShareDegradedReason::SQL_PROJECTION_FAILED,
-                    ShareDegradedReason::FOREIGN_ID_COLLISION,
+                    ConditionKind::SQL_PROJECTION_FAILED,
+                    ConditionKind::FOREIGN_ID_COLLISION,
                 ] {
-                    bus.clear(&DegradedConditionKey {
+                    bus.clear(&ConditionKey {
                         subject: stid.clone(),
                         kind,
                     });
@@ -638,7 +638,7 @@ impl LoroShareBackend {
         snapshot_store: Arc<SharedSnapshotStore>,
         manager: Arc<SharedTreeSyncManager>,
         advertiser: Arc<IrohAdvertiser>,
-        degraded_bus: Arc<DegradedSignalBus>,
+        degraded_bus: Arc<ConditionBus>,
         device_key: SecretKey,
         credentials: Arc<ShareCredentials>,
     ) -> Arc<Self> {
@@ -667,7 +667,7 @@ impl LoroShareBackend {
         snapshot_store: Arc<SharedSnapshotStore>,
         manager: Arc<SharedTreeSyncManager>,
         advertiser: Arc<IrohAdvertiser>,
-        degraded_bus: Arc<DegradedSignalBus>,
+        degraded_bus: Arc<ConditionBus>,
         device_key: SecretKey,
         credentials: Arc<ShareCredentials>,
         sql_ops: Option<Arc<dyn OriginTaggedWrites>>,
@@ -796,9 +796,9 @@ impl LoroShareBackend {
                     error = %e,
                     "[share] flush_all: save failed"
                 );
-                self.degraded_bus.emit(ShareDegraded {
-                    shared_tree_id: id,
-                    reason: ShareDegradedReason::SnapshotSaveFailed(format!("{e:#}")),
+                self.degraded_bus.emit(Condition {
+                    subject: id,
+                    reason: ConditionKind::SnapshotSaveFailed(format!("{e:#}")),
                 });
             }
         }
@@ -846,7 +846,7 @@ impl LoroShareBackend {
     /// Degraded-mode bus accessor — rehydration uses this to emit
     /// `RehydrationFailed` for shares that load successfully but fail
     /// to re-advertise.
-    pub fn degraded_bus(&self) -> &Arc<DegradedSignalBus> {
+    pub fn degraded_bus(&self) -> &Arc<ConditionBus> {
         &self.degraded_bus
     }
 
@@ -1150,9 +1150,9 @@ impl LoroShareBackend {
                 error = %e,
                 "[share] save_peers failed"
             );
-            self.degraded_bus.emit(ShareDegraded {
-                shared_tree_id: shared_tree_id.to_string(),
-                reason: ShareDegradedReason::SnapshotSaveFailed(format!(
+            self.degraded_bus.emit(Condition {
+                subject: shared_tree_id.to_string(),
+                reason: ConditionKind::SnapshotSaveFailed(format!(
                     "peers sidecar save failed: {e:#}"
                 )),
             });
@@ -1438,11 +1438,9 @@ impl LoroShareBackend {
         // never advertise ops we could lose. Complements (does not
         // replace) the debounced save worker.
         if let Err(e) = self.snapshot_store.save(shared_tree_id, &doc) {
-            self.degraded_bus.emit(ShareDegraded {
-                shared_tree_id: shared_tree_id.to_string(),
-                reason: ShareDegradedReason::SnapshotSaveFailed(format!(
-                    "pre-push save failed: {e:#}"
-                )),
+            self.degraded_bus.emit(Condition {
+                subject: shared_tree_id.to_string(),
+                reason: ConditionKind::SnapshotSaveFailed(format!("pre-push save failed: {e:#}")),
             });
             return Err(err(format!(
                 "pre-push snapshot save failed; refusing to push un-persisted ops: {e:#}"
@@ -1923,9 +1921,9 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     .snapshot_store
                     .save(&shared_tree_id, &extracted.shared_doc)
                 {
-                    self.degraded_bus.emit(ShareDegraded {
-                        shared_tree_id: shared_tree_id.clone(),
-                        reason: ShareDegradedReason::SnapshotSaveFailed(format!("{e:#}")),
+                    self.degraded_bus.emit(Condition {
+                        subject: shared_tree_id.clone(),
+                        reason: ConditionKind::SnapshotSaveFailed(format!("{e:#}")),
                     });
                     // Source doc is still untouched — drop the extracted
                     // doc and bail out. No rollback needed.
@@ -1959,9 +1957,9 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // controller's next save cycle reconciles things. Return Err
         // because the caller didn't get a ticket — the op failed.
         if let Err(e) = self.store.read().await.save_all().await {
-            self.degraded_bus.emit(ShareDegraded {
-                shared_tree_id: shared_tree_id.clone(),
-                reason: ShareDegradedReason::SnapshotSaveFailed(format!(
+            self.degraded_bus.emit(Condition {
+                subject: shared_tree_id.clone(),
+                reason: ConditionKind::SnapshotSaveFailed(format!(
                     "global doc save_all failed after fork-prune: {e:#}"
                 )),
             });
@@ -2207,9 +2205,9 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // the global tree. If save fails, no mount node has been
         // created — drop the doc and return Err.
         if let Err(e) = self.snapshot_store.save(&shared_tree_id, &shared_arc) {
-            self.degraded_bus.emit(ShareDegraded {
-                shared_tree_id: shared_tree_id.clone(),
-                reason: ShareDegradedReason::SnapshotSaveFailed(format!("{e:#}")),
+            self.degraded_bus.emit(Condition {
+                subject: shared_tree_id.clone(),
+                reason: ConditionKind::SnapshotSaveFailed(format!("{e:#}")),
             });
             return Err(err(format!(
                 "initial snapshot save failed after sync; global tree unchanged: {e:#}"
@@ -2317,9 +2315,9 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
 
         // Flush the global doc so the mount node is durable.
         if let Err(e) = self.store.read().await.save_all().await {
-            self.degraded_bus.emit(ShareDegraded {
-                shared_tree_id: shared_tree_id.clone(),
-                reason: ShareDegradedReason::SnapshotSaveFailed(format!(
+            self.degraded_bus.emit(Condition {
+                subject: shared_tree_id.clone(),
+                reason: ConditionKind::SnapshotSaveFailed(format!(
                     "global doc save_all failed after accept: {e:#}"
                 )),
             });
@@ -2683,11 +2681,9 @@ pub async fn rehydrate_shared_trees(
                     error = %e,
                     "[share] bump peer-id generation during rehydrate failed"
                 );
-                backend.degraded_bus.emit(ShareDegraded {
-                    shared_tree_id: shared_tree_id.clone(),
-                    reason: ShareDegradedReason::RehydrationFailed(format!(
-                        "next_generation: {e:#}"
-                    )),
+                backend.degraded_bus.emit(Condition {
+                    subject: shared_tree_id.clone(),
+                    reason: ConditionKind::RehydrationFailed(format!("next_generation: {e:#}")),
                 });
                 continue;
             }
@@ -2699,9 +2695,9 @@ pub async fn rehydrate_shared_trees(
                 error = %e,
                 "[share] set_peer_id during rehydrate failed"
             );
-            backend.degraded_bus.emit(ShareDegraded {
-                shared_tree_id: shared_tree_id.clone(),
-                reason: ShareDegradedReason::RehydrationFailed(format!("set_peer_id: {e:#}")),
+            backend.degraded_bus.emit(Condition {
+                subject: shared_tree_id.clone(),
+                reason: ConditionKind::RehydrationFailed(format!("set_peer_id: {e:#}")),
             });
             continue;
         }
@@ -2729,9 +2725,9 @@ pub async fn rehydrate_shared_trees(
                     error = %e,
                     "[share] load_peers during rehydrate failed"
                 );
-                backend.degraded_bus.emit(ShareDegraded {
-                    shared_tree_id: shared_tree_id.clone(),
-                    reason: ShareDegradedReason::RehydrationFailed(format!("load_peers: {e:#}")),
+                backend.degraded_bus.emit(Condition {
+                    subject: shared_tree_id.clone(),
+                    reason: ConditionKind::RehydrationFailed(format!("load_peers: {e:#}")),
                 });
             }
         }
@@ -2750,9 +2746,9 @@ pub async fn rehydrate_shared_trees(
                     error = %e,
                     "[share] roster could not be rebuilt; refusing to advertise this share"
                 );
-                backend.degraded_bus.emit(ShareDegraded {
-                    shared_tree_id: shared_tree_id.clone(),
-                    reason: ShareDegradedReason::RehydrationFailed(format!(
+                backend.degraded_bus.emit(Condition {
+                    subject: shared_tree_id.clone(),
+                    reason: ConditionKind::RehydrationFailed(format!(
                         "roster unavailable, share not advertised: {e:#}"
                     )),
                 });
@@ -2784,11 +2780,9 @@ pub async fn rehydrate_shared_trees(
                         error = %e,
                         "[share] advertiser start_share failed during rehydrate"
                     );
-                    backend.degraded_bus.emit(ShareDegraded {
-                        shared_tree_id: shared_tree_id.clone(),
-                        reason: ShareDegradedReason::RehydrationFailed(format!(
-                            "advertiser: {e:#}"
-                        )),
+                    backend.degraded_bus.emit(Condition {
+                        subject: shared_tree_id.clone(),
+                        reason: ConditionKind::RehydrationFailed(format!("advertiser: {e:#}")),
                     });
                     // Intentionally continue — the share is usable for
                     // pulls even without advertising.
@@ -3006,7 +3000,7 @@ mod tests {
         credentials: Arc<ShareCredentials>,
     ) -> Arc<LoroShareBackend> {
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(dir_path.to_path_buf())));
-        let bus = Arc::new(DegradedSignalBus::new());
+        let bus = Arc::new(ConditionBus::new());
         let snapshot_store = Arc::new(SharedSnapshotStore::new(
             dir_path.to_path_buf(),
             bus.clone(),
@@ -4235,7 +4229,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn save_worker_coalesces_burst() {
         let dir = TempDir::new().unwrap();
-        let bus = Arc::new(DegradedSignalBus::new());
+        let bus = Arc::new(ConditionBus::new());
         let snapshot_store = Arc::new(SharedSnapshotStore::new(
             dir.path().to_path_buf(),
             bus.clone(),
@@ -4285,7 +4279,7 @@ mod tests {
         dir: &TempDir,
         stall: Duration,
     ) -> (Arc<SharedSnapshotStore>, Arc<LoroDoc>, SaveWorker) {
-        let bus = Arc::new(DegradedSignalBus::new());
+        let bus = Arc::new(ConditionBus::new());
         let store = Arc::new(SharedSnapshotStore::new(
             dir.path().to_path_buf(),
             bus.clone(),
@@ -4950,8 +4944,8 @@ mod tests {
         let mut disclosed = Vec::new();
         while let Ok(change) = changes.try_recv() {
             if let Some(event) = change.raised()
-                && let ShareDegradedReason::RehydrationFailed(detail) = &event.reason
-                && event.shared_tree_id == shared_tree_id
+                && let ConditionKind::RehydrationFailed(detail) = &event.reason
+                && event.subject == shared_tree_id
             {
                 disclosed.push(detail.clone());
             }
@@ -4984,11 +4978,11 @@ mod tests {
         let mut disclosures = 0usize;
         while let Ok(change) = changes.try_recv() {
             if let Some(event) = change.raised()
-                && matches!(event.reason, ShareDegradedReason::OwnerRecoveryCodeNotShown)
+                && matches!(event.reason, ConditionKind::OwnerRecoveryCodeNotShown)
             {
                 assert_eq!(
-                    event.shared_tree_id,
-                    crate::degraded_signal_bus::OWNER_IDENTITY_SUBJECT
+                    event.subject,
+                    holon_api::condition_bus::OWNER_IDENTITY_SUBJECT
                 );
                 disclosures += 1;
             }
@@ -5406,7 +5400,7 @@ mod tests {
     }
 
     /// chmod the `shares/` directory to read-only, commit an edit,
-    /// and assert the worker emits `ShareDegraded::SnapshotSaveFailed`
+    /// and assert the worker emits `Condition::SnapshotSaveFailed`
     /// while keeping the in-memory doc's edit intact.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5414,7 +5408,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = TempDir::new().unwrap();
-        let bus = Arc::new(DegradedSignalBus::new());
+        let bus = Arc::new(ConditionBus::new());
         let snapshot_store = Arc::new(SharedSnapshotStore::new(
             dir.path().to_path_buf(),
             bus.clone(),
@@ -5451,13 +5445,10 @@ mod tests {
         let ev = match tokio::time::timeout_at(deadline, rx.recv()).await {
             Ok(Ok(change)) => change.raised().expect("expected Raised"),
             Ok(Err(_)) => panic!("bus closed unexpectedly"),
-            Err(_) => panic!("no ShareDegraded event within 1s"),
+            Err(_) => panic!("no Condition event within 1s"),
         };
-        assert_eq!(ev.shared_tree_id, "readonly");
-        assert!(matches!(
-            ev.reason,
-            ShareDegradedReason::SnapshotSaveFailed(_)
-        ));
+        assert_eq!(ev.subject, "readonly");
+        assert!(matches!(ev.reason, ConditionKind::SnapshotSaveFailed(_)));
 
         // In-memory doc still has the edit — failure must not
         // roll back the state the user produced.
@@ -5660,7 +5651,7 @@ mod tests {
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(
             dir.path().to_path_buf(),
         )));
-        let bus = Arc::new(DegradedSignalBus::new());
+        let bus = Arc::new(ConditionBus::new());
         let snapshot_store = Arc::new(SharedSnapshotStore::new(
             dir.path().to_path_buf(),
             bus.clone(),
@@ -5685,11 +5676,11 @@ mod tests {
     }
 
     /// Fix 2: a projection worker whose `sql_ops` batch fails must emit a
-    /// `ShareDegraded { SqlProjectionFailed }` (not just log), so the UI can
+    /// `Condition { SqlProjectionFailed }` (not just log), so the UI can
     /// surface the Loro↔SQL divergence.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn projection_worker_failure_emits_degraded() {
-        let bus = Arc::new(DegradedSignalBus::new());
+        let bus = Arc::new(ConditionBus::new());
         let failing: Arc<dyn OriginTaggedWrites> = Arc::new(FailingSqlOps);
         let doc = Arc::new(LoroDoc::new());
         let mut rx = bus.subscribe().changes;
@@ -5726,11 +5717,11 @@ mod tests {
         let ev = match tokio::time::timeout_at(deadline, rx.recv()).await {
             Ok(Ok(change)) => change.raised().expect("expected Raised"),
             Ok(Err(_)) => panic!("bus closed unexpectedly"),
-            Err(_) => panic!("no ShareDegraded event within 2s"),
+            Err(_) => panic!("no Condition event within 2s"),
         };
-        assert_eq!(ev.shared_tree_id, "proj-share");
+        assert_eq!(ev.subject, "proj-share");
         assert!(
-            matches!(ev.reason, ShareDegradedReason::SqlProjectionFailed(_)),
+            matches!(ev.reason, ConditionKind::SqlProjectionFailed(_)),
             "expected SqlProjectionFailed, got {:?}",
             ev.reason
         );
@@ -5745,7 +5736,7 @@ mod tests {
     async fn projection_worker_refuses_local_id_collision() {
         use crate::loro_backend::TREE_NAME;
 
-        let bus = Arc::new(DegradedSignalBus::new());
+        let bus = Arc::new(ConditionBus::new());
         let sql = Arc::new(RecordingSqlOps::default());
         let mut rx = bus.subscribe().changes;
 
@@ -5802,13 +5793,13 @@ mod tests {
         let ev = match tokio::time::timeout_at(deadline, rx.recv()).await {
             Ok(Ok(change)) => change.raised().expect("expected Raised"),
             Ok(Err(_)) => panic!("bus closed unexpectedly"),
-            Err(_) => panic!("no ShareDegraded event within 2s"),
+            Err(_) => panic!("no Condition event within 2s"),
         };
-        assert_eq!(ev.shared_tree_id, "hostile-share");
+        assert_eq!(ev.subject, "hostile-share");
         assert!(
             matches!(
                 &ev.reason,
-                ShareDegradedReason::ForeignIdCollision(id) if id == "block:journals"
+                ConditionKind::ForeignIdCollision(id) if id == "block:journals"
             ),
             "expected ForeignIdCollision(block:journals), got {:?}",
             ev.reason
@@ -5866,7 +5857,7 @@ mod tests {
         let path = std::path::Path::new("/vault/Pancakes.cook");
         let (documents, step) = recipe_documents();
 
-        let bus = Arc::new(DegradedSignalBus::new());
+        let bus = Arc::new(ConditionBus::new());
         let sql = Arc::new(RecordingSqlOps::default());
         // `share_subtree` prunes the shared subtree from the global tree, so
         // the collision guard finds no live local node for these ids.
@@ -5962,7 +5953,7 @@ mod tests {
         let step = EntityUri::block("Pancakes.cook::b::0");
         let documents = Arc::new(holon_core::ReadOnlyDocuments::new());
 
-        let bus = Arc::new(DegradedSignalBus::new());
+        let bus = Arc::new(ConditionBus::new());
         let sql = Arc::new(RecordingSqlOps::default());
         let global =
             Arc::new(crate::loro_document::LoroDocument::new("early-global".to_string()).unwrap());

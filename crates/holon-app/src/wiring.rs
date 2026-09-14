@@ -130,17 +130,17 @@ impl FrontendInjectorExt for Injector {
         // ingest, share write-back gap), and a container without it degrades
         // invisibly — blank pages, no banner. It is a plain broadcast channel
         // with no Loro/iroh dependency, so mode has no say in whether it exists.
-        self.provide::<Arc<holon_loro::DegradedSignalBus>>(Provider::root(|_| {
-            Shared::new(Arc::new(holon_loro::DegradedSignalBus::new()))
+        self.provide::<Arc<holon_api::ConditionBus>>(Provider::root(|_| {
+            Shared::new(Arc::new(holon_api::ConditionBus::new()))
         }));
-        disclosure.performed(BootStep::DegradedSignalBus);
+        disclosure.performed(BootStep::ConditionBus);
 
         // Write-back supervision disclosure. Registered UNCONDITIONALLY for the
         // same reason as the bus itself: org write-back runs in every mode, so
         // the one signal saying "your edits stopped reaching disk" must not be
         // reachable only in Loro mode.
         self.provide::<dyn holon_filesystem::WritebackDisclosure>(Provider::root(|resolver| {
-            let bus = resolver.resolve::<Arc<holon_loro::DegradedSignalBus>>();
+            let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
             Arc::new(crate::loro_seams::WritebackDegradedDisclosure {
                 bus: (*bus).clone(),
             }) as Arc<dyn holon_filesystem::WritebackDisclosure>
@@ -164,12 +164,11 @@ impl FrontendInjectorExt for Injector {
             )?;
             let store: Arc<dyn holon_secrets::KeychainStore> = selected.store.into();
             if let Some(why) = selected.disclosure {
-                self.resolve::<Arc<holon_loro::DegradedSignalBus>>().emit(
-                    holon_loro::ShareDegraded {
-                        shared_tree_id: "secrets".to_string(),
-                        reason: holon_loro::ShareDegradedReason::SecretsHeldInMemory { why },
-                    },
-                );
+                self.resolve::<Arc<holon_api::ConditionBus>>()
+                    .emit(holon_api::Condition {
+                        subject: "secrets".to_string(),
+                        reason: holon_api::ConditionKind::SecretsHeldInMemory { why },
+                    });
                 session_secret_store = Some(store.clone());
             }
             self.provide::<dyn holon_secrets::KeychainStore>(Provider::root(move |_| {
@@ -335,15 +334,15 @@ impl FrontendInjectorExt for Injector {
             }));
 
             // Shared-subtree write-back disclosure (Inc 1). Forwards a
-            // not-yet-materialized shared edit to the `DegradedSignalBus` (which
+            // not-yet-materialized shared edit to the `ConditionBus` (which
             // the composition root provides in every mode) so the frontend
             // banners it instead of the edit silently failing to reach disk.
             // Only wired in Loro mode — shares don't exist in SqlOnly, so its
             // absence there (di.rs WARN-logs) is correct.
             self.provide::<dyn holon_filesystem::ShareWritebackDisclosure>(Provider::root(
                 |resolver| {
-                    let bus = resolver.resolve::<Arc<holon_loro::DegradedSignalBus>>();
-                    Arc::new(crate::loro_seams::ShareDegradedDisclosure {
+                    let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
+                    Arc::new(crate::loro_seams::SharedSubtreeNotMaterializedDisclosure {
                         bus: (*bus).clone(),
                     }) as Arc<dyn holon_filesystem::ShareWritebackDisclosure>
                 },
@@ -432,7 +431,7 @@ impl FrontendInjectorExt for Injector {
             }));
             self.provide::<dyn holon_core::WriteTierAuthority>(Provider::root(|resolver| {
                 let documents = resolver.resolve::<Arc<holon_core::ReadOnlyDocuments>>();
-                let bus = resolver.resolve::<Arc<holon_loro::DegradedSignalBus>>();
+                let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
                 Arc::new(crate::read_only_format_gate::ReadOnlyFormatGate::new(
                     (*documents).clone(),
                     (*bus).clone(),
@@ -498,10 +497,10 @@ impl FrontendInjectorExt for Injector {
                 // press cmd-z and get nothing with no explanation.
                 let discarded = engine.undo_entries_discarded_at_boot();
                 if discarded > 0 {
-                    let bus = resolver.resolve::<Arc<holon_loro::DegradedSignalBus>>();
-                    bus.emit(holon_loro::ShareDegraded {
-                        shared_tree_id: "undo".to_string(),
-                        reason: holon_loro::ShareDegradedReason::UndoHistoryClearedAtBoot {
+                    let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
+                    bus.emit(holon_api::Condition {
+                        subject: "undo".to_string(),
+                        reason: holon_api::ConditionKind::UndoHistoryClearedAtBoot {
                             entries: discarded,
                         },
                     });

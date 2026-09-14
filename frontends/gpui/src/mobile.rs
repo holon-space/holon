@@ -216,8 +216,7 @@ fn open_holon_window(
                 };
         }
 
-        let degraded_bus =
-            (*injector.resolve::<std::sync::Arc<holon_loro::DegradedSignalBus>>()).clone();
+        let degraded_bus = (*injector.resolve::<std::sync::Arc<holon_api::ConditionBus>>()).clone();
 
         (session, engine, debug, degraded_bus, app)
     });

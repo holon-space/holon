@@ -304,7 +304,7 @@ fn may_seed_live(after_settled: bool, ungrounded: usize) -> bool {
 }
 
 /// Subject of the global Loro→SQL projection's degraded condition. Not a
-/// shared tree — the `shared_tree_id` field on [`ShareDegraded`] is the bus's
+/// shared tree — the `subject` field on [`Condition`] is the bus's
 /// subject slot, and this projection's subject is the global doc.
 pub const GLOBAL_PROJECTION_SUBJECT: &str = "loro-sql-projection";
 
@@ -320,10 +320,10 @@ const RECONCILE_MAX_ATTEMPTS: usize = 4;
 const RECONCILE_RETRY_BACKOFF: Duration = Duration::from_millis(50);
 
 /// The sticky condition key the projection raises and clears.
-pub fn projection_degraded_key() -> crate::degraded_signal_bus::DegradedConditionKey {
-    crate::degraded_signal_bus::DegradedConditionKey {
+pub fn projection_degraded_key() -> holon_api::condition_bus::ConditionKey {
+    holon_api::condition_bus::ConditionKey {
         subject: GLOBAL_PROJECTION_SUBJECT.to_string(),
-        kind: crate::degraded_signal_bus::ShareDegradedReason::SQL_PROJECTION_FAILED,
+        kind: holon_api::condition_bus::ConditionKind::SQL_PROJECTION_FAILED,
     }
 }
 
@@ -348,7 +348,7 @@ pub struct LoroSyncController {
     /// not optional: a stalled projection means SQL — everything the UI reads —
     /// is behind Loro, and the only alternative to disclosing it is showing
     /// stale rows as if they were current.
-    degraded: Arc<crate::degraded_signal_bus::DegradedSignalBus>,
+    degraded: Arc<holon_api::condition_bus::ConditionBus>,
 }
 
 /// Lifetime handle returned by `start()`. It owns no lifetime of its own: the
@@ -401,7 +401,7 @@ impl LoroSyncControllerHandle {
 impl LoroSyncController {
     pub fn new(
         projection: Arc<LoroProjection>,
-        degraded: Arc<crate::degraded_signal_bus::DegradedSignalBus>,
+        degraded: Arc<holon_api::condition_bus::ConditionBus>,
     ) -> Self {
         let last_synced = projection.last_synced();
         let wake = projection.wake_handle();
@@ -554,7 +554,7 @@ impl LoroSyncController {
 /// Split from the run loop so the retry policy is testable without a live doc.
 async fn drive_with_redrive<F, Fut>(
     mut pass: F,
-    degraded: &crate::degraded_signal_bus::DegradedSignalBus,
+    degraded: &holon_api::condition_bus::ConditionBus,
     error_count: &AtomicUsize,
 ) where
     F: FnMut() -> Fut,
@@ -596,9 +596,9 @@ async fn drive_with_redrive<F, Fut>(
          (what the UI reads) is behind Loro: {why}"
     );
     error!("[LoroSyncController] {summary}");
-    degraded.emit(crate::degraded_signal_bus::ShareDegraded {
-        shared_tree_id: GLOBAL_PROJECTION_SUBJECT.to_string(),
-        reason: crate::degraded_signal_bus::ShareDegradedReason::SqlProjectionFailed(summary),
+    degraded.emit(holon_api::condition_bus::Condition {
+        subject: GLOBAL_PROJECTION_SUBJECT.to_string(),
+        reason: holon_api::condition_bus::ConditionKind::SqlProjectionFailed(summary),
     });
 }
 
@@ -1750,9 +1750,10 @@ fn topological_sort_deletes<'a>(
 mod redrive_tests {
     use std::sync::atomic::AtomicUsize;
 
+    use holon_api::condition_bus::ConditionBus;
+    use holon_api::condition_bus::ConditionKind;
+
     use super::*;
-    use crate::degraded_signal_bus::DegradedSignalBus;
-    use crate::degraded_signal_bus::ShareDegradedReason;
 
     /// Runs `outcomes` in order, one per attempt; panics if driven past the end
     /// (which would mean the budget is unbounded).
@@ -1785,7 +1786,7 @@ mod redrive_tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_failed_reconcile_is_re_driven_and_a_later_success_leaves_no_banner() {
-        let bus = DegradedSignalBus::new();
+        let bus = ConditionBus::new();
         let errors = AtomicUsize::new(0);
         drive_with_redrive(
             scripted(vec![fail(), fail(), Ok(ProjectionPass::Converged)]),
@@ -1802,7 +1803,7 @@ mod redrive_tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_reconcile_that_never_converges_is_bounded_and_disclosed() {
-        let bus = DegradedSignalBus::new();
+        let bus = ConditionBus::new();
         let errors = AtomicUsize::new(0);
         drive_with_redrive(
             scripted((0..RECONCILE_MAX_ATTEMPTS).map(|_| fail()).collect()),
@@ -1817,10 +1818,10 @@ mod redrive_tests {
         );
         let current = bus.subscribe().current;
         assert_eq!(current.len(), 1, "the stall must reach the degraded bus");
-        assert_eq!(current[0].shared_tree_id, GLOBAL_PROJECTION_SUBJECT);
+        assert_eq!(current[0].subject, GLOBAL_PROJECTION_SUBJECT);
         assert!(matches!(
             current[0].reason,
-            ShareDegradedReason::SqlProjectionFailed(ref why)
+            ConditionKind::SqlProjectionFailed(ref why)
                 if why.contains("deferred foreign key")
         ));
     }
@@ -1831,7 +1832,7 @@ mod redrive_tests {
     /// silently without a single error ever being raised.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn an_incomplete_pass_is_re_driven_and_disclosed_if_it_never_completes() {
-        let bus = DegradedSignalBus::new();
+        let bus = ConditionBus::new();
         let errors = AtomicUsize::new(0);
         drive_with_redrive(
             scripted(
@@ -1852,13 +1853,13 @@ mod redrive_tests {
         assert_eq!(current.len(), 1);
         assert!(matches!(
             current[0].reason,
-            ShareDegradedReason::SqlProjectionFailed(ref why) if why.contains("3 op(s) withheld")
+            ConditionKind::SqlProjectionFailed(ref why) if why.contains("3 op(s) withheld")
         ));
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_converged_pass_clears_a_standing_banner() {
-        let bus = DegradedSignalBus::new();
+        let bus = ConditionBus::new();
         let errors = AtomicUsize::new(0);
         drive_with_redrive(
             scripted((0..RECONCILE_MAX_ATTEMPTS).map(|_| fail()).collect()),

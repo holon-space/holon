@@ -110,7 +110,7 @@ where
             ));
         }
         let raised = sut.raised_degraded_conditions().await;
-        let kind = holon_loro::ShareDegradedReason::EDIT_REFUSED_READ_ONLY_FORMAT;
+        let kind = holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT;
         if !raised.iter().any(|c| c == kind) {
             return InvariantResult::Fail(format!(
                 "{attempts} write(s) were refused for a read-only home, but `{kind}` was never \

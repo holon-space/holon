@@ -19,11 +19,11 @@ use std::sync::Arc;
 use holon_api::BlockContent;
 use holon_api::BlockEdges;
 use holon_api::EntityUri;
+use holon_api::condition_bus::ConditionBus;
+use holon_api::condition_bus::ConditionKind;
 use holon_integration_tests::TestEnvironment;
 use holon_loro::DocScope;
 use holon_loro::LoroDocumentStore;
-use holon_loro::degraded_signal_bus::DegradedSignalBus;
-use holon_loro::degraded_signal_bus::ShareDegradedReason;
 use holon_loro::loro_backend::LoroBackend;
 use holon_loro::loro_backend::NewBlockWithProperties;
 use holon_loro::pairing_swap::PairingMarker;
@@ -118,14 +118,14 @@ fn a_pair_whose_reimport_has_no_home_boots_and_raises_the_banner() {
 
     let injector = env.injector().expect("the booted injector");
     let bus = injector
-        .try_resolve::<Arc<DegradedSignalBus>>()
+        .try_resolve::<Arc<ConditionBus>>()
         .expect("the degraded bus is registered on every Loro boot");
     let raised = bus.subscribe().current;
     let archive = marker.archive.display().to_string();
     assert!(
         raised.iter().any(|c| matches!(
             &c.reason,
-            ShareDegradedReason::PairingReimportDeferred { orphans, archive: at }
+            ConditionKind::PairingReimportDeferred { orphans, archive: at }
                 if *orphans == OWED_BLOCKS && at == &archive
         )),
         "the boot must tell the user that {OWED_BLOCKS} block(s) are still only in {archive}; \

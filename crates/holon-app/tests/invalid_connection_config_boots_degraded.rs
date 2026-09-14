@@ -22,11 +22,11 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use holon_api::ConditionBus;
+use holon_api::ConditionKind;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;
-use holon_loro::DegradedSignalBus;
-use holon_loro::ShareDegradedReason;
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
@@ -63,7 +63,7 @@ fn enable(dir: &Path, provider: &str) {
 /// effect once the session is up. Reaching this function's return value at all
 /// is half the assertion: the panic this file was written against never got
 /// here.
-async fn boot_and_read_degraded(dir: &Path) -> Vec<holon_loro::ShareDegraded> {
+async fn boot_and_read_degraded(dir: &Path) -> Vec<holon_api::Condition> {
     let holon_config = HolonConfig {
         db_path: Some(dir.join("degraded.db")),
         vault: VaultConfig {
@@ -79,7 +79,7 @@ async fn boot_and_read_degraded(dir: &Path) -> Vec<holon_loro::ShareDegraded> {
         |_| Ok(()),
         |injector| {
             injector
-                .try_resolve::<Arc<DegradedSignalBus>>()
+                .try_resolve::<Arc<ConditionBus>>()
                 .map(|b| (*b).clone())
         },
     )
@@ -92,7 +92,7 @@ async fn boot_and_read_degraded(dir: &Path) -> Vec<holon_loro::ShareDegraded> {
     // (and its refusals) run only once something asks for it. The production
     // `FrontendSession` factory does exactly that; holding the session here
     // keeps it alive while the conditions are read.
-    let bus = bus.expect("the composition root registers a DegradedSignalBus");
+    let bus = bus.expect("the composition root registers a ConditionBus");
     let current = bus.subscribe().current;
     drop(session);
     current
@@ -117,19 +117,19 @@ fn a_cleartext_endpoint_is_disclosed_rather_than_fatal() {
 
     let disclosure = current
         .iter()
-        .find(|c| c.shared_tree_id == "calendar")
+        .find(|c| c.subject == "calendar")
         .unwrap_or_else(|| {
             panic!(
                 "the refused connection must be disclosed on the degraded bus so the user learns \
                  WHICH file to fix; the bus carries {:?}",
                 current
                     .iter()
-                    .map(|c| (&c.shared_tree_id, c.reason.condition_kind()))
+                    .map(|c| (&c.subject, c.reason.condition_kind()))
                     .collect::<Vec<_>>()
             )
         });
 
-    let ShareDegradedReason::IntegrationSidecarUnusable {
+    let ConditionKind::IntegrationSidecarUnusable {
         installed_path,
         why,
         ..
@@ -185,7 +185,7 @@ fn a_connection_claiming_a_bundled_secret_namespace_is_disclosed_rather_than_fat
     let why = current
         .iter()
         .find_map(|c| match &c.reason {
-            ShareDegradedReason::IntegrationSidecarUnusable { provider, why, .. }
+            ConditionKind::IntegrationSidecarUnusable { provider, why, .. }
                 if provider == "todoist-api" =>
             {
                 Some(why.clone())
@@ -198,7 +198,7 @@ fn a_connection_claiming_a_bundled_secret_namespace_is_disclosed_rather_than_fat
                  running to show it; the bus carries {:?}",
                 current
                     .iter()
-                    .map(|c| (&c.shared_tree_id, c.reason.condition_kind()))
+                    .map(|c| (&c.subject, c.reason.condition_kind()))
                     .collect::<Vec<_>>()
             )
         });
@@ -234,7 +234,7 @@ fn a_connection_spelling_one_account_two_ways_is_disclosed_rather_than_fatal() {
     let why = current
         .iter()
         .find_map(|c| match &c.reason {
-            ShareDegradedReason::IntegrationSidecarUnusable { provider, why, .. }
+            ConditionKind::IntegrationSidecarUnusable { provider, why, .. }
                 if provider == "mything" =>
             {
                 Some(why.clone())
@@ -247,7 +247,7 @@ fn a_connection_spelling_one_account_two_ways_is_disclosed_rather_than_fatal() {
                  application; the bus carries {:?}",
                 current
                     .iter()
-                    .map(|c| (&c.shared_tree_id, c.reason.condition_kind()))
+                    .map(|c| (&c.subject, c.reason.condition_kind()))
                     .collect::<Vec<_>>()
             )
         });
@@ -277,12 +277,12 @@ fn a_foreign_secret_namespace_is_disclosed_rather_than_fatal() {
     let current = runtime().block_on(boot_and_read_degraded(dir.path()));
 
     assert!(
-        current.iter().any(|c| c.shared_tree_id == "calendar"),
+        current.iter().any(|c| c.subject == "calendar"),
         "a connection reaching for another connection's secret must be disclosed, not silent and \
          not fatal; the bus carries {:?}",
         current
             .iter()
-            .map(|c| (&c.shared_tree_id, c.reason.condition_kind()))
+            .map(|c| (&c.subject, c.reason.condition_kind()))
             .collect::<Vec<_>>()
     );
 }

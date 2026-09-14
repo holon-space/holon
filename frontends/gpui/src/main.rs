@@ -163,8 +163,8 @@ fn main() -> Result<()> {
     // Degraded-disclosure bus. `add_frontend` registers it unconditionally, so
     // a missing one is a wiring bug, not a mode — resolve hard rather than ship
     // a window whose only degradation channel is the log.
-    let degraded_bus: std::sync::Arc<holon_loro::DegradedSignalBus> =
-        (*injector.resolve::<std::sync::Arc<holon_loro::DegradedSignalBus>>()).clone();
+    let degraded_bus: std::sync::Arc<holon_api::ConditionBus> =
+        (*injector.resolve::<std::sync::Arc<holon_api::ConditionBus>>()).clone();
 
     let pending_writes: Option<std::sync::Arc<holon_app::PendingWriteStore>> =
         match injector.try_resolve::<holon_app::PendingWriteStore>() {

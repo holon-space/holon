@@ -23,6 +23,7 @@ use holon_api::OpOrigin;
 use holon_api::OperationDescriptor;
 use holon_api::StorageEntity;
 use holon_api::Value;
+use holon_api::condition_bus::ConditionBus;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
 use holon_core::OriginTaggedWrites;
@@ -30,7 +31,6 @@ use holon_core::ReadOnlyDocuments;
 use holon_core::ReadOnlyMembers;
 use holon_core::Result;
 use holon_core::WriteTierAuthority;
-use holon_loro::degraded_signal_bus::DegradedSignalBus;
 use holon_loro::device_key_store::load_or_create_device_key;
 use holon_loro::iroh_advertiser::IrohAdvertiser;
 use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
@@ -202,7 +202,7 @@ fn share_backend(
     let store = Arc::new(RwLock::new(LoroDocumentStore::new(
         dir.path().to_path_buf(),
     )));
-    let bus = Arc::new(DegradedSignalBus::new());
+    let bus = Arc::new(ConditionBus::new());
     let snapshot_store = Arc::new(holon_loro::shared_snapshot_store::SharedSnapshotStore::new(
         dir.path().to_path_buf(),
         bus.clone(),

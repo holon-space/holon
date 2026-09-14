@@ -172,3 +172,48 @@ take an `&EntityUri` parameter; the only sanctioned bare-string entries are \
 `entity_uri_from_id_str` (row-id columns) and the org parser. \
 To suppress: // ALLOW(focus-no-from-raw): <reason>
 """
+
+# holon-api is the boundary vocabulary: block-write fields, intents and — since
+# D121.a (ADR 0035) — the condition kinds, profiles and remedies every frontend
+# renders. A frontend or a storage backend reaching INTO it is what forced the
+# condition bus to live in holon-loro before, which is why the GPUI layer grew
+# its own mirrored kind enum.
+
+[[smell]]
+id = "api-storage-backend"
+pattern = '(^\s*use\s+(holon_loro|holon_turso|loro|turso)\b|(^|[^\w.\-])(loro|turso)::|^[^/\n]*\b(holon_loro|holon_turso)::)'
+files = "crates/holon-api/src/**/*.rs"
+case_sensitive = true
+message = """
+holon-api must not import a storage backend (ADR 0035). It is the vocabulary \
+every crate above and below agrees on; a Loro or Turso type in it makes the \
+condition types — and every other boundary type — unusable in a configuration \
+without that backend, which is exactly the coupling D121.a removed. Prose may NAME a backend type; this catches the import path. Keep the \
+backend types in holon-loro / holon-turso and the seams in holon-app. \
+To suppress: // ALLOW(api-storage-backend): <reason>
+"""
+
+[[smell]]
+id = "api-frontend-dep"
+pattern = '\b(gpui|dioxus|flutter_rust_bridge|ratatui|crossterm|winit)::'
+files = "crates/holon-api/src/**/*.rs"
+case_sensitive = true
+message = """
+holon-api must not import a frontend toolkit (ADR 0035). Condition profiles \
+declare severity and placement as DATA precisely so no frontend type reaches \
+this layer; a `gpui::Rgba` here would put one frontend's palette in the \
+vocabulary every other frontend reads. \
+To suppress: // ALLOW(api-frontend-dep): <reason>
+"""
+
+[[smell]]
+id = "api-storage-backend-manifest"
+pattern = '^(holon-loro|holon-turso|loro|turso)(\.workspace| *=)'
+files = "crates/holon-api/Cargo.toml"
+case_sensitive = true
+message = """
+holon-api's Cargo.toml must not declare a storage-backend dependency \
+(ADR 0035). The dependency runs the other way: holon-loro depends on \
+holon-api. \
+To suppress: # ALLOW(api-storage-backend-manifest): <reason>
+"""
