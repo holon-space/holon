@@ -5152,6 +5152,7 @@ dependencies = [
  "holon-api",
  "holon-block-roundtrip-testing",
  "holon-capability",
+ "holon-connections",
  "holon-core",
  "holon-engine",
  "holon-filesystem",
@@ -5260,6 +5261,7 @@ dependencies = [
  "holon-api",
  "holon-block-roundtrip-testing",
  "holon-capability",
+ "holon-connections",
  "holon-core",
  "holon-filesystem",
  "holon-frontend",
@@ -5313,6 +5315,24 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
+name = "holon-connections"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "holon-api",
+ "holon-core",
+ "holon-rows",
+ "proptest 1.11.0",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
  "workspace-hack 0.1.0",
 ]
 
@@ -5572,9 +5592,8 @@ name = "holon-kitchen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
- "chrono",
  "holon-api",
+ "holon-connections",
  "holon-core",
  "holon-profiles",
  "holon-rows",
@@ -5802,6 +5821,7 @@ dependencies = [
  "futures",
  "futures-signals",
  "holon-api",
+ "holon-connections",
  "holon-core",
  "holon-macros",
  "holon-profiles",

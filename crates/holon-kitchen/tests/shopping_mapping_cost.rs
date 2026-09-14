@@ -9,7 +9,9 @@
 
 use std::time::Instant;
 
-use holon_kitchen::shopping::CompleteSnapshot;
+use holon_connections::CompiledListSync;
+use holon_connections::ListSnapshot;
+use holon_connections::ListSyncSpec;
 use holon_rows::RowMapper;
 
 const SIDECAR: &str = include_str!("../../../assets/integrations/shopping.yaml");
@@ -24,6 +26,16 @@ fn filter() -> String {
         .as_str()
         .expect("the sidecar declares a response filter")
         .to_string()
+}
+
+/// The connection the sidecar declares, compiled once — which is the point the
+/// separate compile measurement below makes for the filter.
+fn connection() -> std::sync::Arc<CompiledListSync> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(SIDECAR).expect("the sidecar parses");
+    let spec: ListSyncSpec = serde_yaml::from_value(doc["holon"]["list_sync"].clone())
+        .expect("the sidecar declares a list_sync block");
+    let declared = holon_kitchen::shopping_item_type().expect("the declared type");
+    CompiledListSync::compile("shopping", spec, &declared).expect("the connection compiles")
 }
 
 fn big_list(items: usize) -> serde_json::Value {
@@ -48,6 +60,7 @@ fn big_list(items: usize) -> serde_json::Value {
 #[test]
 fn a_ten_thousand_item_list_maps_inside_the_slo() {
     let source = filter();
+    let compiled = connection();
 
     let compiled_at = Instant::now();
     let mapper = RowMapper::compile("shopping/pull_list.response", &source).expect("compiles");
@@ -59,8 +72,8 @@ fn a_ten_thousand_item_list_maps_inside_the_slo() {
     let map_ms = ran_at.elapsed().as_millis();
 
     let built_at = Instant::now();
-    let snapshot =
-        CompleteSnapshot::from_rows(&rows, "2026-09-03T10:00:00Z").expect("builds a snapshot");
+    let snapshot = ListSnapshot::from_rows(&compiled, &rows, "2026-09-03T10:00:00Z")
+        .expect("builds a snapshot");
     let build_ms = built_at.elapsed().as_millis();
 
     assert_eq!(snapshot.len(), 10_000, "every item survived the mapping");

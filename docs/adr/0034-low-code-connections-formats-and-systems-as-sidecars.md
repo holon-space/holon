@@ -261,12 +261,14 @@ so invariant 4 survives and no connector becomes a second writer.
 
 - A new format costs a `.wasm` guest and a sidecar; a new system costs a manual
   and a jaq filter. Neither costs Rust.
-- The reconciler is generic only for **id-less** lists, where identity is
-  `(name, cat)` because the peer issues no id. Systems with server ids (Todoist,
-  JIRA) need keyed rows, and a content-key reconciler would read a server-side
-  rename as delete-plus-add and lose local state. The sidecar therefore declares
-  the key derivation as a jaq expression — `.id` for a server id, `[.name,.cat]`
-  for a content key — and one reconciler takes it as a parameter.
+- The reconciler takes its identity as a parameter, so it is generic over BOTH
+  shapes. A content-key reconciler alone would read a server-side rename as
+  delete-plus-add and lose local state; a server-id one alone could not serve a
+  peer that issues no id. The sidecar therefore declares the key derivation as a
+  jaq expression — `.id` for a server id, `[.name,.cat]` for a content key — and
+  `RemoteListReconciler` compiles it once per connection. DONE (lowcode Inc 5):
+  `crates/holon-connections`, pinned over both key shapes by
+  `crates/holon-connections/tests/remote_list_reconcile_pbt.rs`.
 - Users must learn jq to author a mapping. That is the price of not needing an
   escape hatch per peer.
 - A differential test between a plugin and the Rust parser it replaces must NAME
@@ -279,12 +281,15 @@ so invariant 4 survives and no connector becomes a second writer.
   (lowcode Inc 3): `cook.rs`, `rows.rs`, `params.rs`, `file_format.rs` and the
   `cooklang` dependency are gone, and `crates/holon-app/src/wiring.rs` builds
   the vault's format registry from `BUNDLED_PLUGINS` — org is the only format
-  Rust still names. Still pending:
-  `shopping.rs`, `shopping_sync.rs` and `crates/holon-app/src/shopping_rest.rs`
-  go with the generic mapping layer and the renamed `RemoteListReconciler`. No
-  old path stays. That move also closes a platform hole — the write leg lives in
-  `holon-app`, which is in neither wasm graph, so it is silently desktop-only
-  today.
+  Rust still names. The SYSTEM half is DONE (lowcode Inc 5):
+  `shopping.rs`, `shopping_sync.rs`, `crates/holon-app/src/shopping_rest.rs` and
+  `crates/holon-app/src/shopping_operations.rs` are gone, replaced by the
+  generic `RemoteListReconciler` and the one `remote_list_sync` operation in
+  `crates/holon-connections`, which every sidecar declaring `holon.list_sync`
+  reaches. No old path stays. That move also closed a platform hole: the
+  reconcile, round and intent legs now live in a crate both wasm graphs build,
+  and only the transport half — the REST peer and the SQL row reader — stays in
+  `holon-app`.
 - Known kill criteria, each with a measurement rather than an opinion: wasmi too
   slow (a full recipe-directory scan against the current parser, with the 200 ms
   p95 interaction→projection SLO as the line); jaq cost, **stated per

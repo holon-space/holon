@@ -155,6 +155,7 @@ Open reds here: `org-blocks-ref-diverge`, `page-without-own-file`, `loro-frontie
 |---|---|---|---|---|---|
 | MCP client sidecars | YAML-declared external connectors bridged to `OperationProvider` | `EmitMcpData`; CDC re-eval / duplicate detection only | [0001](../adr/0001-hybrid-sync-architecture.md), [0006](../adr/0006-actor-terminology-and-mcp-dual-role.md) | — | `crates/holon-mcp-client/src/mcp_sidecar.rs` |
 | Todoist | The reference connector: MCP over HTTP, static token, oauth false, sync policy, undo | *(none — see Unpinned)* | [Integrations.md](Integrations.md) | — | `assets/integrations/todoist.yaml` |
+| Remote list connections | A sidecar's `holon.list_sync` block mirrors a remote LIST through one generic reconciler — identity is the declared `key` expression, so a peer that issues row ids and one that does not reach the same code | `crates/holon-connections/tests/remote_list_reconcile_pbt.rs` (both key shapes) + `crates/holon-app/tests/shopping_pull_mock.rs` (the round over a mock peer) | [0034](../adr/0034-low-code-connections-formats-and-systems-as-sidecars.md) | — | `crates/holon-connections/src/reconcile.rs` |
 | Other sidecars | gcal, gmail, claude-history, jsonplaceholder | *(none)* | [Integrations.md](Integrations.md) | — | `assets/integrations/` |
 | Write authorization | What an integration is permitted to write back | *(none in the keystone)* | [0028](../adr/0028-sharing-policy-overlay.md) (adjacent) | — | `crates/holon-mcp-client/src/write_authorization.rs` |
 | LogSeq DB import | Reads a LogSeq DB graph (Transit-JSON in SQLite `kvs`) into blocks | *(standalone test `logseq_db_import_store.rs`, not the keystone)* | — | File adapter | `crates/holon-logseq-db/src/ingest.rs` |
@@ -226,6 +227,7 @@ Rows above whose coverage a human judged incomplete. No automated test drives th
 - **Task ranking** — WSJF ranking over the task net is exercised by nothing in the keystone.
 - **Tombstones** — stated as an invariant of the system (Model.md invariant 9), checked by no invariant of the test suite. A premature GC would resurrect deleted blocks on a stale replica's next diff.
 - **Todoist** — `EmitMcpData` covers CDC re-emission only. Nothing exercises the reference connector's sync, auth, write-back, or undo.
+- **Remote list connections** — the keystone drives no configured connection, so nothing there fails if a round stops reconciling. The dedicated PBT and the mock-peer round are the only pins; see `docs/Testing/bugfunnel/entries/2026-09-14-remote-list-sync-keystone-unreachable.md`.
 - **Other sidecars** — the same hole as Todoist, once per connector.
 - **Write authorization** — no keystone coverage of what a connector may write back.
 - **LogSeq DB import** — covered by standalone crate tests, not by the keystone, so no cross-subsystem interaction is exercised.

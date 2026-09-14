@@ -315,6 +315,23 @@ fn register_shared_services(injector: &Injector) -> Result<()> {
         identity_provider as Arc<dyn OperationProvider>
     }));
 
+    // The generic remote-list operation, for every connection a transport wired
+    // (`holon.list_sync` in a sidecar). Registered HERE rather than beside the
+    // transport because the write leg — the round, the reconciler and the local
+    // intents — belongs in the graph every image shares, and a build with no
+    // transport simply resolves nothing and serves no connections.
+    injector.provide_into_set::<dyn OperationProvider>(Provider::root(|inj| {
+        let configured: holon_connections::ConfiguredLists = inj
+            .try_resolve::<holon_connections::ConfiguredLists>()
+            .map(|lists| holon_connections::ConfiguredLists::clone(&lists))
+            .unwrap_or_default();
+        let clock: Arc<dyn holon_connections::RoundClock> =
+            Arc::new(holon_connections::SystemRoundClock);
+        Arc::new(holon_connections::ConfiguredRemoteLists::new(
+            clock, configured,
+        )) as Arc<dyn OperationProvider>
+    }));
+
     OperationModule
         .configure(injector)
         .map_err(|e| anyhow::anyhow!("Failed to register OperationModule: {}", e))?;

@@ -17,8 +17,6 @@
 //! the identity and reconciliation the generic entity mirror cannot supply.
 
 pub mod cookable;
-pub mod shopping;
-pub mod shopping_sync;
 
 use anyhow::Context as _;
 use anyhow::Result;

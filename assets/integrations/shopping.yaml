@@ -192,6 +192,38 @@ holon:
   # The peer serves one unpaginated full snapshot per poll; 60s is the cadence
   # worth having while a shopping list is open.
   poll_interval: 60s
+
+  # This connection mirrors a remote LIST. Everything below parameterises the
+  # ONE generic reconciler (`crates/holon-connections`); there is no
+  # shopping-specific Rust. A second list system reaches the same code by
+  # declaring its own block — `key: .id` where the peer issues row ids.
+  list_sync:
+    entity: shopping_item
+    table: shopping_item_raw
+    pull_tool: pull_list
+    commit_tool: commit
+    # The row carrying the version envelope. Its columns travel verbatim into
+    # the next commit, so this peer's second cursor needs no Rust that knows it.
+    list_row_type: shopping_list
+    version_column: version
+    # This peer issues no item id, so identity is the content pair. Two rows
+    # that fold to one key are a load-bearing failure: under a complete
+    # snapshot a collapsed pair reads as a deletion.
+    key: "[.name, .cat]"
+    watermark_column: last_seen_remote
+    # This peer serves a cached body to a repeated read, and the write leg
+    # re-reads to confirm its own commit landed — a cached body there reports
+    # that write as missing and gets it sent twice. The manual's `_nocache`
+    # input is where the value lands.
+    cache_buster: epoch_millis
+    batch_row_type: shopping_commit
+    command_row_type: shopping_command
+    merge_columns:
+      - count
+    # With no timestamp to arbitrate with, a wrong check skips one item while a
+    # wrong un-check re-buys it every trip.
+    latch_columns:
+      - checked
   tools:
     pull_list:
       # The manual declares these inputs; this says how they reach the wire.
@@ -199,7 +231,7 @@ holon:
       # commit landed, and a cached body there reports a write as missing and
       # gets it sent twice.
       query:
-        oldVersion: "{oldVersion}"
+        oldVersion: "{version}"
         version: "{version}"
         _nocache: "{nocache}"
       # The response, as typed rows. This is the whole of what used to be
@@ -213,7 +245,10 @@ holon:
       # produce from bad input.
       response: |
         def code_of: split("_")[0];
-        def nonempty($k): if type == "string" and test("\\S") then . else error("`\($k)` must be a non-empty string") end;
+        def blank: . == 9 or . == 10 or . == 11 or . == 12 or . == 13 or . == 32
+                   or . == 133 or . == 160 or . == 5760 or (. >= 8192 and . <= 8202)
+                   or . == 8232 or . == 8233 or . == 8239 or . == 8287 or . == 12288;
+        def nonempty($k): if type == "string" and ((explode | map(select(blank | not)) | length) > 0) then . else error("`\($k)` must be a non-empty string") end;
         def whole($k): if type == "number" and . == floor then . else error("`\($k)` is not a whole number") end;
         def count_of: if . == null then null elif type == "number" then . else error("`count` must be a number") end;
         . as $r
@@ -248,7 +283,7 @@ holon:
           ($cats[] | . as $raw | split("_") as $s
             | {type: "shopping_category", row: {id: ("shopping_cat:" + $s[0]), list: "shopping", wire: $raw, code: $s[0], icon: $s[1], color: $s[2]}}),
           ($folded[]
-            | {type: "shopping_item", row: {id: ("shopping:" + .cat + ":" + .name), list: "shopping", name: .name, cat: .cat, count: .count, checked: .checked}})
+            | {type: "shopping_item", row: {id: ("shopping-item:" + (.cat | @uri) + ":" + (.name | @uri)), list: "shopping", name: .name, cat: .cat, count: .count, checked: .checked}})
 
     commit:
       query:
@@ -274,8 +309,8 @@ holon:
         | ($rows | map(select(.type == "shopping_commit")) | .[0].row
            // error("the row stream carries no `shopping_commit` row")) as $batch
         | {
-            version: $batch.old_version,
-            pickedItemsVersion: $batch.old_picked_items_version,
+            version: $batch.version,
+            pickedItemsVersion: $batch.picked_items_version,
             deviceId: $batch.device_id,
             commands: [ $rows[] | select(.type == "shopping_command") | .row
                         | {cmd: (if .verb == "add" then "add"

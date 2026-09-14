@@ -17,37 +17,49 @@ use async_trait::async_trait;
 use holon::testing::e2e_test_helpers::E2ETestContext;
 use holon_api::QueryLanguage;
 use holon_api::Value;
+use holon_connections::CommitAck;
+use holon_connections::CommitBatch;
+use holon_connections::CompiledListSync;
+use holon_connections::ListSnapshot;
+use holon_connections::ListSyncSpec;
+use holon_connections::LocalRow;
+use holon_connections::LocalRowReader;
+use holon_connections::RemoteListPeer;
+use holon_connections::RemoteListReconciler;
+use holon_connections::SyncOutcome;
+use holon_connections::local_intent_operation;
+use holon_connections::sync_once;
 use holon_core::storage::types::StorageEntity;
-use holon_kitchen::shopping::CompleteSnapshot;
-use holon_kitchen::shopping::LocalShoppingItem;
-use holon_kitchen::shopping::ShoppingCategory;
-use holon_kitchen::shopping::ShoppingReconciler;
-use holon_kitchen::shopping_sync::CommitAck;
-use holon_kitchen::shopping_sync::CommitBatch;
-use holon_kitchen::shopping_sync::ShoppingPeer;
-use holon_kitchen::shopping_sync::ShoppingRowReader;
-use holon_kitchen::shopping_sync::SyncOutcome;
-use holon_kitchen::shopping_sync::local_intent_operation;
-use holon_kitchen::shopping_sync::sync_once;
 use holon_rows::RowMapper;
 
 /// The shipped sidecar. The fake peer answers a pull the way production reads
 /// one: the body through this file's `response` mapping, then the rows.
 const SIDECAR: &str = include_str!("../../../assets/integrations/shopping.yaml");
 
+/// The connection the shipped sidecar declares, compiled against the shipped
+/// type — the same two assets production reads.
+fn connection() -> Arc<CompiledListSync> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(SIDECAR).expect("the sidecar parses");
+    let spec: ListSyncSpec = serde_yaml::from_value(doc["holon"]["list_sync"].clone())
+        .expect("the sidecar declares a list_sync block");
+    let declared = holon_kitchen::shopping_item_type().expect("the declared type");
+    CompiledListSync::compile("shopping", spec, &declared).expect("the connection compiles")
+}
+
 /// A snapshot built the way production builds one: the response through the
 /// shipped sidecar's `response` mapping, then the rows.
 fn snapshot_from_body(
+    compiled: &CompiledListSync,
     body: &serde_json::Map<String, serde_json::Value>,
     fetched_at: &str,
-) -> Result<CompleteSnapshot> {
+) -> Result<ListSnapshot> {
     let doc: serde_yaml::Value = serde_yaml::from_str(SIDECAR).expect("the sidecar parses");
     let filter = doc["holon"]["tools"]["pull_list"]["response"]
         .as_str()
         .expect("holon.tools.pull_list.response is a jaq filter");
     let mapper = RowMapper::compile("shopping/pull_list.response", filter)?;
     let rows = mapper.map_to_row_sets(&serde_json::Value::Object(body.clone()))?;
-    CompleteSnapshot::from_rows(&rows, fetched_at)
+    ListSnapshot::from_rows(compiled, &rows, fetched_at)
 }
 
 const TABLE: &str = "shopping_item_raw";
@@ -80,11 +92,13 @@ struct PeerState {
 
 struct FakePeer {
     state: Arc<Mutex<PeerState>>,
+    compiled: Arc<CompiledListSync>,
 }
 
 impl FakePeer {
     fn seeded(items: &[(&str, &str)]) -> Self {
         Self {
+            compiled: connection(),
             state: Arc::new(Mutex::new(PeerState {
                 items: items
                     .iter()
@@ -112,8 +126,8 @@ impl FakePeer {
 }
 
 #[async_trait]
-impl ShoppingPeer for FakePeer {
-    async fn pull(&self) -> Result<CompleteSnapshot> {
+impl RemoteListPeer for FakePeer {
+    async fn pull(&self) -> Result<ListSnapshot> {
         let state = self.state.lock().expect("peer state");
         let items: Vec<serde_json::Value> = state
             .items
@@ -127,6 +141,7 @@ impl ShoppingPeer for FakePeer {
             "options": {"prices": false, "cats": CATS},
         });
         snapshot_from_body(
+            &self.compiled,
             body.as_object().expect("the fake body is an object"),
             &now_rfc3339(),
         )
@@ -134,7 +149,7 @@ impl ShoppingPeer for FakePeer {
 
     async fn commit(&self, batch: &CommitBatch) -> Result<CommitAck> {
         let mut state = self.state.lock().expect("peer state");
-        let stream = batch.to_row_stream();
+        let stream = batch.to_row_stream(self.compiled.spec())?;
         let rows = stream["rows"]
             .as_array()
             .expect("the row stream carries rows");
@@ -159,20 +174,19 @@ impl ShoppingPeer for FakePeer {
         state.version += 1;
         Ok(CommitAck {
             version: state.version,
-            picked_items_version: state.version,
         })
     }
 }
 
 /// Reads the local rows the reconciler decides against, straight off the raw
-/// write table — the same read `ShoppingOperations::Rows` performs in prod.
+/// write table — the same read `SqlMirrorRows` performs in prod.
 struct Rows<'a> {
     ctx: &'a E2ETestContext,
 }
 
 #[async_trait]
-impl ShoppingRowReader for Rows<'_> {
-    async fn load(&self) -> Result<Vec<LocalShoppingItem>> {
+impl LocalRowReader for Rows<'_> {
+    async fn load(&self) -> Result<Vec<LocalRow>> {
         let rows = self
             .ctx
             .query(
@@ -186,34 +200,18 @@ impl ShoppingRowReader for Rows<'_> {
             .await?;
         rows.iter()
             .map(|row| {
-                let text = |column: &str| {
-                    row.get(column)
-                        .and_then(Value::as_string)
-                        .map(str::to_string)
-                };
-                let category = ShoppingCategory::unresolved(
-                    &text("cat").ok_or_else(|| anyhow::anyhow!("a row carries no `cat`"))?,
-                );
-                Ok(LocalShoppingItem {
-                    id: text("id").ok_or_else(|| anyhow::anyhow!("a row carries no `id`"))?,
-                    name: text("name").ok_or_else(|| anyhow::anyhow!("a row carries no `name`"))?,
-                    category,
-                    count: row.get("count").and_then(number),
-                    checked: row.get("checked").and_then(number).unwrap_or(0.0) != 0.0,
-                    product_id: text("product_id"),
-                    deleted_at: text("deleted_at"),
-                    last_seen_remote: text("last_seen_remote"),
-                })
+                let columns: std::collections::BTreeMap<String, Value> = row
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect();
+                let id = columns
+                    .get("id")
+                    .and_then(Value::as_string)
+                    .ok_or_else(|| anyhow::anyhow!("a row carries no `id`"))?
+                    .to_string();
+                Ok(LocalRow { id, columns })
             })
             .collect()
-    }
-}
-
-fn number(value: &Value) -> Option<f64> {
-    match value {
-        Value::Float(f) => Some(*f),
-        Value::Integer(i) => Some(*i as f64),
-        _ => None,
     }
 }
 
@@ -267,13 +265,13 @@ async fn stored_id(ctx: &E2ETestContext, name: &str) -> Result<String> {
 async fn sync_round(
     ctx: &E2ETestContext,
     peer: &FakePeer,
-    reconciler: &ShoppingReconciler,
+    reconciler: &RemoteListReconciler,
 ) -> Result<SyncOutcome> {
     let rows = Rows { ctx };
     let now_ms = chrono::Utc::now().timestamp_millis();
     let outcome = sync_once(peer, &rows, reconciler, DEVICE_ID, now_ms).await?;
     for intent in &outcome.local {
-        let operation = local_intent_operation(intent);
+        let operation = local_intent_operation(reconciler.compiled().spec(), intent);
         ctx.execute_op(
             operation.entity_name.as_str(),
             &operation.op_name,
@@ -301,7 +299,7 @@ async fn adding_a_shopping_item_through_the_generic_surface_stores_it() -> Resul
         params(&[
             (
                 "id",
-                Value::String("shopping:Fleisch:Guanciale".to_string()),
+                Value::String("shopping-item:Fleisch:Guanciale".to_string()),
             ),
             ("name", Value::String("Guanciale".to_string())),
             ("cat", Value::String("Fleisch".to_string())),
@@ -326,7 +324,7 @@ async fn adding_a_shopping_item_through_the_generic_surface_stores_it() -> Resul
 async fn deleting_a_shopping_item_is_pushed_to_the_peer_and_does_not_come_back() -> Result<()> {
     let ctx = E2ETestContext::new().await?;
     let peer = FakePeer::seeded(&[("Milch", "R"), ("Spaghetti", "Trocken")]);
-    let reconciler = ShoppingReconciler::default();
+    let reconciler = RemoteListReconciler::new(connection());
 
     sync_round(&ctx, &peer, &reconciler).await?;
     assert_eq!(

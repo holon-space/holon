@@ -2,8 +2,9 @@
 //! replaces.
 //!
 //! The model below is the parse that lived in `holon_kitchen::shopping` before
-//! this increment, transcribed verbatim. The SUT is the shipped sidecar's jaq
-//! filter fed through [`RowMapper`] and [`CompleteSnapshot::from_rows`]. Both
+//! the low-code increments, transcribed verbatim. The SUT is the shipped
+//! sidecar's jaq filter fed through [`RowMapper`] and the GENERIC list path —
+//! the connection the sidecar's own `holon.list_sync` block declares. Both
 //! are projected onto [`Observed`] — the public shape a consumer can actually
 //! see — so a difference in private structure is not mistaken for a difference
 //! in behaviour.
@@ -16,7 +17,10 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use holon_kitchen::shopping::CompleteSnapshot;
+use holon_connections::CompiledListSync;
+use holon_connections::ListSnapshot;
+use holon_connections::ListSyncSpec;
+use holon_core::file_format::TypedRowSet;
 use holon_rows::RowMapper;
 use proptest::prelude::*;
 use serde_json::Value as Json;
@@ -48,41 +52,92 @@ struct Observed {
     items: BTreeMap<(String, String), (Option<f64>, bool, bool)>,
 }
 
-fn observe(snapshot: &CompleteSnapshot) -> Observed {
-    let vocabulary = snapshot.vocabulary();
+/// The connection this sidecar declares, compiled against the shipped
+/// `shopping_item` type. Reading BOTH from the assets is what makes this a test
+/// of the shopping connection rather than of a restatement of it.
+fn connection() -> std::sync::Arc<CompiledListSync> {
+    let sidecar: serde_yaml::Value = serde_yaml::from_str(SIDECAR).expect("the sidecar parses");
+    let spec: ListSyncSpec = serde_yaml::from_value(sidecar["holon"]["list_sync"].clone())
+        .expect("the sidecar declares a list_sync block");
+    let declared = holon_kitchen::shopping_item_type().expect("the declared type");
+    CompiledListSync::compile("shopping", spec, &declared).expect("the connection compiles")
+}
+
+/// The category vocabulary, read from the rows the mapping emits for it. The
+/// generic list path carries the ITEM rows and the version envelope; the
+/// categories are a second declared type, written alongside.
+fn observed_cats(rows: &[TypedRowSet]) -> BTreeMap<String, (Option<String>, Option<String>)> {
+    rows.iter()
+        .filter(|row_set| row_set.type_name == "shopping_category")
+        .flat_map(|row_set| row_set.rows.iter())
+        .map(|row| {
+            let text = |column: &str| match row.get(column) {
+                Some(holon_api::Value::String(s)) => Some(s.clone()),
+                _ => None,
+            };
+            (
+                text("code").expect("a category row carries its code"),
+                (text("icon"), text("color")),
+            )
+        })
+        .collect()
+}
+
+fn as_f64(value: Option<&holon_api::Value>) -> Option<f64> {
+    match value {
+        Some(holon_api::Value::Integer(n)) => Some(*n as f64),
+        Some(holon_api::Value::Float(f)) => Some(*f),
+        _ => None,
+    }
+}
+
+fn observe(rows: &[TypedRowSet], snapshot: &ListSnapshot) -> Observed {
+    let cats = observed_cats(rows);
+    let picked = match snapshot.envelope().get("picked_items_version") {
+        Some(holon_api::Value::Integer(n)) => *n,
+        other => panic!("the list row carries no whole `picked_items_version` (got {other:?})"),
+    };
     Observed {
-        version: (snapshot.version().list, snapshot.version().picked),
-        cats: vocabulary
-            .codes()
-            .map(|code| {
-                let resolved = vocabulary.resolve(code);
-                let entry = resolved.entry().expect("a published code resolves");
+        items: snapshot
+            .rows()
+            .map(|(_, item)| {
+                let text = |column: &str| match item.columns.get(column) {
+                    Some(holon_api::Value::String(s)) => s.clone(),
+                    other => panic!("an item row's `{column}` is not text (got {other:?})"),
+                };
+                let cat = text("cat");
+                // A latch arrives from a mapping as either a boolean or a
+                // number, and the column it lands in is `INTEGER`, so both
+                // spellings of "on" count here.
+                let checked = matches!(
+                    item.columns.get("checked"),
+                    Some(holon_api::Value::Boolean(true)) | Some(holon_api::Value::Integer(1))
+                );
                 (
-                    code.to_string(),
+                    (text("name"), cat.clone()),
                     (
-                        entry.icon().map(str::to_string),
-                        entry.color().map(str::to_string),
+                        as_f64(item.columns.get("count")),
+                        checked,
+                        cats.contains_key(&cat),
                     ),
                 )
             })
             .collect(),
-        items: snapshot
-            .items()
-            .map(|item| {
-                (
-                    (item.name.clone(), item.category.as_wire().to_string()),
-                    (item.count, item.checked, item.category.is_recognized()),
-                )
-            })
-            .collect(),
+        version: (snapshot.version(), picked),
+        cats,
     }
 }
 
 // -------------------------------------------------------------------- the SUT
 
-fn through_the_sidecar(mapper: &RowMapper, body: &Json) -> Result<Observed> {
+fn through_the_sidecar(
+    mapper: &RowMapper,
+    compiled: &CompiledListSync,
+    body: &Json,
+) -> Result<Observed> {
     let rows = mapper.map_to_row_sets(body)?;
-    Ok(observe(&CompleteSnapshot::from_rows(&rows, FETCHED_AT)?))
+    let snapshot = ListSnapshot::from_rows(compiled, &rows, FETCHED_AT)?;
+    Ok(observe(&rows, &snapshot))
 }
 
 // ------------------------------------------------------------------ the model
@@ -274,10 +329,14 @@ mod model {
 /// other is a divergence rather than a panic. Messages are NOT compared: the
 /// mapping speaks jq's diagnostics, and requiring identical prose would pin
 /// wording rather than behaviour.
-fn compare(mapper: &RowMapper, body: &Json) -> std::result::Result<(), String> {
+fn compare(
+    mapper: &RowMapper,
+    compiled: &CompiledListSync,
+    body: &Json,
+) -> std::result::Result<(), String> {
     let object = body.as_object().expect("a response body is an object");
     let expected = model::parse(object);
-    let actual = through_the_sidecar(mapper, body);
+    let actual = through_the_sidecar(mapper, compiled, body);
     match (&expected, &actual) {
         (Ok(a), Ok(b)) if a == b => Ok(()),
         (Err(_), Err(_)) => Ok(()),
@@ -350,9 +409,10 @@ fn captured() -> Vec<Json> {
 fn the_mapping_matches_the_bespoke_parse_on_the_captured_shapes() {
     let mapper = RowMapper::compile("shopping/pull_list.response", &response_filter())
         .expect("the shipped filter compiles");
+    let compiled = connection();
     let mut divergences = Vec::new();
     for body in captured() {
-        if let Err(why) = compare(&mapper, &body) {
+        if let Err(why) = compare(&mapper, &compiled, &body) {
             divergences.push(why);
         }
     }
@@ -490,7 +550,8 @@ proptest! {
     fn the_mapping_matches_the_bespoke_parse_on_generated_responses(body in body()) {
         let mapper = RowMapper::compile("shopping/pull_list.response", &response_filter())
             .expect("the shipped filter compiles");
-        if let Err(why) = compare(&mapper, &body) {
+        let compiled = connection();
+        if let Err(why) = compare(&mapper, &compiled, &body) {
             prop_assert!(false, "{why}");
         }
     }

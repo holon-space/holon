@@ -1,5 +1,7 @@
-//! The shopping peer end-to-end, over the REAL `rest` transport against a LOCAL
-//! mock HTTP server (no network), driving the SHIPPED sidecar.
+//! The GENERIC remote-list peer end-to-end, over the REAL `rest` transport
+//! against a LOCAL mock HTTP server (no network), driving the SHIPPED shopping
+//! sidecar. Nothing under test here knows it is a shopping list: the connection
+//! is whatever `holon.list_sync` declares.
 //!
 //! The mock is a stateful list, not a canned body: it applies the commands a
 //! commit sends and versions itself, so "both peers mutated the same list
@@ -21,20 +23,21 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use holon_app::shopping_rest::RestShoppingPeer;
-use holon_kitchen::shopping::DEFAULT_TOMBSTONE_WINDOW_DAYS;
-use holon_kitchen::shopping::ItemKey;
-use holon_kitchen::shopping::ListVersion;
-use holon_kitchen::shopping::LocalIntent;
-use holon_kitchen::shopping::LocalShoppingItem;
-use holon_kitchen::shopping::PushIntent;
-use holon_kitchen::shopping::ShoppingCategory;
-use holon_kitchen::shopping::ShoppingReconciler;
-use holon_kitchen::shopping_sync::CommitBatch;
-use holon_kitchen::shopping_sync::ShoppingPeer;
-use holon_kitchen::shopping_sync::ShoppingRowReader;
-use holon_kitchen::shopping_sync::local_intent_operation;
-use holon_kitchen::shopping_sync::sync_once;
+use holon_api::Value;
+use holon_app::remote_list::RestListPeer;
+use holon_connections::CommitBatch;
+use holon_connections::CompiledListSync;
+use holon_connections::ListSnapshot;
+use holon_connections::ListSyncSpec;
+use holon_connections::LocalIntent;
+use holon_connections::LocalRow;
+use holon_connections::LocalRowReader;
+use holon_connections::PushIntent;
+use holon_connections::RemoteListPeer;
+use holon_connections::RemoteListReconciler;
+use holon_connections::local_intent_operation;
+use holon_connections::sync_once;
+use holon_core::file_format::TypedRowSet;
 use holon_mcp_client::CredentialRoot;
 use holon_mcp_client::IntegrationFileConfig;
 use holon_mcp_client::McpTransport;
@@ -84,6 +87,9 @@ struct ListState {
     picked: Vec<(String, String)>,
     version: i64,
     commits: usize,
+    /// Every request path the mock served, in order. The pull's freshness
+    /// argument is only observable on the wire, so this is where it is read.
+    paths: Vec<String>,
 }
 
 impl ListState {
@@ -150,6 +156,7 @@ fn seeded_state(version: i64) -> ListState {
         picked: vec![("Bread".into(), "B".into())],
         version,
         commits: 0,
+        paths: Vec::new(),
     }
 }
 
@@ -199,6 +206,11 @@ async fn start_mock(mode: Mode) -> Mock {
                 let path = request_line.next().unwrap_or_default().to_string();
                 let request_body =
                     String::from_utf8_lossy(&buf[head_end..head_end + content_length]).to_string();
+                state_conn
+                    .lock()
+                    .expect("mock list")
+                    .paths
+                    .push(path.clone());
 
                 let (status, body) = if mode == Mode::EchoUrlIn500 {
                     (
@@ -288,32 +300,88 @@ fn surface_for(base_url: &str) -> Arc<dyn McpCallSurface> {
     }
 }
 
-fn peer_for(base_url: &str) -> RestShoppingPeer {
-    RestShoppingPeer::new(surface_for(base_url), DEVICE_ID)
+/// The connection the shipped sidecar declares, compiled against the shipped
+/// `shopping_item` type. Both halves come from the assets: a test that restated
+/// either would stop being a test of this connection.
+fn connection() -> Arc<CompiledListSync> {
+    let doc: serde_yaml::Value =
+        serde_yaml::from_str(SHOPPING_SIDECAR).expect("the shipped shopping sidecar parses");
+    let spec: ListSyncSpec = serde_yaml::from_value(doc["holon"]["list_sync"].clone())
+        .expect("the sidecar declares a list_sync block");
+    let declared = holon_kitchen::shopping_item_type().expect("the declared type");
+    CompiledListSync::compile("shopping", spec, &declared).expect("the connection compiles")
+}
+
+fn peer_for(base_url: &str) -> RestListPeer {
+    RestListPeer::new(surface_for(base_url), connection(), DEVICE_ID)
+}
+
+/// A version envelope with no items, for a leg that needs a batch to send
+/// rather than a list to reconcile.
+fn empty_snapshot(compiled: &CompiledListSync, version: i64) -> ListSnapshot {
+    let spec = compiled.spec();
+    let mut list_row: holon_api::entity::StorageEntity = Default::default();
+    list_row.insert("id".into(), Value::String("shopping".into()));
+    list_row.insert("version".into(), Value::Integer(version));
+    list_row.insert("picked_items_version".into(), Value::Integer(version));
+    let sets = vec![TypedRowSet {
+        type_name: spec.list_row_type.clone(),
+        owner_column: "list".into(),
+        owner_value: "shopping".into(),
+        rows: vec![list_row],
+    }];
+    ListSnapshot::from_rows(compiled, &sets, chrono::Utc::now().to_rfc3339())
+        .expect("an empty list is still a complete snapshot")
 }
 
 /// The local rows a round starts from.
-struct Rows(Vec<LocalShoppingItem>);
+struct Rows(Vec<LocalRow>);
 
 #[async_trait]
-impl ShoppingRowReader for Rows {
-    async fn load(&self) -> Result<Vec<LocalShoppingItem>> {
+impl LocalRowReader for Rows {
+    async fn load(&self) -> Result<Vec<LocalRow>> {
         Ok(self.0.clone())
     }
 }
 
-fn local(name: &str, cat: &str, count: Option<f64>) -> LocalShoppingItem {
-    let category = ShoppingCategory::unresolved(cat);
-    LocalShoppingItem {
-        id: ItemKey::new(name, &category).row_id(),
-        name: name.to_string(),
-        category,
-        count,
-        checked: false,
-        product_id: None,
-        deleted_at: None,
-        last_seen_remote: Some("2026-08-31T10:00:00Z".into()),
-    }
+/// One segment of a row id, escaped the way the sidecar's `@uri` does. An id is
+/// a reference and must parse as a URI, and an item name is free text: spaces
+/// and umlauts are ordinary in a shopping list.
+fn uri_segment(raw: &str) -> String {
+    raw.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+/// One mirror row, spelled in the declared type's columns. The id is derived
+/// from the content pair because this peer issues none — which is exactly what
+/// the connection's `key` expression says.
+fn local(name: &str, cat: &str, count: Option<f64>) -> LocalRow {
+    let id = format!("shopping-item:{}:{}", uri_segment(cat), uri_segment(name));
+    let mut columns = std::collections::BTreeMap::new();
+    columns.insert("id".to_string(), Value::String(id.clone()));
+    columns.insert("name".to_string(), Value::String(name.to_string()));
+    columns.insert("cat".to_string(), Value::String(cat.to_string()));
+    columns.insert(
+        "count".to_string(),
+        count.map(Value::Float).unwrap_or(Value::Null),
+    );
+    columns.insert("checked".to_string(), Value::Integer(0));
+    columns.insert("deleted_at".to_string(), Value::Null);
+    columns.insert(
+        "last_seen_remote".to_string(),
+        Value::String("2026-08-31T10:00:00Z".into()),
+    );
+    LocalRow { id, columns }
+}
+
+fn set(row: &mut LocalRow, column: &str, value: Value) {
+    row.columns.insert(column.to_string(), value);
 }
 
 // ---------------------------------------------------------------------------
@@ -324,71 +392,96 @@ fn local(name: &str, cat: &str, count: Option<f64>) -> LocalShoppingItem {
 async fn a_served_list_projects_shopping_items() {
     let mock = start_mock(Mode::Live).await;
     let peer = peer_for(&mock.base_url);
+    let compiled = connection();
 
     let snapshot = peer.pull().await.expect("the peer serves the list");
 
-    // Six wire rows, five keys: the two `Milk`/`R` rows are one item.
+    // Six wire rows, five keys: the two `Milk`/`R` rows are one item. The FOLD
+    // happens in the sidecar's own mapping; what the generic path adds is that
+    // a pair which survived the fold and still collided would be refused.
     assert_eq!(
         snapshot.len(),
         5,
         "duplicate (name, cat) rows were not folded"
     );
-    assert_eq!(snapshot.version().list, 7, "the list version came through");
-    assert_eq!(
-        snapshot.vocabulary().len(),
-        CATS.len(),
-        "the vocabulary came from the list's own options.cats"
-    );
+    assert_eq!(snapshot.version(), 7, "the list version came through");
+    // The category vocabulary is a SECOND declared type the same mapping emits.
+    // It never enters the list snapshot, and its content is pinned where the
+    // mapping is: `crates/holon-kitchen/tests/shopping_mapping_differential.rs`.
 
-    let inserts: Vec<_> = ShoppingReconciler::default()
+    let inserts: Vec<_> = RemoteListReconciler::new(compiled.clone())
         .reconcile(&[], &snapshot)
         .expect("reconcile against an empty local list")
         .local
         .into_iter()
-        .map(|i| match i {
-            LocalIntent::Insert(row) => row,
+        .map(|intent| match intent {
+            LocalIntent::Insert { id, columns } => (id, columns),
             other => panic!("an empty local list can only take inserts, got {other:?}"),
         })
         .collect();
     assert_eq!(inserts.len(), 5);
 
-    let milk = inserts
-        .iter()
-        .find(|r| r.name == "Milk" && r.category.as_wire() == "R")
-        .expect("Milk/R row");
+    let column = |id: &str, name: &str| -> Option<Value> {
+        inserts
+            .iter()
+            .find(|(row_id, _)| row_id == id)
+            .and_then(|(_, columns)| columns.get(name).cloned())
+    };
+
+    let milk = "shopping-item:R:Milk";
+    assert_eq!(column(milk, "name"), Some(Value::String("Milk".into())));
     // A row with no count still counts for one, so folding cannot lose a unit.
-    assert_eq!(milk.count, Some(3.0));
-    assert!(milk.category.is_recognized());
+    // Read as a number rather than a spelling: the peer's JSON and the REAL
+    // column disagree on Integer-vs-Float and mean the same thing.
+    assert_eq!(
+        match column(milk, "count") {
+            Some(Value::Integer(n)) => n as f64,
+            Some(Value::Float(f)) => f,
+            other => panic!("`count` is not a number (got {other:?})"),
+        },
+        3.0
+    );
     // The peer stamps the fetch time; its VALUE is pinned in the reconciler
     // tests, which supply one. Here only its presence is the watermark claim.
-    assert!(milk.last_seen_remote.is_some());
-    assert!(!milk.checked);
+    assert!(
+        matches!(column(milk, "last_seen_remote"), Some(Value::String(_))),
+        "the insert carries no watermark"
+    );
+    assert_eq!(column(milk, "checked"), Some(Value::Boolean(false)));
 
     // Same name, different aisle: two items, not a collision.
     assert!(
-        inserts
-            .iter()
-            .any(|r| r.name == "Milk" && r.category.as_wire() == "Ca"),
+        column("shopping-item:Ca:Milk", "name").is_some(),
         "Milk/Ca collapsed into Milk/R"
     );
 
     // `pickedItems` membership IS the checked flag.
-    let bread = inserts.iter().find(|r| r.name == "Bread").expect("Bread");
-    assert!(bread.checked, "a checked-off item arrived unchecked");
-
-    // A code the list did not publish is carried verbatim and marked, never
-    // mapped onto a neighbouring aisle and never dropped.
-    let salmon = inserts.iter().find(|r| r.name == "Salmon").expect("Salmon");
-    assert_eq!(salmon.category.as_wire(), "Fish");
-    assert!(!salmon.category.is_recognized());
-
-    // A decorated vocabulary entry resolves for the plain code an item carries.
-    let socks = inserts.iter().find(|r| r.name == "Socks").expect("Socks");
-    assert!(socks.category.is_recognized());
     assert_eq!(
-        socks.category.entry().and_then(|e| e.color()),
-        Some("1976D2")
+        column("shopping-item:B:Bread", "checked"),
+        Some(Value::Boolean(true)),
+        "a checked-off item arrived unchecked"
     );
+
+    // A code the list did not publish is carried verbatim, never mapped onto a
+    // neighbouring aisle and never dropped.
+    assert_eq!(
+        column("shopping-item:Fish:Salmon", "cat"),
+        Some(Value::String("Fish".into()))
+    );
+
+    // An insert carries the peer's columns the declared type HAS, and nothing
+    // else: an undeclared column would land in the overflow bag as a property
+    // nobody declared.
+    let (_, socks) = inserts
+        .iter()
+        .find(|(id, _)| id == "shopping-item:Kleidung:Socks")
+        .expect("Socks");
+    for column in socks.keys() {
+        assert!(
+            compiled.declares_column(column),
+            "the insert carries the undeclared column '{column}'"
+        );
+    }
 }
 
 #[tokio::test]
@@ -450,10 +543,15 @@ async fn the_commit_leg_hides_the_credential_too() {
     // structurally, so neither layer alone is load-bearing here.
     let mock = start_mock(Mode::EchoUrlIn500).await;
     let peer = peer_for(&mock.base_url);
+    let compiled = connection();
 
+    let row = local("Oat milk", "R", Some(1.0));
+    let key = compiled
+        .key_of(&serde_json::json!({ "name": "Oat milk", "cat": "R" }))
+        .expect("the connection derives the key");
     let batch = CommitBatch::from_push_intents(
-        &[PushIntent::Add(local("Oat milk", "R", Some(1.0)))],
-        ListVersion { list: 7, picked: 7 },
+        &[PushIntent::Add { key, row }],
+        &empty_snapshot(&compiled, 7),
         DEVICE_ID,
         1_756_700_000_000,
     );
@@ -483,20 +581,15 @@ async fn the_commit_leg_hides_the_credential_too() {
 async fn a_local_addition_reaches_the_peer_and_the_round_converges() {
     let mock = start_mock(Mode::Live).await;
     let peer = peer_for(&mock.base_url);
+    let reconciler = RemoteListReconciler::new(connection());
 
     let mut mine = local("Oat milk", "R", Some(1.0));
-    mine.last_seen_remote = None;
+    set(&mut mine, "last_seen_remote", Value::Null);
     let rows = Rows(vec![mine]);
 
-    let outcome = sync_once(
-        &peer,
-        &rows,
-        &ShoppingReconciler::default(),
-        DEVICE_ID,
-        1_756_700_000_000,
-    )
-    .await
-    .expect("one round");
+    let outcome = sync_once(&peer, &rows, &reconciler, DEVICE_ID, 1_756_700_000_000)
+        .await
+        .expect("one round");
 
     assert_eq!(outcome.committed, 1, "the addition was not committed");
     assert!(!outcome.retried);
@@ -512,15 +605,9 @@ async fn a_local_addition_reaches_the_peer_and_the_round_converges() {
 
     // A second round over the SAME local rows finds nothing left to push: the
     // item the first round sent now comes back in the snapshot.
-    let again = sync_once(
-        &peer,
-        &rows,
-        &ShoppingReconciler::default(),
-        DEVICE_ID,
-        1_756_700_001_000,
-    )
-    .await
-    .expect("second round");
+    let again = sync_once(&peer, &rows, &reconciler, DEVICE_ID, 1_756_700_001_000)
+        .await
+        .expect("second round");
     assert_eq!(again.committed, 0, "the round did not converge");
 }
 
@@ -528,21 +615,24 @@ async fn a_local_addition_reaches_the_peer_and_the_round_converges() {
 async fn a_local_deletion_reaches_the_peer_as_a_del_command() {
     let mock = start_mock(Mode::Live).await;
     let peer = peer_for(&mock.base_url);
+    let compiled = connection();
 
     let mut gone = local("Bread", "B", None);
     // The peer stamps the snapshot with the wall clock, and the reconciler
     // measures the tombstone against THAT — so "still live" has to be written
     // relative to now, or the fixture ages out of the window on a calendar date
     // and the test stops exercising the push leg.
-    gone.deleted_at = Some(
-        (chrono::Utc::now() - chrono::Duration::days(DEFAULT_TOMBSTONE_WINDOW_DAYS / 2))
-            .to_rfc3339(),
+    let half_window = compiled.tombstone_window() / 2;
+    set(
+        &mut gone,
+        "deleted_at",
+        Value::String((chrono::Utc::now() - half_window).to_rfc3339()),
     );
 
     let outcome = sync_once(
         &peer,
         &Rows(vec![gone]),
-        &ShoppingReconciler::default(),
+        &RemoteListReconciler::new(compiled),
         DEVICE_ID,
         1_756_700_000_000,
     )
@@ -568,12 +658,12 @@ async fn a_stale_version_re_pulls_instead_of_overwriting() {
     let peer = peer_for(&mock.base_url);
 
     let mut mine = local("Oat milk", "R", Some(1.0));
-    mine.last_seen_remote = None;
+    set(&mut mine, "last_seen_remote", Value::Null);
 
     let outcome = sync_once(
         &peer,
         &Rows(vec![mine]),
-        &ShoppingReconciler::default(),
+        &RemoteListReconciler::new(connection()),
         DEVICE_ID,
         1_756_700_000_000,
     )
@@ -600,9 +690,10 @@ async fn a_stale_version_re_pulls_instead_of_overwriting() {
     // ...and it arrives in the local intents too, so the local rows converge on
     // the same list the peer holds.
     assert!(
-        outcome.local.iter().any(|i| matches!(
-            i,
-            LocalIntent::Insert(row) if row.name == "Yeast"
+        outcome.local.iter().any(|intent| matches!(
+            intent,
+            LocalIntent::Insert { columns, .. }
+                if columns.get("name") == Some(&Value::String("Yeast".into()))
         )),
         "the concurrent write never reached the local intents: {:?}",
         outcome.local
@@ -613,11 +704,12 @@ async fn a_stale_version_re_pulls_instead_of_overwriting() {
 async fn every_local_write_goes_through_the_generic_operation_path() {
     let mock = start_mock(Mode::Live).await;
     let peer = peer_for(&mock.base_url);
+    let compiled = connection();
 
     let outcome = sync_once(
         &peer,
         &Rows(vec![local("Bread", "B", None)]),
-        &ShoppingReconciler::default(),
+        &RemoteListReconciler::new(compiled.clone()),
         DEVICE_ID,
         1_756_700_000_000,
     )
@@ -626,17 +718,14 @@ async fn every_local_write_goes_through_the_generic_operation_path() {
 
     assert!(!outcome.local.is_empty());
     for intent in &outcome.local {
-        let operation = local_intent_operation(intent);
+        let operation = local_intent_operation(compiled.spec(), intent);
         assert_eq!(
             operation.entity_name.as_str(),
             "shopping-item",
             "an intent addressed something other than the declared type"
         );
         assert!(
-            matches!(
-                operation.op_name.as_str(),
-                "create" | "set_field" | "delete"
-            ),
+            matches!(operation.op_name.as_str(), "create" | "set_field" | "purge"),
             "the sync minted its own write op '{}' instead of the type's generic authority",
             operation.op_name
         );
@@ -670,11 +759,154 @@ fn the_shipped_sidecar_holds_no_resolved_url() {
 fn the_shipped_sidecar_declares_no_mirrored_entity() {
     let cfg: IntegrationFileConfig =
         serde_yaml::from_str(SHOPPING_SIDECAR).expect("the shipped shopping sidecar parses");
-    // The generic entity mirror keys rows on a server-issued id column and
-    // fails loud without one. This peer issues none, so an entity here would
-    // be a sidecar that breaks the moment someone enables it.
+    // The generic ENTITY mirror keys rows on a server-issued id column and
+    // fails loud without one. This peer issues none — which is why it is a
+    // `list_sync` connection, whose identity is the declared key expression.
     assert!(
         cfg.entities.is_empty(),
         "the shopping sidecar declares an entity the id-less wire shape cannot mirror"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Freshness is DECLARED
+// ---------------------------------------------------------------------------
+
+/// The shipped sidecar with every trace of its freshness argument removed — a
+/// connection that declares no cache buster, which is the default and the
+/// common case. Edited structurally rather than by line, because the argument
+/// appears in three places: the manual's input schema, the query template, and
+/// the `list_sync` declaration.
+fn sidecar_without_a_cache_buster() -> String {
+    let mut doc: serde_yaml::Value =
+        serde_yaml::from_str(SHOPPING_SIDECAR).expect("the shipped sidecar parses");
+
+    let list_sync = doc["holon"]["list_sync"]
+        .as_mapping_mut()
+        .expect("the sidecar declares a list_sync block");
+    assert!(
+        list_sync
+            .remove(serde_yaml::Value::from("cache_buster"))
+            .is_some(),
+        "the shipped sidecar declares no cache_buster, so this fixture removes nothing"
+    );
+
+    doc["holon"]["tools"]["pull_list"]["query"]
+        .as_mapping_mut()
+        .expect("the pull tool declares a query")
+        .remove(serde_yaml::Value::from("_nocache"));
+
+    let inputs = &mut doc["utcp"]["tools"][0]["inputs"];
+    inputs["properties"]
+        .as_mapping_mut()
+        .expect("the manual declares the pull's inputs")
+        .remove(serde_yaml::Value::from("_nocache"));
+    let required = inputs["required"]
+        .as_sequence_mut()
+        .expect("the manual declares which inputs are required");
+    required.retain(|name| name.as_str() != Some("_nocache"));
+
+    serde_yaml::to_string(&doc).expect("the edited sidecar serializes")
+}
+
+fn peer_from(sidecar: &str, base_url: &str) -> RestListPeer {
+    let cfg: IntegrationFileConfig = serde_yaml::from_str(sidecar).expect("the sidecar parses");
+    let lookup = |name: &str| match name {
+        "SHOPPING_LIST_URL" => Some(base_url.to_string()),
+        _ => None,
+    };
+    let mcp = cfg
+        .into_mcp_config_with(
+            "shopping".to_string(),
+            &lookup,
+            &CredentialRoot::new("/tmp/holon-shopping-c2-config"),
+        )
+        .expect("the sidecar resolves into an mcp config");
+    let surface: Arc<dyn McpCallSurface> = match mcp.transport {
+        McpTransport::Rest { manual, .. } => Arc::new(RestCallSurface::new(manual)),
+        other => panic!("expected the rest transport, got {other:?}"),
+    };
+    let doc: serde_yaml::Value = serde_yaml::from_str(sidecar).expect("the sidecar parses");
+    let spec: ListSyncSpec = serde_yaml::from_value(doc["holon"]["list_sync"].clone())
+        .expect("the sidecar declares a list_sync block");
+    let declared = holon_kitchen::shopping_item_type().expect("the declared type");
+    let compiled =
+        CompiledListSync::compile("shopping", spec, &declared).expect("the connection compiles");
+    RestListPeer::new(surface, compiled, DEVICE_ID)
+}
+
+#[tokio::test]
+async fn a_connection_that_declares_no_cache_buster_sends_none() {
+    let mock = start_mock(Mode::Live).await;
+    let peer = peer_from(&sidecar_without_a_cache_buster(), &mock.base_url);
+
+    peer.pull().await.expect("the peer serves the list");
+
+    let paths = mock.state.lock().expect("mock list").paths.clone();
+    assert_eq!(paths.len(), 1, "one pull, one request");
+    assert!(
+        !paths[0].contains("nocache"),
+        "a connection declaring no cache buster still sent one: {}",
+        paths[0]
+    );
+}
+
+#[tokio::test]
+async fn the_shopping_connection_declares_epoch_millis_and_sends_it() {
+    let mock = start_mock(Mode::Live).await;
+    let peer = peer_for(&mock.base_url);
+
+    peer.pull().await.expect("the peer serves the list");
+
+    let paths = mock.state.lock().expect("mock list").paths.clone();
+    let sent = paths[0]
+        .split(['?', '&'])
+        .find_map(|pair| pair.strip_prefix("_nocache="))
+        .unwrap_or_else(|| panic!("the pull carried no freshness argument: {}", paths[0]));
+    // Epoch milliseconds, so a whole number well past the epoch. The VALUE
+    // being fresh is what the write leg's verifying re-read depends on.
+    let millis: i64 = sent
+        .parse()
+        .expect("the freshness argument is a whole number");
+    assert!(
+        millis > 1_700_000_000_000,
+        "not an epoch-millisecond value: {sent}"
+    );
+}
+
+/// The generic argument builder is where "declared, not assumed" is decided:
+/// the wire only shows the freshness value when the peer's own `query`
+/// template ALSO names it, so a test reading the URL cannot tell a connection
+/// that stopped sending one from a template that never placed it.
+#[test]
+fn the_pull_arguments_carry_a_freshness_value_only_when_one_is_declared() {
+    let declared: ListSyncSpec =
+        serde_yaml::from_value(
+            serde_yaml::from_str::<serde_yaml::Value>(SHOPPING_SIDECAR)
+                .expect("the sidecar parses")["holon"]["list_sync"]
+                .clone(),
+        )
+        .expect("the shipped block");
+    let args = holon_app::remote_list::pull_arguments(&declared, 7, DEVICE_ID);
+    assert_eq!(args["version"], serde_json::json!(7));
+    assert_eq!(args["device_id"], serde_json::json!(DEVICE_ID));
+    let millis = args["nocache"]
+        .as_i64()
+        .expect("the declared freshness value is a whole number");
+    assert!(
+        millis > 1_700_000_000_000,
+        "not epoch milliseconds: {millis}"
+    );
+
+    let undeclared: ListSyncSpec = serde_yaml::from_value(
+        serde_yaml::from_str::<serde_yaml::Value>(&sidecar_without_a_cache_buster())
+            .expect("the fixture parses")["holon"]["list_sync"]
+            .clone(),
+    )
+    .expect("the fixture's block");
+    let args = holon_app::remote_list::pull_arguments(&undeclared, 7, DEVICE_ID);
+    assert!(
+        !args.contains_key("nocache"),
+        "a connection declaring no cache buster was still handed one: {args:?}"
     );
 }

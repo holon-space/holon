@@ -125,15 +125,15 @@ tools: {}
 #[test]
 fn the_write_leg_maps_command_rows_into_the_peers_own_envelope() {
     let surface = surface(SHOPPING_SIDECAR);
+    // The batch row carries the PULL's version envelope verbatim, so the peer's
+    // two cursors travel under the names its own response used. No `scopes`: a
+    // scope says which rows one file owns so a replacement cannot sweep
+    // another's, and a request replaces nothing.
     let stream = serde_json::json!({
-        "scopes": [
-            {"type": "shopping_commit", "owner_column": "list", "owner_value": "shopping"},
-            {"type": "shopping_command", "owner_column": "list", "owner_value": "shopping"},
-        ],
         "rows": [
             {"type": "shopping_commit", "row": {
                 "id": "shopping", "list": "shopping",
-                "old_version": 7, "old_picked_items_version": 5, "device_id": "dev-1"}},
+                "version": 7, "picked_items_version": 5, "device_id": "dev-1"}},
             {"type": "shopping_command", "row": {
                 "id": "1756713600000_3f0a1c9d2b4e5f60", "list": "shopping",
                 "verb": "add", "name": "Eggs", "cat": "R",

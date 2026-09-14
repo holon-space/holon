@@ -1,5 +1,5 @@
 [package]
-name = "holon-kitchen"
+name = "holon-connections"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -10,19 +10,19 @@ publish = false
 ignored = ["workspace-hack"]
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
-holon-profiles.workspace = true
-anyhow.workspace = true
 holon-rows.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
-tempfile.workspace = true
 proptest.workspace = true
-# The shopping sidecar's own tests drive it through the GENERIC list path, so
-# the connection it declares is what they exercise.
-holon-connections.workspace = true
+serde_yaml.workspace = true
+# The sync round is async over the `RemoteListPeer` trait; the tests drive it
+# with a fixture peer, so no HTTP stack is needed here.
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

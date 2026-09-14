@@ -103,6 +103,12 @@ pub struct HolonSection {
     /// refused at load.
     #[serde(default)]
     pub tools: HashMap<String, HolonToolConfig>,
+    /// Set when this connection mirrors a remote LIST: one generic reconciler
+    /// then serves it, parameterised by what is declared here
+    /// (`crates/holon-connections`). Absent for a connection that only syncs
+    /// entities.
+    #[serde(default)]
+    pub list_sync: Option<holon_connections::ListSyncSpec>,
 }
 
 /// One tool's Holon-side behaviour.
@@ -316,6 +322,16 @@ fn build_rest_transport(
         manual
             .tool(name)
             .with_context(|| format!("holon.tools.{name}"))?;
+    }
+    if let Some(list_sync) = &holon.list_sync {
+        for (field, name) in [
+            ("pull_tool", &list_sync.pull_tool),
+            ("commit_tool", &list_sync.commit_tool),
+        ] {
+            manual
+                .tool(name)
+                .with_context(|| format!("holon.list_sync.{field}"))?;
+        }
     }
 
     let mut calls = HashMap::with_capacity(manual.tools.len());

@@ -2734,6 +2734,7 @@ dependencies = [
  "gql-transform",
  "holon-advice",
  "holon-api",
+ "holon-connections",
  "holon-core",
  "holon-kitchen",
  "holon-macros",
@@ -2803,6 +2804,21 @@ dependencies = [
  "tracing-opentelemetry",
  "uuid",
  "wasm-bindgen-futures",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
+name = "holon-connections"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "holon-api",
+ "holon-core",
+ "holon-rows",
+ "serde",
+ "serde_json",
  "workspace-hack 0.1.0",
 ]
 
@@ -2910,8 +2926,6 @@ name = "holon-kitchen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
- "chrono",
  "holon-api",
  "holon-core",
  "holon-profiles",

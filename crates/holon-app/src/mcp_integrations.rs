@@ -924,35 +924,43 @@ impl Module for McpIntegrationsModule {
             ));
         }
 
-        // The shopping peer's own operation, registered into the SAME provider
-        // set. It is not one of the sidecar's operations — the sidecar declares
-        // no entities, because the generic mirror needs a server-issued item id
-        // this peer does not give — so it is wired here, where the connected
-        // integration's call surface can be reached by name.
+        // The generic remote-LIST operation, registered into the SAME provider
+        // set. A sidecar that declares `holon.list_sync` mirrors its remote list
+        // through `crates/holon-connections`' one reconciler and one operation —
+        // there is no per-connection Rust left to register.
         //
-        // Registered only when the sidecar IS configured, like every provider
+        // What is registered HERE is the transport half only: the peer (a
+        // `utcp:` call surface) and the local row reader (a DB handle). Both
+        // need things this module has and the wasm graphs do not, which is
+        // exactly why the connection itself is assembled as a `ConfiguredLists`
+        // value and the operation provider is built from it in the composition
+        // root.
+        //
+        // Registered only when a sidecar declares a list, like every provider
         // above. An unconditional factory resolves the integration registry in
         // EVERY container that configures this module, and resolving it pulls in
         // the composition root's unconditional services — the degraded-signal
         // bus, the sync gate — which a container wiring only this module does not
-        // have. That is both connect work nobody asked for and a dependency
-        // chain this module has no business imposing.
+        // have.
         if configs
             .iter()
-            .any(|(name, _)| name == crate::shopping_operations::PROVIDER)
+            .any(|(_, cfg)| cfg.holon.as_ref().is_some_and(|h| h.list_sync.is_some()))
         {
-            injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
-                move |resolver| async move {
-                    let registry = resolver.resolve_async::<McpIntegrationRegistry>().await;
-                    let db_handle = resolver
-                        .resolve_async::<dyn holon::di::DbHandleProvider>()
-                        .await
-                        .handle();
-                    Arc::new(crate::shopping_operations::ShoppingOperations::new(
-                        registry,
-                        db_handle,
-                        crate::shopping_operations::device_id(),
-                    )) as Arc<dyn OperationProvider>
+            let configs_for_lists = configs.clone();
+            injector.provide::<holon_connections::ConfiguredLists>(Provider::root_async(
+                move |resolver| {
+                    let configs = configs_for_lists.clone();
+                    async move {
+                        let registry = resolver.resolve_async::<McpIntegrationRegistry>().await;
+                        let db_handle = resolver
+                            .resolve_async::<dyn holon::di::DbHandleProvider>()
+                            .await
+                            .handle();
+                        let types = resolver.resolve::<TypeRegistry>();
+                        Arc::new(crate::remote_list::configured_lists(
+                            &configs, &registry, &db_handle, &types,
+                        ))
+                    }
                 },
             ));
         }

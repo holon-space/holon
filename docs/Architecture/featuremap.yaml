@@ -565,6 +565,23 @@ areas:
         unpinned: >
           `EmitMcpData` covers CDC re-emission only. Nothing exercises the reference
           connector's sync, auth, write-back, or undo.
+      - feature: Remote list connections
+        what: >
+          A sidecar's `holon.list_sync` block mirrors a remote LIST through one
+          generic reconciler — identity is the declared `key` expression, so a
+          peer that issues row ids and one that does not reach the same code
+        pin_note: >
+          `crates/holon-connections/tests/remote_list_reconcile_pbt.rs` (both key
+          shapes) + `crates/holon-app/tests/shopping_pull_mock.rs` (the round over
+          a mock peer)
+        ruled_by: "[0034](../adr/0034-low-code-connections-formats-and-systems-as-sidecars.md)"
+        mode_axes: "—"
+        entry: "`crates/holon-connections/src/reconcile.rs`"
+        unpinned: >
+          the keystone drives no configured connection, so nothing there fails if
+          a round stops reconciling. The dedicated PBT and the mock-peer round are
+          the only pins; see
+          `docs/Testing/bugfunnel/entries/2026-09-14-remote-list-sync-keystone-unreachable.md`.
       - feature: Other sidecars
         what: gcal, gmail, claude-history, jsonplaceholder
         pin_note: "*(none)*"
