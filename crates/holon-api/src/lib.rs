@@ -63,6 +63,7 @@ pub mod render_eval;
 pub mod render_requirements;
 pub mod render_types;
 pub mod repository;
+pub mod row_source;
 pub mod share_props;
 pub mod sharing;
 pub mod spawner;

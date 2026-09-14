@@ -724,13 +724,30 @@ pub fn shared_live_query_build<W>(
         }
     });
 
+    // The builder's arguments, parsed once. Everything below reads the spec
+    // rather than re-reading `args`, so adding a `Named` arm does not mean
+    // another pass over the same arguments with a different answer.
+    let spec = holon_api::row_source::RowSourceSpec::Query {
+        lang: language,
+        text: query.clone(),
+        context: query_context.clone(),
+    };
+
     // Validate-by-doing: start (and immediately drop) a watch. Compilation
     // errors and missing-live-query capability both surface as an error
     // render node, exactly as the old compile + start_query pair did. The
     // platform layer starts the *real* watcher from the node props.
+    let holon_api::row_source::RowSourceSpec::Query {
+        lang: spec_lang,
+        text: spec_text,
+        context: spec_context,
+    } = &spec
+    else {
+        unreachable!("the Query arm is the only arm this builder constructs today");
+    };
     let result = ba
         .services
-        .watch_query(&query, language, query_context.clone());
+        .watch_query(spec_text, *spec_lang, spec_context.clone());
 
     let deeper_ctx = ba.ctx.deeper_query();
 

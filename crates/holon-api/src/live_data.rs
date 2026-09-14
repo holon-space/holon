@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use futures_signals::signal_map::MutableBTreeMap;
+use futures_signals::signal_map::MutableBTreeMapEntries;
 use futures_signals::signal_map::MutableBTreeMapLockRef;
 use futures_signals::signal_map::MutableSignalMap;
 use tokio::sync::Notify;
@@ -270,6 +271,17 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     /// react to changes in a background task.
     pub fn signal_map(&self) -> MutableSignalMap<String, Arc<T>> {
         self.items.signal_map_cloned()
+    }
+
+    /// The same items as an ordered `SignalVec`, in key order.
+    ///
+    /// Widgets consume `VecDiff`, mirrors store a keyed map; this is the one
+    /// bridge between them. The key produced by `id_fn` is the sort key, so a
+    /// named source that wants a different display order must encode it in the
+    /// key (the `focus_roots` mirror does exactly that with
+    /// `"{region}\u{1F}{root_id}"`).
+    pub fn entries_signal_vec(&self) -> MutableBTreeMapEntries<String, Arc<T>> {
+        self.items.entries_cloned()
     }
 
     /// Insert or update an item directly (bypasses CDC).

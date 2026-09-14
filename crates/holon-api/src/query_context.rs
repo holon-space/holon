@@ -37,7 +37,7 @@ impl PathContext {
 }
 
 /// Context for query compilation - determines what virtual tables resolve to
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryContext {
     /// Current block ID for `from children` resolution. None = root level
     /// (parent_id IS NULL)
