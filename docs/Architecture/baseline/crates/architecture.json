@@ -1795,6 +1795,68 @@
         ]
       },
       {
+        "name": "holon-connections-testing",
+        "path": "holon-connections-testing",
+        "c4_level": "component",
+        "description": "In-process fixture peers for the generic remote-list reconciler.",
+        "pattern": "Test Harness",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon-connections \"remote-list peer port & sync round\" \"Rust\"\n@c4 uses holon-core \"typed row-set projection\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n\nIn-process fixture peers for the generic remote-list reconciler.\n\nThe production connector owns the round, the reconciler and the intents; the\none thing it cannot own is a transport. This crate stands in for that\ntransport so the REAL [`holon_connections::sync_once`] round can be driven\nin a test, over peers that differ along the axes that distinguish real list\nAPIs.\n\nA second list system is covered by declaring its own sidecar block; a second\npeer behaviour is covered by picking another [`FixtureProfile`]. Nothing\nhere names a product.",
+        "source_file": "holon-connections-testing/src/lib.rs",
+        "layer": "Testing",
+        "relationships": [
+          {
+            "target": "holon-connections",
+            "label": "remote-list peer port & sync round",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-core",
+            "label": "typed row-set projection",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-api",
+            "label": "shared value & operation types",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-connections-testing/src",
+            "files": [
+              {
+                "name": "axes.rs"
+              },
+              {
+                "name": "fakes.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "peer.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-connections-testing/tests",
+            "files": [
+              {
+                "name": "remote_list_fixture_table.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
         "name": "holon-core",
         "path": "holon-core",
         "c4_level": "component",
@@ -2745,7 +2807,7 @@
         "description": "Shared test infrastructure for Holon integration tests",
         "pattern": "Test Harness",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-app \"DI composition root\" \"Rust\"\n@c4 uses holon-block-roundtrip-testing \"block round-trip generators\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-frontend \"frontend session abstraction\" \"Rust\"\n@c4 uses holon-layout-testing \"layout PBT primitives\" \"Rust\"\n@c4 uses holon-mcp \"MCP frontend\" \"Rust\"\n@c4 uses holon-mcp-client \"MCP client providers\" \"Rust\"\n@c4 uses holon-orgmode \"org-mode sync I/O\" \"Rust\"\n@c4 uses holon-pbt-core \"PBT transition traits\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n@c4 uses holon-advice \"runtime advice rules\" \"Rust\"\n@c4 uses holon-capability \"format capability profiles\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-kitchen \"kitchen domain: recipes & shopping\" \"Rust\"\n@c4 uses holon-loro-testing \"Loro subsystem PBT slice\" \"Rust\"\n@c4 uses holon-loro-wiring \"Loro-to-engine wiring\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-net \"derived Petri-net projection\" \"Rust\"\n@c4 uses holon-oracles \"live ref-less invariants\" \"Rust\"\n@c4 uses holon-org-format \"org parse/render\" \"Rust\"\n@c4 uses holon-sharing \"ADR 0028 policy overlay\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-turso-testing \"Turso subsystem PBT slice\" \"Rust\"\n\nShared test infrastructure for Holon integration tests\n\nThis module provides reusable components for both property-based tests\nand Cucumber BDD tests.",
+        "content": "@c4 component\n@c4 layer Testing\nPattern: Test Harness\n@c4 uses holon \"core orchestration\" \"Rust\"\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-app \"DI composition root\" \"Rust\"\n@c4 uses holon-block-roundtrip-testing \"block round-trip generators\" \"Rust\"\n@c4 uses holon-filesystem \"filesystem ports\" \"Rust\"\n@c4 uses holon-frontend \"frontend session abstraction\" \"Rust\"\n@c4 uses holon-layout-testing \"layout PBT primitives\" \"Rust\"\n@c4 uses holon-mcp \"MCP frontend\" \"Rust\"\n@c4 uses holon-mcp-client \"MCP client providers\" \"Rust\"\n@c4 uses holon-orgmode \"org-mode sync I/O\" \"Rust\"\n@c4 uses holon-pbt-core \"PBT transition traits\" \"Rust\"\n@c4 uses holon-loro \"Loro CRDT backend & P2P sync\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n@c4 uses holon-advice \"runtime advice rules\" \"Rust\"\n@c4 uses holon-capability \"format capability profiles\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-connections \"remote-list sync round\" \"Rust\"\n@c4 uses holon-connections-testing \"in-process fixture peers\" \"Rust\"\n@c4 uses holon-kitchen \"kitchen domain: recipes & shopping\" \"Rust\"\n@c4 uses holon-loro-testing \"Loro subsystem PBT slice\" \"Rust\"\n@c4 uses holon-loro-wiring \"Loro-to-engine wiring\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-net \"derived Petri-net projection\" \"Rust\"\n@c4 uses holon-oracles \"live ref-less invariants\" \"Rust\"\n@c4 uses holon-org-format \"org parse/render\" \"Rust\"\n@c4 uses holon-sharing \"ADR 0028 policy overlay\" \"Rust\"\n@c4 uses holon-turso \"Turso storage adapter\" \"Rust\"\n@c4 uses holon-turso-testing \"Turso subsystem PBT slice\" \"Rust\"\n\nShared test infrastructure for Holon integration tests\n\nThis module provides reusable components for both property-based tests\nand Cucumber BDD tests.",
         "source_file": "holon-integration-tests/src/lib.rs",
         "layer": "Testing",
         "relationships": [
@@ -2827,6 +2889,16 @@
           {
             "target": "holon-core",
             "label": "core datasource traits",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-connections",
+            "label": "remote-list sync round",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-connections-testing",
+            "label": "in-process fixture peers",
             "protocol": "Rust"
           },
           {
@@ -3100,6 +3172,9 @@
                             "name": "read_only_home_refuses_writes.rs"
                           },
                           {
+                            "name": "remote_list_mirror_matches_ref.rs"
+                          },
+                          {
                             "name": "reseed_leak.rs"
                           },
                           {
@@ -3225,6 +3300,9 @@
                       },
                       {
                         "name": "observed_errors.rs"
+                      },
+                      {
+                        "name": "remote_list_sut.rs"
                       },
                       {
                         "name": "reseed_observer.rs"
@@ -3474,6 +3552,9 @@
                             "name": "read_only_home_refuses_writes.rs"
                           },
                           {
+                            "name": "remote_list_mirror_matches_ref.rs"
+                          },
+                          {
                             "name": "settle_budget.rs"
                           },
                           {
@@ -3672,6 +3753,9 @@
                       },
                       {
                         "name": "read_only_homes.rs"
+                      },
+                      {
+                        "name": "remote_list.rs"
                       },
                       {
                         "name": "shared_view.rs"
@@ -3878,6 +3962,9 @@
                         "name": "rehome_entity.rs"
                       },
                       {
+                        "name": "remote_list_sync.rs"
+                      },
+                      {
                         "name": "remove_watch.rs"
                       },
                       {
@@ -4054,6 +4141,9 @@
                   },
                   {
                     "name": "reference_state.rs"
+                  },
+                  {
+                    "name": "remote_list_fixture.rs"
                   },
                   {
                     "name": "run_result.rs"

@@ -552,6 +552,11 @@ pub struct ReferenceState {
     /// each type's matview by `inv-typed-matview-matches-ref`. Carries no type
     /// name of its own — the set comes from the registry.
     pub typed_entities: TypedEntitiesRefState,
+
+    /// Remote-list sync oracle: the fixture peer's declared list, which the
+    /// mirror must equal after every round. Read by `RefRemoteListSync`;
+    /// mutated by `RemoteListSync`.
+    pub remote_list: RemoteListRefState,
 }
 
 /// Reference model of the datatype axis (BG-1): which free-standing types are
@@ -716,6 +721,97 @@ impl TypedEntitiesRefState {
     /// asserts none of them reaches a block table.
     pub fn all_ids(&self) -> impl Iterator<Item = &String> {
         self.by_type.values().flat_map(BTreeMap::keys)
+    }
+}
+
+/// Reference model of the remote-list sync axis: the fixture peer's declared
+/// list, which after a sync round is also the mirror's content.
+///
+/// The peer is the oracle: a row is whatever the peer serves, and the mirror
+/// invariant asserts the SUT's mirror equals it after every round. Carries no
+/// product vocabulary — the row shape comes from
+/// [`crate::pbt::remote_list_fixture`], the ONE connection the keystone wires.
+#[derive(Debug, Clone, Default)]
+pub struct RemoteListRefState {
+    /// id -> cells in [`crate::pbt::remote_list_fixture::PROJECTION`] order
+    /// WITHOUT the leading id (the id is the key).
+    rows: BTreeMap<String, Vec<String>>,
+    /// Monotonic label allocator, so an `Add` never reuses a label a `Remove`
+    /// freed and silently folds into a surviving row.
+    next_label: u64,
+}
+
+impl RemoteListRefState {
+    /// The label the next `Add` draws — a fresh identity by construction.
+    pub fn next_label(&self) -> u64 {
+        self.next_label
+    }
+
+    /// Every row the peer currently serves, as its peer-authoritative columns
+    /// (the identity pair first, then merge and latch) — the `Remove` draw
+    /// domain.
+    pub fn existing_columns(&self) -> Vec<Vec<(String, String)>> {
+        self.rows
+            .values()
+            .map(|cells| {
+                crate::pbt::remote_list_fixture::PROJECTION[1..]
+                    .iter()
+                    .cloned()
+                    .zip(cells.iter().cloned())
+                    .map(|(name, value)| (name.to_string(), value))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Apply one remote change the transition drew, mirroring the SUT fixture
+    /// peer's mutation.
+    pub fn apply(&mut self, mutation: &holon_pbt_core::capabilities::RemoteListMutation) {
+        let cell = |columns: &[(String, String)], name: &str| {
+            columns
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the reference model's remote-list mutation names no '{name}' column; \
+                         the generated mutation and the projection must agree on the row's shape"
+                    )
+                })
+        };
+        let id = crate::pbt::remote_list_fixture::row_id(
+            &cell(mutation.columns(), "label"),
+            &cell(mutation.columns(), "bucket"),
+        );
+        match mutation {
+            holon_pbt_core::capabilities::RemoteListMutation::Add { .. } => {
+                let cells = crate::pbt::remote_list_fixture::PROJECTION[1..]
+                    .iter()
+                    .map(|name| cell(mutation.columns(), name))
+                    .collect();
+                self.rows.insert(id, cells);
+                self.next_label += 1;
+            }
+            holon_pbt_core::capabilities::RemoteListMutation::Remove { .. } => {
+                self.rows.remove(&id);
+            }
+        }
+    }
+
+    /// The peer's declared list, as `[id, ..cells]` in projection order,
+    /// canonically sorted for order-insensitive comparison.
+    pub fn expected_rows(&self) -> Vec<Vec<String>> {
+        let mut rows: Vec<Vec<String>> = self
+            .rows
+            .iter()
+            .map(|(id, cells)| {
+                let mut row = vec![id.clone()];
+                row.extend(cells.iter().cloned());
+                row
+            })
+            .collect();
+        rows.sort();
+        rows
     }
 }
 
@@ -963,6 +1059,7 @@ impl ReferenceState {
                 }
                 t
             },
+            remote_list: RemoteListRefState::default(),
         }
     }
 

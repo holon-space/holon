@@ -60,6 +60,7 @@ pub mod mark_bounds_within_content;
 pub mod matview_recompute_matches;
 pub mod observed_errors;
 pub mod paint_text_styling;
+pub mod remote_list_mirror_matches_ref;
 pub mod reseed_leak;
 pub mod sticky_accordion_spec;
 pub mod typed_matview_matches_ref;

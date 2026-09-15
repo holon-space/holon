@@ -142,6 +142,7 @@ pub mod receiver_create_block;
 mod redo;
 pub mod register_entity_scheme;
 mod rehome_entity;
+mod remote_list_sync;
 mod remove_watch;
 mod rename_document;
 pub(crate) mod rename_page;
@@ -231,6 +232,7 @@ pub use receiver_create_block::ReceiverCreateBlock;
 pub use redo::Redo;
 pub use register_entity_scheme::RegisterEntityScheme;
 pub use rehome_entity::RehomeEntity;
+pub use remote_list_sync::RemoteListSync;
 pub use remove_watch::RemoveWatch;
 pub use rename_document::RenameDocument;
 pub use rename_page::RenamePage;
@@ -314,6 +316,7 @@ crate::declare_e2e_transitions! {
         Redo(Redo),
         RegisterEntityScheme(RegisterEntityScheme),
         RehomeEntity(RehomeEntity),
+        RemoteListSync(RemoteListSync),
         SimulateRestart(SimulateRestart),
         RemoveWatch(RemoveWatch),
         SetEdgeField(SetEdgeField),

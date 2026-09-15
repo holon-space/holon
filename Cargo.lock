@@ -5337,6 +5337,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-connections-testing"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "holon-api",
+ "holon-connections",
+ "holon-core",
+ "proptest 1.11.0",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-core"
 version = "0.1.0"
 dependencies = [
@@ -5534,6 +5550,8 @@ dependencies = [
  "holon-app",
  "holon-block-roundtrip-testing",
  "holon-capability",
+ "holon-connections",
+ "holon-connections-testing",
  "holon-core",
  "holon-engine",
  "holon-filesystem",

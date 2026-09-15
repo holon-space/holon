@@ -3969,3 +3969,89 @@ pub trait RefTypedEntities {
     /// datatype-axis identity asserts none of them reaches a block table.
     fn typed_entity_ids(&self) -> std::collections::BTreeSet<String>;
 }
+
+/// One change a fixture remote-list peer is asked to apply, in the connection's
+/// own column names. Free of any product's vocabulary: a row is `columns`, and
+/// a removal names the same columns so the connection's declared key derives
+/// the identity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RemoteListMutation {
+    /// Add (or replace, under a natural key) a row. `columns` carries the
+    /// peer-authoritative columns; the fixture derives the id and the key.
+    Add { columns: Vec<(String, String)> },
+    /// Remove the row whose key the connection derives from `columns`.
+    Remove { columns: Vec<(String, String)> },
+}
+
+impl RemoteListMutation {
+    /// The columns this mutation names, whichever leg it is.
+    pub fn columns(&self) -> &[(String, String)] {
+        match self {
+            RemoteListMutation::Add { columns } | RemoteListMutation::Remove { columns } => columns,
+        }
+    }
+}
+
+crate::step_field_via_json!(
+    RemoteListMutation,
+    vec![
+        RemoteListMutation::Add {
+            columns: vec![
+                ("label".to_string(), "label1".to_string()),
+                ("bucket".to_string(), "bucket".to_string()),
+                ("rank".to_string(), "1".to_string()),
+                ("done".to_string(), "0".to_string()),
+            ],
+        },
+        RemoteListMutation::Remove {
+            columns: vec![
+                ("label".to_string(), "label1".to_string()),
+                ("bucket".to_string(), "bucket".to_string()),
+                ("rank".to_string(), "1".to_string()),
+                ("done".to_string(), "0".to_string()),
+            ],
+        },
+    ]
+);
+
+/// What one sync round decided and did, at the SUT boundary. The transition
+/// reads `committed` to assert a second round over an unchanged peer is a
+/// no-op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteListRoundOutcome {
+    pub committed: usize,
+}
+
+/// SUT side of the remote-list sync axis: a fixture peer the composed keystone
+/// owns, driven through the REAL [`holon_connections::sync_once`] round.
+///
+/// `#[capmap_adapter]` hosts it on `CapMap`, so the `RemoteListSync` transition
+/// and the mirror invariant select only when a composed config wires it. A
+/// storage-only slice deselects honestly rather than driving a peer that does
+/// not exist.
+#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter] // emits async-trait + CapName + `impl … for CapMap`
+pub trait SutRemoteListSync {
+    /// Mutate the fixture peer's list, simulating the remote list changing
+    /// between rounds. Fails loud if the peer is not wired.
+    async fn remote_list_mutate(&self, mutation: RemoteListMutation);
+
+    /// Run ONE production sync round (pull → reconcile → apply the local
+    /// intents through the dispatcher → push) and report how many commands were
+    /// committed. A converged round commits zero.
+    async fn remote_list_sync_round(&self) -> RemoteListRoundOutcome;
+
+    /// The mirror's current rows, projected to the peer-authoritative columns
+    /// (id + the columns the peer serves), canonically sorted for
+    /// order-insensitive diffing.
+    async fn remote_list_mirror_rows(&self) -> Vec<Vec<String>>;
+}
+
+/// Ref-side expectation for the remote-list sync axis: the peer's declared
+/// list, as canonically-sorted rows matching
+/// [`SutRemoteListSync::remote_list_mirror_rows`]'s projection.
+#[holon_macros::capmap_adapter] // sync trait → no async-trait; emits CapName + `impl … for CapMap`
+pub trait RefRemoteListSync {
+    /// The expected mirror rows — the peer's declared list, canonically sorted.
+    fn remote_list_expected_rows(&self) -> Vec<Vec<String>>;
+}

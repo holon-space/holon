@@ -36,6 +36,8 @@ test-infra = [
     "dep:holon-api",
     "dep:holon-capability",
     "dep:holon-net",
+    "dep:holon-connections",
+    "dep:holon-connections-testing",
     "dep:tokio",
     "dep:tokio-stream",
     "dep:tempfile",
@@ -118,6 +120,8 @@ holon-turso = { workspace = true, optional = true }
 holon-filesystem = { workspace = true, optional = true }
 holon-kitchen = { workspace = true, optional = true }
 holon-loro = { workspace = true, optional = true }
+holon-connections = { workspace = true, optional = true }
+holon-connections-testing = { path = "../holon-connections-testing", optional = true }
 # True sharing: the sans-IO acceptor + `sync_once` the two-instance slice drives.
 holon-sharing = { workspace = true, optional = true }
 holon-api = { workspace = true, optional = true }

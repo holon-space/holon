@@ -31,6 +31,7 @@ use crate::capabilities::RefJournalFeed;
 use crate::capabilities::RefLayout;
 use crate::capabilities::RefNavHistory;
 use crate::capabilities::RefReadOnlyHomes;
+use crate::capabilities::RefRemoteListSync;
 use crate::capabilities::RefSharedView;
 use crate::capabilities::RefTaskState;
 use crate::capabilities::RefToggle;
@@ -47,7 +48,7 @@ pub struct NullRef;
 /// The trait names `NullRef` answers for — the ref caps the classifier
 /// can host. Asserted by the classifier test so a newly registered ref
 /// capability cannot silently escape classification.
-pub const NULL_REF_CAPS: [&str; 22] = [
+pub const NULL_REF_CAPS: [&str; 23] = [
     "RefAdvice",
     "RefAudience",
     "RefBackend",
@@ -63,6 +64,7 @@ pub const NULL_REF_CAPS: [&str; 22] = [
     "RefLayout",
     "RefNavHistory",
     "RefReadOnlyHomes",
+    "RefRemoteListSync",
     "RefSharedView",
     "RefTaskState",
     "RefToggle",
@@ -309,6 +311,13 @@ impl RefNavHistory for NullRef {
 }
 
 #[allow(unused_variables)]
+impl RefRemoteListSync for NullRef {
+    fn remote_list_expected_rows(&self) -> Vec<Vec<String>> {
+        panic!("class-2: invariant read RefRemoteListSync::remote_list_expected_rows")
+    }
+}
+
+#[allow(unused_variables)]
 impl RefTypedEntities for NullRef {
     fn typed_entity_schemas(&self) -> Vec<(String, Vec<String>)> {
         panic!("class-2: invariant read RefTypedEntities::typed_entity_schemas")
@@ -458,6 +467,7 @@ pub fn null_ref_caps() -> CapMap {
     caps.insert(nr.clone() as Arc<dyn RefLayout>);
     caps.insert(nr.clone() as Arc<dyn RefNavHistory>);
     caps.insert(nr.clone() as Arc<dyn RefReadOnlyHomes>);
+    caps.insert(nr.clone() as Arc<dyn RefRemoteListSync>);
     caps.insert(nr.clone() as Arc<dyn RefSharedView>);
     caps.insert(nr.clone() as Arc<dyn RefTaskState>);
     caps.insert(nr.clone() as Arc<dyn RefToggle>);
@@ -485,6 +495,7 @@ pub fn null_ref_cap_ids() -> Vec<CapId> {
         CapId::of::<dyn RefLayout>(),
         CapId::of::<dyn RefNavHistory>(),
         CapId::of::<dyn RefReadOnlyHomes>(),
+        CapId::of::<dyn RefRemoteListSync>(),
         CapId::of::<dyn RefSharedView>(),
         CapId::of::<dyn RefTaskState>(),
         CapId::of::<dyn RefToggle>(),

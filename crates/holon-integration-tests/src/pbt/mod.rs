@@ -47,6 +47,7 @@ pub mod ref_caps;
 pub use ref_caps as reference_capabilities;
 pub mod reference_domain_state;
 pub mod reference_state;
+pub mod remote_list_fixture;
 pub mod run_result;
 // `shadow_mesh` co-located to `holon-loro-testing` (RefStateSplit Inc 5);
 // re-exported so `super::shadow_mesh::ShadowMesh` /

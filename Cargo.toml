@@ -18,6 +18,7 @@ members = [
   "crates/holon-orgmode",
   "crates/holon-markdown",
   "crates/holon-connections",
+  "crates/holon-connections-testing",
   "crates/holon-kitchen",
   "crates/holon-rows",
   "crates/holon-plugin-host",
@@ -286,6 +287,7 @@ holon-macros = { path = "crates/holon-macros" }
 holon-mcp-client = { path = "crates/holon-mcp-client" }
 holon-org-format = { path = "crates/holon-org-format" }
 holon-connections = { path = "crates/holon-connections" }
+holon-connections-testing = { path = "crates/holon-connections-testing" }
 holon-kitchen = { path = "crates/holon-kitchen" }
 holon-rows = { path = "crates/holon-rows" }
 holon-plugin-host = { path = "crates/holon-plugin-host" }

@@ -74,6 +74,7 @@ mod misc;
 mod nav;
 mod peers;
 mod read_only_homes;
+mod remote_list;
 mod shared_view;
 mod toggle;
 mod typed_entities;
@@ -223,6 +224,11 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // typed-matview invariant ALSO needs the `SutTypedEntity` SUT cap
         // (Turso-only), so a Loro-only / no-Turso slice deselects honestly.
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefTypedEntities>);
+        // `RefRemoteListSync` carries the remote-list sync oracle (the fixture
+        // peer's declared list) the mirror invariant reads. Harmless to existing
+        // slices: selection ANDs SUT∧ref cap sets, and only a slice supplying
+        // the matching `SutRemoteListSync` selects it.
+        caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefRemoteListSync>);
         // `RefReadOnlyHomes` names the blocks homed in a read-only format, so
         // `AttemptReadOnlyEdit` can aim at one. Empty on every draw whose
         // fixture seeds no second format, which narrows the transition out

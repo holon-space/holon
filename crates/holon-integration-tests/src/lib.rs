@@ -17,6 +17,8 @@
 //! @c4 uses holon-advice "runtime advice rules" "Rust"
 //! @c4 uses holon-capability "format capability profiles" "Rust"
 //! @c4 uses holon-core "core datasource traits" "Rust"
+//! @c4 uses holon-connections "remote-list sync round" "Rust"
+//! @c4 uses holon-connections-testing "in-process fixture peers" "Rust"
 //! @c4 uses holon-kitchen "kitchen domain: recipes & shopping" "Rust"
 //! @c4 uses holon-loro-testing "Loro subsystem PBT slice" "Rust"
 //! @c4 uses holon-loro-wiring "Loro-to-engine wiring" "Rust"

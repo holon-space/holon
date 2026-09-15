@@ -486,6 +486,16 @@ async fn compose_sut_seeded_impl(
         // storage); a Loro-only / storage-only slice never reaches here, so
         // the typed-matview invariant deselects honestly there.
         caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutTypedEntity>);
+        // `SutRemoteListSync` (remote-list sync axis): a fixture peer + the REAL
+        // reconciler + the REAL mirror table, driven by the `RemoteListSync`
+        // transition. Hosted only on the Turso+frontend arm (the round needs the
+        // production dispatcher and the persisted mirror table); a Loro-only /
+        // storage-only slice never reaches here, so the mirror invariant
+        // deselects honestly.
+        caps.insert(
+            crate::pbt::composed::remote_list_sut::RemoteListSut::boot(comp.clone()).await
+                as Arc<dyn holon_pbt_core::capabilities::SutRemoteListSync>,
+        );
         // The editor READ cap (the WRITE cap rides the gesture rung). Selects the
         // `inv-editor-{text,caret}-matches-ref` invariants. Hosted on EVERY frontend
         // arm, not just Loro ones: the reads come from the driver's
