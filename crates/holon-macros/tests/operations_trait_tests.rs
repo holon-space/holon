@@ -78,6 +78,25 @@ where
     async fn set_state(&self, id: &str, state: String) -> Result<OperationResult>;
 }
 
+// ---- Test trait: entity_ref / may_be_root parameter attributes ----
+
+#[holon_macros::operations_trait]
+#[async_trait]
+pub trait EntityRefAttrsTestOps<T>: MaybeSendSync
+where
+    T: MaybeSendSync + 'static,
+{
+    /// Move a block to a destination that may be the tree root.
+    #[holon_macros::affects("parent_id", "sort_key")]
+    async fn move_maybe_to_root(
+        &self,
+        id: &str,
+        #[entity_ref("block")]
+        #[may_be_root]
+        destination: &str,
+    ) -> Result<OperationResult>;
+}
+
 // ---- Test trait: dispatch with various parameter types ----
 
 #[holon_macros::operations_trait]
@@ -261,6 +280,44 @@ fn dispatch_params_have_correct_types() {
         .find(|p| p.name == "count")
         .unwrap();
     assert_eq!(count_param.type_hint, holon_api::TypeHint::Number);
+}
+
+/// `#[entity_ref("block")]` and `#[may_be_root]` on ONE parameter are a
+/// conjunction, not alternatives: the position names the entity it references
+/// AND admits the root. Reading only the first would drop the admission
+/// silently, leaving a move-to-root refused at dispatch on a declaration that
+/// asked for it.
+#[test]
+fn entity_ref_beside_may_be_root_names_the_entity_and_admits_the_root() {
+    let ops = __operations_entity_ref_attrs_test_ops::entity_ref_attrs_test_ops(
+        "test", "t", "tests", "id",
+    );
+    let op = ops
+        .iter()
+        .find(|o| o.name == "move_maybe_to_root")
+        .expect("the operation is declared");
+    let destination = op
+        .required_params
+        .iter()
+        .find(|p| p.name == "destination")
+        .expect("`destination` is a required parameter");
+    assert_eq!(
+        destination.type_hint,
+        holon_api::TypeHint::EntityIdOrRoot {
+            entity_name: holon_api::EntityName::new("block"),
+        },
+        "the pair must name the entity AND admit the root"
+    );
+
+    holon_api::validate_entity_references(&ops).expect("the declaration is complete");
+    let parsed = holon_api::entity_reference_params(&ops, "test", "move_maybe_to_root")
+        .expect("the declaration parses");
+    let found = parsed
+        .iter()
+        .find(|p| p.name == "destination")
+        .expect("`destination` is parsed as a reference");
+    assert!(found.admits_root, "the declaration admits the root");
+    assert_eq!(found.entity_name.as_str(), "block");
 }
 
 #[test]

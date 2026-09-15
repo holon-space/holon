@@ -1916,9 +1916,21 @@ fn parse_param_type_hint(
     }
 
     if let Some(entity_name) = entity_ref_override {
-        quote! {
-            holon_api::TypeHint::EntityId {
-                entity_name: holon_api::EntityName::new(#entity_name),
+        // `#[entity_ref(..)]` names the entity; `#[may_be_root]` says the ROOT
+        // is a legal value there. They answer different questions, so one
+        // parameter may carry both — reading only the first would drop the
+        // admission the second asked for.
+        if may_be_root {
+            quote! {
+                holon_api::TypeHint::EntityIdOrRoot {
+                    entity_name: holon_api::EntityName::new(#entity_name),
+                }
+            }
+        } else {
+            quote! {
+                holon_api::TypeHint::EntityId {
+                    entity_name: holon_api::EntityName::new(#entity_name),
+                }
             }
         }
     } else if not_entity {

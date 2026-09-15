@@ -27,20 +27,21 @@ use crate::render_types::TypeHint;
 ///
 /// Two narrowings keep it from reading things that are not claims about this
 /// parameter. Word boundaries, so "invalid", "identity" and "width" say
-/// nothing. And bracketed spans are skipped: a description that sketches a
-/// payload — `JSON snapshot of [{system, foreign_id, confidence}]` — names
+/// nothing. And the two bracket kinds that sketch a payload are skipped: a
+/// description like `JSON snapshot of [{system, foreign_id, confidence}]` names
 /// fields of something else, and rewording it to quiet a check is how a
-/// description stops being one.
+/// description stops being one. A parenthesis is not a sketch — `(id)` is prose
+/// about this parameter and is read.
 pub fn description_calls_it_an_id(description: &str) -> bool {
     let mut depth = 0usize;
     let prose: String = description
         .chars()
         .map(|c| match c {
-            '[' | '{' | '(' => {
+            '[' | '{' => {
                 depth += 1;
                 ' '
             }
-            ']' | '}' | ')' => {
+            ']' | '}' => {
                 depth = depth.saturating_sub(1);
                 ' '
             }
@@ -53,7 +54,11 @@ pub fn description_calls_it_an_id(description: &str) -> bool {
         .collect();
     prose
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|word| word.eq_ignore_ascii_case("id") || word.eq_ignore_ascii_case("ids"))
+        .any(|word| {
+            word.eq_ignore_ascii_case("id")
+                || word.eq_ignore_ascii_case("ids")
+                || word.eq_ignore_ascii_case("identifier")
+        })
 }
 
 /// Whether `param_name` names an entity reference rather than a value: the
@@ -370,6 +375,29 @@ mod tests {
         assert!(description_calls_it_an_id(
             "Integration row id, 'integration:<provider>'"
         ));
+    }
+
+    /// `identifier` names an id the same way `id` and `ids` do. `identity` and
+    /// `invalid` merely begin with the same letters and say nothing.
+    #[test]
+    fn identifier_names_an_id_and_identity_and_invalid_do_not() {
+        assert!(description_calls_it_an_id("The block id"));
+        assert!(description_calls_it_an_id("The captured ids"));
+        assert!(description_calls_it_an_id("The identifier of the block"));
+        assert!(!description_calls_it_an_id("Identity of the author"));
+        assert!(!description_calls_it_an_id("An invalid width"));
+    }
+
+    /// A parenthesis is prose, not a payload sketch. `(id)` is a claim about
+    /// THIS parameter and trips the rule; only the sketch kinds are skipped.
+    #[test]
+    fn a_parenthesised_id_is_read_and_a_bracketed_payload_sketch_is_not() {
+        assert!(description_calls_it_an_id("Origin block to convert (id)"));
+        assert!(description_calls_it_an_id("The siblings (ids) to renumber"));
+        assert!(!description_calls_it_an_id(
+            "JSON snapshot of [{system, foreign_id, confidence}]"
+        ));
+        assert!(!description_calls_it_an_id("Field map {parent_id: uuid}"));
     }
 
     /// A reference the NAME rule cannot see — `target` is not `id` or `*_id` —
