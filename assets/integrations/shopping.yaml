@@ -243,6 +243,9 @@ holon:
       # would turn it into a deletion of a real item under replace-scope
       # semantics, which is the one outcome absence-as-deletion must never
       # produce from bad input.
+      #
+      # The peer issues no count for a picked entry, so an active and a picked row
+      # of one `(name, cat)` fold into ONE row — declared design, not for 1:1.
       response: |
         def code_of: split("_")[0];
         def blank: . == 9 or . == 10 or . == 11 or . == 12 or . == 13 or . == 32

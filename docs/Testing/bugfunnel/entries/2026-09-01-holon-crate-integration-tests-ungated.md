@@ -81,5 +81,46 @@ Both tests in the `turso_storage_pbt` binary pass — the state machine and
 `test_view_change_stream_receives_events_from_backend_operations`. Row 20 of
 `docs/Testing/HolonCrateReds-2026-09-01.md` and the binary's nextest cap are
 corrected accordingly. The gating decision above stays OPEN; a failure of this
-test inside a loaded run is unexplained by the version API and needs a captured
-contended run before it is attributed.
+test inside a loaded run is unexplained by the version API. A contended run has
+since been captured — see below.
+
+## Captured contended run 2026-09-15
+
+Inside a 2149-test nextest run on integration `30e2bc43` (the `gate-entity-uri`
+leg), the test failed on the deleted-row event of the transition sequence
+`… Update("xui") … Insert("zzhzx", parent "xui") … Delete("xui")`. The change
+feed carried the ENTITY ID where the test's rowid→entity map expected the rowid:
+
+```
+    === View Change Entity ID Mismatch at index 4 for 'entity_view' ===
+    Expected entity ID: Some("xui")
+    Actual entity ID: None
+    Expected change: Deleted { id: "2", origin: Remote { operation_id: None, trace_id: None } }
+    Actual change: Deleted { id: "xui", origin: Remote { operation_id: None, trace_id: None } }
+```
+
+`crates/holon/tests/turso_storage_pbt/pbt_tests.rs:1988`. The run closed
+`Summary [ 165.662s] 2149 tests run: 2142 passed (7 slow, 1 leaky), 7 failed, 10
+skipped`.
+
+Isolated on the SAME tree it is green: the whole `turso_storage_pbt` binary 3/3
+(`turso3x-{1,2,3}.log` under the lane scratchpad below, each `Summary [
+0.509s] 2 tests run: 2 passed, 0 skipped`) and this test alone twice over 512
+cases (`turso512-{1,2}.log`, each `Summary [   0.732s] 1 test run: 1 passed, 1
+skipped`). It did not recur in the next 2149-test run of the same gate
+(`Summary [ 167.160s] 2149 tests run: 2143 passed (3 slow), 6 failed, 10
+skipped`, this test absent from the failing list).
+
+Lane scratchpad holding those logs, the excerpt and the gate log:
+`/private/tmp/claude-501/-Users-martin-Workspaces-pkm-holon/bc7b1e67-1603-4c68-8742-84215e1a79e3/scratchpad/`.
+A 522-line excerpt of the failing run is preserved at
+`.claude/worktrees/docs-w14/lane-logs/turso-state-machine-contended-1789429950.log`
+— a LANE workspace path, not a tracked one, so it survives only as long as that
+workspace does.
+
+The cause is still UNATTRIBUTED — the version API explanation is absent from the
+tree, and the trigger is contention-shaped, so nothing here names it. It is a
+prod-bug candidate of the CDC kind: a consumer that keys change events by rowid
+is handed the entity id instead and resolves `None`, i.e. it sees a deletion it
+cannot match to a row it holds. Attribution needs a dedicated triage lane; the
+gating decision above is unaffected.
