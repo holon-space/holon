@@ -946,7 +946,7 @@ async fn a_kind_map_disagreeing_with_its_bag_fails_the_read_loudly() -> anyhow::
     Ok(())
 }
 
-/// The routes this wiring CANNOT drive, pinned exactly — now none of them.
+/// The routes this wiring CANNOT drive, pinned exactly.
 ///
 /// `undriven_routes` is printed with the report, and an ordinary captured
 /// `cargo nextest` run swallows a passing test's stdout — so the disclosure is
@@ -954,13 +954,14 @@ async fn a_kind_map_disagreeing_with_its_bag_fails_the_read_loudly() -> anyhow::
 /// that silently stops writing later, and so stops certifying the types clause,
 /// turns this red instead of quietly shrinking coverage.
 ///
-/// Both `set_field` routes were undriven for one reason: the probes addressed
-/// blocks by a BARE id while the rows are keyed by the `block:` reference, so
-/// every `set_field` matched no row and observed nothing. The operation
-/// boundary now refuses an unschemed reference instead of letting the two legs
-/// key on different strings
-/// (`crates/holon/tests/entity_reference_boundary.rs`), the probes name the
-/// reference, and both routes reach the substrate.
+/// Probes name the `block:` reference the rows are keyed by: the operation
+/// boundary refuses an unschemed reference and a BARE id matches no row
+/// (`crates/holon/tests/entity_reference_boundary.rs`).
+///
+/// ONE route is undriven BY RULE, not lost coverage: ruling D126.a refuses a
+/// whole-bag `set_field("properties")` at the intent boundary, so the bag route
+/// cannot carry even the control string. The route is in the harness's list as
+/// the live check that the refusal fires.
 #[tokio::test(flavor = "multi_thread")]
 async fn every_certified_route_is_driven() -> anyhow::Result<()> {
     let format = HolonNative::load().await?;
@@ -975,10 +976,18 @@ async fn every_certified_route_is_driven() -> anyhow::Result<()> {
 
     assert_eq!(
         got,
-        Vec::<String>::new(),
+        vec!["block_properties_json/set_field(properties bag)".to_string()],
         "a route LOST coverage: the types clause is now certified over fewer author paths than \
          the profile claims:\n{}",
         report.render()
     );
+
+    for entry in &report.undriven_routes {
+        assert!(
+            entry.contains("Refused"),
+            "undriven may mean 'the boundary refuses this route', never 'nobody looked': this \
+             route stopped being driven for some OTHER reason, which IS lost coverage: {entry}"
+        );
+    }
     Ok(())
 }

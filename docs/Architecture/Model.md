@@ -89,6 +89,11 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
    and in `LoroBlockOperations::execute_operation`, in both modes; the
    frontend intent constructor (`OperationIntent::set_field`) asserts the
    same. Reorders dispatch `move_block { id, parent_id, after_block_id }`.
+   The same vocabulary refuses a whole-bag `set_field("properties")`:
+   the bag carries its values as ONE serialized string, so no per-property
+   kind travels with it and the write could only replace the bag while
+   leaving `property_kinds` describing values it no longer holds. Properties
+   are written one key at a time (ruling D126.a).
 4. Exactly one writer per store; the projection is total.
 5. Sinks never re-merge.
 6. Causality is inherited (scalar base now; Loro/git DAG if P2P topology ever

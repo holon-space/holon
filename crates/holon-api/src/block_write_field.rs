@@ -8,9 +8,10 @@
 //!
 //! [`BlockWriteField`] is the parsed form of the `field` parameter of a
 //! `set_field` *intent* (frontend dispatch, MCP `execute_operation`). It is a
-//! closed enum with **no order-key variant**: after parsing, an order key is
-//! unrepresentable, not merely discarded. Parsing happens once at the intent
-//! boundary (`OperationDispatcher::execute_operation`,
+//! closed enum with **no order-key variant** and **no whole-bag variant**:
+//! after parsing, neither is representable, not merely discarded. Parsing
+//! happens once at the intent boundary
+//! (`OperationDispatcher::execute_operation`,
 //! `LoroBlockOperations::execute_operation`); a disallowed field is a loud
 //! `Err`, never a silent drop.
 //!
@@ -38,6 +39,8 @@ use holon_pattern::schema::FieldIntent;
 /// - `id`, `depth`, `created_at`, `updated_at`, `_change_origin`, `_expected_*`
 ///   — storage bookkeeping / derived fields; written by the storage layer
 ///   itself, never by intent.
+/// - `properties` — the engine-owned overflow bag; an intent writes its KEYS
+///   one at a time, never the bag itself ([`BlockWriteFieldError::WholeBag`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockWriteField {
     Content,
@@ -49,7 +52,6 @@ pub enum BlockWriteField {
     WidgetOnly,
     Completed,
     BlockType,
-    Properties,
     Tags,
     TaskState,
     /// Routed to the structural authority (a tree move), not a raw column
@@ -84,6 +86,9 @@ pub enum BlockWriteFieldError {
     /// The field is storage bookkeeping or derived state, written by the
     /// storage layer itself, never by intent.
     StorageInternal(String),
+    /// The `field` named the engine-owned overflow bag itself, not one of its
+    /// keys.
+    WholeBag(String),
     /// Empty field name.
     Empty,
 }
@@ -101,6 +106,17 @@ impl fmt::Display for BlockWriteFieldError {
                 f,
                 "set_field(\"{field}\") rejected: '{field}' is storage bookkeeping / derived \
                  state, written by the storage layer itself, never by intent."
+            ),
+            BlockWriteFieldError::WholeBag(field) => write!(
+                f,
+                "set_field(\"{field}\") rejected: the 'field' parameter names '{field}', the \
+                 engine-owned property BAG. A whole-bag write hands its values over as ONE \
+                 serialized string, so no per-property kind travels with it: the write replaces \
+                 the bag and leaves its kinds describing values it no longer holds, and a \
+                 DateTime or Json property written this way reads back as a String / Object. \
+                 Write the properties ONE at a time instead — set_field {{ id, field: \
+                 \"<property key>\", value: <the value> }} records that property's kind in the \
+                 same statement; write one such op per property."
             ),
             BlockWriteFieldError::Empty => {
                 write!(f, "set_field(\"\") rejected: empty field name")
@@ -133,6 +149,9 @@ impl BlockWriteField {
             Some(FieldIntent::StorageInternal) => {
                 return Err(BlockWriteFieldError::StorageInternal(raw.to_string()));
             }
+            Some(FieldIntent::EngineOwnedBag) => {
+                return Err(BlockWriteFieldError::WholeBag(raw.to_string()));
+            }
             _ => {}
         }
         match raw {
@@ -145,7 +164,6 @@ impl BlockWriteField {
             "widget_only" => Ok(Self::WidgetOnly),
             "completed" => Ok(Self::Completed),
             "block_type" => Ok(Self::BlockType),
-            "properties" => Ok(Self::Properties),
             "tags" => Ok(Self::Tags),
             "task_state" => Ok(Self::TaskState),
             "parent_id" => Ok(Self::ParentId),
@@ -176,7 +194,6 @@ impl BlockWriteField {
             Self::WidgetOnly => "widget_only",
             Self::Completed => "completed",
             Self::BlockType => "block_type",
-            Self::Properties => "properties",
             Self::Tags => "tags",
             Self::TaskState => "task_state",
             Self::ParentId => "parent_id",
@@ -221,6 +238,34 @@ mod tests {
             Err(BlockWriteFieldError::StorageInternal(
                 "_expected_content".to_string()
             ))
+        );
+    }
+
+    /// The refusal must be actionable: it names the parameter, the offending
+    /// name, and the per-property route that replaces it (ruling D126.a).
+    #[test]
+    fn the_whole_properties_bag_is_unrepresentable() {
+        let field = holon_pattern::schema::BLOCK
+            .field("properties")
+            .expect("the block schema declares the bag")
+            .name;
+        let err = BlockWriteField::parse(field)
+            .expect_err("a whole-bag set_field carries no per-property kind and must be refused");
+        assert_eq!(err, BlockWriteFieldError::WholeBag(field.to_string()));
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("set_field(\"properties\")"),
+            "the refusal must name the operation and the offending name as the caller spelled \
+             them, got: {msg}"
+        );
+        assert!(
+            msg.contains("'field' parameter"),
+            "the refusal must name the offending PARAMETER, got: {msg}"
+        );
+        assert!(
+            msg.contains("property key") && msg.contains("one"),
+            "the refusal must name the per-PROPERTY route a caller switches to, got: {msg}"
         );
     }
 

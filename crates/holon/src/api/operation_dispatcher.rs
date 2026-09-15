@@ -2191,6 +2191,37 @@ mod tests {
         assert!(err.to_string().contains("storage bookkeeping"), "{err}");
     }
 
+    /// A `set_field` naming the engine-owned bag is refused at the boundary
+    /// (ruling D126.a).
+    #[tokio::test]
+    async fn block_set_field_rejects_the_whole_properties_bag() {
+        let crud = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![create_test_operation("block", "set_field")],
+        });
+        let dispatcher = OperationDispatcher::new(vec![crud]);
+
+        let mut params = StorageEntity::new();
+        params.insert("id".into(), holon_api::Value::String("block:a".into()));
+        params.insert(
+            "field".into(),
+            holon_api::Value::String("properties".into()),
+        );
+        params.insert(
+            "value".into(),
+            holon_api::Value::String(r#"{"Probe":"2026-08-22T10:00:00Z"}"#.into()),
+        );
+        let err = dispatcher
+            .execute_operation(&EntityName::new("block"), "set_field", params)
+            .await
+            .expect_err("a whole-bag set_field must be rejected at the boundary");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("set_field(\"properties\")") && msg.contains("property key"),
+            "the refusal must name the offending write and the per-property route, got: {msg}"
+        );
+    }
+
     /// A normal field write passes the boundary and reaches the provider.
     #[tokio::test]
     async fn block_set_field_allows_intent_vocabulary_fields() {

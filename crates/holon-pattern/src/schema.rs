@@ -42,6 +42,11 @@ pub enum FieldIntent {
     OrderKey,
     /// Storage bookkeeping or derived state, written by the storage layer.
     StorageInternal,
+    /// The engine-owned overflow bag. An intent writes its KEYS, one property
+    /// per write, so each key's kind lands beside it in the same statement;
+    /// naming the bag ITSELF is refused, because a whole-bag value arrives as
+    /// ONE serialized string that carries no per-property kind to record.
+    EngineOwnedBag,
     /// The intent boundary has no named variant for it — a write naming it is
     /// an ordinary user property, and the field's own writer owns the real
     /// column or junction.
@@ -216,7 +221,7 @@ pub const BLOCK: EntitySchema = EntitySchema {
         column(block::CONTENT_TYPE, FieldIntent::Writable, true),
         column(block::SOURCE_LANGUAGE, FieldIntent::Writable, true),
         column(block::SOURCE_NAME, FieldIntent::Writable, true),
-        column(block::PROPERTIES, FieldIntent::Writable, true),
+        column(block::PROPERTIES, FieldIntent::EngineOwnedBag, true),
         // Written only by the properties write leg, alongside the bag it
         // describes. `StorageInternal` so no `set_field` intent can name it.
         column(block::PROPERTY_KINDS, FieldIntent::StorageInternal, false),
