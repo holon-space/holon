@@ -2,11 +2,13 @@
 //! (`block_raw` + `block_tags` + `advice_suppressed`) in an in-memory Turso DB
 //! and assert it (a) CREATEs without hanging and (b) the anchor-denormalized
 //! tag-overlap rows are correct. Recency + per-anchor top-K are applied at READ
-//! time (Rust-side). Suppression is an anti-join: IVM CANNOT maintain it fused
-//! with the scoring `GROUP BY` aggregate (`probe_ivm_shape_findings` FINDING
-//! 2), but IT CAN in a plain non-aggregating OUTER view over the scored matview
-//! (`probe_outer_antijoin_is_incrementally_maintained`) — which is why the live
-//! weaver watches that outer read (see `holon_frontend::advice_weaver`).
+//! time (Rust-side). Suppression is an anti-join, also applied at read time,
+//! over the scored matview — the live weaver watches that outer read (see
+//! `holon_frontend::advice_weaver`). `probe_ivm_shape_findings` measures that
+//! current Turso IVM would ALSO maintain the anti-join fused with the scoring
+//! `GROUP BY` aggregate, and `probe_outer_antijoin_is_incrementally_maintained`
+//! measures the plain outer form; read-time is a layering choice, not an engine
+//! limitation.
 //! Mirrors the harness in `holon-turso/tests/sidecar_views.rs`.
 
 use std::collections::HashMap;
@@ -91,9 +93,8 @@ async fn suppress(handle: &DbHandle, anchor: &str, lesson: &str) {
 }
 
 /// The read-time weave: filter the matview to one anchor, drop suppressed
-/// lessons via the anti-join (IVM can't do it inside the matview), order by
-/// shared-tag count then recency, cap at K. This is what the renderer runs (ADR
-/// 0022).
+/// lessons via the anti-join, order by shared-tag count then recency, cap at K.
+/// This is what the renderer runs (ADR 0022).
 ///
 /// The trailing `, v.lesson_id` is a UI-STABILITY tiebreak only: it makes the
 /// display order deterministic when shared-tag count AND recency tie. It does
@@ -107,6 +108,27 @@ fn read_query(anchor: &str, k: u8) -> String {
          v.lesson_id WHERE v.anchor_id = '{anchor}' AND s.lesson_id IS NULL ORDER BY \
          v.shared_tag_count DESC, c.updated_at DESC, v.lesson_id LIMIT {k}"
     )
+}
+
+/// Anchor `t1`'s scored `(lesson_id, shared_tag_count)` rows of a probe
+/// matview, ordered so an equality assertion pins the SET and not just its
+/// length.
+async fn counted_lessons(handle: &DbHandle, view: &str) -> Vec<(String, i64)> {
+    handle
+        .query(
+            &format!("SELECT lesson_id, n FROM {view} WHERE anchor_id='t1' ORDER BY lesson_id"),
+            HashMap::new(),
+        )
+        .await
+        .expect("read the probe matview")
+        .iter()
+        .map(|r| {
+            (
+                r.get("lesson_id").unwrap().as_string().unwrap().to_string(),
+                r.get("n").unwrap().as_i64().unwrap(),
+            )
+        })
+        .collect()
 }
 
 async fn lessons_under(handle: &DbHandle, anchor: &str, k: u8) -> Vec<String> {
@@ -226,9 +248,8 @@ async fn bundled_rule_matview_builds_and_scores_correctly() {
 }
 
 /// Probe record: the IVM behaviours that shaped the synthesized DDL. These are
-/// kept as executable documentation of *why* suppression + recency are
-/// read-time (Spike-2 stage-5). Each asserts what current Turso IVM actually
-/// does.
+/// kept as executable documentation of what current Turso IVM actually does at
+/// the pinned fork rev — re-measure them whenever that rev moves.
 #[tokio::test]
 async fn probe_ivm_shape_findings() {
     let handle = setup().await;
@@ -277,9 +298,10 @@ async fn probe_ivm_shape_findings() {
         .collect();
     assert_eq!(v, vec![("lA".into(), 2), ("lB".into(), 1)]);
 
-    // FINDING 2 (BAD): an in-matview suppression LEFT-JOIN anti-join is IGNORED by
-    // IVM — lA is suppressed yet still present. This is why suppression is
-    // read-time.
+    // FINDING 2: the in-matview suppression anti-join IS
+    // honoured — at build AND on a suppression row inserted AFTER the matview
+    // exists. lB is asserted PRESENT so that lA's absence proves the anti-join
+    // discarded a row, not that the matview came back empty.
     holon_turso::matview_manager::reconcile_named_view(
         &handle,
         "probe_suppress",
@@ -290,17 +312,18 @@ async fn probe_ivm_shape_findings() {
     )
     .await
     .expect("suppress-in-matview builds");
-    let still_present = handle
-        .query(
-            "SELECT lesson_id FROM probe_suppress WHERE anchor_id='t1' AND lesson_id='lA'",
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
     assert_eq!(
-        still_present.len(),
-        1,
-        "IVM ignores the in-matview suppression anti-join → suppression MUST be read-time"
+        counted_lessons(&handle, "probe_suppress").await,
+        vec![("lB".to_string(), 1)],
+        "the fused anti-join drops the suppressed lA and keeps lB"
+    );
+
+    suppress(&handle, "t1", "lB").await;
+    assert_eq!(
+        counted_lessons(&handle, "probe_suppress").await,
+        Vec::<(String, i64)>::new(),
+        "the fused anti-join is maintained incrementally: a suppression row inserted after the \
+         matview exists drops lB too"
     );
 
     handle.shutdown().await.unwrap();

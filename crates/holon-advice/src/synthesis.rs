@@ -44,15 +44,17 @@ pub enum AdviceSynthesisError {
 /// - anchor/candidate predicates lower to `block_tags` joins (`has_tag`) or a
 ///   1:1 `block_raw` join used ONLY in `WHERE` (`entity`/`prop_eq`).
 ///
-/// DELIBERATELY NOT in this matview (Spike-2 findings — the naive in-matview
-/// forms are silently miscompiled by current Turso IVM, see probe tests,
-/// resolving ADR 0021's open stage-5 fork toward read-time application):
-/// - **Suppression** (`LEFT JOIN advice_suppressed … IS NULL`): an anti-join
-///   FUSED WITH this matview's `GROUP BY` aggregate is IGNORED by IVM, so it is
-///   applied over the scored matview instead. (In a PLAIN non-aggregating outer
-///   view the anti-join IS incrementally maintained — the live weaver watches
-///   exactly such a read; see `holon_frontend::advice_weaver::advice_watch_sql`
-///   and `matview_build::probe_outer_antijoin_is_incrementally_maintained`.)
+/// DELIBERATELY NOT in this matview (Spike-2 findings, see the crate's probe
+/// tests; resolving ADR 0021's open stage-5 fork toward read-time application):
+/// - **Suppression** (`LEFT JOIN advice_suppressed … IS NULL`): applied at READ
+///   time over the scored matview, inside the same weave that already applies
+///   the per-anchor cap and ordering — one place for suppression, recency and
+///   top-K. The weaver watches exactly that outer read
+///   (`holon_frontend::advice_weaver::advice_watch_sql`). Current Turso IVM
+///   maintains the anti-join fused with this `GROUP BY` aggregate as well
+///   (`matview_build::probe_ivm_shape_findings`), and in the plain outer form
+///   (`probe_outer_antijoin_is_incrementally_maintained`), so the read-time
+///   placement is a layering choice, not an engine limitation.
 /// - **Recency** (`updated_at`): a `block_raw` column in `GROUP BY`/`SELECT`
 ///   corrupts the IVM aggregate. The `updated_at` tiebreak is applied at READ
 ///   time (join `block` for `updated_at`).

@@ -282,7 +282,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 ### Known reds
 
 - `advice-gate-weave-row-missing`
-- `advice-matview-suppression-read-time`
 - `bulk-add-sibling-order`
 - `catalog-advice-step6-weave-dismiss`
 - `catalog-class-one-pinned-list`
