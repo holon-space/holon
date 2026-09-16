@@ -99,7 +99,7 @@ rewrite it; where a row's failure has since changed, the `Status` cell says so.
 | 12 | `structural_chord_stale_flush_windowed` | `structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_loro` | OPEN — unchanged by `gpui-driver` | 3/3 | FAIL | `830d794f878f` | `…rs:351` `vacuity guard: the Tab chord changed no parentage, so no structural op was dispatched` |
 | 13 | `structural_chord_stale_flush_windowed` | `structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_sqlonly` | OPEN — unchanged by `gpui-driver` | 3/3 | FAIL | `830d794f878f` | as row 12 |
 | 14 | `task_keyword_blur_windowed` | `promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly` | OPEN — unchanged by `gpui-driver` | 3/3 | FAIL | `830d794f878f` | `…rs:357` `vacuity guard: the blur dispatched NO operation (6 history rows before and after)` |
-| 15 | `windowed_log_capture` | `every_windowed_target_declares_test_init` | OPEN | 3/3 | FAIL 0.03s | `830d794f878f` | `windowed_log_capture.rs:162` `these windowed test targets install no tracing subscriber — add \`mod test_init;\`` (10 files) |
+| 15 | `windowed_log_capture` | `every_windowed_target_declares_test_init` | **CLOSED** (known-reds-fix) — 2026-09-17 | 3/3 | PASS | `830d794f878f` | FIXED: the ten named targets each gained the `mod test_init;` tail (`action_bar_windowed.rs`, `android_soft_return_contract.rs`, `arrow_nav_windowed.rs`, `arrow_nav_windowed_pbt.rs`, `gpui_journals_logseq_look.rs`, `inert_integration_disclosure_windowed.rs`, `popup_row_click_windowed.rs`, `settings_integrations_setfield_popup_windowed.rs`, `slash_command_text_hidden_windowed.rs`, `state_toggle_switch_windowed.rs`), so `windowed_log_capture` is 4/4. REMOVED from the Tier-1 allowlist below: a future red here is a REGRESSION the gate must catch. |
 | 16 | `block_focus_keeps_outline_windowed` | `a_short_window_still_paints_the_outline` | **CLOSED** (`gpui-driver`) — see caveat | 1/3 | FAIL | `830d794f878f` | `…rs:457` `the main panel has a 438.0px box and three one-line rows to draw, and painted 0 of them: {}; left: 0, right: 3` |
 
 Rows 5, 6 and 16 fail serially but pass in some loaded runs. That is the
@@ -283,11 +283,9 @@ tracing subscriber — `action_bar_windowed.rs`,
 `settings_integrations_setfield_popup_windowed.rs`,
 `slash_command_text_hidden_windowed.rs`, `state_toggle_switch_windowed.rs`.
 
-- **Hypothesis:** none needed — targets were added without `mod test_init;`
-  because nothing ran the guard.
-- **Discriminating check:** add the module to the ten files; the test goes
-  green. **This is the cheapest row in the register and it should land first**,
-  because it is exactly why the other rows produce unattributed log output.
+- **LANDED 2026-09-17** (known-reds-fix lane): each of the ten targets gained the
+  `mod test_init;` tail and `windowed_log_capture` is 4/4. The names are gone
+  from the Tier-1 allowlist below, so a recurrence is a regression.
 
 ### Family G — the set-field param popup paints no values (row 11)
 
@@ -374,14 +372,14 @@ with two preconditions, because without them the gate reports noise:
    only**: a Tier-2 name that fails in a *serial* rerun is a regression, not a
    flake. **Any name outside both tiers blocks the land.**
 
-### Tier 1 — known deterministic (12), regex over test function names
+### Tier 1 — known deterministic (11), regex over test function names
 
-Rows 2, 5, 6 and 16 are **removed** from this allowlist: they are fixed, so a
-future red there is a REGRESSION the gate must catch, not a known red it should
-excuse.
+Rows 2, 5, 6, 15 and 16 are **removed** from this allowlist: they are fixed, so
+a future red there is a REGRESSION the gate must catch, not a known red it
+should excuse.
 
 ```
-^(windowed_split_then_clickblock_resolves_minted_id|general_e2e_composed_pbt_windowed|gpui_sim_replay_capture|windowed_caret::clicking_an_entity_link_still_navigates|windowed_caret::clicking_an_external_link_opens_the_url_instead_of_navigating|snapshot_captures_each_widget|an_opened_nested_page_paints_its_children|clicking_multi_param_set_field_opens_param_popup_then_dispatches|structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_loro|structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_sqlonly|promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly|every_windowed_target_declares_test_init)$
+^(windowed_split_then_clickblock_resolves_minted_id|general_e2e_composed_pbt_windowed|gpui_sim_replay_capture|windowed_caret::clicking_an_entity_link_still_navigates|windowed_caret::clicking_an_external_link_opens_the_url_instead_of_navigating|snapshot_captures_each_widget|an_opened_nested_page_paints_its_children|clicking_multi_param_set_field_opens_param_popup_then_dispatches|structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_loro|structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_sqlonly|promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly)$
 ```
 
 ### Tier 2 — known load-sensitive (42), regex over test function names

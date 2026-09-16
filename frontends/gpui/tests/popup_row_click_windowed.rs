@@ -241,3 +241,7 @@ fn clicking_a_popup_row_runs_the_command_just_like_enter(cx: &mut TestAppContext
          key uses — not a second dispatch path, and not nothing at all."
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

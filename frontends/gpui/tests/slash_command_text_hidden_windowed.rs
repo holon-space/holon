@@ -357,3 +357,7 @@ fn a_cancelled_picker_leaves_the_trigger_working(cx: &mut TestAppContext) {
          trigger"
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

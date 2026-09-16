@@ -274,3 +274,7 @@ fn the_snapshot_carries_the_requested_binding() {
         other => panic!("expected a StateToggle snapshot, got {other:?}"),
     }
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

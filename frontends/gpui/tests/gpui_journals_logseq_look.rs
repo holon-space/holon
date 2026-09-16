@@ -506,3 +506,7 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
     std::mem::forget(app);
     std::mem::forget(env);
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;
