@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 79 transitions; the repo declares 76 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 79 transitions; the repo declares 78 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -261,11 +261,13 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `inv-block-content/sql`
 - `inv-block-ids-match-ref` — SQL projection block-id set vs ref non-seed block ids (coarse set equality)
 - `inv-boundary-respected` — a cross-instance sharpening of `inv-audience-never-over-approximates`: that one asserts alignment inside ONE model, this one asserts it across a real second SUT.
+- `inv-conditions-match-ref` — a transition that fails on purpose must leave a condition raised, not merely decline to write
 - `inv-decompiled-rows-rendered`
 - `inv-editable-text-has-draggable` — every editable_text/rendered_text in a block-profile subtree paired with a same-id draggable
 - `inv-editor-caret-matches-ref`
 - `inv-frontend-no-error-widgets` — no Error widget in the laid-out BoundsRegistry (authoritative) or, absent geometry, the ViewModel tree
 - `inv-net-totality` — an operation the system can fire that the derived net does not describe, so every net-based analysis (conflicts, cycles, the marking oracle) silently reports on a partial world
+- `inv-no-machine-keychain-access` — a harness that resolves the OS store instead of the injected in-memory one
 - `inv-read-only-home-refuses-writes` — a store-origin write against a block whose document is homed in a `WriteTier::ReadOnly` file
 - `inv-shows-source-when-no-query`
 - `inv-state-toggle-toy`
@@ -282,16 +284,21 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `deletebackward-sql-reads-budget`
 - `drawer-open-matches-ref`
 - `drawer-open-matches-ref-reverse`
+- `integration-toggle-load`
 - `iroh-nat-traversal-address-set`
 - `lib-type-chars-home-profile-derived`
 - `loro-backend-change-count`
 - `opentab-sql-reads-budget`
 - `pinblock-lazy-day-page-shell`
+- `properties-bag-set-field-drops-kinds`
 - `proptest-sm-shrink-seen-transitions`
 - `quick-open-pages-section-misses-a-matching-page`
+- `shopping-mapping-cost-slo`
+- `text-undo-manager-load`
 - `turso-block-query-source-round-trip`
 - `typechars-sql-reads-budget`
 - `vault-scale-main-panel-delivery`
+- `windowed-splitblock-no-editable-surface`
 
 ## Sources
 

@@ -726,10 +726,10 @@
                 "name": "cmd_enter_chord_dispatch.rs"
               },
               {
-                "name": "degraded_bus_bridge_windowed.rs"
+                "name": "condition_bus_container.rs"
               },
               {
-                "name": "degraded_signal_bus_container.rs"
+                "name": "degraded_bus_bridge_windowed.rs"
               },
               {
                 "name": "editor_ime_commit_sequence.rs"
@@ -786,6 +786,9 @@
                 "name": "input_box_windowed.rs"
               },
               {
+                "name": "integration_sync_failing_row_windowed.rs"
+              },
+              {
                 "name": "integrations_row_narrow_window_windowed.rs"
               },
               {
@@ -834,6 +837,9 @@
                 "name": "mcp_write_repaints_windowed.rs"
               },
               {
+                "name": "named_source_rows_windowed.rs"
+              },
+              {
                 "name": "nested_band_height_spike.rs"
               },
               {
@@ -867,16 +873,31 @@
                 "name": "quick_open_returns_focus_windowed.rs"
               },
               {
+                "name": "quick_open_selected_row_contrast_windowed.rs"
+              },
+              {
                 "name": "reactive_vm_realwindow_test.rs"
               },
               {
                 "name": "reactive_vm_test.rs"
               },
               {
+                "name": "refusal_toasts_reach_the_user_windowed.rs"
+              },
+              {
+                "name": "secrets_in_memory_banner_windowed.rs"
+              },
+              {
                 "name": "seeded_accordion_panel_smoke.rs"
               },
               {
                 "name": "seeded_sidebar_live_query_height.rs"
+              },
+              {
+                "name": "settings_integration_toggle_latency_windowed.rs"
+              },
+              {
+                "name": "settings_integrations_last_row_toggle_windowed.rs"
               },
               {
                 "name": "settings_integrations_ops_windowed.rs"
@@ -888,7 +909,25 @@
                 "name": "settings_integrations_setfield_popup_windowed.rs"
               },
               {
+                "name": "settings_integrations_table_fits_windowed.rs"
+              },
+              {
                 "name": "settings_integrations_table_windowed.rs"
+              },
+              {
+                "name": "settings_introduced_connection_disclosure_windowed.rs"
+              },
+              {
+                "name": "settings_introduced_row_fits_windowed.rs"
+              },
+              {
+                "name": "settings_seeded_secret_windowed.rs"
+              },
+              {
+                "name": "settings_setup_column_wraps_windowed.rs"
+              },
+              {
+                "name": "settings_stored_secret_windowed.rs"
               },
               {
                 "name": "sidebar_disclosure_affordance.rs"
@@ -930,6 +969,9 @@
                 "name": "test_platform_smoke.rs"
               },
               {
+                "name": "toast_stack_order_windowed.rs"
+              },
+              {
                 "name": "tracked_layout_neutrality.rs"
               },
               {
@@ -949,6 +991,9 @@
               },
               {
                 "name": "windowed_log_capture.rs"
+              },
+              {
+                "name": "windowed_resize_takes_effect.rs"
               }
             ]
           }
@@ -1094,6 +1139,9 @@
             "files": [
               {
                 "name": "browser_relay.rs"
+              },
+              {
+                "name": "conditions_report.rs"
               },
               {
                 "name": "dense_patch.rs"

@@ -651,6 +651,9 @@
                 "name": "edge_field_e2e.rs"
               },
               {
+                "name": "entity_reference_boundary.rs"
+              },
+              {
                 "name": "fts_e2e.rs"
               },
               {
@@ -721,6 +724,9 @@
               },
               {
                 "name": "stress_tests.rs"
+              },
+              {
+                "name": "sync_import_read_only_adoption.rs"
               },
               {
                 "name": "trust_gate.rs"
@@ -1031,6 +1037,18 @@
                 "name": "computed.rs"
               },
               {
+                "name": "condition_bus.rs"
+              },
+              {
+                "name": "condition_detail.rs"
+              },
+              {
+                "name": "condition_profile.rs"
+              },
+              {
+                "name": "condition_source.rs"
+              },
+              {
                 "name": "content_canonical.rs"
               },
               {
@@ -1044,6 +1062,9 @@
               },
               {
                 "name": "entity_profile.rs"
+              },
+              {
+                "name": "entity_reference.rs"
               },
               {
                 "name": "entity_uri.rs"
@@ -1088,6 +1109,9 @@
                 "name": "lib.rs"
               },
               {
+                "name": "lifecycle.rs"
+              },
+              {
                 "name": "link_candidate.rs"
               },
               {
@@ -1095,6 +1119,9 @@
               },
               {
                 "name": "live_data.rs"
+              },
+              {
+                "name": "live_data_source.rs"
               },
               {
                 "name": "operation_engine.rs"
@@ -1134,6 +1161,9 @@
               },
               {
                 "name": "repository.rs"
+              },
+              {
+                "name": "row_source.rs"
               },
               {
                 "name": "share_props.rs"
@@ -1181,6 +1211,12 @@
             "path": "holon-api/tests",
             "files": [
               {
+                "name": "condition_profile_refusals.rs"
+              },
+              {
+                "name": "condition_replay_order.rs"
+              },
+              {
                 "name": "derived_field_dual_eval_pbt.rs"
               },
               {
@@ -1197,6 +1233,9 @@
               },
               {
                 "name": "person_profile_display_name_seat_a.rs"
+              },
+              {
+                "name": "row_source_parse_refusals.rs"
               },
               {
                 "name": "typed_computed_field_declaration.rs"
@@ -1314,6 +1353,9 @@
                 "name": "integrations_settings.rs"
               },
               {
+                "name": "introduced_secrets.rs"
+              },
+              {
                 "name": "lib.rs"
               },
               {
@@ -1341,16 +1383,13 @@
                 "name": "rehome_entity.rs"
               },
               {
+                "name": "remote_list.rs"
+              },
+              {
                 "name": "seed.rs"
               },
               {
                 "name": "session.rs"
-              },
-              {
-                "name": "shopping_operations.rs"
-              },
-              {
-                "name": "shopping_rest.rs"
               },
               {
                 "name": "turso_seams.rs"
@@ -1366,6 +1405,26 @@
           {
             "name": "tests",
             "path": "holon-app/tests",
+            "dirs": [
+              {
+                "name": "session_shutdown",
+                "path": "holon-app/tests/session_shutdown",
+                "files": [
+                  {
+                    "name": "harness.rs"
+                  }
+                ]
+              },
+              {
+                "name": "undo_precondition_id_scheme",
+                "path": "holon-app/tests/undo_precondition_id_scheme",
+                "files": [
+                  {
+                    "name": "harness.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "arc_affects_consistency.rs"
@@ -1378,6 +1437,9 @@
               },
               {
                 "name": "boundary_behavior_correspondence.rs"
+              },
+              {
+                "name": "cell_leg_delta_delivery.rs"
               },
               {
                 "name": "computed_persisted_boot_column.rs"
@@ -1393,6 +1455,9 @@
               },
               {
                 "name": "home_profile_lookup_latency.rs"
+              },
+              {
+                "name": "in_memory_secret_backend_boot.rs"
               },
               {
                 "name": "integration_open_default_view_op.rs"
@@ -1413,7 +1478,22 @@
                 "name": "integrations_settings_vm.rs"
               },
               {
+                "name": "introduced_connection_disclosure_reaches_the_mirror.rs"
+              },
+              {
+                "name": "introduced_connection_row_disclosure.rs"
+              },
+              {
+                "name": "introduced_connection_secret_field.rs"
+              },
+              {
+                "name": "invalid_connection_config_boots_degraded.rs"
+              },
+              {
                 "name": "loro_seam_edge_fields.rs"
+              },
+              {
+                "name": "loro_write_origins.rs"
               },
               {
                 "name": "marks_span_precondition.rs"
@@ -1446,6 +1526,12 @@
                 "name": "seed_copy_on_write.rs"
               },
               {
+                "name": "session_shutdown_orphan_teeth.rs"
+              },
+              {
+                "name": "session_shutdown_stops_watchers.rs"
+              },
+              {
                 "name": "settings_shopping_list_url_credential.rs"
               },
               {
@@ -1461,6 +1547,9 @@
                 "name": "sort_key_has_no_default.rs"
               },
               {
+                "name": "text_undo_manager.rs"
+              },
+              {
                 "name": "turso_block_round_trip_pbt.rs"
               },
               {
@@ -1468,6 +1557,12 @@
               },
               {
                 "name": "type_admission_cve.rs"
+              },
+              {
+                "name": "undo_does_not_survive_a_restart.rs"
+              },
+              {
+                "name": "undo_precondition_id_scheme.rs"
               }
             ]
           }
@@ -1615,6 +1710,80 @@
               },
               {
                 "name": "violation.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-connections",
+        "path": "holon-connections",
+        "c4_level": "component",
+        "description": "Low-code connections to remote LISTS: one reconciler, one sync round and one operation, parameterised by what a sidecar declares.",
+        "pattern": "Anti-Corruption Layer",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Anti-Corruption Layer\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-rows \"typed row JSON Lines and jaq mappings\" \"Rust\"\n\nLow-code connections to remote LISTS: one reconciler, one sync round and one\noperation, parameterised by what a sidecar declares.\n\nA second system costs a UTCP manual, a `holon.list_sync` block and two jaq\nmappings — no Rust. Identity is the declared `key` expression, so a peer\nthat issues row ids (`.id`) and one that does not (`[.name, .cat]`) reach\nthe same code (ADR 0034).\n\nNo transport lives here: the peer is a trait, implemented over whatever call\nsurface a connection has. That keeps the reconcile, sync and intent legs in\nthe wasm graph, where an HTTP client is not.",
+        "source_file": "holon-connections/src/lib.rs",
+        "layer": "Adapters",
+        "relationships": [
+          {
+            "target": "holon-api",
+            "label": "shared value & operation types",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-core",
+            "label": "core datasource traits",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-rows",
+            "label": "typed row JSON Lines and jaq mappings",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-connections/src",
+            "files": [
+              {
+                "name": "intent.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "provider.rs"
+              },
+              {
+                "name": "reconcile.rs"
+              },
+              {
+                "name": "registry.rs"
+              },
+              {
+                "name": "snapshot.rs"
+              },
+              {
+                "name": "spec.rs"
+              },
+              {
+                "name": "sync.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-connections/tests",
+            "files": [
+              {
+                "name": "remote_list_reconcile_pbt.rs"
               }
             ]
           }
@@ -1813,6 +1982,9 @@
             "files": [
               {
                 "name": "format_registry.rs"
+              },
+              {
+                "name": "live_data_entries_ordering_probe.rs"
               }
             ]
           }
@@ -2022,6 +2194,9 @@
               },
               {
                 "name": "sync_ports.rs"
+              },
+              {
+                "name": "vault_filter.rs"
               },
               {
                 "name": "vault_path.rs"
@@ -2516,10 +2691,22 @@
                 "name": "inert_integration_disclosure.rs"
               },
               {
+                "name": "integration_secret_lookup.rs"
+              },
+              {
+                "name": "list_wrap_keyword.rs"
+              },
+              {
                 "name": "numeric_column_text.rs"
               },
               {
                 "name": "pending_question_render.rs"
+              },
+              {
+                "name": "secret_account_collisions.rs"
+              },
+              {
+                "name": "secret_preference_storage.rs"
               },
               {
                 "name": "settings_secret_field_render.rs"
@@ -2532,6 +2719,9 @@
               },
               {
                 "name": "state_toggle_bool_binding.rs"
+              },
+              {
+                "name": "stored_secret_row.rs"
               },
               {
                 "name": "text_style_kwarg.rs"
@@ -2796,6 +2986,9 @@
                             "name": "complexity_trend.rs"
                           },
                           {
+                            "name": "conditions_match_ref.rs"
+                          },
+                          {
                             "name": "declared_column_gaps.rs"
                           },
                           {
@@ -2880,6 +3073,9 @@
                             "name": "no_errors.rs"
                           },
                           {
+                            "name": "no_machine_keychain_access.rs"
+                          },
+                          {
                             "name": "no_orphan.rs"
                           },
                           {
@@ -2899,6 +3095,9 @@
                           },
                           {
                             "name": "paint_text_styling.rs"
+                          },
+                          {
+                            "name": "read_only_home_refuses_writes.rs"
                           },
                           {
                             "name": "reseed_leak.rs"
@@ -3170,6 +3369,9 @@
                             "name": "companion_has_no_child_page_headings.rs"
                           },
                           {
+                            "name": "conditions_match_ref.rs"
+                          },
+                          {
                             "name": "display_placement_canonical_inert.rs"
                           },
                           {
@@ -3248,6 +3450,9 @@
                             "name": "no_errors.rs"
                           },
                           {
+                            "name": "no_machine_keychain_access.rs"
+                          },
+                          {
                             "name": "no_orphan_blocks.rs"
                           },
                           {
@@ -3264,6 +3469,9 @@
                           },
                           {
                             "name": "paint_text_styling.rs"
+                          },
+                          {
+                            "name": "read_only_home_refuses_writes.rs"
                           },
                           {
                             "name": "settle_budget.rs"
@@ -3433,6 +3641,9 @@
                         "name": "clock.rs"
                       },
                       {
+                        "name": "conditions.rs"
+                      },
+                      {
                         "name": "docs.rs"
                       },
                       {
@@ -3458,6 +3669,9 @@
                       },
                       {
                         "name": "peers.rs"
+                      },
+                      {
+                        "name": "read_only_homes.rs"
                       },
                       {
                         "name": "shared_view.rs"
@@ -3520,6 +3734,12 @@
                         "name": "arrow_navigate.rs"
                       },
                       {
+                        "name": "attempt_ingest_compound_on_read_only.rs"
+                      },
+                      {
+                        "name": "attempt_read_only_edit.rs"
+                      },
+                      {
                         "name": "block_to_page.rs"
                       },
                       {
@@ -3562,6 +3782,9 @@
                         "name": "dense_projection_edit.rs"
                       },
                       {
+                        "name": "dispatch_unschemed_block_id.rs"
+                      },
+                      {
                         "name": "drag_drop_block.rs"
                       },
                       {
@@ -3596,6 +3819,9 @@
                       },
                       {
                         "name": "join_block.rs"
+                      },
+                      {
+                        "name": "jump_to_search_hit.rs"
                       },
                       {
                         "name": "mod.rs"
@@ -3635,6 +3861,9 @@
                       },
                       {
                         "name": "press_key.rs"
+                      },
+                      {
+                        "name": "reboot.rs"
                       },
                       {
                         "name": "receiver_create_block.rs"
@@ -3761,6 +3990,9 @@
                     "name": "composed.rs"
                   },
                   {
+                    "name": "conditions_state.rs"
+                  },
+                  {
                     "name": "convergence.rs"
                   },
                   {
@@ -3813,6 +4045,9 @@
                   },
                   {
                     "name": "query_ast.rs"
+                  },
+                  {
+                    "name": "read_only_state.rs"
                   },
                   {
                     "name": "reference_domain_state.rs"
@@ -4181,6 +4416,9 @@
                     "name": "integration_state_section_refreshes.rs"
                   },
                   {
+                    "name": "integration_state_sync_failing.rs"
+                  },
+                  {
                     "name": "integrations_section_renders_every_row.rs"
                   },
                   {
@@ -4235,6 +4473,9 @@
                     "name": "loro_projection_atomic_advance.rs"
                   },
                   {
+                    "name": "loro_projection_unarmed_delete.rs"
+                  },
+                  {
                     "name": "loro_projection_withheld_delete.rs"
                   },
                   {
@@ -4284,6 +4525,9 @@
                   },
                   {
                     "name": "multiline_serializer_test.rs"
+                  },
+                  {
+                    "name": "nested_vault_copy_dup_slug.rs"
                   },
                   {
                     "name": "org_roundtrip_pbt.rs"
@@ -4407,6 +4651,9 @@
                 "name": "mcp_render_org_matches_writeback.rs"
               },
               {
+                "name": "pairing_reimport_read_only_home.rs"
+              },
+              {
                 "name": "place_all_restates_total_sibling_order.rs"
               },
               {
@@ -4434,6 +4681,9 @@
                 "name": "undo_redo_reference_heal.rs"
               },
               {
+                "name": "vault_scale_interaction_latency.rs"
+              },
+              {
                 "name": "web_arm_keystone.rs"
               },
               {
@@ -4458,7 +4708,7 @@
         "description": "Kitchen domain: recipes and the shopping list, and (later) pantry and nutrition.",
         "pattern": "Anti-Corruption Layer",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Anti-Corruption Layer\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n@c4 uses holon-rows \"typed row JSON Lines\" \"Rust\"\n\nKitchen domain: recipes and the shopping list, and (later) pantry and\nnutrition.\n\nTwo read legs today. The cooklang adapter projects `.cook` files, which are\nauthoritative and are never written back here. [`shopping`] pulls the\nshopping-list peer, which owns its own list and issues no item ids, so this\ncrate carries the identity and reconciliation the generic entity mirror\ncannot supply.\n\nPer-format de-risking: this crate exercises the existing Block-shaped\n`FileFormatAdapter` on a second, non-org format — extension claiming,\ndocument identity, and read authority. It deliberately does NOT generalize\n`FileFormatAdapter`/`FileFormatParseResult` to be type-generic; that is BG\nInc-5's C7 and stays out of scope (see docs/Plans/Kitchen.md R1).",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Anti-Corruption Layer\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-profiles \"entity profile resolution\" \"Rust\"\n@c4 uses holon-rows \"typed row JSON Lines\" \"Rust\"\n\nKitchen domain: recipes and the shopping list, and (later) pantry and\nnutrition.\n\nRecipes reach the vault through the cooklang PLUGIN — a wasm guest and a\nsidecar under `crates/holon-plugin-host/plugins/` — so no `.cook` parsing\nlives here. What remains is the part a format plugin cannot express: the\ndeclared kitchen types, the cookable-now queries, and the shopping-list\npeer, which owns its own list and issues no item ids, so this crate carries\nthe identity and reconciliation the generic entity mirror cannot supply.",
         "source_file": "holon-kitchen/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
@@ -4519,64 +4769,25 @@
             "path": "holon-kitchen/src",
             "files": [
               {
-                "name": "cook.rs"
-              },
-              {
                 "name": "cookable.rs"
               },
               {
-                "name": "file_format.rs"
-              },
-              {
                 "name": "lib.rs"
-              },
-              {
-                "name": "params.rs"
-              },
-              {
-                "name": "rows.rs"
-              },
-              {
-                "name": "shopping.rs"
-              },
-              {
-                "name": "shopping_sync.rs"
               }
             ]
           },
           {
             "name": "tests",
             "path": "holon-kitchen/tests",
-            "dirs": [
-              {
-                "name": "fixtures",
-                "path": "holon-kitchen/tests/fixtures"
-              }
-            ],
             "files": [
               {
-                "name": "block_params.rs"
-              },
-              {
-                "name": "cook_ingest.rs"
-              },
-              {
                 "name": "recipe_page.rs"
-              },
-              {
-                "name": "rows_contract_differential_pbt.rs"
               },
               {
                 "name": "shopping_mapping_cost.rs"
               },
               {
                 "name": "shopping_mapping_differential.rs"
-              },
-              {
-                "name": "shopping_reconcile.rs"
-              },
-              {
-                "name": "shopping_sync_pbt.rs"
               }
             ]
           }
@@ -4901,9 +5112,6 @@
                 "name": "debounced_commit_worker.rs"
               },
               {
-                "name": "degraded_signal_bus.rs"
-              },
-              {
                 "name": "deleted_container_purge.rs"
               },
               {
@@ -4991,6 +5199,9 @@
                 "name": "settled_read.rs"
               },
               {
+                "name": "share_credentials.rs"
+              },
+              {
                 "name": "share_enrollment.rs"
               },
               {
@@ -5009,7 +5220,13 @@
                 "name": "text_merge_provider.rs"
               },
               {
+                "name": "text_undo.rs"
+              },
+              {
                 "name": "ticket.rs"
+              },
+              {
+                "name": "write_origin.rs"
               }
             ]
           },
@@ -5025,6 +5242,12 @@
               },
               {
                 "name": "pairing_boot_degraded.rs"
+              },
+              {
+                "name": "text_undo_contract.rs"
+              },
+              {
+                "name": "undo_history_trim_probe.rs"
               }
             ]
           }
@@ -5567,6 +5790,17 @@
           {
             "name": "src",
             "path": "holon-mcp-client/src",
+            "dirs": [
+              {
+                "name": "bin",
+                "path": "holon-mcp-client/src/bin",
+                "files": [
+                  {
+                    "name": "holon_connection.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "bundled_sidecars.rs"
@@ -5626,6 +5860,9 @@
                 "name": "oauth_bootstrap.rs"
               },
               {
+                "name": "provider_name.rs"
+              },
+              {
                 "name": "redaction.rs"
               },
               {
@@ -5633,6 +5870,15 @@
               },
               {
                 "name": "rest_transport.rs"
+              },
+              {
+                "name": "roster.rs"
+              },
+              {
+                "name": "secret_ref.rs"
+              },
+              {
+                "name": "secure_client.rs"
               },
               {
                 "name": "sync_freshness.rs"
@@ -5664,6 +5910,9 @@
                 "name": "cache_tables_are_not_rowid_alias_tables.rs"
               },
               {
+                "name": "connection_url_scheme.rs"
+              },
+              {
                 "name": "credential_confinement.rs"
               },
               {
@@ -5673,7 +5922,16 @@
                 "name": "entity_link_scheme_join.rs"
               },
               {
+                "name": "inline_secret_refused.rs"
+              },
+              {
                 "name": "integration_state_store.rs"
+              },
+              {
+                "name": "introduced_connection_account_claims.rs"
+              },
+              {
+                "name": "introduced_secret_namespace.rs"
               },
               {
                 "name": "mcp_fanout.rs"
@@ -5683,6 +5941,15 @@
               },
               {
                 "name": "oauth_bootstrap_flow.rs"
+              },
+              {
+                "name": "provider_name.rs"
+              },
+              {
+                "name": "provider_order.rs"
+              },
+              {
+                "name": "redirect_downgrade.rs"
               },
               {
                 "name": "rest_oauth2_mock.rs"
@@ -5706,7 +5973,13 @@
                 "name": "sidecar_drift.rs"
               },
               {
+                "name": "sidecar_id_column_is_text.rs"
+              },
+              {
                 "name": "unconfigured_is_a_gate.rs"
+              },
+              {
+                "name": "user_introduced_connection.rs"
               },
               {
                 "name": "utcp_manual_roundtrip.rs"
@@ -6171,6 +6444,9 @@
                 "name": "dotted_page_title_writeback.rs"
               },
               {
+                "name": "empty_file_is_not_a_document.rs"
+              },
+              {
                 "name": "file_level_drawer_seam.rs"
               },
               {
@@ -6211,6 +6487,9 @@
               },
               {
                 "name": "round_trip_pbt.rs"
+              },
+              {
+                "name": "routing_applicability.rs"
               },
               {
                 "name": "shared_projection_ingest_guard.rs"
@@ -6639,9 +6918,9 @@
                 "name": "support",
                 "path": "holon-plugin-host/tests/support",
                 "c4_level": "unknown",
-                "description": "Shared fixtures for the plugin-host suites: the installed cooklang plugin, and the recipe generator both differential legs are driven with.",
+                "description": "Shared fixtures for the plugin-host suites: the cooklang plugin, the pancakes recipe, and the generator the property suites are driven with.",
                 "pattern_status": "planned",
-                "content": "Shared fixtures for the plugin-host suites: the installed cooklang plugin,\nand the recipe generator both differential legs are driven with.",
+                "content": "Shared fixtures for the plugin-host suites: the cooklang plugin, the\npancakes recipe, and the generator the property suites are driven with.",
                 "source_file": "holon-plugin-host/tests/support/mod.rs",
                 "parent": "holon-plugin-host",
                 "files": [
@@ -6653,10 +6932,16 @@
             ],
             "files": [
               {
-                "name": "cook_plugin_differential_pbt.rs"
+                "name": "block_params.rs"
+              },
+              {
+                "name": "cook_ingest.rs"
               },
               {
                 "name": "plugin_failure_modes.rs"
+              },
+              {
+                "name": "rows_contract_differential_pbt.rs"
               },
               {
                 "name": "vault_scan_latency.rs"
@@ -6838,6 +7123,17 @@
           {
             "name": "src",
             "path": "holon-secrets/src",
+            "dirs": [
+              {
+                "name": "bin",
+                "path": "holon-secrets/src/bin",
+                "files": [
+                  {
+                    "name": "holon_secret.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "lib.rs"
@@ -7021,6 +7317,9 @@
             "name": "tests",
             "path": "holon-toon/tests",
             "files": [
+              {
+                "name": "org_reader_agrees_with_org_format.rs"
+              },
               {
                 "name": "roundtrip_proptest.rs"
               },
