@@ -290,7 +290,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `loro-backend-change-count`
 - `opentab-sql-reads-budget`
 - `pinblock-lazy-day-page-shell`
-- `properties-bag-set-field-drops-kinds`
 - `proptest-sm-shrink-seen-transitions`
 - `quick-open-pages-section-misses-a-matching-page`
 - `shopping-mapping-cost-slo`
