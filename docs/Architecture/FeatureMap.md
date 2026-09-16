@@ -279,20 +279,34 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 
 ### Known reds
 
+- `advice-gate-weave-row-missing`
+- `advice-matview-suppression-read-time`
 - `bulk-add-sibling-order`
+- `catalog-advice-step6-weave-dismiss`
+- `catalog-class-one-pinned-list`
+- `catalog-null-ref-ref-caps`
 - `cooklang-read-only-split-block-refusal`
+- `cooklang-read-only-write-refusal-any-op`
 - `deletebackward-sql-reads-budget`
 - `drawer-open-matches-ref`
 - `drawer-open-matches-ref-reverse`
+- `hand-authored-cap-timeout`
 - `integration-toggle-load`
 - `iroh-nat-traversal-address-set`
 - `lib-type-chars-home-profile-derived`
+- `logseq-db-import-graph-count`
 - `loro-backend-change-count`
 - `opentab-sql-reads-budget`
+- `org-stale-cross-doc-not-pruned`
 - `pinblock-lazy-day-page-shell`
 - `proptest-sm-shrink-seen-transitions`
 - `quick-open-pages-section-misses-a-matching-page`
 - `shopping-mapping-cost-slo`
+- `span-region-stale-blocks-not-ingested`
+- `span-region-writeback-quarantine-misnamed`
+- `span-split-root-quarantine-not-disclosed`
+- `span-split-root-refusal-not-repeated`
+- `store-watch-ui-missing-block-entities`
 - `text-undo-manager-load`
 - `turso-block-query-source-round-trip`
 - `typechars-sql-reads-budget`
