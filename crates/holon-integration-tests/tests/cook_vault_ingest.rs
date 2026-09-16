@@ -304,6 +304,7 @@ fn params(pairs: &[(&str, holon_api::Value)]) -> HashMap<String, holon_api::Valu
 
 /// Stock the pantry through the declared type's generic `create` — the same
 /// door Inc B's `add` op uses, so this fixture cannot drift from production.
+/// `id` is the stored entity-scoped form, e.g. `pantry-item:p-eggs`.
 async fn stock(
     env: &holon_integration_tests::TestEnvironment,
     id: &str,
@@ -454,8 +455,8 @@ fn a_vault_recipe_produces_typed_rows_and_answers_cookable_now() {
         );
 
         // Enough for the pancakes, nothing for the omelette's cheese.
-        stock(&env, "p-eggs", "eggs", 12.0, None).await;
-        stock(&env, "p-flour", "flour", 500.0, Some("g")).await;
+        stock(&env, "pantry-item:p-eggs", "eggs", 12.0, None).await;
+        stock(&env, "pantry-item:p-flour", "flour", 500.0, Some("g")).await;
 
         let cookable = rows_eventually(
             &env,
