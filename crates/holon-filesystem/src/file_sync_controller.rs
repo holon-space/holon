@@ -2263,11 +2263,11 @@ impl FileSyncController {
         }
         let detail = format!(
             "DUPLICATE BLOCK ID: '{slug}' is declared by BOTH {} and {}, so {} is NOT ingested — \
-             its headlines would merge into the other file's document and write-back would \
-             rewrite one file with the other's content. Give the duplicated headline a fresh \
-             `:ID:` in one of the two files, or delete the stray copy. The claimant is whichever \
-             file was ingested FIRST, and the vault walk order is arbitrary, so which of the two \
-             wins can differ between runs.",
+             QUARANTINING this file from write-back, because ingesting it would merge its \
+             headlines into the other file's document and rewrite one file with the other's \
+             content. Give the duplicated headline a fresh `:ID:` in one of the two files, or \
+             delete the stray copy. The claimant is whichever file was ingested FIRST, and the \
+             vault walk order is arbitrary, so which of the two wins can differ between runs.",
             claimed_by.display(),
             refused.display(),
             refused.display(),

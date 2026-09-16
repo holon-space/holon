@@ -304,7 +304,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `quick-open-pages-section-misses-a-matching-page`
 - `shopping-mapping-cost-slo`
 - `span-region-stale-blocks-not-ingested`
-- `span-region-writeback-quarantine-misnamed`
 - `span-split-root-quarantine-not-disclosed`
 - `span-split-root-refusal-not-repeated`
 - `text-undo-manager-load`
