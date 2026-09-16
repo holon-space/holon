@@ -841,11 +841,13 @@ guests/build.sh cooklang                    # → crates/holon-plugin-host/plugi
 guests/build.sh testkit crates/holon-plugin-host/tests/fixtures
 ```
 
-`wasm-opt` is applied when binaryen is on PATH and skipped with a printed
-warning when it is not, so a size figure always says whether it is
-post-processed. A guest must stay under 1 MiB: that is jj's
-`snapshot.max-new-file-size`, and above it the artifact is silently left out of
-the commit.
+A rebuild of unchanged sources reproduces the tracked bytes: `guests/build.sh`
+builds with the channel pinned in `rust-toolchain.toml` (the staged tree sits
+outside the repository, so that file does not apply on its own) and stages the
+sources at `$HOLON_GUEST_STAGE/<guest>`. No post-processing is applied;
+`wasm-opt` would make the hash depend on what is installed. A guest must stay
+under 1 MiB: that is jj's `snapshot.max-new-file-size`, and above it the
+artifact is silently left out of the commit.
 
 The tracked `.wasm` files are build outputs living in the tree, so nothing but
 a gate ties one to its source — edit `guests/cooklang/src/lib.rs`, skip the
@@ -855,7 +857,7 @@ rebuild, and the whole plugin suite stays green on the old binary:
 just guests-verify     # rebuild every guest into a scratch dir, compare sha256
 ```
 
-It is step 11 of `just landing-gate`. **Inc 3 — deleting
+It is step 14 of `just landing-gate`. **Inc 3 — deleting
 `crates/holon-kitchen/src/cook.rs` — requires it green**: after that the guest
 IS the cooklang parser, and no native leg is left to disagree with a stale one.
 

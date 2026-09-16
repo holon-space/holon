@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Build one guest to `wasm32-unknown-unknown` and install it beside its
 # sidecar. `just guests-verify` compares the result's sha256 against the
-# tracked artifact, so the bytes must not depend on where this checkout lives:
-# cargo hashes a path package's absolute directory into `-C metadata`, which
-# feeds symbol disambiguators and reorders the LTO output. The sources are
-# therefore staged at $HOLON_GUEST_STAGE/<guest> — a path that depends on
-# nothing but the guest's name — and built from there. Identity holds across
-# checkouts and machines that share a toolchain and a stage root; a different
-# stage root gives different bytes.
+# tracked artifact, so the bytes must be a function of the sources, the
+# toolchain and the stage root alone: cargo hashes a path package's absolute
+# directory into `-C metadata`, which feeds symbol disambiguators and reorders
+# the LTO output, and a floating `nightly` channel picks up a new compiler
+# every day. The sources are therefore staged at $HOLON_GUEST_STAGE/<guest>, a
+# path that depends on nothing but the guest's name, and built with the channel
+# pinned in the repository's rust-toolchain.toml.
 set -euo pipefail
 export PATH=/opt/homebrew/opt/rustup/bin:$PATH
 export RUSTC_WRAPPER=
@@ -19,6 +19,18 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 # caller typed rather than a path under the guest's own directory.
 INSTALL_DIR=$(cd "${2:-$HERE/../crates/holon-plugin-host/plugins}" && pwd)
 OUT=$INSTALL_DIR/$GUEST.wasm
+
+TOOLCHAIN_FILE=$HERE/../rust-toolchain.toml
+CHANNEL=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$TOOLCHAIN_FILE")
+if [ -z "$CHANNEL" ]; then
+    echo "guests/build.sh: $TOOLCHAIN_FILE has no channel line" >&2
+    exit 1
+fi
+export RUSTUP_TOOLCHAIN=$CHANNEL
+
+if ! rustup target list --installed --toolchain "$CHANNEL" | grep -qx wasm32-unknown-unknown; then
+    rustup target add wasm32-unknown-unknown --toolchain "$CHANNEL"
+fi
 
 # Restaging key. Only files cargo reads are hashed: a stray `target/` left in a
 # checkout by an older build must not count as a source.

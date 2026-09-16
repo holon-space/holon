@@ -716,16 +716,15 @@ check-worker-wasm:
 # OUTPUTS living in the tree: nothing else ties
 # `crates/holon-plugin-host/plugins/cooklang.wasm` to `guests/cooklang/src/`,
 # so a source edit without a rebuild leaves every plugin test green on the old
-# binary. Rebuilds each guest into a scratch dir and compares sha256.
+# binary. Rebuilds each guest into a scratch dir and compares sha256. The
+# rebuild is reproducible because `guests/build.sh` pins the toolchain channel
+# named in `rust-toolchain.toml`.
 # Inc 3 (deleting `crates/holon-kitchen/src/cook.rs`) requires this green:
 # after it the guest IS the cooklang parser, with no native leg left to
 # disagree with a stale one.
 guests-verify:
     #!/usr/bin/env bash
     set -euo pipefail
-    if ! rustup target list --installed | grep -qx wasm32-unknown-unknown; then
-        rustup target add wasm32-unknown-unknown
-    fi
     scratch=$(mktemp -d)
     trap 'rm -rf "$scratch"' EXIT
     status=0
