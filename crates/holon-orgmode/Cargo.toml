@@ -28,7 +28,6 @@ uuid.workspace = true
 holon-api.workspace = true
 holon-filesystem.workspace = true
 fluxdi.workspace = true
-ignore.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
