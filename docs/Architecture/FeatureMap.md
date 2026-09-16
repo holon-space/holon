@@ -308,7 +308,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `span-region-writeback-quarantine-misnamed`
 - `span-split-root-quarantine-not-disclosed`
 - `span-split-root-refusal-not-repeated`
-- `store-watch-ui-missing-block-entities`
 - `text-undo-manager-load`
 - `turso-block-query-source-round-trip`
 - `typechars-sql-reads-budget`

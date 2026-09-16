@@ -27,8 +27,11 @@ SELECT
 -- (intermittent inv10d failure: `render_entity` falls through to
 -- `render_leaf_block`, root widget renders as `live_block(self_id)`
 -- instead of the parsed `tree(...)`). See devlog/2026-05-05-110311.md.
+-- LEFT JOIN, not INNER: the caller must be able to tell "this block has no
+-- query source" (ordinary leaf) from "this block does not exist" (a stale
+-- reference that must fail loud), and a LEFT JOIN answers both in one query.
 FROM block_raw b
-INNER JOIN block_raw query_src ON query_src.parent_id = b.id
+LEFT JOIN block_raw query_src ON query_src.parent_id = b.id
     AND query_src.content_type = 'source'
     AND query_src.source_language IN {query_langs}
 LEFT JOIN block_raw render_src ON render_src.parent_id = b.id

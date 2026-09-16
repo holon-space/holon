@@ -95,10 +95,21 @@ impl<'a> BlockDomain<'a> {
             return self.render_root_slot(block_id).await;
         }
 
-        // ALLOW(ok): a block with no query source of its own is the ordinary
-        // case, handled as a bare leaf below — not a failure to report.
-        let block_info = self.load_block_with_query_source(block_id).await.ok();
-        let Some(block_info) = block_info else {
+        let Some(block_info) = self.load_block_with_query_source(block_id).await? else {
+            // Rendering a leaf for an id with no block row paints nothing, so a
+            // stale reference (a deleted block, a region still focused on it)
+            // would be indistinguishable from an empty block. Fail loud.
+            anyhow::bail!(
+                "block '{block_id}' has no row in the store — there is nothing to render"
+            );
+        };
+
+        let query_source = block_info
+            .get("query_source")
+            .and_then(|v| v.as_string())
+            .map(str::to_owned);
+
+        let Some(query_source) = query_source else {
             // A block with no query source of its own renders as a bare leaf,
             // except when a region has navigated to it: then it stands for its
             // whole subtree and must supply the descendants query itself.
@@ -128,12 +139,6 @@ impl<'a> BlockDomain<'a> {
                  0024 WP3 / C-revised ruling). This is a render-dispatch routing bypass."
             );
         }
-
-        let query_source = block_info
-            .get("query_source")
-            .and_then(|v| v.as_string())
-            .ok_or_else(|| anyhow::anyhow!("Block '{block_id}' has no query source child"))?
-            .to_string();
 
         let query_language: QueryLanguage = block_info
             .get("query_language")
@@ -607,11 +612,14 @@ impl<'a> BlockDomain<'a> {
 
     /// Load a block by ID and find its query source child + optional render
     /// sibling.
+    ///
+    /// `None` means the block itself has no row; a row with a `NULL`
+    /// `query_source` means the block exists and simply authors no query.
     #[tracing::instrument(skip(self))]
     async fn load_block_with_query_source(
         &self,
         block_id: &EntityUri,
-    ) -> Result<holon_api::StorageEntity> {
+    ) -> Result<Option<holon_api::StorageEntity>> {
         let query_langs = QueryLanguage::sql_in_list();
         let sql = BLOCK_WITH_QUERY_SOURCE_SQL.replace("{query_langs}", &query_langs);
 
@@ -620,14 +628,7 @@ impl<'a> BlockDomain<'a> {
 
         let rows = self.engine.execute_query(sql, params, None).await?;
 
-        if rows.is_empty() {
-            anyhow::bail!(
-                "Block '{}' not found or has no query source child (prql/gql/sql)",
-                block_id
-            );
-        }
-
-        Ok(rows[0].clone())
+        Ok(rows.into_iter().next())
     }
 
     /// Parse a render_source into a RenderExpr.
