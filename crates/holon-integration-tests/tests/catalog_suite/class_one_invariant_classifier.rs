@@ -38,17 +38,12 @@ use holon_pbt_core::composition::CapId;
 use holon_pbt_core::null_ref::null_ref_cap_ids;
 use holon_pbt_core::null_ref::null_ref_caps;
 
-/// The class-1 set, pinned. A new invariant that reads the reference model
-/// self-classifies OUT of this list (its `needs()` names a `Ref*` cap); one
-/// that does not, lands IN it and must be added here deliberately — the act of
-/// editing this list is the act of asserting "the live self-check suite may run
-/// this against a running app with no reference model".
-///
-/// Cross-check: the hand census in the dogfood-recorder plan §1.2 counted 29,
-/// and this machine-derived set is 30 — one above the census, which predates
-/// `inv-complexity-class-trend` — over a 76-entry catalog
-/// (the census counted body modules; the catalog also holds the
-/// correspondence-derived per-store families).
+/// The class-1 set, pinned: 35 of the catalog's 89 registered invariants. A new
+/// invariant that reads the reference model self-classifies OUT of this list
+/// (its `needs()` names a `Ref*` cap); one that does not lands IN it and must
+/// be added here deliberately — the act of editing this list is the act of
+/// asserting "the live self-check suite may run this against a running app with
+/// no reference model".
 ///
 /// Class 1 is NOT the same as "safe to run against a live app with no history":
 /// five of these are the plan's class-3 temporal/budget checks
@@ -71,6 +66,8 @@ const CLASS_ONE: &[&str] = &[
     "inv-loro-no-errors",
     "inv-mark-bounds-within-content",
     "inv-matview-consistent-with-recompute",
+    "inv-net-totality",
+    "inv-no-declared-column-absent",
     "inv-no-errors",
     "inv-no-machine-keychain-access",
     "inv-no-observed-errors",

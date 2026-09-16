@@ -284,8 +284,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `advice-gate-weave-row-missing`
 - `bulk-add-sibling-order`
 - `catalog-advice-step6-weave-dismiss`
-- `catalog-class-one-pinned-list`
-- `catalog-null-ref-ref-caps`
 - `cooklang-read-only-split-block-refusal`
 - `cooklang-read-only-write-refusal-any-op`
 - `deletebackward-sql-reads-budget`
@@ -295,7 +293,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `integration-toggle-load`
 - `iroh-nat-traversal-address-set`
 - `lib-type-chars-home-profile-derived`
-- `logseq-db-import-graph-count`
 - `loro-backend-change-count`
 - `opentab-sql-reads-budget`
 - `org-stale-cross-doc-not-pruned`

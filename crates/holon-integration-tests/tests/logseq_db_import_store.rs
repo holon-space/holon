@@ -5,8 +5,10 @@
 //! the store then DOES with it, which is the only place three things can be
 //! checked at all:
 //!
-//!  1. all 206 uuid-bearing entities exist as rows, addressed by their LogSeq
-//!     uuid — identity survives the store, not just the projection;
+//!  1. every PROJECTED block exists as a row, addressed by its LogSeq uuid —
+//!     identity survives the store, not just the projection. `LogSeq`'s own
+//!     built-in pages are never projected, so the count under test is the
+//!     authored subset (LW-7.a), not the fixture's 206 uuid-bearing entities;
 //!  2. the RE-MINTED sibling order matches LogSeq's fracdex sequence. The
 //!     importer never stores LogSeq's `:block/order` (invariants 2/3/10 — the
 //!     order owner mints keys), so nothing before this point can tell whether
@@ -15,12 +17,11 @@
 //!     Holon RE-DERIVES the reference graph. Only a real store has the
 //!     `block_links` junction and `backlinks` matview that premise names.
 //!
-//! Assertion 3 is expected RED on arrival, for a real reason rather than a
-//! missing symbol: `block_links` is derived from a block's inline MARKS
-//! (`holon_api::derive_block_links`), `marks` is a STORED field the writer
-//! supplies, and the projection supplies none — so the import currently loses
-//! the entire reference graph while every count stays green. This is the
-//! tripwire for that.
+//! Assertion 3 pins amendment A5's premise: `:block/refs` is dropped on import
+//! because Holon RE-DERIVES the reference graph. `block_links` is derived from
+//! a block's inline MARKS (`holon_api::derive_block_links`) and `marks` is a
+//! stored field the writer supplies, so the projection supplies them
+//! (`holon_logseq_db::project::link_marks`) and the graph survives the import.
 //!
 //! @pbt kind harness
 //! @pbt covers logseq-db-import — read-only LogSeq DB-graph import (stage 1)
@@ -56,7 +57,11 @@ fn fixture_path() -> PathBuf {
         .join("../holon-logseq-db/tests/fixtures/logseq-db/holontest.sqlite")
 }
 
-const EXPECTED_BLOCKS: usize = 206;
+/// The blocks the importer PROJECTS. `LogSeq`'s own property, class and system
+/// pages are read for schema knowledge and never materialized (LW-7.a), so this
+/// is the authored subset of the fixture's 206 uuid-bearing entities — the same
+/// 17 `holon-logseq-db`'s own `ingest_ordering` pins.
+const EXPECTED_BLOCKS: usize = 17;
 
 /// The Aug-20 journal and its children in fracdex order — measured from the
 /// fixture with the stage-0 spike's Python decoder, independently of the Rust.
@@ -210,7 +215,7 @@ fn logseq_db_graph_imports_into_a_real_store() {
              sibling order of blocks it did not persist"
         );
 
-        // Loro is the authority. Importing 206 blocks and then re-stating
+        // Loro is the authority. Importing the whole graph and then re-stating
         // every sibling order is a long burst of ops, so wait on the real
         // barriers rather than a guessed sleep — a fixed sleep here reads as
         // "the order was not applied" when it only means "not yet projected".
@@ -218,7 +223,7 @@ fn logseq_db_graph_imports_into_a_real_store() {
         env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60))
             .await;
 
-        // --- 1. every uuid-bearing entity exists as a row ---
+        // --- 1. every projected block exists as a row ---
         let rows = query(
             &env,
             "SELECT id, parent_id, sort_key, content FROM block_raw",
