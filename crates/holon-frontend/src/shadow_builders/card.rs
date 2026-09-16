@@ -4,10 +4,18 @@ holon_macros::widget_builder! {
     raw fn card(ba: BA<'_>) -> ViewModel {
         // Named "accent" takes priority — positional[0] is polluted by eval_to_value
         // flattening the first child expr's text content.
-        let accent = ba.args.get_string("accent")
+        let accent = match ba
+            .args
+            .get_string("accent")
             .map(|s| s.to_string())
             .or_else(|| ba.args.get_positional_string(0))
-            .unwrap_or_default();
+        {
+            Some(raw) if !raw.is_empty() => match theme_token_prop("card", "accent", &raw) {
+                Ok(token) => token,
+                Err(msg) => return ViewModel::error("card", msg),
+            },
+            _ => String::new(),
+        };
 
         let children: Vec<ViewModel> = if ba.args.positional_exprs.is_empty() {
             vec![]

@@ -1,17 +1,21 @@
-//! `state_accent(state_string)` — map a task state to a default accent color.
+//! `state_accent(state_string)` — map a task state to an accent THEME TOKEN.
 //!
-//! Returns a hex string (`#RRGGBB`) suitable for `card(accent: ...)`. Lets
-//! kanban boards / collection profiles drive accent color from the
-//! `task_state` column without storing a per-row color.
+//! Returns a token name (`holon_api::theme_token::THEME_TOKENS`) suitable for
+//! `card(accent: ...)`. Lets kanban boards / collection profiles drive accent
+//! colour from the `task_state` column without storing a per-row colour.
+//!
+//! It returns a token rather than a hex so the accent follows the active theme:
+//! the earlier hardcoded palette was a dark-theme palette painted unchanged in
+//! a light theme, and it named colours no theme could reach.
 //!
 //! Mapping (case-insensitive, leading/trailing whitespace ignored):
 //!
-//! | Input               | Hex      | Intent          |
-//! | ------------------- | -------- | --------------- |
-//! | `DONE`              | `#7D9D7D`| sage / completed|
-//! | `DOING`, `IN PROGRESS`, `IN-PROGRESS`, `NEXT`, `STARTED` | `#D4A373`| amber / active|
-//! | `BLOCKED`, `WAIT`, `WAITING`, `HOLD`                     | `#C97064`| coral / blocked|
-//! | empty / `TODO` / `OPEN` / unknown                        | `#5A5A55`| neutral / pending|
+//! | Input               | Token     | Intent          |
+//! | ------------------- | --------- | --------------- |
+//! | `DONE`              | `success` | sage / completed|
+//! | `DOING`, `IN PROGRESS`, `IN-PROGRESS`, `NEXT`, `STARTED` | `warning` | amber / active|
+//! | `BLOCKED`, `WAIT`, `WAITING`, `HOLD`                     | `error`   | coral / blocked|
+//! | empty / `TODO` / `OPEN` / unknown                        | `muted`   | neutral / pending|
 //!
 //! Caller pattern:
 //!
@@ -31,10 +35,10 @@ use crate::render_interpreter::ValueFn;
 
 struct StateAccentValueFn;
 
-const ACCENT_DONE: &str = "#7D9D7D";
-const ACCENT_ACTIVE: &str = "#D4A373";
-const ACCENT_BLOCKED: &str = "#C97064";
-const ACCENT_NEUTRAL: &str = "#5A5A55";
+const ACCENT_DONE: &str = "success";
+const ACCENT_ACTIVE: &str = "warning";
+const ACCENT_BLOCKED: &str = "error";
+const ACCENT_NEUTRAL: &str = "muted";
 
 pub fn accent_for_state(state: &str) -> &'static str {
     let key = state.trim().to_ascii_uppercase();

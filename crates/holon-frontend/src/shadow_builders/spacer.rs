@@ -15,7 +15,13 @@ holon_macros::widget_builder! {
             .or_else(|| ba.args.get_positional_f64(1))
             .map(|v| v as f32)
             .unwrap_or(0.0);
-        let color = ba.args.get_string("color").map(|s| s.to_string());
+        let color = match ba.args.get_string("color") {
+            Some(c) => match theme_token_prop("spacer", "color", c) {
+                Ok(token) => Some(token),
+                Err(msg) => return ViewModel::error("spacer", msg),
+            },
+            None => None,
+        };
         // `spacer(#{grow: true})` is the elastic gap: it takes whatever the row
         // has left over, which pushes the children after it to the trailing
         // edge. Rows of one list are equally wide, so a trailing column placed

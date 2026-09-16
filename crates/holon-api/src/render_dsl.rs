@@ -212,6 +212,7 @@ fn parse_render_dsl_with_engine(source: &str, engine: &RhaiEngine) -> Result<Ren
 
     // Try JSON first (backwards compat)
     if let Ok(expr) = serde_json::from_str::<RenderExpr>(trimmed) {
+        validate_colour_args(&expr)?;
         return Ok(expr);
     }
 
@@ -219,8 +220,68 @@ fn parse_render_dsl_with_engine(source: &str, engine: &RhaiEngine) -> Result<Ren
         .eval_expression::<Dynamic>(trimmed)
         .map_err(|e| anyhow::anyhow!("Failed to parse render DSL '{}': {e}", trimmed))?;
 
-    dynamic_to_render_expr(&result)
-        .with_context(|| format!("Failed to convert Rhai result to RenderExpr: {:?}", result))
+    let expr = dynamic_to_render_expr(&result)
+        .with_context(|| format!("Failed to convert Rhai result to RenderExpr: {:?}", result))?;
+    validate_colour_args(&expr)?;
+    Ok(expr)
+}
+
+/// Argument names whose value names a theme colour.
+const COLOUR_ARGS: &[&str] = &["color", "accent"];
+
+/// Refuse a colour the theme does not define, when the doc is LOADED.
+///
+/// The check lives here rather than only in the widget builders because the
+/// builders are not the only way a widget gets its props: for the props-only
+/// widgets (`text`, `icon`, ...) a collection's item template takes the
+/// `resolve_props` fast path, which re-derives props from THIS expression
+/// without running the builder at all. Validating the expression at parse time
+/// covers both paths, and it is the same moment a bad `live_query(source: ...)`
+/// is refused.
+///
+/// Only literal names are checked. A non-literal (`color: col("x")`) names no
+/// colour yet, so there is nothing to refuse here; the value is resolved per
+/// row and checked where it is consumed.
+fn validate_colour_args(expr: &RenderExpr) -> Result<()> {
+    match expr {
+        RenderExpr::FunctionCall { name, args } => {
+            for arg in args {
+                let arg_name = arg.name.as_deref();
+                let names_a_colour = arg_name.is_some_and(|n| COLOUR_ARGS.contains(&n));
+                let literal = match &arg.value {
+                    RenderExpr::Literal {
+                        value: Value::String(raw),
+                    } => Some(raw.as_str()),
+                    _ => None,
+                };
+                if let (true, Some(arg_name), Some(raw)) = (names_a_colour, arg_name, literal) {
+                    crate::theme_token::ThemeToken::parse(raw)
+                        .map_err(|e| anyhow::anyhow!("{name}(#{{{arg_name}: {raw:?}}}): {e}"))?;
+                }
+                validate_colour_args(&arg.value)?;
+            }
+            Ok(())
+        }
+        RenderExpr::BinaryOp { left, right, .. } => {
+            validate_colour_args(left)?;
+            validate_colour_args(right)
+        }
+        RenderExpr::Array { items } => {
+            for item in items {
+                validate_colour_args(item)?;
+            }
+            Ok(())
+        }
+        RenderExpr::Object { fields } => {
+            for value in fields.values() {
+                validate_colour_args(value)?;
+            }
+            Ok(())
+        }
+        RenderExpr::LiveBlock { .. }
+        | RenderExpr::ColumnRef { .. }
+        | RenderExpr::Literal { .. } => Ok(()),
+    }
 }
 
 fn default_table() -> RenderExpr {

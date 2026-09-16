@@ -425,13 +425,14 @@ pub fn design_gallery_render_expr() -> RenderExpr {
     ])
 }
 
-fn color_swatch(label: &str, hex: &str) -> RenderExpr {
+fn color_swatch(label: &str, token: &str) -> RenderExpr {
     row(
         vec![
-            call(
-                "badge",
-                vec![pos(lit_str(hex)), named("color", lit_str(hex))],
-            ),
+            // The token name rides as the badge LABEL. This is not a colour
+            // chip and never was: `badge` declares no colour parameter, so the
+            // `#{color: ...}` this used to pass was dropped unread by the
+            // builder and again by the renderer.
+            call("badge", vec![pos(lit_str(token))]),
             call(
                 "text",
                 vec![
@@ -447,7 +448,7 @@ fn color_swatch(label: &str, hex: &str) -> RenderExpr {
 
 fn color_palette_section() -> RenderExpr {
     section(
-        "Color Palette — Light Theme",
+        "Color Palette — Theme Tokens",
         vec![
             call(
                 "text",
@@ -459,24 +460,25 @@ fn color_palette_section() -> RenderExpr {
                     named("size", lit_f64(13.0)),
                 ],
             ),
-            // Primary surfaces
+            // The palette IS the token table: every colour a layout may name,
+            // spelled the way a layout must spell it. The hex list this used to
+            // show was a dark-theme palette rendered unchanged in a light theme.
             row(
                 vec![
-                    color_swatch("Background", "#FAFAF8"),
-                    color_swatch("Surface", "#F5F4F0"),
-                    color_swatch("Text Primary", "#2D2D2A"),
-                    color_swatch("Text Secondary", "#6B6B65"),
+                    color_swatch("Foreground", "foreground"),
+                    color_swatch("Muted", "muted"),
+                    color_swatch("Primary", "primary"),
+                    color_swatch("Secondary", "secondary"),
                 ],
                 16.0,
             ),
-            // Accent & semantic
             row(
                 vec![
-                    color_swatch("Accent: Teal", "#2A7D7D"),
-                    color_swatch("Accent: Coral", "#E07A5F"),
-                    color_swatch("Success: Sage", "#7D9D7D"),
-                    color_swatch("Warning: Amber", "#D4A373"),
-                    color_swatch("Error: Rose", "#C97064"),
+                    color_swatch("Accent", "accent"),
+                    color_swatch("Info", "info"),
+                    color_swatch("Success", "success"),
+                    color_swatch("Warning", "warning"),
+                    color_swatch("Error", "error"),
                 ],
                 16.0,
             ),
@@ -795,7 +797,7 @@ fn watcher_card(source: &str, summary: &str, accent: &str, icon_char: &str) -> R
 }
 
 fn orient_task_row(text: &str, accent: Option<&str>) -> RenderExpr {
-    let indicator_color = accent.unwrap_or("#3A3A36");
+    let indicator_color = accent.unwrap_or("muted");
     row(
         vec![
             call(
@@ -852,28 +854,28 @@ pub fn orient_mode_expr() -> RenderExpr {
             watcher_card(
                 "JIRA",
                 "5 high-priority JIRA issues across active projects.",
-                "#5DBDBD",
+                "accent",
                 "✦",
             ),
             watcher_card(
                 "Gmail",
                 "3 overdue emails from key stakeholders.",
-                "#C97064",
+                "error",
                 "✉",
             ),
             watcher_card(
                 "Linear",
                 "2 projects with approaching deadlines.",
-                "#7D9D7D",
+                "success",
                 "◆",
             ),
             watcher_card(
                 "Gmail",
                 "4 high-priority JIRA tiks across R projects.",
-                "#D4A373",
+                "warning",
                 "✉",
             ),
-            watcher_card("Linear", "1 blocked issue needs triage.", "#5DBDBD", "◆"),
+            watcher_card("Linear", "1 blocked issue needs triage.", "accent", "◆"),
         ],
         12.0,
     );
@@ -893,28 +895,28 @@ pub fn orient_mode_expr() -> RenderExpr {
                 orient_task_row("Investigate CRDT conflict resolution strategies.", None),
                 orient_task_row(
                     "JIRA-123: Define sync protocol specifications.",
-                    Some("#5DBDBD"),
+                    Some("accent"),
                 ),
-                orient_task_row("Schedule team sync on architecture.", Some("#C97064")),
-                orient_task_row("Schedule team sync on architecture.", Some("#7D9D7D")),
+                orient_task_row("Schedule team sync on architecture.", Some("error")),
+                orient_task_row("Schedule team sync on architecture.", Some("success")),
                 orient_task_row(
                     "JIRA-123: Define sync protocol specifications.",
-                    Some("#D4A373"),
+                    Some("warning"),
                 ),
                 orient_task_row(
                     "JIRA-123: Define sync protocol specifications.",
-                    Some("#5DBDBD"),
+                    Some("accent"),
                 ),
-                orient_task_row("Schedule team sync on architecture.", Some("#C97064")),
+                orient_task_row("Schedule team sync on architecture.", Some("error")),
             ],
         ),
         orient_project(
             "Project: API Gateway Redesign",
             vec![
                 orient_task_row("Investigate CRDT conflict resolution strategies.", None),
-                orient_task_row("JIRA-456: Review rate limiting strategy.", Some("#5DBDBD")),
-                orient_task_row("Overdue emails from key projects.", Some("#D4A373")),
-                orient_task_row("Schedule team sync on architecture.", Some("#C97064")),
+                orient_task_row("JIRA-456: Review rate limiting strategy.", Some("accent")),
+                orient_task_row("Overdue emails from key projects.", Some("warning")),
+                orient_task_row("Schedule team sync on architecture.", Some("error")),
                 orient_task_row("Completed tasks on architecture.", None),
             ],
         ),
@@ -931,10 +933,7 @@ fn flow_task_card(text: &str, accent: &str, icon: &str, completed: bool) -> Rend
     call(
         "card",
         vec![
-            named(
-                "accent",
-                lit_str(if completed { "#555550" } else { accent }),
-            ),
+            named("accent", lit_str(if completed { "muted" } else { accent })),
             pos(row(
                 vec![
                     call(
@@ -979,18 +978,18 @@ pub fn flow_mode_expr() -> RenderExpr {
             ),
             flow_task_card(
                 "Investigate CRDT conflict resolution strategies.",
-                "#5DBDBD",
+                "accent",
                 "■",
                 false,
             ),
             flow_task_card(
                 "JIRA-123: Define sync protocol specifications.",
-                "#5DBDBD",
+                "accent",
                 "✦",
                 false,
             ),
-            flow_task_card("Schedule team sync on architecture.", "#C97064", "■", false),
-            flow_task_card("Completed tasks on architecture.", "#555550", "■", true),
+            flow_task_card("Schedule team sync on architecture.", "error", "■", false),
+            flow_task_card("Completed tasks on architecture.", "muted", "■", true),
         ],
         16.0,
     )
@@ -1016,44 +1015,44 @@ pub fn board_mode_expr() -> RenderExpr {
         card_row(
             "Design review",
             "To Do",
-            "#5DBDBD",
+            "accent",
             "Walk through the new VISION_UI palette.",
         ),
         card_row(
             "Write tests",
             "To Do",
-            "#7D9D7D",
+            "success",
             "Cover the board grouping path.",
         ),
         card_row(
             "Fix CI pipeline",
             "To Do",
-            "#C97064",
+            "error",
             "Flaky lint job blocks merges.",
         ),
         card_row(
             "Update docs",
             "To Do",
-            "#D4A373",
+            "warning",
             "Refresh the design gallery section.",
         ),
         card_row(
             "Sortable widget",
             "In Progress",
-            "#9D7DBD",
+            "info",
             "Drag-and-drop polish.",
         ),
         card_row(
             "Board demo",
             "In Progress",
-            "#5DBDBD",
+            "accent",
             "End-to-end card composition.",
         ),
-        card_row("Ship v2.0", "Done", "#7D9D7D", "Tagged and announced."),
+        card_row("Ship v2.0", "Done", "success", "Tagged and announced."),
         card_row(
             "Customer demo",
             "Done",
-            "#D4A373",
+            "warning",
             "Recorded walkthrough shipped.",
         ),
     ]);
@@ -1107,7 +1106,7 @@ pub fn capture_mode_expr() -> RenderExpr {
         call(
             "card",
             vec![
-                named("accent", lit_str("#3A3A36")),
+                named("accent", lit_str("muted")),
                 pos(call(
                     "text",
                     vec![
@@ -1403,7 +1402,7 @@ pub fn actions_mode_expr() -> RenderExpr {
             ),
             rule_card(
                 "Daily journal",
-                "#7D9D7D",
+                "success",
                 true,
                 "today 00:03",
                 "when: today and not journal(date = today)\nthen: block.create\n  parent: \
@@ -1412,7 +1411,7 @@ pub fn actions_mode_expr() -> RenderExpr {
             ),
             rule_card(
                 "Weekly digest",
-                "#C97064",
+                "error",
                 false,
                 "never",
                 "when: jurnal(date = last_week)\nthen: block.create\n  parent: digests\n  name: \
@@ -1453,7 +1452,7 @@ pub fn actions_mode_expr() -> RenderExpr {
                 "00:03",
                 "Daily journal",
                 "created '2026-07-09' in Journals",
-                "#7D9D7D",
+                "success",
             ),
             call(
                 "text",
@@ -1467,19 +1466,19 @@ pub fn actions_mode_expr() -> RenderExpr {
                 "00:02",
                 "Daily journal",
                 "created '2026-07-08' in Journals",
-                "#7D9D7D",
+                "success",
             ),
             automation_row(
                 "14:20",
                 "Archive done",
                 "moved 'Ship v2.0' to Archive",
-                "#5DBDBD",
+                "accent",
             ),
             automation_row(
                 "09:00",
                 "Weekly digest",
                 "guard error: unknown relation 'jurnal'",
-                "#C97064",
+                "error",
             ),
         ],
     );
@@ -1492,7 +1491,7 @@ pub fn actions_mode_expr() -> RenderExpr {
             call(
                 "card",
                 vec![
-                    named("accent", lit_str("#5DBDBD")),
+                    named("accent", lit_str("accent")),
                     pos(row(
                         vec![
                             call("state_toggle", vec![pos(lit_str("task_state_doing"))]),
@@ -1529,7 +1528,7 @@ pub fn actions_mode_expr() -> RenderExpr {
             call(
                 "card",
                 vec![
-                    named("accent", lit_str("#D4A373")),
+                    named("accent", lit_str("warning")),
                     pos(call(
                         "text",
                         vec![
@@ -2108,15 +2107,15 @@ mod tests {
         }
         assert_eq!(
             accent_by_status.get("Done").map(String::as_str),
-            Some("#7D9D7D")
+            Some("success")
         );
         assert_eq!(
             accent_by_status.get("In Progress").map(String::as_str),
-            Some("#D4A373"),
+            Some("warning"),
         );
         assert_eq!(
             accent_by_status.get("Blocked").map(String::as_str),
-            Some("#C97064"),
+            Some("error"),
         );
     }
 }

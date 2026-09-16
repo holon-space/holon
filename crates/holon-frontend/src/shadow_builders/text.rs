@@ -63,7 +63,11 @@ holon_macros::widget_builder! {
             __props.insert("style".to_string(), Value::String(s.clone()));
         }
         if let Some(c) = color {
-            __props.insert("color".to_string(), Value::String(c));
+            let token = match theme_token_prop("text", "color", &c) {
+                Ok(token) => token,
+                Err(msg) => return ViewModel::error("text", msg),
+            };
+            __props.insert("color".to_string(), Value::String(token));
         }
         // Record the bound column so the gpui builder can scope geometry
         // tracking. `inv-displayed-text` only compares against

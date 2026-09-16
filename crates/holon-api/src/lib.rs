@@ -75,6 +75,7 @@ pub mod storage_error;
 pub mod streaming;
 pub mod template;
 pub mod template_instantiation;
+pub mod theme_token;
 pub mod types;
 pub mod ui_watcher;
 pub mod vault_shape;
