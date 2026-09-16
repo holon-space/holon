@@ -367,6 +367,28 @@ fn build_rest_transport(
             })
             .transpose()
         };
+        // The manual's `inputs:` is a JSON Schema document, and an operation
+        // descriptor reads its parameters from there. A shape that is not an
+        // object is refused here rather than presented as a call that takes no
+        // arguments.
+        let input_schema = tool
+            .inputs
+            .as_ref()
+            .map(|inputs| {
+                serde_json::to_value(inputs)
+                    .with_context(|| format!("utcp.tools.{}.inputs", tool.name))?
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "utcp.tools.{}.inputs does not hold an object, and an input schema \
+                             is an object (`type: object` with `properties`) — the call's \
+                             parameters are read from here",
+                            tool.name
+                        )
+                    })
+            })
+            .transpose()?;
         calls.insert(
             tool.name.clone(),
             crate::rest_transport::RestCall {
@@ -383,6 +405,8 @@ fn build_rest_transport(
                 response_version_path: cfg.response_version_path,
                 response: compile("response", cfg.response)?,
                 request: compile("request", cfg.request)?,
+                input_schema,
+                description: tool.description.clone(),
             },
         );
     }

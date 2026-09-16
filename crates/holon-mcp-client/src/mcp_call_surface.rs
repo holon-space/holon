@@ -15,6 +15,20 @@ use rmcp::model::ReadResourceResult;
 use rmcp::service::Peer;
 use rmcp::service::ServiceError;
 
+/// One call a connection DECLARES for itself, as an operation descriptor needs
+/// it. Independent of how the call is reached: a peer answers
+/// `list_all_tools` with the same three facts a manual publishes under
+/// `utcp.tools`.
+pub struct DeclaredCall {
+    /// The name the connection answers to, in the connection's own spelling.
+    pub name: String,
+    pub description: Option<String>,
+    /// The published input schema. `None` means the connection publishes NONE,
+    /// which is not the same as publishing an empty one: an empty schema
+    /// declares a call that takes no arguments.
+    pub input_schema: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
 #[async_trait]
 pub trait McpCallSurface: Send + Sync + std::fmt::Debug {
     async fn call_tool(&self, params: CallToolRequestParam)

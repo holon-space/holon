@@ -1209,12 +1209,12 @@ fn reject_rest_out_of_scope(sidecar: &McpSidecar, provider_name: &str) -> anyhow
 }
 
 /// Finalize a `rest`-transport integration: a poll-only background runner over
-/// the shared connector read path, with no MCP peer and no resource
-/// subscriptions.
+/// the shared connector read path, and an operation provider over the same call
+/// surface. No MCP peer and no resource subscriptions.
 ///
-/// Out of scope (fails loud): leases, read-write operations, and
-/// `vtable.write_through`. The `rest` transport serves *calls*, not MCP
-/// resources, so an entity that syncs via `list_resource` is also rejected.
+/// Out of scope (fails loud): `vtable`, which needs an MCP peer to back the FDW
+/// cursor, and `sync.list_resource`, which names a resource — a plain HTTP API
+/// serves *calls*.
 #[allow(clippy::too_many_arguments)] // mirrors finish_integration; each arg is a distinct subsystem
 async fn finish_rest_integration(
     manual: RestManual,
@@ -1227,12 +1227,11 @@ async fn finish_rest_integration(
     sync_gate: SyncGate,
 ) -> anyhow::Result<McpIntegration> {
     // Reject the out-of-scope shapes up front (parse, don't validate): the REST
-    // runner is read-only and poll-based, so vtable/write_through and
-    // resource-based sync are configuration errors, not degraded modes.
+    // runner polls and calls, so vtable/write_through and resource-based sync
+    // are configuration errors, not degraded modes.
     reject_rest_out_of_scope(&sidecar, &provider_name)?;
 
-    let surface: Arc<dyn crate::mcp_call_surface::McpCallSurface> =
-        Arc::new(RestCallSurface::new(manual));
+    let surface = Arc::new(RestCallSurface::new(manual));
 
     // Build caches + readers, then strategies (disclosed degradation on a bad
     // entity, same as the MCP path).
@@ -1249,10 +1248,12 @@ async fn finish_rest_integration(
 
     reconcile_sidecar_views(&sidecar, &db_handle, &provider_name).await?;
 
-    // REST exposes no write operations: a read-only provider whose
-    // `execute_operation` fails loud, but whose entity readers still back
-    // cache reads.
-    let operation_provider = McpOperationProvider::read_only(sidecar.clone(), entity_readers);
+    // The calls this manual publishes become operations, so a sidecar that
+    // declares a mutating tool dispatches; one that declares none keeps the
+    // read-only provider, whose `execute_operation` fails loud, and whose
+    // entity readers still back cache reads.
+    let operation_provider =
+        McpOperationProvider::rest(surface.clone(), sidecar.clone(), entity_readers)?;
 
     // REST has no MCP peer and cannot subscribe.
     let resource_capabilities = ProbedResourceCapabilities::from_server(None);
@@ -1906,6 +1907,19 @@ mod integration_resilience_tests {
         )
         .expect("sidecar parses");
         reject_rest_out_of_scope(&sidecar, "p").expect("list_tool sync is in scope for rest");
+    }
+
+    #[test]
+    fn rest_accepts_a_declared_write_tool() {
+        // A declared write is a CALL, which is what the `rest` transport
+        // serves: neither refusal in this guard is about write ability, so a
+        // sidecar that dispatches one passes unchanged.
+        let sidecar: McpSidecar = serde_yaml::from_str(
+            "entities:\n  thing:\n    id_column: id\n    sync:\n      list_tool: list-things\n\
+             writes: enabled\ntools:\n  add-thing:\n    entity: thing\n    effect: idempotent\n",
+        )
+        .expect("sidecar parses");
+        reject_rest_out_of_scope(&sidecar, "p").expect("a declared write is in scope for rest");
     }
 }
 

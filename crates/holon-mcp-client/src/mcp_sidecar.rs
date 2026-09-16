@@ -556,7 +556,7 @@ impl ToolConfig {
     /// Whether this tool mutates the provider's system of record. An absent
     /// `effect` means [`ToolEffect::Read`] — the parse-time validation refuses
     /// a write-shaped tool that omits it, so absence here is a real read.
-    fn mutates(&self) -> bool {
+    pub fn mutates(&self) -> bool {
         !matches!(self.effect, None | Some(ToolEffect::Read))
     }
 }
@@ -903,6 +903,17 @@ impl McpSidecar {
             .next()
             .map(|s| s.as_str())
             .expect("sidecar must have at least one entity")
+    }
+
+    /// Whether this sidecar declares any tool that mutates the provider's
+    /// system of record.
+    ///
+    /// A connection with none has no dispatchable operation: everything it can
+    /// do is on its read path, so a provider built for it carries no
+    /// descriptors and refuses every dispatch
+    /// (`McpOperationProvider::read_only`).
+    pub fn declares_a_write(&self) -> bool {
+        self.tools.values().any(|tool| tool.mutates())
     }
 }
 

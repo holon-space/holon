@@ -39,6 +39,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tracing::warn;
 
+use crate::mcp_call_surface::DeclaredCall;
 use crate::mcp_call_surface::McpCallSurface;
 use crate::redaction::Redactor;
 use crate::rest_oauth2::OAuth2TokenProvider;
@@ -85,6 +86,13 @@ pub struct RestCall {
     pub response: Option<Arc<RowMapper>>,
     /// Compiled rows→arguments mapping, the write leg of the same seam.
     pub request: Option<Arc<RowMapper>>,
+    /// The manual's `inputs:` document, kept so an operation descriptor can be
+    /// synthesized from what the manual publishes about this call. `None` when
+    /// the manual publishes none.
+    pub input_schema: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The manual's own description of this call, carried for the descriptor
+    /// the UI renders.
+    pub description: Option<String>,
 }
 
 impl std::fmt::Debug for RestCall {
@@ -99,7 +107,6 @@ impl std::fmt::Debug for RestCall {
             .finish()
     }
 }
-
 /// The key an extracted [`RestCall::response_version_path`] is re-emitted
 /// under, the same for every provider so a caller carries no provider-specific
 /// field name into its own concurrency handling.
@@ -333,6 +340,24 @@ impl RestCallSurface {
     /// a specific timeout, and to avoid a per-surface client in hot paths).
     pub fn with_client(manual: RestManual, client: reqwest::Client) -> Self {
         Self { manual, client }
+    }
+
+    /// Each call this manual publishes, as an operation descriptor needs it.
+    ///
+    /// The set is [`RestManual::calls`], so it holds exactly the calls this
+    /// build can drive: a tool whose call template is unsupported was skipped
+    /// at load and is absent here rather than presented as an operation that
+    /// could never run.
+    pub fn declared_calls(&self) -> Vec<DeclaredCall> {
+        self.manual
+            .calls
+            .iter()
+            .map(|(name, call)| DeclaredCall {
+                name: name.clone(),
+                description: call.description.clone(),
+                input_schema: call.input_schema.clone(),
+            })
+            .collect()
     }
 
     /// The single exit for everything this transport says out loud. `msg` may

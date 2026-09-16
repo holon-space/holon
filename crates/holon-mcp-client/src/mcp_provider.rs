@@ -26,12 +26,15 @@ use rmcp::transport::TokioChildProcess;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use tracing::info;
 
+use crate::mcp_call_surface::DeclaredCall;
+use crate::mcp_call_surface::McpCallSurface;
 use crate::mcp_schema_mapping::input_schema_to_params;
 use crate::mcp_sidecar::AckVerdict;
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sidecar::ToolEffect;
 use crate::mcp_sidecar::UndoConfig;
 use crate::mcp_sidecar::WritesPolicy;
+use crate::rest_transport::RestCallSurface;
 use crate::write_authorization::PendingState;
 use crate::write_authorization::PendingWrite;
 use crate::write_authorization::PendingWriteStore;
@@ -177,9 +180,10 @@ impl McpRunningService {
 }
 
 pub struct McpOperationProvider {
-    /// The MCP peer used to call tools. `None` for a read-only provider (the
-    /// `rest` transport exposes no write operations).
-    peer: Option<Peer<RoleClient>>,
+    /// The seam a dispatch leaves through: an MCP peer, or a plain-HTTP call
+    /// surface for a `utcp:` connection, which has no peer. `None` for a
+    /// read-only provider, whose sidecar declares no tool that mutates.
+    surface: Option<Arc<dyn McpCallSurface>>,
     descriptors: Vec<OperationDescriptor>,
     /// Maps normalized op_name (snake_case) -> original MCP tool name
     /// (kebab-case)
@@ -262,12 +266,73 @@ impl McpOperationProvider {
             "[McpOperationProvider] Fetched {} tools from MCP server",
             tools.len()
         );
+        let declared = tools
+            .iter()
+            .map(|tool| DeclaredCall {
+                name: tool.name.to_string(),
+                description: tool.description.as_deref().map(str::to_string),
+                input_schema: Some(tool.input_schema.as_ref().clone()),
+            })
+            .collect();
+        Self::from_declared_calls(Arc::new(peer), declared, sidecar, entity_readers)
+    }
 
-        let mut descriptors = Vec::with_capacity(tools.len());
+    /// Build the provider a `rest` connection dispatches through: the surface
+    /// that carries its calls, plus one operation per call its manual
+    /// publishes.
+    ///
+    /// A sidecar that declares no tool which mutates stays
+    /// [`Self::read_only`]: its read path is the whole connection, so a
+    /// dispatch would have nothing to reach and must keep failing loud.
+    pub fn rest(
+        surface: Arc<RestCallSurface>,
+        sidecar: McpSidecar,
+        entity_readers: HashMap<String, Arc<dyn EntityFieldReader>>,
+    ) -> anyhow::Result<Self> {
+        if !sidecar.declares_a_write() {
+            return Ok(Self::read_only(sidecar, entity_readers));
+        }
+        let declared = surface.declared_calls();
+        // Every mutating tool the sidecar declares must be a call the manual
+        // publishes: this build drives only the calls `RestManual::calls`
+        // holds, so one naming anything else describes a write that can never
+        // be dispatched. Refused by name rather than left silently unreachable.
+        for (name, tool) in &sidecar.tools {
+            if tool.mutates() && !declared.iter().any(|call| &call.name == name) {
+                let mut published: Vec<&str> =
+                    declared.iter().map(|call| call.name.as_str()).collect();
+                published.sort_unstable();
+                anyhow::bail!(
+                    "sidecar tool '{name}' declares an `effect:` that mutates, but the manual \
+                     publishes no call named '{name}' (it publishes {published:?}) — a declared \
+                     write that names no reachable call can never be dispatched"
+                );
+            }
+        }
+        Self::from_declared_calls(surface, declared, sidecar, entity_readers)
+    }
+
+    /// Build a provider over a call surface from the calls a connection
+    /// declares, synthesizing one operation descriptor per call from the
+    /// sidecar's annotations and the connection's own input schema.
+    ///
+    /// The descriptor set is exactly the declared calls — for a peer, the
+    /// tools it answers with; for a `utcp:` manual, the calls it publishes.
+    /// A `None` schema on a mutating call is refused rather than rendered as
+    /// an operation with no parameters: the descriptor is what the UI offers
+    /// fields from, so a write with no published inputs is a mapping no
+    /// surface could present.
+    pub fn from_declared_calls(
+        surface: Arc<dyn McpCallSurface>,
+        declared: Vec<DeclaredCall>,
+        sidecar: McpSidecar,
+        entity_readers: HashMap<String, Arc<dyn EntityFieldReader>>,
+    ) -> anyhow::Result<Self> {
+        let mut descriptors = Vec::with_capacity(declared.len());
         let mut tool_name_map = HashMap::new();
 
-        for tool in &tools {
-            let tool_name = tool.name.as_ref();
+        for call in &declared {
+            let tool_name = call.name.as_str();
             let normalized = tool_name.replace('-', "_");
 
             let tool_config = sidecar.tools.get(tool_name);
@@ -287,9 +352,19 @@ impl McpOperationProvider {
                 .unwrap_or(tool_name)
                 .to_string();
 
-            let description = tool.description.as_deref().unwrap_or("").to_string();
+            let description = call.description.clone().unwrap_or_default();
 
-            let input_schema = tool.input_schema.as_ref();
+            let input_schema = match &call.input_schema {
+                Some(schema) => schema,
+                None if tool_config.is_some_and(|tc| tc.mutates()) => {
+                    anyhow::bail!(
+                        "call '{tool_name}' is declared with an `effect:` that mutates but \
+                         publishes no `inputs:`, so it has no parameters to present. Publish the \
+                         call's input schema, or classify it `effect: read`."
+                    )
+                }
+                None => &serde_json::Map::new(),
+            };
             let param_overrides = tool_config.and_then(|tc| tc.param_overrides.as_ref());
             let required_params = input_schema_to_params(input_schema, param_overrides);
 
@@ -348,7 +423,7 @@ impl McpOperationProvider {
 
         let policy = policy_for(sidecar.once_only);
         Ok(Self {
-            peer: Some(peer),
+            surface: Some(surface),
             descriptors,
             tool_name_map,
             sidecar,
@@ -360,18 +435,17 @@ impl McpOperationProvider {
         })
     }
 
-    /// Build a read-only provider for a transport that exposes no write
-    /// operations (the `rest` transport). It carries no peer, no operation
-    /// descriptors, and an empty tool map, so `operations()` is empty and any
-    /// `execute_operation` call fails loud. The entity readers still back
-    /// cache reads for the sync path.
+    /// Build a provider that can reach no write. It carries no call surface,
+    /// no operation descriptors, and an empty tool map, so `operations()` is
+    /// empty and any `execute_operation` call fails loud. The entity readers
+    /// still back cache reads for the sync path.
     pub fn read_only(
         sidecar: McpSidecar,
         entity_readers: HashMap<String, Arc<dyn EntityFieldReader>>,
     ) -> Self {
         let policy = policy_for(sidecar.once_only);
         Self {
-            peer: None,
+            surface: None,
             descriptors: Vec::new(),
             tool_name_map: HashMap::new(),
             sidecar,
@@ -629,17 +703,21 @@ impl OperationProvider for McpOperationProvider {
             },
         )?;
 
-        let peer =
-            self.peer
+        let surface =
+            self.surface
                 .as_ref()
                 .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
                     format!(
-                "provider '{}' is read-only: the `rest` integration exposes no write operations \
-                 (attempted '{op_name}' on entity '{}')",
-                self.sidecar.entity_prefix.as_deref().unwrap_or("<unprefixed>"),
-                entity_name.as_str()
-            )
-            .into()
+                        "provider '{}' is read-only: no call surface is wired, so no operation is \
+                     dispatchable. A `rest` sidecar becomes dispatchable by declaring a tool with \
+                     a mutating `effect:` (attempted '{op_name}' on entity '{}')",
+                        self.sidecar
+                            .entity_prefix
+                            .as_deref()
+                            .unwrap_or("<unprefixed>"),
+                        entity_name.as_str()
+                    )
+                    .into()
                 })?;
 
         let original_name = self
@@ -824,7 +902,7 @@ impl OperationProvider for McpOperationProvider {
             json_params.insert(param_name, serde_json::Value::String(key));
         }
 
-        let call_result: Result<OperationResult> = match peer
+        let call_result: Result<OperationResult> = match surface
             .call_tool(CallToolRequestParam {
                 name: Cow::Owned(original_name.clone()),
                 arguments: Some(json_params),

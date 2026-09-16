@@ -69,6 +69,23 @@ comparison is fair. The caret oracle fix cannot reach this path: `BulkExternalAd
 never touches `active_editor`, so at the birth in that sequence the field is
 already `None` and both halves of that change are no-ops.
 
+## Later firing (2026-09-17)
+
+`just keystone-smoke` (`PROPTEST_CASES=1`) fired the same assertion as the SOLE
+violation on the `google-write-seam` lane (rev `edf1602fd7a1` + working copy):
+`re-executed 87x`, the shrink tail spanning 78–87x — count tracks the draw, the
+invariant, transition and query do not. Two facts for this entry's owner:
+
+- The draw was `storage={Org,Turso} sync={} actors={ActionEngine}` — **no MCP
+  actor**, so the `holon-mcp-client` diff that lane carries is not on this path.
+- The reproducer above **PASSED** on that tree when replayed as a hand-authored
+  case (`HOLON_HAND_AUTHORED_SIDECAR=/tmp/toggle-probe.jsonl`): that two-
+  transition shape no longer crosses the ratchet, while a sibling draw still
+  does. The minimal case is therefore not the whole family.
+
+Log: `google-write-seam/lane-logs/green-keystone-smoke.log:6611` (firing),
+`google-write-seam/lane-logs/ab-toggle-probe-seam.log:296` (the replay, PASSED).
+
 ## Root cause
 
 NOT ATTRIBUTED — the consumer that issues the repeats is not yet identified,
