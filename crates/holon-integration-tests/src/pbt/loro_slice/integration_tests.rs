@@ -53,7 +53,9 @@ async fn loro_slice_runs_structural_block_invariants_over_loro() {
     // With no reference wired, the no-ref invariants run: the four `SutBackend`-
     // only structural ones (`no-orphan-blocks` became ref-free when its CDC-lag
     // gate was removed) **plus** `inv-loro-no-errors` (the Loro component also
-    // provides `SutLoroLog`). Ref-comparing invariants are deselected.
+    // provides `SutLoroLog`) **plus** `inv-no-machine-keychain-access`, which
+    // declares no capability and so selects on every slice. Ref-comparing
+    // invariants are deselected.
     let mut ran = report.ran_ids();
     ran.sort_unstable();
     assert_eq!(
@@ -62,6 +64,7 @@ async fn loro_slice_runs_structural_block_invariants_over_loro() {
             "inv-filter-spec-resolves",
             "inv-loro-no-errors",
             "inv-mark-bounds-within-content",
+            "inv-no-machine-keychain-access",
             "inv-no-orphan-blocks",
             "inv-no-parent-cycles",
             "inv-source-language-iff-source",

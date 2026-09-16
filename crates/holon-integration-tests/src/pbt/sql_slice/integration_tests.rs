@@ -43,8 +43,9 @@ async fn sql_slice_runs_structural_block_invariants_over_turso() {
 
     // With no reference wired, only the `SutBackend`-only structural
     // invariants run (`no-orphan-blocks` became ref-free when its CDC-lag gate
-    // was removed); everything ref-comparing (and the Loro invariants) is
-    // deselected — disclosed, not faked.
+    // was removed), joined by `inv-no-machine-keychain-access`, which declares
+    // no capability and so selects on every slice; everything ref-comparing (and
+    // the Loro invariants) is deselected — disclosed, not faked.
     let mut ran = report.ran_ids();
     ran.sort_unstable();
     assert_eq!(
@@ -53,6 +54,7 @@ async fn sql_slice_runs_structural_block_invariants_over_turso() {
             "inv-filter-spec-resolves",
             "inv-mark-bounds-within-content",
             "inv-net-totality",
+            "inv-no-machine-keychain-access",
             "inv-no-orphan-blocks",
             "inv-no-parent-cycles",
             "inv-source-language-iff-source",

@@ -61,13 +61,15 @@ async fn memory_slice_runs_structural_block_invariants_without_turso() {
     // The `SutBackend`-only invariants run (`no-orphan-blocks` became ref-free
     // when its CDC-lag gate was removed; `mark-bounds-within-content` is
     // ref-free by design and landed 2026-07-20 over the RAW snapshot;
-    // `filter-spec-resolves` is FLT-1.b, `SutBackend` only); the ref-comparing
-    // `blocks-match-ref/block_raw` is *deselected* (no `RefBackend` wired),
-    // disclosed rather than faked — the §2 negative containment in action.
+    // `filter-spec-resolves` is FLT-1.b, `SutBackend` only), plus
+    // `no-machine-keychain-access`, which declares no capability at all and so
+    // selects on every slice; the ref-comparing `blocks-match-ref/block_raw` is
+    // *deselected* (no `RefBackend` wired), disclosed rather than faked — the §2
+    // negative containment in action.
     assert_eq!(
         report.ran_ids().len(),
-        5,
-        "only the SutBackend invariants are cap-selected; ran={:?} deselected={:?}",
+        6,
+        "only the SutBackend and capability-free invariants are cap-selected; ran={:?} deselected={:?}",
         report.ran_ids(),
         report.deselected,
     );

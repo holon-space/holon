@@ -182,3 +182,7 @@ fn the_toast_stack_follows_raise_order_not_subject_order() {
          degradations happened. Painted: {painted:?}"
     );
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;
