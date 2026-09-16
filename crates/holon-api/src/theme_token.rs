@@ -23,7 +23,11 @@
 
 use std::fmt;
 
-/// Every colour a layout may name, sorted.
+/// Every colour a layout may name, as the names themselves, sorted.
+///
+/// The names live twice on purpose: once here (the string table the parser and
+/// its refusal message use) and once in [`ThemeToken::as_str`]. A test asserts
+/// the two agree, so a token added to only one of them fails loudly.
 ///
 /// `muted` and `secondary` are both here, and every frontend resolves the two
 /// to one pixel. They are two names rather than one because the shipped
@@ -44,31 +48,70 @@ pub const THEME_TOKENS: &[&str] = &[
     "warning",
 ];
 
-/// A colour name [`THEME_TOKENS`] holds — proof that a frontend can resolve it.
+/// A colour name [`THEME_TOKENS`] holds, as a type.
+///
+/// An enum rather than a string newtype, so each frontend resolves it with an
+/// EXHAUSTIVE match. A frontend that misses a token then fails to compile
+/// instead of quietly painting its catch-all, which is the defect this module
+/// exists to remove: the old resolvers all ended in `_ => foreground`, so
+/// `color: "primary"` painted body text and said nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ThemeToken(&'static str);
+pub enum ThemeToken {
+    Accent,
+    Error,
+    Foreground,
+    Info,
+    Muted,
+    Primary,
+    Secondary,
+    Success,
+    Warning,
+}
 
 impl ThemeToken {
+    /// Every token, for iterating in a test or a palette.
+    pub const ALL: [ThemeToken; 9] = [
+        ThemeToken::Accent,
+        ThemeToken::Error,
+        ThemeToken::Foreground,
+        ThemeToken::Info,
+        ThemeToken::Muted,
+        ThemeToken::Primary,
+        ThemeToken::Secondary,
+        ThemeToken::Success,
+        ThemeToken::Warning,
+    ];
+
     /// Parse a colour name. Accept-or-refuse, never a rewrite: see
     /// [`THEME_TOKENS`] for why the two are incompatible.
     pub fn parse(raw: &str) -> Result<Self, UnknownThemeToken> {
-        THEME_TOKENS
+        Self::ALL
             .iter()
-            .find(|t| **t == raw)
-            .map(|t| Self(t))
+            .copied()
+            .find(|token| token.as_str() == raw)
             .ok_or_else(|| UnknownThemeToken {
                 raw: raw.to_string(),
             })
     }
 
-    pub fn as_str(&self) -> &'static str {
-        self.0
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ThemeToken::Accent => "accent",
+            ThemeToken::Error => "error",
+            ThemeToken::Foreground => "foreground",
+            ThemeToken::Info => "info",
+            ThemeToken::Muted => "muted",
+            ThemeToken::Primary => "primary",
+            ThemeToken::Secondary => "secondary",
+            ThemeToken::Success => "success",
+            ThemeToken::Warning => "warning",
+        }
     }
 }
 
 impl fmt::Display for ThemeToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -79,7 +122,7 @@ pub struct UnknownThemeToken {
 
 impl fmt::Display for UnknownThemeToken {
     /// Names the near misses rather than the whole table: an author who typed
-    /// `sucess` wants to be told `success` exists, and an eight-entry dump
+    /// `sucess` wants to be told `success` exists, and a nine-entry dump
     /// would bury that.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let lowered = self.raw.to_lowercase();
@@ -112,7 +155,7 @@ impl std::error::Error for UnknownThemeToken {}
 
 impl serde::Serialize for ThemeToken {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.0)
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -128,17 +171,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_table_is_sorted_and_free_of_duplicates() {
+    fn the_name_table_is_sorted_and_free_of_duplicates() {
         let mut sorted = THEME_TOKENS.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted, THEME_TOKENS.to_vec());
     }
 
+    /// The names live in two places (the string table and `as_str`). This is
+    /// the assertion that keeps them one list.
+    #[test]
+    fn the_name_table_and_the_enum_agree() {
+        let from_enum: Vec<&str> = ThemeToken::ALL.iter().map(|t| t.as_str()).collect();
+        assert_eq!(from_enum, THEME_TOKENS.to_vec());
+    }
+
     #[test]
     fn every_token_parses_to_itself() {
-        for token in THEME_TOKENS {
-            assert_eq!(ThemeToken::parse(token).unwrap().as_str(), *token);
+        for token in ThemeToken::ALL {
+            assert_eq!(ThemeToken::parse(token.as_str()).unwrap(), token);
         }
     }
 
@@ -148,8 +199,8 @@ mod tests {
     /// strings into the same prop.
     #[test]
     fn parsing_never_rewrites_the_name() {
-        for token in THEME_TOKENS {
-            assert_eq!(ThemeToken::parse(token).unwrap().as_str(), *token);
+        for token in ThemeToken::ALL {
+            assert_eq!(ThemeToken::parse(token.as_str()).unwrap(), token);
         }
         assert_eq!(
             ThemeToken::parse("secondary").unwrap().as_str(),

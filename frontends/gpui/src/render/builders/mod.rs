@@ -2,6 +2,7 @@ mod columns;
 pub(crate) mod prelude;
 pub mod style;
 mod table;
+pub(crate) mod theme;
 
 // Re-export tree_item collapse helper for use by ReactiveShell.
 // Re-export the sidebar drag-resize machinery so the root view (`lib.rs`) can
@@ -29,7 +30,7 @@ pub(crate) mod switch_track;
 pub(crate) use switch_track::switch_track;
 
 holon_macros::builder_registry!("src/render/builders",
-    skip: [prelude, columns, style, switch_track, table],
+    skip: [prelude, columns, style, switch_track, table, theme],
     node_dispatch: AnyElement,
     context: GpuiRenderContext,
     transform: crate::render::builders::tag_node(ctx, __name, node, __inner),

@@ -9,6 +9,7 @@ use gpui_component::ActiveTheme as _;
 use gpui_component::sortable::Sortable;
 use gpui_component::sortable::SortableState;
 use holon_api::Value;
+use holon_api::theme_token::ThemeToken;
 use holon_frontend::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
@@ -61,33 +62,14 @@ struct BoardCard {
     lines: Vec<CardLine>,
 }
 
-/// Parse a `#RRGGBB` (or `RRGGBB`) hex color into a packed `RGBA` u32.
+/// The accent a card names, as a theme colour and as its packed form.
 ///
-/// Returns `None` only when the input is empty. Malformed non-empty input
-/// (wrong length, non-hex digits) is logged with a `warn!` so the typo
-/// surfaces in the log instead of silently rendering as the default colour.
-fn parse_hex(hex: &str) -> Option<u32> {
-    let trimmed = hex.trim_start_matches('#');
-    if trimmed.is_empty() {
-        return None;
-    }
-    let parse = |slice: &str| -> Result<u32, std::num::ParseIntError> {
-        u8::from_str_radix(slice, 16).map(|b| b as u32)
-    };
-    if trimmed.len() < 6 || !trimmed.is_ascii() {
-        tracing::warn!(target: "holon.board", hex = %hex, "malformed hex colour — using default");
-        return None;
-    }
-    match (
-        parse(&trimmed[0..2]),
-        parse(&trimmed[2..4]),
-        parse(&trimmed[4..6]),
-    ) {
-        (Ok(r), Ok(g), Ok(b)) => Some((r << 24) | (g << 16) | (b << 8) | 0xFF),
-        _ => {
-            tracing::warn!(target: "holon.board", hex = %hex, "malformed hex colour — using default");
-            None
-        }
+/// A card with no accent takes the theme's muted foreground, so the border and
+/// the tint still follow the active theme rather than a hardcoded constant.
+fn card_accent(ctx: &GpuiRenderContext, accent: Option<&str>) -> (Option<gpui::Hsla>, u32) {
+    match super::theme::optional_colour_prop(ctx, accent) {
+        Some(colour) => (Some(colour), super::theme::packed(colour)),
+        None => (None, super::theme::packed(tc(ctx, |t| t.muted_foreground))),
     }
 }
 
@@ -121,19 +103,24 @@ fn extract_lines(card_vm: &ReactiveViewModel) -> Vec<CardLine> {
                 content,
                 bold: child.prop_bool("bold").unwrap_or(false),
                 size: child.prop_f64("size").unwrap_or(14.0) as f32,
-                muted: matches!(
-                    child.prop_str("color").as_deref(),
-                    Some("muted") | Some("secondary")
-                ),
+                // `muted` reads as secondary text, so the two tokens that mean
+                // secondary text both qualify. Read through the vocabulary
+                // rather than by comparing raw strings, so a future token that
+                // resolves to the same colour cannot silently stop qualifying.
+                muted: ThemeToken::parse(child.prop_str("color").as_deref().unwrap_or(""))
+                    .is_ok_and(|token| matches!(token, ThemeToken::Muted | ThemeToken::Secondary)),
             })
         })
         .collect()
 }
 
-fn extract_card(lane_index: usize, card_index: usize, card_vm: &ReactiveViewModel) -> BoardCard {
-    let accent_str = card_vm.prop_str("accent").unwrap_or_default();
-    let accent_hex = parse_hex(&accent_str).unwrap_or(CARD_BG);
-    let accent = parse_hex(&accent_str).map(|hex| gpui::rgba(hex).into());
+fn extract_card(
+    ctx: &GpuiRenderContext,
+    lane_index: usize,
+    card_index: usize,
+    card_vm: &ReactiveViewModel,
+) -> BoardCard {
+    let (accent, accent_hex) = card_accent(ctx, card_vm.prop_str("accent").as_deref());
     // Static path attaches `row_id` / `parent_id` as card-level props.
     // Streaming path attaches the source row to `card_vm.data` (via
     // `flat_driver::interpret_and_attach`) — read both, props take
@@ -437,7 +424,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         let cards: Vec<BoardCard> = card_vms
             .iter()
             .enumerate()
-            .map(|(card_index, card_vm)| extract_card(lane_index, card_index, card_vm))
+            .map(|(card_index, card_vm)| extract_card(ctx, lane_index, card_index, card_vm))
             .collect();
 
         let state_key = crate::entity_view_registry::CacheKey::Ephemeral(format!(

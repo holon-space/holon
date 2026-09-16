@@ -141,29 +141,15 @@ fn icon_char(name: &str) -> &'static str {
     crate::icon(glyph)
 }
 
-/// Map an optional semantic color name to a theme token. Empty/unknown names
-/// fall back to `muted_foreground` (the default icon tint).
-fn icon_color(ctx: &GpuiRenderContext, name: &str) -> Hsla {
-    match name {
-        "primary" => tc(ctx, |t| t.primary),
-        "accent" => tc(ctx, |t| t.accent_foreground),
-        "muted" => tc(ctx, |t| t.muted_foreground),
-        "warning" => tc(ctx, |t| t.warning),
-        "info" => tc(ctx, |t| t.accent),
-        "success" => tc(ctx, |t| t.success),
-        "foreground" => tc(ctx, |t| t.foreground),
-        _ => tc(ctx, |t| t.muted_foreground),
-    }
-}
-
 pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let name = node
         .prop_str("name")
         .unwrap_or_else(|| "circle".to_string());
     let size = node.prop_f64("size").unwrap_or(16.0) as f32;
-    let color = node
-        .prop_str("color")
-        .map(|c| icon_color(ctx, &c))
+    // An icon with no colour keeps its own muted default; a named colour goes
+    // through the shared token resolver, so `color: "primary"` paints primary
+    // here exactly as `text` and `card` do.
+    let color = super::theme::optional_colour_prop(ctx, node.prop_str("color").as_deref())
         .unwrap_or_else(|| tc(ctx, |t| t.muted_foreground));
     let mt = node.prop_f64("mt").unwrap_or(0.0) as f32;
     render_icon_styled(&name, size, color, mt, ctx)

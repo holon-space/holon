@@ -1,16 +1,5 @@
 use super::prelude::*;
 
-fn hex_to_hsla(hex: &str) -> gpui::Hsla {
-    let hex = hex.trim_start_matches('#');
-    if hex.len() < 6 || !hex.is_ascii() {
-        return gpui::rgba(0x888888FF).into();
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(128);
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(128);
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(128);
-    gpui::rgba((r as u32) << 24 | (g as u32) << 16 | (b as u32) << 8 | 0xFF).into()
-}
-
 /// Tint an RGBA base color toward an accent at ~15% blend in linear RGB space.
 fn tint_rgba(accent: u32, base: u32) -> gpui::Hsla {
     let mix = |a: u32, b: u32, shift: u32| -> u32 {
@@ -24,28 +13,16 @@ fn tint_rgba(accent: u32, base: u32) -> gpui::Hsla {
     gpui::rgba((r << 24) | (g << 16) | (b << 8) | 0xFF).into()
 }
 
-fn parse_hex_u32(hex: &str) -> u32 {
-    let hex = hex.trim_start_matches('#');
-    if hex.len() < 6 || !hex.is_ascii() {
-        return 0x2A2A27FF;
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(42) as u32;
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(42) as u32;
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(39) as u32;
-    (r << 24) | (g << 16) | (b << 8) | 0xFF
-}
-
-/// Pack a theme `Hsla` into the `0xRRGGBBAA` u32 the tint blender operates on,
-/// so the card base surface follows the active theme (readable in light AND
-/// dark) instead of a hardcoded dark constant.
-fn hsla_to_u32(color: gpui::Hsla) -> u32 {
-    let rgba: gpui::Rgba = color.into();
-    let to_u8 = |f: f32| (f.clamp(0.0, 1.0) * 255.0).round() as u32;
-    (to_u8(rgba.r) << 24) | (to_u8(rgba.g) << 16) | (to_u8(rgba.b) << 8) | 0xFF
-}
-
 pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
-    let accent = node.prop_str("accent").unwrap_or_default();
+    // An accent is optional. With none the card takes the theme's muted
+    // foreground for both its border and its tint, in place of the two
+    // different hardcoded greys this used to fall through to.
+    let accent_color = match node.prop_str("accent").as_deref().filter(|a| !a.is_empty()) {
+        Some(name) => {
+            super::theme::theme_token_color(ctx, super::theme::theme_token_from_prop(name))
+        }
+        None => tc(ctx, |t| t.muted_foreground),
+    };
     let children = &node.children;
     let s = ctx.style();
     let border_radius = s.card_border_radius;
@@ -54,9 +31,8 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     let gap = s.card_gap;
     drop(s);
 
-    let accent_u32 = parse_hex_u32(&accent);
-    let accent_color = hex_to_hsla(&accent);
-    let card_bg = hsla_to_u32(tc(ctx, |t| t.secondary));
+    let accent_u32 = super::theme::packed(accent_color);
+    let card_bg = super::theme::packed(tc(ctx, |t| t.secondary));
     let tinted = tint_rgba(accent_u32, card_bg);
 
     let mut container = div()

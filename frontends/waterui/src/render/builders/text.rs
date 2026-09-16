@@ -1,5 +1,3 @@
-use holon_api::render_eval::resolve_color_name;
-
 use super::prelude::*;
 
 pub fn build(ba: BA) -> AnyView {
@@ -18,7 +16,7 @@ pub fn build(ba: BA) -> AnyView {
 
     let size = ba.args.get_f64("size").unwrap_or(14.0) as f32;
     let bold = ba.args.get_bool("bold").unwrap_or(false);
-    let color = ba.args.get_string("color").map(|c| parse_color(c));
+    let color = super::theme::optional_colour_prop(ba.args.get_string("color"));
 
     let t = text(content).size(size);
     match (bold, color) {
@@ -27,8 +25,4 @@ pub fn build(ba: BA) -> AnyView {
         (false, Some(c)) => AnyView::new(t.foreground(c)),
         (false, None) => AnyView::new(t),
     }
-}
-
-fn parse_color(s: &str) -> Color {
-    Color::srgb_hex(resolve_color_name(s))
 }

@@ -121,11 +121,20 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     if bold {
         el = el.font_weight(FontWeight::SEMIBOLD);
     }
-    if let Some(ref color_name) = color {
-        el = el.text_color(resolve_color(ctx, color_name));
+    // The colour this run's text actually lands on, so the layout record can
+    // report what reached the paint rather than what the props asked for. A
+    // geometry-only assertion cannot tell `#{color: "primary"}` from
+    // `#{color: "foreground"}` when the resolver conflates them, and that
+    // conflation is exactly the defect the theme vocabulary removes.
+    let mut painted_fg: Option<Hsla> = None;
+    if let Some(resolved) = super::theme::optional_colour_prop(ctx, color.as_deref()) {
+        el = el.text_color(resolved);
+        painted_fg = Some(resolved);
     }
     if is_placeholder {
-        el = el.text_color(tc(ctx, |t| t.muted_foreground)).italic();
+        let muted = tc(ctx, |t| t.muted_foreground);
+        el = el.text_color(muted).italic();
+        painted_fg = Some(muted);
     }
 
     let mut styled_runs: Option<Vec<holon_api::StyledRun>> = None;
@@ -173,27 +182,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     if let Some(runs) = styled_runs {
         tracker = tracker.with_styled_runs(runs);
     }
+    tracker = tracker.with_painted_colors(painted_fg, None);
     tracker.into_any_element()
-}
-
-fn resolve_color(ctx: &GpuiRenderContext, color_name: &str) -> Hsla {
-    if color_name.starts_with('#') {
-        let hex = color_name.trim_start_matches('#');
-        if hex.len() >= 6 && hex.is_ascii() {
-            let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(128);
-            let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(128);
-            let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(128);
-            return gpui::rgba((r as u32) << 24 | (g as u32) << 16 | (b as u32) << 8 | 0xFF).into();
-        }
-        return tc(ctx, |t| t.foreground);
-    }
-    match color_name {
-        "muted" | "secondary" => tc(ctx, |t| t.muted_foreground),
-        "warning" => tc(ctx, |t| t.warning),
-        "error" => tc(ctx, |t| t.danger),
-        "success" => tc(ctx, |t| t.success),
-        _ => tc(ctx, |t| t.foreground),
-    }
 }
 
 /// Convert mark spans (Unicode-scalar offsets) into a sorted, non-overlapping

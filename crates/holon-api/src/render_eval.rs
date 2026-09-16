@@ -117,19 +117,6 @@ pub fn sorted_rows(rows: &[Arc<DataRow>], sort_key: Option<&str>) -> Vec<Arc<Dat
     sorted
 }
 
-pub fn resolve_color_name(s: &str) -> &str {
-    match s {
-        "red" => "#FF0000",
-        "green" => "#00FF00",
-        "blue" => "#0000FF",
-        "yellow" => "#FFFF00",
-        "white" => "#FFFFFF",
-        "gray" | "grey" | "muted" => "#808080",
-        s if s.starts_with('#') => s,
-        _ => "#FFFFFF",
-    }
-}
-
 pub fn resolve_states<K: RowKey>(args: &ResolvedArgs, row: &HashMap<K, Value>) -> Vec<String> {
     if let Some(states_expr) = args.get_template("states") {
         let val = eval_to_value(states_expr, row);
@@ -1473,13 +1460,6 @@ mod tests {
         assert_eq!(state_display("CUSTOM"), ("CUSTOM", "primary"));
     }
 
-    #[test]
-    fn test_resolve_color_name() {
-        assert_eq!(resolve_color_name("red"), "#FF0000");
-        assert_eq!(resolve_color_name("#ABC123"), "#ABC123");
-        assert_eq!(resolve_color_name("unknown"), "#FFFFFF");
-    }
-
     // ── F1 regression — unknown FunctionCall returns Value::Null ───────
     //
     // Pre-F1, unknown function calls silently returned their first arg,
@@ -1755,17 +1735,6 @@ mod mutation_gap_tests {
         assert_eq!(state_display("DONE"), ("[x]", "success"));
         assert_eq!(state_display("CANCELLED"), ("CANCELLED", "error"));
         assert_eq!(state_display("WAITING"), ("WAITING", "primary"));
-
-        assert_eq!(resolve_color_name("red"), "#FF0000");
-        assert_eq!(resolve_color_name("green"), "#00FF00");
-        assert_eq!(resolve_color_name("blue"), "#0000FF");
-        assert_eq!(resolve_color_name("yellow"), "#FFFF00");
-        assert_eq!(resolve_color_name("white"), "#FFFFFF");
-        assert_eq!(resolve_color_name("gray"), "#808080");
-        assert_eq!(resolve_color_name("grey"), "#808080");
-        assert_eq!(resolve_color_name("muted"), "#808080");
-        assert_eq!(resolve_color_name("#ABCDEF"), "#ABCDEF");
-        assert_eq!(resolve_color_name("chartreuse"), "#FFFFFF");
     }
 
     #[test]

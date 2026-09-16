@@ -5,7 +5,7 @@
 **Base:** `edf1602fd7a1` (main; sentinel `grep -c id_like_but_undeclared crates/holon-api/src/entity_reference.rs` = 2).
 **Ruling:** D130.a (Martin, 2026-09-15). Build the generic DSL colour-from-column lever, then pin the condition-row severity colour with a rung on the `conditions` source.
 **Depends on:** error-remedy Inc 2 (ADR 0035). Present on integration: `condition_bus.rs`, `condition_profile.rs`, `condition_detail.rs`, `row_source.rs`, `condition_source.rs`.
-**Status:** Option A approved by the senior review of 2026-09-17, with amendments folded in below. Inc 0a is being implemented.
+**Status:** Option A approved by the senior review of 2026-09-17, amendments folded in. Inc 0a and Inc 0b are LANDED in this workspace. Inc 1 to 3 are not started.
 **Caveat:** an earlier draft of this design came from a cheaper model. It was not reused. Every claim below is re-derived from the workspace at the sentinel.
 
 ## 1. First principles
@@ -30,7 +30,9 @@ The shape "one column value decides one visual property" recurs: task state, pri
 
 ## 2. Architecture
 
-### 2.1 Current render-DSL style capabilities
+### 2.1 Render-DSL style capabilities BEFORE Inc 0b
+
+The table under it is the state Inc 0b replaced. It is kept because it is the case for the lever: five resolvers, five vocabularies, five silent substitutions. Section 3's Inc 0b records what now stands.
 
 `RenderExpr` (`crates/holon-api/src/render_types.rs:779`) has no style node, and its `Object` fields are untyped (`HashMap<String, RenderExpr>`). A colour is an ordinary **string argument**: `text(..., #{color: "muted"})`, `icon(..., #{color: "primary"})`, `card(#{accent: ...})`.
 
@@ -177,20 +179,88 @@ Each increment is independently landable and carries its own red-first PBT. Inc 
 
 **Does NOT close the shipped `"primary"` defect.** After 0a, `primary` is a *known* token but resolvers 1, 3 and 4 still cannot paint it. Inc 0b closes that, and 0b must follow in this lane.
 
-### Inc 0b: one resolver, the paint plumbing, the windowed rung
+### Inc 0b: one resolver, the paint plumbing, the windowed rung. LANDED
 
-**Build:**
-- Resolvers 1 to 5 take a `ThemeToken`, never a `&str`. Each frontend keeps one token-to-pixel function; the five vocabularies and the five silent fallbacks are gone.
-- `RenderedElement` (`crates/holon-pbt-core/src/capabilities.rs:2070`) gains `painted_fg` / `painted_bg`, projected at `crates/holon-integration-tests/src/pbt/window_slice/components.rs:65`. `ElementInfo` already records them (`crates/holon-frontend/src/geometry.rs:31`, set at `frontends/gpui/src/geometry.rs:487`), so this is plumbing, not new capture.
-- The GPUI `text` builder calls `with_painted_colors`. **Validated: it does not today.** Only `search_ui.rs:474,487` calls it, so a text run's foreground is `None` and inherits from an enclosing tracked element. This is why the windowed red needs 0b's plumbing.
-- A gpui-side test asserting the token table and the renderer's `ThemeColor` picks agree, mirroring `frontends/gpui/src/render/builders/icon.rs:248`.
-- The 3 gallery DSL hex literals (lines 1110, 1495, 1532) migrate to tokens.
+**Scope as built.** The five resolvers are gone; each frontend has ONE
+token-to-pixel function taking a `ThemeToken`.
 
-**Red-first PBT (windowed):** a new rung in `frontends/gpui/tests/`, asserting that one frame containing both a `text(..., #{color: "primary"})` and a `text(..., #{color: "muted"})` paints **two different** foregrounds, and that the first equals the active theme's `primary` resolved through the theme, never a hardcoded hex. Asserting token-against-token in one frame is the shape the review asked for; it survives a theme swap in either direction. Run with `--test-threads=1`.
+| # | Change | File |
+|---|---|---|
+| 1 | `ThemeToken` becomes an ENUM with `ALL`, so each frontend's mapping is an exhaustive match and a missing token is a compile error rather than a catch-all. | `crates/holon-api/src/theme_token.rs` |
+| 2 | The GPUI resolver: one exhaustive `theme_token_color`, plus `theme_token_from_prop` (discloses a name that reached paint unvalidated) and `optional_colour_prop` / `packed`. | `frontends/gpui/src/render/builders/theme.rs` (new) |
+| 3 | `text`, `icon`, `spacer`, `card`, `board` all resolve through it. `resolve_color`, `icon_color`, `hex_to_hsla`, `parse_hex_u32` and `parse_hex` are deleted. | the same five builders |
+| 4 | The GPUI `text` builder declares what it paints, via `with_painted_colors`. | `frontends/gpui/src/render/builders/text.rs` |
+| 5 | waterui gets its own `theme_token_color` over holon's default dark theme, and its text builder resolves through it. | `frontends/waterui/src/render/builders/theme.rs` (new) |
+| 6 | `resolve_color_name` is DELETED (its only consumer was waterui; 0 shipped uses of its CSS vocabulary). | `crates/holon-api/src/render_eval.rs` |
 
-**Gate:** as 0a, plus `cargo check -p holon-waterui` (the only consumer of resolver 5), `cargo check -p holon-frontend --features blinc`, and the GPUI pbt suite.
+**Plan correction.** The plan expected `RenderedElement` to gain `painted_fg` /
+`painted_bg` and two projection sites to be updated. Implementation found that
+`BoundsSnapshot::entries` already carry the full `ElementInfo`
+(`crates/holon-layout-testing/src/snapshot.rs:43`), which has `painted_fg` since
+`frontends/gpui/src/geometry.rs:487`. No `RenderedElement` change was needed, so
+that risk row is retired rather than mitigated.
 
-**Done when:** the red log shows `primary` and `muted` painting the same colour, the green log shows them painting two, and no frontend has a colour-name string match left.
+**Two decisions worth recording:**
+
+- **`accent` resolves to `ThemeColor.accent`**, not `accent_foreground` as the
+  legacy icon table had it. `apply_holon_theme` sets `accent` from holon's
+  `primary` and `accent_foreground` from `text_primary`, so keeping the legacy
+  mapping would have made the token `accent` paint the SAME colour as
+  `foreground`: the exact conflation this lane removes. No shipped layout used
+  `color: "accent"` before 0a migrated the gallery to it.
+- **waterui's mapping reads holon's default dark theme** (`ThemeColors::default_dark()`).
+  That frontend wires no live theme, so a token cannot follow the user's choice
+  there. Disclosed in its module doc.
+
+**Red-first PBT (windowed):** `frontends/gpui/tests/text_colour_windowed.rs`, two
+cases. One asserts each of the nine tokens paints the `gpui_component` slot it
+names, against the ACTIVE theme (the expected mapping is written out in the test
+rather than shared with the renderer, so a change on either side fails). The
+other asserts `primary`, `muted` and `foreground` paint three distinct colours in
+ONE frame, so a theme swap cannot make it pass or fail on its own.
+
+**Red evidence:** `lane-logs/inc0b-red.log`, captured after the paint plumbing
+and before the resolver change, so the failure is the colour conflation and not a
+missing tracker:
+```
+`text(#{color: "accent"})` painted [10, 10, 10, 255], but that token means the
+theme's Accent slot ([245, 245, 245, 255]).
+`color: "primary"` and `color: "foreground"` painted the same colour ([10, 10, 10, 255]).
+```
+The same two cases also fail on the Inc 0a baseline with the 0b builder changes
+reverted, which is the red re-confirmed on a clean tree.
+
+**Gates:** `gate-compile` clean; `gate-arch` 7/7; `fmt --check` exit 0; clippy
+`-D warnings` exit 0 on holon-api, holon-frontend and holon-gpui; `nextest`
+holon-api + holon-frontend 1214/1214; `keystone-smoke` 4 passed 0 failed;
+`keystone-known-reds` GREEN; blinc `cargo check --locked` exit 0.
+
+**The GPUI suite has pre-existing reds and load-sensitive flakes.** A full
+`nextest -p holon-gpui --features pbt` run fails 17 tests on MY tree and 17 on the
+0a baseline. Diffing the two sets: 12 failures are common and pre-existing, 5
+were load-induced flakes (each passes in isolation on my tree, and 3 baseline
+failures passed in my run), and the 2 tests that differ by design are
+`text_colour_windowed` itself, red on the baseline and green here. **Zero
+regressions.**
+
+**Known limit, stated rather than papered over:** only `text` declares what it
+paints, so the windowed rung proves the resolver through `text`. `icon`, `card`,
+`board` and `spacer` call the same exhaustive function, and no colour-name
+resolver remains in any frontend to check structurally, but their painted
+colours are not in the layout record. Giving `card` and `icon` the same paint
+declaration would let the shipped `card(accent: "primary")` and
+`icon(color: "primary")` be asserted directly; that is a follow-up, not part of
+0b.
+
+**waterui is NOT compile-verified.** Its check cannot run in this environment:
+`waterkit-screen`, a transitive dependency, fails to build its Swift helper
+(`'CGWindowListCreateImage' is unavailable in macOS: Please use ScreenCaptureKit
+instead`), and a `--target wasm32-unknown-unknown` attempt fails earlier in
+`errno`. Both failures reproduce on the 0a baseline, so they are pre-existing and
+not caused by this lane. The waterui change is small and mirrors the GPUI module,
+and every symbol it names was read at its definition, but it has not been through
+a compiler.
+
 
 ### Inc 1: the generic lever `style_from(column, map)`
 
@@ -272,15 +342,17 @@ grep -n "const COLOUR_ARGS" crates/holon-api/src/render_dsl.rs         # expect 
 grep -n "fn theme_token_prop" crates/holon-frontend/src/shadow_builders/prelude.rs # expect :213
 grep -n "ICON_NAMES" crates/holon-api/src/icon_name.rs            # expect the shape to mirror
 
-# Five resolvers, still divergent: Inc 0b has NOT landed (section 2.1).
-grep -c "=> tc(ctx" frontends/gpui/src/render/builders/text.rs     # expect 5
-grep -n "fn icon_color" frontends/gpui/src/render/builders/icon.rs # expect :146
-grep -n "fn resolve_color_name" crates/holon-api/src/render_eval.rs # expect :120
-grep -rn "resolve_color_name" frontends/ | wc -l                   # expect 2 (waterui only)
+# ONE resolver per frontend, and no colour-name string match anywhere else (Inc 0b landed).
+grep -rn "fn resolve_color\b\|fn icon_color\|fn hex_to_hsla\|fn parse_hex" frontends/gpui/src/ | wc -l   # expect 0
+grep -rn "resolve_color_name" crates/ frontends/ | wc -l           # expect 0 (deleted)
+grep -n "pub(crate) fn theme_token_color" frontends/gpui/src/render/builders/theme.rs    # expect :23
+grep -n "pub(crate) fn theme_token_hex" frontends/waterui/src/render/builders/theme.rs   # expect :26
+grep -c "ThemeToken::" frontends/gpui/src/render/builders/theme.rs # expect 10 (9 tokens + the signature)
 
-# The colour string still reaches the GPUI renderer unvalidated at paint time (section 2.2).
-grep -n 'get_string("color")' frontends/gpui/src/render/builders/text.rs # expect :52
-grep -n 'let color = node.prop_str("color")' frontends/gpui/src/render/builders/text.rs # expect :52
+# The paint plumbing the windowed rung reads (section 2.2).
+grep -n "with_painted_colors" frontends/gpui/src/render/builders/text.rs # expect 1
+grep -n "painted_fg" frontends/gpui/src/geometry.rs                # expect :568 region
+grep -rn "with_painted_colors" frontends/ | grep -v "fn with_painted_colors"  # expect text.rs + search_ui.rs
 
 # Hex is gone from the gallery and was never in a shipped layout doc (section 2.3).
 grep -rEoh '#[0-9a-fA-F]{6}' assets/default/ | wc -l               # expect 0

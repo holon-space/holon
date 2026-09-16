@@ -1,7 +1,8 @@
 mod prelude;
+mod theme;
 
 holon_macros::builder_registry!("src/render/builders",
-    skip: [prelude],
+    skip: [prelude, theme],
     register: AnyView
 );
 
