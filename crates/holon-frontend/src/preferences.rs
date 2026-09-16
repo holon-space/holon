@@ -357,11 +357,26 @@ pub fn define_preferences(theme_registry: &ThemeRegistry) -> Vec<PreferenceDef> 
                           change the list. The SHOPPING_LIST_URL environment variable overrides \
                           this if set."
                 .into(),
-            section: integrations,
+            section: integrations.clone(),
             pref_type: PrefType::Secret,
             default: toml::Value::String(String::new()),
             requires_restart: true,
             env_override: Some("SHOPPING_LIST_URL".into()),
+        },
+        PreferenceDef {
+            key: PrefKey::new("ics.calendar_url"),
+            label: "Calendar URL (iCal)".into(),
+            description: "Paste a calendar's published iCal (.ics) address — in Google Calendar \
+                          that is Settings, Integrate calendar, \"Secret address in iCal \
+                          format\". Treat it as a password: anyone holding the address can read \
+                          the calendar. The ICS_CALENDAR_URL environment variable overrides this \
+                          if set. The bundled \"Calendar by URL\" row replicates it read-only."
+                .into(),
+            section: integrations.clone(),
+            pref_type: PrefType::Secret,
+            default: toml::Value::String(String::new()),
+            requires_restart: true,
+            env_override: Some("ICS_CALENDAR_URL".into()),
         },
         PreferenceDef {
             key: PrefKey::new("vault.root"),

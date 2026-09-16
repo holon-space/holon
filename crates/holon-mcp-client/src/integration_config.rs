@@ -163,6 +163,13 @@ pub struct HolonToolConfig {
     /// `{scopes, rows}`; its single output is the argument object.
     #[serde(default)]
     pub request: Option<String>,
+    /// How far either side of now an `ics` response's recurrences are expanded
+    /// (`back`, `forward`; a humantime-style string such as `30d`, or seconds).
+    /// Read only by the `ics` codec, and it is the BOUND on the replica: an
+    /// occurrence outside the window is not replicated, which a sidecar must
+    /// say. Defaults to 30 days back and 365 days forward.
+    #[serde(default)]
+    pub ics_window: Option<crate::ics::IcsWindow>,
 }
 
 /// Auth for a `utcp:` manual's calls. Exactly one arm must be set:
@@ -399,6 +406,7 @@ fn build_rest_transport(
                 )?,
                 query: cfg.query,
                 format: cfg.format,
+                ics_window: cfg.ics_window.unwrap_or_default(),
                 result_key: cfg.result_key,
                 pagination: cfg.pagination,
                 body: cfg.body,

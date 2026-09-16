@@ -17,6 +17,7 @@ pub mod command_resolution;
 pub mod credential_path;
 pub mod credential_store;
 pub mod entity_mirror;
+pub mod ics;
 pub mod integration_config;
 pub mod integration_state;
 pub mod mcp_call_surface;

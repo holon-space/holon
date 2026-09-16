@@ -72,6 +72,13 @@ column(text("Recent sessions, newest first", #{muted: true}), live_query(#{sql: 
 #+BEGIN_SRC render :id gcal-view::render::0
 column(text("Calendar events, latest first", #{muted: true}), live_query(#{sql: "SELECT id, summary, start, end_time, location FROM gcal_event ORDER BY start DESC LIMIT 25", item_template: list(#{item_template: render_entity()})}))
 #+END_SRC
+* Calendar by URL
+:PROPERTIES:
+:ID: ics-view
+:END:
+#+BEGIN_SRC render :id ics-view::render::0
+column(text("Events from a published calendar feed, latest first", #{muted: true}), live_query(#{sql: "SELECT id, summary, start, end_time, location FROM ics_event ORDER BY start DESC LIMIT 25", item_template: list(#{item_template: render_entity()})}))
+#+END_SRC
 * Gmail
 :PROPERTIES:
 :ID: gmail-view

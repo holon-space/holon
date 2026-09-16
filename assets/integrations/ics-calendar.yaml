@@ -1,0 +1,137 @@
+# Sidecar-format generation. The app runs its own bundled copy of this file
+# unless an INSTALLED copy declares the generation the running build understands
+# (crates/holon-mcp-client/src/bundled_sidecars.rs).
+schema_version: 2
+
+# The Integrations sidebar row: what it says, what glyph it wears, and the page
+# `integration.open_default_view` focuses in the main panel. `default_view` is
+# the BARE id of a block (org convention), authored in assets/default/index.org.
+display_name: "Calendar by URL"
+icon: calendar
+default_view: ics-view
+
+# A calendar published as an iCalendar (`.ics`) feed.
+#
+# WHY THIS RUNG EXISTS: it is the only one that needs no OAuth client, no
+# consent screen, no Google Cloud project and no terminal. Google Calendar
+# offers a per-calendar "Secret address in iCal format" under
+# Settings → Integrate calendar, and most other calendar providers publish an
+# equivalent, so this sidecar is not Google-specific: any ICS address works.
+#
+# THE ADDRESS IS A CREDENTIAL. Anyone holding it reads the calendar, so it is
+# stored as a SECRET preference (`ics.calendar_url`, Settings → Integrations)
+# and referenced here as `${ICS_CALENDAR_URL}` only. `${VAR}` is what marks a
+# value secret and strips it from logs; the address never appears in this file,
+# and a `${VAR}` with no preference definition is refused at load.
+#
+# WHAT IT REPLICATES: one row per OCCURRENCE. A recurring event is expanded
+# into its occurrences, an `EXDATE` removes one, and a `RECURRENCE-ID` override
+# takes the place of the occurrence it names (both land on the same row id,
+# `<uid>@<instant>`), so a moved instance shows its moved time rather than the
+# time it was moved from. An all-day event is a date with `all_day = 1`.
+#
+# WHAT IT DOES NOT: writing. The feed is read-only by nature. `VTODO`,
+# `VJOURNAL`, `DURATION` and a `TZID` that is not an IANA zone name are refused
+# LOUDLY rather than skipped — under replace-scope semantics a skipped record
+# reads as a deletion. A `VALARM` carries no row and is ignored.
+#
+# THE WINDOW IS THE BOUND. A published feed is the whole history, so recurrence
+# expansion is bounded by `ics_window` below. An occurrence outside it is NOT
+# replicated: a daily standup a decade back would otherwise be thousands of rows
+# nobody asked for. The window itself is 30 days back (a glance at what just
+# happened) and 365 forward (a year of planning).
+
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: list-events
+      description: >-
+        The calendar's published iCalendar feed: one document holding every
+        VEVENT, with recurrences, exclusions and overrides.
+      tool_call_template:
+        call_template_type: http
+        url: ${ICS_CALENDAR_URL}
+        http_method: GET
+
+holon:
+  # A published feed changes on the provider's schedule and has no push
+  # notification, so polling is the only freshness. Half-hourly is the
+  # compromise: often enough to notice a change, rare enough not to hammer an
+  # address that is often a static file.
+  poll_interval: 30m
+  tools:
+    list-events:
+      # The manual states a content type; this states how Holon DECODES what
+      # arrives. A calendar document is not JSON, so the codec is the whole
+      # difference between a replica and a parse error.
+      format: ics
+      # A calendar is inherently a collection: the decoded occurrence array is
+      # always wrapped under this key so `sync.extract_path` can select it.
+      result_key: entries
+      ics_window:
+        back: 30d
+        forward: 365d
+
+entity_prefix: "ics_"
+
+entities:
+  event:
+    short_name: event
+    id_column: id
+    # `render_entity()` paints NOTHING for an entity with no profile variant, so
+    # the default view needs this to be a list rather than a blank page.
+    profile_variants:
+      - name: default
+        render: 'row(text(col("start")), spacer(8), text(col("summary")))'
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: uid
+        sql_type: TEXT
+        nullable: true
+      # Set only on an override: the instant this row's VEVENT replaces.
+      - name: recurrence_id
+        sql_type: TEXT
+        nullable: true
+      - name: summary
+        sql_type: TEXT
+        nullable: true
+      # RFC 3339 UTC for a timed event; `YYYY-MM-DD` for an all-day one.
+      - name: start
+        sql_type: TEXT
+        nullable: true
+      # `end_time` (not `end`): END is a SQL keyword and the cache-table DDL
+      # builder does not quote column identifiers, so a bare `end` column breaks
+      # CREATE TABLE. The CODEC emits the iCalendar name `end` — the mapping
+      # below is what renames it, so the storage concern stays out of the codec.
+      - name: end_time
+        sql_type: TEXT
+        nullable: true
+      - name: all_day
+        sql_type: INTEGER
+        nullable: true
+      - name: location
+        sql_type: TEXT
+        nullable: true
+      - name: description
+        sql_type: TEXT
+        nullable: true
+      - name: status
+        sql_type: TEXT
+        nullable: true
+      # The zone the start was expressed in, for display.
+      - name: tzid
+        sql_type: TEXT
+        nullable: true
+      - name: updated
+        sql_type: TEXT
+        nullable: true
+    sync:
+      list_tool: list-events
+      extract_path: entries
+      interval: 30m
+      project:
+        end_time:
+          path: ["end"]

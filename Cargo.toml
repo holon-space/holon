@@ -117,6 +117,13 @@ opentelemetry-appender-tracing = "0.31"
 
 # === Time/IDs ===
 chrono = { version = "0.4", features = ["serde"] }
+# An IANA timezone database, for resolving an iCalendar `TZID` to a real zone.
+# Embedded tzdata (pure Rust), so it builds for the wasm32 and Android targets
+# as well as macOS.
+chrono-tz = "0.10"
+# RFC 5545 recurrence expansion, for an iCalendar `RRULE`. Pulls `chrono-tz`
+# itself. Expansion is always window-bounded at the call site.
+rrule = "0.14"
 # `v5` is used by holon-api (deterministic id derivation). It was never declared
 # here — on native some other crate in the graph turned it on and holon-api
 # compiled by luck; on wasm32-unknown-unknown nothing does, so the omission

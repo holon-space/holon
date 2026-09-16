@@ -60,9 +60,13 @@ pub struct RestCall {
     pub url: String,
     pub query: HashMap<String, String>,
     /// How to decode the response body before extraction. `json` is the default
-    /// (back-compat); `atom`/`rss` decode a syndication feed into the same
-    /// record shape (see [`ResponseFormat`]).
+    /// (back-compat); `atom`/`rss`/`ics` decode a published document into the
+    /// same record shape (see [`ResponseFormat`]).
     pub format: ResponseFormat,
+    /// How far either side of now an `ics` recurrence is expanded. Carried on
+    /// the call rather than read from the clock at decode time, so the window a
+    /// sidecar declared is the window that is used.
+    pub ics_window: crate::ics::IcsWindow,
     /// For `json`: if set, a non-object body (e.g. a bare array) is wrapped as
     /// `{ result_key: <body> }` so a `sync.extract_path` can select it. This is
     /// the response→block-shape adapter: REST APIs return arbitrary top-level
@@ -226,12 +230,12 @@ impl RestAuth {
 
 /// How a [`RestCall`] response body is decoded into records.
 ///
-/// `Json` is the default and back-compatible. `Atom`/`Rss` decode a syndication
-/// feed (a fixed, standardized schema — RFC 4287 for Atom, RSS 2.0) into an
-/// array of record objects with the same field-per-column contract the JSON
-/// path uses, so the transport axis (mcp | rest) stays orthogonal to the body
-/// codec (json | atom | rss). Parse-don't-validate: the codec is chosen at the
-/// boundary and malformed input fails loud.
+/// `Json` is the default and back-compatible. `Atom`/`Rss`/`Ics` decode a
+/// published document (a fixed, standardized schema) into an array of record
+/// objects with the same field-per-column contract the JSON path uses, so the
+/// transport axis (mcp | rest) stays orthogonal to the body codec (json | atom
+/// | rss | ics). Parse-don't-validate: the codec is chosen at the boundary and
+/// malformed input fails loud.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ResponseFormat {
@@ -239,6 +243,11 @@ pub enum ResponseFormat {
     Json,
     Atom,
     Rss,
+    /// iCalendar (RFC 5545), decoded by [`crate::ics`]. A calendar feed is
+    /// read-only by nature, which is what makes this the zero-OAuth rung: the
+    /// provider's own published address needs no client, no consent and no
+    /// token.
+    Ics,
 }
 
 /// A UTCP-manual, resolved and ready to serve calls. Built by
@@ -402,7 +411,7 @@ impl RestCallSurface {
             if call.format != ResponseFormat::Json {
                 anyhow::bail!(
                     "rest transport: call '{name}' sets pagination, which is only supported for \
-                     `format: json` (atom/rss feeds are single-document)"
+                     `format: json` (atom/rss/ics documents are single)"
                 );
             }
             return self.fetch_paginated(name, &url, &query, pg).await;
@@ -450,6 +459,22 @@ impl RestCallSurface {
                 })?;
                 // A feed is inherently a collection; always wrap under the key so
                 // `sync.extract_path` can select it (default `entries`).
+                let key = call.result_key.as_deref().unwrap_or("entries");
+                let mut obj = serde_json::Map::new();
+                obj.insert(key.to_string(), serde_json::Value::Array(entries));
+                serde_json::Value::Object(obj)
+            }
+            ResponseFormat::Ics => {
+                // The window is anchored on the clock at decode time, which is
+                // the only moment "now" is a fact.
+                let entries = crate::ics::decode(&body, call.ics_window, chrono::Utc::now())
+                    .map_err(|e| {
+                        self.err(format!(
+                            "rest transport: {} {}: {e:#}",
+                            call.method,
+                            self.safe_url(&url)
+                        ))
+                    })?;
                 let key = call.result_key.as_deref().unwrap_or("entries");
                 let mut obj = serde_json::Map::new();
                 obj.insert(key.to_string(), serde_json::Value::Array(entries));
@@ -934,7 +959,9 @@ fn parse_feed(format: ResponseFormat, body: &str) -> anyhow::Result<Vec<serde_js
                 .map(rss_item_to_record)
                 .collect()
         }
-        ResponseFormat::Json => unreachable!("parse_feed is only called for atom/rss"),
+        ResponseFormat::Json | ResponseFormat::Ics => {
+            unreachable!("parse_feed is only called for atom/rss")
+        }
     };
     Ok(records)
 }

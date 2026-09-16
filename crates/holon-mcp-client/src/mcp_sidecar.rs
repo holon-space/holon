@@ -287,7 +287,7 @@ impl SyncInterval {
         };
         if digits.is_empty() {
             return Err(format!(
-                "invalid sync interval '{s}': expected <number>[s|m|h] or plain seconds"
+                "invalid sync interval '{s}': expected <number>[s|m|h|d] or plain seconds"
             ));
         }
         let n: u64 = digits
@@ -297,9 +297,12 @@ impl SyncInterval {
             "" | "s" | "sec" | "secs" | "second" | "seconds" => n,
             "m" | "min" | "mins" | "minute" | "minutes" => n * 60,
             "h" | "hr" | "hour" | "hours" => n * 3600,
+            // Days are the unit a calendar-window bound is expressed in; the
+            // vocabulary stays one, so a sidecar never carries a second one.
+            "d" | "day" | "days" => n * 86_400,
             other => {
                 return Err(format!(
-                    "invalid sync interval '{s}': unknown unit '{other}' (use s, m, or h)"
+                    "invalid sync interval '{s}': unknown unit '{other}' (use s, m, h, or d)"
                 ));
             }
         };

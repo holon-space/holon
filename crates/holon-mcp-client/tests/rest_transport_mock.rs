@@ -87,6 +87,124 @@ const RSS_BODY: &str = r#"<?xml version="1.0"?>
   </channel>
 </rss>"#;
 
+/// The ICS fixture, dated RELATIVE TO NOW so it cannot rot: recurrence
+/// expansion is bounded by a window anchored on the clock, so a fixture with
+/// hard-coded dates silently falls outside that window as time passes.
+///
+/// Anchored in UTC rather than a `TZID`, so the expected instants are plain
+/// arithmetic. The zone-dependent cases (summer vs winter offsets, all-day
+/// dates across a zone boundary, an unresolvable `TZID`) are decoded against a
+/// FIXED clock in `crates/holon-mcp-client/src/ics.rs`, where an exact
+/// expectation cannot drift.
+///
+/// The shape is Google's: an RRULE with an EXDATE, a RECURRENCE-ID override, an
+/// all-day VALUE=DATE event, escaped TEXT, and a folded line. Every property
+/// line starts at column 0. The folded continuation begins with TWO spaces, and
+/// that is deliberate: the first is the fold marker RFC 5545 strips on
+/// unfolding, the second is the space the TEXT itself holds between "fold" and
+/// "across". A continuation with one space unfolds to "foldacross".
+fn ics_body() -> String {
+    let today = chrono::Utc::now().date_naive();
+    let compact = |days: i64| (today + chrono::Duration::days(days)).format("%Y%m%d");
+    format!(
+        r#"BEGIN:VCALENDAR
+PRODID:-//Google Inc//Google Calendar 70.9054//EN
+VERSION:2.0
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+X-WR-CALNAME:Mock
+BEGIN:VEVENT
+DTSTART:{d0}T100000Z
+DTEND:{d0}T110000Z
+RRULE:FREQ=WEEKLY;COUNT=3
+EXDATE:{d7}T100000Z
+UID:weekly-1@example.com
+DESCRIPTION:Line one\nLine two\, with comma
+LOCATION:Room 1\; Building A
+STATUS:CONFIRMED
+SUMMARY:Weekly sync
+END:VEVENT
+BEGIN:VEVENT
+DTSTART:{d14}T140000Z
+DTEND:{d14}T153000Z
+UID:weekly-1@example.com
+RECURRENCE-ID:{d14}T100000Z
+SUMMARY:Weekly sync (moved)
+END:VEVENT
+BEGIN:VEVENT
+DTSTART;VALUE=DATE:{d3}
+DTEND;VALUE=DATE:{d4}
+UID:allday-1@example.com
+SUMMARY:All day event with a very long summary that an exporter will fold
+{tab} across two physical lines
+END:VEVENT
+BEGIN:VEVENT
+DTSTART:{d5}T120000Z
+DTEND:{d5}T130000Z
+UID:utc-1@example.com
+SUMMARY:UTC event
+END:VEVENT
+END:VCALENDAR
+"#,
+        d0 = compact(0),
+        d3 = compact(3),
+        d4 = compact(4),
+        d5 = compact(5),
+        d7 = compact(7),
+        d14 = compact(14),
+        // RFC 5545 section 3.1: the fold marker is "a single white space
+        // character (space or horizontal tab)", so a tab must unfold the same
+        // way a space does. The space AFTER the tab belongs to the TEXT.
+        tab = "\t",
+    )
+}
+
+/// The RFC 3339 instant of day `days` from today on the fixture's daily grid.
+fn ics_day(days: i64) -> String {
+    let date = chrono::Utc::now().date_naive() + chrono::Duration::days(days);
+    date.format("%Y-%m-%d").to_string()
+}
+
+/// One VEVENT, years before the window, and no recurrence. A one-off must be
+/// bounded by `ics_window` exactly as an expansion is.
+fn ics_old_body() -> String {
+    let long_ago = (chrono::Utc::now().date_naive() - chrono::Duration::days(400)).format("%Y%m%d");
+    format!(
+        r#"BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:long-ago@example.com
+DTSTART:{long_ago}T100000Z
+DTEND:{long_ago}T110000Z
+SUMMARY:Years ago
+END:VEVENT
+END:VCALENDAR
+"#
+    )
+}
+
+/// An ICS body whose only VEVENT carries a TZID this build cannot resolve.
+const ICS_BAD_TZID_BODY: &str = r#"BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+DTSTART;TZID=W. Europe Standard Time:20261005T120000
+DTEND;TZID=W. Europe Standard Time:20261005T130000
+UID:windows-tz@example.com
+SUMMARY:Windows zone name
+END:VEVENT
+END:VCALENDAR
+"#;
+
+/// An ICS body carrying a VTODO, which this build does not model.
+const ICS_VTODO_BODY: &str = r#"BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VTODO
+UID:todo-1@example.com
+SUMMARY:Buy milk
+END:VTODO
+END:VCALENDAR
+"#;
+
 /// Route a request path to a canned body (JSON or XML). Returns the body text.
 fn route(path: &str) -> String {
     if path.starts_with("/posts") {
@@ -102,6 +220,14 @@ fn route(path: &str) -> String {
         ATOM_BODY.to_string()
     } else if path.starts_with("/feed.rss") {
         RSS_BODY.to_string()
+    } else if path.starts_with("/feed.ics") {
+        ics_body()
+    } else if path.starts_with("/feed-badtzid.ics") {
+        ICS_BAD_TZID_BODY.to_string()
+    } else if path.starts_with("/feed-old.ics") {
+        ics_old_body()
+    } else if path.starts_with("/feed-vtodo.ics") {
+        ICS_VTODO_BODY.to_string()
     } else {
         serde_json::json!([]).to_string()
     }
@@ -321,6 +447,231 @@ tools: {{}}
         .await
         .expect("fetch feed")
         .records
+}
+
+/// The sidecar an ICS feed is driven through, carrying the columns the ICS
+/// decoder emits.
+fn ics_feed_yaml(base: &str, path: &str) -> String {
+    format!(
+        r#"
+utcp:
+  utcp_version: "1.1.3"
+  manual_version: "1.0.0"
+  tools:
+    - name: list-feed
+      tool_call_template:
+        call_template_type: http
+        url: {base}{path}
+        http_method: GET
+holon:
+  tools:
+    list-feed:
+      format: ics
+      result_key: entries
+      ics_window:
+        back: 30d
+        forward: 365d
+entities:
+  ics_events:
+    id_column: id
+    schema:
+      - {{ name: id, sql_type: TEXT, primary_key: true }}
+      - {{ name: uid, sql_type: TEXT }}
+      - {{ name: recurrence_id, sql_type: TEXT, nullable: true }}
+      - {{ name: summary, sql_type: TEXT, nullable: true }}
+      - {{ name: start, sql_type: TEXT, nullable: true }}
+      - {{ name: end, sql_type: TEXT, nullable: true }}
+      - {{ name: all_day, sql_type: INTEGER, nullable: true }}
+      - {{ name: location, sql_type: TEXT, nullable: true }}
+      - {{ name: description, sql_type: TEXT, nullable: true }}
+      - {{ name: status, sql_type: TEXT, nullable: true }}
+    sync:
+      list_tool: list-feed
+      extract_path: entries
+tools: {{}}
+"#
+    )
+}
+
+/// Fetch an ICS feed through the real sync path, returning the Result rather
+/// than panicking, so a missing codec reads as a failed assertion naming it
+/// instead of a panic inside the harness.
+async fn try_fetch_ics(
+    path: &str,
+    base: &str,
+) -> anyhow::Result<Vec<serde_json::Map<String, serde_json::Value>>> {
+    let yaml = ics_feed_yaml(base, path);
+    let cfg: IntegrationFileConfig = serde_yaml::from_str(&yaml)?;
+    let strategy = cfg.entities["ics_events"]
+        .sync
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("the ICS sidecar declares no sync block"))?
+        .into_strategy()?;
+    let mcp_cfg = cfg.into_mcp_config_with(
+        "ics_calendar".to_string(),
+        &|_| None,
+        &test_credential_root(),
+    )?;
+    let surface = match mcp_cfg.transport {
+        McpTransport::Rest { manual, .. } => RestCallSurface::new(manual),
+        other => anyhow::bail!("expected the rest transport, got {other:?}"),
+    };
+    Ok(strategy
+        .fetch_records(&surface, &NoopTokenStore, "ics_calendar.ics_events")
+        .await?
+        .records)
+}
+
+/// The record whose `id` is `id`, if present.
+fn record<'a>(
+    records: &'a [serde_json::Map<String, serde_json::Value>],
+    id: &str,
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    records
+        .iter()
+        .find(|r| r.get("id").and_then(|v| v.as_str()) == Some(id))
+}
+
+/// The Google-shaped fixture decodes: recurrence expands, the EXDATE is
+/// honored, the RECURRENCE-ID override stands in for its own occurrence, an
+/// all-day event is distinguished, TEXT is unescaped and a folded line is
+/// rejoined. Red before the `ics` codec exists: the sidecar refuses
+/// `format: ics` as an unknown response format.
+#[tokio::test]
+async fn rest_transport_decodes_ics_feed_via_shared_sync_path() {
+    let mock = start_mock().await;
+    let records = try_fetch_ics("/feed.ics", &mock.base_url).await;
+    assert!(
+        records.is_ok(),
+        "an `ics` response format must be a codec the sidecar can declare: {:?}",
+        records.err()
+    );
+    let records = records.expect("checked above");
+
+    // weekly-1 asks for three occurrences, one is EXDATEd out, and one is
+    // replaced by its override. So TWO rows, not four: the EXDATE removed one
+    // and the override did not add one.
+    let weekly = records
+        .iter()
+        .filter(|r| r["uid"].as_str() == Some("weekly-1@example.com"))
+        .count();
+    assert_eq!(
+        weekly, 2,
+        "expected two surviving occurrences: {records:#?}"
+    );
+
+    // The first occurrence is keyed by its instant and carries the event's
+    // length.
+    let first_id = format!("weekly-1@example.com@{}T10:00:00Z", ics_day(0));
+    let first =
+        record(&records, &first_id).unwrap_or_else(|| panic!("{first_id} missing: {records:#?}"));
+    assert_eq!(first["start"], format!("{}T10:00:00Z", ics_day(0)));
+    assert_eq!(first["end"], format!("{}T11:00:00Z", ics_day(0)));
+    assert_eq!(first["summary"], "Weekly sync");
+    assert_eq!(first["status"], "CONFIRMED");
+    assert_eq!(first["all_day"], 0);
+    assert!(
+        first.get("recurrence_id").is_none(),
+        "a generated occurrence carries no recurrence_id"
+    );
+    // Escaped TEXT is unescaped.
+    assert_eq!(first["description"], "Line one\nLine two, with comma");
+    assert_eq!(first["location"], "Room 1; Building A");
+
+    // The EXDATEd occurrence is absent.
+    let exdated = format!("weekly-1@example.com@{}T10:00:00Z", ics_day(7));
+    assert!(
+        record(&records, &exdated).is_none(),
+        "the EXDATE must remove its occurrence"
+    );
+
+    // The override stands in for its occurrence: the same key, carrying its own
+    // moved times, so a moved instance shows the time it was moved TO.
+    let overridden_id = format!("weekly-1@example.com@{}T10:00:00Z", ics_day(14));
+    let overridden = record(&records, &overridden_id)
+        .unwrap_or_else(|| panic!("{overridden_id} missing: {records:#?}"));
+    assert_eq!(overridden["start"], format!("{}T14:00:00Z", ics_day(14)));
+    assert_eq!(overridden["end"], format!("{}T15:30:00Z", ics_day(14)));
+    assert_eq!(overridden["summary"], "Weekly sync (moved)");
+    assert_eq!(
+        overridden["recurrence_id"],
+        format!("{}T10:00:00Z", ics_day(14))
+    );
+
+    assert_eq!(
+        records.len(),
+        4,
+        "two weekly occurrences, one all-day and one UTC: {records:#?}"
+    );
+
+    // All-day: a date-only start, an exclusive end, all_day = 1. The date is the
+    // one AS WRITTEN, which is why the fixture needs no zone for it.
+    let allday = record(&records, "allday-1@example.com").expect("the all-day event");
+    assert_eq!(allday["all_day"], 1);
+    assert_eq!(allday["start"], ics_day(3));
+    assert_eq!(allday["end"], ics_day(4));
+    assert_eq!(
+        allday["summary"],
+        "All day event with a very long summary that an exporter will fold across two physical \
+         lines",
+        "a folded line must be rejoined"
+    );
+
+    // A UTC DATE-TIME keeps its instant.
+    let utc = record(&records, "utc-1@example.com").expect("the UTC event");
+    assert_eq!(utc["start"], format!("{}T12:00:00Z", ics_day(5)));
+    assert_eq!(utc["all_day"], 0);
+
+    let reqs = mock.requests.lock().unwrap();
+    assert!(
+        reqs.iter().any(|r| r.starts_with("GET /feed.ics")),
+        "mock never saw GET /feed.ics; saw {reqs:?}"
+    );
+}
+
+/// The window is the replica's BOUND, proved end to end: a one-off event from
+/// over a year ago is not replicated, exactly as an expansion outside the
+/// window is not.
+#[tokio::test]
+async fn a_one_off_event_outside_the_ics_window_is_not_replicated() {
+    let mock = start_mock().await;
+    let records = try_fetch_ics("/feed-old.ics", &mock.base_url)
+        .await
+        .expect("the feed decodes; it is the WINDOW that drops the row");
+    assert!(
+        records.is_empty(),
+        "a one-off 400 days back is outside a 30d-back/365d-forward window: {records:#?}"
+    );
+}
+
+/// A TZID this build cannot resolve fails the feed loudly, naming it. It is
+/// never skipped: under replace-scope a skipped record reads as a deletion.
+#[tokio::test]
+async fn an_unresolvable_ics_tzid_fails_loud() {
+    let mock = start_mock().await;
+    let err = try_fetch_ics("/feed-badtzid.ics", &mock.base_url)
+        .await
+        .expect_err("an unresolvable TZID must fail the feed");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("W. Europe Standard Time"),
+        "the refusal must name the TZID it could not resolve: {msg}"
+    );
+}
+
+/// A VTODO is not modelled, so the feed fails loud rather than silently
+/// dropping the component.
+#[tokio::test]
+async fn an_ics_vtodo_fails_loud() {
+    let mock = start_mock().await;
+    let err = try_fetch_ics("/feed-vtodo.ics", &mock.base_url)
+        .await
+        .expect_err("a VTODO must fail the feed");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("VTODO"),
+        "the refusal must name the unmodelled component: {msg}"
+    );
 }
 
 #[tokio::test]

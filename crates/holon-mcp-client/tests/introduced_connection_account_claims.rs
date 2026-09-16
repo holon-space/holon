@@ -283,6 +283,7 @@ const BUNDLED: &[&str] = &[
     "claude-history",
     "gcal",
     "gmail",
+    "ics-calendar",
     "jsonplaceholder",
     "shopping",
     "todoist",

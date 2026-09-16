@@ -487,14 +487,14 @@ Both accept an integer (seconds) or a humantime-style string (`"30s"`, `"5m"`,
 mean "never refresh" — the 300s default bounds staleness rather than silently
 letting the replica go stale.
 
-#### Response formats: `json` | `atom` | `rss` (feeds)
+#### Response formats: `json` | `atom` | `rss` | `ics`
 
 A tool decodes its response body per a `holon.tools.<name>.format:` codec
 (default `json`). The manual states a `content_type`; `format` states how Holon
-DECODES what arrives, which for a syndication feed is not the same thing. How
+DECODES what arrives, which for a published document is not the same thing. How
 you reach the source stays orthogonal to how the response is shaped, so
-**syndication feeds need no new transport** — an Atom/RSS feed is fetched
-exactly like any GET, only the codec differs:
+**a feed or a calendar needs no new transport** — an Atom, RSS or iCalendar
+document is fetched exactly like any GET, only the codec differs:
 
 - `format: json` (default) — the JSON path described above.
 - `format: atom` — decodes an Atom feed (RFC 4287); each `<entry>` →
@@ -503,12 +503,51 @@ exactly like any GET, only the codec differs:
 - `format: rss` — decodes RSS 2.0; each `<item>` → the same record shape
   (`<guid>`→id falling back to `<link>`, `<pubDate>`→updated,
   `<author>`/`<dc:creator>`→author, `<description>`/`<content:encoded>`→content).
+- `format: ics` — decodes an iCalendar document (RFC 5545) into one record per
+  OCCURRENCE: `{ id, uid, start, end, all_day, tzid, summary, description,
+  location, status, updated }`, plus `recurrence_id` on an override. A `TZID`
+  is resolved through the tz database (`chrono-tz`), never by replaying a
+  `VTIMEZONE` block's offsets. `RRULE` is expanded within a bounded window,
+  `EXDATE` removes an occurrence, and a `RECURRENCE-ID` override lands on the
+  same row id as the occurrence it replaces (`uid` without a recurrence,
+  `uid@<instant>` with one). This is what makes a calendar published as an `.ics`
+  address read replicable with no OAuth client, no consent screen and no
+  terminal — see `assets/integrations/ics-calendar.yaml`. `VTODO`, `VJOURNAL`,
+  `DURATION` and a `TZID` that is not an IANA zone name are refused LOUDLY
+  rather than skipped: under replace-scope semantics a skipped record reads as a
+  deletion.
 
 Because a feed is inherently a collection, the decoded entry array is always
 wrapped under `result_key` (default `entries`), so `sync.extract_path` selects
 it just like the JSON case. The codecs are parse-don't-validate at the boundary:
 the root element is asserted to be a feed and malformed XML fails loud; an empty
 feed (zero entries) is legitimate.
+
+An `ics` tool additionally declares how far recurrences are expanded:
+
+```yaml
+holon:
+  tools:
+    list-events:
+      format: ics
+      result_key: entries
+      ics_window:
+        back: 30d
+        forward: 365d
+```
+
+The window is the replica's BOUND, not a hint, and it bounds EVERY row: an
+expanded occurrence, a one-off event, and a `RECURRENCE-ID` override are all
+judged by it alike, so a single meeting from years back is not replicated either.
+Two consequences worth stating plainly. A published feed is the whole history, so
+without a bound a decade of a daily standup becomes thousands of rows. And
+because the replica is replace-scoped, a row that falls outside the window on a
+later sync is DROPPED from the replica: with the default `back: 30d`, history
+older than a month is deliberately not kept. Raise `back` if you want more.
+`back`/`forward` take the same interval spelling as everywhere else (`30d`,
+`12h`, `90s`). Reaching the hard per-event occurrence bound FAILS LOUD rather
+than truncating, because a silently short expansion reads as a deletion of
+everything past the bound.
 
 Feed example sidecar (a blog's Atom feed, no auth):
 
@@ -556,10 +595,17 @@ the dependency tree).
 
 ## Open questions
 
-- **Leases / read-write for `rest`.** The `rest` transport is read-only (GET
-  only). Write-back — and the general **lease-governed external-effect** model
-  (diffed intent against the replica's own base, ADR 0024 Phase 4 place-kind
-  taxonomy) — is unresolved and out of scope. Non-GET methods fail loud today.
+- **Write-back for `rest`.** The TRANSPORT is not read-only: `HttpMethod` carries
+  `GET`, `POST`, `PUT`, `PATCH` and `DELETE`, parsed from the manual's
+  `http_method` at load, and a tool may declare a request `body` template (a body
+  on a `GET` is refused) plus a `request` mapping that turns a row stream into
+  its arguments. What is missing is the REACHABILITY leg: a `rest` integration
+  registers a read-only operation provider (`finish_rest_integration`), so a
+  dispatch with a non-`read` effect fails loud with "this provider is read-only"
+  rather than reaching the wire. Declaring `writes: enabled` and an `effect:` on
+  a tool is necessary but not yet sufficient. The general **lease-governed
+  external-effect** model (ADR 0024 Phase 4 place-kind taxonomy) governs how such
+  a write is admitted once it can be dispatched.
 - **`rest` background runner.** ✅ Done — `build_mcp_integration` now wires a
   `rest` sidecar into a **poll-only** background runner (`finish_rest_integration`:
   no MCP peer, no subscriptions, one poll ticker per sync entity; see
