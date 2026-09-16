@@ -2375,9 +2375,15 @@ impl DispatchingOperationEngine {
     /// so MCP discovers it like any provider op.
     pub(crate) fn merge_blocks_descriptor() -> OperationDescriptor {
         use holon_api::render_types::TypeHint;
-        let param = |name: &str, description: &str| holon_api::OperationParam {
+        // Both name a block of THIS entity. Neither is `id` nor `*_id`, so the
+        // name rule cannot see them: the declaration is the only thing that
+        // tells a READER of this descriptor — MCP discovery, the profile
+        // resolver, the net — that these values are entity references.
+        let block_ref = |name: &str, description: &str| holon_api::OperationParam {
             name: name.to_string(),
-            type_hint: TypeHint::String,
+            type_hint: TypeHint::EntityId {
+                entity_name: EntityName::new("block"),
+            },
             description: description.to_string(),
         };
         OperationDescriptor {
@@ -2390,8 +2396,8 @@ impl DispatchingOperationEngine {
                           content over, and keep its id resolving via a redirect."
                 .to_string(),
             required_params: vec![
-                param("canonical", "The surviving block id"),
-                param("duplicate", "The block id folded away"),
+                block_ref("canonical", "The surviving block id"),
+                block_ref("duplicate", "The block id folded away"),
             ],
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Block,
@@ -2483,14 +2489,21 @@ impl DispatchingOperationEngine {
                           missing bindings."
                 .to_string(),
             required_params: vec![
+                // Both name a block of THIS entity. `template_id` is a real
+                // template root; `target_parent` is a parent POSITION, so the
+                // ROOT sentinel is a legal value there — a template is not.
                 param(
                     "template_id",
-                    TypeHint::String,
+                    TypeHint::EntityId {
+                        entity_name: EntityName::new("block"),
+                    },
                     "Id of the template root block (must carry the 'template' property)",
                 ),
                 param(
                     "target_parent",
-                    TypeHint::String,
+                    TypeHint::EntityIdOrRoot {
+                        entity_name: EntityName::new("block"),
+                    },
                     "Block id the instance root is created under",
                 ),
                 param(
@@ -2526,14 +2539,27 @@ impl DispatchingOperationEngine {
     /// present; `instantiate_template` only when a template source is wired
     /// (it is `PickerBacked`, surfaced via the template picker, never as a
     /// bare menu op).
-    pub fn block_synthetic_descriptors(include_template_picker: bool) -> Vec<OperationDescriptor> {
+    /// The engine-synthetic descriptors are a DECLARATION like a provider's —
+    /// MCP discovery, the profile resolver and the net all read them as the
+    /// operation surface — so the rule that polices a provider's descriptors
+    /// polices them too, HERE, where the set is built: one place the injection
+    /// sites inherit from rather than a check each of them must remember.
+    pub fn block_synthetic_descriptors(
+        include_template_picker: bool,
+    ) -> Result<Vec<OperationDescriptor>> {
         let mut ops = Vec::with_capacity(2);
         if include_template_picker {
             ops.push(Self::instantiate_template_descriptor());
         }
         ops.push(Self::convert_block_to_page_descriptor());
         ops.push(Self::merge_blocks_descriptor());
-        ops
+        holon_api::validate_entity_references(&ops).map_err(|e| {
+            anyhow::anyhow!(
+                "the engine-synthetic block descriptors are a declaration like any provider's, \
+                 and one of them breaks the entity-reference rule: {e}"
+            )
+        })?;
+        Ok(ops)
     }
 
     /// The engine-synthetic `block` descriptors that can actually FIRE in this
@@ -2545,7 +2571,7 @@ impl DispatchingOperationEngine {
     /// the same builder because it fills the profile MENU, where the op is
     /// reached through the template picker rather than as a bare entry — a
     /// different question, not a disagreement about what runs.
-    pub fn firable_block_synthetic_descriptors(&self) -> Vec<OperationDescriptor> {
+    pub fn firable_block_synthetic_descriptors(&self) -> Result<Vec<OperationDescriptor>> {
         Self::block_synthetic_descriptors(self.template_source.is_some())
     }
 
@@ -3100,9 +3126,16 @@ impl OperationEngine for DispatchingOperationEngine {
             .filter(|op| op.entity_name == entity_name)
             .collect();
         if entity_name == "block" {
-            ops.extend(Self::block_synthetic_descriptors(
-                self.template_source.is_some(),
-            ));
+            // Fallible at the source, where the set is BUILT, but infallible
+            // HERE: both sites that inject this set propagate the same error as
+            // a startup failure, so a booted process holds a set already
+            // admitted.
+            ops.extend(
+                Self::block_synthetic_descriptors(self.template_source.is_some()).expect(
+                    "the engine-synthetic block descriptors are validated where they are built, \
+                     so this read follows a set the boot gates already admitted",
+                ),
+            );
         }
         ops
     }

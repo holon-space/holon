@@ -1324,7 +1324,7 @@ impl BackendEngine {
 
         let mut catalog = Vec::new();
         let mut claimed = std::collections::HashSet::new();
-        let synthetic = self.op_engine.firable_block_synthetic_descriptors();
+        let synthetic = self.op_engine.firable_block_synthetic_descriptors()?;
         for descriptor in self.dispatcher.operations().into_iter().chain(synthetic) {
             let admission = holon_core::classify_for_net(&descriptor)
                 .map_err(|e| anyhow::anyhow!("the net's descriptor catalog refuses one: {e}"))?;

@@ -190,7 +190,7 @@ async fn create_initialized_engine(
         LiveEntities::new(),
         type_profiles,
     )
-    .await;
+    .await?;
 
     let mut engine = BackendEngine::new(
         db_handle.clone(),
@@ -445,7 +445,7 @@ async fn create_profile_resolver(
     ui_info: holon_api::UiInfo,
     live_entities: LiveEntities,
     type_profiles: Vec<crate::entity_profile::EntityProfile>,
-) -> Arc<ProfileResolver> {
+) -> Result<Arc<ProfileResolver>> {
     use holon_api::EntityName;
     let mut entity_operations: HashMap<EntityName, Vec<holon_api::OperationDescriptor>> =
         HashMap::new();
@@ -471,7 +471,8 @@ async fn create_profile_resolver(
         .extend(
             crate::api::operation_engine::DispatchingOperationEngine::block_synthetic_descriptors(
                 false,
-            ),
+            )
+            .map_err(|e| anyhow::anyhow!("[ProfileResolver] {e}"))?,
         );
     match matview_manager.watch(PROFILE_SQL).await {
         Ok(result) => {
@@ -494,13 +495,13 @@ async fn create_profile_resolver(
                 },
             );
             live_profiles.subscribe("entity_profile", result.stream);
-            Arc::new(ProfileResolver::with_type_profiles(
+            Ok(Arc::new(ProfileResolver::with_type_profiles(
                 live_profiles,
                 ui_info,
                 live_entities,
                 entity_operations,
                 type_profiles,
-            ))
+            )))
         }
         Err(e) => {
             tracing::debug!(
@@ -512,13 +513,13 @@ async fn create_profile_resolver(
                 |_| Ok(String::new()),
                 |_| anyhow::bail!("no profiles"),
             );
-            Arc::new(ProfileResolver::with_type_profiles(
+            Ok(Arc::new(ProfileResolver::with_type_profiles(
                 live_profiles,
                 ui_info,
                 live_entities,
                 entity_operations,
                 type_profiles,
-            ))
+            )))
         }
     }
 }

@@ -166,14 +166,24 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         let param_name_lit = param_name.clone();
                         let type_str_lit = type_str.clone();
 
-                        // Parse type hint with entity ID detection
-                        let type_hint_expr =
-                            parse_param_type_hint(&param_name, &pat_type.attrs, &type_str_lit);
+                        // Parse type hint with entity ID detection. A
+                        // contradiction among the attributes is a compile error.
+                        let type_hint_field = match parse_param_type_hint(
+                            &param_name,
+                            &pat_type.attrs,
+                            &type_str_lit,
+                        ) {
+                            Ok(expr) => quote! { type_hint: #expr, },
+                            Err(err) => {
+                                let err = err.to_compile_error();
+                                quote! { type_hint: { #err }, }
+                            }
+                        };
 
                         Some(quote! {
                             holon_api::OperationParam {
                                 name: #param_name_lit.to_string(),
-                                type_hint: #type_hint_expr,
+                                #type_hint_field
                                 description: String::new(), // TODO: Extract from doc comments
                             }
                         })
@@ -1882,45 +1892,78 @@ fn is_entity_reference_name(param_name: &str) -> bool {
             .is_some_and(|role| !role.is_empty())
 }
 
-/// Parse parameter type hint with entity ID detection
+/// Parse parameter type hint with entity ID detection.
+///
+/// The one refusal here is a CONTRADICTION between two attributes, which the
+/// caller turns into a compile error naming both.
 fn parse_param_type_hint(
     param_name: &str,
     attrs: &[syn::Attribute],
     rust_type_str: &str,
-) -> proc_macro2::TokenStream {
+) -> syn::Result<proc_macro2::TokenStream> {
     let mut entity_ref_override: Option<String> = None;
-    let mut not_entity = false;
-    let mut may_be_root = false;
+    let mut not_entity: Option<&syn::Attribute> = None;
+    let mut may_be_root: Option<&syn::Attribute> = None;
 
     for attr in attrs {
-        if attr.path().is_ident("entity_ref")
-            && let Meta::List(meta_list) = &attr.meta
-        {
-            let tokens = &meta_list.tokens;
-            let token_str = quote! { #tokens }.to_string();
-            if let Some(stripped) = token_str
-                .strip_prefix('"')
-                .and_then(|s| s.strip_suffix('"'))
-            {
-                entity_ref_override = Some(stripped.to_string());
-            }
+        if attr.path().is_ident("entity_ref") {
+            // ONE accepted spelling. Reading whatever tokens happen to be there
+            // instead drops `#[entity_ref(block)]` to a silent value name and
+            // mints the entity `a", "b` from `#[entity_ref("a", "b")]` — a
+            // scheme no reference can answer to.
+            let Meta::List(meta_list) = &attr.meta else {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "`#[entity_ref]` must name the entity it references: write \
+                     `#[entity_ref(\"block\")]`.",
+                ));
+            };
+            let named = meta_list.parse_args::<syn::LitStr>().map_err(|e| {
+                syn::Error::new_spanned(
+                    attr,
+                    format!(
+                        "`#[entity_ref(..)]` takes ONE quoted entity name, e.g. \
+                         `#[entity_ref(\"block\")]`: {e}"
+                    ),
+                )
+            })?;
+            entity_ref_override = Some(named.value());
         }
 
         if attr.path().is_ident("not_entity") {
-            not_entity = true;
+            not_entity = Some(attr);
         }
 
         if attr.path().is_ident("may_be_root") {
-            may_be_root = true;
+            may_be_root = Some(attr);
         }
     }
 
-    if let Some(entity_name) = entity_ref_override {
+    // `#[not_entity]` denies that the parameter is an entity reference at all;
+    // `#[may_be_root]` admits the ROOT sentinel, which is one. Reading either
+    // first would drop the other in silence, so the pair is refused where both
+    // are visible rather than resolved in favour of an attribute order.
+    if let (Some(not_entity), Some(may_be_root)) = (not_entity, may_be_root) {
+        let mut err = syn::Error::new_spanned(
+            not_entity,
+            "`#[not_entity]` and `#[may_be_root]` contradict: `#[may_be_root]` admits the ROOT \
+             sentinel, which is a reference to an entity, and `#[not_entity]` denies that this \
+             parameter is one. Keep `#[may_be_root]` if the ROOT is a legal value in this \
+             position, or `#[not_entity]` if the parameter names a value — not both.",
+        );
+        err.combine(syn::Error::new_spanned(
+            may_be_root,
+            "the contradicting attribute",
+        ));
+        return Err(err);
+    }
+
+    let hint = if let Some(entity_name) = entity_ref_override {
         // `#[entity_ref(..)]` names the entity; `#[may_be_root]` says the ROOT
         // is a legal value there. They answer different questions, so one
         // parameter may carry both — reading only the first would drop the
         // admission the second asked for.
-        if may_be_root {
+        if may_be_root.is_some() {
             quote! {
                 holon_api::TypeHint::EntityIdOrRoot {
                     entity_name: holon_api::EntityName::new(#entity_name),
@@ -1933,7 +1976,7 @@ fn parse_param_type_hint(
                 }
             }
         }
-    } else if not_entity {
+    } else if not_entity.is_some() {
         // A reference-NAMED parameter that opts out still has to say what it is
         // instead: registration refuses a `TypeHint::String` under one of these
         // names, because the boundary would then pass it through unparsed.
@@ -1942,7 +1985,7 @@ fn parse_param_type_hint(
         } else {
             infer_type_hint_from_rust_type(rust_type_str)
         }
-    } else if may_be_root {
+    } else if may_be_root.is_some() {
         // The ROOT is a legal value in this position. Stated on the parameter
         // because whether the root is meaningful is a property of the position,
         // not of the name: `parent_id` says where the value goes, and only the
@@ -1972,7 +2015,8 @@ fn parse_param_type_hint(
         }
     } else {
         infer_type_hint_from_rust_type(rust_type_str)
-    }
+    };
+    Ok(hint)
 }
 
 /// Infer TypeHint from Rust type string
@@ -2146,5 +2190,120 @@ mod arc_attribute_tests {
             arcs_of(vec![syn::parse_quote!(#[doc = "unrelated"])]).expect("no arc attrs"),
             TransitionArcs::Undeclared
         );
+    }
+}
+
+#[cfg(test)]
+mod param_hint_attribute_tests {
+    use super::*;
+
+    fn hint(param_name: &str, attrs: Vec<syn::Attribute>, rust_type: &str) -> syn::Result<String> {
+        parse_param_type_hint(param_name, &attrs, rust_type).map(|tokens| tokens.to_string())
+    }
+
+    /// `#[not_entity]` denies that the parameter is an entity reference;
+    /// `#[may_be_root]` admits the ROOT sentinel, which IS one. Reading either
+    /// attribute first drops the other in silence, so the contradiction is a
+    /// compile error instead — and it names BOTH attributes, because either one
+    /// is the one the author may want to delete.
+    #[test]
+    fn not_entity_beside_may_be_root_is_a_macro_error() {
+        let err = hint(
+            "target",
+            vec![
+                syn::parse_quote!(#[not_entity]),
+                syn::parse_quote!(#[may_be_root]),
+            ],
+            "String",
+        )
+        .expect_err("the two attributes contradict, so the parameter cannot expand");
+        let msg = err.to_string();
+        assert!(msg.contains("not_entity"), "the error must name it: {msg}");
+        assert!(msg.contains("may_be_root"), "the error must name it: {msg}");
+    }
+
+    /// `#[entity_ref]` names an entity, so it has to SAY which one. Bare, it
+    /// names nothing and the parameter silently degrades to a value name.
+    #[test]
+    fn a_bare_entity_ref_is_a_macro_error() {
+        let err = hint(
+            "destination",
+            vec![syn::parse_quote!(#[entity_ref])],
+            "String",
+        )
+        .expect_err("a bare `#[entity_ref]` names no entity");
+        let msg = err.to_string();
+        assert!(msg.contains("entity_ref"), "the error must name it: {msg}");
+        assert!(
+            msg.contains(r#"[entity_ref("block")]"#),
+            "the error must name the accepted form: {msg}"
+        );
+    }
+
+    /// `#[entity_ref(block)]` is the same hole spelled as an identifier: the
+    /// quote-stripping reads no entity name and drops the attribute in silence.
+    #[test]
+    fn an_unquoted_entity_ref_is_a_macro_error() {
+        let err = hint(
+            "destination",
+            vec![syn::parse_quote!(#[entity_ref(block)])],
+            "String",
+        )
+        .expect_err("an unquoted `#[entity_ref(..)]` names no entity");
+        let msg = err.to_string();
+        assert!(msg.contains("entity_ref"), "the error must name it: {msg}");
+        assert!(
+            msg.contains(r#"[entity_ref("block")]"#),
+            "the error must name the accepted form: {msg}"
+        );
+    }
+
+    /// Two names is not a name: the accepted spelling is ONE quoted entity.
+    #[test]
+    fn a_two_name_entity_ref_is_a_macro_error() {
+        hint(
+            "destination",
+            vec![syn::parse_quote!(#[entity_ref("block", "project")])],
+            "String",
+        )
+        .expect_err("`#[entity_ref(..)]` takes exactly one entity name");
+    }
+
+    /// The one accepted spelling still declares the reference it names.
+    #[test]
+    fn a_quoted_entity_ref_still_declares_the_reference() {
+        let declared = hint(
+            "destination",
+            vec![syn::parse_quote!(#[entity_ref("project")])],
+            "String",
+        )
+        .expect("the accepted form expands")
+        .to_string();
+        assert!(declared.contains("EntityId"), "{declared}");
+        assert!(declared.contains("project"), "{declared}");
+    }
+
+    /// The refusal is the CONTRADICTION, not either attribute: each one alone
+    /// is a legal declaration and must still expand.
+    #[test]
+    fn either_attribute_alone_still_expands() {
+        let root_position = hint(
+            "parent_id",
+            vec![syn::parse_quote!(#[may_be_root])],
+            "String",
+        )
+        .expect("`#[may_be_root]` alone declares a legal position")
+        .to_string();
+        assert!(
+            root_position.contains("EntityIdOrRoot"),
+            "a lone `#[may_be_root]` still admits the root: {root_position}"
+        );
+
+        hint(
+            "canonical",
+            vec![syn::parse_quote!(#[not_entity])],
+            "String",
+        )
+        .expect("`#[not_entity]` alone declares a legal opt-out");
     }
 }

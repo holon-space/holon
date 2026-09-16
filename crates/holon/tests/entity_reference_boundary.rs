@@ -396,3 +396,30 @@ async fn set_field_accepts_a_scheme_qualified_reference() {
         other => panic!("unexpected value type for completed: {other:?}"),
     }
 }
+
+/// The engine-synthetic `block` descriptors are a DECLARATION like a
+/// provider's: MCP discovery, the profile resolver and the net all read them as
+/// the operation surface. `merge_blocks` names two BLOCK references, and a
+/// `String` under a description that calls it an id is the exact hole the
+/// registration rule exists to refuse.
+///
+/// Both `bool` values are swept because the synthetic set is a pure function of
+/// this one argument, so the two calls cover its whole input space — there is
+/// no runtime input that could mint a third shape.
+#[test]
+fn the_engine_synthetic_block_descriptors_pass_the_registration_rule() {
+    use holon::api::operation_engine::DispatchingOperationEngine;
+
+    for include_template_picker in [false, true] {
+        // The builder is the set's single source and validates before returning,
+        // so a failure here surfaces as the build error it is.
+        let ops = DispatchingOperationEngine::block_synthetic_descriptors(include_template_picker)
+            .unwrap_or_else(|e| panic!("the synthetic set must build: {e}"));
+        holon_api::validate_entity_references(&ops).unwrap_or_else(|e| {
+            panic!(
+                "the engine-synthetic block descriptors (include_template_picker = \
+                 {include_template_picker}) fail the rule every provider's declaration passes: {e}"
+            )
+        });
+    }
+}
