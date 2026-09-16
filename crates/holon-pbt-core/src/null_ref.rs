@@ -15,11 +15,14 @@ use crate::capabilities::AdviceExpectation;
 use crate::capabilities::Audience;
 use crate::capabilities::CapCursor;
 use crate::capabilities::CapRegion;
+use crate::capabilities::DrawnHome;
 use crate::capabilities::RefAdvice;
 use crate::capabilities::RefAudience;
 use crate::capabilities::RefBackend;
 use crate::capabilities::RefBlockTree;
 use crate::capabilities::RefClock;
+use crate::capabilities::RefConditions;
+use crate::capabilities::RefDocuments;
 use crate::capabilities::RefEditorMirror;
 use crate::capabilities::RefFocus;
 use crate::capabilities::RefGlobalFocus;
@@ -27,6 +30,7 @@ use crate::capabilities::RefHistoryExpectation;
 use crate::capabilities::RefJournalFeed;
 use crate::capabilities::RefLayout;
 use crate::capabilities::RefNavHistory;
+use crate::capabilities::RefReadOnlyHomes;
 use crate::capabilities::RefSharedView;
 use crate::capabilities::RefTaskState;
 use crate::capabilities::RefToggle;
@@ -43,12 +47,14 @@ pub struct NullRef;
 /// The trait names `NullRef` answers for — the ref caps the classifier
 /// can host. Asserted by the classifier test so a newly registered ref
 /// capability cannot silently escape classification.
-pub const NULL_REF_CAPS: [&str; 19] = [
+pub const NULL_REF_CAPS: [&str; 22] = [
     "RefAdvice",
     "RefAudience",
     "RefBackend",
     "RefBlockTree",
     "RefClock",
+    "RefConditions",
+    "RefDocuments",
     "RefEditorMirror",
     "RefFocus",
     "RefGlobalFocus",
@@ -56,6 +62,7 @@ pub const NULL_REF_CAPS: [&str; 19] = [
     "RefJournalFeed",
     "RefLayout",
     "RefNavHistory",
+    "RefReadOnlyHomes",
     "RefSharedView",
     "RefTaskState",
     "RefToggle",
@@ -175,6 +182,54 @@ impl RefClock for NullRef {
     }
     fn visited_days(&self) -> BTreeSet<String> {
         panic!("class-2: invariant read RefClock::visited_days")
+    }
+}
+
+#[allow(unused_variables)]
+impl RefConditions for NullRef {
+    fn expected_conditions(&self) -> Vec<(String, &'static str)> {
+        panic!("class-2: invariant read RefConditions::expected_conditions")
+    }
+    fn governed_condition_kinds(&self) -> BTreeSet<&'static str> {
+        panic!("class-2: invariant read RefConditions::governed_condition_kinds")
+    }
+}
+
+#[allow(unused_variables)]
+impl RefDocuments for NullRef {
+    fn document_names(&self) -> Vec<String> {
+        panic!("class-2: invariant read RefDocuments::document_names")
+    }
+    fn has_document(&self, file_name: &str) -> bool {
+        panic!("class-2: invariant read RefDocuments::has_document")
+    }
+    fn document_count(&self) -> usize {
+        panic!("class-2: invariant read RefDocuments::document_count")
+    }
+    fn doc_uri_by_name(&self, name: &str) -> Option<EntityUri> {
+        panic!("class-2: invariant read RefDocuments::doc_uri_by_name")
+    }
+    fn block_document_of(&self, block_id: &EntityUri) -> Option<EntityUri> {
+        panic!("class-2: invariant read RefDocuments::block_document_of")
+    }
+    fn has_non_seed_advice_rule(&self) -> bool {
+        panic!("class-2: invariant read RefDocuments::has_non_seed_advice_rule")
+    }
+    fn document_uris(&self) -> Vec<EntityUri> {
+        panic!("class-2: invariant read RefDocuments::document_uris")
+    }
+    fn has_document_uri(&self, uri: &EntityUri) -> bool {
+        panic!("class-2: invariant read RefDocuments::has_document_uri")
+    }
+    fn file_home_of(&self, block_id: &EntityUri) -> DrawnHome {
+        panic!("class-2: invariant read RefDocuments::file_home_of")
+    }
+}
+
+#[allow(unused_variables)]
+impl RefReadOnlyHomes for NullRef {
+    fn read_only_homed_blocks(&self) -> BTreeSet<EntityUri> {
+        panic!("class-2: invariant read RefReadOnlyHomes::read_only_homed_blocks")
     }
 }
 
@@ -393,6 +448,8 @@ pub fn null_ref_caps() -> CapMap {
     caps.insert(nr.clone() as Arc<dyn RefBackend>);
     caps.insert(nr.clone() as Arc<dyn RefBlockTree>);
     caps.insert(nr.clone() as Arc<dyn RefClock>);
+    caps.insert(nr.clone() as Arc<dyn RefConditions>);
+    caps.insert(nr.clone() as Arc<dyn RefDocuments>);
     caps.insert(nr.clone() as Arc<dyn RefEditorMirror>);
     caps.insert(nr.clone() as Arc<dyn RefFocus>);
     caps.insert(nr.clone() as Arc<dyn RefGlobalFocus>);
@@ -400,6 +457,7 @@ pub fn null_ref_caps() -> CapMap {
     caps.insert(nr.clone() as Arc<dyn RefJournalFeed>);
     caps.insert(nr.clone() as Arc<dyn RefLayout>);
     caps.insert(nr.clone() as Arc<dyn RefNavHistory>);
+    caps.insert(nr.clone() as Arc<dyn RefReadOnlyHomes>);
     caps.insert(nr.clone() as Arc<dyn RefSharedView>);
     caps.insert(nr.clone() as Arc<dyn RefTaskState>);
     caps.insert(nr.clone() as Arc<dyn RefToggle>);
@@ -417,6 +475,8 @@ pub fn null_ref_cap_ids() -> Vec<CapId> {
         CapId::of::<dyn RefBackend>(),
         CapId::of::<dyn RefBlockTree>(),
         CapId::of::<dyn RefClock>(),
+        CapId::of::<dyn RefConditions>(),
+        CapId::of::<dyn RefDocuments>(),
         CapId::of::<dyn RefEditorMirror>(),
         CapId::of::<dyn RefFocus>(),
         CapId::of::<dyn RefGlobalFocus>(),
@@ -424,6 +484,7 @@ pub fn null_ref_cap_ids() -> Vec<CapId> {
         CapId::of::<dyn RefJournalFeed>(),
         CapId::of::<dyn RefLayout>(),
         CapId::of::<dyn RefNavHistory>(),
+        CapId::of::<dyn RefReadOnlyHomes>(),
         CapId::of::<dyn RefSharedView>(),
         CapId::of::<dyn RefTaskState>(),
         CapId::of::<dyn RefToggle>(),

@@ -72,6 +72,7 @@ const CLASS_ONE: &[&str] = &[
     "inv-mark-bounds-within-content",
     "inv-matview-consistent-with-recompute",
     "inv-no-errors",
+    "inv-no-machine-keychain-access",
     "inv-no-observed-errors",
     "inv-no-orphan-blocks",
     "inv-no-parent-cycles",

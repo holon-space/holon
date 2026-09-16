@@ -171,6 +171,10 @@ pub const SHARED_WITH_ME_ROOT_ID: &str = "shared-with-me";
 pub const SHARED_WITH_ME_TITLE: &str = "Shared with me";
 
 /// Operations for creating and accepting shared Loro subtrees.
+///
+/// Every id parameter here addresses a BLOCK: `tree` is the operation surface
+/// the sharing machinery registers under, while the values it carries are
+/// nodes of the block tree, so each is declared `#[entity_ref("block")]`.
 #[holon_macros::operations_trait]
 #[async_trait]
 pub trait SubtreeShareOperations<T>: MaybeSendSync
@@ -182,7 +186,11 @@ where
     ///
     /// `retention` must be `"full"` or `"none"`.
     #[holon_macros::affects("parent_id")]
-    async fn share_subtree(&self, id: &str, retention: String) -> Result<OperationResult>;
+    async fn share_subtree(
+        &self,
+        #[entity_ref("block")] id: &str,
+        retention: String,
+    ) -> Result<OperationResult>;
 
     /// Accept a shared subtree under `parent_id`, using a ticket generated
     /// by `share_subtree` on the other peer. Returns the new mount block's
@@ -190,7 +198,7 @@ where
     #[holon_macros::affects("parent_id")]
     async fn accept_shared_subtree(
         &self,
-        parent_id: &str,
+        #[entity_ref("block")] parent_id: &str,
         ticket: String,
     ) -> Result<OperationResult>;
 
@@ -213,7 +221,8 @@ where
     /// snapshot. Returns the removed `shared_tree_id` + `mount_block_id` in
     /// the response JSON. Loud error if `mount_block_id` is not a mount.
     #[holon_macros::affects("parent_id")]
-    async fn unshare(&self, mount_block_id: &str) -> Result<OperationResult>;
+    async fn unshare(&self, #[entity_ref("block")] mount_block_id: &str)
+    -> Result<OperationResult>;
 }
 
 /// Holder for a per-share save worker. Wraps the generic

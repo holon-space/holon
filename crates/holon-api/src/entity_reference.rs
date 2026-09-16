@@ -73,6 +73,26 @@ pub fn names_an_entity_reference(param_name: &str) -> bool {
             .is_some_and(|role| !role.is_empty())
 }
 
+/// Whether a parameter is id-like yet declares no role for the reference —
+/// exactly the declaration the registration rule refuses.
+///
+/// The ONE composition of the two readings and the role check: the rule
+/// ([`entity_reference_params`]) refuses on it, and a schema-driven synthesizer
+/// (the MCP tool mapper, which builds parameters no Holon author writes)
+/// declares [`TypeHint::RowKey`] on it, so a parameter the rule would refuse is
+/// a parameter it converts. Re-deriving either condition at either site is the
+/// drift this closes: the name reading is UNCONDITIONAL, and only the
+/// description reading is `String`-scoped.
+pub fn id_like_but_undeclared(name: &str, description: &str, hint: &TypeHint) -> bool {
+    let declares_its_role = matches!(
+        hint,
+        TypeHint::EntityId { .. } | TypeHint::EntityIdOrRoot { .. } | TypeHint::RowKey
+    );
+    !declares_its_role
+        && (names_an_entity_reference(name)
+            || (*hint == TypeHint::String && description_calls_it_an_id(description)))
+}
+
 /// One entity-reference parameter of a dispatched operation, as its
 /// descriptors declare it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,23 +147,11 @@ pub fn entity_reference_params<'a>(
                     // parses it) or `RowKey` (it names a row in this provider's
                     // own table). Any other hint under such a name leaves the
                     // boundary nothing to decide by, so it is refused rather
-                    // than passed through.
-                    let declares_its_role = matches!(
-                        param.type_hint,
-                        TypeHint::EntityId { .. }
-                            | TypeHint::EntityIdOrRoot { .. }
-                            | TypeHint::RowKey
-                    );
-                    let by_name = names_an_entity_reference(&param.name);
-                    // The description is the second reading of the same
-                    // question, and it reaches the references the name rule
-                    // cannot see (`target`, `canonical`, `from`). Only
-                    // `TypeHint::String` is read this way: a parameter that
-                    // already declares its role has answered.
-                    let by_description = param.type_hint == TypeHint::String
-                        && description_calls_it_an_id(&param.description);
-                    if (by_name || by_description) && !declares_its_role {
-                        let said = if by_name {
+                    // than passed through. The description is the second
+                    // reading of the same question, reaching the references the
+                    // name rule cannot see (`target`, `canonical`, `from`).
+                    if id_like_but_undeclared(&param.name, &param.description, &param.type_hint) {
+                        let said = if names_an_entity_reference(&param.name) {
                             "is named as an entity reference"
                         } else {
                             "is described as an id"

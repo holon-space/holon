@@ -235,6 +235,7 @@ pub use entity::{
 pub use entity_reference::EntityReferenceParam;
 pub use entity_reference::description_calls_it_an_id;
 pub use entity_reference::entity_reference_params;
+pub use entity_reference::id_like_but_undeclared;
 pub use entity_reference::names_an_entity_reference;
 pub use entity_reference::validate_entity_references;
 pub use entity_uri::EntityUri;
