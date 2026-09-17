@@ -514,7 +514,7 @@ areas:
         ruled_by: "—"
         mode_axes: File adapter
         entry: "`crates/holon-filesystem/src/`"
-    open_reds: [org-blocks-ref-diverge, org-render-echo-loop, page-without-own-file, loro-stable-id-missing, loro-frontier-height, delete-backward-merge-budget, lib-seed-wide-drift]
+    open_reds: [org-blocks-ref-diverge, org-render-echo-loop, page-without-own-file, loro-stable-id-missing, loro-frontier-height, delete-backward-merge-budget]
     note: >
       `org-blocks-ref-diverge` is half fixed — cause A (undo over-reverting
       file-ingested content) is locked by a keystone regression; cause B, the

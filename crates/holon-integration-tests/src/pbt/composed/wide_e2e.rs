@@ -244,9 +244,7 @@ async fn converge_projections(handle: &WideHandle, budget: Duration) {
 /// — store and org share one source, keeping `inv-blocks-match-ref/org` green.
 /// The filename is the page title the viewmodel renders (the oracle's page
 /// content is `structural-page`).
-pub const WIDE_TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: \
-                                 parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* \
-                                 c2\n:PROPERTIES:\n:ID: c2\n:END:\n";
+pub const WIDE_TREE_ORG: &str = include_str!("../../../scripts/seed_wide/structural-page.org");
 
 /// The keystone's READ-ONLY-format document. Cooklang ships no writer, so this
 /// file is authoritative input: the store may project it and may never author

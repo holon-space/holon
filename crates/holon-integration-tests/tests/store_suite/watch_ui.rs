@@ -53,7 +53,7 @@ fn watch_ui_emits_structure_event_for_block_with_query_source() {
                     ":PROPERTIES:\n",
                     ":ID: query-heading\n",
                     ":END:\n",
-                    "#+begin_src prql\n",
+                    "#+begin_src holon_prql\n",
                     "from block | select {id, content} | take 5\n",
                     "#+end_src\n",
                 ),
@@ -72,14 +72,43 @@ fn watch_ui_emits_structure_event_for_block_with_query_source() {
             .await
             .expect("watch_ui should succeed for block with query source");
 
-        // The RenderExpr should not be a bare literal
-        assert!(
-            !matches!(
-                render_expr,
-                holon_api::render_types::RenderExpr::Literal { .. }
-            ),
-            "render_expr should not be a bare literal — expected a function call (table, list, \
-             etc.)"
+        // The `source` view mode is the query-source-specific part of the render: it
+        // carries this block's own query text and language. A fixture language that is
+        // not a query language attaches no query source, and the block renders as a
+        // leaf instead.
+        let holon_api::render_types::RenderExpr::FunctionCall { name, args } = &render_expr else {
+            panic!("expected a query-source render, got {render_expr:?}");
+        };
+        assert_eq!(
+            name, "view_mode_switcher",
+            "a query-source child must render the view-mode switcher"
+        );
+        let source_mode = args
+            .iter()
+            .find(|a| a.name.as_deref() == Some("mode_source"))
+            .unwrap_or_else(|| panic!("switcher carries no `source` view mode: {render_expr:?}"));
+        assert_eq!(
+            source_mode.value,
+            holon_api::render_types::RenderExpr::FunctionCall {
+                name: "source_editor".to_string(),
+                args: vec![
+                    holon_api::render_types::Arg {
+                        name: Some("language".to_string()),
+                        value: holon_api::render_types::RenderExpr::Literal {
+                            value: Value::String("holon_prql".to_string()),
+                        },
+                    },
+                    holon_api::render_types::Arg {
+                        name: Some("content".to_string()),
+                        value: holon_api::render_types::RenderExpr::Literal {
+                            value: Value::String(
+                                "from block | select {id, content} | take 5".to_string()
+                            ),
+                        },
+                    },
+                ],
+            },
+            "the `source` view mode must carry this block's query text and language"
         );
     });
 }

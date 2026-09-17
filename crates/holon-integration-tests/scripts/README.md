@@ -21,16 +21,23 @@ crates/holon-integration-tests/scripts/ios_reset_sut.sh \
 ```
 
 All flags optional: UDID falls back to `$IOS_SIM_UDID` then the booted sim;
-bundle `space.holon.gpui`; port `8521`; seed `./seed_wide`.
+bundle `space.holon.gpui`; port `8521`; seed `./seed_wide` (the repo default is
+generated first — see `seed_wide/` below).
 
 ## `seed_wide/` — the wide-tree seed
 
 The remote face of `WIDE_TREE_ORG` (see `pbt::composed::wide_e2e`):
 
 - `structural-page.org` — `structural-page` (Page-tagged doc, `sentinel:no_parent`)
-  with `parent`/`c1`/`c2` as leaf siblings — the oracle's `wide_seed_tree`.
+  with `parent`/`c1`/`c2` as leaf siblings — the oracle's `wide_seed_tree`. This
+  file IS the source: `wide_e2e::WIDE_TREE_ORG` is an `include_str!` of it.
+- `index.org.header` — the pinned layout-doc `#+ID:` line, the one place that id
+  lives. The live rung's `SEED_INDEX_ORG` is a `concat!` of this file and the asset.
 - `index.org` — the deterministic app shell (root-layout / sidebars / main-panel,
-  fixed ids). Mirrors `DEFAULT_INDEX_ORG` in `frontends/gpui/src/mobile.rs`.
+  fixed ids). GENERATED, not checked in: `gen-index.sh` concatenates
+  `index.org.header` with `assets/default/index.org`. `ios_reset_sut.sh` generates
+  it for the repo default and fails loud when a seed dir's `index.org` is absent or
+  does not start with the pinned line; the two python consumers call the same script.
 - `Journals.org` — a **date-free** `journals` page (the default seed's dated
   auto-entry is non-deterministic, so it is replaced).
 

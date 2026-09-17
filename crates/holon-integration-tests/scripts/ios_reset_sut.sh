@@ -43,6 +43,34 @@ if [ -z "$UDID" ]; then
 fi
 [ -n "$UDID" ] || { echo "ERROR: no booted simulator; pass --udid or set IOS_SIM_UDID" >&2; exit 1; }
 [ -d "$SEED_DIR" ] || { echo "ERROR: seed dir not found: $SEED_DIR" >&2; exit 1; }
+SEED_DIR="$(cd "$SEED_DIR" && pwd)"
+
+# The repo default's index.org is generated, and its shape is a repo invariant:
+# generate it, then assert the three files and the pinned layout-doc line. A
+# caller-supplied --seed dir is the caller's own contract, so it gets neither.
+GENERATOR="seed_wide/gen-index.sh"
+if [ "$SEED_DIR" = "$SCRIPT_DIR/seed_wide" ]; then
+  "$SCRIPT_DIR/$GENERATOR"
+  HEADER="$SCRIPT_DIR/seed_wide/index.org.header"
+  [ -f "$HEADER" ] || {
+    echo "ERROR: missing $HEADER — the pinned layout-doc line lives there" >&2
+    exit 1
+  }
+  for f in index.org structural-page.org Journals.org; do
+    [ -f "$SEED_DIR/$f" ] || {
+      echo "ERROR: seed dir $SEED_DIR is missing $f (regenerate with $GENERATOR)" >&2
+      exit 1
+    }
+  done
+  expected_id="$(cat "$HEADER")"
+  actual_id="$(head -n 1 "$SEED_DIR/index.org")"
+  [ "$actual_id" = "$expected_id" ] || {
+    echo "ERROR: $SEED_DIR/index.org does not start with the pinned layout-doc line" >&2
+    echo "       expected: $expected_id" >&2
+    echo "       regenerate with $GENERATOR" >&2
+    exit 1
+  }
+fi
 
 echo "[ios-reset] udid=$UDID bundle=$BUNDLE port=$PORT seed=$SEED_DIR"
 

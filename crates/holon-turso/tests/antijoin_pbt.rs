@@ -3,8 +3,8 @@
 //!
 //! This is `inv-matview-consistent-with-recompute` applied at the engine tier,
 //! with a generator whose shapes MUST include the correlated `NOT EXISTS`
-//! anti-join and `OR(EXISTS, NOT EXISTS)` that Martin's `Now.org` planning
-//! query uses.
+//! anti-join and `OR(EXISTS, NOT EXISTS)` of the legacy `Now.org` shape (see
+//! [`ANTIJOIN`]).
 //!
 //! The DB is the faithful prod shape: `block_raw` + per-junction aggregation
 //! matviews (`block_requires_agg`, `block_tags_agg`) + the chained `block`
@@ -267,8 +267,10 @@ const ANTIJOIN_ISOLATED: &str = "SELECT b.id FROM block b WHERE \
     NOT EXISTS (SELECT 1 FROM block_requires br JOIN block bl ON bl.id = br.required_id \
         WHERE br.block_id = b.id AND COALESCE(json_extract(bl.properties,'$.task_state'),'') != 'DONE')";
 
-/// The FULL Now.org shape: correlated NOT EXISTS anti-join (wrapping an inner
-/// JOIN) plus OR(EXISTS, NOT EXISTS). The faithful regression witness.
+/// The legacy Now.org anti-join shape: correlated `NOT EXISTS` (wrapping an
+/// inner JOIN) plus OR(EXISTS, NOT EXISTS). The fork-IVM anti-join maintenance
+/// witness; the live now-query states :REQUIRES: as a per-block LEFT JOIN
+/// aggregate (`block_domain::REQUIRES_DONE_JOINS_SQL`).
 const ANTIJOIN: &str = "SELECT b.id FROM block b WHERE \
     json_extract(b.properties,'$.task_state') = 'TODO' AND \
     json_extract(b.properties,'$.gate') = 'G1' AND \
@@ -339,8 +341,8 @@ proptest! {
         prop_assert_eq!(mv, fresh, "isolated anti-join matview must equal fresh recompute");
     }
 
-    /// ACCEPTANCE PIN for the engine's correlated-EXISTS IVM support: the FULL
-    /// Now.org readiness shape is maintained as a LIVE matview, and its served
+    /// ACCEPTANCE PIN for the engine's correlated-EXISTS IVM support: the legacy
+    /// Now.org anti-join shape is maintained as a LIVE matview, and its served
     /// rows equal a fresh recompute after any mutation sequence.
     #[test]
     fn prop_matview_consistent_now_org(muts in mutations_strategy()) {

@@ -8,6 +8,14 @@ import argparse, json, pathlib, subprocess, sys, time, urllib.request
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 SEED_DIR = SCRIPT_DIR / "seed_wide"
+
+
+def materialize_seed_dir():
+    """The seed dir's index.org is generated from the app's layout asset."""
+    subprocess.run([str(SCRIPT_DIR / "seed_wide" / "gen-index.sh")], check=True)
+    for name in ("index.org", "structural-page.org", "Journals.org"):
+        if not (SEED_DIR / name).is_file():
+            raise SystemExit(f"seed dir {SEED_DIR} is missing {name}")
 SESSION = {"id": None}
 
 
@@ -66,6 +74,7 @@ def main():
 
     base = f"http://127.0.0.1:{args.port}/mcp"
     pid = args.pid or app_pid(args.bundle)
+    materialize_seed_dir()
     files = [{"name": p.name, "content": p.read_text()}
              for p in sorted(SEED_DIR.glob("*.org"))]
     if not files:

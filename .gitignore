@@ -77,6 +77,10 @@ frontends/gpui/android/build-release-aab/
 *.proptest-regressions
 **/proptest-regressions/*.txt
 
+# Seed shell generated from assets/default/index.org by
+# crates/holon-integration-tests/scripts/seed_wide/gen-index.sh
+crates/holon-integration-tests/scripts/seed_wide/index.org
+
 # Bug-funnel index: derived from docs/Testing/bugfunnel/entries/ by
 # `scripts/bugfunnel.py index`. Committing it would restore the single
 # insertion point that per-entry files exist to remove.

@@ -2,14 +2,20 @@
 """Phase 1 Option A verification: drive reset_vault twice over ONE streamable-http
 session and assert the reset is deterministic, the same session observes the
 swapped engine (C2), and the retirement list grows per reset."""
-import json, sys, urllib.request, pathlib
+import json, subprocess, sys, urllib.request, pathlib
 
 BASE = "http://127.0.0.1:8521/mcp"
 SESSION = {"id": None}
-SEED_DIR = pathlib.Path(
-    "/Users/martin/Workspaces/pkm/holon/.claude/worktrees/ios-keyboard-crash-fix/"
-    "crates/holon-integration-tests/scripts/seed_wide"
-)
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+SEED_DIR = SCRIPT_DIR / "seed_wide"
+
+
+def materialize_seed_dir():
+    """The seed dir's index.org is generated from the app's layout asset."""
+    subprocess.run([str(SCRIPT_DIR / "seed_wide" / "gen-index.sh")], check=True)
+    for name in ("index.org", "structural-page.org", "Journals.org"):
+        if not (SEED_DIR / name).is_file():
+            raise SystemExit(f"seed dir {SEED_DIR} is missing {name}")
 
 
 def post(body):
@@ -55,6 +61,7 @@ def tool(name, args, rid):
 
 
 def seed_files():
+    materialize_seed_dir()
     return [
         {"name": p.name, "content": p.read_text()}
         for p in sorted(SEED_DIR.glob("*.org"))

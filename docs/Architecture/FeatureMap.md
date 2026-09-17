@@ -137,7 +137,7 @@ Open reds here: `task-state-storage-coherence`, `state-toggle-row-absent`.
 | P2P sync | Iroh transport carrying Loro deltas between devices | `AddPeer`, `PeerEdit`, `PeerCharEdit`, `SyncWithPeer`, `MergeFromPeer`, `SyncNow` | [0001](../adr/0001-hybrid-sync-architecture.md); Model.md inv 11 | Transport | `crates/holon-loro/src/iroh_sync_adapter.rs` |
 | Git / jj vault init | Initializing version control over the vault directory | `GitInit`, `JjGitInit` | — | File adapter | `crates/holon-filesystem/src/` |
 
-Open reds here: `org-blocks-ref-diverge`, `page-without-own-file`, `loro-frontier-height`, `lib-seed-wide-drift`.
+Open reds here: `org-blocks-ref-diverge`, `page-without-own-file`, `loro-frontier-height`.
 
 `org-blocks-ref-diverge` is half fixed — cause A (undo over-reverting file-ingested content) is locked by a keystone regression; cause B, the `::img::0` sub-block id remap, is open.
 

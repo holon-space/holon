@@ -3011,7 +3011,12 @@
             "dirs": [
               {
                 "name": "seed_wide",
-                "path": "holon-integration-tests/scripts/seed_wide"
+                "path": "holon-integration-tests/scripts/seed_wide",
+                "files": [
+                  {
+                    "name": "gen-index.sh"
+                  }
+                ]
               }
             ],
             "files": [

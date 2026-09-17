@@ -65,6 +65,7 @@ use crate::McpUserDriver;
 use crate::pbt::composed::harness::ComposedSlice;
 use crate::pbt::composed::harness::sut_ids;
 use crate::pbt::composed::seed_primitives::fixed_ids;
+use crate::pbt::composed::wide_e2e::WIDE_TREE_ORG;
 use crate::pbt::composed::wide_e2e::WideE2E;
 use crate::pbt::composed::wide_e2e::WideE2EMachine;
 use crate::pbt::composed::wide_e2e::page_root;
@@ -75,16 +76,17 @@ use crate::pbt::sut_row_parsing::BLOCK_RAW_SNAPSHOT_SQL;
 use crate::pbt::sut_row_parsing::parse_block_rows;
 use crate::pbt::transitions::E2ETransition;
 
-// ── Embedded seed (include_str! so the test and the on-disk seed can't drift)
-// ──
+// ── Embedded seed (compile-time include of the seed sources) ──
 
-/// The structural working page — MUST stay byte-identical to
-/// `wide_e2e::WIDE_TREE_ORG` (asserted by [`tests::seed_wide_stays_aligned`]).
-const SEED_STRUCTURAL_ORG: &str = include_str!("../../../scripts/seed_wide/structural-page.org");
 /// The default layout (sidebars + main panel) the live app boots — the same
-/// `assets/default/index.org` the iOS app seeds, pinned to a fixed `#+ID:` so
-/// the rebuilt vault's layout doc id is deterministic across resets.
-const SEED_INDEX_ORG: &str = include_str!("../../../scripts/seed_wide/index.org");
+/// `assets/default/index.org` the iOS app seeds, with the pinned `#+ID:` line
+/// in front so the rebuilt vault's layout doc id is deterministic across
+/// resets. The on-disk seed dir gets these same bytes
+/// (`seed_wide/gen-index.sh`).
+const SEED_INDEX_ORG: &str = concat!(
+    include_str!("../../../scripts/seed_wide/index.org.header"),
+    include_str!("../../../../../assets/default/index.org")
+);
 /// The first-boot journals page.
 const SEED_JOURNALS_ORG: &str = include_str!("../../../scripts/seed_wide/Journals.org");
 
@@ -1032,7 +1034,7 @@ impl ComposedSlice for LiveMcpE2E {
                 "reset_vault",
                 serde_json::json!({
                     "files": [
-                        { "name": "structural-page.org", "content": SEED_STRUCTURAL_ORG },
+                        { "name": "structural-page.org", "content": WIDE_TREE_ORG },
                         { "name": "index.org", "content": SEED_INDEX_ORG },
                         { "name": "Journals.org", "content": SEED_JOURNALS_ORG },
                     ]
@@ -1211,38 +1213,6 @@ fn wires_to_blocks(v: &serde_json::Value) -> Vec<Block> {
 mod tests {
     use super::*;
 
-    /// The embedded `include_str!` seed MUST stay byte-aligned with the in-repo
-    /// sources of truth, so the live rung seeds the SAME tree the headless
-    /// keystone and the iOS app boot.
-    #[test]
-    fn seed_wide_stays_aligned() {
-        // 1. structural-page.org IS the headless `WIDE_TREE_ORG`, byte-for-byte.
-        assert_eq!(
-            SEED_STRUCTURAL_ORG,
-            crate::pbt::composed::wide_e2e::WIDE_TREE_ORG,
-            "scripts/seed_wide/structural-page.org drifted from wide_e2e::WIDE_TREE_ORG"
-        );
-
-        // 2. index.org IS the iOS app's default layout (assets/default/index.org, the
-        //    `DEFAULT_INDEX_ORG` const in frontends/gpui/src/mobile.rs) PLUS a pinned
-        //    `#+ID:` header so the rebuilt vault's layout doc id is deterministic
-        //    across resets. That const is private to the gpui crate (not importable),
-        //    so we compare against the SAME on-disk asset it `include_str!`s —
-        //    fail-loud note: this is the asset copy, not the const.
-        const DEFAULT_INDEX_ORG: &str = include_str!("../../../../../assets/default/index.org");
-        let body = SEED_INDEX_ORG
-            .strip_prefix("#+ID: 15223f86-4b69-49b0-8ad7-c5b15fbc9f95\n")
-            .expect(
-                "scripts/seed_wide/index.org must start with the pinned `#+ID:` header \
-                 (deterministic layout-doc id across resets)",
-            );
-        assert_eq!(
-            body, DEFAULT_INDEX_ORG,
-            "scripts/seed_wide/index.org body drifted from assets/default/index.org (the \
-             DEFAULT_INDEX_ORG the iOS app boots)"
-        );
-    }
-
     /// DRIFT GUARD (hard gate). The browser worker has NO org parser
     /// (holon-orgmode won't build on wasm), so
     /// `frontends/holon-worker/src/seed.rs` HAND-CODES the `reset_vault`
@@ -1280,11 +1250,7 @@ mod tests {
             &[("block:journals", "sentinel:no_parent", "Journals")];
 
         for (name, org, expected) in [
-            (
-                "structural-page.org",
-                SEED_STRUCTURAL_ORG,
-                EXPECTED_STRUCTURAL,
-            ),
+            ("structural-page.org", WIDE_TREE_ORG, EXPECTED_STRUCTURAL),
             ("Journals.org", SEED_JOURNALS_ORG, EXPECTED_JOURNALS),
         ] {
             let path = PathBuf::from(format!("/seed/{name}"));
