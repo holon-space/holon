@@ -132,7 +132,7 @@ impl OpDispatchWriter {
 
     async fn execute(&self, op: &str, params: StorageEntity) {
         if let Err(e) = self.try_execute(op, params).await {
-            panic!("block/{op} operation failed: {e}");
+            panic!("block/{op} operation failed: {e:#}");
         }
     }
 

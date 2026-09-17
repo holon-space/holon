@@ -155,7 +155,7 @@ impl SqlProjectionComponent {
         self.engine
             .execute_operation(&entity, op, params, holon_api::OpOrigin::User)
             .await
-            .unwrap_or_else(|e| panic!("block/{op} operation failed: {e}"));
+            .unwrap_or_else(|e| panic!("block/{op} operation failed: {e:#}"));
     }
 
     async fn blocks_from_block_raw(&self) -> Vec<Block> {
