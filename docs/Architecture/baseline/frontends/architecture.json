@@ -501,6 +501,9 @@
                         "name": "text.rs"
                       },
                       {
+                        "name": "theme.rs"
+                      },
+                      {
                         "name": "tree_item.rs"
                       },
                       {
@@ -969,6 +972,9 @@
                 "name": "test_platform_smoke.rs"
               },
               {
+                "name": "text_colour_windowed.rs"
+              },
+              {
                 "name": "toast_stack_order_windowed.rs"
               },
               {
@@ -1405,6 +1411,9 @@
                       },
                       {
                         "name": "text.rs"
+                      },
+                      {
+                        "name": "theme.rs"
                       },
                       {
                         "name": "tree.rs"

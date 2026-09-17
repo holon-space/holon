@@ -1187,6 +1187,9 @@
                 "name": "template_instantiation.rs"
               },
               {
+                "name": "theme_token.rs"
+              },
+              {
                 "name": "types.rs"
               },
               {
@@ -1233,6 +1236,9 @@
               },
               {
                 "name": "person_profile_display_name_seat_a.rs"
+              },
+              {
+                "name": "render_dsl_colour_refusal.rs"
               },
               {
                 "name": "row_source_parse_refusals.rs"
@@ -1530,6 +1536,9 @@
               },
               {
                 "name": "session_shutdown_stops_watchers.rs"
+              },
+              {
+                "name": "settings_ics_calendar_url_credential.rs"
               },
               {
                 "name": "settings_shopping_list_url_credential.rs"
@@ -2708,6 +2717,9 @@
                 "name": "theme.rs"
               },
               {
+                "name": "theme_arg.rs"
+              },
+              {
                 "name": "tour.rs"
               },
               {
@@ -2784,6 +2796,9 @@
               },
               {
                 "name": "stored_secret_row.rs"
+              },
+              {
+                "name": "text_color_token.rs"
               },
               {
                 "name": "text_style_kwarg.rs"
@@ -5908,6 +5923,9 @@
                 "name": "entity_mirror.rs"
               },
               {
+                "name": "ics.rs"
+              },
+              {
                 "name": "integration_config.rs"
               },
               {
@@ -6055,6 +6073,9 @@
               },
               {
                 "name": "rest_transport_write.rs"
+              },
+              {
+                "name": "rest_write_dispatch.rs"
               },
               {
                 "name": "sidecar_conformance.rs"
