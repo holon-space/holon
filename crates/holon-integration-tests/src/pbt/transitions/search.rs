@@ -241,21 +241,31 @@ crate::cap_transition! {
             if !folded_contains(content, &query) {
                 continue;
             }
+            // `id` is a reference-model key, the hit sets hold SUT ids, and
+            // the two spaces part company exactly on the blocks a transition
+            // minted (a split tail): resolve before comparing, or a tail can
+            // never be found whatever the search did.
+            let sut_id = sut.resolve_block_id(&id);
             let (section, found, limit) = if state.is_page_block(&id) {
-                ("Pages", page_hits.contains(&id), PAGES_LIMIT)
+                ("Pages", page_hits.contains(&sut_id), PAGES_LIMIT)
             } else {
-                ("In content", content_hits.contains(&id), CONTENT_LIMIT)
+                ("In content", content_hits.contains(&sut_id), CONTENT_LIMIT)
             };
             let truncated = if state.is_page_block(&id) {
                 page_hits.len() >= limit
             } else {
                 content_hits.len() >= limit
             };
+            let sut_note = if sut_id == id {
+                String::new()
+            } else {
+                format!(" (SUT id {sut_id})")
+            };
             assert!(
                 found || truncated,
-                "quick_open_search({query:?}) missed {id} in the {section} section: its content \
-                 {content:?} contains the query and the section returned only {} of its {limit} \
-                 slots, so nothing was truncated",
+                "quick_open_search({query:?}) missed {id}{sut_note} in the {section} section: its \
+                 content {content:?} contains the query and the section returned only {} of its \
+                 {limit} slots, so nothing was truncated",
                 if section == "Pages" { page_hits.len() } else { content_hits.len() }
             );
         }

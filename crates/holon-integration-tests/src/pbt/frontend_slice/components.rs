@@ -2332,6 +2332,10 @@ impl SutQueryResults for HeadlessFrontendComponent {
 
 #[async_trait::async_trait(?Send)]
 impl holon_pbt_core::capabilities::SutSearch for HeadlessFrontendComponent {
+    fn resolve_block_id(&self, id: &holon_api::EntityUri) -> holon_api::EntityUri {
+        self.resolve_id(id)
+    }
+
     async fn quick_open_search(
         &self,
         query: &str,

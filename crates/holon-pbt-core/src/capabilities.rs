@@ -2022,6 +2022,14 @@ pub trait SutSearch {
     /// error is returned (rendered) instead of reading as "no matches".
     async fn quick_open_search(&self, query: &str) -> Result<Vec<SearchHit>, String>;
 
+    /// Translate a reference-model (oracle) id to the id the backend minted
+    /// for it — identity where the two id spaces already agree, which is every
+    /// block the oracle did not mint itself. The engine reports SUT ids while
+    /// every other id this trait handles is a reference id, so a hit set can
+    /// only be compared against the model across this bridge: a split tail is
+    /// `block::split-N` to the model and a fresh uuid in the backend.
+    fn resolve_block_id(&self, id: &EntityUri) -> EntityUri;
+
     /// Type `query` into quick-open and press Enter on `hit`: run the same
     /// search, assert the overlay really offered that row, then dispatch the
     /// ONE navigation chokepoint the overlay dispatches
