@@ -57,3 +57,4 @@ tower = { version = "0.5", features = ["util"] }
 proptest.workspace = true
 holon-org-format = { workspace = true }
 holon-mcp-client = { path = "../../crates/holon-mcp-client" }
+async-trait = { workspace = true }

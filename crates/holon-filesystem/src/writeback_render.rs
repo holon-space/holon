@@ -70,6 +70,36 @@ impl WritebackRenderer {
         self.block_reader.get_blocks(doc_id).await
     }
 
+    /// The document id `path`'s content declares — the id the ingest keys both
+    /// stores by, wrapping the declared value exactly as `parse_org_file_with`
+    /// does. `None` when the format declares none: such a file's identity is
+    /// its name chain, which only the ingest knows.
+    pub fn declared_doc_id(&self, path: &Path, content: &str) -> Result<Option<EntityUri>> {
+        let Some(bare) = self.writable_adapter(path)?.doc_id_from_content(content) else {
+            return Ok(None);
+        };
+        // Wrapped, never re-parsed as a whole: the ingest's `EntityUri::block`
+        // asserts on a value that already carries an entity scheme, and this
+        // one is hand-editable file content, so it is refused by name instead.
+        anyhow::ensure!(
+            !["block:", "file:", "sentinel:"]
+                .iter()
+                .any(|prefix| bare.starts_with(prefix)),
+            "{} declares the document id {bare:?}, which already carries a scheme. Org files \
+             declare BARE ids, and the ingest asserts on this value, so no document is keyed by \
+             it.",
+            path.display()
+        );
+        EntityUri::parse(&format!("block:{bare}"))
+            .map(Some)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "{} declares the document id {bare:?}, which forms no URI: {e}",
+                    path.display()
+                )
+            })
+    }
+
     /// Render `blocks` — already in authoritative document order — as
     /// `doc_id`'s file text.
     ///

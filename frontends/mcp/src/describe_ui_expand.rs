@@ -24,6 +24,18 @@ use holon_frontend::view_model::ViewModel;
 /// unevaluated rather than silently dropped.
 const MAX_EXPANSION_DEPTH: usize = 8;
 
+/// The block a `context_id` names. It comes from a `context:` argument in a
+/// vault-authored render expression, so a value that forms no URI is a content
+/// error to report.
+fn context_block_uri(id: &str) -> anyhow::Result<holon_api::EntityUri> {
+    holon_api::EntityUri::try_from_raw(id).map_err(|e| {
+        anyhow::anyhow!(
+            "context_id {id:?} names no block: a vault-authored `context:` argument takes a \
+             block id. ({e})"
+        )
+    })
+}
+
 /// Depth alone does not bound WORK — total expansions are `Σ bᵏ` in the
 /// branching factor, and for the ordinary per-row nested query
 /// (`live_query(item_template: list(#{item_template: live_query(context:
@@ -141,9 +153,7 @@ impl DeferredResolver for EngineResolver {
             // filter, so the query runs unscoped.
             let context = match spec.query_context_id {
                 Some(id) => {
-                    // ALLOW(entity_uri_from_raw): live_query node prop, same as
-                    // the gpui builder's own reconstruction
-                    let uri = holon_api::EntityUri::from_raw(id);
+                    let uri = context_block_uri(id)?;
                     let path = engine.lookup_block_path(&uri).await.map_err(|e| {
                         anyhow::anyhow!(
                             "context path prefix lookup for block '{uri}' failed, so \
@@ -332,5 +342,66 @@ async fn resolve_live_query(
         Err(e) => error_node(format!(
             "live_query expansion FAILED ({query_lang}): {e:#} — query: {query}"
         )),
+    }
+}
+
+#[cfg(test)]
+mod context_id_tests {
+    use futures::FutureExt;
+    use holon_api::render_types::RenderExpr;
+
+    use super::DeferredResolver;
+    use super::EngineResolver;
+    use super::LiveQuerySpec;
+    use super::context_block_uri;
+
+    /// A vault-authored `context:` argument reaches the resolver here, so a
+    /// value that forms no URI must come back as an error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn expand_live_query_refuses_a_context_id_that_forms_no_uri() {
+        let engine = crate::tools::engine_harness::fresh_engine().await;
+        let resolver = EngineResolver {
+            services: std::sync::Arc::new(holon_app::HeadlessBuilderServices::new(engine)),
+        };
+        let render_expr = RenderExpr::ColumnRef {
+            name: "id".to_string(),
+        };
+        let spec = LiveQuerySpec {
+            query: "SELECT 1",
+            query_lang: "holon_sql",
+            query_context_id: Some("my task"),
+            render_expr: &render_expr,
+        };
+
+        let caught = std::panic::AssertUnwindSafe(resolver.expand_live_query(spec))
+            .catch_unwind()
+            .await;
+
+        let result = caught.expect(
+            "a context id that forms no URI escaped the handler; the client sees only a transport \
+             error with no cause attached",
+        );
+        let err = result.expect_err("no block is named 'my task'");
+        assert!(err.to_string().contains("my task"), "{err}");
+    }
+
+    #[test]
+    fn a_context_id_that_forms_no_uri_is_an_error_not_a_panic() {
+        let err = context_block_uri("my task").expect_err("a space forms no URI");
+        assert!(err.to_string().contains("my task"), "{err}");
+    }
+
+    #[test]
+    fn a_context_id_resolves_bare_or_schemed_alike() {
+        assert_eq!(
+            context_block_uri("abc").expect("a bare id").as_str(),
+            "block:abc"
+        );
+        assert_eq!(
+            context_block_uri("block:abc")
+                .expect("a schemed id")
+                .as_str(),
+            "block:abc"
+        );
     }
 }

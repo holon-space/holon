@@ -43,6 +43,16 @@ fn json_to_holon_value(v: serde_json::Value) -> Value {
     Value::from_json_value(v)
 }
 
+/// Whether a `doc_id` tool argument names a vault FILE rather than a document.
+///
+/// A path and a document id are both plain strings at the boundary, and the
+/// two resolution halves below must agree on which one they were handed: a
+/// path containing a space or a `/` is not a URI, and minting one from it
+/// (`block:<path>`) keys a document that exists nowhere.
+fn doc_arg_is_path(doc_id: &str) -> bool {
+    doc_id.contains('/') || doc_id.ends_with(".org")
+}
+
 /// Parse a `doc_id` tool argument into the block URI the stores key on.
 ///
 /// Agents get ids from both directions — `list_loro_documents` publishes them
@@ -50,9 +60,20 @@ fn json_to_holon_value(v: serde_json::Value) -> Value {
 /// boundary must accept either. `from_raw` is idempotent, which
 /// `EntityUri::block` is not: it re-schemes an already-schemed id into
 /// `block:block:<uuid>`, matching no row in either store.
-fn doc_uri_from_arg(doc_id: &str) -> String {
-    // ALLOW(entity_uri_from_raw): doc_id is a raw MCP argument of unknown form
-    holon_api::EntityUri::from_raw(doc_id).to_string()
+///
+/// Fallible, not `from_raw`: an id that forms no URI is a content error in one
+/// argument, and `from_raw` asserts against it by panicking — which kills the
+/// request and reaches the caller as a bare transport failure.
+fn doc_uri_from_arg(doc_id: &str) -> Result<holon_api::EntityUri, rmcp::ErrorData> {
+    holon_api::EntityUri::try_from_raw(doc_id).map_err(|e| {
+        rmcp::ErrorData::invalid_params(
+            format!(
+                "doc_id {doc_id:?} names no document: pass the document's UUID (a `block:<uuid>` \
+                 URI and a bare uuid are both accepted), not a file path. ({e})"
+            ),
+            Some(serde_json::json!({ "doc_id": doc_id })),
+        )
+    })
 }
 
 /// The two facts the Loro↔SQL diff needs about a block to decide whether it
@@ -327,10 +348,21 @@ fn resolve_agent_id(param: Option<String>) -> Result<String, rmcp::ErrorData> {
 /// where a task tool's agent-supplied id is parsed. It shares
 /// [`EntityUri::schemed`] with that refusal, so the two agree on which strings
 /// already name their entity.
-fn ensure_block_prefix(s: &str) -> String {
-    // ALLOW(entity_uri_from_raw): the agent-supplied `task_id` / `parent_id`
-    // MCP tool params.
-    EntityUri::from_raw(s).as_str().to_string()
+/// The `block:<id>` URI for an agent-supplied id, rejected loudly when the id
+/// forms none.
+///
+/// `from_raw` asserts by PANICKING, and the stdio serve loop drives the
+/// handler inline: a panic here takes the whole server down, so every later
+/// call in the session fails as a bare transport error.
+fn ensure_block_prefix(s: &str) -> Result<String, rmcp::ErrorData> {
+    EntityUri::try_from_raw(s).map(|uri| uri.as_str().to_string()).map_err(|e| {
+        rmcp::ErrorData::invalid_params(
+            format!(
+                "{s:?} is not a block id: pass a bare uuid (or slug), or a `block:`-prefixed id.                  ({e})"
+            ),
+            Some(serde_json::json!({ "id": s })),
+        )
+    })
 }
 
 /// Build a filesystem-safe slug from a task id (lowercase alphanumeric +
@@ -405,6 +437,206 @@ async fn move_block_after(
             rmcp::ErrorData::internal_error(format!("move_block on {id} failed: {e:#}"), None)
         })?;
     Ok(())
+}
+
+/// What one `dense_patch` batch did, counted per op kind.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct AppliedCounts {
+    created: usize,
+    updated: usize,
+    moved: usize,
+    deleted: usize,
+}
+
+/// The identity minted for a block a plan creates.
+struct MintedBlock {
+    /// The bare uuid the `ID` property carries — org files store bare ids.
+    bare: String,
+    /// The `block:<uuid>` URI every reference resolves to.
+    uri: String,
+}
+
+/// Every id a plan's references resolve to, computed BEFORE anything is
+/// dispatched.
+///
+/// The new blocks' ids are minted here rather than as each create runs, so a
+/// reference can be checked against the WHOLE plan: an op positioned against a
+/// block the plan never creates is a broken plan, not a create against an
+/// empty predecessor.
+fn plan_block_ids(
+    plan: &crate::dense_patch::PatchPlan,
+) -> Result<HashMap<usize, MintedBlock>, rmcp::ErrorData> {
+    use crate::dense_patch::PatchOp;
+    use crate::dense_patch::Ref as PRef;
+
+    let mut ids: HashMap<usize, MintedBlock> = HashMap::new();
+    for op in &plan.ops {
+        if let PatchOp::Create { temp, .. } = op {
+            let bare = Uuid::new_v4().to_string();
+            assert!(
+                ids.insert(
+                    *temp,
+                    MintedBlock {
+                        uri: ensure_block_prefix(&bare)?,
+                        bare,
+                    }
+                )
+                .is_none(),
+                "plan_patch emits one create per temp id; #{temp} appeared twice"
+            );
+        }
+    }
+
+    for op in &plan.ops {
+        let refs: [Option<&PRef>; 2] = match op {
+            PatchOp::Create { parent, after, .. } => [Some(parent), after.as_ref()],
+            PatchOp::Move { parent, after, .. } => [Some(parent), after.as_ref()],
+            _ => [None, None],
+        };
+        for r in refs.into_iter().flatten() {
+            if let PRef::New(t) = r {
+                if !ids.contains_key(t) {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        format!(
+                            "the patch plan positions a block against new block #{t}, which the \
+                             plan never creates — the whole patch is refused, so nothing was \
+                             applied"
+                        ),
+                        Some(serde_json::json!({ "unresolved_new_block": t })),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(ids)
+}
+
+/// Apply a plan's ops in order — `dense_patch`'s engine half.
+///
+/// Resolution runs to completion first (`plan_block_ids`), so a plan that
+/// cannot apply in full is refused before the first dispatch.
+async fn apply_plan(
+    service: &HolonService,
+    plan: &crate::dense_patch::PatchPlan,
+    file_id: &EntityUri,
+) -> Result<AppliedCounts, rmcp::ErrorData> {
+    use crate::dense_patch::PatchOp;
+    use crate::dense_patch::Ref as PRef;
+
+    let new_ids = plan_block_ids(plan)?;
+    let minted = |t: usize| -> Result<&MintedBlock, rmcp::ErrorData> {
+        new_ids.get(&t).ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                format!("plan referenced new block #{t} past resolution"),
+                None,
+            )
+        })
+    };
+    let resolve = |r: &PRef| -> Result<String, rmcp::ErrorData> {
+        Ok(match r {
+            PRef::Root => file_id.as_str().to_string(),
+            PRef::Existing(id) => id.as_str().to_string(),
+            PRef::New(t) => minted(*t)?.uri.clone(),
+        })
+    };
+
+    let mut counts = AppliedCounts::default();
+    for op in &plan.ops {
+        match op {
+            PatchOp::Create {
+                temp,
+                parent,
+                after,
+                title,
+                task_state,
+            } => {
+                let minted = minted(*temp)?;
+                let parent_id = resolve(parent)?;
+                let mut storage: StorageEntity = HashMap::new();
+                storage.insert("id".into(), Value::String(minted.uri.clone()));
+                storage.insert("parent_id".into(), Value::String(parent_id));
+                storage.insert("content".into(), Value::String(title.clone()));
+                storage.insert("content_type".into(), Value::String("text".to_string()));
+                storage.insert("ID".into(), Value::String(minted.bare.clone()));
+                if let Some(st) = task_state {
+                    storage.insert("task_state".into(), Value::String(st.keyword.clone()));
+                    storage.insert(
+                        "task_state_category".into(),
+                        Value::String(st.category.as_str().to_string()),
+                    );
+                }
+                // Create AND position in one op via the canonical positional
+                // key: `after_block_id` places the new block immediately after
+                // its predecessor sibling atomically across both providers.
+                if let Some(a) = after {
+                    let after_id = resolve(a)?;
+                    storage.insert(
+                        POSITION_AFTER_BLOCK_ID_PARAM.into(),
+                        Value::String(after_id),
+                    );
+                }
+                service
+                    .execute_operation(&EntityName::new("block"), "create", storage)
+                    .await
+                    .map_err(|e| {
+                        rmcp::ErrorData::internal_error(format!("create failed: {e:#}"), None)
+                    })?;
+                counts.created += 1;
+            }
+            PatchOp::UpdateTitle { block_id, title } => {
+                set_field(
+                    service,
+                    block_id.as_str(),
+                    "content",
+                    Value::String(title.clone()),
+                )
+                .await?;
+                counts.updated += 1;
+            }
+            PatchOp::SetState {
+                block_id,
+                task_state,
+            } => {
+                let (kw, cat) = match task_state {
+                    Some(st) => (st.keyword.clone(), st.category.as_str().to_string()),
+                    None => (String::new(), String::new()),
+                };
+                set_field(service, block_id.as_str(), "task_state", Value::String(kw)).await?;
+                set_field(
+                    service,
+                    block_id.as_str(),
+                    "task_state_category",
+                    Value::String(cat),
+                )
+                .await?;
+                counts.updated += 1;
+            }
+            PatchOp::Move {
+                block_id,
+                parent,
+                after,
+            } => {
+                let parent_id = resolve(parent)?;
+                let after_id = after.as_ref().map(&resolve).transpose()?;
+                move_block_after(service, block_id.as_str(), &parent_id, after_id.as_deref())
+                    .await?;
+                counts.moved += 1;
+            }
+            PatchOp::Delete { block_id } => {
+                let mut storage: StorageEntity = HashMap::new();
+                storage.insert("id".into(), Value::String(block_id.as_str().to_string()));
+                service
+                    .execute_operation(&EntityName::new("block"), "delete", storage)
+                    .await
+                    .map_err(|e| {
+                        rmcp::ErrorData::internal_error(format!("delete failed: {e:#}"), None)
+                    })?;
+                counts.deleted += 1;
+            }
+        }
+    }
+
+    Ok(counts)
 }
 
 /// One-line JSON description of a planned patch op (for dense_patch dry_run).
@@ -496,7 +728,7 @@ fn parse_requires_target(raw: &str) -> Result<String, rmcp::ErrorData> {
         ));
     }
     match raw.split_once(':') {
-        None => Ok(ensure_block_prefix(raw)),
+        None => ensure_block_prefix(raw),
         Some(("block", _)) => Ok(raw.to_string()),
         Some((scheme, _)) => Err(rmcp::ErrorData::invalid_params(
             format!(
@@ -884,8 +1116,7 @@ impl HolonMcpServer {
         &self,
         Parameters(params): Parameters<ExecuteSourceBlockParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        // ALLOW(entity_uri_from_raw): MCP tool param ExecuteSourceBlockParams.block_id
-        let block_id = EntityUri::from_raw(&params.block_id).to_string();
+        let block_id = ensure_block_prefix(&params.block_id)?;
         let (query, stored_language) = self.load_source_block(&block_id).await?;
         let language_str = params.language.or(stored_language).ok_or_else(|| {
             rmcp::ErrorData::invalid_params(
@@ -1729,7 +1960,7 @@ impl HolonMcpServer {
         Parameters(params): Parameters<ClaimTaskParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let agent_id = resolve_agent_id(params.agent_id)?;
-        let task_id = ensure_block_prefix(&params.task_id);
+        let task_id = ensure_block_prefix(&params.task_id)?;
 
         let current = read_assigned_to(&self.engine(), &task_id).await?;
         if let Some(other) = &current {
@@ -1818,13 +2049,13 @@ impl HolonMcpServer {
         &self,
         Parameters(params): Parameters<AddSubtaskParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let parent_id = ensure_block_prefix(&params.parent_id);
+        let parent_id = ensure_block_prefix(&params.parent_id)?;
 
         let new_id_bare = params
             .id
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let new_id = ensure_block_prefix(&new_id_bare);
+        let new_id = ensure_block_prefix(&new_id_bare)?;
 
         let title = params.title.trim();
         if title.is_empty() {
@@ -1972,7 +2203,7 @@ impl HolonMcpServer {
         Parameters(params): Parameters<CompleteTaskParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let agent_id = resolve_agent_id(params.agent_id)?;
-        let task_id = ensure_block_prefix(&params.task_id);
+        let task_id = ensure_block_prefix(&params.task_id)?;
 
         let cwd = std::env::current_dir().map_err(|e| {
             rmcp::ErrorData::internal_error(format!("current_dir failed: {e}"), None)
@@ -2951,8 +3182,9 @@ impl HolonMcpServer {
             })?;
 
         let file_path = self.resolve_to_file_path(&params.doc_id).await?;
-        // ALLOW(entity_uri_from_raw): MCP doc_id param, schemed or bare
-        let doc_uri = EntityUri::from_raw(&params.doc_id);
+        let doc_uri = self
+            .resolve_document_uri(&renderer, &params.doc_id, &file_path)
+            .await?;
 
         // The Loro store is ONE global tree, so its blocks are scoped to the
         // document here; the SQL reader is already doc-scoped.
@@ -3017,6 +3249,7 @@ impl HolonMcpServer {
 
         let result = serde_json::json!({
             "doc_id": params.doc_id,
+            "doc_uri": doc_uri.as_str(),
             "file_path": file_path.display().to_string(),
             "source": params.source,
             "scope": params.scope,
@@ -3158,8 +3391,6 @@ impl HolonMcpServer {
         use holon_org_format::Alias;
         use holon_org_format::parse_dense_with;
 
-        use crate::dense_patch::PatchOp;
-        use crate::dense_patch::Ref as PRef;
         use crate::dense_patch::plan_patch;
 
         let projection = self
@@ -3244,126 +3475,14 @@ impl HolonMcpServer {
             )]));
         }
 
-        // Apply. New-block temp ids resolve to freshly minted uuids as they are
-        // created; pre-order guarantees a parent/predecessor is created first.
-        let svc = self.service();
-        let mut new_ids: HashMap<usize, String> = HashMap::new();
-        let resolve = |r: &PRef, new_ids: &HashMap<usize, String>| -> String {
-            match r {
-                PRef::Root => projection.file_id.as_str().to_string(),
-                PRef::Existing(id) => id.as_str().to_string(),
-                PRef::New(t) => new_ids.get(t).cloned().unwrap_or_default(),
-            }
-        };
-        let mut created = 0usize;
-        let mut updated = 0usize;
-        let mut moved = 0usize;
-        let mut deleted = 0usize;
-        for op in &plan.ops {
-            match op {
-                PatchOp::Create {
-                    temp,
-                    parent,
-                    after,
-                    title,
-                    task_state,
-                } => {
-                    let new_bare = Uuid::new_v4().to_string();
-                    let new_id = ensure_block_prefix(&new_bare);
-                    let parent_id = resolve(parent, &new_ids);
-                    let mut storage: StorageEntity = HashMap::new();
-                    storage.insert("id".into(), Value::String(new_id.clone()));
-                    storage.insert("parent_id".into(), Value::String(parent_id));
-                    storage.insert("content".into(), Value::String(title.clone()));
-                    storage.insert("content_type".into(), Value::String("text".to_string()));
-                    storage.insert("ID".into(), Value::String(new_bare.clone()));
-                    if let Some(st) = task_state {
-                        storage.insert("task_state".into(), Value::String(st.keyword.clone()));
-                        storage.insert(
-                            "task_state_category".into(),
-                            Value::String(st.category.as_str().to_string()),
-                        );
-                    }
-                    // Create AND position in one op via the canonical positional
-                    // key: `after_block_id` places the new block immediately
-                    // after its predecessor sibling atomically across both
-                    // providers. Pre-order guarantees the predecessor is already
-                    // created, so `resolve` yields a real id. This retired the
-                    // create-then-`move_block` seam (and its
-                    // orphan-compensation block + projection-lag race).
-                    if let Some(a) = after {
-                        let after_id = resolve(a, &new_ids);
-                        storage.insert(
-                            POSITION_AFTER_BLOCK_ID_PARAM.into(),
-                            Value::String(after_id),
-                        );
-                    }
-                    svc.execute_operation(&EntityName::new("block"), "create", storage)
-                        .await
-                        .map_err(|e| {
-                            rmcp::ErrorData::internal_error(format!("create failed: {e:#}"), None)
-                        })?;
-                    new_ids.insert(*temp, new_id);
-                    created += 1;
-                }
-                PatchOp::UpdateTitle { block_id, title } => {
-                    set_field(
-                        &svc,
-                        block_id.as_str(),
-                        "content",
-                        Value::String(title.clone()),
-                    )
-                    .await?;
-                    updated += 1;
-                }
-                PatchOp::SetState {
-                    block_id,
-                    task_state,
-                } => {
-                    let (kw, cat) = match task_state {
-                        Some(st) => (st.keyword.clone(), st.category.as_str().to_string()),
-                        None => (String::new(), String::new()),
-                    };
-                    set_field(&svc, block_id.as_str(), "task_state", Value::String(kw)).await?;
-                    set_field(
-                        &svc,
-                        block_id.as_str(),
-                        "task_state_category",
-                        Value::String(cat),
-                    )
-                    .await?;
-                    updated += 1;
-                }
-                PatchOp::Move {
-                    block_id,
-                    parent,
-                    after,
-                } => {
-                    let parent_id = resolve(parent, &new_ids);
-                    let after_id = after.as_ref().map(|a| resolve(a, &new_ids));
-                    move_block_after(&svc, block_id.as_str(), &parent_id, after_id.as_deref())
-                        .await?;
-                    moved += 1;
-                }
-                PatchOp::Delete { block_id } => {
-                    let mut storage: StorageEntity = HashMap::new();
-                    storage.insert("id".into(), Value::String(block_id.as_str().to_string()));
-                    svc.execute_operation(&EntityName::new("block"), "delete", storage)
-                        .await
-                        .map_err(|e| {
-                            rmcp::ErrorData::internal_error(format!("delete failed: {e}"), None)
-                        })?;
-                    deleted += 1;
-                }
-            }
-        }
+        let counts = apply_plan(&self.service(), &plan, &projection.file_id).await?;
 
         let result = serde_json::json!({
             "applied": true,
-            "created": created,
-            "updated": updated,
-            "moved": moved,
-            "deleted": deleted,
+            "created": counts.created,
+            "updated": counts.updated,
+            "moved": counts.moved,
+            "deleted": counts.deleted,
         });
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
@@ -4628,16 +4747,70 @@ impl HolonMcpServer {
 
     /// Resolve a doc_id to its block URI.
     async fn resolve_doc_uri(&self, doc_id: &str) -> Result<String, rmcp::ErrorData> {
-        Ok(doc_uri_from_arg(doc_id))
+        Ok(doc_uri_from_arg(doc_id)?.to_string())
     }
 
     /// Resolve a doc_id (UUID or path) to a file path on disk.
+    /// The document a `doc_id` argument names, given the file it resolved to.
+    ///
+    /// A path argument names a FILE, and the stores key a document by the id
+    /// its own bytes declare — the same `doc_id_from_content` the ingest keys
+    /// the store by. Deriving one from the other any other way (minting
+    /// `block:<path>`) names a document that exists nowhere, which reads back
+    /// as an empty render rather than as an error.
+    async fn resolve_document_uri(
+        &self,
+        renderer: &holon_filesystem::WritebackRenderer,
+        doc_id: &str,
+        file_path: &std::path::Path,
+    ) -> Result<EntityUri, rmcp::ErrorData> {
+        if !doc_arg_is_path(doc_id) {
+            return doc_uri_from_arg(doc_id);
+        }
+
+        let content = self
+            .debug
+            .org_filesystem()
+            .read_to_string(file_path)
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!(
+                        "cannot read '{}' to resolve its document id: {e}",
+                        file_path.display()
+                    ),
+                    None,
+                )
+            })?;
+
+        renderer
+            .declared_doc_id(file_path, &content)
+            .map_err(|e| {
+                rmcp::ErrorData::invalid_params(
+                    format!(
+                        "cannot resolve the document id '{}' declares: {e:#}",
+                        file_path.display()
+                    ),
+                    Some(serde_json::json!({ "file_path": file_path.display().to_string() })),
+                )
+            })?
+            .ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    format!(
+                        "'{}' declares no document id, so no document's blocks are keyed by it.                          Ingest stamps `#+ID:` on every file it adopts, so this file was never                          ingested in this session — pass a UUID, or let the app scan the vault.",
+                        file_path.display()
+                    ),
+                    Some(serde_json::json!({ "file_path": file_path.display().to_string() })),
+                )
+            })
+    }
+
     async fn resolve_to_file_path(
         &self,
         doc_id: &str,
     ) -> Result<std::path::PathBuf, rmcp::ErrorData> {
         // If it looks like a file path already, use it directly
-        if doc_id.contains('/') || doc_id.ends_with(".org") {
+        if doc_arg_is_path(doc_id) {
             let fs = self.debug.org_filesystem();
             let path = std::path::PathBuf::from(doc_id);
             if fs.exists(&path) {
@@ -4652,11 +4825,20 @@ impl HolonMcpServer {
             }
         }
 
-        // Try to resolve via Loro aliases
+        // Try to resolve via Loro aliases. The registry is keyed by the
+        // SCHEMED document URI the ingest registered, so a bare uuid has to be
+        // normalized before the lookup or it matches nothing.
         if let Some(store) = self.current_loro_doc_store() {
             let store_read = store.read().await;
             if let Some(path) = store_read.resolve_alias_to_path(doc_id).await {
                 return Ok(path);
+            }
+            if let Ok(uri) = doc_uri_from_arg(doc_id) {
+                if uri.as_str() != doc_id {
+                    if let Some(path) = store_read.resolve_alias_to_path(uri.as_str()).await {
+                        return Ok(path);
+                    }
+                }
             }
         }
 
@@ -4819,9 +5001,9 @@ mod tests {
     #[test]
     fn doc_uri_from_arg_accepts_schemed_and_bare_alike() {
         let bare = "1820f890-aaaa-bbbb-cccc-ddddeeeeffff";
-        assert_eq!(doc_uri_from_arg(bare), DOC);
+        assert_eq!(doc_uri_from_arg(bare).expect("a bare uuid").as_str(), DOC);
         assert_eq!(
-            doc_uri_from_arg(DOC),
+            doc_uri_from_arg(DOC).expect("a schemed id").as_str(),
             DOC,
             "a schemed id must not re-scheme"
         );
@@ -4861,7 +5043,7 @@ mod tests {
     fn both_arms_agree_on_membership_for_schemed_and_bare_ids() {
         let bare = "1820f890-aaaa-bbbb-cccc-ddddeeeeffff";
         for arg in [DOC, bare] {
-            let uri = doc_uri_from_arg(arg);
+            let uri = doc_uri_from_arg(arg).expect("a document id").to_string();
             let loro = doc_subtree_ids(&uri, &loro_nodes()).expect("acyclic");
             let sql = doc_subtree_ids(&uri, &sql_nodes()).expect("acyclic");
             assert_eq!(loro, sql, "arms disagree for doc_id {arg:?}");
@@ -5151,44 +5333,24 @@ mod self_check_wiring_tests {
     }
 }
 
-/// `now_for_agent` is the agent-coordination entry point: every task it returns
-/// is work an agent starts. It owns no eligibility SQL — it executes a vault
-/// source block — so these tests seed that block and drive the tool through it,
-/// which is the only way an SQL-owning tool could pass them.
+/// A real engine + MCP server over an in-memory store, for the tool tests that
+/// drive the tools rather than their helpers. The `block` matview is
+/// CDC-maintained, so a seeded row stays invisible until it projects —
+/// `await_projected` is the wait.
 #[cfg(test)]
-mod now_for_agent_tests {
+pub(crate) mod engine_harness {
     use std::collections::HashMap;
     use std::sync::Arc;
 
     use fluxdi::Module;
     use fluxdi::Provider;
-    use holon::storage::BLOCK_WRITE_TABLE;
-    use rmcp::handler::server::wrapper::Parameters;
 
-    use super::NOW_QUERY_SOURCE_BLOCK;
     use crate::server::DebugServices;
     use crate::server::HolonMcpServer;
-    use crate::types::NowForAgentParams;
-
-    /// A now-query that references every param the tool binds, selects `gate =
-    /// 'G7'`, and carries the per-block `:REQUIRES:` aggregate. NO hard-coded
-    /// tool SQL would ever choose G7 — that is how these tests show the BLOCK
-    /// is what executes.
-    const NOW_QUERY_SQL: &str = "SELECT b.* FROM block b
-LEFT JOIN block_requires br ON br.block_id = b.id
-LEFT JOIN block bl ON bl.id = br.required_id
-WHERE json_extract(b.properties, '$.task_state') IN ($state_todo, $state_doing)
-  AND json_extract(b.properties, '$.gate') = 'G7'
-  AND ( json_extract(b.properties, '$.assigned-to') IS NULL OR json_extract(b.properties, '$.assigned-to') = $agent_id )
-  AND ( EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'agent') OR NOT EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'human-only') )
-GROUP BY b.id
-HAVING count(br.required_id) = sum(iif(COALESCE(json_extract(bl.properties, '$.task_state'), '') = 'DONE', 1, 0))
-ORDER BY CASE WHEN json_extract(b.properties, '$.assigned-to') = $agent_id THEN 0 ELSE 1 END, json_extract(b.properties, '$.priority'), json_extract(b.properties, '$.effort'), b.id
-LIMIT $limit";
 
     /// The tool reads the `block` matview, so the CDC wiring has to be live for
     /// a seeded row to become visible at all.
-    async fn fresh_engine() -> Arc<holon::api::BackendEngine> {
+    pub(crate) async fn fresh_engine() -> Arc<holon::api::BackendEngine> {
         holon::di::create_backend_engine_with_extras(
             ":memory:".into(),
             |injector| {
@@ -5217,7 +5379,7 @@ LIMIT $limit";
         .expect("fresh-db lazy DI graph must build")
     }
 
-    fn server(engine: Arc<holon::api::BackendEngine>) -> HolonMcpServer {
+    pub(super) fn server(engine: Arc<holon::api::BackendEngine>) -> HolonMcpServer {
         HolonMcpServer::with_type_registry(
             Some(engine),
             None,
@@ -5225,6 +5387,109 @@ LIMIT $limit";
             None,
         )
     }
+
+    /// IVM maintains the `block` matview asynchronously, so wait for the seeded
+    /// rows to be projected instead of racing them.
+    pub(super) async fn await_projected(engine: &holon::api::BackendEngine, ids: &[&str]) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let mut projected = 0usize;
+            for id in ids {
+                projected += engine
+                    .execute_query(
+                        format!("SELECT id FROM block WHERE id = '{id}'"),
+                        HashMap::new(),
+                        None,
+                    )
+                    .await
+                    .expect("probe query")
+                    .len();
+            }
+            if projected == ids.len() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "seeded blocks never reached the `block` matview: {ids:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// One `block_raw` row in `parent_id`'s child list. Reading `block_raw`
+    /// rather than the matview is what lets a test assert on what a write path
+    /// actually landed, free of projection lag.
+    pub(super) async fn seed_row(
+        engine: &holon::api::BackendEngine,
+        id: &str,
+        parent_id: &str,
+        content: &str,
+    ) {
+        engine
+            .db_handle()
+            .execute_values(
+                &format!(
+                    "INSERT INTO {} (id, parent_id, content, content_type, properties) VALUES \
+                     ('{id}', '{parent_id}', '{content}', 'text', '{{}}')",
+                    holon::storage::BLOCK_WRITE_TABLE
+                ),
+                vec![],
+            )
+            .await
+            .expect("insert seeded row");
+    }
+
+    /// How many rows the write authority holds under `parent_id`.
+    pub(super) async fn child_count(engine: &holon::api::BackendEngine, parent_id: &str) -> usize {
+        engine
+            .db_handle()
+            .query(
+                &format!(
+                    "SELECT id FROM {} WHERE parent_id = $parent_id",
+                    holon::storage::BLOCK_WRITE_TABLE
+                ),
+                HashMap::from([(
+                    "parent_id".to_string(),
+                    holon_api::Value::String(parent_id.to_string()),
+                )]),
+            )
+            .await
+            .expect("count children")
+            .len()
+    }
+}
+
+/// `now_for_agent` is the agent-coordination entry point: every task it returns
+/// is work an agent starts. It owns no eligibility SQL — it executes a vault
+/// source block — so these tests seed that block and drive the tool through it,
+/// which is the only way an SQL-owning tool could pass them.
+#[cfg(test)]
+mod now_for_agent_tests {
+    use holon::storage::BLOCK_WRITE_TABLE;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    use super::NOW_QUERY_SOURCE_BLOCK;
+    use super::engine_harness::await_projected;
+    use super::engine_harness::fresh_engine;
+    use super::engine_harness::server;
+    use crate::server::HolonMcpServer;
+    use crate::types::NowForAgentParams;
+
+    /// A now-query that references every param the tool binds, selects `gate =
+    /// 'G7'`, and carries the per-block `:REQUIRES:` aggregate. NO hard-coded
+    /// tool SQL would ever choose G7 — that is how these tests show the BLOCK
+    /// is what executes.
+    const NOW_QUERY_SQL: &str = "SELECT b.* FROM block b
+LEFT JOIN block_requires br ON br.block_id = b.id
+LEFT JOIN block bl ON bl.id = br.required_id
+WHERE json_extract(b.properties, '$.task_state') IN ($state_todo, $state_doing)
+  AND json_extract(b.properties, '$.gate') = 'G7'
+  AND ( json_extract(b.properties, '$.assigned-to') IS NULL OR json_extract(b.properties, '$.assigned-to') = $agent_id )
+  AND ( EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'agent') OR NOT EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'human-only') )
+GROUP BY b.id
+HAVING count(br.required_id) = sum(iif(COALESCE(json_extract(bl.properties, '$.task_state'), '') = 'DONE', 1, 0))
+ORDER BY CASE WHEN json_extract(b.properties, '$.assigned-to') = $agent_id THEN 0 ELSE 1 END, json_extract(b.properties, '$.priority'), json_extract(b.properties, '$.effort'), b.id
+LIMIT $limit";
 
     /// A block tagged `agent`, so the requirement check is the only thing that
     /// can keep it out of the result.
@@ -5286,34 +5551,6 @@ LIMIT $limit";
             )
             .await
             .expect("insert now-query source block");
-    }
-
-    /// IVM maintains the `block` matview asynchronously, so wait for the seeded
-    /// rows to be projected instead of racing them.
-    async fn await_projected(engine: &holon::api::BackendEngine, ids: &[&str]) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        loop {
-            let mut projected = 0usize;
-            for id in ids {
-                projected += engine
-                    .execute_query(
-                        format!("SELECT id FROM block WHERE id = '{id}'"),
-                        HashMap::new(),
-                        None,
-                    )
-                    .await
-                    .expect("probe query")
-                    .len();
-            }
-            if projected == ids.len() {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "seeded blocks never reached the `block` matview: {ids:?}"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
     }
 
     async fn call_now_for_agent(
@@ -5466,5 +5703,571 @@ LIMIT $limit";
                  served: {served:?}"
             );
         }
+    }
+}
+
+/// A `doc_id` reaches the MCP three ways — a bare uuid, a schemed URI, and a
+/// vault file path — and `render_org` reads through the write-back path, which
+/// keys a document by the id its own file declares. Resolution is therefore
+/// what these tests exercise: a reader that answers ONLY under the declared id
+/// turns a wrong resolution into an empty render, and an argument that forms no
+/// URI must come back as an error.
+#[cfg(test)]
+mod render_org_doc_id_tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use holon_api::EntityUri;
+    use holon_api::block::Block;
+    use holon_core::FormatRegistry;
+    use holon_filesystem::BlockReader;
+    use holon_filesystem::DocumentManager;
+    use holon_filesystem::WritebackRenderer;
+    use holon_orgmode::OrgFormatAdapter;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    use super::engine_harness::fresh_engine;
+    use crate::server::DebugServices;
+    use crate::server::HolonMcpServer;
+    use crate::types::RenderOrgParams;
+    use crate::types::RenderScope;
+    use crate::types::RenderSource;
+
+    const TITLE: &str = "Plain-Text Layer";
+    const DECLARED: &str = "c0450284-7413-44e6-a5dd-4680d09ad9f8";
+    const BODY: &str = "a rendered block";
+
+    fn doc_uri() -> EntityUri {
+        EntityUri::block(DECLARED)
+    }
+
+    /// The write authority, keyed the way both stores key it. Any other key
+    /// finds no blocks, which is what makes the resolution the thing under
+    /// test.
+    struct KeyedReader {
+        declared: EntityUri,
+        blocks: Vec<Block>,
+    }
+
+    #[async_trait]
+    impl BlockReader for KeyedReader {
+        async fn get_blocks(&self, doc_id: &EntityUri) -> anyhow::Result<Vec<Block>> {
+            Ok(if *doc_id == self.declared {
+                self.blocks.clone()
+            } else {
+                Vec::new()
+            })
+        }
+
+        async fn doc_block_topology(
+            &self,
+            doc_id: &EntityUri,
+        ) -> anyhow::Result<Vec<(EntityUri, EntityUri)>> {
+            Ok(self
+                .get_blocks(doc_id)
+                .await?
+                .into_iter()
+                .map(|b| (b.id, b.parent_id))
+                .collect())
+        }
+
+        async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
+            Ok(self.blocks.iter().find(|b| b.id == *id).cloned())
+        }
+
+        async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
+            unimplemented!("render_org reads one document by id")
+        }
+    }
+
+    /// `scope=blocks` renders straight from the reader, so no document
+    /// metadata is ever looked up.
+    struct UnusedDocManager;
+
+    #[async_trait]
+    impl DocumentManager for UnusedDocManager {
+        async fn find_by_parent_and_name(
+            &self,
+            _: &EntityUri,
+            _: &str,
+        ) -> anyhow::Result<Option<Block>> {
+            unimplemented!("scope=blocks reads no document metadata")
+        }
+
+        async fn create(&self, _: Block) -> anyhow::Result<Block> {
+            unimplemented!("scope=blocks writes nothing")
+        }
+
+        async fn get_by_id(&self, _: &EntityUri) -> anyhow::Result<Option<Block>> {
+            unimplemented!("scope=blocks reads no document metadata")
+        }
+
+        async fn update_metadata(&self, _: &Block) -> anyhow::Result<()> {
+            unimplemented!("scope=blocks writes nothing")
+        }
+    }
+
+    /// A vault root holding one file, named with a space so its path forms no
+    /// URI.
+    fn vault_with_file(content: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("temp vault");
+        let path = dir.path().join(format!("{TITLE}.org"));
+        std::fs::write(&path, content).expect("write the vault file");
+        (dir, path)
+    }
+
+    /// The server over a session whose org file sync is wired: the renderer
+    /// plus, when a document's file alias is registered, the Loro store that
+    /// carries it. A bare uuid reaches a file only through that alias, so a
+    /// session without one genuinely cannot route the id.
+    async fn server_over(
+        dir: &std::path::Path,
+        alias: Option<(&EntityUri, &std::path::Path)>,
+    ) -> HolonMcpServer {
+        let debug = Arc::new(DebugServices::default());
+        debug.orgmode_root.set(dir.to_path_buf()).ok();
+        let renderer = Arc::new(WritebackRenderer::new(
+            Arc::new(KeyedReader {
+                declared: doc_uri(),
+                blocks: vec![Block::new_text(
+                    EntityUri::block("child"),
+                    doc_uri(),
+                    BODY.to_string(),
+                )],
+            }),
+            Arc::new(UnusedDocManager),
+            Arc::new(
+                FormatRegistry::new(vec![Arc::new(OrgFormatAdapter::new())])
+                    .expect("one adapter claims .org"),
+            ),
+        ));
+        let loro = match alias {
+            Some((uri, file)) => {
+                let store = holon_loro::LoroDocumentStore::new(dir.to_path_buf());
+                store.register_alias(uri.as_str(), file).await;
+                Some(Arc::new(tokio::sync::RwLock::new(store)))
+            }
+            None => None,
+        };
+        {
+            let mut cell = debug.live_debug.write().expect("live_debug cell poisoned");
+            cell.writeback_renderer = Some(renderer);
+            cell.loro_doc_store = loro;
+        }
+        HolonMcpServer::with_type_registry(Some(fresh_engine().await), None, debug, None)
+    }
+
+    async fn render(
+        server: &HolonMcpServer,
+        doc_id: &str,
+    ) -> Result<serde_json::Value, rmcp::ErrorData> {
+        let result = server
+            .render_org(Parameters(RenderOrgParams {
+                doc_id: doc_id.to_string(),
+                source: RenderSource::Sql,
+                scope: RenderScope::Blocks,
+            }))
+            .await?;
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            other => panic!("expected a text result, got {other:?}"),
+        };
+        Ok(serde_json::from_str(&text).expect("tool output is JSON"))
+    }
+
+    /// An absolute path is a form `read_org_file` accepts, and a vault path
+    /// with a space in it forms no URI.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn renders_a_document_addressed_by_absolute_path() {
+        let (dir, path) =
+            vault_with_file(&format!("#+TITLE: {TITLE}\n#+ID: {DECLARED}\n\n* {BODY}\n"));
+        let server = server_over(dir.path(), None).await;
+
+        let out = render(&server, &path.display().to_string())
+            .await
+            .expect("an absolute path is the form read_org_file accepts");
+
+        assert_eq!(out["doc_uri"], doc_uri().as_str());
+        assert!(
+            out["rendered"].as_str().expect("rendered").contains(BODY),
+            "the document's blocks must be what renders: {out}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn renders_a_document_addressed_by_bare_uuid() {
+        let (dir, path) =
+            vault_with_file(&format!("#+TITLE: {TITLE}\n#+ID: {DECLARED}\n\n* {BODY}\n"));
+        let server = server_over(dir.path(), Some((&doc_uri(), &path))).await;
+
+        let out = render(&server, DECLARED)
+            .await
+            .expect("a bare uuid is the id the app hands out for a vault document");
+
+        assert_eq!(out["doc_uri"], doc_uri().as_str());
+        assert!(out["rendered"].as_str().expect("rendered").contains(BODY));
+    }
+
+    /// A path relative to the vault root, which is what an agent reads out of
+    /// the app.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn renders_a_document_addressed_by_vault_relative_path() {
+        let (dir, _) =
+            vault_with_file(&format!("#+TITLE: {TITLE}\n#+ID: {DECLARED}\n\n* {BODY}\n"));
+        let server = server_over(dir.path(), None).await;
+
+        let out = render(&server, &format!("{TITLE}.org"))
+            .await
+            .expect("a path relative to the vault root must resolve");
+
+        assert_eq!(out["doc_uri"], doc_uri().as_str());
+        assert!(out["rendered"].as_str().expect("rendered").contains(BODY));
+    }
+
+    /// A bare declared id resolves to the URI the ingest keys the document by
+    /// (`EntityUri::block(<declared>)` in `parse_org_file_with`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bare_declared_id_resolves_to_the_block_uri_ingest_keys() {
+        let (dir, _) = vault_with_file(&format!("#+TITLE: {TITLE}\n#+ID: abc\n\n* {BODY}\n"));
+        let server = server_over(dir.path(), None).await;
+
+        let out = render(&server, &format!("{TITLE}.org"))
+            .await
+            .expect("a declared id is a document id");
+
+        assert_eq!(out["doc_uri"], "block:abc");
+    }
+
+    /// A declared id that carries an entity scheme is the one value the
+    /// parser's `EntityUri::block` asserts against, so no document is keyed by
+    /// it. Refused by name rather than rendered empty.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_declared_id_that_carries_a_scheme_is_refused_by_name() {
+        let (dir, path) =
+            vault_with_file(&format!("#+TITLE: {TITLE}\n#+ID: block:abc\n\n* {BODY}\n"));
+        let server = server_over(dir.path(), None).await;
+
+        let err = render(&server, &path.display().to_string())
+            .await
+            .expect_err("no document is keyed by a schemed declared id");
+
+        assert!(err.message.contains("block:abc"), "{}", err.message);
+        assert!(
+            err.message.contains(&path.display().to_string()),
+            "the error must name the file it refused: {}",
+            err.message
+        );
+    }
+
+    /// A file that declares no id names no document's blocks. Rendering it
+    /// empty would read as "the document is empty", which is the opposite of
+    /// what the file says.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_declaring_no_document_id_is_refused_loudly() {
+        let (dir, path) = vault_with_file(&format!("#+TITLE: {TITLE}\n\n* {BODY}\n"));
+        let server = server_over(dir.path(), None).await;
+
+        let err = render(&server, &path.display().to_string())
+            .await
+            .expect_err("a file the ingest never adopted names no document");
+
+        assert!(
+            err.message.contains(&path.display().to_string()),
+            "the error must name the file it refused: {}",
+            err.message
+        );
+    }
+
+    /// A path carrying a space forms no URI, and an argument that forms none
+    /// is the caller's error to see.
+    #[test]
+    fn a_path_that_forms_no_uri_is_an_error_not_a_panic() {
+        let err = super::doc_uri_from_arg("/vault/Plain-Text Layer.org")
+            .expect_err("a path is not a document id");
+        assert!(err.message.contains("doc_id"), "{}", err.message);
+    }
+
+    /// The agent-facing task tools take ids the same way, so an id that forms
+    /// no URI is an error there too.
+    #[test]
+    fn an_agent_supplied_id_that_forms_no_uri_is_an_error_not_a_panic() {
+        let err = super::ensure_block_prefix("my task").expect_err("a space forms no URI");
+        assert!(err.message.contains("my task"), "{}", err.message);
+        assert_eq!(
+            super::ensure_block_prefix(DECLARED)
+                .expect("a bare uuid is a block id")
+                .as_str(),
+            doc_uri().as_str()
+        );
+    }
+
+    /// A path without a space DOES form a URI, so the guard cannot be "does it
+    /// parse" — minting `block:<path>` would key a document that exists
+    /// nowhere.
+    #[test]
+    fn a_path_that_forms_a_uri_is_still_a_path() {
+        assert!(
+            super::doc_arg_is_path("Projects/Holon/Plain.org"),
+            "a slash-carrying argument is a path, not an id"
+        );
+        assert!(
+            super::doc_arg_is_path("Plain.org"),
+            "an .org argument is a path, not an id"
+        );
+        assert!(!super::doc_arg_is_path(DECLARED));
+    }
+}
+
+/// An agent's query is arbitrary SQL, and a recursive CTE is legitimate: the
+/// store's own document walks are built from one. The MCP client reports a
+/// panic in the handler as a bare `Receive failed` with no cause attached, so
+/// the property is that the tool ANSWERS — rows or a loud error.
+#[cfg(test)]
+mod query_survival_tests {
+    use std::collections::HashMap;
+
+    use futures::FutureExt;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    use super::engine_harness::await_projected;
+    use super::engine_harness::fresh_engine;
+    use super::engine_harness::seed_row;
+    use super::engine_harness::server;
+    use crate::server::HolonMcpServer;
+    use crate::types::ExecuteQueryParams;
+    use crate::types::ExecuteRawSqlParams;
+    use crate::types::ExecuteSourceBlockParams;
+
+    /// A document walk: the anchor names the root, the recursive arm descends
+    /// `block`, and the outer select projects the walk.
+    const DOC_WALK: &str = "WITH RECURSIVE d(id, parent_id, depth) AS (
+  SELECT id, parent_id, 0 FROM block WHERE id = 'block:root'
+  UNION ALL
+  SELECT b.id, b.parent_id, d.depth + 1 FROM block b JOIN d ON b.parent_id = d.id
+)
+SELECT id, parent_id, depth FROM d ORDER BY depth, id";
+
+    async fn seeded_chain() -> HolonMcpServer {
+        let engine = fresh_engine().await;
+        seed_row(&engine, "block:root", "sentinel:no_parent", "root").await;
+        seed_row(&engine, "block:child", "block:root", "child").await;
+        seed_row(&engine, "block:grandchild", "block:child", "grandchild").await;
+        await_projected(&engine, &["block:root", "block:child", "block:grandchild"]).await;
+        server(engine)
+    }
+
+    fn text_of(result: &rmcp::model::CallToolResult) -> String {
+        match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            other => panic!("expected a text result, got {other:?}"),
+        }
+    }
+
+    /// The walk's `(id, depth)` pairs in result order — the SHAPE of the
+    /// answer, so the pin covers what the recursion computed and not merely
+    /// that something came back.
+    fn walk_rows(text: &str) -> Vec<(String, i64)> {
+        let parsed: serde_json::Value = serde_json::from_str(text).expect("tool output is JSON");
+        parsed["rows"]
+            .as_array()
+            .expect("rows array")
+            .iter()
+            .map(|row| {
+                (
+                    row["id"].as_str().expect("row id").to_string(),
+                    row["depth"].as_i64().expect("row depth"),
+                )
+            })
+            .collect()
+    }
+
+    /// Depth 0 at the anchor, one deeper per level.
+    fn expected_walk() -> Vec<(String, i64)> {
+        vec![
+            ("block:root".to_string(), 0),
+            ("block:child".to_string(), 1),
+            ("block:grandchild".to_string(), 2),
+        ]
+    }
+
+    /// A panic here is what the MCP client turns into `Receive failed` with no
+    /// cause, so the assertion is on the future COMPLETING at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_recursive_cte_through_raw_sql_answers_the_caller() {
+        let server = seeded_chain().await;
+
+        let caught =
+            std::panic::AssertUnwindSafe(server.execute_raw_sql(Parameters(ExecuteRawSqlParams {
+                sql: DOC_WALK.to_string(),
+                params: HashMap::new(),
+                format: Some("json".to_string()),
+            })))
+            .catch_unwind()
+            .await;
+
+        let result = caught.expect(
+            "a recursive CTE killed the request handler; the client reports this as `Receive \
+             failed: no pending response` and the caller cannot act on it",
+        );
+        let text = text_of(&result.expect("the walk over `block` must run or refuse loudly"));
+        assert_eq!(walk_rows(&text), expected_walk());
+    }
+
+    /// `execute_source_block` takes the id of a block an agent names, so a
+    /// value that forms no URI is refused by name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_source_block_id_that_forms_no_uri_is_an_error_not_a_panic() {
+        let server = server(fresh_engine().await);
+
+        let caught = std::panic::AssertUnwindSafe(server.execute_source_block(Parameters(
+            ExecuteSourceBlockParams {
+                block_id: "my task".to_string(),
+                params: HashMap::new(),
+                language: None,
+                context_id: None,
+                context_parent_id: None,
+                render: None,
+                include_profile: None,
+                format: None,
+            },
+        )))
+        .catch_unwind()
+        .await;
+
+        let result = caught.expect(
+            "a block id that forms no URI escaped the handler; the client sees only a transport \
+             error with no cause attached",
+        );
+        let err = result.expect_err("no block is keyed by 'my task'");
+        assert!(err.message.contains("my task"), "{}", err.message);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_recursive_cte_through_execute_query_answers_the_caller() {
+        let server = seeded_chain().await;
+
+        let caught =
+            std::panic::AssertUnwindSafe(server.execute_query(Parameters(ExecuteQueryParams {
+                query: DOC_WALK.to_string(),
+                language: "holon_sql".to_string(),
+                params: HashMap::new(),
+                context_id: None,
+                context_parent_id: None,
+                render: None,
+                include_profile: None,
+                format: Some("json".to_string()),
+            })))
+            .catch_unwind()
+            .await;
+
+        let result = caught.expect(
+            "a recursive CTE killed the request handler; the client reports this as `Receive \
+             failed: no pending response` and the caller cannot act on it",
+        );
+        let text = text_of(&result.expect("the walk over `block` must run or refuse loudly"));
+        assert_eq!(walk_rows(&text), expected_walk());
+    }
+}
+
+/// `dense_patch` promises all-or-nothing: a batch it refuses writes nothing.
+/// The two gates that refuse one (unknown handle, conflict) run before the
+/// first dispatch; this suite pins that, and pins the third refusal — a plan
+/// whose references do not all resolve — at the write boundary itself.
+#[cfg(test)]
+mod dense_patch_atomicity_tests {
+    use holon_api::EntityUri;
+
+    use super::apply_plan;
+    use super::engine_harness::await_projected;
+    use super::engine_harness::child_count;
+    use super::engine_harness::fresh_engine;
+    use super::engine_harness::seed_row;
+    use super::engine_harness::server;
+    use crate::dense_patch::PatchOp;
+    use crate::dense_patch::PatchPlan;
+    use crate::dense_patch::Ref as PRef;
+
+    const ROOT: &str = "block:root";
+
+    fn create(temp: usize, title: &str) -> PatchOp {
+        PatchOp::Create {
+            temp,
+            parent: PRef::Root,
+            after: None,
+            title: title.to_string(),
+            task_state: None,
+        }
+    }
+
+    /// A plan whose second op positions a block against a new block the plan
+    /// never creates cannot apply in full. Applying the first op anyway leaves
+    /// a row the caller was told nothing about, and its retry then duplicates.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plan_whose_references_do_not_all_resolve_writes_nothing() {
+        let engine = fresh_engine().await;
+        seed_row(&engine, ROOT, "sentinel:no_parent", "root").await;
+        await_projected(&engine, &[ROOT]).await;
+        let server = server(engine.clone());
+
+        let plan = PatchPlan {
+            ops: vec![
+                create(0, "first"),
+                PatchOp::Create {
+                    temp: 1,
+                    parent: PRef::Root,
+                    after: Some(PRef::New(7)),
+                    title: "second".to_string(),
+                    task_state: None,
+                },
+            ],
+            verify: Vec::new(),
+        };
+
+        let err = apply_plan(&server.service(), &plan, &EntityUri::block("root"))
+            .await
+            .expect_err("a plan naming a block it never creates must be refused");
+
+        assert!(
+            err.message.contains("#7"),
+            "the refusal must name the unresolvable reference: {}",
+            err.message
+        );
+        assert_eq!(
+            child_count(&engine, ROOT).await,
+            0,
+            "a refused plan must write nothing — the resolvable ops landed anyway"
+        );
+    }
+
+    /// The happy path still applies, so the refusal above is the plan's fault
+    /// and not the applier's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fully_resolved_plan_applies_every_op() {
+        let engine = fresh_engine().await;
+        seed_row(&engine, ROOT, "sentinel:no_parent", "root").await;
+        await_projected(&engine, &[ROOT]).await;
+        let server = server(engine.clone());
+
+        let plan = PatchPlan {
+            ops: vec![
+                create(0, "first"),
+                PatchOp::Create {
+                    temp: 1,
+                    parent: PRef::Root,
+                    after: Some(PRef::New(0)),
+                    title: "second".to_string(),
+                    task_state: None,
+                },
+            ],
+            verify: Vec::new(),
+        };
+
+        let counts = apply_plan(&server.service(), &plan, &EntityUri::block("root"))
+            .await
+            .expect("a fully resolved plan must apply");
+
+        assert_eq!(counts.created, 2);
+        assert_eq!(child_count(&engine, ROOT).await, 2);
     }
 }
