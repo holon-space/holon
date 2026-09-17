@@ -230,6 +230,16 @@ pub trait BuilderServices: Send + Sync {
             .unwrap_or_else(|| mode.default_open())
     }
 
+    /// Flip `id`'s drawer open state — the write a plain click on a drawer
+    /// handle performs. Single-sourced here so the GPUI handler
+    /// (`finalize_sidebar_resize`) and the PBT gesture drivers cannot drift:
+    /// the flip inverts [`Self::drawer_open`], so an untracked drawer moves
+    /// away from its MODE default rather than from a blanket `open`.
+    fn toggle_drawer(&self, id: &str, mode: crate::view_model::DrawerMode) {
+        let current = self.drawer_open(id, mode);
+        self.set_widget_open(id, !current);
+    }
+
     /// Set a widget's `open` field. Used by self-rendering toggle widgets
     /// (`drawer`, `collapse_toggle`) so the click handler doesn't have to
     /// reach into `FrontendSession` directly. Default impl panics — every
@@ -2435,6 +2445,20 @@ impl UiState {
     /// Get a snapshot of the current viewport.
     pub fn viewport(&self) -> Option<ViewportInfo> {
         self.viewport.get_cloned()
+    }
+
+    /// Put the viewport back to a previously captured [`Self::viewport`]
+    /// snapshot, INCLUDING the "no viewport known yet" state. `set_viewport`
+    /// cannot express that state, so a caller that restores only a `Some`
+    /// leaves its own viewport in place for every later render on the shared
+    /// engine — which silently changes every downstream `if_space` breakpoint
+    /// (the default layout renders the sidebars `overlay` below 600 px).
+    pub fn restore_viewport(&self, previous: Option<ViewportInfo>) {
+        if self.viewport.get_cloned() == previous {
+            return;
+        }
+        self.viewport.set(previous);
+        self.bump_viewport_generation();
     }
 
     /// Get a signal for the current viewport — used by the root

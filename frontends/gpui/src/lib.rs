@@ -1236,6 +1236,12 @@ impl Render for HolonApp {
             search_theme,
         );
 
+        // The titlebar drawer buttons drive the SAME flip production's drawer
+        // handle runs (`finalize_sidebar_resize`), so the gesture cannot drift
+        // from it.
+        let left_drawer_services = services.clone();
+        let right_drawer_services = services.clone();
+
         let title_bar = div()
             .id("title-bar")
             .flex()
@@ -1278,8 +1284,7 @@ impl Render for HolonApp {
                             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                 if let Some((ref bid, mode)) = left_drawer {
                                     left_model.update(cx, |m, cx| {
-                                        let current = m.session.drawer_open(bid, mode);
-                                        m.session.set_widget_open(bid, !current);
+                                        left_drawer_services.toggle_drawer(bid, mode);
                                         m.rebuild(cx);
                                         cx.notify();
                                     });
@@ -1308,8 +1313,7 @@ impl Render for HolonApp {
                             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                 if let Some((ref bid, mode)) = right_drawer {
                                     right_model.update(cx, |m, cx| {
-                                        let current = m.session.drawer_open(bid, mode);
-                                        m.session.set_widget_open(bid, !current);
+                                        right_drawer_services.toggle_drawer(bid, mode);
                                         m.rebuild(cx);
                                         cx.notify();
                                     });

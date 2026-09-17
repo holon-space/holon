@@ -245,6 +245,45 @@ impl DriverInputComponent {
             .is_some()
     }
 
+    /// Toggle the drawer `block_id`'s resolved node renders. This is the write
+    /// production's plain click on the drawer handle performs
+    /// ([`BuilderServices::toggle_drawer`], the body of GPUI's
+    /// `finalize_sidebar_resize`), against the MODE that same node rendered —
+    /// the mode the handler reads off the drawer it hit. The windowed slices
+    /// boot their layout asynchronously, so poll for the node the way
+    /// `cycle_state_toggle` does; a drawer still absent at the deadline is a
+    /// loud failure, because a drawer that isn't rendered cannot be clicked.
+    async fn toggle_rendered_drawer(&self, block_id: &str) {
+        let uri = if block_id.contains(':') {
+            EntityUri::parse(block_id).unwrap_or_else(|e| {
+                panic!("[click_at_element] drawer_toggle::{block_id} is not an EntityUri: {e}")
+            })
+        } else {
+            EntityUri::block(block_id)
+        };
+        let root_uri = holon_api::root_layout_block_uri();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let resolved = loop {
+            let resolved = self.engine.snapshot_resolved(&root_uri);
+            if holon_frontend::focus_path::rendered_drawer_mode(&resolved, uri.as_str()).is_some()
+                || tokio::time::Instant::now() >= deadline
+            {
+                break resolved;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let mode = holon_frontend::focus_path::rendered_drawer_mode(&resolved, uri.as_str())
+            .unwrap_or_else(|| {
+                panic!(
+                    "[click_at_element] no `drawer` node for {uri} in the resolved root \
+                         layout; drawers rendered: {:?}",
+                    holon_frontend::focus_path::rendered_drawer_ids(&resolved)
+                )
+            });
+        let services: Arc<dyn BuilderServices> = self.engine.clone();
+        services.toggle_drawer(uri.as_str(), mode);
+    }
+
     /// Single-shot bounds gate (mirror of
     /// `GpuiWindowComponent::wait_for_bounds`): the harness pumps to a
     /// fixed point before driving, so this never spins.
@@ -604,6 +643,15 @@ impl SutBlockInteract for DriverInputComponent {
                 .unwrap_or_else(|e| {
                     panic!("[click_at_element] click_expand_toggle({element_id}) failed: {e:#}")
                 });
+            return;
+        }
+        // A drawer handle is NOT its panel block: clicking the block resolves
+        // the sidebar row's `navigation_focus` and degrades to bare focus, while
+        // the handle's production handler flips the drawer's open state. No
+        // medium here renders the handle widget, so drive the same write the
+        // handler performs — the `expand_toggle`/`state_toggle` precedent.
+        if kind == Some("drawer_toggle") {
+            self.toggle_rendered_drawer(target).await;
             return;
         }
         // A VMS button is a view-local closure in GPUI, never an `OperationIntent`,

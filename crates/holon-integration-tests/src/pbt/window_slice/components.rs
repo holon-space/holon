@@ -349,28 +349,15 @@ impl SutFrontendEngine for GpuiFrontendEngineComponent {
 
 #[async_trait::async_trait(?Send)]
 impl SutFrontendEmissions for GpuiFrontendEngineComponent {
-    /// Force `viewport`, interpret the reactive root layout twice, and report
-    /// on the streaming providers. Faithful port of
-    /// `E2ESut::provider_stability_report` over the live window engine (the
-    /// root id falls back to the layout root, as E2ESut's did). `None`
-    /// while the root is a loading/spacer placeholder.
+    /// Force `viewport` for the duration of the probe, then put the engine's
+    /// own viewport back — see [`probe_provider_stability`] for what is
+    /// measured.
     async fn provider_stability_report(
         &self,
         viewport: ViewportHint,
     ) -> Option<ProviderStabilityReport> {
-        use std::collections::HashMap;
-        use std::collections::HashSet;
-
-        use crate::pbt::value_fn_invariants::collect_providers;
-        use crate::pbt::value_fn_invariants::count_bottom_docks;
-        use crate::pbt::value_fn_invariants::rhai_mentions;
-
         let reactive = self.engine.clone();
-
-        // The probe viewport is narrow (forces the `if_space`-gated mobile bar), so
-        // save + restore the engine's real viewport around the probe to avoid
-        // perturbing later render observations on the shared engine.
-        let prev_viewport = reactive.ui_state().viewport();
+        let previous = reactive.ui_state().viewport();
         reactive
             .ui_state()
             .set_viewport(holon_frontend::reactive::ViewportInfo {
@@ -379,105 +366,14 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
                 scale_factor: 1.0,
             });
         tokio::task::yield_now().await;
-
-        let root_id = holon_api::root_layout_block_uri();
-        let results = reactive.ensure_watching(&root_id);
-        let (render_expr, data_rows) = results.snapshot();
-        if matches!(&render_expr, holon_api::RenderExpr::FunctionCall { name, .. } if name == "loading" || name == "spacer")
-        {
-            return None;
-        }
-
-        let services: Arc<dyn BuilderServices> = reactive.clone();
-
-        // Pass 1.
-        let re = render_expr.clone();
-        let dr = data_rows.clone();
-        let svc1 = services.clone();
-        let tree1 = tokio::task::spawn_blocking(move || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                holon_frontend::interpret_pure(&re, &dr, &*svc1)
-            }))
-            .ok()
-        })
-        .await
-        .expect("spawn_blocking panicked")?;
-
-        let providers1 = collect_providers(&tree1);
-        let total_providers = providers1.len();
-        let mentions_bottom_dock = rhai_mentions(&render_expr, "bottom_dock");
-        let bottom_dock_count = if mentions_bottom_dock {
-            count_bottom_docks(&tree1)
-        } else {
-            0
-        };
-        let mentions_focus_chain = rhai_mentions(&render_expr, "focus_chain");
-        let any_nonempty = providers1.iter().any(|p| p.rows_snapshot_len > 0);
-
-        // vfn12: provider identity stability within one pass — group by
-        // (template, rows) and require a single cache_identity per group.
-        let mut sites_per_group: HashMap<(String, usize), usize> = HashMap::new();
-        let mut ids_per_group: HashMap<(String, usize), HashSet<u64>> = HashMap::new();
-        for p in &providers1 {
-            let key = (p.item_template_debug.clone(), p.rows_snapshot_len);
-            *sites_per_group.entry(key.clone()).or_default() += 1;
-            ids_per_group
-                .entry(key)
-                .or_default()
-                .insert(p.cache_identity);
-        }
-        let identity_instability = ids_per_group.iter().find_map(|(key, ids)| {
-            (ids.len() > 1).then(|| {
-                let sites = sites_per_group.get(key).copied().unwrap_or(0);
-                format!(
-                    "template={} rows={} → {} distinct cache_identities across {sites} call sites",
-                    key.0,
-                    key.1,
-                    ids.len(),
-                )
-            })
-        });
-
-        // vfn13: cache identity flicker across re-interpret. A pass-2 panic leaves
-        // flicker unmeasured (0) rather than failing the report.
-        let re2 = render_expr.clone();
-        let dr2 = data_rows.clone();
-        let svc2 = services.clone();
-        let tree2 = tokio::task::spawn_blocking(move || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                holon_frontend::interpret_pure(&re2, &dr2, &*svc2)
-            }))
-            .ok()
-        })
-        .await
-        .expect("spawn_blocking panicked");
-        let flicker_count = match tree2 {
-            Some(tree2) => {
-                let providers2 = collect_providers(&tree2);
-                let ids1: HashSet<u64> = providers1.iter().map(|p| p.cache_identity).collect();
-                let ids2: HashSet<u64> = providers2.iter().map(|p| p.cache_identity).collect();
-                ids1.difference(&ids2).count()
-            }
-            None => 0,
-        };
-
-        // Restore the engine's real viewport so the narrow probe doesn't leak into
-        // later render observations on the shared engine.
-        if let Some(v) = prev_viewport {
-            reactive.ui_state().set_viewport(v);
-        }
-
-        Some(ProviderStabilityReport {
-            mentions_bottom_dock,
-            bottom_dock_count,
-            mentions_focus_chain,
-            total_providers,
-            any_nonempty,
-            identity_instability,
-            flicker_count,
-        })
+        let report = probe_provider_stability(&reactive).await;
+        // ALWAYS restore, INCLUDING to "no viewport known": `if_space` reads that
+        // state as desktop-first, so leaving the probe's narrow viewport in place
+        // moves every later render on this shared engine onto the mobile branch,
+        // where both sidebars render `overlay` (i.e. default-closed).
+        reactive.ui_state().restore_viewport(previous);
+        report
     }
-
     /// Drain the intermediate ViewModel emissions accumulated during the last
     /// transition and extract every `StateToggle`'s `(block_id, current)`.
     /// Faithful port of `E2ESut::drain_vm_emission_toggles` over the
@@ -684,6 +580,113 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
 
         Some(prop_diffs)
     }
+}
+
+/// Interpret the reactive root layout twice under the engine's CURRENT viewport
+/// and report on the streaming providers. Faithful port of
+/// `E2ESut::provider_stability_report` over the live window engine (the root id
+/// falls back to the layout root, as E2ESut's did). `None` while the root is a
+/// loading/spacer placeholder.
+async fn probe_provider_stability(
+    reactive: &Arc<ReactiveEngine>,
+) -> Option<ProviderStabilityReport> {
+    use std::collections::HashMap;
+    use std::collections::HashSet;
+
+    use crate::pbt::value_fn_invariants::collect_providers;
+    use crate::pbt::value_fn_invariants::count_bottom_docks;
+    use crate::pbt::value_fn_invariants::rhai_mentions;
+
+    let root_id = holon_api::root_layout_block_uri();
+    let results = reactive.ensure_watching(&root_id);
+    let (render_expr, data_rows) = results.snapshot();
+    if matches!(&render_expr, holon_api::RenderExpr::FunctionCall { name, .. } if name == "loading" || name == "spacer")
+    {
+        return None;
+    }
+
+    let services: Arc<dyn BuilderServices> = reactive.clone();
+
+    // Pass 1.
+    let re = render_expr.clone();
+    let dr = data_rows.clone();
+    let svc1 = services.clone();
+    let tree1 = tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            holon_frontend::interpret_pure(&re, &dr, &*svc1)
+        }))
+        .ok()
+    })
+    .await
+    .expect("spawn_blocking panicked")?;
+
+    let providers1 = collect_providers(&tree1);
+    let total_providers = providers1.len();
+    let mentions_bottom_dock = rhai_mentions(&render_expr, "bottom_dock");
+    let bottom_dock_count = if mentions_bottom_dock {
+        count_bottom_docks(&tree1)
+    } else {
+        0
+    };
+    let mentions_focus_chain = rhai_mentions(&render_expr, "focus_chain");
+    let any_nonempty = providers1.iter().any(|p| p.rows_snapshot_len > 0);
+
+    // vfn12: provider identity stability within one pass — group by
+    // (template, rows) and require a single cache_identity per group.
+    let mut sites_per_group: HashMap<(String, usize), usize> = HashMap::new();
+    let mut ids_per_group: HashMap<(String, usize), HashSet<u64>> = HashMap::new();
+    for p in &providers1 {
+        let key = (p.item_template_debug.clone(), p.rows_snapshot_len);
+        *sites_per_group.entry(key.clone()).or_default() += 1;
+        ids_per_group
+            .entry(key)
+            .or_default()
+            .insert(p.cache_identity);
+    }
+    let identity_instability = ids_per_group.iter().find_map(|(key, ids)| {
+        (ids.len() > 1).then(|| {
+            let sites = sites_per_group.get(key).copied().unwrap_or(0);
+            format!(
+                "template={} rows={} → {} distinct cache_identities across {sites} call sites",
+                key.0,
+                key.1,
+                ids.len(),
+            )
+        })
+    });
+
+    // vfn13: cache identity flicker across re-interpret. A pass-2 panic leaves
+    // flicker unmeasured (0) rather than failing the report.
+    let re2 = render_expr.clone();
+    let dr2 = data_rows.clone();
+    let svc2 = services.clone();
+    let tree2 = tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            holon_frontend::interpret_pure(&re2, &dr2, &*svc2)
+        }))
+        .ok()
+    })
+    .await
+    .expect("spawn_blocking panicked");
+    let flicker_count = match tree2 {
+        Some(tree2) => {
+            let providers2 = collect_providers(&tree2);
+            let ids1: HashSet<u64> = providers1.iter().map(|p| p.cache_identity).collect();
+            let ids2: HashSet<u64> = providers2.iter().map(|p| p.cache_identity).collect();
+            ids1.difference(&ids2).count()
+        }
+        None => 0,
+    };
+
+    Some(ProviderStabilityReport {
+        mentions_bottom_dock,
+        bottom_dock_count,
+        mentions_focus_chain,
+        total_providers,
+        any_nonempty,
+        identity_instability,
+        flicker_count,
+    })
 }
 
 #[async_trait::async_trait(?Send)]

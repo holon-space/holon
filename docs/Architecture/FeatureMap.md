@@ -287,8 +287,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `cooklang-read-only-split-block-refusal`
 - `cooklang-read-only-write-refusal-any-op`
 - `deletebackward-sql-reads-budget`
-- `drawer-open-matches-ref`
-- `drawer-open-matches-ref-reverse`
 - `hand-authored-cap-timeout`
 - `integration-toggle-load`
 - `iroh-nat-traversal-address-set`

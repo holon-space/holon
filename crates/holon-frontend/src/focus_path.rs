@@ -104,6 +104,48 @@ pub fn find_node_by_id(
     }
 }
 
+/// The `DrawerMode` the resolved tree renders `drawer_block_id`'s drawer with,
+/// or `None` when that block renders no `drawer` node.
+///
+/// The RENDERED mode is the one production's toggle reads: GPUI's
+/// `finalize_sidebar_resize` flips against the mode of the drawer node it hit.
+/// A layout can render a different mode per breakpoint — the default layout's
+/// `if_space` renders both sidebars `overlay` on its mobile branch — so a
+/// static per-sidebar table is not the rendered truth.
+pub fn rendered_drawer_mode(
+    root: &crate::view_model::ViewModel,
+    drawer_block_id: &str,
+) -> Option<crate::view_model::DrawerMode> {
+    let mut found = None;
+    walk_drawers(root, &mut |block_id, mode| {
+        if found.is_none() && block_id == drawer_block_id {
+            found = Some(mode);
+        }
+    });
+    found
+}
+
+/// Every `drawer` node's `block_id` in `root` — the census a miss message
+/// names, so "no drawer for X" never reads the same as "the layout resolved to
+/// a branch that renders other drawers".
+pub fn rendered_drawer_ids(root: &crate::view_model::ViewModel) -> Vec<String> {
+    let mut ids = Vec::new();
+    walk_drawers(root, &mut |block_id, _| ids.push(block_id.to_string()));
+    ids
+}
+
+fn walk_drawers<F: FnMut(&str, crate::view_model::DrawerMode)>(
+    node: &crate::view_model::ViewModel,
+    f: &mut F,
+) {
+    if let crate::view_model::ViewKind::Drawer { block_id, mode, .. } = &node.kind {
+        f(block_id, *mode);
+    }
+    for child in node.children() {
+        walk_drawers(child, f);
+    }
+}
+
 /// DFS walk: visit `node`, then children, collection items, slot. Used by
 /// `UserDriver::drop_entity` to scan for `draggable` / `drop_zone` widgets
 /// across the rendered tree, including across the LiveBlock slot boundary.

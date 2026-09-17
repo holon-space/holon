@@ -99,8 +99,7 @@ pub(crate) fn finalize_sidebar_resize(
                 services.set_widget_width(&active.block_id, width, true);
             }
         } else {
-            let current = services.drawer_open(&active.block_id, active.mode);
-            services.set_widget_open(&active.block_id, !current);
+            services.toggle_drawer(&active.block_id, active.mode);
         }
         window.refresh();
     }
