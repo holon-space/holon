@@ -291,6 +291,26 @@ async fn render_and_forward(
             forward_data_stream(data_stream, tx, profile_resolver, generation).await;
         }
         Err(e) => {
+            if e.downcast_ref::<crate::api::block_domain::NoBlockRow>()
+                .is_some()
+            {
+                // WARN, not ERROR: a block with no row is a watch STATE, not a
+                // failed render — the watcher discloses it with the same visible
+                // error widget and recovers on its own when a row appears.
+                tracing::warn!(
+                    block_id = %block_id,
+                    "[UiWatcher] render_entity found no block row — nothing to render until one \
+                     appears"
+                );
+                let _ = tx
+                    .send(UiEvent::Structure {
+                        render_expr: error_render_expr(&format!("{e:#}")),
+                        candidates: Vec::new(),
+                        generation,
+                    })
+                    .await;
+                return;
+            }
             let verdict = missing_table_verdict(engine.integration_attribution(), &e);
             if let Some(verdict) = verdict.as_ref().filter(|v| v.is_fully_explained()) {
                 // WARN, not ERROR: every one of these tables belongs to an

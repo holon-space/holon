@@ -23,6 +23,29 @@ pub use holon_api::ROOT_LAYOUT_BLOCK_ID;
 /// reach the panel; the cycle guard in the same CTE covers malformed parentage.
 const MAX_ROOT_SUBTREE_DEPTH: u32 = 20;
 
+/// A watched block has no row in the store.
+///
+/// A STATE a watch can be in, not a failed render: the row may not be projected
+/// yet (a newborn) or may never come back (the block was deleted with its
+/// file). The watcher keeps the visible error widget and recovers on its own
+/// when a row appears, so it must not read as a render failure.
+#[derive(Debug)]
+pub struct NoBlockRow {
+    pub block_id: EntityUri,
+}
+
+impl std::fmt::Display for NoBlockRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "block '{}' has no row in the store — there is nothing to render",
+            self.block_id
+        )
+    }
+}
+
+impl std::error::Error for NoBlockRow {}
+
 // NOTE (bug 2A): `virtual_parent: true` on a collection render is a SENTINEL
 // meaning "parent new blocks under the query's focus root". This is a
 // query-source block path (`render_entity` → `collection_render_from_profile`),
@@ -99,9 +122,9 @@ impl<'a> BlockDomain<'a> {
             // Rendering a leaf for an id with no block row paints nothing, so a
             // stale reference (a deleted block, a region still focused on it)
             // would be indistinguishable from an empty block. Fail loud.
-            anyhow::bail!(
-                "block '{block_id}' has no row in the store — there is nothing to render"
-            );
+            return Err(anyhow::Error::new(NoBlockRow {
+                block_id: block_id.clone(),
+            }));
         };
 
         let query_source = block_info

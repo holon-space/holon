@@ -20,6 +20,10 @@ use holon_api::Value;
 use holon_frontend::reactive::BuilderServices;
 use holon_integration_tests::TestEnvironment;
 use holon_integration_tests::TestEnvironmentBuilder;
+use holon_integration_tests::test_tracing::ProblemKind;
+use holon_integration_tests::test_tracing::SpanCollector;
+use holon_integration_tests::test_tracing::attach_scope_to_runtime;
+use holon_integration_tests::test_tracing::begin_test_scope;
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     Arc::new(
@@ -229,6 +233,133 @@ fn watch_ui_error_recovery_on_nonexistent_block() {
                 "After recovery, render_expr should not be an error"
             );
         }
+    });
+}
+
+/// The common case: `create_block` is awaited, so the newborn's row is in the
+/// store before the watcher's first render, and that render must not be the
+/// missing-row error widget. This pins the WARN-tier path staying out of the
+/// ordinary case, NOT that the create race is impossible — on a row that had
+/// not landed, the same widget would paint.
+#[test]
+fn a_just_created_blocks_first_render_is_not_the_missing_row_widget() {
+    let rt = runtime();
+    rt.block_on(async {
+        let env = TestEnvironmentBuilder::new()
+            .with_org_file(
+                "test.org",
+                "* Placeholder\n:PROPERTIES:\n:ID: placeholder\n:END:\n",
+            )
+            .build(rt.clone())
+            .await
+            .expect("Failed to build environment");
+
+        assert!(
+            env.wait_for_block("placeholder", SYNC_TIMEOUT).await,
+            "placeholder should sync"
+        );
+
+        env.create_block("newborn", "placeholder", "just typed")
+            .await
+            .expect("create newborn");
+
+        // Watch with NO wait for the row: the point is the render that races it.
+        let (first_render_expr, _watch) = env
+            .watch_ui_first_structure(&EntityUri::block("newborn"))
+            .await
+            .expect("watch_ui should return a stream for the newborn");
+
+        if let holon_api::render_types::RenderExpr::FunctionCall { name, .. } = &first_render_expr {
+            assert_ne!(
+                name, "error",
+                "a just-created block rendered the missing-row error widget"
+            );
+        }
+    });
+}
+
+/// A runtime whose worker threads carry this case's observability scope: the
+/// `ui_watcher` logs its render failures from inside a spawned task, so a
+/// thread-local capture would see nothing.
+fn scoped_runtime() -> Arc<tokio::runtime::Runtime> {
+    SpanCollector::global();
+    let scope = begin_test_scope();
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    attach_scope_to_runtime(&mut builder, scope);
+    Arc::new(builder.build().expect("Failed to create runtime"))
+}
+
+/// The ERROR tier of `render_and_forward` needs a positive pin: the
+/// `api::ui_watcher` unit tests exercise the disclosure helpers, never the
+/// dispatch. A render failure that is NOT a missing row — here a query source
+/// reading a table no schema provider registers, which the integration
+/// attribution cannot explain away — is a real failure, so it must reach the
+/// error-capture oracles as well as paint the visible error widget.
+#[test]
+fn a_render_failure_that_is_not_a_missing_row_stays_at_the_error_tier() {
+    let rt = scoped_runtime();
+    rt.block_on(async {
+        let env = TestEnvironmentBuilder::new()
+            .with_org_file(
+                "test.org",
+                concat!(
+                    "* Broken Query\n",
+                    ":PROPERTIES:\n",
+                    ":ID: broken-query\n",
+                    ":END:\n",
+                    "#+begin_src holon_prql\n",
+                    "from missing_table_zzz | select {id}\n",
+                    "#+end_src\n",
+                ),
+            )
+            .build(rt.clone())
+            .await
+            .expect("Failed to build environment");
+
+        assert!(
+            env.wait_for_block("broken-query", SYNC_TIMEOUT).await,
+            "broken-query should sync"
+        );
+
+        let (render_expr, _watch) = env
+            .watch_ui_first_structure(&EntityUri::block("broken-query"))
+            .await
+            .expect("watch_ui should return a stream for a block whose render fails");
+
+        match &render_expr {
+            holon_api::render_types::RenderExpr::FunctionCall { name, .. } => {
+                assert_eq!(
+                    name, "error",
+                    "a failed render must still paint the error widget"
+                );
+            }
+            other => panic!("Expected FunctionCall(error), got {:?}", other),
+        }
+
+        let problems = SpanCollector::global().captured_problems();
+        assert!(
+            problems.iter().any(|p| {
+                p.kind == ProblemKind::ErrorLog
+                    && p.target.contains("ui_watcher")
+                    && p.message.contains("render_entity")
+                    && p.message.contains("broken-query")
+            }),
+            "the failing render must be logged at ERROR by the ui_watcher — that tier is what \
+             `inv-no-observed-errors` reads. Captured: {problems:#?}"
+        );
+
+        let problems = SpanCollector::global().captured_problems();
+        assert!(
+            problems.iter().any(|p| {
+                p.kind == ProblemKind::ErrorLog
+                    && p.target.contains("ui_watcher")
+                    && p.message.contains("render_entity")
+                    && p.message.contains("broken-query")
+            }),
+            "the failing render must be logged at ERROR by the ui_watcher — that tier is what \
+             `inv-no-observed-errors` reads. Captured: {problems:#?}"
+        );
     });
 }
 
