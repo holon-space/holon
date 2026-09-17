@@ -927,6 +927,20 @@ impl TestFixture {
         self.store
             .seed_blocks(self.doc_id.as_str(), blocks.to_vec());
     }
+
+    /// Store a document's `#+ID:` root as a Page row — the row the AUTHORITY
+    /// walk reads (`resolve_authoritative_doc` → the nearest `Page` ancestor).
+    ///
+    /// A fixture doc otherwise lives in `MockDocumentManager` alone, so its
+    /// root never reaches the block store, the walk leaves the store at the
+    /// slug's first ancestor (`PageAncestor::Broken(ChainLeftTheStore)`)
+    /// and the authority reads as UNKNOWN. The integration harness reaches
+    /// the other leg with its real `DocumentManager`.
+    fn seed_authority_page_root(&self, doc_id: &str) {
+        let mut root = Block::new_text(EntityUri::block(doc_id), EntityUri::no_parent(), doc_id);
+        root.set_page(true);
+        self.store.seed_blocks(self.doc_id.as_str(), vec![root]);
+    }
 }
 
 // ============================================================================
@@ -4299,6 +4313,156 @@ mod duplicate_block_slug_tests {
                 raised[0]
             );
         }
+    }
+
+    /// `FIRST`'s `#+ID:` — the doc root `dupblk-shared` is stored under.
+    const SHARED_DOC_ROOT: &str = "0f4a1c22-1111-4c19-9d84-2ac6b0e51137";
+
+    /// The leg that keeps D102.a whole: a slug whose store authority resolves
+    /// to NO document is genuinely contested, so the whole second file is
+    /// refused and the disagreement is raised as exactly one condition.
+    ///
+    /// This fixture's authority really is unknown, and measurably so: the slug
+    /// row IS stored (`parent_id` = the first file's `#+ID:` root) but that
+    /// ROOT is not, so the nearest-`Page` walk leaves the store at the
+    /// slug's first ancestor. Both halves are asserted below, so the day
+    /// the fixture starts storing its own doc root this test fails loudly
+    /// rather than pinning a leg it no longer reaches.
+    #[tokio::test]
+    async fn a_slug_with_no_store_authority_is_refused_whole() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new_with(temp_dir.path(), vec!["First".to_string()], false);
+        let log = Arc::new(RefusalLog::default());
+        fixture.controller = fixture.controller.with_writeback_disclosure(log.clone());
+        fixture.controller.initialize().await.expect("initialize");
+
+        let first = fixture.root_dir.join("First.org");
+        let second = fixture.root_dir.join("Second.org");
+        tokio::fs::write(&first, FIRST).await.unwrap();
+        tokio::fs::write(&second, SECOND).await.unwrap();
+        let _ = fixture.controller.on_file_changed(&first).await.unwrap();
+
+        assert_eq!(
+            fixture
+                .store
+                .get_block_authoritative(&EntityUri::block("dupblk-shared"))
+                .await
+                .unwrap()
+                .map(|b| b.parent_id),
+            Some(EntityUri::block(SHARED_DOC_ROOT)),
+            "premise: the slug must be STORED under the first file's `#+ID:` root"
+        );
+        assert!(
+            fixture
+                .store
+                .get_block_authoritative(&EntityUri::block(SHARED_DOC_ROOT))
+                .await
+                .unwrap()
+                .is_none(),
+            "premise: the root row must be ABSENT, which is what makes the authority unknown"
+        );
+
+        assert_eq!(
+            fixture.controller.on_file_changed(&second).await.unwrap(),
+            IngestOutcome::RefusedWhileClaimed(ClaimedId::BlockSlug(EntityUri::block(
+                "dupblk-shared"
+            ))),
+            "an authority that names no document leaves the two files genuinely contesting the \
+             slug, so the whole-file refusal stands"
+        );
+        assert!(
+            fixture
+                .store
+                .get_block_authoritative(&EntityUri::block("dupblk-second-only"))
+                .await
+                .unwrap()
+                .is_none(),
+            "refusing the file must leave nothing of it in the store"
+        );
+
+        let raised = log.0.lock().unwrap().clone();
+        assert_eq!(
+            raised.len(),
+            1,
+            "the refusal must raise EXACTLY one degraded condition. Raised: {raised:?}"
+        );
+        for needle in ["First.org", "Second.org", "dupblk-shared"] {
+            assert!(
+                raised[0].contains(needle),
+                "the banner must name both files and the slug; '{needle}' is missing from: {}",
+                raised[0]
+            );
+        }
+    }
+
+    /// The OTHER leg of the authority check: when the colliding slug's store
+    /// authority resolves to the document whose own file IS the on-disk
+    /// claimant, the two names agree and the slug is a stale copy rather than a
+    /// contested identity — the second file is ADMITTED minus that block, and
+    /// the stale copy is pruned off it so the vault converges.
+    ///
+    /// One row has to be planted for that: see `seed_authority_page_root` for
+    /// why a unit fixture otherwise only ever reaches the unknown leg.
+    #[tokio::test]
+    async fn a_slug_the_store_routes_to_the_claimant_is_pruned_not_refused() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new_with(temp_dir.path(), vec!["First".to_string()], false);
+        fixture.controller.initialize().await.expect("initialize");
+
+        let first = fixture.root_dir.join("First.org");
+        let second = fixture.root_dir.join("Second.org");
+        tokio::fs::write(&first, FIRST).await.unwrap();
+        tokio::fs::write(&second, SECOND).await.unwrap();
+        let _ = fixture.controller.on_file_changed(&first).await.unwrap();
+        fixture.seed_authority_page_root(SHARED_DOC_ROOT);
+        assert_eq!(
+            fixture
+                .store
+                .get_block_authoritative(&EntityUri::block(SHARED_DOC_ROOT))
+                .await
+                .unwrap()
+                .map(|b| b.is_page()),
+            Some(true),
+            "premise: the root must be a store-resident Page for the authority to resolve"
+        );
+
+        assert_eq!(
+            fixture.controller.on_file_changed(&second).await.unwrap(),
+            IngestOutcome::Ingested,
+            "the store routes the slug to the claimant's own file, so the second file must ingest \
+             and prune the stale copy, not be refused"
+        );
+
+        assert!(
+            fixture
+                .store
+                .get_block_authoritative(&EntityUri::block("dupblk-second-only"))
+                .await
+                .unwrap()
+                .is_some(),
+            "everything the second file OWNS must ingest"
+        );
+        assert_eq!(
+            fixture
+                .store
+                .get_block_authoritative(&EntityUri::block("dupblk-shared"))
+                .await
+                .unwrap()
+                .map(|b| b.parent_id),
+            Some(EntityUri::block(SHARED_DOC_ROOT)),
+            "the slug must stay under its authoritative document, never re-parented"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&first).await.unwrap(),
+            FIRST,
+            "the claimant's bytes must be untouched"
+        );
+        let second_disk = tokio::fs::read_to_string(&second).await.unwrap();
+        assert!(
+            !second_disk.contains("dupblk-shared"),
+            "the stale copy must be pruned from the second file's own write-back so it converges \
+             to its real owner:\n{second_disk}"
+        );
     }
 
     /// The claimant releasing the slug — by an edit, not by leaving disk — must

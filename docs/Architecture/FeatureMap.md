@@ -295,15 +295,12 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `lib-type-chars-home-profile-derived`
 - `loro-backend-change-count`
 - `opentab-sql-reads-budget`
-- `org-stale-cross-doc-not-pruned`
 - `pinblock-lazy-day-page-shell`
 - `proptest-sm-shrink-seen-transitions`
 - `quick-open-pages-section-misses-a-matching-page`
 - `shopping-mapping-cost-slo`
-- `span-region-stale-blocks-not-ingested`
-- `span-split-root-quarantine-not-disclosed`
-- `span-split-root-refusal-not-repeated`
 - `text-undo-manager-load`
+- `toggle-state-sql-read-repeat-budget`
 - `turso-block-query-source-round-trip`
 - `typechars-sql-reads-budget`
 - `vault-scale-main-panel-delivery`

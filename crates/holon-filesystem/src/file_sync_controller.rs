@@ -2110,10 +2110,36 @@ impl FileSyncController {
             .then_some(home_path))
     }
 
-    /// The first parsed block slug another file already declares.
+    /// Whether the write authority already routes `slug` to `claimant`'s own
+    /// document — the store and the disk naming ONE owner.
     ///
-    /// The document's own root is excluded: its identity is the `#+ID:`, which
-    /// the duplicate-document refusal upstream already settled.
+    /// `false` covers both an authority that is absent and one naming a
+    /// DIFFERENT file's document. Either way the two files genuinely contest
+    /// the slug, which is what the whole-file refusal exists for.
+    async fn authority_routes_slug_to_claimant(
+        &self,
+        slug: &EntityUri,
+        claimant: &PathBuf,
+    ) -> Result<bool> {
+        let Some(auth_doc) = self.resolve_authoritative_doc(slug).await? else {
+            return Ok(false);
+        };
+        Ok(self
+            .doc_home
+            .get(&auth_doc)
+            .is_some_and(|home| home.as_path_buf() == claimant))
+    }
+
+    /// The first parsed block slug another file declares that the store's
+    /// authority does not already route to that same file.
+    ///
+    /// When the authority DOES name the claimant's document the slug is a
+    /// stale on-disk copy rather than a contested identity: the
+    /// cross-doc-membership guard skips it and this file's own honest
+    /// re-render prunes it, so refusing the file would strand that copy on
+    /// disk at every boot. The document's own root is excluded: its identity
+    /// is the `#+ID:`, which the duplicate-document refusal upstream already
+    /// settled.
     async fn colliding_block_slug(
         &self,
         blocks: &[Block],
@@ -2124,9 +2150,16 @@ impl FileSyncController {
             if &block.id == doc_root {
                 continue;
             }
-            if let Some(claimant) = self.live_block_claimant_of(&block.id, candidate).await? {
-                return Ok(Some((block.id.clone(), claimant)));
+            let Some(claimant) = self.live_block_claimant_of(&block.id, candidate).await? else {
+                continue;
+            };
+            if self
+                .authority_routes_slug_to_claimant(&block.id, &claimant)
+                .await?
+            {
+                continue;
             }
+            return Ok(Some((block.id.clone(), claimant)));
         }
         Ok(None)
     }
@@ -2782,7 +2815,12 @@ impl FileSyncController {
             if owner == *document_uri || owner == *parsed_doc_id {
                 continue;
             }
-            anyhow::bail!(
+            // Disclosed on EVERY refused re-ingest, not once per file path:
+            // each attempt re-parses the file against a possibly-moved split
+            // root, and a reader who only ever sees the first diagnosis cannot
+            // tell a still-refused file from one ingest quietly stopped
+            // reading.
+            let refuse = format!(
                 "split doc root: this file declares anchor {document_uri}, but \
                  the block its ID-less headlines would be created under, {}, \
                  is owned by {owner} — outside that anchor's subtree. The \
@@ -2792,6 +2830,13 @@ impl FileSyncController {
                 mint_parent,
                 minted.len(),
             );
+            tracing::error!(
+                document_uri = %document_uri,
+                mint_parent = %mint_parent,
+                owner = %owner,
+                "[FileSyncController] {refuse}",
+            );
+            anyhow::bail!("{refuse}");
         }
         Ok(())
     }

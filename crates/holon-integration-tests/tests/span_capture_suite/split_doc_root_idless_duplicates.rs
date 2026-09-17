@@ -336,6 +336,100 @@ fn quarantine_is_stable_across_reingests() {
     });
 }
 
+/// The third `#+ID:`-declaring file: it claims `Fix bugs` while the store
+/// routes that id to the CHAIN's document.
+const THIRD_PATH: &str = "Projects/Third.org";
+const THIRD_DOC: &str = "88888888-8888-4888-8888-888888888888";
+const THIRD_HEADLINE: &str = "Third file own headline";
+
+fn third_org() -> String {
+    format!(
+        "#+ID: {THIRD_DOC}\n#+TITLE: Third\n\n\
+         * {THIRD_HEADLINE}\n:PROPERTIES:\n:ID: third-only\n:END:\n\
+         * Fix bugs\n:PROPERTIES:\n:ID: {FIXBUGS}\n:END:\n"
+    )
+}
+
+/// The whole-file refusal is for a CONTESTED slug, never for the stale copy of
+/// one the store already routes elsewhere.
+///
+/// `write_idless` leaves the page file still claiming `Fix bugs` on disk (its
+/// refusal skipped the write-back that would have pruned it) while the store
+/// routes that id to the CHAIN's document, so the two names disagree and the
+/// identity is genuinely in dispute. A further file claiming the same id must
+/// therefore be refused WHOLE, with nothing of it reaching the store.
+#[test]
+fn disputed_slug_is_refused_whole() {
+    let rt = runtime();
+    rt.block_on(async {
+        let env = split_root_env(rt.clone()).await;
+        write_idless(&env, "contested claim").await;
+
+        // Premise, both halves: the claim is on disk AND the store routes the
+        // id elsewhere. Either half alone is not a dispute.
+        let page_before = env
+            .org_fs
+            .read_to_string(&env.org_file_path(PAGE_PATH))
+            .await
+            .expect("read page file");
+        assert!(
+            page_before.contains(FIXBUGS),
+            "precondition: the page file must still CLAIM the id on disk:\n{page_before}"
+        );
+        assert_eq!(
+            parent_of_id(&env, FIXBUGS).await,
+            format!("block:{PPU_INLINE}"),
+            "precondition: the store must route the id to the CHAIN's document, not to the \
+             page file claiming it"
+        );
+
+        let third_path = env.org_file_path(THIRD_PATH);
+        FileSystem::write(env.org_fs.as_ref(), &third_path, third_org().as_bytes())
+            .await
+            .expect("write Third.org");
+        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        tokio::time::sleep(SETTLE).await;
+
+        let ingested = ids_with_content(&env, THIRD_HEADLINE).await;
+        assert!(
+            ingested.is_empty(),
+            "a disputed slug must refuse the WHOLE file — nothing of it may reach the store, \
+             got {ingested:?}"
+        );
+
+        let errors = captured_errors();
+        let refusal = SpanCollector::global()
+            .captured_problems()
+            .iter()
+            .map(ToString::to_string)
+            .find(|p| p.contains("Third.org"))
+            .unwrap_or_else(|| {
+                panic!("no disclosure names the refused file, captured errors:\n{errors}")
+            });
+        for (what, needle) in [
+            ("the disputed id", FIXBUGS),
+            ("the refusal itself", "is NOT ingested"),
+            ("the on-disk claimant", "Prepare personal usage.org"),
+        ] {
+            assert!(
+                refusal.contains(needle),
+                "the refusal must name {what}; '{needle}' is missing from:\n{refusal}"
+            );
+        }
+
+        let page_after = env
+            .org_fs
+            .read_to_string(&env.org_file_path(PAGE_PATH))
+            .await
+            .expect("read page file");
+        assert_eq!(
+            page_after, page_before,
+            "the refusal is about the OTHER file — the on-disk claimant's bytes must be \
+             untouched"
+        );
+    });
+}
+
 /// The discriminating control: a well-formed file — whose anchor owns its own
 /// content — still mints its ID-less headline exactly once and reconciles on
 /// re-ingest. The guard must fire on the split root ONLY.

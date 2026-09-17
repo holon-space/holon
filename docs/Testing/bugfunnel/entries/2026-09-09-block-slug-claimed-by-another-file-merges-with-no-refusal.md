@@ -55,12 +55,24 @@ file", so the merge would pass unflagged.
 
 ## Remedy
 
-FIXED by D102.a (Martin, 2026-09-08): the refusal drops the WHOLE second file,
-walk order decides which file is second, and the existing ingest-refusal bus
+FIXED by D102.a (Martin, 2026-09-08), scope set by D131.b (Martin, 2026-09-17):
+the refusal drops the WHOLE second file, walk order decides which file is
+second, and the existing ingest-refusal bus
 (`WritebackDisclosure::ingest_refused`) carries a typed reason naming both
-paths and the slug. Dropping only the colliding subtree was rejected: it leaves
-a file whose on-disk content no longer matches the store, which the next
-write-back rewrites.
+paths and the slug.
+
+The refusal is scoped to a CONTESTED slug, which is the only case where a merge
+is possible. When the colliding slug's store authority (`block_raw`) already
+routes it to the document whose own file is the on-disk claimant, the two names
+agree and nothing is in dispute: the block is a stale on-disk copy, so the
+ingest skips it and this file's own honest re-render prunes it off disk
+(D131.b). An authority that is ABSENT, or that names a different file's
+document, keeps the whole-file refusal — an unresolvable owner is exactly the
+state in which the merge this entry records would happen. Pinned by
+`crates/holon-integration-tests/tests/span_capture_suite/split_doc_root_idless_duplicates.rs`
+`disputed_slug_is_refused_whole`: the on-disk claimant keeps the slug while the
+store routes it to a THIRD file's document, and the new claimer is refused
+whole with the claimant's bytes untouched.
 
 `block_home: HashMap<EntityUri, CanonicalPath>` mirrors `doc_home` and is
 replaced wholesale per file on every ingest, so a headline that moves between
@@ -79,3 +91,13 @@ without the claimant having to leave disk.
   banner names both paths and the slug.
 - `duplicate_block_slug_tests::the_refusal_lifts_once_the_claimant_drops_the_slug`
   — the claimant renames the slug in place; the refused file then ingests.
+- `crates/holon-integration-tests/tests/span_capture_suite/split_doc_root_idless_duplicates.rs`
+  `disputed_slug_is_refused_whole` (D131.b) — the discriminator: the on-disk
+  claimant still declares the slug while the store routes it to a third file's
+  document, so the whole-file refusal applies and names the refused file, the
+  slug and the real claimant.
+- `region_writeback_loss::writeback_stale_cross_doc_prune` and the `org_suite`
+  twin `writeback_stale_cross_doc_prune::stale_cross_doc_block_is_pruned_not_adopted`
+  — the other side of the discriminator: the authority names the very file that
+  claims the slug on disk, so the file ingests and its own re-render prunes the
+  stale copy.
