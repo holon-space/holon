@@ -59,3 +59,30 @@ wrong.
 Worth noting for whoever takes it: this is not a regression from the column
 floors. The floors change how the table wraps, which changes how far down the
 rows sit, but the panel's fold and its scrolling are independent of them.
+
+## Remedy (2026-09-17, `fix-settings-modal-rows` lane)
+
+The height half is fixed. `modal_overlay` now takes a `ModalHeight` and the
+Settings modal takes `FillAvailable`, so the panel's height comes from the
+window (`h_full`, ceiling 900px) instead of the fixed 720px cap. That cap put
+the panel's lower edge at y=810 in a 900px window, and the content above the
+table — the preferences form, then the Integrations heading and its
+next-launch notice — already reached it: one more preference field (the ICS
+connector's `ics.calendar_url`) left the integrations table with a single row's
+top sliver above the fold, which turned five windowed rungs red. Verified red
+and green at 1512x900 in `frontends/gpui/src/lib.rs`'s `ModalHeight`.
+
+Two corrections this lane measured, worth keeping:
+
+- The panel DOES scroll. The 2026-09-12 refutation
+  (`2026-09-12-only-the-first-settings-integrations-row-can-be-clicked.md`) and
+  `settings_integrations_last_row_toggle_windowed` both hold: a wheel over the
+  panel reaches the bottom rows. A cap therefore costs FIRST-PAINT visibility,
+  not reachability — which is what the five rungs above actually judge.
+- The rungs' visibility oracle clips to the panel, and a row clipped to a
+  sliver still counts as visible. So the table sat at the fold for months with
+  the rungs green and no slack, and nothing said so.
+
+Still owed, exactly as asked below: a rung that scrolls the panel to its end
+and requires the last row to register bounds, at a swept width. Everything the
+windowed fleet judges is the state at boot.

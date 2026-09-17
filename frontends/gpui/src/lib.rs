@@ -382,6 +382,10 @@ fn publish_window_key_bindings(
 /// windowed test locates it by this name.
 pub const SETTINGS_GEAR_ID: &str = "settings-gear";
 
+/// The ceiling a `ModalHeight::FillAvailable` panel never grows past, so a
+/// modal does not become a full-screen column on a tall display.
+const MODAL_FILL_MAX_H: f32 = 900.0;
+
 struct AppModel {
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
@@ -682,10 +686,38 @@ fn interpret_and_render(
     render::builders::render(&rvm, &inner_ctx)
 }
 
+/// How tall a modal's panel may become.
+///
+/// The Settings modal stacks two lists that grow independently — the
+/// preferences form, then the integrations table — and the panel scrolls
+/// (`settings_integrations_last_row_toggle_windowed` pins that the wheel
+/// reaches the bottom rows). A fixed cap therefore does not make the lower
+/// list unreachable; it decides how much of it is there on the FIRST paint,
+/// which is the state a reader opens the modal into and the one the windowed
+/// rungs judge. At 720px the panel's lower edge fell at y=810 in a 900px
+/// window, room for the preferences form, the section's heading and its
+/// next-launch notice, and about one table row — so the ICS connector's one
+/// added preference field (`holon-frontend/src/preferences.rs`, the
+/// `ics.calendar_url` field) left the integrations table with a single row's
+/// top sliver above the fold, and every rung that needs two rows or a click on
+/// the second one went red with no fault reported anywhere.
+///
+/// A surface whose content length is fixed takes `Capped`: it must not stretch
+/// over a tall desktop window merely because the window is tall.
+#[derive(Clone, Copy)]
+enum ModalHeight {
+    /// As tall as the window allows, up to a comfortable ceiling.
+    FillAvailable,
+    /// No taller than this many pixels.
+    Capped(f32),
+}
+
+#[allow(clippy::too_many_arguments)]
 fn modal_overlay(
     id: &str,
     title: &str,
     content: impl IntoElement,
+    height: ModalHeight,
     panel_bg: Hsla,
     border_color: Hsla,
     model: Entity<AppModel>,
@@ -706,66 +738,69 @@ fn modal_overlay(
         // panel is `w_full` capped at 640px, so this padding is what stops it
         // from touching the screen edges on mobile.
         .p(px(16.0))
-        .child(
-            div()
+        .child({
+            let panel = div()
                 .id(SharedString::from(format!("{id}-panel")))
                 .w_full()
-                .max_w(px(640.0))
-                .max_h(px(720.0))
-                .overflow_y_scroll()
-                .bg(panel_bg)
-                .rounded(px(12.0))
-                .border_1()
-                .border_color(border_color)
-                .shadow_lg()
-                .p(px(24.0))
-                .flex_col()
-                .gap_1()
-                .on_mouse_down_out({
-                    let model = model.clone();
-                    move |_, _window, cx| {
-                        model.update(cx, |m, cx| {
-                            *field(m) = false;
-                            cx.notify();
-                        });
-                    }
-                })
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .pb_3()
-                        .mb_2()
-                        .border_b_1()
-                        .border_color(border_color)
-                        .child(
-                            div()
-                                .text_size(px(18.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(title.to_string()),
-                        )
-                        .child({
-                            let model = model.clone();
-                            div()
-                                .id(SharedString::from(format!("{id}-close")))
-                                .cursor_pointer()
-                                .px_2()
-                                .py_1()
-                                .rounded(px(4.0))
-                                .hover(|s| s.bg(gpui::rgba(0xffffff18)))
-                                .child("✕")
-                                .on_click(move |_, _, cx| {
-                                    model.update(cx, |m, cx| {
-                                        *field(m) = false;
-                                        cx.notify();
-                                    });
-                                })
-                        }),
-                )
-                .child(content),
-        )
+                .max_w(px(640.0));
+            match height {
+                ModalHeight::FillAvailable => panel.h_full().max_h(px(MODAL_FILL_MAX_H)),
+                ModalHeight::Capped(h) => panel.max_h(px(h)),
+            }
+            .overflow_y_scroll()
+            .bg(panel_bg)
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(border_color)
+            .shadow_lg()
+            .p(px(24.0))
+            .flex_col()
+            .gap_1()
+            .on_mouse_down_out({
+                let model = model.clone();
+                move |_, _window, cx| {
+                    model.update(cx, |m, cx| {
+                        *field(m) = false;
+                        cx.notify();
+                    });
+                }
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .pb_3()
+                    .mb_2()
+                    .border_b_1()
+                    .border_color(border_color)
+                    .child(
+                        div()
+                            .text_size(px(18.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(title.to_string()),
+                    )
+                    .child({
+                        let model = model.clone();
+                        div()
+                            .id(SharedString::from(format!("{id}-close")))
+                            .cursor_pointer()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(4.0))
+                            .hover(|s| s.bg(gpui::rgba(0xffffff18)))
+                            .child("✕")
+                            .on_click(move |_, _, cx| {
+                                model.update(cx, |m, cx| {
+                                    *field(m) = false;
+                                    cx.notify();
+                                });
+                            })
+                    }),
+            )
+            .child(content)
+        })
 }
 
 // ── HolonApp: GPUI view ────────────────────────────────────────────────────
@@ -1134,6 +1169,9 @@ impl Render for HolonApp {
                 "settings",
                 "Settings",
                 content,
+                // Two independently growing lists: the table must not be
+                // pushed out of the panel by the preferences form above it.
+                ModalHeight::FillAvailable,
                 bg,
                 border_color,
                 self.app_model.clone(),
@@ -1150,6 +1188,7 @@ impl Render for HolonApp {
                 "gallery",
                 "Widget Gallery",
                 content,
+                ModalHeight::Capped(720.0),
                 bg,
                 border_color,
                 self.app_model.clone(),
