@@ -243,6 +243,7 @@ pub mod size_expectation;
 pub mod sticky_accordion;
 pub mod template_placement;
 pub mod theme;
+pub mod theme_arg;
 pub mod tour;
 pub mod user_driver;
 pub mod value_fns;

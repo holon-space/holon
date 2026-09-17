@@ -1,19 +1,14 @@
 //! The one place a theme token becomes a pixel in this frontend.
 //!
-//! Before this, five sites in the GPUI frontend each turned a colour name into
-//! a pixel with its own string match and its own catch-all: `text` knew
-//! `muted`/`warning`/`success` and painted `foreground` for anything else,
-//! `icon` knew a different set and painted `muted_foreground`, and `card` /
-//! `board` accepted hex only and painted grey for a name. So the shipped
-//! `card(accent: "primary")` and `icon(color: "primary")` in
-//! `assets/default/types/block_profile.yaml` painted something the author never
-//! asked for, and nothing said so.
-//!
-//! The match below is exhaustive over [`ThemeToken`], so a token added to the
-//! vocabulary fails to compile here instead of falling into a catch-all. Each
+//! `theme_token_color` is exhaustive over [`ThemeToken`], so a token added to
+//! the vocabulary fails to compile here rather than reaching a catch-all. Each
 //! token maps to the `gpui_component` slot `apply_holon_theme`
 //! (`frontends/gpui/src/lib.rs`) fills from holon's own theme, which is what
 //! makes a layout colour follow the active theme in both modes.
+//!
+//! `theme_token_from_prop` is the paint-side entry: it takes a name that has
+//! already been through [`holon_frontend::theme_arg`] and reports one that has
+//! not, because a paint pass has no error widget to render.
 
 use holon_api::theme_token::ThemeToken;
 
@@ -35,23 +30,18 @@ pub(crate) fn theme_token_color(ctx: &GpuiRenderContext, token: ThemeToken) -> H
     })
 }
 
-/// Parse a colour prop, disclosing a name that reached paint unvalidated.
+/// The token a colour prop names, disclosing one that reached paint
+/// unvalidated.
 ///
-/// A colour name is refused when the layout doc is loaded
-/// (`holon_api::render_dsl`) and again when a builder reads it
-/// (`shadow_builders`), so reaching here with an unknown name means an
-/// expression was built in Rust and never went through either boundary. That is
-/// a bug, and it is reported as one rather than absorbed: the alternative is
-/// what this whole module replaces, where four sites quietly painted a colour
-/// nobody asked for.
+/// A paint pass has no error widget, so the disclosure here is the log and the
+/// body foreground. The conditions that cause it: a colour the layout doc
+/// declared and the parse gate would have refused, or a row value the theme has
+/// no slot for, as [`holon_frontend::theme_arg`] reports it.
 pub(crate) fn theme_token_from_prop(name: &str) -> ThemeToken {
-    match ThemeToken::parse(name) {
+    match holon_frontend::theme_arg::resolve_colour_arg(name) {
         Ok(token) => token,
         Err(e) => {
-            tracing::error!(
-                "{e}; painting the body foreground instead. A colour name should have been \
-                 refused when the expression was built (holon_api::theme_token)."
-            );
+            tracing::error!("{e}; painting the body foreground instead");
             ThemeToken::Foreground
         }
     }

@@ -208,6 +208,18 @@ that risk row is retired rather than mitigated.
   mapping would have made the token `accent` paint the SAME colour as
   `foreground`: the exact conflation this lane removes. No shipped layout used
   `color: "accent"` before 0a migrated the gallery to it.
+- **`accent` and `primary` are two names that production paints as one pixel.**
+  RECORDED, and the recommendation is to keep it that way. The mapping reads two
+  different slots (`ThemeToken::Accent => ThemeColor.accent`, `Primary =>
+  ThemeColor.primary`), and the windowed rung pins that they stay apart. They
+  coincide in production because `apply_holon_theme` fills the `accent` slot from
+  holon's `primary`: that slot is `gpui_component`'s, and it also colours the
+  component library's own chrome, so pointing it elsewhere would restyle buttons,
+  switches and focus rings, not just this render DSL. Separating the two is
+  therefore a THEME change with a component-library blast radius, not a
+  vocabulary change, and it needs its own decision. Until then the vocabulary
+  keeps both names because a layout author may reasonably ask for either, and a
+  theme that separates them will separate them here too.
 - **waterui's mapping reads holon's default dark theme** (`ThemeColors::default_dark()`).
   That frontend wires no live theme, so a token cannot follow the user's choice
   there. Disclosed in its module doc.

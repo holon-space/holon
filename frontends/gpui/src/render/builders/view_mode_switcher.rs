@@ -60,7 +60,19 @@ fn build_switcher_bar(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Opti
                     // ALLOW(ok): see ALLOW(filter_map_ok) above -- same rationale
                     serde_json::from_str::<holon_api::render_types::RenderExpr>(s)
                         .ok()
-                        .map(|expr| (mode_key.to_string(), expr))
+                        .and_then(|expr| {
+                            // A deserialized template has not been through the
+                            // parser's colour gate. A mode whose template is not
+                            // valid is dropped, and said so, rather than
+                            // rendered with a colour nobody asked for.
+                            match holon_api::render_dsl::validate_render_expr(&expr) {
+                                Ok(()) => Some((mode_key.to_string(), expr)),
+                                Err(e) => {
+                                    tracing::error!(mode = %mode_key, "{e}");
+                                    None
+                                }
+                            }
+                        })
                 } else {
                     None
                 }

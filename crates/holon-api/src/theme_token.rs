@@ -1,16 +1,11 @@
 //! The colour names a layout may ask a widget for.
 //!
-//! A colour in the render DSL is a plain string argument, and nothing validated
-//! it: `text(..., #{color: "corrigendum"})` built a widget carrying the
-//! nonsense name, and the frontend's colour resolver only met it inside the
-//! frame loop, where the only options are a panic or a silent substitution.
-//! Every frontend had grown its own substitution table, and the tables
-//! disagreed: `text(color: "primary")` painted the body foreground,
-//! `card(accent: "primary")` painted grey, and neither said so.
-//!
-//! So the vocabulary is parsed here, at the config boundary, where a typo is a
-//! refusal rather than a substitution. Each frontend keeps ONE token-to-pixel
-//! function over this table instead of its own string match.
+//! A colour in the render DSL is a plain string argument, and this is the one
+//! vocabulary such a name is checked against. A literal is refused where the
+//! layout doc is parsed (`render_dsl::validate_render_expr`); a value a row
+//! supplies is refused where it is resolved (`holon_frontend::theme_arg`).
+//! Each frontend then resolves a token through ONE token-to-pixel function, so
+//! one name cannot come out as two colours in two places.
 //!
 //! The set is deliberately small and semantic. It holds no hex arm and no CSS
 //! colour names: a layout that wants `#3B82F6` wants a colour that does not
@@ -25,17 +20,15 @@ use std::fmt;
 
 /// Every colour a layout may name, as the names themselves, sorted.
 ///
-/// The names live twice on purpose: once here (the string table the parser and
-/// its refusal message use) and once in [`ThemeToken::as_str`]. A test asserts
-/// the two agree, so a token added to only one of them fails loudly.
+/// These are the strings a layout writes; [`ThemeToken`] is the same list as a
+/// type, and a test asserts the two agree, so a token added to only one of them
+/// fails loudly.
 ///
-/// `muted` and `secondary` are both here, and every frontend resolves the two
-/// to one pixel. They are two names rather than one because the shipped
-/// resolvers already accepted both, and because parsing must be a pure
-/// accept-or-refuse: a parser that REWROTE `secondary` into `muted` would make
-/// the props derived from one expression disagree with each other, since a
-/// props-only widget's fast path re-reads this name from the expression
-/// without going through the validator.
+/// `muted` and `secondary` are separate entries that every frontend resolves to
+/// one pixel. They stay separate because parsing is accept-or-refuse and never
+/// rewrites: a parser that turned `secondary` into `muted` would give one
+/// expression two props that disagree, since a props-only widget's fast path
+/// re-reads this name without going through the parser.
 pub const THEME_TOKENS: &[&str] = &[
     "accent",
     "error",

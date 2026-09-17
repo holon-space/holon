@@ -103,12 +103,22 @@ fn extract_lines(card_vm: &ReactiveViewModel) -> Vec<CardLine> {
                 content,
                 bold: child.prop_bool("bold").unwrap_or(false),
                 size: child.prop_f64("size").unwrap_or(14.0) as f32,
-                // `muted` reads as secondary text, so the two tokens that mean
-                // secondary text both qualify. Read through the vocabulary
-                // rather than by comparing raw strings, so a future token that
-                // resolves to the same colour cannot silently stop qualifying.
-                muted: ThemeToken::parse(child.prop_str("color").as_deref().unwrap_or(""))
-                    .is_ok_and(|token| matches!(token, ThemeToken::Muted | ThemeToken::Secondary)),
+                // `muted` reads as secondary text, and exactly two of the
+                // vocabulary's names mean secondary text. The name goes through
+                // the same seam every other colour site uses, so a name outside
+                // the vocabulary is reported here rather than treated as
+                // primary text in silence.
+                muted: match child.prop_str("color").as_deref().filter(|c| !c.is_empty()) {
+                    None => false,
+                    Some(name) => match holon_frontend::theme_arg::resolve_colour_arg(name) {
+                        Ok(ThemeToken::Muted) | Ok(ThemeToken::Secondary) => true,
+                        Ok(_) => false,
+                        Err(e) => {
+                            tracing::error!(target: "holon.board", "{e}");
+                            false
+                        }
+                    },
+                },
             })
         })
         .collect()

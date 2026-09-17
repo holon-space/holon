@@ -9,16 +9,6 @@ use holon_frontend::view_model::StateToggleBinding;
 use super::prelude::*;
 use super::switch_track;
 
-fn semantic_color(ctx: &GpuiRenderContext, name: &str) -> Hsla {
-    match name {
-        "muted" => tc(ctx, |t| t.muted_foreground),
-        "warning" => tc(ctx, |t| t.warning),
-        "info" => tc(ctx, |t| t.accent),
-        "success" => tc(ctx, |t| t.success),
-        _ => tc(ctx, |t| t.foreground),
-    }
-}
-
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let field = node
         .prop_str("field")
@@ -64,7 +54,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     };
 
     let (_label, semantic) = state_display(&current);
-    let color = semantic_color(ctx, semantic);
+    let color = super::theme::theme_token_color(ctx, semantic);
     let icon = state_icon(&current);
 
     let Some(intent) = intent else {
@@ -139,5 +129,43 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                     .child(icon)
                     .on_mouse_down(gpui::MouseButton::Left, click),
             ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use holon_api::theme_token::ThemeToken;
+
+    use super::*;
+
+    /// The colour the vocabulary names for a state is the colour this builder
+    /// paints. It holds by construction now that the vocabulary yields a
+    /// [`ThemeToken`]; what this pins is that the declared mapping is the one a
+    /// reader expects, including for the two states that were drawn as plain
+    /// body text: `CANCELLED` and any keyword outside the built-in list.
+    ///
+    /// Regression: bugfunnel
+    /// `2026-09-17-task-state-toggle-paints-body-foreground-for-unknown-keyword`.
+    #[test]
+    fn the_declared_colour_is_the_painted_colour() {
+        for (state, expected) in [
+            ("", ThemeToken::Muted),
+            ("TODO", ThemeToken::Muted),
+            ("DOING", ThemeToken::Warning),
+            ("DONE", ThemeToken::Success),
+            ("CANCELLED", ThemeToken::Error),
+            ("LATER", ThemeToken::Muted),
+            ("NOW", ThemeToken::Warning),
+            // A foreign vault's own keyword. No arm names it, and it must still
+            // be a colour rather than a fall-through.
+            ("WAITING", ThemeToken::Primary),
+            ("BLOCKED", ThemeToken::Primary),
+        ] {
+            let (_, token) = state_display(state);
+            assert_eq!(
+                token, expected,
+                "state {state:?} must be drawn in {expected:?}"
+            );
+        }
     }
 }

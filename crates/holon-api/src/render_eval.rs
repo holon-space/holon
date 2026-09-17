@@ -7,6 +7,7 @@ use crate::interp_value::ReactiveRowProvider;
 use crate::render_types::Arg;
 use crate::render_types::BinaryOperator;
 use crate::render_types::RenderExpr;
+use crate::theme_token::ThemeToken;
 use crate::types::TaskState;
 use crate::widget_spec::DataRow;
 
@@ -208,20 +209,31 @@ pub fn state_icon(state: &str) -> &'static str {
     }
 }
 
-pub fn state_display(state: &str) -> (&str, &str) {
+/// The glyph and the theme colour a task state is drawn with.
+///
+/// The colour is a [`ThemeToken`], not a name, so it is total by construction:
+/// a caller cannot receive a colour string that no resolver knows, which is how
+/// `CANCELLED` and every keyword outside the built-in list came to be drawn in
+/// body foreground after the vocabulary gave them `error` and `primary`.
+///
+/// A keyword outside the list takes `Primary`, which is this vocabulary's
+/// declared default for a state it does not recognise. That is a decision, not
+/// an absence: a foreign vault's own keyword is a state, and drawing it as one
+/// says more than drawing it as unremarkable text.
+pub fn state_display(state: &str) -> (&str, ThemeToken) {
     match state {
-        "" => ("", "muted"),
-        "TODO" => ("TODO", "muted"),
-        "DOING" => ("DOING", "warning"),
-        "DONE" => ("[x]", "success"),
-        "CANCELLED" => ("CANCELLED", "error"),
+        "" => ("", ThemeToken::Muted),
+        "TODO" => ("TODO", ThemeToken::Muted),
+        "DOING" => ("DOING", ThemeToken::Warning),
+        "DONE" => ("[x]", ThemeToken::Success),
+        "CANCELLED" => ("CANCELLED", ThemeToken::Error),
         // LogSeq dialect (ForeignVaultCompat §4): LATER is TODO-family
         // (not started), NOW is DOING-family (in progress). Rendered with
-        // the same accents as their native counterparts; the label keeps
+        // the same colours as their native counterparts; the label keeps
         // the source keyword for round-trip fidelity.
-        "LATER" => ("LATER", "muted"),
-        "NOW" => ("NOW", "warning"),
-        _ => (state, "primary"),
+        "LATER" => ("LATER", ThemeToken::Muted),
+        "NOW" => ("NOW", ThemeToken::Warning),
+        _ => (state, ThemeToken::Primary),
     }
 }
 
@@ -1453,11 +1465,11 @@ mod tests {
 
     #[test]
     fn test_state_display() {
-        assert_eq!(state_display("TODO"), ("TODO", "muted"));
-        assert_eq!(state_display("DOING"), ("DOING", "warning"));
-        assert_eq!(state_display("DONE"), ("[x]", "success"));
-        assert_eq!(state_display(""), ("", "muted"));
-        assert_eq!(state_display("CUSTOM"), ("CUSTOM", "primary"));
+        assert_eq!(state_display("TODO"), ("TODO", ThemeToken::Muted));
+        assert_eq!(state_display("DOING"), ("DOING", ThemeToken::Warning));
+        assert_eq!(state_display("DONE"), ("[x]", ThemeToken::Success));
+        assert_eq!(state_display(""), ("", ThemeToken::Muted));
+        assert_eq!(state_display("CUSTOM"), ("CUSTOM", ThemeToken::Primary));
     }
 
     // ── F1 regression — unknown FunctionCall returns Value::Null ───────
@@ -1729,12 +1741,12 @@ mod mutation_gap_tests {
         assert_eq!(state_icon("DONE"), "✓");
         assert_eq!(state_icon("TODO"), "○");
 
-        assert_eq!(state_display(""), ("", "muted"));
-        assert_eq!(state_display("TODO"), ("TODO", "muted"));
-        assert_eq!(state_display("DOING"), ("DOING", "warning"));
-        assert_eq!(state_display("DONE"), ("[x]", "success"));
-        assert_eq!(state_display("CANCELLED"), ("CANCELLED", "error"));
-        assert_eq!(state_display("WAITING"), ("WAITING", "primary"));
+        assert_eq!(state_display(""), ("", ThemeToken::Muted));
+        assert_eq!(state_display("TODO"), ("TODO", ThemeToken::Muted));
+        assert_eq!(state_display("DOING"), ("DOING", ThemeToken::Warning));
+        assert_eq!(state_display("DONE"), ("[x]", ThemeToken::Success));
+        assert_eq!(state_display("CANCELLED"), ("CANCELLED", ThemeToken::Error));
+        assert_eq!(state_display("WAITING"), ("WAITING", ThemeToken::Primary));
     }
 
     #[test]

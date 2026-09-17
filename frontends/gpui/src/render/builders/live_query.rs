@@ -183,7 +183,15 @@ fn render_placed(
 
     if let (Some(source), Some(re_str)) = (node.prop_str("source"), render_expr_str.as_ref()) {
         match serde_json::from_str::<holon_api::render_types::RenderExpr>(re_str) {
-            Ok(re) => return render_named(node, ctx, placement, source, re),
+            Ok(re) => {
+                if let Err(e) = holon_api::render_dsl::validate_render_expr(&re) {
+                    return error_element(
+                        &format!("live_query(source: {source}): render_expr is not valid: {e}"),
+                        ctx,
+                    );
+                }
+                return render_named(node, ctx, placement, source, re);
+            }
             Err(e) => {
                 return error_element(
                     &format!("live_query(source: {source}): unreadable render_expr: {e}"),
@@ -198,6 +206,11 @@ fn render_placed(
             .parse()
             .expect("live_query node carries an invalid query_lang prop");
         if let Ok(re) = serde_json::from_str::<holon_api::render_types::RenderExpr>(&re_str) {
+            // A deserialized expression has not been through the parser's colour
+            // gate, so it is validated here rather than trusted.
+            if let Err(e) = holon_api::render_dsl::validate_render_expr(&re) {
+                return error_element(&format!("live_query: render_expr is not valid: {e}"), ctx);
+            }
             let key = super::live_query_key(&query, query_context_id.as_deref());
             let cache_key = crate::entity_view_registry::CacheKey::LiveQuery(key);
 

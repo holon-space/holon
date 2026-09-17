@@ -186,3 +186,28 @@ fn distinct_tokens_paint_distinct_colours_in_one_frame(cx: &mut TestAppContext) 
 // Installs the windowed capturing tracing subscriber before this binary's
 // first line of test code (see tests/test_init/mod.rs).
 mod test_init;
+
+/// `accent` and `primary` read two DIFFERENT theme slots, and this pins that
+/// they stay that way.
+///
+/// They can still paint the same pixel, and in production they do: the windowed
+/// fixture runs on `gpui_component`'s default theme, while production calls
+/// `apply_holon_theme` (`frontends/gpui/src/lib.rs`), which fills the `accent`
+/// slot from holon's `primary` because that slot also colours the component
+/// library's own chrome. Two names resolving to one pixel is therefore a
+/// property of the THEME, not of the mapping: what this rung guards is that the
+/// mapping keeps reading the two slots apart, so a theme that separates them
+/// separates them here too.
+#[gpui::test]
+fn accent_and_primary_read_two_different_slots(cx: &mut TestAppContext) {
+    let tokens = [ThemeToken::Accent, ThemeToken::Primary];
+    let snap = render_fixture_sized(cx, frame(&tokens), size(px(900.0), px(600.0)));
+
+    assert_ne!(
+        painted_fg(&snap, "accent"),
+        painted_fg(&snap, "primary"),
+        "`accent` and `primary` painted one colour, so one of them is reading the other's slot. \
+         In this theme the two slots differ; a mapping that conflates them is the defect this \
+         rung exists to catch."
+    );
+}

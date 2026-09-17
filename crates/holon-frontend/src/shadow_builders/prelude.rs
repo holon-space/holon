@@ -200,18 +200,17 @@ pub(crate) fn content_from_row(
 
 /// Parse a colour prop against the shared theme vocabulary, or name the fault.
 ///
-/// A colour is a string argument, and every frontend used to resolve it inside
-/// the frame loop, where the only options are a panic or a silent substitution.
-/// Validating here means an unknown name becomes an error widget when the
-/// layout doc is built, which is the same moment a bad `live_query(source:
-/// ...)` is refused and the same moment `inv-frontend-no-error-widgets` can see
-/// it.
+/// An unknown name becomes an error widget when the layout doc is built, the
+/// same moment a bad `live_query(source: ...)` is refused and the same moment
+/// `inv-frontend-no-error-widgets` can see it. The vocabulary itself lives in
+/// [`crate::theme_arg`], so every frontend answers "is this a colour?" the same
+/// way.
 ///
 /// An EMPTY value means "unset" and is not a colour: `card` and `icon` default
 /// their colour parameter to `""`, so refusing it would break every call site
 /// that never asked for a colour.
 pub(crate) fn theme_token_prop(builder: &str, prop: &str, raw: &str) -> Result<String, String> {
-    holon_api::theme_token::ThemeToken::parse(raw)
+    crate::theme_arg::resolve_colour_arg(raw)
         .map(|token| token.as_str().to_string())
         .map_err(|e| format!("{builder}(#{{{prop}: {raw:?}}}): {e}"))
 }

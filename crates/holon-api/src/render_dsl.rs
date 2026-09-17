@@ -226,6 +226,16 @@ fn parse_render_dsl_with_engine(source: &str, engine: &RhaiEngine) -> Result<Ren
     Ok(expr)
 }
 
+/// Refuse a colour the theme does not define, for an expression that did not
+/// come through the parser.
+///
+/// `parse_render_dsl` runs this on every doc it loads. A `RenderExpr` that was
+/// deserialized from a prop (`render_expr`, `tmpl_*`) bypasses that path, so a
+/// producer of such a prop must call this itself.
+pub fn validate_render_expr(expr: &RenderExpr) -> Result<()> {
+    validate_colour_args(expr)
+}
+
 /// Argument names whose value names a theme colour.
 const COLOUR_ARGS: &[&str] = &["color", "accent"];
 

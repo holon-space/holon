@@ -16,7 +16,15 @@ pub fn build(ba: BA) -> AnyView {
 
     let size = ba.args.get_f64("size").unwrap_or(14.0) as f32;
     let bold = ba.args.get_bool("bold").unwrap_or(false);
-    let color = super::theme::optional_colour_prop(ba.args.get_string("color"));
+    let color = match super::theme::optional_colour_prop(ba.args.get_string("color")) {
+        Ok(colour) => colour,
+        // A colour value the theme has no slot for. This frontend's convention
+        // for a refused widget is the message in red (see `builders/mod.rs`),
+        // so the value is shown rather than dropped and painted over.
+        Err(msg) => {
+            return AnyView::new(text(msg).size(12.0).foreground(Color::srgb_hex("#FF0000")));
+        }
+    };
 
     let t = text(content).size(size);
     match (bold, color) {
