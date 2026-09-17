@@ -23,14 +23,16 @@
 //!
 //! The kill condition is "more than 10 operations". This module ships with:
 //!   - `QueryAst` (single struct; FROM + filters + sort + limit)
-//!   - `Predicate` enum with 7 variants: `PropEq`, `PropNe`, `Membership`,
-//!     `EdgeExists`, `And`, `Or`, `Not`
+//!   - `Predicate` enum with 8 variants: `PropEq`, `PropNe`, `Membership`,
+//!     `EdgeExists`, `AllRequiresDone`, `And`, `Or`, `Not`
 //!   - `EdgeRef`, `SortKey` (helpers, not ops)
 //!
 //! That's enough to express the canonical now-query target verbatim.
 
 use std::collections::HashMap;
 
+use holon::api::block_domain::REQUIRES_DONE_HAVING_SQL;
+use holon::api::block_domain::REQUIRES_DONE_JOINS_SQL;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
@@ -123,6 +125,15 @@ pub enum Predicate {
         edge: EdgeRef,
         inner: Option<Box<Predicate>>,
     },
+    /// Every `:REQUIRES:` target of this block resolves to a DONE block — the
+    /// now-query's eligibility contract.
+    ///
+    /// Distinct from `EdgeExists{negated:true}` because the quantification is
+    /// universal, and because an UNRESOLVABLE target (a `block_requires` row
+    /// whose `required_id` has no `block`) must BLOCK. Compiled as the grouped
+    /// aggregate in [`holon::api::block_domain::REQUIRES_DONE_HAVING_SQL`],
+    /// where a dangling requirement leaves the DONE count short of the total.
+    AllRequiresDone,
     And(Vec<Predicate>),
     Or(Vec<Predicate>),
     Not(Box<Predicate>),
@@ -186,12 +197,97 @@ fn sql_value(v: &Value) -> String {
     }
 }
 
+/// `<alias>.properties` with a missing edge target widened to `'{}'` (the
+/// `{}` is doubled so it reaches SQL as a literal). A missing target makes
+/// `bl.properties` NULL, and `json_extract(NULL, '$.<key>')` is then NULL —
+/// so the outer `COALESCE(..., '')` in `PropNe` would see NULL and `NULL <> v`
+/// is NULL, i.e. *false*. The `NOT EXISTS` around it would then read the
+/// dangling requirement as DONE. Widening to `{}` makes the extraction yield a
+/// genuine NULL-in-JSON, which the outer `COALESCE` turns into `''` and reads
+/// as not-DONE. The outer alias can never be unmatched, so it stays bare.
+fn alias_properties(alias: &Alias) -> String {
+    match alias {
+        Alias::Outer => format!("{}.properties", alias.sql_outer()),
+        Alias::EdgeTarget => format!("COALESCE({}.properties, '{{}}')", alias.sql_outer()),
+    }
+}
+
 fn json_extract(alias: &Alias, key: &str) -> String {
-    format!(
-        "json_extract({}.properties, '$.{}')",
-        alias.sql_outer(),
-        key
-    )
+    format!("json_extract({}, '$.{}')", alias_properties(alias), key)
+}
+
+/// Every predicate nested directly inside `pred`, each paired with the `path`
+/// segment that reaches it.
+///
+/// This is the ONE place [`Predicate`]'s container variants are enumerated. The
+/// two walkers below are folds over it, so a container that holds a predicate
+/// cannot be visible to one and hidden from the other — which is exactly how
+/// `EdgeExists` let a misplaced `AllRequiresDone` reach the compiler.
+fn child_predicates(pred: &Predicate) -> Vec<(String, &Predicate)> {
+    match pred {
+        Predicate::And(preds) => preds
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (format!("And[{i}]"), p))
+            .collect(),
+        Predicate::Or(preds) => preds
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (format!("Or[{i}]"), p))
+            .collect(),
+        Predicate::Not(inner) => vec![("Not".to_string(), inner)],
+        Predicate::EdgeExists { inner, .. } => inner
+            .as_deref()
+            .map(|p| vec![("EdgeExists".to_string(), p)])
+            .unwrap_or_default(),
+        // Leaves: listed exhaustively so a new variant must be classified here.
+        Predicate::PropEq { .. }
+        | Predicate::PropNe { .. }
+        | Predicate::Membership { .. }
+        | Predicate::AllRequiresDone => Vec::new(),
+    }
+}
+
+/// Does this filter contain `AllRequiresDone` (at any nesting depth)?
+fn collect_all_requires_done(pred: Option<&Predicate>) -> bool {
+    match pred {
+        None => false,
+        Some(Predicate::AllRequiresDone) => true,
+        Some(p) => child_predicates(p)
+            .into_iter()
+            .any(|(_, child)| collect_all_requires_done(Some(child))),
+    }
+}
+
+/// The path to an `AllRequiresDone` that is NOT a direct conjunct of the
+/// top-level `And`, or `None` when every occurrence sits in that one position.
+///
+/// The path reads root-first and indexes the children it descends through, e.g.
+/// `filter → Or[1] → Not`, so the error names where the predicate actually is.
+fn misplaced_all_requires_done(filter: Option<&Predicate>) -> Option<String> {
+    match filter? {
+        // The whole filter IS the aggregate: admissible, but renders no WHERE.
+        Predicate::AllRequiresDone => None,
+        Predicate::And(preds) => preds
+            .iter()
+            .enumerate()
+            .filter(|(_, pred)| !matches!(pred, Predicate::AllRequiresDone))
+            .find_map(|(i, pred)| nested_all_requires_done(pred, &format!("filter → And[{i}]"))),
+        other => nested_all_requires_done(other, "filter"),
+    }
+}
+
+/// The path to an `AllRequiresDone` below `pred`, which is by construction not
+/// a direct conjunct of the top-level `And`.
+fn nested_all_requires_done(pred: &Predicate, path: &str) -> Option<String> {
+    if matches!(pred, Predicate::AllRequiresDone) {
+        return Some(path.to_string());
+    }
+    child_predicates(pred)
+        .into_iter()
+        .find_map(|(segment, child)| {
+            nested_all_requires_done(child, &format!("{path} → {segment}"))
+        })
 }
 
 fn pred_to_sql(pred: &Predicate) -> String {
@@ -223,20 +319,27 @@ fn pred_to_sql(pred: &Predicate) -> String {
                  for Requires"
             ),
         },
+        // Handled by the grouped FROM/HAVING emission, not by a WHERE clause.
+        Predicate::AllRequiresDone => String::new(),
         Predicate::EdgeExists {
             negated,
             edge,
             inner,
         } => {
+            let inner_clause = match inner {
+                Some(p) => format!(" AND {}", pred_to_sql(p)),
+                None => String::new(),
+            };
             let body = match edge {
                 EdgeRef::Requires => {
-                    let where_clause = match inner {
-                        Some(p) => format!(" AND {}", pred_to_sql(p)),
-                        None => String::new(),
-                    };
+                    // The universal form lives in `AllRequiresDone` (a HAVING
+                    // over the grouped join); this existential shape would need
+                    // a correlated `LEFT JOIN` that this engine answers wrongly
+                    // (the unmatched row escapes the correlation, so every row
+                    // matches).
                     format!(
                         "SELECT 1 FROM block_requires br JOIN block bl ON bl.id = br.required_id \
-                         WHERE br.block_id = b.id{where_clause}"
+                         WHERE br.block_id = b.id{inner_clause}"
                     )
                 }
                 EdgeRef::Tag(_) => {
@@ -279,25 +382,62 @@ impl QueryAst {
     /// what matters at runtime — `mcp__holon-direct__compile_query`
     /// accepts either form. The string here is structured to match the
     /// canonical example in the plan verbatim (modulo whitespace).
-    pub fn compile_to_sql(&self) -> String {
+    ///
+    /// # Errors
+    /// `AllRequiresDone` renders no fragment of its own (its aggregate lives in
+    /// the HAVING), so under `Or`/`Not`/`EdgeExists.inner` it would leave a
+    /// hole in the surrounding expression and produce SQL that cannot
+    /// parse. Only the positions that compile to valid SQL are accepted.
+    pub fn compile_to_sql(&self) -> anyhow::Result<String> {
         assert_eq!(
             self.entity, "block",
             "compile_to_sql: only `block` entity supported today"
         );
+        if let Some(position) = misplaced_all_requires_done(self.filter.as_ref()) {
+            anyhow::bail!(
+                "Predicate::AllRequiresDone is a per-block aggregate and compiles to a HAVING, so \
+                 it is only expressible as a conjunct of the top-level And — found it at \
+                 `{position}`. Under Or/Not/EdgeExists.inner it renders an empty fragment \
+                 and the query cannot parse. Move it up into the top-level And."
+            );
+        }
         let mut sql = String::from("SELECT b.*\nFROM block b");
+
+        // `AllRequiresDone` quantifies over the block's requirement rows, which
+        // a WHERE clause cannot express: it is a per-block aggregate. It
+        // therefore joins the junctions into the FROM and asserts the
+        // aggregate in a HAVING.
+        let universal = collect_all_requires_done(self.filter.as_ref());
+        if universal {
+            sql.push('\n');
+            sql.push_str(REQUIRES_DONE_JOINS_SQL);
+        }
 
         if let Some(filter) = &self.filter {
             // The top-level And renders without outer parens to match the
             // canonical form exactly (avoids a bracketed wrapper).
             let body = match filter {
                 Predicate::And(preds) => {
-                    let parts: Vec<String> = preds.iter().map(pred_to_sql).collect();
+                    let parts: Vec<String> = preds
+                        .iter()
+                        .map(pred_to_sql)
+                        .filter(|p| !p.is_empty())
+                        .collect();
                     parts.join("\n  AND ")
                 }
                 _ => pred_to_sql(filter),
             };
-            sql.push_str("\nWHERE ");
-            sql.push_str(&body);
+            // An all-aggregate filter renders no conjunct at all; emitting
+            // `WHERE` with nothing after it is the invalid-SQL case this avoids.
+            if !body.is_empty() {
+                sql.push_str("\nWHERE ");
+                sql.push_str(&body);
+            }
+        }
+
+        if universal {
+            sql.push('\n');
+            sql.push_str(REQUIRES_DONE_HAVING_SQL);
         }
 
         if !self.sort.is_empty() {
@@ -309,7 +449,7 @@ impl QueryAst {
         if let Some(n) = self.limit {
             sql.push_str(&format!("\nLIMIT {n}"));
         }
-        sql
+        Ok(sql)
     }
 }
 
@@ -365,9 +505,10 @@ impl<'a> EvalContext<'a> {
     ) -> Option<Value> {
         let target_block = match alias {
             Alias::Outer => outer,
-            Alias::EdgeTarget => {
-                target.expect("EdgeTarget alias used outside an EdgeExists predicate context")
-            }
+            // `None` is a dangling edge target: the `block_requires` row points
+            // at an id with no block, so every property reads NULL — the
+            // SQL-side equivalent of a LEFT JOIN's unmatched right-hand row.
+            Alias::EdgeTarget => target?,
         };
         if key == "id" {
             return Some(Value::String(target_block.id.to_string()));
@@ -398,6 +539,14 @@ impl<'a> EvalContext<'a> {
                     panic!("Membership only valid for Tag; use EdgeExists for Requires")
                 }
             },
+            Predicate::AllRequiresDone => self.required_ids_of(outer).iter().all(|rid| {
+                // An unresolvable requirement is a normal representable
+                // state and it must BLOCK: the contract is that EVERY
+                // `:REQUIRES:` target resolves to a DONE block.
+                self.blocks.get(rid).is_some_and(|b| {
+                    b.properties.get("task_state").and_then(|v| v.as_string()) == Some("DONE")
+                })
+            }),
             Predicate::EdgeExists {
                 negated,
                 edge,
@@ -407,12 +556,16 @@ impl<'a> EvalContext<'a> {
                     EdgeRef::Requires => {
                         let required = self.required_ids_of(outer);
                         required.iter().any(|rid| {
-                            let Some(b) = self.blocks.get(rid) else {
-                                return false;
-                            };
+                            // An unresolvable requirement is a normal
+                            // representable state and it must BLOCK: the org
+                            // contract is that EVERY `:REQUIRES:` target
+                            // resolves to a DONE block. Mirrors the SQL's
+                            // LEFT JOIN + NULL-side `COALESCE` — a missing
+                            // target reads as "not DONE".
+                            let target = self.blocks.get(rid);
                             match inner {
-                                Some(p) => self.predicate_matches(p, outer, Some(b)),
-                                None => true,
+                                Some(p) => self.predicate_matches(p, outer, target),
+                                None => target.is_some(),
                             }
                         })
                     }
@@ -535,15 +688,7 @@ pub fn now_query_ast() -> QueryAst {
                 key: "gate".to_string(),
                 value: Value::String("G1".to_string()),
             },
-            Predicate::EdgeExists {
-                negated: true,
-                edge: EdgeRef::Requires,
-                inner: Some(Box::new(Predicate::PropNe {
-                    alias: Alias::EdgeTarget,
-                    key: "task_state".to_string(),
-                    value: Value::String("DONE".to_string()),
-                })),
-            },
+            Predicate::AllRequiresDone,
             Predicate::Or(vec![
                 Predicate::Membership {
                     negated: false,
@@ -592,21 +737,19 @@ mod tests {
     #[test]
     fn now_query_compiles_to_canonical_sql() {
         let ast = now_query_ast();
-        let actual = ast.compile_to_sql();
+        let actual = ast.compile_to_sql().expect("canonical now-query compiles");
         let expected = "SELECT b.*
 FROM block b
+LEFT JOIN block_requires br ON br.block_id = b.id
+LEFT JOIN block bl ON bl.id = br.required_id
 WHERE json_extract(b.properties, '$.task_state') = 'TODO'
   AND json_extract(b.properties, '$.gate') = 'G1'
-  AND NOT EXISTS (
-    SELECT 1 FROM block_requires br
-    JOIN block bl ON bl.id = br.required_id
-    WHERE br.block_id = b.id
-      AND COALESCE(json_extract(bl.properties, '$.task_state'), '') <> 'DONE'
-  )
   AND (
     EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'agent')
     OR NOT EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'human-only')
   )
+GROUP BY b.id
+HAVING count(br.required_id) = sum(iif(COALESCE(json_extract(bl.properties, '$.task_state'), '') = 'DONE', 1, 0))
 ORDER BY
   json_extract(b.properties, '$.priority'),
   json_extract(b.properties, '$.effort'),
@@ -740,6 +883,50 @@ LIMIT 10";
         );
     }
 
+    /// A `:REQUIRES:` target with no `block` row is a normal representable
+    /// state (the ingest path deliberately dropped the target FK so a forward
+    /// reference cannot abort a whole file — see
+    /// `tests/boot_suite/forward_edge_ingest_regression.rs`). The eligibility
+    /// contract is that EVERY requirement resolves to a DONE block, so a
+    /// dangling one blocks. Before this test the row-less requirement was read
+    /// as *satisfied*: the SQL INNER JOIN dropped it and the Rust evaluator
+    /// early-returned `false`, so the blocked task surfaced as eligible.
+    #[test]
+    fn dangling_requires_blocks_eligibility() {
+        let mut blocks: HashMap<EntityUri, Block> = HashMap::new();
+
+        // 'dangling' requires a block that is never defined → BLOCKED.
+        blocks.extend(std::iter::once(make_block(
+            "dangling",
+            &[
+                ("task_state", Value::String("TODO".into())),
+                ("gate", Value::String("G1".into())),
+                ("priority", Value::Integer(1)),
+                ("requires", Value::String("block:never-defined".into())),
+            ],
+        )));
+
+        // 'resolved' requires a DONE block → eligible.
+        let done = make_block("done_dep", &[("task_state", Value::String("DONE".into()))]);
+        blocks.insert(done.0.clone(), done.1);
+        blocks.extend(std::iter::once(make_block(
+            "resolved",
+            &[
+                ("task_state", Value::String("TODO".into())),
+                ("gate", Value::String("G1".into())),
+                ("priority", Value::Integer(2)),
+                ("requires", Value::String("block:done_dep".into())),
+            ],
+        )));
+
+        let result = evaluate(&now_query_ast(), &blocks);
+        assert_eq!(
+            result,
+            vec![EntityUri::block("resolved")],
+            "an unresolved :REQUIRES: target must BLOCK its dependent task; got {result:?}"
+        );
+    }
+
     #[test]
     fn evaluate_respects_limit() {
         let mut blocks: HashMap<EntityUri, Block> = HashMap::new();
@@ -762,5 +949,96 @@ LIMIT 10";
         // priority-asc → ids in order k0..k4.
         let expected: Vec<EntityUri> = (0..5).map(|i| EntityUri::block(&format!("k{i}"))).collect();
         assert_eq!(result, expected);
+    }
+    /// `AllRequiresDone` compiles to a HAVING, not to a WHERE fragment, so the
+    /// `pred_to_sql` arm for it renders nothing. Under `Or`/`Not` that hole
+    /// lands inside a boolean expression (`NOT ()`, `(a OR )`) and the query
+    /// cannot parse — so those positions must be REFUSED with the position
+    /// named, never compiled into broken SQL.
+    #[test]
+    fn all_requires_done_under_not_is_refused_with_its_position() {
+        let ast = QueryAst::from_block().with_filter(Predicate::And(vec![Predicate::Not(
+            Box::new(Predicate::AllRequiresDone),
+        )]));
+
+        let err = ast
+            .compile_to_sql()
+            .expect_err("AllRequiresDone under Not cannot compile to valid SQL");
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("AllRequiresDone"),
+            "the error must name the predicate: {message}"
+        );
+        assert!(
+            message.contains("Not"),
+            "the error must name the position: {message}"
+        );
+    }
+
+    /// Same refusal under `Or`, where the hole is `(a OR )`.
+    #[test]
+    fn all_requires_done_under_or_is_refused_with_its_index() {
+        let ast = QueryAst::from_block().with_filter(Predicate::And(vec![Predicate::Or(vec![
+            Predicate::AllRequiresDone,
+            Predicate::PropEq {
+                alias: Alias::Outer,
+                key: "gate".to_string(),
+                value: Value::String("G1".to_string()),
+            },
+        ])]));
+
+        let err = ast
+            .compile_to_sql()
+            .expect_err("AllRequiresDone under Or cannot compile to valid SQL");
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("Or[0]"),
+            "the error must name the position: {message}"
+        );
+    }
+
+    /// Same refusal under `EdgeExists.inner`, where the hole is the subquery's
+    /// trailing `AND`. `collect_all_requires_done` descends into `EdgeExists`
+    /// (it must, to emit the grouped join), so the refusal walker has to agree
+    /// with it or the predicate slips through unrefused.
+    #[test]
+    fn all_requires_done_under_edge_exists_is_refused() {
+        let ast = QueryAst::from_block().with_filter(Predicate::And(vec![Predicate::EdgeExists {
+            negated: false,
+            edge: EdgeRef::Requires,
+            inner: Some(Box::new(Predicate::AllRequiresDone)),
+        }]));
+
+        let err = ast
+            .compile_to_sql()
+            .expect_err("AllRequiresDone under EdgeExists cannot compile to valid SQL");
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("EdgeExists"),
+            "the error must name the position: {message}"
+        );
+    }
+
+    /// As the WHOLE filter it is admissible: the aggregate needs no WHERE
+    /// conjunct, so the compiler drops the `WHERE` keyword rather than emitting
+    /// one with nothing after it.
+    #[test]
+    fn all_requires_done_as_the_sole_filter_emits_no_empty_where() {
+        let sql = QueryAst::from_block()
+            .with_filter(Predicate::AllRequiresDone)
+            .compile_to_sql()
+            .expect("the aggregate alone is a valid query");
+
+        assert!(
+            !sql.contains("WHERE"),
+            "an all-aggregate filter has no WHERE conjunct to emit: {sql}"
+        );
+        assert!(
+            sql.contains("GROUP BY b.id") && sql.contains("HAVING"),
+            "the aggregate must still be asserted: {sql}"
+        );
     }
 }

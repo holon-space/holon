@@ -5,15 +5,15 @@
 # as debt-free. Ratchet DOWN: as violations are fixed, regenerate with
 #   ./archlint/archlint --update-baseline
 # See archlint/BURNDOWN.md for the category table and burn-down priority.
-# Snapshot total: 104 violation(s) across 11 rule(s).
+# Snapshot total: 85 violation(s) across 11 rule(s).
 #
 #   deleted_cell_symbol: 2
 #   entity_uri_from_raw: 9
 #   entity_uri_parse_default: 1
-#   fallback: 12
+#   fallback: 11
 #   frontend-provider-dep: 1
 #   frontend-raw-sql: 3
-#   loro_doc_escape: 35
+#   loro_doc_escape: 17
 #   no-underscore-params: 33
 #   ok: 4
 #   raw_sql_in_frontend: 3
@@ -37,7 +37,6 @@ fallback	crates/holon-frontend/src/user_driver.rs	// Final fallback: if the rout
 fallback	crates/holon-frontend/src/user_driver.rs	/// This is NOT a fallback — it is the intended path for that feature. //
 fallback	crates/holon-frontend/src/user_driver.rs	/// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable. //
 fallback	crates/holon-frontend/src/user_driver.rs	/// `send_key_chord` uses for its router fallback. If the entity is //
-fallback	crates/holon-orgmode/src/file_watcher.rs	/// fallback, see docs/Testing/BugFunnel.md 2026-07-27).
 fallback	frontends/dioxus-web/src/render/builders/mod.rs	// per file. Variants not covered by a file hit the fallback (empty element //
 fallback	frontends/dioxus-web/src/render/builders/mod.rs	/// Fallback arm emitted by `builder_registry!` when a `ViewKind` variant //
 fallback	frontends/gpui/src/user_driver.rs	/// (with a short poll fallback for idle windows, whose `changed()` may not
@@ -47,7 +46,6 @@ frontend-provider-dep	frontends/gpui/Cargo.toml	holon-orgmode.workspace = true
 frontend-raw-sql	crates/holon-frontend/src/advice_weaver.rs	"SELECT v.anchor_id, v.lesson_id, c.content FROM {view} v LEFT JOIN advice_suppressed s \
 frontend-raw-sql	crates/holon-frontend/src/advice_weaver.rs	"SELECT v.lesson_id AS id, v.anchor_id, c.content FROM {view} v LEFT JOIN \
 frontend-raw-sql	crates/holon-frontend/src/lib.rs	"SELECT * FROM journal_feed ORDER BY content DESC",
-loro_doc_escape	crates/holon-loro/src/container_registry.rs	let raw: Arc<LoroDoc> = doc.doc();
 loro_doc_escape	crates/holon-loro/src/deleted_container_purge.rs	let a_vv = a.doc().oplog_vv();
 loro_doc_escape	crates/holon-loro/src/deleted_container_purge.rs	let b_vv = b.doc().oplog_vv();
 loro_doc_escape	crates/holon-loro/src/import_atomicity_probe.rs	let raw = doc.doc();
@@ -64,23 +62,6 @@ loro_doc_escape	crates/holon-loro/src/loro_backend.rs	let f_before_child = doc.d
 loro_doc_escape	crates/holon-loro/src/loro_backend.rs	let raw = doc.doc();
 loro_doc_escape	crates/holon-loro/src/loro_backend.rs	let raw = doc.doc();
 loro_doc_escape	crates/holon-loro/src/loro_backend.rs	let raw = doc.doc();
-loro_doc_escape	crates/holon-loro/src/loro_document.rs	let _sub = doc.doc().subscribe_root(Arc::new(move |event| {
-loro_doc_escape	crates/holon-loro/src/loro_document.rs	let _sub = doc.doc().subscribe_root(Arc::new(move |event| {
-loro_doc_escape	crates/holon-loro/src/loro_document.rs	let _sub = doc2.doc().subscribe_root(Arc::new(move |event| {
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-child")).is_none(),
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-child")).is_none(),
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-new-child"))
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let doc_arc = collab.doc();
-loro_doc_escape	crates/holon-loro/src/loro_share_backend.rs	let gdoc = global.doc();
 loro_doc_escape	crates/holon-sharing/src/registry_binding.rs	// registry.register_container("ledger", ledger.doc()) // no such method
 no-underscore-params	crates/holon-api/src/identity_minting.rs	async fn mint(&self, _input: IdentityInput) -> Result<MintedId, BoxError> {
 no-underscore-params	crates/holon-core/src/boundary_enforcer.rs	_behavior: &BoundaryBehavior,

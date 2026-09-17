@@ -1402,6 +1402,46 @@ mod tests {
     use crate::di::test_helpers::create_test_engine;
     use crate::di::test_helpers::create_test_engine_with_providers;
 
+    /// A test engine whose `block` entity carries the SANCTIONED SQL writer
+    /// (`SqlOperationProvider`, the SqlOnly single writer). Seeding a block any
+    /// other way is a raw `block_raw` write, which the `sole_block_writer`
+    /// archlint smell refuses: blocks have exactly one writer per mode.
+    async fn block_writer_engine() -> Arc<BackendEngine> {
+        create_test_engine_with_providers(":memory:".into(), |module| {
+            module.with_operation_provider_factory(|backend| {
+                let db_handle =
+                    tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
+                Arc::new(SqlOperationProvider::new(
+                    db_handle,
+                    crate::storage::BLOCK_WRITE_TABLE.to_string(),
+                    "block".to_string(),
+                    "block".to_string(),
+                ))
+            })
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Seed one block through the sanctioned writer. Param keys outside the
+    /// `block_raw` column set (`task_state`, `gate`, `priority`, ...) are
+    /// packed into the `properties` JSON column by the provider.
+    async fn seed_block(engine: &BackendEngine, fields: &[(&str, Value)]) {
+        let params: StorageEntity = fields
+            .iter()
+            .map(|(k, v)| (Arc::from(*k), v.clone()))
+            .collect();
+        engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "create",
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn prql_stdlib_compiles_successfully() {
         let full_prql = format!("{}\nfrom block", PRQL_STDLIB);
@@ -2096,13 +2136,14 @@ mod tests {
             .await
             .unwrap();
 
-        let sql = "SELECT b.* FROM block b WHERE \
+        let sql = "SELECT b.* FROM block b LEFT JOIN block_requires br ON br.block_id = b.id \
+            LEFT JOIN block bl ON bl.id = br.required_id WHERE \
             json_extract(b.properties,'$.task_state') = 'TODO' AND \
             json_extract(b.properties,'$.gate') = 'G1' AND \
-            NOT EXISTS (SELECT 1 FROM block_requires br JOIN block bl ON bl.id = br.required_id \
-                WHERE br.block_id = b.id AND COALESCE(json_extract(bl.properties,'$.task_state'),'') != 'DONE') AND \
             (EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'agent') \
-             OR NOT EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'human-only'))";
+             OR NOT EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'human-only')) \
+            GROUP BY b.id HAVING count(br.required_id) = sum(iif(COALESCE( \
+                json_extract(bl.properties,'$.task_state'),'') = 'DONE', 1, 0))";
 
         let mut stream = engine
             .query_and_watch(sql.to_string(), HashMap::new(), None)
@@ -2181,6 +2222,74 @@ mod tests {
         assert!(
             saw_delete_b1,
             "eager re-execution must retract b1 once it becomes blocked"
+        );
+    }
+
+    /// A `:REQUIRES:` target with no `block` row must BLOCK. The ingest path
+    /// deliberately dropped the target FK (a forward reference is legal and
+    /// must not abort a whole file — see
+    /// `boot_suite/forward_edge_ingest_regression.rs`), so a dangling
+    /// `required_id` is a normal representable state. Under the INNER JOIN the
+    /// subquery found no row and `NOT EXISTS` read the requirement as
+    /// satisfied, surfacing the blocked task as eligible — the live vault's
+    /// `block:handoff-md-migration` → `block:edge-field-descriptor` case.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dangling_requires_blocks_the_task() {
+        let engine = block_writer_engine().await;
+        seed_block(
+            &engine,
+            &[
+                ("id", Value::String("block:dangle".into())),
+                ("content", Value::String("Blocked by a missing dep".into())),
+                ("task_state", Value::String("TODO".into())),
+                ("gate", Value::String("G1".into())),
+            ],
+        )
+        .await;
+        seed_block(
+            &engine,
+            &[
+                ("id", Value::String("block:free".into())),
+                ("content", Value::String("Unblocked".into())),
+                ("task_state", Value::String("TODO".into())),
+                ("gate", Value::String("G1".into())),
+            ],
+        )
+        .await;
+        engine
+            .db_handle()
+            .execute(
+                "INSERT INTO block_requires (block_id, required_id) VALUES \
+                 ('block:dangle', 'block:never-defined-9f3a')",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let sql = "SELECT b.* FROM block b LEFT JOIN block_requires br ON br.block_id = b.id \
+            LEFT JOIN block bl ON bl.id = br.required_id WHERE \
+            json_extract(b.properties,'$.task_state') = 'TODO' AND \
+            json_extract(b.properties,'$.gate') = 'G1' AND \
+            (EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'agent') \
+             OR NOT EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'human-only')) \
+            GROUP BY b.id HAVING count(br.required_id) = sum(iif(COALESCE( \
+                json_extract(bl.properties,'$.task_state'),'') = 'DONE', 1, 0))";
+
+        let rows = engine
+            .execute_query(sql.to_string(), HashMap::new(), None)
+            .await
+            .expect("dangling-requires now-query must run");
+        let ids: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
+            .collect();
+        assert!(
+            ids.iter().any(|id| id.contains("free")),
+            "the unblocked task must be served; got {ids:?}"
+        );
+        assert!(
+            !ids.iter().any(|id| id.contains("dangle")),
+            "a task whose :REQUIRES: target has no block row must NOT be served; got {ids:?}"
         );
     }
 
@@ -2558,5 +2667,39 @@ mod tests {
             err.to_string().contains("writes places"),
             "the refusal must name the broken premise; got: {err}"
         );
+    }
+
+    /// The `rank_tasks` SQL projection must carry every column
+    /// `Block::try_from` requires. `TASK_BLOCKS_FOR_PETRI_SQL` projected
+    /// only `tags`/`requires`, so the row parse bailed on the first block
+    /// with "required column 'advice_suppressed' absent from row" — the
+    /// whole ranker was dead against any real vault, and the MCP tool
+    /// reported only its outer context.
+    ///
+    /// The pre-existing petri PBTs call `rank_tasks(blocks)` on already-built
+    /// `Block`s, so they never crossed the SQL -> `Block::try_from` seam this
+    /// pins.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rank_tasks_full_path_parses_every_required_column() {
+        let engine = block_writer_engine().await;
+        seed_block(
+            &engine,
+            &[
+                ("id", Value::String("block:t1".into())),
+                ("content", Value::String("A task".into())),
+                ("task_state", Value::String("TODO".into())),
+                ("priority", Value::Integer(2)),
+                ("ID", Value::String("t1".into())),
+            ],
+        )
+        .await;
+
+        let ranked = engine
+            .blocks()
+            .rank_tasks()
+            .await
+            .expect("rank_tasks must parse the projected row");
+        assert_eq!(ranked.ranked.len(), 1, "the single TODO must rank");
+        assert_eq!(ranked.ranked[0].block_id, "block:t1");
     }
 }

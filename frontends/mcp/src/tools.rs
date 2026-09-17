@@ -644,6 +644,20 @@ fn format_display_tree_with_geometry(
     }
 }
 
+/// The tool's OWN named source block. `now_for_agent` executes THIS, so the
+/// eligibility contract — including "a dangling `:REQUIRES:` target blocks the
+/// task" — lives in the vault, with no second copy in the tool.
+///
+/// Distinct from the page's `now-query::src::0`: that one renders Now.org and
+/// binds NO params, so it cannot carry the agent scope.
+pub const NOW_QUERY_SOURCE_BLOCK: &str = "block:now-for-agent::src::0";
+
+/// The params `now_for_agent` binds; the block must reference every one. A
+/// param a block ignores is not an error the engine reports, and the
+/// one that would go missing here is the agent scope — the tool would
+/// hand out another agent's claimed work while looking correct.
+const NOW_QUERY_PARAMS: [&str; 4] = ["$agent_id", "$state_todo", "$state_doing", "$limit"];
+
 #[tool_router(router = tool_router_backend, vis = "pub(crate)")]
 impl HolonMcpServer {
     #[tool(description = "Create a table with specified schema")]
@@ -872,40 +886,7 @@ impl HolonMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         // ALLOW(entity_uri_from_raw): MCP tool param ExecuteSourceBlockParams.block_id
         let block_id = EntityUri::from_raw(&params.block_id).to_string();
-        let lookup_sql = format!(
-            "SELECT content, source_language FROM block_raw WHERE id = '{}'",
-            block_id.replace('\'', "''")
-        );
-        let lookup = self
-            .service()
-            .execute_raw_sql(&lookup_sql, HashMap::new())
-            .await
-            .map_err(|e| {
-                rmcp::ErrorData::internal_error(
-                    format!("Failed to look up source block '{}': {}", block_id, e),
-                    None,
-                )
-            })?;
-        let row = lookup.rows.into_iter().next().ok_or_else(|| {
-            rmcp::ErrorData::invalid_params(
-                format!("No block found with id '{}'", block_id),
-                Some(serde_json::json!({"block_id": block_id})),
-            )
-        })?;
-        let query = row
-            .get("content")
-            .and_then(|v| v.as_string())
-            .ok_or_else(|| {
-                rmcp::ErrorData::invalid_params(
-                    format!("Block '{}' has no content", block_id),
-                    None,
-                )
-            })?
-            .to_string();
-        let stored_language = row
-            .get("source_language")
-            .and_then(|v| v.as_string())
-            .map(|s| s.to_string());
+        let (query, stored_language) = self.load_source_block(&block_id).await?;
         let language_str = params.language.or(stored_language).ok_or_else(|| {
             rmcp::ErrorData::invalid_params(
                 format!(
@@ -1333,9 +1314,12 @@ impl HolonMcpServer {
     )]
     async fn rank_tasks(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         let rank_result = self.service().rank_tasks().await.map_err(|e| {
+            // `{e:#}` — the anyhow chain, not just the outermost context: the
+            // bare `.to_string()` reduced every ranker failure to
+            // "Failed to rank tasks" and hid the cause.
             rmcp::ErrorData::internal_error(
                 "rank_tasks_failed",
-                Some(serde_json::json!({"error": e.to_string()})),
+                Some(serde_json::json!({"error": format!("{e:#}")})),
             )
         })?;
 
@@ -1657,12 +1641,33 @@ impl HolonMcpServer {
     }
 
     #[tool(
-        description = "Return ranked Now-snapshot tasks visible to the calling agent. Mirrors the \
-                       `now-query::src::0` block but adds two filters: tasks must be unclaimed OR \
-                       already assigned to this agent (`assigned-to` property), and any \
-                       `task_state IN ('TODO','DOING')` is allowed (so an agent re-discovers \
-                       in-flight work). agent_id falls back to env HOLON_AGENT_ID. Tasks already \
-                       claimed by the caller sort first."
+        description = "Return ranked Now-snapshot tasks visible to the calling agent. Executes \
+                       the VAULT's `now-for-agent::src::0` source block (the tool's own block — \
+                       the page's `now-query::src::0` binds no params) and owns no eligibility \
+                       SQL of its own. Fails loud when that block is absent, has no `source_language`, or \
+                       does not reference every param this tool binds: `$agent_id` (tasks \
+                       unclaimed or assigned to this agent, and the claimed-first ordering), \
+                       `$state_todo` / `$state_doing` (the open-state set, so an agent \
+                       re-discovers in-flight work) and `$limit` (row cap, clamped 1..100). The \
+                       block owns the gate, the tag filter, the `:REQUIRES:` eligibility rule, the \
+                       ordering and the projection. agent_id falls back to env HOLON_AGENT_ID. \
+                       Minimal valid block SQL — copy verbatim; `count(br.required_id)` counts \
+                       EVERY requirement row, so a target with no `block` row leaves the DONE \
+                       count short and that task is withheld: SELECT b.* FROM block b LEFT JOIN \
+                       block_requires br ON br.block_id = b.id LEFT JOIN block bl ON bl.id = \
+                       br.required_id WHERE json_extract(b.properties, '$.task_state') IN \
+                       ($state_todo, $state_doing) AND json_extract(b.properties, '$.gate') = \
+                       'G1' AND (json_extract(b.properties, '$.assigned-to') IS NULL OR \
+                       json_extract(b.properties, '$.assigned-to') = $agent_id) AND (EXISTS \
+                       (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = \
+                       'agent') OR NOT EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = \
+                       b.id AND bt.tag = 'human-only')) GROUP BY b.id HAVING \
+                       count(br.required_id) = sum(iif(COALESCE(json_extract(bl.properties, \
+                       '$.task_state'), '') = 'DONE', 1, 0)) ORDER BY CASE WHEN \
+                       json_extract(b.properties, '$.assigned-to') = $agent_id THEN 0 ELSE 1 \
+                       END, json_extract(b.properties, '$.priority') NULLS LAST, \
+                       COALESCE(json_extract(b.properties, '$.Effort'), \
+                       json_extract(b.properties, '$.effort')), b.id LIMIT $limit"
     )]
     async fn now_for_agent(
         &self,
@@ -1670,34 +1675,45 @@ impl HolonMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let agent_id = resolve_agent_id(params.agent_id)?;
         let limit = params.limit.unwrap_or(10).clamp(1, 100);
-        let sql = format!(
-            "SELECT b.* FROM block b WHERE json_extract(b.properties, '$.task_state') IN ('TODO', \
-             'DOING') AND json_extract(b.properties, '$.gate') = 'G1' AND ( \
-             json_extract(b.properties, '$.assigned-to') IS NULL OR json_extract(b.properties, \
-             '$.assigned-to') = $agent_id ) AND NOT EXISTS ( SELECT 1 FROM block_requires br JOIN \
-             block bl ON bl.id = br.required_id WHERE br.block_id = b.id AND \
-             COALESCE(json_extract(bl.properties, '$.task_state'), '') <> 'DONE' ) AND ( EXISTS \
-             (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'agent') OR NOT \
-             EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = \
-             'human-only') ) ORDER BY CASE WHEN json_extract(b.properties, '$.assigned-to') = \
-             $agent_id THEN 0 ELSE 1 END, json_extract(b.properties, '$.priority'), \
-             json_extract(b.properties, '$.effort'), b.id LIMIT {limit}"
-        );
+        let (query, language) = self.now_query().await?;
+
         let mut q_params = HashMap::new();
         q_params.insert("agent_id".to_string(), Value::String(agent_id.clone()));
+        q_params.insert("state_todo".to_string(), Value::String("TODO".to_string()));
+        q_params.insert(
+            "state_doing".to_string(),
+            Value::String("DOING".to_string()),
+        );
+        q_params.insert("limit".to_string(), Value::Integer(limit as i64));
 
-        let rows = self
-            .engine()
-            .execute_query(sql, q_params, None)
+        let context = self
+            .service()
+            .build_context(None, None)
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("Failed to resolve context: {e:#}"), None)
+            })?;
+        let query_result = self
+            .service()
+            .execute_query(&query, language, q_params, context)
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
-                    format!("now_for_agent query failed: {e}"),
-                    Some(serde_json::json!({"agent_id": agent_id})),
+                    format!("now_for_agent query failed: {e:#}"),
+                    Some(serde_json::json!({
+                        "agent_id": agent_id,
+                        "block_id": NOW_QUERY_SOURCE_BLOCK,
+                    })),
                 )
             })?;
 
-        self.finalize_query_response(&rows, None, false, OutputFormat::Json)
+        let duration_ms = query_result.duration.as_secs_f64() * 1000.0;
+        self.finalize_query_response(
+            &query_result.rows,
+            Some(duration_ms),
+            false,
+            OutputFormat::Json,
+        )
     }
 
     #[tool(
@@ -4408,6 +4424,91 @@ impl HolonMcpServer {
         )]))
     }
 
+    /// The `content` and stored `source_language` of a source block, read from
+    /// `block_raw`.
+    ///
+    /// Fails loud when the block has no row or no content: both callers EXECUTE
+    /// what they load, so a `None` here would mean silently running nothing.
+    async fn load_source_block(
+        &self,
+        block_id: &str,
+    ) -> Result<(String, Option<String>), rmcp::ErrorData> {
+        let lookup_sql = format!(
+            "SELECT content, source_language FROM block_raw WHERE id = '{}'",
+            block_id.replace('\'', "''")
+        );
+        let lookup = self
+            .service()
+            .execute_raw_sql(&lookup_sql, HashMap::new())
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("Failed to look up source block '{block_id}': {e:#}"),
+                    None,
+                )
+            })?;
+        let row = lookup.rows.into_iter().next().ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                format!("No block found with id '{block_id}'"),
+                Some(serde_json::json!({"block_id": block_id})),
+            )
+        })?;
+        let content = row
+            .get("content")
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    format!("Block '{block_id}' has no content"),
+                    Some(serde_json::json!({"block_id": block_id})),
+                )
+            })?
+            .to_string();
+        let stored_language = row
+            .get("source_language")
+            .and_then(|v| v.as_string())
+            .map(|s| s.to_string());
+        Ok((content, stored_language))
+    }
+
+    /// The now-query text and language, or a loud error naming the block.
+    ///
+    /// Asserts the param contract in [`NOW_QUERY_PARAMS`]: a block that does
+    /// not reference them cannot honour the agent scope.
+    async fn now_query(&self) -> Result<(String, QueryLanguage), rmcp::ErrorData> {
+        let (query, stored_language) = self.load_source_block(NOW_QUERY_SOURCE_BLOCK).await?;
+        let missing: Vec<&str> = NOW_QUERY_PARAMS
+            .iter()
+            .copied()
+            .filter(|param| !query.contains(param))
+            .collect();
+        if !missing.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "the now-query source block '{NOW_QUERY_SOURCE_BLOCK}' does not reference                      {missing:?}; now_for_agent binds those params, and a block that ignores them                      silently drops the agent scope. Reference each in the block's SQL —                      `task_state IN ($state_todo, $state_doing)`, `assigned-to = $agent_id`,                      `LIMIT $limit`, and `$agent_id` again in the claimed-first ORDER BY."
+                ),
+                Some(serde_json::json!({
+                    "block_id": NOW_QUERY_SOURCE_BLOCK,
+                    "missing_params": missing,
+                })),
+            ));
+        }
+        let language_str = stored_language.ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                format!(
+                    "block '{NOW_QUERY_SOURCE_BLOCK}' has no source_language, so it is not a query                      source block — now_for_agent needs the vault's now-query there"
+                ),
+                Some(serde_json::json!({"block_id": NOW_QUERY_SOURCE_BLOCK})),
+            )
+        })?;
+        let language = language_str.parse::<QueryLanguage>().map_err(|e| {
+            rmcp::ErrorData::invalid_params(
+                format!("block '{NOW_QUERY_SOURCE_BLOCK}' has an invalid source_language: {e}"),
+                None,
+            )
+        })?;
+        Ok((query, language))
+    }
+
     /// The current Loro doc store: the swappable `live_debug` cell when
     /// populated (mobile boot + every `reset_vault` swap), else the boot-time
     /// `OnceLock` (desktop paths that never reset). Tools MUST read through
@@ -5047,5 +5148,323 @@ mod self_check_wiring_tests {
             "the error must name the one-command form: {}",
             err.message
         );
+    }
+}
+
+/// `now_for_agent` is the agent-coordination entry point: every task it returns
+/// is work an agent starts. It owns no eligibility SQL — it executes a vault
+/// source block — so these tests seed that block and drive the tool through it,
+/// which is the only way an SQL-owning tool could pass them.
+#[cfg(test)]
+mod now_for_agent_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use fluxdi::Module;
+    use fluxdi::Provider;
+    use holon::storage::BLOCK_WRITE_TABLE;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    use super::NOW_QUERY_SOURCE_BLOCK;
+    use crate::server::DebugServices;
+    use crate::server::HolonMcpServer;
+    use crate::types::NowForAgentParams;
+
+    /// A now-query that references every param the tool binds, selects `gate =
+    /// 'G7'`, and carries the per-block `:REQUIRES:` aggregate. NO hard-coded
+    /// tool SQL would ever choose G7 — that is how these tests show the BLOCK
+    /// is what executes.
+    const NOW_QUERY_SQL: &str = "SELECT b.* FROM block b
+LEFT JOIN block_requires br ON br.block_id = b.id
+LEFT JOIN block bl ON bl.id = br.required_id
+WHERE json_extract(b.properties, '$.task_state') IN ($state_todo, $state_doing)
+  AND json_extract(b.properties, '$.gate') = 'G7'
+  AND ( json_extract(b.properties, '$.assigned-to') IS NULL OR json_extract(b.properties, '$.assigned-to') = $agent_id )
+  AND ( EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'agent') OR NOT EXISTS (SELECT 1 FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = 'human-only') )
+GROUP BY b.id
+HAVING count(br.required_id) = sum(iif(COALESCE(json_extract(bl.properties, '$.task_state'), '') = 'DONE', 1, 0))
+ORDER BY CASE WHEN json_extract(b.properties, '$.assigned-to') = $agent_id THEN 0 ELSE 1 END, json_extract(b.properties, '$.priority'), json_extract(b.properties, '$.effort'), b.id
+LIMIT $limit";
+
+    /// The tool reads the `block` matview, so the CDC wiring has to be live for
+    /// a seeded row to become visible at all.
+    async fn fresh_engine() -> Arc<holon::api::BackendEngine> {
+        holon::di::create_backend_engine_with_extras(
+            ":memory:".into(),
+            |injector| {
+                holon_loro_wiring::EventInfraModule
+                    .configure(injector)
+                    .map_err(|e| anyhow::anyhow!("configure EventInfraModule: {e}"))?;
+                injector.provide_into_set::<dyn holon_core::OperationProvider>(Provider::root(
+                    |resolver| {
+                        let db = resolver
+                            .resolve::<dyn holon::di::DbHandleProvider>()
+                            .handle();
+                        Arc::new(holon::core::SqlOperationProvider::new(
+                            db,
+                            holon::storage::BLOCK_WRITE_TABLE.to_string(),
+                            "block".to_string(),
+                            "block".to_string(),
+                        )) as Arc<dyn holon_core::OperationProvider>
+                    },
+                ));
+                Ok(())
+            },
+            |_| async {},
+        )
+        .await
+        .map(|(engine, _)| engine)
+        .expect("fresh-db lazy DI graph must build")
+    }
+
+    fn server(engine: Arc<holon::api::BackendEngine>) -> HolonMcpServer {
+        HolonMcpServer::with_type_registry(
+            Some(engine),
+            None,
+            Arc::new(DebugServices::default()),
+            None,
+        )
+    }
+
+    /// A block tagged `agent`, so the requirement check is the only thing that
+    /// can keep it out of the result.
+    async fn seed_block(
+        engine: &holon::api::BackendEngine,
+        id: &str,
+        task_state: &str,
+        gate: &str,
+    ) {
+        engine
+            .db_handle()
+            .execute_values(
+                &format!(
+                    "INSERT INTO {BLOCK_WRITE_TABLE} (id, parent_id, content, content_type, \
+                     properties) VALUES ('{id}', 'sentinel:no_parent', '{id}', 'text', \
+                     '{{\"task_state\":\"{task_state}\",\"gate\":\"{gate}\"}}')"
+                ),
+                vec![],
+            )
+            .await
+            .expect("insert seeded block");
+        engine
+            .db_handle()
+            .execute_values(
+                &format!("INSERT INTO block_tags (block_id, tag) VALUES ('{id}', 'agent')"),
+                vec![],
+            )
+            .await
+            .expect("tag seeded block");
+    }
+
+    /// The junction carries no target FK, which is what makes a dangling
+    /// `required_id` a representable state.
+    async fn require(engine: &holon::api::BackendEngine, task: &str, required: &str) {
+        engine
+            .db_handle()
+            .execute_values(
+                &format!(
+                    "INSERT INTO block_requires (block_id, required_id) VALUES ('{task}', \
+                     '{required}')"
+                ),
+                vec![],
+            )
+            .await
+            .expect("insert requirement");
+    }
+
+    /// The tool's now-query, as a source block.
+    async fn seed_now_query(engine: &holon::api::BackendEngine, content: &str) {
+        engine
+            .db_handle()
+            .execute_values(
+                &format!(
+                    "INSERT INTO {BLOCK_WRITE_TABLE} (id, parent_id, content, content_type, \
+                     source_language) VALUES ('{NOW_QUERY_SOURCE_BLOCK}', 'sentinel:no_parent', \
+                     ?, 'source', 'holon_sql')"
+                ),
+                vec![holon_api::Value::String(content.to_string())],
+            )
+            .await
+            .expect("insert now-query source block");
+    }
+
+    /// IVM maintains the `block` matview asynchronously, so wait for the seeded
+    /// rows to be projected instead of racing them.
+    async fn await_projected(engine: &holon::api::BackendEngine, ids: &[&str]) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let mut projected = 0usize;
+            for id in ids {
+                projected += engine
+                    .execute_query(
+                        format!("SELECT id FROM block WHERE id = '{id}'"),
+                        HashMap::new(),
+                        None,
+                    )
+                    .await
+                    .expect("probe query")
+                    .len();
+            }
+            if projected == ids.len() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "seeded blocks never reached the `block` matview: {ids:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn call_now_for_agent(
+        server: &HolonMcpServer,
+        agent_id: &str,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        server
+            .now_for_agent(Parameters(NowForAgentParams {
+                agent_id: Some(agent_id.to_string()),
+                limit: Some(50),
+            }))
+            .await
+    }
+
+    /// The ids the tool returned, as the agent would see them.
+    async fn served_ids(server: &HolonMcpServer, agent_id: &str) -> Vec<String> {
+        let result = call_now_for_agent(server, agent_id)
+            .await
+            .expect("now_for_agent must answer");
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            other => panic!("expected a text result, got {other:?}"),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("tool output is JSON");
+        parsed["rows"]
+            .as_array()
+            .expect("rows array")
+            .iter()
+            .map(|row| row["id"].as_str().expect("row id").to_string())
+            .collect()
+    }
+
+    /// The contract: the tool resolves the vault's named block by id and
+    /// refuses to answer at all when it is missing. A tool that owned its
+    /// own SQL would quietly return rows here, which is exactly what the
+    /// inversion removes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refuses_to_answer_when_the_named_source_block_is_absent() {
+        let server = server(fresh_engine().await);
+
+        let err = call_now_for_agent(&server, "test-agent")
+            .await
+            .expect_err("an absent now-query source block must be a loud error, not an empty list");
+
+        assert!(
+            err.message.contains(NOW_QUERY_SOURCE_BLOCK),
+            "the error must name the block it resolved: {}",
+            err.message
+        );
+    }
+
+    /// A block that does not reference the bound params would drop the agent
+    /// scope without any engine error, so the tool refuses it and names them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refuses_a_block_that_ignores_the_bound_params() {
+        let engine = fresh_engine().await;
+        seed_now_query(&engine, "SELECT b.* FROM block b WHERE 1 = 1").await;
+        let server = server(engine);
+
+        let err = call_now_for_agent(&server, "test-agent")
+            .await
+            .expect_err("a block that ignores the bound params must be refused");
+
+        for param in ["$agent_id", "$state_todo", "$state_doing", "$limit"] {
+            assert!(
+                err.message.contains(param),
+                "the error must name the missing param {param}: {}",
+                err.message
+            );
+        }
+    }
+
+    /// The block decides what is eligible: it selects `gate = 'G7'` (which the
+    /// tool's old embedded SQL, hard-coded to G1, never served), so a G7 task
+    /// being served AND the G1 task being withheld together prove the tool
+    /// executes the vault block rather than SQL of its own.
+    ///
+    /// The `:REQUIRES:` cases ride the same path: a target with no `block` row
+    /// is UNMET, so that task must be withheld — alone, and alongside a
+    /// satisfied requirement. `block:two-done-deps` pins the fan-out
+    /// collapse: two requirement rows must still yield ONE result row, not
+    /// one per join.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn executes_the_vault_block_and_withholds_a_dangling_requires_target() {
+        let engine = fresh_engine().await;
+        seed_now_query(&engine, NOW_QUERY_SQL).await;
+        for dep in ["block:done-dep", "block:done-dep-2"] {
+            seed_block(&engine, dep, "DONE", "G7").await;
+        }
+        for task in [
+            "block:free-g7-task",
+            "block:one-done-dep",
+            "block:two-done-deps",
+            "block:dangling-dep",
+            "block:dangling-plus-done",
+        ] {
+            seed_block(&engine, task, "TODO", "G7").await;
+        }
+        seed_block(&engine, "block:g1-decoy-task", "TODO", "G1").await;
+        for (task, required) in [
+            ("block:one-done-dep", "block:done-dep"),
+            ("block:two-done-deps", "block:done-dep"),
+            ("block:two-done-deps", "block:done-dep-2"),
+            ("block:dangling-dep", "block:never-ingested"),
+            ("block:dangling-plus-done", "block:done-dep"),
+            ("block:dangling-plus-done", "block:never-ingested"),
+        ] {
+            require(&engine, task, required).await;
+        }
+        await_projected(
+            &engine,
+            &[
+                "block:done-dep",
+                "block:done-dep-2",
+                "block:free-g7-task",
+                "block:one-done-dep",
+                "block:two-done-deps",
+                "block:dangling-dep",
+                "block:dangling-plus-done",
+                "block:g1-decoy-task",
+            ],
+        )
+        .await;
+        let server = server(engine);
+
+        let served = served_ids(&server, "test-agent").await;
+
+        for unblocked in ["block:free-g7-task", "block:one-done-dep"] {
+            assert!(
+                served.iter().any(|id| id == unblocked),
+                "{unblocked} is unblocked and selected by the block, so it must be served — else                  the block never executed: {served:?}"
+            );
+        }
+        assert!(
+            !served.iter().any(|id| id == "block:g1-decoy-task"),
+            "the block selects G7, so a G1 task must NOT be served — the tool's old embedded SQL              is what filtered on G1: {served:?}"
+        );
+        assert_eq!(
+            served
+                .iter()
+                .filter(|id| *id == "block:two-done-deps")
+                .count(),
+            1,
+            "two requirement rows must collapse to ONE result row: {served:?}"
+        );
+        for withheld in ["block:dangling-dep", "block:dangling-plus-done"] {
+            assert!(
+                !served.iter().any(|id| id == withheld),
+                "a :REQUIRES: target with no block row is UNMET, so {withheld} must not be \
+                 served: {served:?}"
+            );
+        }
     }
 }

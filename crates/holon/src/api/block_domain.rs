@@ -19,6 +19,25 @@ const BLOCK_WITH_QUERY_SOURCE_SQL: &str =
 
 pub use holon_api::ROOT_LAYOUT_BLOCK_ID;
 
+/// The `:REQUIRES:` eligibility fragment — a block qualifies only when EVERY
+/// requirement row of it resolves to a DONE block. A correlated `NOT EXISTS`
+/// cannot express this: an unresolvable `required_id` yields no join row, which
+/// reads as SATISFIED. The quantified form is a per-block aggregate, so it
+/// splits around the query's WHERE clause — the joins into the FROM, the
+/// grouping after it. Both halves are required together.
+///
+/// The LIVE copies are the vault's two now-query source blocks — the page's
+/// `now-query::src::0` and the tool's `now-for-agent::src::0`, which adds the
+/// agent params. This const is what the PBT compiler (`pbt::query_ast`) emits,
+/// so the shapes stay diffable.
+pub const REQUIRES_DONE_JOINS_SQL: &str = "LEFT JOIN block_requires br ON br.block_id = b.id\nLEFT JOIN block bl ON bl.id = br.required_id";
+
+/// See [`REQUIRES_DONE_JOINS_SQL`]. `required_id` is NOT NULL, so a dangling
+/// requirement still counts on the left; the equality holds because a
+/// DONE-resolved requirement is a resolved one, so `count(all) = count(DONE)`
+/// means every requirement resolves AND is DONE.
+pub const REQUIRES_DONE_HAVING_SQL: &str = "GROUP BY b.id\nHAVING count(br.required_id) = sum(iif(COALESCE(json_extract(bl.properties, '$.task_state'), '') = 'DONE', 1, 0))";
+
 /// Bounds the focus-root subtree walk. Blocks nested deeper than this do not
 /// reach the panel; the cycle guard in the same CTE covers malformed parentage.
 const MAX_ROOT_SUBTREE_DEPTH: u32 = 20;
