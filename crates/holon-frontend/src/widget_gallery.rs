@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use holon_api::Value;
 use holon_api::render_types::Arg;
 use holon_api::render_types::RenderExpr;
+use holon_api::theme_token::ThemeToken;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -425,65 +426,37 @@ pub fn design_gallery_render_expr() -> RenderExpr {
     ])
 }
 
-fn color_swatch(label: &str, token: &str) -> RenderExpr {
-    row(
-        vec![
-            // The token name rides as the badge LABEL. This is not a colour
-            // chip and never was: `badge` declares no colour parameter, so the
-            // `#{color: ...}` this used to pass was dropped unread by the
-            // builder and again by the renderer.
-            call("badge", vec![pos(lit_str(token))]),
-            call(
-                "text",
-                vec![
-                    pos(lit_str(label)),
-                    named("size", lit_f64(13.0)),
-                    named("color", lit_str("muted")),
-                ],
-            ),
-        ],
-        8.0,
-    )
+fn token_swatch(token: &str) -> RenderExpr {
+    call("badge", vec![pos(lit_str(token))])
 }
 
 fn color_palette_section() -> RenderExpr {
-    section(
-        "Color Palette — Theme Tokens",
+    // The exhibit IS the vocabulary: it lists `ThemeToken::ALL`, so a token
+    // added to the table appears here without anyone remembering to add it, and
+    // a token removed cannot linger as a stale entry. It paints no colour
+    // itself. An entry is the token's NAME, which is the only thing a layout may
+    // write, and a palette exhibit that painted literal colours was dropped
+    // under D136.a: a literal colour is what the vocabulary exists to refuse.
+    let mut entries: Vec<RenderExpr> = Vec::new();
+    for chunk in ThemeToken::ALL.chunks(5) {
+        entries.push(row(
+            chunk.iter().map(|t| token_swatch(t.as_str())).collect(),
+            16.0,
+        ));
+    }
+
+    let mut children = vec![call(
+        "text",
         vec![
-            call(
-                "text",
-                vec![
-                    pos(lit_str(
-                        "Warm, professional, alive. Not clinical, not childish.",
-                    )),
-                    named("color", lit_str("muted")),
-                    named("size", lit_f64(13.0)),
-                ],
-            ),
-            // The palette IS the token table: every colour a layout may name,
-            // spelled the way a layout must spell it. The hex list this used to
-            // show was a dark-theme palette rendered unchanged in a light theme.
-            row(
-                vec![
-                    color_swatch("Foreground", "foreground"),
-                    color_swatch("Muted", "muted"),
-                    color_swatch("Primary", "primary"),
-                    color_swatch("Secondary", "secondary"),
-                ],
-                16.0,
-            ),
-            row(
-                vec![
-                    color_swatch("Accent", "accent"),
-                    color_swatch("Info", "info"),
-                    color_swatch("Success", "success"),
-                    color_swatch("Warning", "warning"),
-                    color_swatch("Error", "error"),
-                ],
-                16.0,
-            ),
+            pos(lit_str(
+                "The colour vocabulary. A layout names one of these; the theme decides the pixel.",
+            )),
+            named("color", lit_str("muted")),
+            named("size", lit_f64(13.0)),
         ],
-    )
+    )];
+    children.extend(entries);
+    section("Color Palette: Theme Tokens", children)
 }
 
 fn typography_section() -> RenderExpr {

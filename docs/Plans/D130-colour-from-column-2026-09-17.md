@@ -302,7 +302,7 @@ a compiler.
 - **The `rules:` lever.** Option D is not built or changed here.
 - **A style editor UI.** The lever is layout-doc data.
 - **Non-colour style properties.** Size, weight and spacing stay as they are.
-- **A palette exhibit that PAINTS a literal colour.** The gallery's `color_swatch` never did: `badge` declares no colour parameter, so its `#{color: hex}` was dropped unread by the builder and again by the renderer. Inc 0a removed the dead argument and the exhibit now lists the token table. A genuine want remains behind it, recorded as a finding for Martin: exhibiting the raw palette needs either a widget that paints a literal colour, or an explicit exemption from the token vocabulary. Neither is invented here, and neither is a reason for a hex arm.
+- **A palette exhibit that PAINTS a literal colour.** RULED: D136.a (Martin, 2026-09-17) drops it. The gallery shows the token vocabulary instead, with no dev-only literal-colour widget and no parser exemption. Implemented: `color_swatch` is deleted, `token_swatch` renders one badge per token, and the section generates its rows from `ThemeToken::ALL` so it cannot drift from the vocabulary. Note for the record that the old `color_swatch` never painted a colour anyway: `badge` declares no colour parameter, so its `#{color: hex}` was dropped unread by the builder and again by the renderer.
 - **`assets/themes/*.yaml` and `assets/icons/**/*.svg`.** Theme definitions and artwork, not colour args (section 2.3).
 - **Blinc's and waterui's rendering.** Inc 0 only removes their divergent vocabularies; their pixels are not otherwise in scope.
 - **Per-instance severity.** ADR 0035 rules severity is per kind. Not revisited.
