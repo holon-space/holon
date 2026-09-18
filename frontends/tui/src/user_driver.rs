@@ -50,6 +50,7 @@ use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_frontend::user_driver::ReactiveEngineDriver;
+use holon_frontend::user_driver::StateToggleVerb;
 use holon_frontend::user_driver::UserDriver;
 use holon_mcp::server::InteractionCommand;
 use r3bl_tui::InputEvent;
@@ -264,6 +265,26 @@ impl TuiUserDriver {
         entries.join(", ")
     }
 
+    /// Press one navigation key and wait until the renderer's focus index shows
+    /// the move. A barrier satisfied by "any render" lets an unrelated render
+    /// through, so the next press duplicates a move the app has not made yet
+    /// and the walk skips over the target row (`nav_to: walked past
+    /// target`).
+    async fn step_focus(&self, key: RKey, deadline: Instant) -> Result<()> {
+        let pre = self.focus_index.load(Ordering::Acquire);
+        self.send_input(InputEvent::Keyboard(KeyPress::Plain { key }))
+            .await?;
+        loop {
+            if self.focus_index.load(Ordering::Acquire) != pre {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!("nav_to: focus did not move after {key:?} before the deadline");
+            }
+            self.await_render(deadline).await?;
+        }
+    }
+
     /// Navigate keyboard focus to `target_entity_id`. Emits Tab to hop
     /// regions, then Down to walk within the region. Re-snapshots the
     /// registry inside each loop iteration so registry mutations during
@@ -294,11 +315,8 @@ impl TuiUserDriver {
                      (target_region={target_region})"
                 );
             }
-            self.send_input(InputEvent::Keyboard(KeyPress::Plain {
-                key: RKey::SpecialKey(SpecialKey::Tab),
-            }))
-            .await?;
-            self.await_render(deadline).await?;
+            self.step_focus(RKey::SpecialKey(SpecialKey::Tab), deadline)
+                .await?;
             tab_steps += 1;
         }
 
@@ -343,11 +361,8 @@ impl TuiUserDriver {
                      size {max_seen})"
                 );
             }
-            self.send_input(InputEvent::Keyboard(KeyPress::Plain {
-                key: RKey::SpecialKey(SpecialKey::Down),
-            }))
-            .await?;
-            self.await_render(deadline).await?;
+            self.step_focus(RKey::SpecialKey(SpecialKey::Down), deadline)
+                .await?;
             steps += 1;
         }
     }
@@ -654,43 +669,51 @@ impl UserDriver for TuiUserDriver {
     /// [`Self::click_entity`], whose contract ("a geometry hit-test lands on
     /// the glyph") this TUI cannot satisfy — it has no mouse arm, so its click
     /// is navigate-then-Enter and Enter on a Block region OPENS EDIT MODE
-    /// (`app_main.rs`), leaving the task state untouched. Resolve the glyph's
-    /// dispatch from the resolved view tree instead, exactly as
-    /// `ReactiveEngineDriver` does: a keyless driver has no other way to say
-    /// "tap the checkbox", and the tree is the one this renderer paints.
+    /// (`app_main.rs`), leaving the task state untouched. The TUI's equivalent
+    /// of "tap the checkbox on this row" is the `cycle_task_state` chord on the
+    /// focused row, so seat focus and press it.
     ///
-    /// The TUI's `cycle_task_state` chord (Ctrl+T) is NOT a substitute here:
-    /// it reads the prior keyword off the authority and advances one step, so
-    /// it is not idempotent, while the caller's landing loop re-clicks against
-    /// a stale projection precisely because it assumes stall re-clicks are
-    /// no-ops. That combination advanced blocks past the reference.
+    /// The `cycle_task_state` lookup goes to the engine's binding registry,
+    /// which is hardcoded in `reactive.rs` rather than read from
+    /// `assets/default/keybindings.yaml`; the chord it yields is used only to
+    /// name the op in the error text. The keys actually pressed come from
+    /// `tui_keystrokes_for_op`.
+    ///
+    /// ADVANCING: `cycle_task_state` reads the prior keyword off the authority,
+    /// so re-issuing the chord is a real extra step in the ring.
     async fn cycle_state_toggle(
         &self,
         entity_id: &holon_api::EntityUri,
-        region: &str,
-    ) -> Result<()> {
-        let root_uri = holon_api::root_layout_block_uri();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            let resolved = self.engine.snapshot_resolved(&root_uri);
-            if let Some(intent) =
-                holon_frontend::focus_path::state_toggle_cycle_intent(&resolved, entity_id, region)
-            {
-                return self
-                    .synthetic_dispatch(intent.entity_name.as_str(), &intent.op_name, intent.params)
-                    .await;
-            }
-            if Instant::now() >= deadline {
-                bail!(
-                    "cycle_state_toggle: could not resolve the state_toggle cycle intent for \
-                     {entity_id} in region {region} within 2s. {}",
-                    holon_frontend::focus_path::state_toggle_miss_reason(
-                        &resolved, entity_id, region
-                    )
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        _: &str,
+    ) -> Result<StateToggleVerb> {
+        let chord = self
+            .engine
+            .key_bindings()
+            .lock_ref()
+            .get("cycle_task_state")
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "cycle_state_toggle: the keymap binds no chord to cycle_task_state, so the \
+                     TUI's state-toggle gesture has no key to press"
+                )
+            })?;
+
+        // The TUI's own key for that op — the single per-frontend translation,
+        // shared with `send_key_chord`.
+        let events =
+            tui_keystrokes_for_op("cycle_task_state", &HashMap::new()).with_context(|| {
+                format!("cycle_state_toggle: no TUI keystroke for {chord:?}'s operation")
+            })?;
+
+        self.nav_to(entity_id).await?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for ev in events {
+            self.send_input(ev).await?;
+            self.await_render(deadline).await?;
         }
+        self.await_chord_settled(entity_id, deadline).await?;
+        Ok(StateToggleVerb::Advancing)
     }
 
     /// LIMITATION: TUI has no DnD path through `app_handle_input_event`

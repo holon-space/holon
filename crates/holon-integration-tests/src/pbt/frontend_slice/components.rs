@@ -37,6 +37,7 @@ use holon_api::QueryLanguage;
 use holon_app::HeadlessBuilderServices;
 use holon_frontend::FrontendSession;
 use holon_frontend::ReactiveEngineDriver;
+use holon_frontend::StateToggleVerb;
 use holon_frontend::UserDriver;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
@@ -3755,51 +3756,59 @@ impl HeadlessFrontendComponent {
             // Click the `state_toggle` GLYPH (not a plain row click, which would
             // just focus): `cycle_state_toggle` targets the widget's own
             // `set_field` cycle dispatch — geometry hit-test on a window driver,
-            // resolved-tree intent on the headless driver.
-            driver
+            // resolved-tree intent on the headless driver, the `cycle_task_state`
+            // chord on the TUI.
+            let verb = driver
                 .cycle_state_toggle(&id, "main")
                 .await
                 .unwrap_or_else(|e| {
                     panic!("[toggle_state] click #{} failed for {id}: {e:#}", n + 1)
                 });
-            // WAIT until the projection shows THIS click landed before the
-            // next one, RE-CLICKING while the resolved view is stale. Each
-            // click's intent computes `next` from the resolved view's
-            // `current` prop; while that view still serves the pre-click
-            // value, a click re-dispatches the SAME keyword — a no-op write
-            // that can never advance the cycle (the stale-read double
-            // dispatch `inv-viewmodel-state-toggle-correct` caught when
-            // ToggleState first fired in the keystone: DOING != DONE, and
-            // the pure block_raw-settle variant of this loop then hung on a
-            // no-op click). Stale re-clicks are idempotent (same value), and
-            // the first click after the view refreshes advances exactly one
-            // step — a user hammering an unresponsive toggle sees the same.
-            // The generator excludes no-op toggles, so every landed click
-            // changes `task_state`.
-            let overall = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(10));
-            'landing: loop {
-                let attempt_deadline =
-                    (tokio::time::Instant::now() + Duration::from_millis(500)).min(overall);
-                while tokio::time::Instant::now() < attempt_deadline {
-                    let now_state = self.block_task_state(&id).await.unwrap_or_default();
-                    if now_state != current {
-                        current = now_state;
-                        break 'landing;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+            self.await_toggle_landed(driver, &id, &mut current, n, verb)
+                .await;
+        }
+    }
+
+    /// Wait until the projection shows the click above landed, re-issuing the
+    /// verb while it does not — and only where [`StateToggleVerb`] permits it.
+    /// The generator excludes no-op toggles, so every landed click changes
+    /// `task_state`.
+    async fn await_toggle_landed(
+        &self,
+        driver: &dyn UserDriver,
+        id: &EntityUri,
+        current: &mut String,
+        n: u8,
+        verb: StateToggleVerb,
+    ) {
+        let overall = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(10));
+        loop {
+            let attempt_deadline =
+                (tokio::time::Instant::now() + Duration::from_millis(500)).min(overall);
+            while tokio::time::Instant::now() < attempt_deadline {
+                let now_state = self.block_task_state(id).await.unwrap_or_default();
+                if now_state != *current {
+                    *current = now_state;
+                    return;
                 }
-                assert!(
-                    tokio::time::Instant::now() < overall,
-                    "[toggle_state] click #{} never landed for {id} (task_state still {current:?} \
-                     after 10s of re-clicks)",
-                    n + 1
-                );
-                driver
-                    .cycle_state_toggle(&id, "main")
-                    .await
-                    .unwrap_or_else(|e| {
-                        panic!("[toggle_state] re-click #{} failed for {id}: {e:#}", n + 1)
-                    });
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                tokio::time::Instant::now() < overall,
+                "[toggle_state] click #{} never landed for {id} (task_state still {current:?} \
+                 after 10s)",
+                n + 1
+            );
+            match verb {
+                StateToggleVerb::Idempotent => {
+                    driver
+                        .cycle_state_toggle(id, "main")
+                        .await
+                        .unwrap_or_else(|e| {
+                            panic!("[toggle_state] re-click #{} failed for {id}: {e:#}", n + 1)
+                        });
+                }
+                StateToggleVerb::Advancing => {}
             }
         }
     }

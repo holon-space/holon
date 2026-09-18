@@ -616,7 +616,7 @@ impl UserDriver for SimUserDriver {
         &self,
         entity_id: &EntityUri,
         region: &str,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<holon_frontend::StateToggleVerb, anyhow::Error> {
         let root = holon_api::root_layout_block_uri();
         let resolved = self.engine.snapshot_resolved(&root);
         let intent =
@@ -629,7 +629,7 @@ impl UserDriver for SimUserDriver {
                 })?;
         self.engine.dispatch_intent_sync(intent).await?;
         self.pump();
-        Ok(())
+        Ok(holon_frontend::StateToggleVerb::Idempotent)
     }
 
     async fn click_entity_with_tree(

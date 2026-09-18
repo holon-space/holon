@@ -90,22 +90,58 @@ over 112 probed runs / 278 traced toggles `reclicks=0` in 110 and **the only 2
 runs with a re-click are the only 2 that diverged** (2/2 vs 0/110). Detail in
 `2026-09-18-toggle-landing-loop-assumes-an-idempotent-click-verb`.
 
-**Attempt 2 (final).** `TuiUserDriver::cycle_state_toggle` now resolves the
-glyph's dispatch from the resolved view tree and dispatches it, exactly as
-`ReactiveEngineDriver` does. The view-computed verb IS idempotent under a stale
-view, so the landing loop's premise holds; no `nav_to`, no keystroke, no op→
-keystroke map. Disclosed cost: the TUI's Ctrl+T path is not exercised by this
-rung (recorded in the idempotence entry above).
+**Attempts 2 and 3.** Attempt 2 gave the TUI the resolved-tree
+`set_field` intent, which closed the symptom but left the TUI's own Ctrl+T —
+a real production verb — unexercised by the rung. **Attempt 3 (final, ruling
+D143.a)** puts the TUI back on the real chord and removes the reason attempt 1
+could not: `cycle_state_toggle` now returns the verb's nature
+(`StateToggleVerb::Advancing`), so the caller's landing loop no longer re-issues
+it against a lagging projection. See
+`2026-09-18-toggle-landing-loop-assumes-an-idempotent-click-verb` for the enum,
+the loop, and the red/green/teeth evidence.
 
-Evidence (all `lane-logs/`):
+Attempt 1's three refuting reasons and where each stands now:
+
+1. `cycle_task_state` advances per issue → the loop no longer re-issues an
+   `Advancing` verb. CLOSED.
+2. `nav_to` + a keystroke cannot be sequenced → `nav_to` now barriers each
+   navigation key on the renderer's focus index actually moving instead of on
+   "some render" (`TuiUserDriver::step_focus`), so a press is never duplicated
+   and the walk converges in 1-2 steps instead of walking to its bound.
+   CLOSED — see `2026-09-18-tui-focus-walk-barriers-on-any-render`.
+3. It replaced one hardcoded op→keystroke map with another → NOT CLOSED. The op
+   is looked up in `engine.key_bindings()` and the keystroke comes from
+   `tui_keystrokes_for_op`, the single per-frontend translation, but that lookup
+   is a presence check against a table hardcoded in
+   `crates/holon-frontend/src/reactive.rs`. The TUI's real keymap is
+   `assets/default/keybindings.yaml` (`frontends/tui/src/keybindings.rs`
+   `include_str!`), and a binding dropped OR rebound there is not caught —
+   renaming `action: cycle_task_state` in it left 3 of 3 ToggleState-biased runs
+   passing. Only removing the op from the hardcoded registry fails loud, and a
+   rebind of the registry chord is not caught either. The TUI also cannot
+   resolve the chord through the engine (`resolve_key_chord`/`send_key_chord`)
+   because Cmd+Enter's `capture_action` wiring is GPUI-only — bubbling returns
+   `Focus`, so 41 of 41 `ToggleState` draws failed with "binds cycle_task_state
+   but does not resolve" (`lane-logs/redA-*`).
+
+Measured on the final tree (biased `HOLON_PBT_WEIGHTS=ToggleState:400`,
+paired so both arms share the load; rubric in `lane-logs/classify.py`):
+
+- **shipped (`Advancing`): 0 toggle-family failures in 30 runs** at load 200-285,
+  1 barrier timeout (`click #3 failed … engine did not quiesce`).
+- teeth (the same binary, only the TUI's declaration flipped to `Idempotent`):
+  **2 toggle-family failures in 30 runs**, including `block:c1: ref=Some("DONE")
+  sql=Some("")` — this entry's own counterexample.
+
+Predecessor evidence (previous lane's `lane-logs/`):
 
 - pre-fix (no override) biased: 7/7 runs that reached the rung panicked
   (`wtoggle-r*.log`).
 - attempt 1, biased: 10 toggle-family failures in the verifier's 52 runs
   (`verify-post-toggle*`, `verify-v-post-toggle*.log`).
-- **attempt 2, biased: 68 runs, 0 toggle-family failures** — 20 serial at load
+- attempt 2, biased: 68 runs, 0 toggle-family failures — 20 serial at load
   10→91 (`wA-resolved-summary.txt`), 48 parallel at load 79→111
-  (`wB-resolved-summary.txt`), against the verifier's refutation load of 43-60.
+  (`wB-resolved-summary.txt`).
 - the (b)/(c) seeds (4, 10, 12, 13, 28, 32) stay green (`final-seed-*.log`).
 
 One consequence to note, absorbed by an existing registry row: with the recipe

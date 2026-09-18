@@ -93,6 +93,20 @@ pub fn build_drop_intent(
 
 use crate::focus_path::walk_tree;
 
+/// What a driver's `state_toggle` verb does when it is issued a second time
+/// against a view whose projection has not caught up with the first issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateToggleVerb {
+    /// The verb derives an absolute target from the view it resolved, so a
+    /// re-issue against a stale view writes the keyword already stored and
+    /// cannot advance the cycle twice.
+    Idempotent,
+    /// The verb reads the prior keyword off the authority and moves one step in
+    /// the ring, so every issue — including one against a stale view — is a
+    /// real extra step.
+    Advancing,
+}
+
 /// How UI mutations are dispatched to the system under test.
 ///
 /// Backend PBTs use `ReactiveEngineDriver` (same path as GPUI).
@@ -500,8 +514,18 @@ pub trait UserDriver: Send + Sync {
     /// (`ReactiveEngineDriver`) cannot disambiguate the glyph from the row by a
     /// coordinate-free `click_entity`, so it overrides this to resolve and
     /// dispatch the glyph's `set_field` intent from the resolved view tree.
-    async fn cycle_state_toggle(&self, entity_id: &EntityUri, region: &str) -> Result<()> {
-        self.click_entity(entity_id, region).await
+    ///
+    /// Returns the nature of the verb this driver just issued
+    /// ([`StateToggleVerb`]); a driver whose verb advances per issue must say
+    /// so, because the caller re-issues on a lagging projection only for a verb
+    /// that is idempotent under a stale view.
+    async fn cycle_state_toggle(
+        &self,
+        entity_id: &EntityUri,
+        region: &str,
+    ) -> Result<StateToggleVerb> {
+        self.click_entity(entity_id, region).await?;
+        Ok(StateToggleVerb::Idempotent)
     }
 
     /// Whether `send_raw_keystroke` routes through a real input pipeline
@@ -1046,7 +1070,11 @@ impl UserDriver for ReactiveEngineDriver {
     /// GPUI `state_toggle` `on_mouse_down` builds (next cycle value) — and
     /// dispatch it. Fails loud if the target renders no `state_toggle` (a
     /// caller drove `ToggleState` on a non-task/non-visible row).
-    async fn cycle_state_toggle(&self, entity_id: &EntityUri, region: &str) -> Result<()> {
+    async fn cycle_state_toggle(
+        &self,
+        entity_id: &EntityUri,
+        region: &str,
+    ) -> Result<StateToggleVerb> {
         let root_uri = holon_api::root_layout_block_uri();
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -1054,7 +1082,8 @@ impl UserDriver for ReactiveEngineDriver {
             if let Some(intent) =
                 crate::focus_path::state_toggle_cycle_intent(&resolved, entity_id, region)
             {
-                return self.apply_intent(intent).await;
+                self.apply_intent(intent).await?;
+                return Ok(StateToggleVerb::Idempotent);
             }
             if Instant::now() >= deadline {
                 anyhow::bail!(

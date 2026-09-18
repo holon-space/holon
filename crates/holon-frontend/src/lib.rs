@@ -316,6 +316,7 @@ pub use row_origin::RowOrigin;
 pub use shadow_builders::DEFAULT_DRAWER_WIDTH;
 pub use shadow_builders::DRAWER_TOGGLE_WIDTH;
 pub use user_driver::ReactiveEngineDriver;
+pub use user_driver::StateToggleVerb;
 pub use user_driver::UserDriver;
 pub use view_model::ViewModel;
 
