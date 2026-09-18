@@ -666,6 +666,15 @@ pub struct LiveQueryResult<W> {
     pub render_expr: holon_api::render_types::RenderExpr,
 }
 
+/// The block a render-spec `id` argument names.
+///
+/// The value is authored in the render expression, or read from the row the
+/// expression sits in, so one that forms no URI is a content error to report.
+pub fn render_spec_block_uri(arg: &str, id: &str) -> Result<holon_api::EntityUri, String> {
+    holon_api::EntityUri::try_from_raw(id)
+        .map_err(|e| format!("{arg} {id:?} names no block — render-spec ids are block ids ({e})"))
+}
+
 /// Parse the builder's arguments into a [`RowSourceSpec`] plus the raw
 /// `context:` id the props carry.
 ///
@@ -736,18 +745,18 @@ fn parse_row_source<W>(
                 .map(|s| s.to_string())
         });
 
-    let context = context_id.as_ref().map(|id| {
-        // ALLOW(entity_uri_from_raw): context_id from render-spec arg or matview row
-        // 'id' field
-        let uri = holon_api::EntityUri::from_raw(id);
-        crate::QueryContext {
-            current_block_id: Some(uri.clone()),
-            context_parent_id: Some(uri),
-            // Validation-only context (the watch is started and immediately
-            // dropped); descendants scoping is irrelevant here, so unfiltered.
-            path_context: crate::PathContext::Unfiltered,
-        }
-    });
+    let context = context_id
+        .as_ref()
+        .map(|id| {
+            render_spec_block_uri("context", id).map(|uri| crate::QueryContext {
+                current_block_id: Some(uri.clone()),
+                context_parent_id: Some(uri),
+                // Validation-only context (the watch is started and immediately
+                // dropped); descendants scoping is irrelevant here, so unfiltered.
+                path_context: crate::PathContext::Unfiltered,
+            })
+        })
+        .transpose()?;
 
     Ok((
         holon_api::row_source::RowSourceSpec::Query {

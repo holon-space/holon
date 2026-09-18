@@ -126,6 +126,7 @@ fn mount(cx: &mut TestAppContext) -> (Rig, &mut VisualTestContext) {
                 String::new(),
                 "content".to_string(),
                 ROW_ID.to_string(),
+                holon_api::EntityUri::parse(ROW_ID).expect("the test row id is a schemed URI"),
                 operations(),
                 triggers(),
                 services_dyn,

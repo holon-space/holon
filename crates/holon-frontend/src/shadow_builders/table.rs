@@ -271,7 +271,10 @@ fn row_template(columns: &[ColumnDef]) -> RenderExpr {
 holon_macros::widget_builder! {
     fn table(#[default = 4.0] gap: f32, children: Collection) {
         let __parent_space = ba.ctx.available_space;
-        let virtual_child = virtual_child_slot_from_arg(&ba);
+        let virtual_child = match virtual_child_slot_from_arg(&ba) {
+                    Ok(slot) => slot,
+                    Err(msg) => return ViewModel::error("table", msg),
+                };
 
         let Some(spec) = ba.args.get_template("columns") else {
             // Bare `table` — the collection widget it has always been.
@@ -281,7 +284,11 @@ holon_macros::widget_builder! {
                 }
                 CollectionData::Static { mut items } => {
                     if let Some(tmpl) = ba.args.get_template("item_template").or(ba.args.get_template("item")) {
-                        if let Some(vc) = interpret_virtual_child(&ba, tmpl) {
+                        let vc = match interpret_virtual_child(&ba, tmpl) {
+                            Ok(vc) => vc,
+                            Err(msg) => return ViewModel::error("table", msg),
+                        };
+                        if let Some(vc) = vc {
                             items.push(vc);
                         }
                     }

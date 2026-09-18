@@ -11,6 +11,7 @@ use holon_frontend::link_segments::link_content_segments;
 use holon_frontend::link_segments::marks_of;
 use holon_frontend::link_segments::nav_focus;
 use holon_frontend::link_segments::wants_styled_render;
+use holon_frontend::render_interpreter::render_spec_block_uri;
 
 use super::prelude::*;
 use crate::render::builders::text::build_highlights;
@@ -39,8 +40,10 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     let services = ctx.services.clone();
 
     // Parsed once for the click target.
-    // ALLOW(entity_uri_from_raw): render-spec rendered_text node row_id (boundary)
-    let block_uri = EntityUri::from_raw(&row_id);
+    let block_uri = match render_spec_block_uri("row_id", &row_id) {
+        Ok(uri) => uri,
+        Err(msg) => return error_banner(&format!("rendered_text: {msg}"), ctx),
+    };
 
     let marks = marks_of(&node.entity());
 

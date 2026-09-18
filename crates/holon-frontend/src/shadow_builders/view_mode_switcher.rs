@@ -4,13 +4,15 @@ holon_macros::widget_builder! {
     raw fn view_mode_switcher(ba: BA<'_>) -> ViewModel {
         let modes = ba.args.get_string("modes").unwrap_or("[]").to_string();
 
-        // Point-free form would drop the archlint baseline entry for this
-        // `EntityUri::from_raw` call site.
-        #[allow(clippy::redundant_closure)]
-        let entity_uri = ba.args.get_string("entity_uri")
-            // ALLOW(entity_uri_from_raw): ba.args.get_string('entity_uri') render-spec DSL arg
-            .map(|s| holon_api::EntityUri::from_raw(s))
+        let entity_id = ba
+            .args
+            .get_string("entity_uri")
             .expect("view_mode_switcher requires an `entity_uri` argument");
+        let entity_uri =
+            match crate::render_interpreter::render_spec_block_uri("entity_uri", entity_id) {
+                Ok(uri) => uri,
+                Err(msg) => return ViewModel::error("view_mode_switcher", msg),
+            };
 
         // Collect all mode_* templates.
         let mode_templates: std::collections::HashMap<String, holon_api::render_types::RenderExpr> =

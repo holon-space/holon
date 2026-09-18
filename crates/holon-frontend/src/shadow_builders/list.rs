@@ -27,12 +27,19 @@ holon_macros::widget_builder! {
         let gap = crate::reactive_view_model::parse_gap(ba.args.named.get("gap"), gap);
         match children {
             CollectionData::Streaming { item_template, data_source, sort_key, rules } => {
-                let virtual_child = virtual_child_slot_from_arg(&ba);
+                let virtual_child = match virtual_child_slot_from_arg(&ba) {
+                    Ok(slot) => slot,
+                    Err(msg) => return ViewModel::error("list", msg),
+                };
                 ViewModel::streaming_collection("list", item_template, data_source, gap, flow, sort_key, __parent_space, None, virtual_child, rules, None, Default::default())
             }
             CollectionData::Static { mut items } => {
                 if let Some(tmpl) = ba.args.get_template("item_template").or(ba.args.get_template("item")) {
-                    if let Some(vc) = interpret_virtual_child(&ba, tmpl) {
+                    let vc = match interpret_virtual_child(&ba, tmpl) {
+                        Ok(vc) => vc,
+                        Err(msg) => return ViewModel::error("list", msg),
+                    };
+                    if let Some(vc) = vc {
                         items.push(vc);
                     }
                 }

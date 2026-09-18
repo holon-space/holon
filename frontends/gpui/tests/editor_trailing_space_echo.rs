@@ -78,7 +78,9 @@ fn mount_editor(
                 "editor-el".to_string(),
                 String::new(), // initial content — matches the initial data row below
                 "content".to_string(),
-                row_id_for_view,
+                row_id_for_view.clone(),
+                holon_api::EntityUri::parse(&row_id_for_view)
+                    .expect("the test row id is a schemed URI"),
                 Vec::new(),
                 Vec::new(),
                 services,

@@ -44,6 +44,32 @@ pub(crate) fn hashed_id(s: &str) -> ElementId {
 /// Shared by the read-only render paths (`rendered_text` builder,
 /// `render_entity_view`); each caller adds its own outer wrapping (e.g. bounds
 /// tracking). The caret defaults to end-of-text on mount ("add to this block").
+/// The visible-failure banner a builder paints when it cannot build: what
+/// `builders::error::render` paints for a `ViewModel`-borne error.
+///
+/// Tracked as an `error` widget so the region's painted text is readable by the
+/// same windowed assertions, instead of a bare `div` no test can see.
+pub(crate) fn error_banner(message: &str, ctx: &GpuiRenderContext) -> gpui::AnyElement {
+    let banner = div()
+        .p_2()
+        .rounded(px(4.0))
+        .bg(tc(ctx, |t| t.secondary))
+        .text_color(tc(ctx, |t| t.danger))
+        .text_sm()
+        .child(message.to_string())
+        .into_any_element();
+    crate::geometry::tracked(
+        format!("render-error-{message}"),
+        banner,
+        &ctx.bounds_registry,
+        "error",
+        None,
+        true,
+        Some(message.into()),
+    )
+    .into_any_element()
+}
+
 pub(crate) fn click_to_focus(
     el_id: &str,
     child: AnyElement,

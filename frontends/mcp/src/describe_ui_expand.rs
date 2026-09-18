@@ -15,6 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use holon_api::render_types::RenderExpr;
+use holon_frontend::render_interpreter::render_spec_block_uri;
 use holon_frontend::view_model::DeferredMechanism;
 use holon_frontend::view_model::ViewKind;
 use holon_frontend::view_model::ViewModel;
@@ -23,18 +24,6 @@ use holon_frontend::view_model::ViewModel;
 /// same query would otherwise recurse forever. Subtrees past the cap are marked
 /// unevaluated rather than silently dropped.
 const MAX_EXPANSION_DEPTH: usize = 8;
-
-/// The block a `context_id` names. It comes from a `context:` argument in a
-/// vault-authored render expression, so a value that forms no URI is a content
-/// error to report.
-fn context_block_uri(id: &str) -> anyhow::Result<holon_api::EntityUri> {
-    holon_api::EntityUri::try_from_raw(id).map_err(|e| {
-        anyhow::anyhow!(
-            "context_id {id:?} names no block: a vault-authored `context:` argument takes a \
-             block id. ({e})"
-        )
-    })
-}
 
 /// Depth alone does not bound WORK — total expansions are `Σ bᵏ` in the
 /// branching factor, and for the ordinary per-row nested query
@@ -153,7 +142,8 @@ impl DeferredResolver for EngineResolver {
             // filter, so the query runs unscoped.
             let context = match spec.query_context_id {
                 Some(id) => {
-                    let uri = context_block_uri(id)?;
+                    let uri =
+                        render_spec_block_uri("context_id", id).map_err(anyhow::Error::msg)?;
                     let path = engine.lookup_block_path(&uri).await.map_err(|e| {
                         anyhow::anyhow!(
                             "context path prefix lookup for block '{uri}' failed, so \
@@ -353,7 +343,6 @@ mod context_id_tests {
     use super::DeferredResolver;
     use super::EngineResolver;
     use super::LiveQuerySpec;
-    use super::context_block_uri;
 
     /// A vault-authored `context:` argument reaches the resolver here, so a
     /// value that forms no URI must come back as an error.
@@ -383,25 +372,5 @@ mod context_id_tests {
         );
         let err = result.expect_err("no block is named 'my task'");
         assert!(err.to_string().contains("my task"), "{err}");
-    }
-
-    #[test]
-    fn a_context_id_that_forms_no_uri_is_an_error_not_a_panic() {
-        let err = context_block_uri("my task").expect_err("a space forms no URI");
-        assert!(err.to_string().contains("my task"), "{err}");
-    }
-
-    #[test]
-    fn a_context_id_resolves_bare_or_schemed_alike() {
-        assert_eq!(
-            context_block_uri("abc").expect("a bare id").as_str(),
-            "block:abc"
-        );
-        assert_eq!(
-            context_block_uri("block:abc")
-                .expect("a schemed id")
-                .as_str(),
-            "block:abc"
-        );
     }
 }

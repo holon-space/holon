@@ -28,7 +28,10 @@ holon_macros::widget_builder! {
                 // read-only `rendered_text`) and never re-resolves on focus; as a
                 // real row it re-resolves `rendered_text` → `editable_text` on
                 // focus exactly like the other rows.
-                let virtual_child = virtual_child_slot_from_arg(&ba);
+                let virtual_child = match virtual_child_slot_from_arg(&ba) {
+                    Ok(slot) => slot,
+                    Err(msg) => return ViewModel::error("tree", msg),
+                };
                 let __rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
                 let __context_root = crate::render_interpreter::collection_context_root_id(&ba);
                 ViewModel::streaming_collection("tree", tmpl.clone(), ds, 4.0, ItemFlow::Stacked, __sort_key, __parent_space, None, virtual_child, __rules, __context_root, Default::default())
@@ -40,7 +43,11 @@ holon_macros::widget_builder! {
                 // for empty collections — the user needs to create the first child
                 // via the slot. Static/snapshot path only (live-query / MCP / PBT);
                 // the streaming path above injects it as a reactive row instead.
-                if let Some(vc) = interpret_virtual_child(&ba, tmpl) {
+                let vc = match interpret_virtual_child(&ba, tmpl) {
+                    Ok(vc) => vc,
+                    Err(msg) => return ViewModel::error("tree", msg),
+                };
+                if let Some(vc) = vc {
                     flat.push((vc, 0, std::collections::HashMap::new()));
                 }
                 if flat.is_empty() {

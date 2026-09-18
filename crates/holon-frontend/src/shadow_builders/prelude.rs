@@ -31,20 +31,20 @@ pub(crate) type BA<'a> = BuilderArgs<'a, crate::reactive_view_model::ReactiveVie
 /// expressions (which have no sentinel resolution) still produce a slot.
 pub(crate) fn virtual_child_slot_from_arg(
     ba: &BA<'_>,
-) -> Option<crate::reactive_view::VirtualChildSlot> {
+) -> Result<Option<crate::reactive_view::VirtualChildSlot>, String> {
     // `creation_slot: true` ALSO gates the top-level "create a new root entity"
     // slot for a flat `no_parent` forest (BugFunnel #61 / #67), which
     // `resolve_creation_parent` reads as `allow_root_creation`.
     let creation_slot = ba.args.get_bool("creation_slot").unwrap_or(false);
     if !creation_slot {
-        return None;
+        return Ok(None);
     }
     // An EXPLICIT `virtual_parent` (the DSL author naming the container) is the
     // only form allowed to afford a creation slot on an EMPTY collection — it
     // is the author's assertion of where a first child belongs. The two
     // fallbacks below derive the container from context and stay implicit.
     let explicit = ba.args.get_string("virtual_parent").map(|s| s.to_string());
-    let vp = explicit
+    let Some(vp) = explicit
         .clone()
         // Streaming path: context row IS the parent block.
         .or_else(|| {
@@ -63,17 +63,21 @@ pub(crate) fn virtual_child_slot_from_arg(
                 .and_then(|r| r.get("parent_id"))
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_string())
-        })?;
-    // ALLOW(entity_uri_from_raw): render-spec arg or data row 'parent_id'
-    let uri = holon_api::EntityUri::from_raw(&vp);
+        })
+    else {
+        return Ok(None);
+    };
+    let uri = crate::render_interpreter::render_spec_block_uri("virtual_parent", &vp)?;
     let entity_name = uri.scheme().to_string();
-    let config = ba.services.virtual_child_config(&entity_name)?;
-    Some(crate::reactive_view::VirtualChildSlot {
+    let Some(config) = ba.services.virtual_child_config(&entity_name) else {
+        return Ok(None);
+    };
+    Ok(Some(crate::reactive_view::VirtualChildSlot {
         defaults: config.defaults,
         parent_id: uri,
         allow_root_creation: creation_slot,
         parent_is_explicit: explicit.is_some(),
-    })
+    }))
 }
 
 /// Build a virtual child DataRow from a `VirtualChildSlot`.
@@ -118,17 +122,21 @@ pub(crate) fn virtual_child_row(
 pub(crate) fn interpret_virtual_child(
     ba: &BA<'_>,
     template: &holon_api::render_types::RenderExpr,
-) -> Option<ViewModel> {
-    let slot = virtual_child_slot_from_arg(ba)?;
+) -> Result<Option<ViewModel>, String> {
+    let Some(slot) = virtual_child_slot_from_arg(ba)? else {
+        return Ok(None);
+    };
     // Bug 2A: parent the creation slot at the query's focus root (resolved from
     // the rendered rows), not the static container `slot.parent_id`. `None`
     // (empty / not-yet-resolvable) → no slot rather than a silent mis-parent.
-    let parent = crate::row_origin::resolve_creation_parent(
+    let Some(parent) = crate::row_origin::resolve_creation_parent(
         &ba.ctx.data_rows,
         &slot.parent_id,
         slot.allow_root_creation,
         slot.parent_is_explicit,
-    )?;
+    ) else {
+        return Ok(None);
+    };
     let row = virtual_child_row(&parent, &slot.defaults);
     let affordance = crate::reactive_view::creation_affordance_template();
     let template = if crate::reactive_view::caret_is_on_row(&row, ba.services) {
@@ -137,7 +145,7 @@ pub(crate) fn interpret_virtual_child(
         &affordance
     };
     let row_ctx = ba.ctx.with_row(row);
-    Some((ba.interpret)(template, &row_ctx))
+    Ok(Some((ba.interpret)(template, &row_ctx)))
 }
 
 /// Weave the session-level advice sidecar (ADR 0022) into a static collection's

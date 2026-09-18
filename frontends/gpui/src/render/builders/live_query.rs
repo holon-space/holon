@@ -1,6 +1,7 @@
 use gpui::AnyView;
 use gpui::StyleRefinement;
 use holon_frontend::ReactiveViewModel;
+use holon_frontend::render_interpreter::render_spec_block_uri;
 
 use super::prelude::*;
 use crate::views::ReactiveShell;
@@ -83,19 +84,6 @@ fn resolve_block_path(
     .map_err(|e| format!("live_query({id}): context path prefix lookup failed: {e:#}"))
 }
 
-/// The visible-failure element: what a builder paints when it cannot build.
-/// Mirrors `builders::error::render`, reached without a `ViewModel` detour.
-fn error_element(message: &str, ctx: &GpuiRenderContext) -> AnyElement {
-    div()
-        .p_2()
-        .rounded(px(4.0))
-        .bg(tc(ctx, |t| t.secondary))
-        .text_color(tc(ctx, |t| t.danger))
-        .text_sm()
-        .child(message.to_string())
-        .into_any_element()
-}
-
 /// The shell for a node whose rows come from a registered named source.
 ///
 /// Its own path because a named source has no watcher to start and no context
@@ -121,7 +109,7 @@ fn render_named(
     let named = match spec {
         Ok(holon_api::row_source::RowSourceSpec::Named(named)) => named,
         Ok(_) => unreachable!("parse_named only builds the Named arm"),
-        Err(e) => return error_element(&e.to_string(), ctx),
+        Err(e) => return error_banner(&e.to_string(), ctx),
     };
 
     let cache_key = crate::entity_view_registry::CacheKey::LiveQuery(super::named_source_key(
@@ -185,7 +173,7 @@ fn render_placed(
         match serde_json::from_str::<holon_api::render_types::RenderExpr>(re_str) {
             Ok(re) => {
                 if let Err(e) = holon_api::render_dsl::validate_render_expr(&re) {
-                    return error_element(
+                    return error_banner(
                         &format!("live_query(source: {source}): render_expr is not valid: {e}"),
                         ctx,
                     );
@@ -193,7 +181,7 @@ fn render_placed(
                 return render_named(node, ctx, placement, source, re);
             }
             Err(e) => {
-                return error_element(
+                return error_banner(
                     &format!("live_query(source: {source}): unreadable render_expr: {e}"),
                     ctx,
                 );
@@ -209,7 +197,7 @@ fn render_placed(
             // A deserialized expression has not been through the parser's colour
             // gate, so it is validated here rather than trusted.
             if let Err(e) = holon_api::render_dsl::validate_render_expr(&re) {
-                return error_element(&format!("live_query: render_expr is not valid: {e}"), ctx);
+                return error_banner(&format!("live_query: render_expr is not valid: {e}"), ctx);
             }
             let key = super::live_query_key(&query, query_context_id.as_deref());
             let cache_key = crate::entity_view_registry::CacheKey::LiveQuery(key);
@@ -230,8 +218,8 @@ fn render_placed(
                 Some(_) => None,
                 None => {
                     let resolved = query_context_id.as_ref().map(|id| {
-                        // ALLOW(entity_uri_from_raw): render-spec live_query node props
-                        let uri = holon_api::EntityUri::from_raw(id);
+                        let uri = render_spec_block_uri("query_context_id", id)
+                            .map_err(|e| format!("live_query: {e}"))?;
                         resolve_block_path(&services, &uri).map(|path| {
                             holon_frontend::QueryContext::for_block_with_path(
                                 &uri,
@@ -242,7 +230,7 @@ fn render_placed(
                     });
                     match resolved.transpose() {
                         Ok(ctxt) => ctxt,
-                        Err(msg) => return error_element(&msg, ctx),
+                        Err(msg) => return error_banner(&msg, ctx),
                     }
                 }
             };

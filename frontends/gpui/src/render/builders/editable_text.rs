@@ -32,9 +32,14 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     let triggers = node.triggers.clone();
     let services = ctx.services.clone();
     let reseed_services = ctx.services.clone();
-    // ALLOW(entity_uri_from_raw): render-spec row_id, schemed to match the
-    // key the undo/redo dispatch arms its re-seed under.
-    let reseed_row = holon_api::EntityUri::from_raw(&row_id);
+    // Parsed once: the key the undo/redo dispatch arms its re-seed under, the
+    // editor's focus identity, and everything `EditorView` keys off the row.
+    let row_uri = match holon_frontend::render_interpreter::render_spec_block_uri("row_id", &row_id)
+    {
+        Ok(uri) => uri,
+        Err(msg) => return error_banner(&format!("editable_text: {msg}"), ctx),
+    };
+    let reseed_row = row_uri.clone();
     let nav = ctx.nav.clone();
     let data_handle = Some(node.data.clone());
     let el_id_for_create = el_id.clone();
@@ -42,6 +47,7 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     let content_for_create = content.clone();
     let field_for_create = field.clone();
     let bounds_registry_for_create = ctx.bounds_registry.clone();
+    let row_uri_for_create = row_uri.clone();
 
     let key = crate::entity_view_registry::CacheKey::Ephemeral(el_id.clone());
     let any = ctx.local.get_or_create(key, || {
@@ -52,6 +58,7 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
                     content_for_create,
                     field_for_create,
                     row_id_for_create,
+                    row_uri_for_create.clone(),
                     operations,
                     triggers,
                     services,
