@@ -822,6 +822,9 @@
                 "name": "live_promotion_windowed.rs"
               },
               {
+                "name": "live_query_context_id_windowed.rs"
+              },
+              {
                 "name": "main_outline_virtualized_pbt.rs"
               },
               {
@@ -886,6 +889,9 @@
               },
               {
                 "name": "refusal_toasts_reach_the_user_windowed.rs"
+              },
+              {
+                "name": "render_spec_row_id_windowed.rs"
               },
               {
                 "name": "secrets_in_memory_banner_windowed.rs"

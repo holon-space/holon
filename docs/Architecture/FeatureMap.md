@@ -295,7 +295,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `opentab-sql-reads-budget`
 - `pinblock-lazy-day-page-shell`
 - `proptest-sm-shrink-seen-transitions`
-- `quick-open-pages-section-misses-a-matching-page`
 - `shopping-mapping-cost-slo`
 - `text-undo-manager-load`
 - `toggle-state-sql-read-repeat-budget`

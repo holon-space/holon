@@ -9,6 +9,7 @@
 //! Unicode simple case folding, with pattern metacharacters matching themselves
 //! and an empty query returning nothing.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use holon_api::EntityUri;
@@ -200,23 +201,39 @@ crate::cap_transition! {
             return;
         }
 
+        // Every oracle block paired with the id the SUT minted for it. The two
+        // spaces part company on the blocks a transition minted (a split tail is
+        // `block::split-N` to the model, a created page `block:ref-doc-N`), so
+        // both loops below compare through this pairing, never raw ids.
+        let model: Vec<(EntityUri, EntityUri)> = state
+            .all_non_seed_block_ids()
+            .into_iter()
+            .map(|id| {
+                let sut_id = sut.resolve_block_id(&id);
+                (id, sut_id)
+            })
+            .collect();
+        let oracle_of = reverse_pairing(&model);
+
         // Soundness: every hit the reference model knows really does contain the
         // query as a literal, case-folded substring. An unescaped `%` or `_`
         // fails here — it matches blocks that never held the character.
         for hit in &hits {
-            let Some(content) = state.block_content(&hit.id) else {
+            let oracle = oracle_of.get(&hit.id).unwrap_or(&hit.id);
+            let Some(content) = state.block_content(oracle) else {
                 continue;
             };
             assert!(
                 folded_contains(content, &query),
-                "quick_open_search({query:?}) returned {} whose content {content:?} does not \
-                 contain the query — a pattern metacharacter was treated as a wildcard",
+                "quick_open_search({query:?}) returned {} (model id {oracle}) whose content \
+                 {content:?} does not contain the query — a pattern metacharacter was treated as \
+                 a wildcard",
                 hit.id
             );
             assert_eq!(
                 hit.is_page_section,
-                state.is_page_block(&hit.id),
-                "quick_open_search({query:?}) filed {} in the wrong section",
+                state.is_page_block(oracle),
+                "quick_open_search({query:?}) filed {} (model id {oracle}) in the wrong section",
                 hit.id
             );
         }
@@ -234,24 +251,19 @@ crate::cap_transition! {
                 }
                 (p, c)
             });
-        for id in state.all_non_seed_block_ids() {
-            let Some(content) = state.block_content(&id) else {
+        for (id, sut_id) in &model {
+            let Some(content) = state.block_content(id) else {
                 continue;
             };
             if !folded_contains(content, &query) {
                 continue;
             }
-            // `id` is a reference-model key, the hit sets hold SUT ids, and
-            // the two spaces part company exactly on the blocks a transition
-            // minted (a split tail): resolve before comparing, or a tail can
-            // never be found whatever the search did.
-            let sut_id = sut.resolve_block_id(&id);
-            let (section, found, limit) = if state.is_page_block(&id) {
-                ("Pages", page_hits.contains(&sut_id), PAGES_LIMIT)
+            let (section, found, limit) = if state.is_page_block(id) {
+                ("Pages", page_hits.contains(sut_id), PAGES_LIMIT)
             } else {
-                ("In content", content_hits.contains(&sut_id), CONTENT_LIMIT)
+                ("In content", content_hits.contains(sut_id), CONTENT_LIMIT)
             };
-            let truncated = if state.is_page_block(&id) {
+            let truncated = if state.is_page_block(id) {
                 page_hits.len() >= limit
             } else {
                 content_hits.len() >= limit
@@ -278,7 +290,77 @@ crate::cap_transition! {
     }
 }
 
+/// Reverse the model's id pairing into SUT id -> oracle id, so a returned hit's
+/// content can be read back through the model.
+///
+/// The side map is synthetic->real and injective at reconcile time: a
+/// self-mapped id is never a pair's value, and pair values are minted once. A
+/// violation would silently read the WRONG block's content, so it panics naming
+/// both model ids.
+fn reverse_pairing(model: &[(EntityUri, EntityUri)]) -> BTreeMap<EntityUri, EntityUri> {
+    let mut oracle_of = BTreeMap::new();
+    for (id, sut_id) in model {
+        if let Some(prev) = oracle_of.insert(sut_id.clone(), id.clone()) {
+            panic!(
+                "two model ids resolve to one SUT id {sut_id}: {prev} and {id} — the reconcile's \
+                 synthetic->real pairing is not injective, so a hit's content cannot be read back"
+            );
+        }
+    }
+    oracle_of
+}
+
 /// `LIMIT` of the Pages branch in `QueryEngine::quick_open_search`.
 const PAGES_LIMIT: usize = 20;
 /// `LIMIT` of the In-content branch in `QueryEngine::quick_open_search`.
 const CONTENT_LIMIT: usize = 30;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pair(model: &str, sut: &str) -> (EntityUri, EntityUri) {
+        (EntityUri::block(model), EntityUri::block(sut))
+    }
+
+    /// A collision must name BOTH model ids. The message is formatted AFTER the
+    /// insert, so reading the displaced value back out of the map would print
+    /// the second id twice and leave the panic undiagnosable.
+    #[test]
+    fn reverse_pairing_names_both_model_ids_on_a_collision() {
+        let model = vec![pair("ref-doc-0", "real-1"), pair("ref-doc-1", "real-1")];
+        let msg = std::panic::catch_unwind(|| reverse_pairing(&model))
+            .expect_err("a non-injective pairing must not resolve silently")
+            .downcast_ref::<String>()
+            .expect("panic payload is a String")
+            .clone();
+        assert!(
+            msg.contains("block:ref-doc-0"),
+            "names the displaced model id: {msg}"
+        );
+        assert!(
+            msg.contains("block:ref-doc-1"),
+            "names the colliding model id: {msg}"
+        );
+        assert!(
+            msg.contains("block:real-1"),
+            "names the shared SUT id: {msg}"
+        );
+    }
+
+    /// A born-equal id self-maps to itself, which is the pass-through case the
+    /// soundness loop's `unwrap_or` relies on.
+    #[test]
+    fn reverse_pairing_maps_a_minted_id_back_and_self_maps_a_born_equal_one() {
+        let model = vec![pair("ref-doc-0", "real-1"), pair("renhost", "renhost")];
+        let oracle_of = reverse_pairing(&model);
+        assert_eq!(
+            oracle_of[&EntityUri::block("real-1")],
+            EntityUri::block("ref-doc-0")
+        );
+        assert_eq!(
+            oracle_of[&EntityUri::block("renhost")],
+            EntityUri::block("renhost")
+        );
+    }
+}
