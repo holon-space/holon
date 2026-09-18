@@ -21,7 +21,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         return child_el;
     }
 
-    let row_id = node.row_id();
+    let row_id = node.row_id().map(|uri| uri.to_string());
     let el_id = format!("selectable-{}", row_id.as_deref().unwrap_or("unknown"));
     let services = ctx.services.clone();
     let el_id_log = el_id.clone();

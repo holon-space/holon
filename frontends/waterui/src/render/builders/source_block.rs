@@ -43,7 +43,7 @@ pub fn build(ba: BA) -> AnyView {
                 .on_tap(move || {
                     let Some(ref id) = row_id else { return };
                     let mut params = HashMap::new();
-                    params.insert("id".to_string(), Value::String(id.clone()));
+                    params.insert("id".to_string(), Value::String(id.to_string()));
                     holon_frontend::operations::dispatch_operation(
                         &spawner,
                         &session,

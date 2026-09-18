@@ -103,7 +103,7 @@ fn find_editable_target(
     row_block_id: Option<&str>,
 ) -> Option<EditableTarget> {
     if node.widget_name().as_deref() == Some("editable_text") {
-        let from_row = node.row_id();
+        let from_row = node.row_id().map(|uri| uri.to_string());
         let from_entity = node.entity_id();
         let block_id = from_row
             .clone()
@@ -435,6 +435,7 @@ fn render_selectable(
     };
     let entity_id = node
         .row_id()
+        .map(|uri| uri.to_string())
         .or_else(|| node.entity_id().map(|u| u.to_string()))
         .unwrap_or_default();
 
@@ -499,6 +500,7 @@ fn render_editable_text(
 ) -> usize {
     let row_id = node
         .row_id()
+        .map(|uri| uri.to_string())
         .or_else(|| node.entity_id().map(|u| u.to_string()));
     let edit = ctx
         .edit

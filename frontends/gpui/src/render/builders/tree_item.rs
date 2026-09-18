@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use futures_signals::signal::Mutable;
+use holon_api::EntityUri;
+use holon_api::RowId;
 use holon_frontend::disclosure_halo_id_for;
 use holon_frontend::expand_toggle_id_for;
 use holon_frontend::reactive::BuilderServices;
@@ -70,27 +72,21 @@ fn marker_gutter_px(style: &super::style::LayoutStyle) -> f32 {
     style.tree_chevron_size
 }
 
-/// Extract a stable ID from the first child's entity data for collapse state
-/// tracking. Walks into wrapper nodes (render_entity, live_query) to find the
-/// actual entity with an "id".
-fn node_id(vm: &ReactiveViewModel) -> Option<String> {
-    if let Some(id) = vm.entity().get("id").and_then(|v| v.as_string()) {
-        return Some(id.to_string());
+/// The identity of the row a tree node stands for — the collapse-state key
+/// AND the row the chevron's `set_field(collapsed)` addresses. Walks into
+/// wrapper nodes (render_entity, live_query) to reach the entity that carries
+/// the `id`.
+fn node_identity(vm: &ReactiveViewModel) -> RowId {
+    let own = vm.row_identity();
+    if !matches!(own, RowId::Absent) {
+        return own;
     }
-    let name = vm.widget_name();
-    match name.as_deref() {
-        Some("render_entity") | Some("live_query") => {
-            if let Some(ref slot) = vm.slot {
-                let content = slot.content.lock_ref();
-                return content
-                    .entity()
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .map(|s| s.to_string());
-            }
-            None
-        }
-        _ => None,
+    match vm.widget_name().as_deref() {
+        Some("render_entity") | Some("live_query") => match vm.slot {
+            Some(ref slot) => slot.content.lock_ref().row_identity(),
+            None => RowId::Absent,
+        },
+        _ => RowId::Absent,
     }
 }
 
@@ -178,7 +174,7 @@ fn collapse_chevron(
     expanded: Mutable<bool>,
     persist: Option<(
         Arc<dyn BuilderServices>,
-        String,
+        EntityUri,
         Arc<holon_api::widget_spec::DataRow>,
     )>,
     halo_id: Option<String>,
@@ -275,10 +271,11 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     // and shadow builders that need stable click-targetable chevrons stamp
     // this so the bounds-registry id is deterministic. Fall back to the
     // child's entity id (production org-tree path).
-    let explicit_target = node.prop_str("target_id");
-    let id = explicit_target
-        .clone()
-        .or_else(|| items.first().and_then(|c| node_id(c)));
+    let identity = match node.prop_str("target_id") {
+        Some(target) => holon_api::row_id_of_str(&target),
+        None => items.first().map_or(RowId::Absent, |c| node_identity(c)),
+    };
+    let id = identity.entity().map(|uri| uri.to_string());
 
     // Per-instance expand/collapse state. Read the `Mutable` from the VM
     // (set by `wrap_tree_item`) so two tree_items wrapping the same id keep
@@ -317,8 +314,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             let mutable = expanded_handle.unwrap_or_else(|| Mutable::new(true));
             // Persist through set_field(collapsed) when the row is identifiable;
             // rows without an id (synthetic gallery items) fold view-locally.
-            let persist = id
-                .clone()
+            let persist = identity
+                .entity()
                 .map(|row_id| (ctx.services.clone(), row_id, node.entity()));
             // Register under the row's OWN identity — the explicit `target_id`
             // when a blueprint stamped one, otherwise the content child's entity

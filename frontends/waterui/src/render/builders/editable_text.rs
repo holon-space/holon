@@ -49,7 +49,7 @@ pub fn build(ba: BA) -> AnyView {
                     if *last != new_string {
                         *last = new_string.clone();
                         let mut params = HashMap::new();
-                        params.insert("id".into(), Value::String(row_id.clone()));
+                        params.insert("id".into(), Value::String(row_id.to_string()));
                         params.insert("field".into(), Value::String(field.clone()));
                         params.insert("value".into(), Value::String(new_string));
                         holon_frontend::operations::dispatch_operation(

@@ -18,7 +18,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let appearance = node.state_toggle_appearance();
     let binding = node.state_toggle_binding();
 
-    let row_id = node.row_id();
+    let row_id = node.row_id().map(|uri| uri.to_string());
     let (on, current, intent) = match binding {
         StateToggleBinding::Bool => {
             let on = node.state_toggle_bool(&field);

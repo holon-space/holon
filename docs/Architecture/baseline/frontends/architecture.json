@@ -894,6 +894,9 @@
                 "name": "render_spec_row_id_windowed.rs"
               },
               {
+                "name": "row_id_boundary_windowed.rs"
+              },
+              {
                 "name": "secrets_in_memory_banner_windowed.rs"
               },
               {

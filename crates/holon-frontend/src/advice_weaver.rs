@@ -172,16 +172,24 @@ pub fn synthesize_advice_rows(
 /// stamp `ReactiveViewModel::occurrence` — the same `for_placement(lesson,
 /// anchor)` coordinate the keystone invariant recomputes to match.
 pub fn advice_row_occurrence(row: &DataRow) -> Occurrence {
-    let lesson = row.get("id").and_then(|v| v.as_string());
+    let lesson = holon_api::row_id_of(row);
     let anchor = row.get("anchor_id").and_then(|v| v.as_string());
     match (lesson, anchor) {
-        (Some(l), Some(a)) => Occurrence::Placed(OccurrenceId::for_placement(
-            &holon_api::entity_uri_from_id_str(l),
-            &holon_api::entity_uri_from_id_str(a),
-        )),
         // A row missing its identity columns is a synthesis bug, not a display
         // state — fail loud rather than silently render it as canonical.
-        _ => panic!("advice_row_occurrence: synthesized advice row missing id/anchor_id: {row:?}"),
+        (holon_api::RowId::Absent, _) | (_, None) => {
+            panic!("advice_row_occurrence: synthesized advice row missing id/anchor_id: {row:?}")
+        }
+        (lesson, Some(anchor)) => {
+            match (lesson.entity(), holon_api::row_id_of_str(anchor).entity()) {
+                (Some(lesson), Some(anchor)) => {
+                    Occurrence::Placed(OccurrenceId::for_placement(&lesson, &anchor))
+                }
+                _ => {
+                    panic!("advice_row_occurrence: synthesized advice row names no entity: {row:?}")
+                }
+            }
+        }
     }
 }
 
@@ -238,10 +246,10 @@ pub async fn recompute_sidecar(query_engine: &dyn holon_api::QueryEngine, sideca
         let (Some(anchor), Some(lesson)) = (
             r.get("anchor_id")
                 .and_then(|v| v.as_string())
-                .map(holon_api::entity_uri_from_id_str),
+                .and_then(|s| holon_api::row_id_of_str(s).entity()),
             r.get("lesson_id")
                 .and_then(|v| v.as_string())
-                .map(holon_api::entity_uri_from_id_str),
+                .and_then(|s| holon_api::row_id_of_str(s).entity()),
         ) else {
             continue;
         };
@@ -306,6 +314,8 @@ async fn discover_active_rule(query_engine: &dyn holon_api::QueryEngine) -> Opti
     let mut active: Vec<ActiveRule> = rows
         .iter()
         .filter_map(|r| {
+            // ALLOW(raw_row_id_column): label — `DiscoveredRule.block_id` is a String field
+            // for diagnostics; nothing converts it
             let block_id = r.get("id").and_then(|v| v.as_string())?;
             let content = r.get("content").and_then(|v| v.as_string())?;
             let discovered = holon_advice::parse_discovered_rule(block_id, content);

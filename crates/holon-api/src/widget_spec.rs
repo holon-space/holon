@@ -13,27 +13,127 @@ use crate::streaming::Change;
 /// A single row of query result data (may or may not be enriched).
 pub type DataRow = HashMap<String, Value>;
 
-/// Parse the canonical `EntityUri` out of a matview/CDC `DataRow`'s `"id"`
-/// column. This is the single typed-id boundary for the reactive row
-/// pipeline: the row's `"id"` is the stringly-typed matview representation,
-/// and every downstream consumer must thread the resulting `EntityUri` rather
-/// than re-parsing the string. Returns `None` when the row has no `"id"`.
+/// A row's `id` column, resolved into its typed identity.
+///
+/// The `id` column is authored outside Holon — a vault's own SQL chooses it —
+/// so text that forms no URI is content, not a programming error. Three
+/// outcomes, and the third must stay distinguishable from the first: a row
+/// with no `id` column is an ordinary value row, while a row whose `id` forms
+/// no URI is a fault the renderer paints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowId {
+    /// No `id` column (an aggregate, a rule-trigger row, a synthetic id).
+    Absent,
+    /// The `id` column names an entity.
+    Entity(EntityUri),
+    /// The `id` column forms no URI.
+    Unusable(RowIdUnusable),
+}
+
+/// An `id` column value that forms no URI, with the parser's reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowIdUnusable {
+    raw: String,
+    reason: String,
+}
+
+impl RowIdUnusable {
+    /// The value the `id` column held, verbatim.
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    /// Why the value is not a URI.
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+impl std::fmt::Display for RowIdUnusable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "row id {:?} names no entity: {}", self.raw, self.reason)
+    }
+}
+
+impl RowId {
+    /// The entity this row names, or `None` for [`RowId::Absent`] and
+    /// [`RowId::Unusable`]. A consumer that only needs "is there an entity
+    /// here" reads this; one that must disclose a fault asks
+    /// [`Self::unusable`] instead.
+    pub fn entity(&self) -> Option<EntityUri> {
+        match self {
+            RowId::Entity(uri) => Some(uri.clone()),
+            RowId::Absent | RowId::Unusable(_) => None,
+        }
+    }
+
+    /// The fault, when the `id` column held text that forms no URI.
+    pub fn unusable(&self) -> Option<&RowIdUnusable> {
+        match self {
+            RowId::Unusable(u) => Some(u),
+            RowId::Absent | RowId::Entity(_) => None,
+        }
+    }
+}
+
+/// THE conversion of a row's `id` column into its typed identity — the single
+/// classifier every consumer that needs the row's IDENTITY goes through, from
+/// the row store ([`RowIdentity::of_row`]) to the render binding to navigation.
+/// A consumer threads the result rather than re-parsing the string.
+///
+/// Enforced, not merely intended: archlint's `raw_row_id_column` rule rejects a
+/// raw read of the column across the render and binding trees. Each read that
+/// remains carries an `ALLOW(raw_row_id_column)` marker naming what the text
+/// is used for — a sort tie-break, a log label, a hash key, an op-param bag's
+/// own entry. A marker is a claim about the value's WHOLE downstream path, not
+/// about the enclosing function: a value that any consumer converts into an
+/// `EntityUri`, writes as a prop, or hands to an op param belongs here
+/// instead.
+///
+/// A `String` is classified as-is, an `Integer` by its digits, and anything
+/// else — an empty string included — is [`RowId::Absent`].
+pub fn row_id_of<K>(row: &HashMap<K, Value>) -> RowId
+where
+    K: std::borrow::Borrow<str> + std::hash::Hash + Eq,
+{
+    match row.get("id") {
+        Some(Value::String(id)) => row_id_of_str(id),
+        Some(Value::Integer(i)) => row_id_of_str(&i.to_string()),
+        _ => RowId::Absent,
+    }
+}
+
+/// [`row_id_of`] for a caller that holds the id text alone — a CDC `Change`'s
+/// `id` / `entity_id`. An empty string is [`RowId::Absent`].
+pub fn row_id_of_str(id: &str) -> RowId {
+    if id.is_empty() {
+        return RowId::Absent;
+    }
+    match EntityUri::try_from_raw(id) {
+        Ok(uri) => RowId::Entity(uri),
+        Err(e) => RowId::Unusable(RowIdUnusable {
+            raw: id.to_string(),
+            reason: e.to_string(),
+        }),
+    }
+}
+
+/// The entity a row names, or `None` when it names none. Prefer
+/// [`row_id_of`] where the difference between "no id" and "an id that is not
+/// a URI" matters — a fault must be disclosed, not folded into `None`.
 pub fn data_row_entity_uri(row: &DataRow) -> Option<EntityUri> {
-    row.get("id")
-        .and_then(|v| v.as_string())
-        .map(entity_uri_from_id_str)
+    row_id_of(row).entity()
 }
 
 /// Typed accessor for the matview `parent_id` column of a row.
 ///
-/// Boundary read — routes through the centralized [`entity_uri_from_id_str`]
-/// helper so the column name and the bare-vs-schemed canonicalisation live in
-/// one place. Empty / missing → `None`.
+/// Empty / missing / unparseable → `None`: a row whose stated parent names no
+/// entity has no resolvable parent, which the tree drivers read as a root.
 pub fn data_row_parent_id(row: &DataRow) -> Option<EntityUri> {
     row.get("parent_id")
-        .and_then(|v| v.as_string())
-        .filter(|s| !s.is_empty())
-        .map(entity_uri_from_id_str)
+        .and_then(Value::as_string)
+        .map(row_id_of_str)
+        .and_then(|id| id.entity())
 }
 
 /// Typed accessor for the sibling-ordering key of a row.
@@ -48,15 +148,6 @@ pub fn data_row_parent_id(row: &DataRow) -> Option<EntityUri> {
 pub fn data_row_sort_key(row: &DataRow) -> String {
     let v = row.get("sort_key").or_else(|| row.get("sequence"));
     crate::render_eval::sort_value(v)
-}
-
-/// Parse a boundary id string (matview row id column, CDC `Change` id /
-/// `entity_id`) into the canonical `EntityUri`. The single `from_raw` seam
-/// for the reactive row pipeline.
-pub fn entity_uri_from_id_str(id: &str) -> EntityUri {
-    // ALLOW(entity_uri_from_raw): matview/CDC row id column is the typed-id
-    // boundary
-    EntityUri::from_raw(id)
 }
 
 /// Deterministic content hash of a value-shaped row.
@@ -90,6 +181,21 @@ impl RowContentHash {
             canonicalize_value(&row[k], &mut hasher);
             hasher.write(&[0x1e]); // record separator: end of column
         }
+        Self(hasher.finish())
+    }
+
+    /// FNV-1a over the raw `id` text of a row whose id names no entity.
+    ///
+    /// Such a row is keyed on the id it was given rather than on its content,
+    /// because the CDC arms that report by id alone (`Deleted`,
+    /// `FieldsChanged`) have no content to hash and must derive the same key
+    /// as `Created`/`Updated`. The domain tag keeps this space disjoint from
+    /// [`Self::of_row`]'s column stream.
+    pub fn of_id(raw: &str) -> Self {
+        let mut hasher = Fnv1a::new();
+        hasher.write(b"holon:unusable-row-id");
+        hasher.write(&[0x00]);
+        hasher.write(raw.as_bytes());
         Self(hasher.finish())
     }
 
@@ -201,26 +307,40 @@ pub enum RowIdentity {
 }
 
 impl RowIdentity {
-    /// Classify a row into its identity shape: a row carrying a non-empty
-    /// string `id` column is entity-shaped, keyed through
-    /// [`entity_uri_from_id_str`] — the pipeline's `from_raw` boundary that
-    /// normalizes bare ids like `b` to `block:b`, the SAME normalization the
-    /// `Updated`/`Deleted`/`FieldsChanged` CDC arms apply to their id strings,
-    /// so `Created` and `Updated` agree on the store key. A row with no usable
-    /// `id` is value-shaped, keyed on its content hash. (Deliberately NOT the
-    /// profile resolver's strict [`crate::row_id`] parse: that rejects bare
-    /// ids, which the CDC pipeline legitimately carries.)
+    /// Classify a row into its identity shape by [`row_id_of`], the one
+    /// classifier: a row whose `id` column names an entity is entity-shaped
+    /// (bare ids like `b` normalize to `block:b`, the same normalization
+    /// [`Self::of_id_str`] applies to the CDC arms that carry an id without a
+    /// row); a row whose column names no entity keys on that id text, so it
+    /// stays distinct from its content-identical siblings AND matches those
+    /// arms; a row with no column at all keys on its content hash.
+    ///
+    /// One asymmetry, by design: an EMPTY `id` column is [`RowId::Absent`], so
+    /// such a row keys on its content — several empty-id rows stay several
+    /// rows, which keying them all on the empty string would not.
+    /// (Deliberately NOT the profile resolver's strict [`crate::row_id`] parse:
+    /// that rejects bare ids, which the CDC pipeline legitimately carries.)
     pub fn of_row<K>(row: &HashMap<K, Value>) -> Self
     where
         K: std::borrow::Borrow<str> + std::hash::Hash + Eq,
     {
-        match row
-            .get("id")
-            .and_then(|v| v.as_string())
-            .filter(|s| !s.is_empty())
-        {
-            Some(id) => RowIdentity::Entity(entity_uri_from_id_str(id)),
-            None => RowIdentity::Value(RowContentHash::of_row(row)),
+        match row_id_of(row) {
+            RowId::Entity(uri) => RowIdentity::Entity(uri),
+            RowId::Unusable(refusal) => RowIdentity::Value(RowContentHash::of_id(refusal.raw())),
+            RowId::Absent => RowIdentity::Value(RowContentHash::of_row(row)),
+        }
+    }
+
+    /// Classify a CDC change that carries an id but no row (`Deleted`,
+    /// `FieldsChanged`). Agrees with [`Self::of_row`] on every arm reachable
+    /// from CDC: an id that names an entity keys on that entity, and one that
+    /// does not keys on the id text itself. It cannot agree on the EMPTY case —
+    /// a change carrying an empty id has no row to hash — so it keys that text,
+    /// as [`Self::of_row`] documents.
+    pub fn of_id_str(id: &str) -> Self {
+        match row_id_of_str(id) {
+            RowId::Entity(uri) => RowIdentity::Entity(uri),
+            RowId::Absent | RowId::Unusable(_) => RowIdentity::Value(RowContentHash::of_id(id)),
         }
     }
 

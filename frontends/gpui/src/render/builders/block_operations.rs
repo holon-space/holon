@@ -26,11 +26,13 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
 
     let first_op = ops[0];
     let intent_template =
-        row_id.map(|id| OperationIntent::for_row(first_op, &id, entity_name.as_ref()));
+        row_id.map(|id| OperationIntent::for_row(first_op, &id.to_string(), entity_name.as_ref()));
     let el_id = format!(
         "block-ops-{}",
         intent_template
             .as_ref()
+            // ALLOW(raw_row_id_column): param-map — an op intent's params, hashed into the element
+            // id
             .and_then(|i| i.params.get("id"))
             .map(|v| v.to_display_string())
             .unwrap_or_else(|| "x".into())

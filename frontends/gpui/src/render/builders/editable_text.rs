@@ -7,7 +7,13 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         .prop_str("field")
         .unwrap_or_else(|| "content".to_string());
 
-    let Some(row_id) = node.row_id() else {
+    // A row with no `id` is a static label; one whose `id` forms no URI is a
+    // fault the vault authored, and the static path would hide it.
+    let identity = node.row_identity();
+    if let Some(refusal) = identity.unusable() {
+        return error_banner(&format!("editable_text: {refusal}"), ctx);
+    }
+    let Some(row_id) = identity.entity().map(|uri| uri.to_string()) else {
         return static_fallback(&content, ctx);
     };
 
@@ -32,12 +38,14 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     let triggers = node.triggers.clone();
     let services = ctx.services.clone();
     let reseed_services = ctx.services.clone();
-    // Parsed once: the key the undo/redo dispatch arms its re-seed under, the
-    // editor's focus identity, and everything `EditorView` keys off the row.
-    let row_uri = match holon_frontend::render_interpreter::render_spec_block_uri("row_id", &row_id)
-    {
-        Ok(uri) => uri,
-        Err(msg) => return error_banner(&format!("editable_text: {msg}"), ctx),
+    // The block the node was bound with — the key the undo/redo dispatch arms
+    // its re-seed under, the editor's focus identity, and everything
+    // `EditorView` keys off the row. Cannot fail: the row binding resolved it.
+    let Some(row_uri) = node.entity_id() else {
+        return error_banner(
+            &format!("editable_text: row id {row_id:?} names no block"),
+            ctx,
+        );
     };
     let reseed_row = row_uri.clone();
     let nav = ctx.nav.clone();

@@ -149,6 +149,15 @@ where
     F: Fn(&RenderExpr, &RenderContext) -> W,
     W: WithEntity,
 {
+    // The row's identity is resolved once, here, before the template sees the
+    // row: the `id` column is read again by `live_block`, by every value fn and
+    // by navigation, so a row whose column forms no URI is answered now
+    // instead of at each of those conversions.
+    let row_id = holon_api::row_id_of(row);
+    if let holon_api::RowId::Unusable(refusal) = row_id {
+        return (W::refused_row(&refusal), HashMap::new());
+    }
+
     let merged = if rules.is_empty() {
         HashMap::new()
     } else {
@@ -164,7 +173,7 @@ where
     };
 
     let mut node = interpret(template, &row_ctx);
-    node.attach_entity(Arc::clone(row));
+    node.attach_entity(Arc::clone(row), row_id.entity());
 
     (node, merged)
 }

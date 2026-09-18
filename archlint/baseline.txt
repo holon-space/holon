@@ -9,7 +9,6 @@
 #
 #   deleted_cell_symbol: 2
 #   entity_uri_from_raw: 9
-#   entity_uri_parse_default: 1
 #   fallback: 11
 #   frontend-provider-dep: 1
 #   frontend-raw-sql: 3
@@ -30,7 +29,6 @@ entity_uri_from_raw	crates/holon-frontend/src/tour.rs	id: EntityUri::from_raw(id
 entity_uri_from_raw	crates/holon-frontend/src/tour.rs	let block = AnchorSelector::Block(EntityUri::from_raw("page-x"));
 entity_uri_from_raw	crates/holon-frontend/src/tour.rs	let entity = AnchorSelector::Entity(EntityUri::from_raw("page-x"));
 entity_uri_from_raw	crates/holon-frontend/src/tour.rs	under: AnchorSelector::Block(EntityUri::from_raw("page-x")),
-entity_uri_parse_default	frontends/gpui/src/render/builders/live_block.rs	EntityUri::parse(&block_id_str).unwrap_or_else(|_| EntityUri::block(&block_id_str));
 fallback	crates/holon-core/src/boundary_enforcer.rs	/// It is deliberately NOT a silent fallback for a missing decision: there is no
 fallback	crates/holon-frontend/src/config.rs	/// `HOLON_LORO_PEER_ID` env / random fallback. Set it when more than one
 fallback	crates/holon-frontend/src/user_driver.rs	// Final fallback: if the router never saw the entity within the //

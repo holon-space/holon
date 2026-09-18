@@ -279,6 +279,8 @@ impl OutlineTree {
 
         let ids: std::collections::HashSet<&str> = sorted_rows
             .iter()
+            // ALLOW(raw_row_id_column): key — membership set for the parent/child join; compared as
+            // text, never converted
             .filter_map(|r| r.get("id").and_then(|v| v.as_string()))
             .collect();
 
@@ -340,6 +342,8 @@ impl OutlineTree {
             let row = &self.sorted_rows[i];
             result.push(render_item(row, depth));
 
+            // ALLOW(raw_row_id_column): key — index key into `children_of`; compared as
+            // text, never converted
             if let Some(own_id) = row.get("id").and_then(|v| v.as_string()) {
                 if let Some(child_indices) = self.children_of.get(own_id) {
                     self.walk_level(child_indices, depth + 1, render_item, result);
@@ -402,6 +406,8 @@ where
                 .and_then(|v| v.as_string());
             let is_drawer = collapse_to.is_some_and(|s| s.eq_ignore_ascii_case("drawer"));
             let block_id = row
+                // ALLOW(raw_row_id_column): label — the partition region's id; its one
+                // production consumer (waterui `columns`) reads only the widget
                 .get("id")
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_string());

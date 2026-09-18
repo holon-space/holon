@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use holon_api::entity_uri_from_id_str;
+use holon_api::row_id_of_str;
 use holon_integration_tests::McpUserDriver;
 use holon_integration_tests::UserDriver;
 
@@ -61,7 +61,9 @@ async fn mcp_user_driver_smoke() -> Result<()> {
 
     // 1. Click the virtual add-block editor — routes through the app's
     //    GpuiUserDriver::click_entity, i.e. a real geometry click.
-    let add_block = entity_uri_from_id_str(ADD_BLOCK_ENTITY);
+    let add_block = row_id_of_str(ADD_BLOCK_ENTITY)
+        .entity()
+        .expect("test constant");
     driver
         .click_entity(&add_block, "main")
         .await
@@ -91,7 +93,9 @@ async fn mcp_user_driver_smoke() -> Result<()> {
     //    path or an MCP verb returning the live editor buffer. (Content
     //    rendering itself is confirmed manually via sim screenshots.)
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let main_panel = entity_uri_from_id_str(MAIN_PANEL_ENTITY);
+    let main_panel = row_id_of_str(MAIN_PANEL_ENTITY)
+        .entity()
+        .expect("test constant");
     driver
         .refresh_ui(&main_panel)
         .await

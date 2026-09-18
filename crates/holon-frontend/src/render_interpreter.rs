@@ -21,7 +21,13 @@ use holon_api::widget_spec::DataRow;
 /// Trait for attaching entity data to a widget node.
 /// Both `ViewModel` and `ReactiveViewModel` implement this.
 pub trait WithEntity {
-    fn attach_entity(&mut self, entity: std::sync::Arc<DataRow>);
+    /// Bind `entity` to this node. `entity_id` is the row's `id` column,
+    /// already resolved by the caller — a node never re-parses the column, and
+    /// a row whose column forms no URI reaches [`Self::refused_row`] instead.
+    fn attach_entity(&mut self, entity: std::sync::Arc<DataRow>, entity_id: Option<EntityUri>);
+
+    /// The node a row renders as when its `id` column forms no URI.
+    fn refused_row(refusal: &holon_api::RowIdUnusable) -> Self;
 }
 
 use crate::RenderContext;
@@ -579,6 +585,8 @@ pub fn shared_tree_build<W: WithEntity>(
         };
         let is_context_root = context_root_id.as_deref().is_some_and(|cid| {
             resolved_row
+                // ALLOW(raw_row_id_column): key — equality against the collection's `context_root`
+                // id; compared as text
                 .get("id")
                 .and_then(|v| v.as_string())
                 .is_some_and(|rid| rid == cid)
@@ -603,6 +611,23 @@ pub fn shared_tree_build<W: WithEntity>(
     })
 }
 
+/// The block a `live_block` node names: its positional argument, else the
+/// surrounding row's own `id` column. `Err` names why neither named one — the
+/// argument and the column are both authored outside Holon.
+pub fn live_block_target<W>(ba: &BuilderArgs<'_, W>) -> Result<EntityUri, String> {
+    let named = match ba.args.get_positional_string(0) {
+        Some(arg) => holon_api::row_id_of_str(&arg),
+        None => holon_api::row_id_of(ba.ctx.row()),
+    };
+    match named {
+        holon_api::RowId::Entity(uri) => Ok(uri),
+        holon_api::RowId::Unusable(refusal) => Err(refusal.to_string()),
+        holon_api::RowId::Absent => {
+            Err("live_block: no positional arg and no 'id' column in current row".to_string())
+        }
+    }
+}
+
 /// `live_block` builder: fetches a block's WidgetSpec and recursively
 /// interprets it.
 ///
@@ -610,18 +635,7 @@ pub fn shared_tree_build<W: WithEntity>(
 /// `interpret`. The only framework-specific part is error rendering, which
 /// falls back to `text`.
 pub fn shared_live_block_build<W>(ba: &BuilderArgs<'_, W>) -> Result<W, String> {
-    let block_id = ba
-        .args
-        .get_positional_string(0)
-        .or_else(|| {
-            ba.ctx
-                .row()
-                .get("id")
-                .and_then(|v| v.as_string())
-                .map(|s| s.to_string())
-        })
-        .map(|s| EntityUri::parse(&s).expect("live_block: invalid entity URI"))
-        .expect("live_block: no positional arg and no 'id' column in current row");
+    let block_id = live_block_target(ba)?;
 
     if ba.ctx.query_depth >= MAX_QUERY_DEPTH {
         return Err(format!(
@@ -733,30 +747,30 @@ fn parse_row_source<W>(
         return Err("[empty query]".to_string());
     }
 
-    let context_id = ba
-        .args
-        .get_string("context")
-        .map(|s| s.to_string())
-        .or_else(|| {
-            ba.ctx
-                .row()
-                .get("id")
-                .and_then(|v| v.as_string())
-                .map(|s| s.to_string())
-        });
+    // The authored `context:` argument is render-expression text, so the helper
+    // answers for it. The row's own id is resolved by [`holon_api::row_id_of`]:
+    // when this node came from a collection the binding has already refused an
+    // id that names no entity, but a bare `live_query` outside a collection
+    // reaches this builder directly and still has to answer for its own.
+    let context_uri = match ba.args.get_string("context") {
+        Some(arg) => Some(render_spec_block_uri("context", arg)?),
+        None => match holon_api::row_id_of(ba.ctx.row()) {
+            holon_api::RowId::Entity(uri) => Some(uri),
+            holon_api::RowId::Unusable(refusal) => return Err(refusal.to_string()),
+            holon_api::RowId::Absent => None,
+        },
+    };
+    // `virtual_parent: true` resolves against this same id, so it reads the
+    // classification rather than the column a second time.
+    let context_id = context_uri.as_ref().map(|uri| uri.as_str().to_string());
 
-    let context = context_id
-        .as_ref()
-        .map(|id| {
-            render_spec_block_uri("context", id).map(|uri| crate::QueryContext {
-                current_block_id: Some(uri.clone()),
-                context_parent_id: Some(uri),
-                // Validation-only context (the watch is started and immediately
-                // dropped); descendants scoping is irrelevant here, so unfiltered.
-                path_context: crate::PathContext::Unfiltered,
-            })
-        })
-        .transpose()?;
+    let context = context_uri.map(|uri| crate::QueryContext {
+        current_block_id: Some(uri.clone()),
+        context_parent_id: Some(uri),
+        // Validation-only context (the watch is started and immediately
+        // dropped); descendants scoping is irrelevant here, so unfiltered.
+        path_context: crate::PathContext::Unfiltered,
+    });
 
     Ok((
         holon_api::row_source::RowSourceSpec::Query {
@@ -952,16 +966,10 @@ fn pick_active_variant(
         return profile.render.clone();
     }
 
-    // Get block ID for UI state lookup
-    // Point-free form would drop the archlint baseline entry for this
-    // `EntityUri::from_raw` call site.
-    #[allow(clippy::redundant_closure)]
-    let block_id = ctx
-        .row()
-        .get("id")
-        .and_then(|v| v.as_string())
-        // ALLOW(entity_uri_from_raw): block_id from matview row 'id' field
-        .map(|s| EntityUri::from_raw(s));
+    // The row's id, as a UI-state key rather than an entity to resolve: a
+    // column that names no entity has no stored state, so the default applies
+    // and the classifier answers without unwinding.
+    let block_id = holon_api::row_id_of(ctx.row()).entity();
 
     let mut ui_state = match block_id {
         Some(ref id) => services.ui_state(id),

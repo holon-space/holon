@@ -3,7 +3,7 @@ id: 2026-09-18-render-spec-ids-panic-the-frontend-render
 date: 2026-09-18
 gap: COVERAGE
 secondary: ORACLE
-status: PARTIAL
+status: FIXED
 summary: >-
   Six render-path sites converted a vault-supplied id with
   `EntityUri::from_raw`, which PANICS on a value that forms no URI, so a value
@@ -133,6 +133,71 @@ Red logs: `lane-logs/red-site1.log`, `lane-logs/red-site2.log`,
 `lane-logs/teeth/`. Green logs: `lane-logs/green-site1.log`,
 `lane-logs/green-site2.log`, `lane-logs/green-rowid-sites.log`,
 `lane-logs/green-affected2.log`.
+
+### CLOSED 2026-09-18 (D142.a) — the conversion moved to the binding boundary
+
+`holon_api::widget_spec::entity_uri_from_id_str` is **deleted**; the panicking raw-string →
+`EntityUri` path no longer exists, so a consumer cannot re-introduce it (a re-introduced call is a
+compile error, `E0425`). Its replacement is the typed classifier
+`widget_spec::row_id_of(&DataRow) -> RowId { Absent | Entity(EntityUri) | Unusable(..) }`, resolved
+**once** at the one site where a query row is bound into a view model —
+`row_pipeline::apply_rules_and_interpret_with_ctx`, the sole caller of
+`WithEntity::attach_entity`.
+
+- `Unusable` → **one** error node naming the value (`WithEntity::refused_row`); the item template
+  is not interpreted for that row, so `entity_id()`, `live_block`, every value fn and navigation
+  are unreachable with a bad value.
+- `Entity` → the resolved `EntityUri` is threaded into `attach_entity`, so no node re-parses the
+  column. `ReactiveViewModel::entity_id()` and its 49 consumers keep their signatures.
+- The store's own ingest (`RowIdentity::of_row`) no longer panics either: an id that names no
+  entity is keyed on its own text, the same key the id-only CDC arms
+  (`RowIdentity::of_id_str`) derive, so `Created`/`Updated`/`Deleted`/`FieldsChanged` agree.
+
+Per-row arms that bypassed the pipeline were guarded the same way (`columns.rs` snapshot over
+`ctx.data_rows`, `board.rs::build_static_card`, `shadow_builders/live_block.rs`). The queue's
+residual list got a verdict each: `live_block.rs:19` and `reactive_shell.rs:1085` (the
+`parse(..).unwrap_or_else(|_| block(..))` shape) fixed, `row_origin.rs:298` fixed, the three
+`block("")` value-fn defaults replaced by the store's own total keying, `expand_toggle.rs:17`
+out of class (a string prop, never parsed). `archlint`'s `entity_uri_parse_default` rule now fires
+nowhere.
+
+Red: `lane-logs/red-probe-locations.log` (four panic sites, base `58b095f8`). Green:
+`crates/holon-frontend/tests/row_id_boundary.rs` (7) and
+`frontends/gpui/tests/row_id_boundary_windowed.rs` (2). Teeth: removing the refusal reds both
+tiers; re-introducing a raw conversion fails to compile. Lane report:
+`.claude/worktrees/fix-row-id-boundary/lane-logs/lane-report.md`.
+
+Remaining reachable site, reported not hidden: `advice_weaver.rs`'s synthesized-advice path still
+panics (with the row in the message) when a synthesized row's `anchor_id`/`lesson_id` names no
+entity — a weaver-internal synthesis assertion, kept loud because skipping the placement would
+silently drop the advice.
+
+### What the first version of this section got wrong (verifier, 2026-09-18)
+
+The claim "classified ONCE … no downstream conversion can see a bad id" was **false**, and the
+sweep table was incomplete. Closed since, each red-first:
+
+| Counterexample | Site | Now |
+|---|---|---|
+| id `"my task:__virtual:x"` in a collection row | `RowOrigin::from_id` (`row_origin.rs:109`) resolved the marker's "parent" with `EntityUri::from_raw`, at `reactive_view.rs:1351` — BEFORE the refusal at `:1386` | the marker reader goes through the one classifier. The tree and flat drivers classify the row before it reaches the marker reader; the grouped driver reads no id before `apply_rules_and_interpret_with_ctx`, whose own classification refuses it |
+| `transclude()` over a row whose `target_uri` is `"block:my task"` | `shadow_builders/transclude.rs:18`, `.expect("invalid block URI")` | classified; a value that forms no URI is an error node naming it |
+| `RowIdentity::of_row({id: Integer(42)})` ≠ `RowIdentity::of_id_str("42")` | two classifications, not one: `of_row` read the column with `as_string()` (None for an Integer) | `of_row` now calls `row_id_of`, the one classifier; the empty-`id` case is the single documented asymmetry (a row keys on its content, a CDC id text on itself) |
+| `pick_active_variant` (`render_interpreter.rs:984`), `entity_id()`'s `block_id`-prop arms (`reactive_view_model.rs:1069`, `view_model.rs:1723`), `row_origin.rs:168` | row-column conversions left panicking and absent from the sweep table | all three now go through the classifier. `pick_active_variant`'s use of the column is a UI-state KEY, not an entity: an id that names none has no stored state, so the default is the right answer. The `block_id`-prop arms keep an `expect`, because every writer of that prop takes an already-typed `EntityUri` (`ReactiveViewModel::live_block` / `::drawer` and their snapshot twins `ViewModel::live_block` / `::drawer`), and the arm is now covered by a `render_entity` test with a variant profile (`StubBuilderServices::with_profile`) |
+
+### `inv-viewmodel-no-error-widgets` and a refused row
+
+The invariant (`pbt/invariants/bodies/viewmodel_no_error_widgets.rs:49-72`) walks the forest and
+fails on ANY Error node, with no carve-out. It is green today only because **no bad-id row is
+drawable**: the keystone projects real ids (`pbt/composed/live_mcp.rs` maps `id_of_row` over
+matview rows; `pbt/transition_budgets.rs` renders `SELECT root_id AS id FROM focus_roots`).
+
+If one WERE drawn, the invariant would fire on the intended outcome: an error ROW naming a
+vault-authored value is the ruling's requirement, not a render fault. **Proposal (not
+implemented):** give the refusal a machine-readable marker — the `refused_row` node already
+carries the reason in its `message` prop, so the invariant can key on a refusal KIND rather than
+on prose — and have the check accept exactly those Error nodes while every other Error node
+(matview fault, CDC delivery bug, shadow-interpret panic) still fails it. Keying on the kind, not
+on the message text, is what keeps the carve-out from swallowing real faults.
 
 ### Still open — the same conversion at the row pipeline's choke point
 

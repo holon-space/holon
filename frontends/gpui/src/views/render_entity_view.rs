@@ -3,7 +3,6 @@ use std::sync::Arc;
 use gpui::*;
 use gpui_component::input::Enter;
 use holon_api::EntityName;
-use holon_api::EntityUri;
 use holon_frontend::RenderContext;
 use holon_frontend::input::Key;
 use holon_frontend::input::WidgetInput;
@@ -87,7 +86,7 @@ impl RenderEntityView {
     }
 
     pub fn row_id(&self) -> Option<String> {
-        self.current.row_id()
+        self.current.row_id().map(|uri| uri.to_string())
     }
 }
 
@@ -123,12 +122,9 @@ impl Render for RenderEntityView {
         let content = slot.content.lock_ref();
         let child_el = builders::render(&content, &gpui_ctx);
 
-        let block_id = self
-            .current
-            .entity()
-            .get("id")
-            .and_then(|v| v.as_string())
-            .map(EntityUri::from_raw);
+        // A row that names no entity has no block to focus or edit; it renders
+        // its child and nothing else, exactly as a row with no `id` column does.
+        let block_id = holon_api::row_id_of(self.current.entity().as_ref()).entity();
 
         let Some(ref id) = block_id else {
             return child_el;

@@ -231,12 +231,13 @@ fn build_static_card(
     row: Arc<HashMap<String, Value>>,
     ba: &BA<'_>,
 ) -> ViewModel {
+    let row_id = holon_api::row_id_of(&row);
+    if let holon_api::RowId::Unusable(refusal) = row_id {
+        return ViewModel::refused_row(&refusal);
+    }
     let row_ctx = ba.ctx.with_row(row.clone());
     let card_vm = (ba.interpret)(tmpl, &row_ctx);
-    let row_id_val = row
-        .get("id")
-        .and_then(|v| v.as_string())
-        .map(|s| s.to_string());
+    let row_id_val = row_id.entity().map(|uri| uri.to_string());
     let parent_id_val = row
         .get("parent_id")
         .and_then(|v| v.as_string())

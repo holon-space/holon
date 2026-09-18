@@ -177,14 +177,21 @@ holon_macros::widget_builder! {
         // (`cc-pending-question:<question_id>`); the tool wants the provider's
         // opaque id, which is the URI's path. Read fresh from the row on every
         // build — the id is volatile and nothing may cache it.
-        let row_id = row
-            .get("id")
-            .and_then(|v| v.as_string())
-            .expect("question_options: the row must carry the question's `id`");
-        let question_id = holon_api::EntityUri::parse(row_id)
-            .unwrap_or_else(|e| panic!("question_options: row id must be an entity URI: {e}"))
-            .id()
-            .to_string();
+        let question_id = match holon_api::row_id_of(row) {
+            holon_api::RowId::Entity(uri) => uri.id().to_string(),
+            holon_api::RowId::Unusable(refusal) => return ViewModel::refused_row(&refusal),
+            // Unlike a drawer, which may legitimately name no block, a question
+            // with no id has no answer to dispatch — there is nothing to render
+            // but the fault.
+            holon_api::RowId::Absent => {
+                return ViewModel::error(
+                    "question_options",
+                    "question_options: the row carries no `id` column, so no answer can name \
+                     its question"
+                        .to_string(),
+                );
+            }
+        };
 
         let items = offered
             .iter()

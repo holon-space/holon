@@ -9,7 +9,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::*;
-use holon_api::EntityUri;
 use holon_frontend::RenderContext;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view::ReactiveView;
@@ -997,7 +996,7 @@ fn render_entity_row_id(node: &ReactiveViewModel) -> Option<String> {
     if node.widget_name().as_deref() != Some("render_entity") {
         return None;
     }
-    node.row_id()
+    node.row_id().map(|uri| uri.to_string())
 }
 
 /// Render a collection row.
@@ -1080,11 +1079,11 @@ fn collect_referenced_cache_keys(node: &ReactiveViewModel, out: &mut HashSet<Cac
 
     match node.widget_name().as_deref() {
         Some("live_block") => {
-            if let Some(bid) = node.prop_str("block_id") {
-                let canonical = EntityUri::parse(&bid)
-                    .unwrap_or_else(|_| EntityUri::block(&bid))
-                    .to_string();
-                out.insert(CacheKey::LiveBlock(canonical));
+            if let Some(uri) = node
+                .prop_str("block_id")
+                .and_then(|bid| holon_api::row_id_of_str(&bid).entity())
+            {
+                out.insert(CacheKey::LiveBlock(uri.to_string()));
             }
         }
         Some("live_query") => {
@@ -1103,7 +1102,7 @@ fn collect_referenced_cache_keys(node: &ReactiveViewModel, out: &mut HashSet<Cac
         }
         Some("render_entity") => {
             if let Some(row_id) = node.row_id() {
-                out.insert(CacheKey::RenderEntity(row_id));
+                out.insert(CacheKey::RenderEntity(row_id.to_string()));
             }
         }
         _ => {}

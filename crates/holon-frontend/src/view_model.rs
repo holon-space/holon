@@ -889,8 +889,12 @@ impl ViewModel {
 }
 
 impl crate::render_interpreter::WithEntity for ViewModel {
-    fn attach_entity(&mut self, entity: Arc<DataRow>) {
+    fn attach_entity(&mut self, entity: Arc<DataRow>, _: Option<EntityUri>) {
         self.entity = entity;
+    }
+
+    fn refused_row(refusal: &holon_api::RowIdUnusable) -> Self {
+        Self::error("refused_row", refusal.to_string())
     }
 }
 
@@ -1152,18 +1156,23 @@ impl ViewModel {
         }
     }
 
-    pub fn live_block(block_id: impl Into<String>, content: ViewModel) -> Self {
+    /// Typed, because [`Self::entity_id`] parses the stored `block_id` back
+    /// with an `expect` — the snapshot twin of `ReactiveViewModel::live_block`.
+    pub fn live_block(block_id: EntityUri, content: ViewModel) -> Self {
         Self {
             kind: ViewKind::LiveBlock {
-                block_id: block_id.into(),
+                block_id: block_id.to_string(),
                 content: Box::new(content),
             },
             ..Default::default()
         }
     }
 
+    /// `None` for a drawer over a row that names no entity — it names no block,
+    /// and `collect_drawers` reports it under the empty id the same way GPUI's
+    /// `prop_str("block_id").unwrap_or_default()` reads an absent prop.
     pub fn drawer(
-        block_id: impl Into<String>,
+        block_id: Option<EntityUri>,
         mode: DrawerMode,
         open: bool,
         width: f32,
@@ -1171,7 +1180,7 @@ impl ViewModel {
     ) -> Self {
         Self {
             kind: ViewKind::Drawer {
-                block_id: block_id.into(),
+                block_id: block_id.map(|id| id.to_string()).unwrap_or_default(),
                 mode,
                 open,
                 width,
@@ -1497,22 +1506,25 @@ impl ViewModel {
         }
     }
 
-    /// Collect all entity IDs referenced in the tree, in depth-first order.
-    pub fn collect_entity_ids(&self) -> Vec<String> {
+    /// Collect all entities referenced in the tree, in depth-first order.
+    pub fn collect_entity_ids(&self) -> Vec<EntityUri> {
         let mut ids = Vec::new();
         self.collect_ids_recursive(&mut ids);
         ids
     }
 
-    fn collect_ids_recursive(&self, ids: &mut Vec<String>) {
+    fn collect_ids_recursive(&self, ids: &mut Vec<EntityUri>) {
         match &self.kind {
             ViewKind::LiveBlock { block_id, content } => {
-                ids.push(block_id.clone());
+                ids.push(
+                    EntityUri::parse(block_id)
+                        .expect("live_block block_id must be a schemed EntityUri"),
+                );
                 content.collect_ids_recursive(ids);
             }
             ViewKind::TableRow { data } => {
-                if let Some(id) = data.get("id").and_then(|v| v.as_string()) {
-                    ids.push(id.to_string());
+                if let Some(id) = holon_api::row_id_of(data).entity() {
+                    ids.push(id);
                 }
             }
             _ => {
@@ -1642,16 +1654,16 @@ impl ViewModel {
 
     /// Collect entity IDs of all blocks that have a StateToggle in their
     /// subtree.
-    pub fn state_toggle_block_ids(&self) -> Vec<String> {
+    pub fn state_toggle_block_ids(&self) -> Vec<EntityUri> {
         let mut ids = Vec::new();
         self.collect_state_toggle_ids(&mut ids);
         ids
     }
 
-    fn collect_state_toggle_ids(&self, ids: &mut Vec<String>) {
+    fn collect_state_toggle_ids(&self, ids: &mut Vec<EntityUri>) {
         if matches!(self.kind, ViewKind::StateToggle { .. }) {
-            if let Some(Value::String(id)) = self.entity.get("id") {
-                ids.push(id.clone());
+            if let Some(id) = self.row_id() {
+                ids.push(id);
             }
         }
         for child in self.children() {
@@ -1714,25 +1726,20 @@ impl ViewModel {
     /// Extract entity ID from element data or LiveBlock block_id.
     pub fn entity_id(&self) -> Option<EntityUri> {
         match &self.kind {
-            ViewKind::TableRow { data } => data
-                .get("id")
-                .and_then(|v| v.as_string())
-                .map(holon_api::entity_uri_from_id_str),
+            ViewKind::TableRow { data } => holon_api::data_row_entity_uri(data),
             ViewKind::LiveBlock { block_id, .. } => Some(
                 EntityUri::parse(block_id)
                     .expect("live_block block_id must be a schemed EntityUri"),
             ),
-            _ => self
-                .entity
-                .get("id")
-                .and_then(|v| v.as_string())
-                .map(holon_api::entity_uri_from_id_str),
+            _ => holon_api::data_row_entity_uri(&self.entity),
         }
     }
 
     /// Extract the entity name from this node's ID scheme (e.g. `"block:uuid"`
     /// → `"block"`), falling back to an explicit `entity_name` field.
     pub fn entity_name(&self) -> Option<EntityName> {
+        // ALLOW(raw_row_id_column): key — reads the SCHEME only, or collects the id
+        // TEXT for a driver lookup
         if let Some(Value::String(id)) = self.entity.get("id") {
             if let Some(scheme) = id.split_once(':').map(|(s, _)| s) {
                 return Some(EntityName::Named(scheme.to_string()));
@@ -1744,19 +1751,25 @@ impl ViewModel {
         None
     }
 
-    /// Extract the row ID from this node's entity data.
-    pub fn row_id(&self) -> Option<String> {
-        match self.entity.get("id") {
-            Some(Value::String(s)) => Some(s.clone()),
-            Some(Value::Integer(i)) => Some(i.to_string()),
-            _ => None,
-        }
+    /// This node's entity-data `id` column, classified. A caller that only
+    /// needs the entity reads [`Self::row_id`]; one that must disclose an
+    /// unusable id asks here.
+    pub fn row_identity(&self) -> holon_api::RowId {
+        holon_api::row_id_of(&self.entity)
+    }
+
+    /// The entity this node's data row names. `None` both when the row carries
+    /// no `id` and when the id forms no URI — a caller that must tell those
+    /// apart reads [`Self::row_identity`].
+    pub fn row_id(&self) -> Option<EntityUri> {
+        self.row_identity().entity()
     }
 
     /// Find the first `EditableText` descendant whose entity `id` matches
     /// `entity_id`.
     pub fn find_editable_text(&self, entity_id: &str) -> Option<&ViewModel> {
         if matches!(&self.kind, ViewKind::EditableText { .. })
+            // ALLOW(raw_row_id_column): key — equality against the sought id; compared as text
             && self.entity.get("id").and_then(|v| v.as_string()) == Some(entity_id)
         {
             return Some(self);
@@ -1798,14 +1811,20 @@ mod tests {
             "columns",
             vec![
                 ViewModel::drawer(
-                    "left",
+                    Some(EntityUri::block("left")),
                     DrawerMode::Overlay,
                     false,
                     260.0,
                     ViewModel::empty(),
                 ),
-                ViewModel::live_block("main", ViewModel::empty()),
-                ViewModel::drawer("right", DrawerMode::Shrink, true, 260.0, ViewModel::empty()),
+                ViewModel::live_block(EntityUri::block("main"), ViewModel::empty()),
+                ViewModel::drawer(
+                    Some(EntityUri::block("right")),
+                    DrawerMode::Shrink,
+                    true,
+                    260.0,
+                    ViewModel::empty(),
+                ),
             ],
         );
 
@@ -1813,8 +1832,8 @@ mod tests {
         assert_eq!(
             drawers,
             vec![
-                ("left".to_string(), DrawerMode::Overlay),
-                ("right".to_string(), DrawerMode::Shrink),
+                ("block:left".to_string(), DrawerMode::Overlay),
+                ("block:right".to_string(), DrawerMode::Shrink),
             ]
         );
     }
@@ -1827,7 +1846,7 @@ mod tests {
                 "list",
                 vec![
                     ViewModel::live_block(
-                        "a",
+                        EntityUri::block("a"),
                         ViewModel::element(
                             "table_row",
                             Arc::new(HashMap::from([
@@ -1838,7 +1857,7 @@ mod tests {
                         ),
                     ),
                     ViewModel::live_block(
-                        "b",
+                        EntityUri::block("b"),
                         ViewModel::element(
                             "table_row",
                             Arc::new(HashMap::from([
@@ -1855,8 +1874,8 @@ mod tests {
         let output = tree.pretty_print(0);
         assert!(output.contains("columns"));
         assert!(output.contains("list [2 items]"));
-        assert!(output.contains("live_block(a)"));
-        assert!(output.contains("live_block(b)"));
+        assert!(output.contains("live_block(block:a)"));
+        assert!(output.contains("live_block(block:b)"));
     }
 
     #[test]
@@ -1865,7 +1884,7 @@ mod tests {
             "column",
             vec![
                 ViewModel::live_block(
-                    "ref-1",
+                    EntityUri::block("ref-1"),
                     ViewModel::element(
                         "table_row",
                         Arc::new(HashMap::from([(
@@ -1887,7 +1906,14 @@ mod tests {
         );
 
         let ids = tree.collect_entity_ids();
-        assert_eq!(ids, vec!["ref-1", "inner-1", "row-1"]);
+        assert_eq!(
+            ids,
+            vec![
+                EntityUri::parse("block:ref-1").unwrap(),
+                EntityUri::block("inner-1"),
+                EntityUri::block("row-1"),
+            ]
+        );
     }
 
     #[test]
@@ -1908,7 +1934,8 @@ mod tests {
         );
         assert_eq!(elem.entity_id(), Some(EntityUri::block("abc")));
 
-        let bref = ViewModel::live_block("block:xyz", ViewModel::empty());
+        let bref =
+            ViewModel::live_block(EntityUri::parse("block:xyz").unwrap(), ViewModel::empty());
         assert_eq!(bref.entity_id(), Some(EntityUri::block("xyz")));
 
         assert_eq!(ViewModel::empty().entity_id(), None);

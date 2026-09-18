@@ -121,6 +121,8 @@ pub fn dispatch_operation(
     // point; `holon_api::latency_e2e` closes it when the target's row lands
     // in a LiveData mirror (stage="e2e").
     let latency_target = params
+        // ALLOW(raw_row_id_column): param-map — an op intent's params, read to start the latency
+        // clock
         .get("id")
         .and_then(|v| v.as_string())
         .map(String::from);
@@ -344,6 +346,8 @@ pub fn find_set_field_op<'a>(
 /// `"block:uuid"` → `"block"`), falling back to an explicit `entity_name`
 /// field.
 pub fn get_entity_name(ctx: &RenderContext) -> Option<String> {
+    // ALLOW(raw_row_id_column): key — reads the SCHEME only, to name the entity the
+    // row belongs to
     if let Some(Value::String(id)) = ctx.row().get("id") {
         if let Some((scheme, _)) = id.split_once(':') {
             return Some(scheme.to_string());
@@ -355,12 +359,11 @@ pub fn get_entity_name(ctx: &RenderContext) -> Option<String> {
     None
 }
 
-pub fn get_row_id(ctx: &RenderContext) -> Option<String> {
-    match ctx.row().get("id") {
-        Some(Value::String(s)) => Some(s.clone()),
-        Some(Value::Integer(i)) => Some(i.to_string()),
-        _ => None,
-    }
+/// The entity the current row names. `None` both when the row carries no
+/// `id` and when the id forms no URI — a builder that dispatches on the row
+/// has nothing to address in either case.
+pub fn get_row_id(ctx: &RenderContext) -> Option<holon_api::EntityUri> {
+    holon_api::row_id_of(ctx.row()).entity()
 }
 
 #[cfg(test)]

@@ -52,3 +52,40 @@ stringifying + re-parsing; if the scheme is known statically use \
 `EntityUri::block(..)` / `EntityUri::doc(..)` / `EntityUri::parse(..)`. \
 To suppress at a genuine boundary: // ALLOW(entity_uri_from_raw): <names the external source>
 """
+
+[[smell]]
+id = "raw_row_id_column"
+# A query row's `id` column is authored OUTSIDE Holon — a vault's own SQL, or an
+# integration's mirror, chooses it. Reading it raw and converting it (or writing
+# it into an id-bearing prop) is how four separate builders came to panic the
+# whole render on one malformed row (D142.a; see the bugfunnel entry
+# 2026-09-18-render-spec-ids-panic-the-frontend-render.md). `holon_api::row_id_of`
+# is THE classifier: it returns `Entity`/`Absent`/`Unusable`, and a builder paints
+# the `Unusable` arm as an error node instead of unwinding.
+#
+# Scoped to the render/binding trees, where the column reaches a widget. A read
+# that is genuinely not an identity — a sort tie-break, a log label, a scroll-id
+# hash, a map key on the raw text — is legitimate and says so with its ALLOW.
+pattern = '\.get\("id"\)|\["id"\]|\.get\(ID_COLUMN\)'
+files = [
+  "crates/holon-frontend/src/**/*.rs",
+  "crates/holon-api/src/**/*.rs",
+  "frontends/gpui/src/**/*.rs",
+  "frontends/tui/src/**/*.rs",
+]
+exclude = [
+  "**/target/**",
+  # The classifier itself, and the row-store keying that must agree with it.
+  "crates/holon-api/src/widget_spec.rs",
+]
+case_sensitive = true
+skip_comments = true
+skip_test_mods = true
+message = """
+Raw read of a row's `id` column. That column is authored outside Holon, so a \
+value that forms no URI is content, not a bug — route it through \
+`holon_api::row_id_of` (or `row_id_of_str`) and paint the `Unusable` arm as an \
+error node. \
+To suppress a read that is NOT an identity (sort tie-break, log label, hash \
+key, op-intent param map): // ALLOW(raw_row_id_column): <what it reads, and why it is not an identity>
+"""

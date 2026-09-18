@@ -90,6 +90,8 @@ impl DispatchJournal {
             intent.op_name.clone(),
             intent
                 .params
+                // ALLOW(raw_row_id_column): param-map — an op intent's params, journalled as text
+                // for the dispatch log
                 .get("id")
                 .and_then(|v| v.as_string())
                 .map(str::to_string),

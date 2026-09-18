@@ -177,10 +177,16 @@ impl TreeNavigator {
         tree.walk_depth_first(|row, _depth| {
             if let Some(id) = row.get(id_col).and_then(|v| v.as_string()) {
                 // Typed-id boundary: matview row columns → EntityUri, once.
-                let id = holon_api::entity_uri_from_id_str(id);
+                let holon_api::RowId::Entity(id) = holon_api::row_id_of_str(id) else {
+                    return;
+                };
                 dfs_order.push(id.clone());
-                if let Some(pid) = row.get(parent_id_col).and_then(|v| v.as_string()) {
-                    parent_map.insert(id, holon_api::entity_uri_from_id_str(pid));
+                if let Some(holon_api::RowId::Entity(pid)) = row
+                    .get(parent_id_col)
+                    .and_then(|v| v.as_string())
+                    .map(holon_api::row_id_of_str)
+                {
+                    parent_map.insert(id, pid);
                 }
             }
         });

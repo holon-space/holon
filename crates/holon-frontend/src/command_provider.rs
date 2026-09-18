@@ -186,6 +186,9 @@ impl CommandProvider {
     ) -> Result<PopupResult, anyhow::Error> {
         let id = self
             .context_params
+            // ALLOW(raw_row_id_column): param-map — the focused block's id in the popup's
+            // op-param bag; `BlockResolver::resolve` looks it up by text and it never
+            // reaches the instantiate op's own params
             .get("id")
             .and_then(|v| v.as_string())
             .ok_or_else(|| anyhow::anyhow!("instantiate_template: no focused block id in context"))?

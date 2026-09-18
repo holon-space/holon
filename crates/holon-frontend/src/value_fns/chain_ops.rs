@@ -129,8 +129,7 @@ impl ReactiveRowProvider for ChainOpsProvider {
                 .map(move |opt| build_rows(&opt, level, services.as_ref()))
                 .to_signal_vec()
                 .map(|row| {
-                    let id = holon_api::data_row_entity_uri(&row)
-                        .unwrap_or_else(|| EntityUri::block(""));
+                    let id = holon_api::RowIdentity::of_row(&*row).to_store_key();
                     ((id, holon_api::Occurrence::Canonical), row)
                 }),
         )

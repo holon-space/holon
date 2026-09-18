@@ -32,17 +32,19 @@ pub const DRAWER_TOGGLE_WIDTH: f32 = 12.0;
 //   Overlay drawers use this as their panel width but claim 0px in flow layout.
 holon_macros::widget_builder! {
     raw fn drawer(ba: BA<'_>) -> ViewModel {
-        let block_id = ba
-            .args
-            .get_positional_string(0)
-            .or_else(|| {
-                ba.ctx
-                    .row()
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_default();
+        // The id names a block whose collapse state is stored, so it is
+        // classified here rather than at the view-store read: a `drawer()` with
+        // no positional argument takes the surrounding row's `id` column, which
+        // the vault's own SQL chose.
+        let block_id = match ba.args.get_positional_string(0) {
+            Some(raw) => holon_api::row_id_of_str(&raw),
+            None => holon_api::row_id_of(ba.ctx.row()),
+        };
+        let block_id = match block_id {
+            holon_api::RowId::Unusable(refusal) => return ViewModel::refused_row(&refusal),
+            holon_api::RowId::Entity(uri) => Some(uri),
+            holon_api::RowId::Absent => None,
+        };
 
         let mode = ba
             .args
@@ -76,7 +78,11 @@ holon_macros::widget_builder! {
         // The SAME view-store read GPUI performs at render time. Stamping it
         // here is what lets a snapshot-driven frontend (dioxus-web) collapse a
         // closed drawer at all — GPUI keeps reading live and ignores the stamp.
-        let open = ba.services.drawer_open(&block_id, mode);
+        let open_key = block_id
+            .as_ref()
+            .map(holon_api::EntityUri::as_str)
+            .unwrap_or_default();
+        let open = ba.services.drawer_open(open_key, mode);
 
         let layout_hint = match mode {
             // Overlay drawers float above siblings — zero flow footprint.

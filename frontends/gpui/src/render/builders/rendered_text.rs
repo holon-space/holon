@@ -11,7 +11,6 @@ use holon_frontend::link_segments::link_content_segments;
 use holon_frontend::link_segments::marks_of;
 use holon_frontend::link_segments::nav_focus;
 use holon_frontend::link_segments::wants_styled_render;
-use holon_frontend::render_interpreter::render_spec_block_uri;
 
 use super::prelude::*;
 use crate::render::builders::text::build_highlights;
@@ -31,7 +30,14 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
         .prop_str("field")
         .unwrap_or_else(|| "content".to_string());
 
-    let Some(row_id) = node.row_id() else {
+    // A row with no `id` is a static label with nothing to bind to; one whose
+    // `id` forms no URI is a fault the vault authored, and painting it as a
+    // label would hide it.
+    let identity = node.row_identity();
+    if let Some(refusal) = identity.unusable() {
+        return error_banner(&format!("rendered_text: {refusal}"), ctx);
+    }
+    let Some(row_id) = identity.entity().map(|uri| uri.to_string()) else {
         return static_inner(&content, ctx).into_any_element();
     };
 
@@ -39,10 +45,13 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     let has_content = !content.is_empty();
     let services = ctx.services.clone();
 
-    // Parsed once for the click target.
-    let block_uri = match render_spec_block_uri("row_id", &row_id) {
-        Ok(uri) => uri,
-        Err(msg) => return error_banner(&format!("rendered_text: {msg}"), ctx),
+    // The click target's block: the id the node was bound with, so it cannot
+    // fail here.
+    let Some(block_uri) = node.entity_id() else {
+        return error_banner(
+            &format!("rendered_text: row id {row_id:?} names no block"),
+            ctx,
+        );
     };
 
     let marks = marks_of(&node.entity());

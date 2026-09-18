@@ -249,6 +249,7 @@ def load_smells() -> list[dict]:
 
 def smell_scope(files: list[Path], smell: dict) -> list[Path]:
     files_glob = smell.get("files", "**/*.rs")
+    includes = [files_glob] if isinstance(files_glob, str) else list(files_glob)
     exclude = smell.get("exclude")
     excludes: list[str] = []
     if isinstance(exclude, str):
@@ -259,7 +260,7 @@ def smell_scope(files: list[Path], smell: dict) -> list[Path]:
     scope: list[Path] = []
     for f in files:
         rel = relpath(f) if f.is_absolute() else str(f)
-        if not matches_glob(rel, files_glob):
+        if not matches_any(rel, includes):
             continue
         if matches_any(rel, excludes):
             continue
@@ -294,13 +295,43 @@ def run_smells(files: list[Path], smells: list[dict]) -> list[dict]:
             if obj.get("type") != "match":
                 continue
             data = obj["data"]
+            text = data.get("lines", {}).get("text", "")
+            start = (data.get("submatches") or [{}])[0].get("start", 0)
+            # `skip_comments`: prose that quotes the pattern is not the smell.
+            if smell.get("skip_comments") and "//" in text[:start]:
+                continue
             diags.append({
                 "id": sid,
                 "file": data["path"]["text"],
                 "line": data["line_number"],
                 "message": message,
             })
-    return diags
+    return filter_test_mods(diags, smells)
+
+
+# A rule with `skip_test_mods` fires only above a file's first `#[cfg(test)]`:
+# a test that builds a row and asserts on one of its columns is not the
+# production boundary the rule guards.
+def filter_test_mods(diags: list[dict], smells: list[dict]) -> list[dict]:
+    scoped = {s["id"] for s in smells if s.get("skip_test_mods")}
+    if not scoped:
+        return diags
+    first_test: dict[str, int] = {}
+    kept: list[dict] = []
+    for d in diags:
+        if d["id"] not in scoped:
+            kept.append(d)
+            continue
+        path = d["file"]
+        if path not in first_test:
+            lines = read_lines(path)
+            first_test[path] = next(
+                (i + 1 for i, l in enumerate(lines) if l.strip().startswith("#[cfg(test)]")),
+                1 << 30,
+            )
+        if d["line"] < first_test[path]:
+            kept.append(d)
+    return kept
 
 
 # ---------------------------------------------------------------- defensive-pattern post-filters

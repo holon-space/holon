@@ -343,8 +343,8 @@ pub use types::{
 pub use widget_meta::{StaticParam, WidgetCategory, WidgetMeta};
 // Re-export widget spec types
 pub use widget_spec::{
-    DataRow, DataRowAccumulator, EnrichedRow, RowContentHash, RowIdentity, data_row_entity_uri,
-    entity_uri_from_id_str,
+    DataRow, DataRowAccumulator, EnrichedRow, RowContentHash, RowId, RowIdUnusable, RowIdentity,
+    data_row_entity_uri, row_id_of, row_id_of_str,
 };
 
 /// flutter_rust_bridge:non_opaque

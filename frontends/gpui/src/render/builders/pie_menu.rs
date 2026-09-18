@@ -31,7 +31,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         return child_el;
     }
 
-    let row_id = node.row_id();
+    let row_id = node.row_id().map(|uri| uri.to_string());
     let entity_name = node.entity_name();
     let menu_id = format!("pie-menu-{}", row_id.as_deref().unwrap_or("x"));
 

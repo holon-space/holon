@@ -5,6 +5,7 @@ pub(crate) use holon_api::Value;
 pub(crate) use crate::reactive_view_model::ItemFlow;
 pub(crate) use crate::reactive_view_model::ReactiveViewModel as ViewModel;
 pub(crate) use crate::render_interpreter::BuilderArgs;
+pub(crate) use crate::render_interpreter::WithEntity;
 
 pub(crate) type BA<'a> = BuilderArgs<'a, crate::reactive_view_model::ReactiveViewModel>;
 
@@ -48,11 +49,9 @@ pub(crate) fn virtual_child_slot_from_arg(
         .clone()
         // Streaming path: context row IS the parent block.
         .or_else(|| {
-            ba.ctx
-                .row()
-                .get("id")
-                .and_then(|v| v.as_string())
-                .map(|s| s.to_string())
+            holon_api::row_id_of(ba.ctx.row())
+                .entity()
+                .map(|uri| uri.as_str().to_string())
         })
         // Static/snapshot path: context rows are children; first
         // row's parent_id is the common parent.
@@ -168,10 +167,7 @@ pub(crate) fn weave_advice_into_items(ba: &BA<'_>, items: Vec<ViewModel>) -> Vec
 }
 
 fn weave_advice_into_item(ba: &BA<'_>, mut item: ViewModel) -> ViewModel {
-    let Some(anchor_id) = item.row_id() else {
-        return item;
-    };
-    let Ok(anchor) = holon_api::EntityUri::parse(&anchor_id) else {
+    let Some(anchor) = item.row_id() else {
         return item;
     };
     let advice_rows = ba.services.advice_children(&anchor);

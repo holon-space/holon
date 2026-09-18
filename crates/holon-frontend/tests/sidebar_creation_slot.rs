@@ -197,6 +197,7 @@ fn entity_ids(vm: &Arc<ReactiveViewModel>) -> Vec<String> {
     let mut stack: Vec<Arc<ReactiveViewModel>> = vec![vm.clone()];
     while let Some(node) = stack.pop() {
         if let Some(id) = node.row_id() {
+            let id = id.to_string();
             if !out.contains(&id) {
                 out.push(id);
             }
@@ -275,7 +276,10 @@ fn widgets_by_row(vm: &Arc<ReactiveViewModel>) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut stack: Vec<(Arc<ReactiveViewModel>, String)> = vec![(vm.clone(), String::new())];
     while let Some((node, inherited)) = stack.pop() {
-        let row = node.row_id().unwrap_or(inherited);
+        let row = node
+            .row_id()
+            .map(|uri| uri.to_string())
+            .unwrap_or(inherited);
         if let Some(name) = node.widget_name() {
             out.push((row.clone(), name.to_string()));
         }
@@ -362,7 +366,10 @@ fn texts_by_row(vm: &Arc<ReactiveViewModel>) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut stack: Vec<(Arc<ReactiveViewModel>, String)> = vec![(vm.clone(), String::new())];
     while let Some((node, inherited)) = stack.pop() {
-        let row = node.row_id().unwrap_or(inherited);
+        let row = node
+            .row_id()
+            .map(|uri| uri.to_string())
+            .unwrap_or(inherited);
         if let Some(text) = node.prop_str("content") {
             out.push((row.clone(), text));
         }

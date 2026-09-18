@@ -66,8 +66,15 @@ fn DropZoneNode(target_id: Option<String>, entity_name: String, op_name: String)
                     );
                     return;
                 };
-                let source = holon_api::entity_uri_from_id_str(&source_id);
-                let target = holon_api::entity_uri_from_id_str(&target);
+                let (Some(source), Some(target)) = (
+                    holon_api::row_id_of_str(&source_id).entity(),
+                    holon_api::row_id_of_str(&target).entity(),
+                ) else {
+                    tracing::warn!(
+                        "[dnd] drop {source_id} -> {target} names no entity — ignoring"
+                    );
+                    return;
+                };
                 let Some(intent) = build_drop_intent(
                     &source,
                     &target,

@@ -14,10 +14,14 @@ fn row_collapsed(row: &holon_api::widget_spec::DataRow) -> bool {
 
 holon_macros::widget_builder! {
     fn expand_toggle(header: Expr, content: Expr) -> ViewModel {
-        let target_id = ba.ctx.row().get("id")
-            .and_then(|v| v.as_string())
-            .unwrap_or("")
-            .to_string();
+        // `target_id` keys the expansion store on the row this toggle sits on,
+        // so the column is classified here — a bare `expand_toggle()` outside a
+        // collection reaches this builder before any row binding refused it.
+        let target_id = match holon_api::row_id_of(ba.ctx.row()) {
+            holon_api::RowId::Unusable(refusal) => return ViewModel::refused_row(&refusal),
+            holon_api::RowId::Entity(uri) => uri.as_str().to_string(),
+            holon_api::RowId::Absent => String::new(),
+        };
 
         // The lazy gate starts CLOSED by default: `expand_toggle` is a
         // lazy-section widget (claude-history style) whose default is

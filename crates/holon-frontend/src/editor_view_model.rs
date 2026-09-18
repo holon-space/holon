@@ -339,13 +339,11 @@ impl EditorViewModel {
         if new_text.is_empty() {
             return;
         }
-        let (Some(newborns), Some(id)) = (&self.ephemeral_newborns, self.handler.context_id())
+        let (Some(newborns), Some(uri)) = (&self.ephemeral_newborns, self.handler.context_id())
         else {
             return;
         };
-        if let Ok(uri) = holon_api::EntityUri::parse(id) {
-            newborns.retire(&uri);
-        }
+        newborns.retire(&uri);
     }
 
     /// Announce that a local edit reached this buffer, so an async gesture
@@ -359,9 +357,7 @@ impl EditorViewModel {
         let Some(id) = self.handler.context_id() else {
             return;
         };
-        // ALLOW(entity_uri_from_raw): boundary — the context id is the render
-        // spec's row id string; the gesture side keys on the same parse.
-        crate::local_edit_epoch::note(&holon_api::EntityUri::from_raw(id));
+        crate::local_edit_epoch::note(&id);
     }
 
     /// Attach a [`Cell<String>`] handle for the editable field. Call once,
@@ -478,12 +474,12 @@ impl EditorViewModel {
             self.surface_prefix = 0;
             return source;
         };
-        let seed = crate::editor_source::project_or_disclose(
-            self.handler.context_id().unwrap_or("<unmounted>"),
-            &source,
-            task_state,
-            vocabulary,
-        );
+        let id = self
+            .handler
+            .context_id()
+            .map(|uri| uri.as_str().to_string())
+            .unwrap_or_else(|| "<unmounted>".to_string());
+        let seed = crate::editor_source::project_or_disclose(&id, &source, task_state, vocabulary);
         self.surface = seed.surface;
         // The KEYWORD prefix only. The markup delta between source and content
         // is not a prefix at all and is crossed by the offset map in
@@ -648,7 +644,7 @@ impl EditorViewModel {
         // that never existed — the same reason `structural_block_action`
         // asserts for the structural table.
         assert!(
-            !crate::row_origin::RowOrigin::from_id(&id).is_creation_placeholder(),
+            !crate::row_origin::RowOrigin::from_id(id.as_str()).is_creation_placeholder(),
             "text write dispatched against creation-affordance id {id:?} — an affordance is not \
              a block; the write must name the newborn `edit_target_id` resolves it to"
         );
@@ -668,7 +664,7 @@ impl EditorViewModel {
             "content"
         };
         let mut params = HashMap::new();
-        params.insert("id".into(), Value::String(id));
+        params.insert("id".into(), Value::String(id.to_string()));
         params.insert("field".into(), Value::String(field.to_string()));
         params.insert("value".into(), Value::String(new_text.to_string()));
         params.insert("write_seq".into(), Value::Integer(seq.get()));
@@ -1474,8 +1470,39 @@ mod tests {
                 word_boundary: false,
             },
         ];
-        let context = HashMap::from([("id".into(), Value::String("block-1".into()))]);
+        let context = HashMap::from([("id".into(), Value::String("block:block-1".into()))]);
         EditorViewModel::new(ops, triggers, context, "content".into(), "original".into())
+    }
+
+    /// A matview can produce an INTEGER `id` column, and the row binding
+    /// already treats such a row as entity-shaped: `data_row_entity_uri` hands
+    /// the driver `block:42` and resolves a row mutable for it. The editor
+    /// reads the column through the same classifier, so it addresses the block
+    /// the binder bound — where the pre-classifier `as_string()` read dropped
+    /// the row and swallowed the keystroke with neither a write nor an error.
+    #[test]
+    fn an_integer_row_id_addresses_the_block_the_binder_bound() {
+        let row = HashMap::from([("id".to_string(), Value::Integer(42))]);
+
+        assert_eq!(
+            holon_api::data_row_entity_uri(&row),
+            Some(holon_api::EntityUri::block("42")),
+        );
+
+        let handler = crate::view_event_handler::ViewEventHandler::new(
+            Vec::new(),
+            row,
+            "content".into(),
+            String::new(),
+        );
+        assert_eq!(
+            handler.context_id(),
+            Some(holon_api::EntityUri::block("42"))
+        );
+        assert_eq!(
+            handler.edit_target_id(),
+            Some(holon_api::EntityUri::block("42"))
+        );
     }
 
     #[test]
@@ -1508,7 +1535,7 @@ mod tests {
             make_op("delete", &["parent_id"], vec![param("id")]),
         ];
         let triggers = crate::input_trigger::default_triggers_for_operations(&ops);
-        let context = HashMap::from([("id".into(), Value::String("block-1".into()))]);
+        let context = HashMap::from([("id".into(), Value::String("block:block-1".into()))]);
         EditorViewModel::new(ops, triggers, context, "content".into(), "original".into())
     }
 
@@ -1631,7 +1658,7 @@ mod tests {
                 strip_prefix_start,
             } => {
                 assert_eq!(intent.op_name, "delete");
-                assert_eq!(intent.params["id"], Value::String("block-1".into()));
+                assert_eq!(intent.params["id"], Value::String("block:block-1".into()));
                 assert_eq!(strip_prefix_start, 0);
             }
             other => panic!("Expected ExecuteAndStripCommand, got {:?}", other),
@@ -1888,7 +1915,7 @@ mod tests {
             EditorAction::Execute(intent) => {
                 assert_eq!(intent.entity_name, EntityName::new("block"));
                 assert_eq!(intent.op_name, "apply_mark");
-                assert_eq!(intent.params["id"], Value::String("block-1".into()));
+                assert_eq!(intent.params["id"], Value::String("block:block-1".into()));
                 assert_eq!(intent.params["range_start"], Value::Integer(0));
                 assert_eq!(intent.params["range_end"], Value::Integer(5));
                 let mark_json = intent.params["mark_json"]

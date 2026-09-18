@@ -104,25 +104,38 @@ impl RowOrigin {
     pub fn from_id(id: &str) -> Self {
         match id.split_once(VIRTUAL_MARKER) {
             Some((scheme, parent_local)) if !scheme.is_empty() && !parent_local.is_empty() => {
-                // ALLOW(entity_uri_from_raw): synthetic creation-slot id (render-spec/row
-                // boundary)
-                let parent = EntityUri::from_raw(&format!("{scheme}:{parent_local}"));
-                RowOrigin::CreationPlaceholder {
-                    entity_type: scheme.to_string(),
-                    parent,
+                // The "parent" is read from the row's own `id` column, so it is
+                // resolved by the one classifier: an id that merely CONTAINS the
+                // marker is not a creation slot, and the row binding answers for
+                // the value.
+                match holon_api::row_id_of_str(&format!("{scheme}:{parent_local}")) {
+                    holon_api::RowId::Entity(parent) => RowOrigin::CreationPlaceholder {
+                        entity_type: scheme.to_string(),
+                        parent,
+                    },
+                    holon_api::RowId::Absent | holon_api::RowId::Unusable(_) => {
+                        RowOrigin::Canonical
+                    }
                 }
             }
             _ => RowOrigin::Canonical,
         }
     }
 
+    /// Parse the origin from an already-classified row id. The form for a
+    /// caller that holds the classification, so the column is not read
+    /// twice.
+    pub fn from_row_id(id: &holon_api::RowId) -> Self {
+        match id {
+            holon_api::RowId::Entity(uri) => Self::from_id(uri.as_str()),
+            holon_api::RowId::Absent | holon_api::RowId::Unusable(_) => RowOrigin::Canonical,
+        }
+    }
+
     /// Parse the origin from a `DataRow`'s `id` field. A row with no `id` is
     /// `Canonical`.
     pub fn from_row(row: &holon_api::widget_spec::DataRow) -> Self {
-        row.get("id")
-            .and_then(|v| v.as_string())
-            .map(Self::from_id)
-            .unwrap_or(RowOrigin::Canonical)
+        Self::from_row_id(&holon_api::row_id_of(row))
     }
 
     /// The synthetic id a `CreationPlaceholder` renders under. This is the
@@ -155,23 +168,17 @@ impl RowOrigin {
         occurrence: &Occurrence,
     ) -> Self {
         match occurrence {
-            Occurrence::Placed(occ) => {
-                let id = row
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .unwrap_or_default();
-                let canonical_id = if let Ok(uri) = EntityUri::parse(id) {
-                    uri
-                } else {
-                    // ALLOW(entity_uri_from_raw): id column from a render row (render-pipeline/row
-                    // boundary)
-                    EntityUri::from_raw(id)
-                };
-                RowOrigin::DisplayPlaced {
+            // No production caller today; the PBT injects a display-placed
+            // node directly (`frontend_slice::components`). The id column is
+            // still the vault's, so it is resolved by the one classifier and a
+            // row that names no entity stays `Canonical`.
+            Occurrence::Placed(occ) => match holon_api::row_id_of(row) {
+                holon_api::RowId::Entity(canonical_id) => RowOrigin::DisplayPlaced {
                     canonical_id,
                     occurrence: occ.clone(),
-                }
-            }
+                },
+                holon_api::RowId::Absent | holon_api::RowId::Unusable(_) => RowOrigin::Canonical,
+            },
             Occurrence::Canonical => Self::from_row(row),
         }
     }
@@ -277,6 +284,8 @@ pub fn resolve_creation_parent(
     // itself displayed.
     let ids: std::collections::HashSet<String> = real
         .iter()
+        // ALLOW(raw_row_id_column): key — membership set deciding which displayed row is a forest
+        // root; compared as text
         .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(String::from))
         .collect();
     let roots: Vec<&std::sync::Arc<holon_api::widget_spec::DataRow>> = real
@@ -289,13 +298,10 @@ pub fn resolve_creation_parent(
         .collect();
     match roots.as_slice() {
         [single] => {
-            let id = single
-                .get("id")
-                .and_then(|v| v.as_string())
-                .expect("rendered row carries an 'id' column");
-            // ALLOW(entity_uri_from_raw): forest-root id read back from a rendered row
-            // (render-pipeline/row boundary)
-            Some(EntityUri::from_raw(id))
+            // A forest root names no parent, and its own id may name no entity
+            // (a vault-authored value): the row is still a root, with nothing
+            // to re-parent it under.
+            holon_api::row_id_of(single).entity()
         }
         // Every real row's parent is present → a cycle; not resolvable yet.
         [] => None,

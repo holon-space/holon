@@ -8,7 +8,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let child = node.children.first().expect("draggable requires a child");
     let child_el = super::render(child, ctx);
 
-    let Some(block_id) = node.row_id() else {
+    let Some(block_id) = node.row_id().map(|uri| uri.to_string()) else {
         return child_el;
     };
 

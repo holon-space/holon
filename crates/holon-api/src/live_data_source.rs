@@ -21,7 +21,6 @@ use std::sync::Arc;
 use futures_signals::signal_vec::SignalVec;
 use futures_signals::signal_vec::SignalVecExt as _;
 
-use crate::EntityUri;
 use crate::Occurrence;
 use crate::RowKey;
 use crate::Value;
@@ -108,13 +107,20 @@ impl<T: Clone + Send + Sync + 'static> LiveDataProvider<T> {
     }
 }
 
+/// The key one mirrored row is addressed by.
+///
+/// Unlike a query's `id`, this column is minted by the source's own
+/// [`RowMap`] from the mirror key, so a value that names no entity is a
+/// registration bug — and keying every such row on one default would collapse
+/// the whole mirror onto a single entry.
 fn row_key(row: &DataRow) -> RowKey {
-    let id = row
-        .get(ID_COLUMN)
-        .and_then(Value::as_string)
-        .unwrap_or_default();
-    // ALLOW(entity_uri_from_raw): the id a named source's own row map minted
-    (EntityUri::from_raw(id), Occurrence::Canonical)
+    match crate::widget_spec::row_id_of(row) {
+        crate::widget_spec::RowId::Entity(uri) => (uri, Occurrence::Canonical),
+        other => panic!(
+            "a named source's row map minted a '{ID_COLUMN}' column that names no entity: \
+             {other:?}"
+        ),
+    }
 }
 
 impl<T: Clone + Send + Sync + 'static> ReactiveRowProvider for LiveDataProvider<T> {

@@ -6,7 +6,7 @@ use super::prelude::*;
 use crate::render::drag::DraggedBlock;
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
-    let target_id = node.row_id();
+    let target_id = node.row_id().map(|uri| uri.to_string());
     let target_entity = node.entity_name();
     let op_name = node
         .prop_str("op")
@@ -30,10 +30,20 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 .clone()
                 .unwrap_or_else(|| holon_api::EntityName::new("block"));
 
-            // Drag state + row ids come from rendered rows — schemed by the
-            // matview pipeline. Parse once at this boundary, fail loud.
-            let source = holon_api::entity_uri_from_id_str(&dragged.block_id);
-            let target = holon_api::entity_uri_from_id_str(target);
+            // Drag state + row ids come from rendered rows. Resolve each once
+            // through the row-id entry point; a value that names no entity has
+            // no drop to dispatch.
+            let (Some(source), Some(target)) = (
+                holon_api::row_id_of_str(&dragged.block_id).entity(),
+                holon_api::row_id_of_str(target).entity(),
+            ) else {
+                tracing::warn!(
+                    "drop_zone: dragged {:?} onto {:?} names no entity",
+                    dragged.block_id,
+                    target
+                );
+                return;
+            };
             if let Some(intent) = build_drop_intent(&source, &target, entity_name, &op_name) {
                 services.dispatch_intent(intent);
             }

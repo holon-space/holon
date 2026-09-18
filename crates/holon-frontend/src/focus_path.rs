@@ -402,13 +402,14 @@ pub fn state_toggle_cycle_intent(
         } = &node.kind
         {
             if node.entity_id().as_ref() == Some(entity_id) {
+                let row_id = node.row_id().map(|uri| uri.to_string());
                 return crate::operations::state_toggle_intent(
                     field,
                     current,
                     states,
                     &node.operations,
                     node.entity_name().as_ref(),
-                    node.row_id().as_deref(),
+                    row_id.as_deref(),
                 );
             }
         }
@@ -1177,23 +1178,14 @@ fn collect_children_arcs(node: &Arc<ReactiveViewModel>) -> Vec<Arc<ReactiveViewM
     collect_children(node.as_ref())
 }
 
-/// Resolve the typed `EntityUri` for a node. Returns the explicit ID for
-/// nodes that have one, otherwise falls back to `entity().get("id")` —
-/// parsed once at this boundary via the centralized `entity_uri_from_id_str`
-/// seam, so the whole routing layer compares `EntityUri`s and a
-/// bare-vs-schemed mismatch is impossible past this point.
+/// Resolve the typed `EntityUri` for a node. The node's own binding is the
+/// authority; a row outside a binding falls back to its `id` column, resolved
+/// through the same row-id entry point the binding uses, so the whole routing
+/// layer compares `EntityUri`s and a bare-vs-schemed mismatch is impossible
+/// past this point.
 pub fn resolve_entity_id(node: &ReactiveViewModel) -> Option<EntityUri> {
-    if let Some(id) = node.entity_id() {
-        return Some(id);
-    }
-    let entity = node.entity();
-    match entity.get("id") {
-        Some(holon_api::Value::String(s)) => Some(holon_api::entity_uri_from_id_str(s)),
-        Some(holon_api::Value::Integer(i)) => {
-            Some(holon_api::entity_uri_from_id_str(&i.to_string()))
-        }
-        _ => None,
-    }
+    node.entity_id()
+        .or_else(|| holon_api::row_id_of(&node.entity()).entity())
 }
 
 fn build_navigator(
@@ -1344,7 +1336,7 @@ mod tests {
     /// schemed → parsed as-is. Same canonicalisation `resolve_entity_id`
     /// applies to fixture row ids.
     fn uri(s: &str) -> EntityUri {
-        holon_api::entity_uri_from_id_str(s)
+        holon_api::row_id_of_str(s).entity().expect("fixture id")
     }
 
     #[test]
@@ -1716,11 +1708,11 @@ mod tests {
         // The panel wrappers are `live_block` nodes whose entity_id matches
         // the panel's well-known id.
         let left_panel = ViewModel::live_block(
-            "block:default-left-sidebar",
+            EntityUri::parse("block:default-left-sidebar").unwrap(),
             ViewModel::collection("list", vec![sidebar_item]),
         );
         let main_panel = ViewModel::live_block(
-            "block:default-main-panel",
+            EntityUri::parse("block:default-main-panel").unwrap(),
             // `collection` has no `column` kind; this resolved to `list` via the
             // old silent default, so spell it `list` now that parsing is strict.
             ViewModel::collection("list", vec![main_item]),

@@ -233,6 +233,8 @@ pub fn agrees_with_ops(
 
 fn id_of(params: &StorageEntity) -> String {
     params
+        // ALLOW(raw_row_id_column): param-map — a StorageEntity op-param bag, not a query
+        // row; the shadow `ChangeOp` only counts and compares ops, never resolves this
         .get("id")
         .and_then(Value::as_string)
         .unwrap_or("<no-id>")

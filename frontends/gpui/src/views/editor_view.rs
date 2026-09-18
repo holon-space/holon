@@ -2381,20 +2381,20 @@ fn render_popup(
             } else {
                 "popup_item"
             };
-            // Canonicalize through the same total boundary helper the PBT
-            // driver uses: `PopupItem.id` is a raw token (op name for slash
-            // commands, bare block id for link candidates), but waits compare
-            // against schemed `EntityUri` strings — registering the raw token
-            // made `wait_for_widget_kind(EntityUri::block("delete"), ...)`
-            // unable to ever match ("delete" vs "block:delete", 4/4
-            // deterministic Loro-twin red, 2026-06-11).
-            let entity_uri = holon_api::entity_uri_from_id_str(&item.id);
+            // `PopupItem.id` is a raw token (op name for slash commands, bare
+            // block id for link candidates), while waits compare against
+            // schemed `EntityUri` strings — registering the raw token made
+            // `wait_for_widget_kind(EntityUri::block("delete"), ...)` unable to
+            // ever match ("delete" vs "block:delete", 4/4 deterministic
+            // Loro-twin red, 2026-06-11). A token that names no entity is
+            // tracked bare.
+            let entity_uri = holon_api::row_id_of_str(&item.id).entity();
             let tracked = crate::geometry::tracked(
                 format!("popup-item-{}", item.id),
                 row.into_any_element(),
                 bounds_registry,
                 widget_type,
-                Some(entity_uri.as_str()),
+                entity_uri.as_ref().map(|uri| uri.as_str()),
                 true,
                 Some(std::sync::Arc::from(item.label.as_str())),
             );

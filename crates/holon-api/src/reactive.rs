@@ -388,6 +388,8 @@ where
     pub fn from_rows(rows: Vec<HashMap<K, crate::Value>>) -> Self {
         let mut state = HashMap::with_capacity(rows.len());
         for row in rows {
+            // ALLOW(raw_row_id_column): key — the reactive map keys on the id TEXT,
+            // agreeing with the CDC arms that carry an id without a row
             if let Some(id) = row.get("id").and_then(|v| v.as_string()) {
                 state.insert(id.to_string(), row);
             }
@@ -405,6 +407,8 @@ where
         match change {
             crate::Change::Created { data, .. } => {
                 let key = data
+                    // ALLOW(raw_row_id_column): key — the reactive map keys on the id TEXT,
+                    // agreeing with the CDC arms that carry an id without a row
                     .get("id")
                     .and_then(|v| v.as_string())
                     .expect("Created event must have 'id' column")

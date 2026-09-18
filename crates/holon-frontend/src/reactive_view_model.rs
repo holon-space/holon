@@ -18,6 +18,7 @@ use futures_signals::signal::Mutable;
 use futures_signals::signal::ReadOnlyMutable;
 use holon_api::EntityName;
 use holon_api::EntityUri;
+use holon_api::RowId;
 use holon_api::Value;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::RenderExpr;
@@ -515,7 +516,7 @@ pub struct ExpandToggleTarget {
     pub gate: Mutable<bool>,
     pub operations: Vec<OperationWiring>,
     pub entity_name: Option<EntityName>,
-    pub row_id: Option<String>,
+    pub row_id: Option<EntityUri>,
 }
 
 /// The `tree_item` chevron a caret click acts on, as located by
@@ -525,7 +526,7 @@ pub struct ExpandToggleTarget {
 /// node, so `find_expand_toggle` cannot see them.
 pub struct TreeChevronTarget {
     pub expanded: Mutable<bool>,
-    pub row_id: String,
+    pub row_id: EntityUri,
     /// The full data row the tree_item interprets — profile resolution for
     /// the persist leg needs the declared columns, not just the id.
     pub row: Arc<DataRow>,
@@ -548,6 +549,14 @@ pub struct ReactiveViewModel {
     /// (expand, focus, view mode, scroll) lives in separate fields and
     /// stays freely mutable.
     pub data: ReadOnlyMutable<Arc<DataRow>>,
+
+    /// The entity this node's row names, resolved once where the row was bound
+    /// ([`crate::row_pipeline::apply_rules_and_interpret_with_ctx`] refuses a
+    /// row whose column names no entity before any node is built). `None` for a
+    /// node with no row and for one that was never bound. Kept as a field so
+    /// [`Self::entity_id`] need not re-parse the row's `id` column, whose text
+    /// is authored outside Holon.
+    pub bound_id: Option<EntityUri>,
 
     /// Static children (layout containers, expand toggle header).
     pub children: Vec<Arc<ReactiveViewModel>>,
@@ -759,10 +768,14 @@ impl ReactiveViewModel {
             if !(has_children && show_chevron) {
                 return;
             }
-            let Some(id) = node.prop_str("target_id").or_else(|| node.row_id()) else {
+            let identity = match node.prop_str("target_id") {
+                Some(target) => holon_api::row_id_of_str(&target),
+                None => node.row_identity(),
+            };
+            let Some(id) = identity.entity() else {
                 return;
             };
-            if bare(&id) != bare(target_id) {
+            if bare(id.as_str()) != bare(target_id) {
                 return;
             }
             let Some(expanded) = node.expanded.as_ref() else {
@@ -841,6 +854,7 @@ impl ReactiveViewModel {
             // Cloning preserves the shared `Arc<MutableState>` so the new
             // node sees CDC updates through the same signal.
             data: self.data.clone(),
+            bound_id: self.bound_id.clone(),
             children: Self::push_down_children(&self.children, &fresh.children),
             collection: fresh.collection.clone(),
             slot: Self::push_down_slot(&self.slot, &fresh.slot),
@@ -893,6 +907,7 @@ impl ReactiveViewModel {
                             // Share the existing per-row signal cell — see
                             // `with_update` for rationale.
                             data: old_child.data.clone(),
+                            bound_id: old_child.bound_id.clone(),
                             children: pushed,
                             collection: fresh_child.collection.clone(),
                             slot: Self::push_down_slot(&old_child.slot, &fresh_child.slot),
@@ -954,7 +969,11 @@ impl ReactiveViewModel {
             }
         }
         match (
+            // ALLOW(raw_row_id_column): key — identity-preservation check across an update; the
+            // two values are compared, not parsed
             old.data.lock_ref().get("id"),
+            // ALLOW(raw_row_id_column): key — identity-preservation check across an update; the
+            // two values are compared, not parsed
             fresh.data.lock_ref().get("id"),
         ) {
             (Some(a), Some(b)) => a == b,
@@ -1025,6 +1044,8 @@ impl ReactiveViewModel {
     /// Extract entity name from the data row's ID scheme.
     pub fn entity_name(&self) -> Option<EntityName> {
         let data = self.data.get_cloned();
+        // ALLOW(raw_row_id_column): key — reads the SCHEME only, to name the entity the
+        // row belongs to
         if let Some(Value::String(id)) = data.get("id") {
             if let Some(scheme) = id.split_once(':').map(|(s, _)| s) {
                 return Some(EntityName::Named(scheme.to_string()));
@@ -1036,23 +1057,25 @@ impl ReactiveViewModel {
         None
     }
 
-    /// Extract the row ID from the data row.
-    pub fn row_id(&self) -> Option<String> {
-        let data = self.data.get_cloned();
-        match data.get("id") {
-            Some(Value::String(s)) => Some(s.clone()),
-            Some(Value::Integer(i)) => Some(i.to_string()),
-            _ => None,
-        }
+    /// The row's `id` column, classified. A caller that only needs the entity
+    /// reads [`Self::row_id`]; one that must disclose an unusable id asks here.
+    pub fn row_identity(&self) -> RowId {
+        holon_api::row_id_of(&self.data.get_cloned())
     }
 
-    /// Entity ID — for live_block nodes, uses the block_id from props.
+    /// The entity this node's data row names. `None` both when the row carries
+    /// no `id` and when the id forms no URI — a caller that must tell those
+    /// apart reads [`Self::row_identity`].
+    pub fn row_id(&self) -> Option<EntityUri> {
+        self.row_identity().entity()
+    }
+
+    /// Entity ID — for `live_block` and `drawer` nodes, the `block_id` prop.
     ///
-    /// Typed end-to-end (focus-routing #7): `props["block_id"]` is written
-    /// schemed (Tier-1 #6), so a non-URI value here is a programming error —
-    /// fail loud. Nodes without the prop read the row id through the
-    /// centralized `entity_uri_from_id_str` boundary, same as the rest of
-    /// the row pipeline.
+    /// Every writer of that prop takes an [`EntityUri`] ([`Self::live_block`],
+    /// [`Self::drawer`]), so a non-URI value here is a programming error — fail
+    /// loud. Nodes without the prop answer from [`Self::bound_id`], the row's
+    /// id as resolved when the row was bound.
     pub fn entity_id(&self) -> Option<EntityUri> {
         let props = self.props.lock_ref();
         if let Some(Value::String(block_id)) = props.get("block_id") {
@@ -1062,8 +1085,9 @@ impl ReactiveViewModel {
             );
         }
         drop(props);
-        self.row_id()
-            .map(|id| holon_api::entity_uri_from_id_str(&id))
+        self.bound_id
+            .clone()
+            .or_else(|| holon_api::data_row_entity_uri(&self.data.get_cloned()))
     }
 
     /// Get a string property (owned — reads through Mutable lock).
@@ -1582,6 +1606,7 @@ impl Default for ReactiveViewModel {
             // Arc inside `ReadOnlyMutable`. No upstream writer means no
             // updates — fine for a default-empty node.
             data: Mutable::new(Arc::new(HashMap::new())).read_only(),
+            bound_id: None,
             children: vec![],
             collection: None,
             slot: None,
@@ -1622,6 +1647,7 @@ impl ReactiveViewModel {
     /// shadow tree builders) that don't participate in the live CDC
     /// pipeline.
     pub fn with_entity(mut self, entity: Arc<DataRow>) -> Self {
+        self.bound_id = holon_api::row_id_of(&entity).entity();
         self.data = Mutable::new(entity).read_only();
         self
     }
@@ -1677,15 +1703,21 @@ impl ReactiveViewModel {
         Self::default()
     }
 
+    /// `block_id` is the block whose collapse state this drawer controls, or
+    /// `None` for a drawer over a row that names no entity. Typed, because
+    /// [`Self::entity_id`] answers from the `block_id` prop alone wherever the
+    /// prop is present.
     pub fn drawer(
-        block_id: impl Into<String>,
+        block_id: Option<EntityUri>,
         mode: DrawerMode,
         open: bool,
         width: f32,
         child: ReactiveViewModel,
     ) -> Self {
         let mut props = HashMap::new();
-        props.insert("block_id".to_string(), Value::String(block_id.into()));
+        if let Some(block_id) = block_id {
+            props.insert("block_id".to_string(), Value::String(block_id.to_string()));
+        }
         props.insert("mode".to_string(), Value::String(mode.as_str().to_string()));
         props.insert("open".to_string(), Value::Boolean(open));
         props.insert("width".to_string(), Value::Float(width as f64));
@@ -1870,8 +1902,10 @@ impl ReactiveViewModel {
             _ => {}
         }
 
+        let bound_id = holon_api::row_id_of(&data).entity();
         Self {
             data: Mutable::new(data).read_only(),
+            bound_id,
             children: children.into_iter().map(Arc::new).collect(),
             ..Self::from_widget(&widget, props)
         }
@@ -2016,7 +2050,7 @@ impl ReactiveViewModel {
 }
 
 impl crate::render_interpreter::WithEntity for ReactiveViewModel {
-    fn attach_entity(&mut self, entity: Arc<DataRow>) {
+    fn attach_entity(&mut self, entity: Arc<DataRow>, entity_id: Option<EntityUri>) {
         // Replace the data field with a fresh one-shot read-only cell.
         // `attach_entity` is called by `shared_tree_build` for nested
         // children where no shared CDC handle is available — so the new
@@ -2024,6 +2058,11 @@ impl crate::render_interpreter::WithEntity for ReactiveViewModel {
         // sources should construct via `with_row_mutable` on the
         // `RenderContext` instead.
         self.data = Mutable::new(entity).read_only();
+        self.bound_id = entity_id;
+    }
+
+    fn refused_row(refusal: &holon_api::RowIdUnusable) -> Self {
+        Self::error("refused_row", refusal.to_string())
     }
 }
 
@@ -2527,7 +2566,7 @@ mod tests {
         let found = wired
             .find_expand_toggle("block:a")
             .expect("nested expand_toggle must be found");
-        assert_eq!(found.row_id.as_deref(), Some("block:a"));
+        assert_eq!(found.row_id, Some(EntityUri::block("a")));
         assert_eq!(found.entity_name, Some(EntityName::new("block")));
 
         let fx = crate::expand_toggle::expand_toggle_effects(
@@ -2535,7 +2574,7 @@ mod tests {
             true,
             &found.operations,
             found.entity_name.as_ref(),
-            found.row_id.as_deref(),
+            found.row_id.as_ref(),
         );
         assert_eq!(fx.view_store, ("block:a".to_string(), true));
         let intent = fx.intent.expect("wired node must yield the document write");
@@ -2559,7 +2598,7 @@ mod tests {
             true,
             &found.operations,
             found.entity_name.as_ref(),
-            found.row_id.as_deref(),
+            found.row_id.as_ref(),
         );
         assert_eq!(fx.view_store, ("block:b".to_string(), true));
         assert!(

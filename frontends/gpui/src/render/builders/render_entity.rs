@@ -18,7 +18,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let slot = node.slot.as_ref().expect("render_entity requires a slot");
 
     if let Some(row_id) = node.row_id() {
-        let cache_key = crate::entity_view_registry::CacheKey::RenderEntity(row_id);
+        let cache_key = crate::entity_view_registry::CacheKey::RenderEntity(row_id.to_string());
         let entity: Option<gpui::Entity<crate::views::RenderEntityView>> = {
             let cache = ctx.local.entity_cache.read().unwrap();
             cache.get(&cache_key).and_then(|any| {

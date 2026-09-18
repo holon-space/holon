@@ -1343,6 +1343,17 @@ impl ReactiveView {
                 move |row: Arc<holon_api::widget_spec::DataRow>,
                       depth: usize,
                       occurrence: holon_api::Occurrence| {
+                    // The row's identity is resolved before ANY consumer reads
+                    // the column: the origin reader, the row-mutability handle
+                    // and the item template all read it, and a value that names
+                    // no entity is answered here — once, with the one node the
+                    // row renders as.
+                    if let holon_api::RowId::Unusable(refusal) = holon_api::row_id_of(&row) {
+                        let mut node = <ReactiveViewModel as crate::render_interpreter::WithEntity>::refused_row(&refusal);
+                        node.interpret_fn = Some(nif.clone());
+                        node.occurrence = occurrence;
+                        return (Arc::new(node), HashMap::new());
+                    }
                     let parent_space = space.get_cloned();
                     let handle =
                         holon_api::data_row_entity_uri(&row).and_then(|uri| ds.row_mutable(&uri));
@@ -1369,6 +1380,8 @@ impl ReactiveView {
                     let active_rules: &[holon_api::render_types::RuleSpec] =
                         if is_virtual || is_advice { &[] } else { &rules };
                     let is_context_root = context_root.as_deref().is_some_and(|cid| {
+                        // ALLOW(raw_row_id_column): key — equality against the collection's
+                        // `context_root` id; compared as text
                         row.get("id")
                             .and_then(|v| v.as_string())
                             .is_some_and(|rid| rid == cid)
@@ -1979,6 +1992,17 @@ impl ReactiveView {
                   child_space: Option<AvailableSpace>,
                   occurrence: holon_api::Occurrence|
                   -> Arc<ReactiveViewModel> {
+                // See the tree driver: the classification answers for the row
+                // before any consumer reads its `id` column.
+                if let holon_api::RowId::Unusable(refusal) = holon_api::row_id_of(&row) {
+                    let mut node =
+                        <ReactiveViewModel as crate::render_interpreter::WithEntity>::refused_row(
+                            &refusal,
+                        );
+                    node.interpret_fn = Some(nif.clone());
+                    node.occurrence = occurrence;
+                    return Arc::new(node);
+                }
                 let handle =
                     holon_api::data_row_entity_uri(&row).and_then(|uri| ds.row_mutable(&uri));
                 let ctx = row_render_context(row.clone(), handle, svc.as_ref(), child_space);
@@ -2345,7 +2369,11 @@ impl ReactiveView {
                             let ord = holon_api::render_eval::cmp_values(a.get(key), b.get(key));
                             let ord = if descending { ord.reverse() } else { ord };
                             ord.then_with(|| {
+                                // ALLOW(raw_row_id_column): key — sort tie-break; the id orders
+                                // rows and resolves nothing
                                 let id_a = a.get("id").and_then(|v| v.as_string()).unwrap_or("");
+                                // ALLOW(raw_row_id_column): key — sort tie-break; the id orders
+                                // rows and resolves nothing
                                 let id_b = b.get("id").and_then(|v| v.as_string()).unwrap_or("");
                                 id_a.cmp(id_b)
                             })
@@ -2379,6 +2407,11 @@ impl ReactiveView {
                     let cards: Vec<Arc<ReactiveViewModel>> = rows
                         .into_iter()
                         .map(|row| {
+                            // No id guard here, unlike the tree and flat
+                            // drivers: nothing between this point and
+                            // `apply_rules_and_interpret_with_ctx` CONVERTS the
+                            // `id` column (the lane sort reads it as a text
+                            // tie-break), and that call refuses the row.
                             let handle = holon_api::data_row_entity_uri(&row)
                                 .and_then(|uri| ds.row_mutable(&uri));
                             let ctx =
@@ -2966,6 +2999,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The grouped driver carries no id guard of its own — it reaches the row
+    /// through `apply_rules_and_interpret_with_ctx`, whose classification is
+    /// the one that answers for the column. A lane card over a row whose `id`
+    /// names no entity must be that refusal, not a card built from it.
+    #[tokio::test]
+    async fn grouped_driver_paints_a_refused_row_as_an_error_card() {
+        let row_set = ReactiveRowSet::new();
+        row_set.set_generation(1);
+        for id in ["my task", "block:ok"] {
+            row_set.apply_change(
+                holon_api::Change::Created {
+                    data: enriched(make_row(id, "hello")),
+                    origin: remote_origin(),
+                },
+                1,
+            );
+        }
+        let data_source: Arc<dyn holon_api::ReactiveRowProvider> = Arc::new(row_set);
+
+        let view = ReactiveView::new_grouped(
+            CollectionVariant::from_name("board", 0.0).expect("`board` is a registered builtin"),
+            data_source,
+            RenderExpr::FunctionCall {
+                name: "row".to_string(),
+                args: vec![],
+            },
+            "task_state".to_string(),
+            "No state".to_string(),
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+        );
+
+        let services: Arc<dyn crate::reactive::BuilderServices> =
+            Arc::new(StubBuilderServices::new());
+        view.start(services, &tokio::runtime::Handle::current());
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let cards: Vec<Arc<ReactiveViewModel>> = view
+            .items
+            .lock_ref()
+            .iter()
+            .flat_map(|lane| lane.children.clone())
+            .collect();
+
+        assert_eq!(cards.len(), 2, "one card per row, refused or not");
+        let refused = cards
+            .iter()
+            .find(|c| c.widget_name().as_deref() == Some("error"))
+            .expect("the row whose id names no entity renders an error card");
+        let message = refused.prop_str("message").unwrap_or_default();
+        assert!(message.contains("my task"), "{message}");
     }
 
     /// Reproducer: a single CDC field update on one row should NOT produce a

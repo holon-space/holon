@@ -153,6 +153,7 @@ pub fn marks_of(entity: &DataRow) -> Vec<MarkSpan> {
     // A row missing `id` is already anomalous; the label only names the row in
     // the log, so a placeholder keeps the disclosure readable.
     let block_id = entity
+        // ALLOW(raw_row_id_column): label — names the row in a warning line only
         .get("id")
         .and_then(|v| v.as_string())
         .unwrap_or("<row without id>"); // ALLOW(fallback): log label only

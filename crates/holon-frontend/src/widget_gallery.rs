@@ -1959,7 +1959,11 @@ mod tests {
             .iter()
             .map(|c| c.prop_str("row_id").unwrap_or_default())
             .collect();
-        assert_eq!(row_ids, vec!["row-1", "row-2"]);
+        // The stamp is the row's PROVEN identity, not its authored text: the
+        // prop addresses `set_field` / `move_block`, and the store keys those
+        // rows `block:row-N`. A bare stamp would dispatch against an id no
+        // row has.
+        assert_eq!(row_ids, vec!["block:row-1", "block:row-2"]);
     }
 
     #[test]

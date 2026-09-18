@@ -32,10 +32,9 @@ fn submit_wiring(
     // The row's `id` names the entity this box composes for. Cache tables store
     // it scheme-qualified (`cc-session:<id>`) while the operation wants the
     // bare id, so the URI is unwrapped here rather than at every declaration
-    // site. A box with no row is not bound to an entity and binds nothing.
-    if let Some(raw) = row.get("id").and_then(|v| v.as_string()) {
-        let target = holon_api::EntityUri::parse(raw)
-            .unwrap_or_else(|e| panic!("input_box: row id must be an entity URI: {e}"));
+    // site. A row that names no entity binds nothing — the box composes for an
+    // entity or for none at all.
+    if let holon_api::RowId::Entity(target) = holon_api::row_id_of(row) {
         bound_params.insert(id_param, Value::String(target.id().to_string()));
     }
     for (k, v) in &resolved.named {

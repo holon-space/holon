@@ -165,9 +165,10 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     // under that oracle, and stays untracked. A row of another entity — an
     // `integration:` mirror row — has no block content to be compared against,
     // so what it paints is left readable for the rungs that read it.
-    if field != "content" && row_id.starts_with("block:") {
+    if field != "content" && row_id.is_block() {
         return inner;
     }
+    let row_id = row_id.to_string();
     let el_id = format!("text-{row_id}-{field}");
     let has_content = !content.is_empty();
     let mut tracker = crate::geometry::tracked(

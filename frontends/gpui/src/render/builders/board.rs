@@ -8,6 +8,7 @@ use gpui::SharedString;
 use gpui_component::ActiveTheme as _;
 use gpui_component::sortable::Sortable;
 use gpui_component::sortable::SortableState;
+use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::theme_token::ThemeToken;
 use holon_frontend::OperationIntent;
@@ -49,9 +50,10 @@ struct CardLine {
 #[derive(Clone)]
 struct BoardCard {
     id: u64,
-    /// Persisted row id (e.g. `block:UUID`). `None` when the source row had
-    /// no `id` column — drag/drop in that case is in-memory only.
-    row_id: Option<String>,
+    /// Persisted row id. `None` when the source row had no `id` column —
+    /// drag/drop in that case is in-memory only. A row whose id forms no URI
+    /// never reaches here: `extract_card` refuses it into a banner.
+    row_id: Option<EntityUri>,
     /// Parent block id of the source row. Used as the `move_block` target
     /// when this card becomes the positional anchor of a reorder. `None`
     /// when the row carries no `parent_id` column (non-block entities) —
@@ -124,24 +126,29 @@ fn extract_lines(card_vm: &ReactiveViewModel) -> Vec<CardLine> {
         .collect()
 }
 
+/// A card's visual snapshot, or the refusal when its source row's `id` names
+/// no entity. A refused row never becomes a draggable card: every persistence
+/// leg the board has is addressed by that id, so a card built on unusable text
+/// could only drag in a lie. The static path refuses the same rows one layer
+/// up (`shadow_builders::board::build_static_card`).
 fn extract_card(
     ctx: &GpuiRenderContext,
     lane_index: usize,
     card_index: usize,
     card_vm: &ReactiveViewModel,
-) -> BoardCard {
+) -> Result<BoardCard, holon_api::RowIdUnusable> {
     let (accent, accent_hex) = card_accent(ctx, card_vm.prop_str("accent").as_deref());
     // Static path attaches `row_id` / `parent_id` as card-level props.
     // Streaming path attaches the source row to `card_vm.data` (via
     // `flat_driver::interpret_and_attach`) — read both, props take
     // precedence so static-path tests stay deterministic.
-    let row_id = card_vm.prop_str("row_id").or_else(|| {
-        card_vm
-            .data
-            .get_cloned()
-            .get("id")
-            .and_then(|v| v.as_string().map(|s| s.to_string()))
-    });
+    let row_id = match card_vm.prop_str("row_id") {
+        Some(stamped) => holon_api::row_id_of_str(&stamped),
+        None => card_vm.row_identity(),
+    };
+    if let Some(refusal) = row_id.unusable() {
+        return Err(refusal.clone());
+    }
     let parent_id = card_vm.prop_str("parent_id").or_else(|| {
         card_vm
             .data
@@ -149,14 +156,14 @@ fn extract_card(
             .get("parent_id")
             .and_then(|v| v.as_string().map(|s| s.to_string()))
     });
-    BoardCard {
+    Ok(BoardCard {
         id: ((lane_index as u64) << 32) | (card_index as u64),
-        row_id,
+        row_id: row_id.entity(),
         parent_id,
         accent,
         accent_hex,
         lines: extract_lines(card_vm),
-    }
+    })
 }
 
 /// Extract the cards that should populate a single lane.
@@ -176,7 +183,7 @@ fn extract_lane_cards(lane: &ReactiveViewModel) -> Vec<std::sync::Arc<ReactiveVi
 /// drag/drop must not crash mid-drag).
 fn resolve_row_op_entity(
     services: &std::sync::Arc<dyn BuilderServices>,
-    row_id: &str,
+    row_id: &EntityUri,
     op_name: &str,
     context: &str,
 ) -> Option<holon_api::EntityName> {
@@ -197,7 +204,7 @@ fn resolve_row_op_entity(
 /// resolving the row's entity.
 fn dispatch_set_field(
     services: &std::sync::Arc<dyn BuilderServices>,
-    row_id: &str,
+    row_id: &EntityUri,
     field: &str,
     value: String,
     context: &str,
@@ -208,7 +215,7 @@ fn dispatch_set_field(
     let intent = OperationIntent::set_field(
         &entity_name,
         "set_field",
-        row_id,
+        &row_id.to_string(),
         field,
         Value::String(value),
     );
@@ -220,7 +227,7 @@ fn dispatch_set_field(
 /// `dispatch_move_for_position` after the optimistic state update.
 fn dispatch_lane_change(
     services: &std::sync::Arc<dyn BuilderServices>,
-    row_id: &str,
+    row_id: &EntityUri,
     lane_field: &str,
     new_value: &str,
 ) {
@@ -260,14 +267,14 @@ fn dispatch_move_for_position(
     let Some(card) = items.get(position) else {
         return;
     };
-    let Some(row_id) = card.row_id.as_deref() else {
+    let Some(row_id) = card.row_id.as_ref() else {
         return;
     };
     let prev = position.checked_sub(1).and_then(|i| items.get(i));
     let next = items.get(position + 1);
     let (parent_id, after_block_id) = match (prev, next) {
         (Some(prev), _) => {
-            let (Some(parent), Some(prev_id)) = (prev.parent_id.as_deref(), prev.row_id.as_deref())
+            let (Some(parent), Some(prev_id)) = (prev.parent_id.as_deref(), prev.row_id.as_ref())
             else {
                 tracing::warn!(
                     "board {context}: reorder anchor lacks parent_id/row_id — not persisting \
@@ -395,6 +402,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         "board".hash(&mut h);
         if let Some(row) = ctx.ctx.current_row.as_ref() {
+            // ALLOW(raw_row_id_column): key — hashed into the board's element id
             if let Some(id) = row.get("id").and_then(|v| v.as_string()) {
                 id.hash(&mut h);
             }
@@ -431,11 +439,14 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         let title = lane.prop_str("title").unwrap_or_else(|| "Lane".to_string());
 
         let card_vms = extract_lane_cards(lane);
-        let cards: Vec<BoardCard> = card_vms
-            .iter()
-            .enumerate()
-            .map(|(card_index, card_vm)| extract_card(ctx, lane_index, card_index, card_vm))
-            .collect();
+        let mut cards: Vec<BoardCard> = Vec::with_capacity(card_vms.len());
+        let mut refusals: Vec<AnyElement> = Vec::new();
+        for (card_index, card_vm) in card_vms.iter().enumerate() {
+            match extract_card(ctx, lane_index, card_index, card_vm) {
+                Ok(card) => cards.push(card),
+                Err(refusal) => refusals.push(error_banner(&refusal.to_string(), ctx)),
+            }
+        }
 
         let state_key = crate::entity_view_registry::CacheKey::Ephemeral(format!(
             "{board_key_seed}:lane-state:{lane_index}"
@@ -472,7 +483,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                 dispatch_move_for_position(&services_for_reorder, &items, to, "on_reorder");
             })
             .on_insert(move |item, insert_idx, _src_state, _w, cx| {
-                let Some(row_id) = item.row_id.as_deref() else {
+                let Some(row_id) = item.row_id.as_ref() else {
                     // Inline / synthetic cards (e.g. gallery demo) have no
                     // persisted id — drop is in-memory only.
                     return;
@@ -513,7 +524,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                     .text_color(tc(ctx, |t| t.muted_foreground))
                     .child(title.to_uppercase()),
             )
-            .child(sortable);
+            .child(sortable)
+            .children(refusals);
 
         row = row.child(lane_view);
     }

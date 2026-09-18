@@ -695,6 +695,7 @@ impl ReactiveEngineDriver {
             if tokio::time::Instant::now() >= deadline {
                 let row_ids: Vec<String> = rows
                     .iter()
+                    // ALLOW(raw_row_id_column): label — lists the live rows in a bail! message
                     .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(String::from))
                     .collect();
                 anyhow::bail!(
@@ -964,7 +965,7 @@ impl ReactiveEngineDriver {
                 Some("tree_item") => {
                     let id = node
                         .prop_str("target_id")
-                        .or_else(|| node.row_id())
+                        .or_else(|| node.row_id().map(|uri| uri.to_string()))
                         .unwrap_or_else(|| "<no id>".into());
                     seen.push(format!(
                         "tree_item({id}, has_children={:?}, show_chevron={:?}, gate={})",
@@ -1002,7 +1003,7 @@ impl ReactiveEngineDriver {
             expanded,
             &found.operations,
             found.entity_name.as_ref(),
-            found.row_id.as_deref(),
+            found.row_id.as_ref(),
         );
         self.engine
             .ui_state()
@@ -1424,13 +1425,15 @@ impl UserDriver for ReactiveEngineDriver {
                     walk_tree(tree, &mut |n| {
                         if !found_source
                             && n.widget_name().as_deref() == Some("draggable")
-                            && n.row_id().as_deref() == Some(source_id.as_str())
+                            && n.row_id().map(|uri| uri.to_string()).as_deref()
+                                == Some(source_id.as_str())
                         {
                             found_source = true;
                         }
                         if target_entity.is_none()
                             && n.widget_name().as_deref() == Some("drop_zone")
-                            && n.row_id().as_deref() == Some(target_id.as_str())
+                            && n.row_id().map(|uri| uri.to_string()).as_deref()
+                                == Some(target_id.as_str())
                         {
                             target_entity =
                                 Some(n.entity_name().unwrap_or_else(|| EntityName::new("block")));
@@ -1790,7 +1793,10 @@ impl HeadlessInputRouter {
             walk_tree(tree, &mut |n| {
                 let Some(name) = n.widget_name() else { return };
                 if matches!(name.as_str(), "draggable" | "drop_zone" | "live_block") {
-                    let row = n.row_id().unwrap_or_else(|| "<no row_id>".into());
+                    let row = n
+                        .row_id()
+                        .map(|uri| uri.to_string())
+                        .unwrap_or_else(|| "<no row_id>".into());
                     row_ids_per_widget
                         .entry(name)
                         .or_default()

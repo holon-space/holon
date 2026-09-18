@@ -111,11 +111,14 @@ impl ViewEventHandler {
         self.loro_content_writer = active;
     }
 
-    /// The block (or row) id the controller is editing, read from
-    /// `context_params["id"]`. `None` if the context wasn't populated with
-    /// an id — the caller should treat that as "no-op" rather than panic.
-    pub fn context_id(&self) -> Option<&str> {
-        self.context_params.get("id").and_then(|v| v.as_string())
+    /// The entity the controller is editing — `context_params["id"]`, the
+    /// node's own row, classified once here so no caller re-parses the text.
+    ///
+    /// `None` for a context with no id (an unmounted controller) and for an id
+    /// that names no entity: such a row renders as an error node, which mounts
+    /// no editor, so every caller's "no-op" is the right answer for both.
+    pub fn context_id(&self) -> Option<EntityUri> {
+        holon_api::row_id_of(&self.context_params).entity()
     }
 
     /// The id an edit made in this editor must name — the ONE resolution every
@@ -125,11 +128,8 @@ impl ViewEventHandler {
     /// creation affordance, a rendered row the backend has no block for. That
     /// id is birthed through the chokepoint here (idempotently), so no funnel
     /// can dispatch an op against an affordance.
-    pub fn edit_target_id(&self) -> Option<String> {
-        let row_id = self.context_id()?;
-        // ALLOW(entity_uri_from_raw): the row id as the render spec's
-        // `context_params` delivered it.
-        let row_uri = EntityUri::from_raw(row_id);
+    pub fn edit_target_id(&self) -> Option<EntityUri> {
+        let row_uri = self.context_id()?;
         match crate::row_origin::Caret::from_focus(Some(&row_uri)) {
             crate::row_origin::Caret::Slot(_) => Some(
                 self.services
@@ -137,11 +137,9 @@ impl ViewEventHandler {
                     .expect("a creation affordance can only be edited through BuilderServices")
                     .caret_block_for_edit()
                     .expect("birthing the caret's creation affordance")
-                    .expect("a caret sitting on an affordance resolves to a newborn")
-                    .as_str()
-                    .to_string(),
+                    .expect("a caret sitting on an affordance resolves to a newborn"),
             ),
-            _ => Some(row_id.to_string()),
+            _ => Some(row_uri),
         }
     }
 
@@ -258,7 +256,7 @@ impl ViewEventHandler {
         };
 
         let mut params = HashMap::new();
-        params.insert("id".into(), Value::String(id));
+        params.insert("id".into(), Value::String(id.to_string()));
         params.insert("field".into(), Value::String(self.field.clone()));
         params.insert("value".into(), Value::String(new_value));
 

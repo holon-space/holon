@@ -35,12 +35,15 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     if let Some(exec_op) = exec_op {
         let row_id = node.row_id();
         let entity_name = node.entity_name();
-        let intent_template = row_id
-            .map(|id| OperationIntent::for_row(&exec_op.descriptor, &id, entity_name.as_ref()));
+        let intent_template = row_id.map(|id| {
+            OperationIntent::for_row(&exec_op.descriptor, &id.to_string(), entity_name.as_ref())
+        });
         let el_id = format!(
             "src-run-{}",
             intent_template
                 .as_ref()
+                // ALLOW(raw_row_id_column): param-map — an op intent's params, hashed into the
+                // element id
                 .and_then(|i| i.params.get("id"))
                 .map(|v| v.to_display_string())
                 .unwrap_or_else(|| "x".into())

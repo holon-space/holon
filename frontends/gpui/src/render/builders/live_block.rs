@@ -15,8 +15,10 @@ use crate::views::ReactiveShell;
 /// fires before the cache lookup so the cycle case never enters the cache.
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let block_id_str = node.prop_str("block_id").unwrap_or_default();
-    let block_id =
-        EntityUri::parse(&block_id_str).unwrap_or_else(|_| EntityUri::block(&block_id_str));
+    let Some(block_id) = holon_api::row_id_of_str(&block_id_str).entity() else {
+        tracing::warn!("[live_block] block_id {block_id_str:?} names no entity — rendering empty");
+        return div().into_any_element();
+    };
 
     let bid = block_id.to_string();
     if ctx.live_block_ancestors.contains(&bid) {

@@ -42,7 +42,7 @@ pub(crate) fn view_model_to_snapshot(
     // invariants can walk references without knowing about LiveBlock.
     let entity_id = match &vm.kind {
         ViewKind::LiveBlock { block_id, .. } => Some(block_id.clone()),
-        _ => vm.row_id(),
+        _ => vm.row_id().map(|uri| uri.to_string()),
     };
 
     let mut props: BTreeMap<String, String> = BTreeMap::new();

@@ -71,7 +71,7 @@ pub(crate) fn tag_node<E: gpui::IntoElement>(
         ctx.bounds_registry.clone(),
         el.into_any_element(),
     )
-    .with_vm_node(node.row_id().as_deref())
+    .with_vm_node(node.row_id().map(|uri| uri.to_string()).as_deref())
     .into_any_element()
 }
 

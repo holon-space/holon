@@ -72,6 +72,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         for item in &items {
             let entity = item.entity();
             let scroll_id = entity
+                // ALLOW(raw_row_id_column): key — hashed into the scroll-handle element id
                 .get("id")
                 .and_then(|v| v.as_string())
                 .unwrap_or("panel");
@@ -266,6 +267,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
             seen_flow_child = true;
             let entity = item.entity();
             let scroll_id = entity
+                // ALLOW(raw_row_id_column): key — hashed into the scroll-handle element id
                 .get("id")
                 .and_then(|v| v.as_string())
                 .unwrap_or("panel");

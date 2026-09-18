@@ -326,13 +326,7 @@ impl SutFrontendEngine for GpuiFrontendEngineComponent {
         }
         let vm = self.engine.snapshot(&root_uri);
         let root_kind = vm.widget_name().unwrap_or("?").to_string();
-        let entity_ids = vm
-            .collect_entity_ids()
-            .into_iter()
-            // ALLOW(entity_uri_from_raw): collect_entity_ids() yields rendered-VM
-            // id strings, parsed the same way the geometry mirror parses them.
-            .map(|s| EntityUri::from_raw(&s))
-            .collect();
+        let entity_ids = vm.collect_entity_ids();
         Some(FrontendRootVm {
             root_kind,
             entity_ids,
@@ -386,11 +380,9 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
             for toggle in crate::display_assertions::collect_state_toggle_nodes(vm) {
                 if let holon_frontend::view_model::ViewKind::StateToggle { current, .. } =
                     &toggle.kind
-                    && let Some(block_id_str) = toggle.row_id()
+                    && let Some(block_id) = toggle.row_id()
                 {
-                    // ALLOW(entity_uri_from_raw): toggle.row_id() String from a
-                    // ViewModel StateToggle node.
-                    out.push((EntityUri::from_raw(&block_id_str), current.clone()));
+                    out.push((block_id, current.clone()));
                 }
             }
         }

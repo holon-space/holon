@@ -706,6 +706,8 @@ fn block_row_pairs(c: &crate::Change<crate::StorageEntity>) -> Vec<(String, Opti
             .filter(|&s| s > 0)
             .map(WriteSeq::from_i64);
         let mut out = Vec::new();
+        // ALLOW(raw_row_id_column): key — the latency ledger keys on the id TEXT; it
+        // resolves no entity
         if let Some(id) = data.get("id").and_then(|v| v.as_string()) {
             out.push((id.to_string(), seq));
         }

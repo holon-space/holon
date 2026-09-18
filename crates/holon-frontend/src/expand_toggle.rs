@@ -6,6 +6,7 @@
 //! performs one leg and not the other either loses the gesture on the next
 //! structural rebuild or leaves the document stale.
 
+use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::render_types::OperationWiring;
 use holon_api::types::EntityName;
@@ -32,7 +33,7 @@ pub fn expand_toggle_effects(
     expanded: bool,
     operations: &[OperationWiring],
     entity_name: Option<&EntityName>,
-    row_id: Option<&str>,
+    row_id: Option<&EntityUri>,
 ) -> ExpandToggleEffects {
     let intent = match (
         find_set_field_op("collapsed", operations),
@@ -42,7 +43,7 @@ pub fn expand_toggle_effects(
         (Some(op), Some(entity), Some(id)) => Some(OperationIntent::set_field(
             entity,
             &op.name,
-            id,
+            &id.to_string(),
             "collapsed",
             Value::Boolean(!expanded),
         )),
@@ -63,7 +64,7 @@ pub fn expand_toggle_effects(
 pub fn tree_chevron_persist_intent(
     services: &dyn crate::reactive::BuilderServices,
     row: &holon_api::widget_spec::DataRow,
-    row_id: &str,
+    row_id: &EntityUri,
     new_expanded: bool,
 ) -> Option<OperationIntent> {
     // Resolve off the FULL data row the tree_item interprets — a skinny
@@ -89,7 +90,7 @@ pub fn tree_chevron_persist_intent(
     Some(OperationIntent::set_field(
         &op.entity_name,
         "set_field",
-        row_id,
+        &row_id.to_string(),
         "collapsed",
         Value::Boolean(!new_expanded),
     ))
@@ -153,7 +154,7 @@ mod tests {
             true,
             &ops,
             Some(&EntityName::new("block")),
-            Some("block:a"),
+            Some(&EntityUri::block("a")),
         );
         assert_eq!(fx.view_store, ("block:a".to_string(), true));
         let intent = fx.intent.expect("set_field wiring present");
@@ -178,7 +179,7 @@ mod tests {
             false,
             &ops,
             Some(&EntityName::new("block")),
-            Some("block:a"),
+            Some(&EntityUri::block("a")),
         );
         assert_eq!(fx.view_store, ("block:a".to_string(), false));
         let intent = fx.intent.expect("set_field wiring present");

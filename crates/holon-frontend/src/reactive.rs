@@ -986,6 +986,7 @@ impl ReactiveRowSet {
             let kind = match &change {
                 holon_api::Change::Created { data, .. } => format!(
                     "Created {}",
+                    // ALLOW(raw_row_id_column): label — row-lifecycle trace line
                     data.get("id")
                         .and_then(|v| v.as_string())
                         .unwrap_or("<none>")
@@ -1003,6 +1004,7 @@ impl ReactiveRowSet {
             let detail = match &change {
                 holon_api::Change::Created { data, .. } => format!(
                     "Created id={}",
+                    // ALLOW(raw_row_id_column): label — row-lifecycle trace line
                     data.get("id")
                         .and_then(|v| v.as_string())
                         .unwrap_or("<none>")
@@ -1043,7 +1045,7 @@ impl ReactiveRowSet {
             }
             holon_api::Change::Updated { id, data, .. } => {
                 let row = Arc::new(data.into_inner());
-                let key = holon_api::entity_uri_from_id_str(&id);
+                let key = holon_api::RowIdentity::of_id_str(&id).to_store_key();
                 let mut lock = self.data.lock_mut();
                 if let Some(existing) = lock.get(&key) {
                     // set_neq: CDC echoes of locally-applied writes arrive with
@@ -1057,7 +1059,7 @@ impl ReactiveRowSet {
                 }
             }
             holon_api::Change::Deleted { id, .. } => {
-                let key = holon_api::entity_uri_from_id_str(&id);
+                let key = holon_api::RowIdentity::of_id_str(&id).to_store_key();
                 if self.data.lock_mut().remove(&key).is_some() {
                     row_lifecycle::record("CDC Deleted", &self.label, &key);
                 }
@@ -1065,7 +1067,7 @@ impl ReactiveRowSet {
             holon_api::Change::FieldsChanged {
                 entity_id, fields, ..
             } => {
-                let key = holon_api::entity_uri_from_id_str(&entity_id);
+                let key = holon_api::RowIdentity::of_id_str(&entity_id).to_store_key();
                 let lock = self.data.lock_ref();
                 if let Some(existing) = lock.get(&key) {
                     let mut patched = existing.get_cloned();
@@ -2982,7 +2984,7 @@ impl ReactiveEngine {
             // see a live-block slot; the inner `Badge` is a leaf, so
             // `snapshot_resolved` does not recurse.
             return ViewModel::live_block(
-                block_id.to_string(),
+                block_id.clone(),
                 ViewModel {
                     kind: crate::view_model::ViewKind::Badge {
                         label: format!("↺ self-reference: {block_id}"),
@@ -3437,6 +3439,8 @@ impl ReactiveEngine {
                                         match change {
                                             holon_api::Change::Created { data, .. } => {
                                                 let id = data
+                                                    // ALLOW(raw_row_id_column): label — a CDC
+                                                    // row's id in a trace line
                                                     .get("id")
                                                     .and_then(|v| v.as_string())
                                                     .unwrap_or("<no id>");
@@ -3496,6 +3500,8 @@ impl ReactiveEngine {
                                         .iter()
                                         .filter_map(|c| match c {
                                             holon_api::Change::Created { data, .. } => data
+                                                // ALLOW(raw_row_id_column): label — CDC row ids
+                                                // collected for a trace line
                                                 .get("id")
                                                 .and_then(|v| v.as_string())
                                                 .map(|s| s.to_string()),
@@ -3543,6 +3549,8 @@ impl ReactiveEngine {
                                     .snapshot_rows()
                                     .iter()
                                     .filter_map(|r| {
+                                        // ALLOW(raw_row_id_column): label — snapshot row ids for a
+                                        // trace line
                                         r.get("id")
                                             .and_then(|v| v.as_string())
                                             .map(|s| s.to_string())
@@ -4148,6 +4156,8 @@ impl BuilderServices for ReactiveEngine {
         // entry point; `holon_api::latency_e2e` closes it when the target's
         // row lands in a LiveData mirror (stage="e2e").
         let latency_target = params
+            // ALLOW(raw_row_id_column): param-map — an op intent's params, read to start the
+            // latency clock
             .get("id")
             .and_then(|v| v.as_string())
             .map(String::from);
@@ -4312,6 +4322,8 @@ impl BuilderServices for ReactiveEngine {
                 // target="holon_latency".
                 let block = intent
                     .params
+                    // ALLOW(raw_row_id_column): param-map — an op intent's params, read to start
+                    // the latency clock
                     .get("id")
                     .and_then(|v| v.as_string())
                     .map(|s| s.to_string())
@@ -4321,6 +4333,8 @@ impl BuilderServices for ReactiveEngine {
                 // in a LiveData mirror (stage="e2e").
                 let latency_target = intent
                     .params
+                    // ALLOW(raw_row_id_column): param-map — an op intent's params, read to start
+                    // the latency clock
                     .get("id")
                     .and_then(|v| v.as_string())
                     .map(String::from);
@@ -4404,6 +4418,8 @@ impl BuilderServices for ReactiveEngine {
         let op_name = intent.op_name.clone();
         let params = intent.params;
         let latency_target = params
+            // ALLOW(raw_row_id_column): param-map — an op intent's params, read to start the
+            // latency clock
             .get("id")
             .and_then(|v| v.as_string())
             .map(String::from);
@@ -4480,6 +4496,8 @@ impl BuilderServices for ReactiveEngine {
         let op_name = intent.op_name.clone();
         let params = intent.params;
         let latency_target = params
+            // ALLOW(raw_row_id_column): param-map — an op intent's params, read to start the
+            // latency clock
             .get("id")
             .and_then(|v| v.as_string())
             .map(String::from);
@@ -4838,6 +4856,10 @@ pub struct StubBuilderServices {
     /// unset id keeps reading `WidgetState::default()` exactly as before; tests
     /// that need a CLOSED drawer set one entry.
     widget_states: std::collections::HashMap<String, WidgetState>,
+    /// The profile `resolve_profile` answers with, so a test can drive the
+    /// profile/variant path (`render_entity`) that a profile-less stub leaves
+    /// unreachable. `None` keeps the stub's documented "no profile" answer.
+    profile: Option<holon_api::RenderProfile>,
 }
 
 fn stub_runtime_handle() -> tokio::runtime::Handle {
@@ -4867,6 +4889,7 @@ impl StubBuilderServices {
             rt_handle,
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
             widget_states: std::collections::HashMap::new(),
+            profile: None,
         }
     }
 
@@ -4876,7 +4899,15 @@ impl StubBuilderServices {
             rt_handle,
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
             widget_states: std::collections::HashMap::new(),
+            profile: None,
         }
+    }
+
+    /// Answer `resolve_profile` with `profile`, so the profile/variant path
+    /// (`render_entity` → `pick_active_variant`) is reachable from a test.
+    pub fn with_profile(mut self, profile: holon_api::RenderProfile) -> Self {
+        self.profile = Some(profile);
+        self
     }
 
     /// Record an explicit stored open state for `block_id`, the way a user's
@@ -4913,6 +4944,7 @@ impl BuilderServices for StubBuilderServices {
             rt_handle: self.rt_handle.clone(),
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
             widget_states: self.widget_states.clone(),
+            profile: self.profile.clone(),
         })
     }
 
@@ -4925,7 +4957,7 @@ impl BuilderServices for StubBuilderServices {
     }
 
     fn resolve_profile(&self, _: &DataRow) -> Option<holon_api::RenderProfile> {
-        None
+        self.profile.clone()
     }
 
     fn watch_query(
@@ -5220,9 +5252,7 @@ fn focus_clear_on_delete_target(
     if !op_deletes_target(&intent.op_name) {
         return None;
     }
-    let id = intent.params.get("id").and_then(|v| v.as_string())?;
-    // ALLOW(entity_uri_from_raw): id from op-intent params (ingest boundary)
-    let deleted = EntityUri::from_raw(id);
+    let deleted = holon_api::row_id_of(&intent.params).entity()?;
     (ui_state.focused_block().as_ref() == Some(&deleted)).then_some(deleted)
 }
 

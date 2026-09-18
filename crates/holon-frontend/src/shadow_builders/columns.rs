@@ -187,6 +187,10 @@ holon_macros::widget_builder! {
                 let items: Vec<ViewModel> = sorted
                     .into_iter()
                     .map(|row| {
+                        let row_id = holon_api::row_id_of(&row);
+                        if let holon_api::RowId::Unusable(refusal) = row_id {
+                            return ViewModel::refused_row(&refusal);
+                        }
                         let row_ctx = ba.ctx.with_row(row);
                         let row_ctx = match row_ctx.available_space {
                             Some(p) => row_ctx.with_available_space(partition(p, count, gap)),

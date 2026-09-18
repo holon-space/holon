@@ -70,7 +70,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 new_val,
                 &operations,
                 entity_name.as_ref(),
-                row_id.as_deref(),
+                row_id.as_ref(),
             );
             services.set_block_expanded_view(&fx.view_store.0, fx.view_store.1);
             if let Some(intent) = fx.intent {
