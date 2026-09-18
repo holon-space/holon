@@ -298,6 +298,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `shopping-mapping-cost-slo`
 - `text-undo-manager-load`
 - `toggle-state-sql-read-repeat-budget`
+- `tui-inline-row-mount-unsettled-frame`
 - `turso-block-query-source-round-trip`
 - `typechars-sql-reads-budget`
 - `vault-scale-main-panel-delivery`

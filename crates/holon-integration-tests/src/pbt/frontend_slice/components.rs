@@ -1936,6 +1936,16 @@ impl HeadlessFrontendComponent {
         }
     }
 
+    /// The `main` region's current navigation target, as the `current_focus`
+    /// view reports it — `None` before the first navigation, and the same read
+    /// [`Self::assert_navigate_focus_landed`] checks after a click.
+    async fn current_main_focus(&self) -> Option<String> {
+        self.sql_query("SELECT block_id FROM current_focus WHERE region = 'main'")
+            .await
+            .first()
+            .and_then(|r| Self::cell(r, "block_id"))
+    }
+
     /// Loud postcondition for a sidebar-nav click: `current_focus(main)` must
     /// reflect `id` once CDC settles. If it does not, the click dispatched no
     /// `navigation.focus` SQL write (silent set_focus fallthrough) or the
@@ -1944,11 +1954,7 @@ impl HeadlessFrontendComponent {
     async fn assert_navigate_focus_landed(&self, id: &EntityUri) {
         let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         loop {
-            let focus = self
-                .sql_query("SELECT block_id FROM current_focus WHERE region = 'main'")
-                .await
-                .first()
-                .and_then(|r| Self::cell(r, "block_id"));
+            let focus = self.current_main_focus().await;
             if focus.as_deref() == Some(id.as_str()) {
                 return;
             }
@@ -2870,6 +2876,18 @@ impl HeadlessFrontendComponent {
         // restricts `NavigateFocus` to `Region::Main` on sidebar-listed pages, so the
         // click always targets the `left_sidebar` entry.
         let id = self.resolve_id(id);
+        // prod's `navigation.focus` is idempotent on the region's current
+        // target: `NavigationProvider::focus` returns before writing anything,
+        // so the click produces no CDC emission for the driver's barrier to
+        // observe. Skip both — the reference model skips the same case in
+        // `NavigateFocus::apply_to_ref`, so the no-op is recorded on both sides.
+        if self.current_main_focus().await.as_deref() == Some(id.as_str()) {
+            tracing::debug!(
+                block_id = %id,
+                "[apply_navigate_focus] main already sits on the target — no click to drive"
+            );
+            return;
+        }
         // Do not let the click outrun the async sidebar render: wait until the
         // target's `navigation.focus` intent is actually bound, so `click_entity`
         // dispatches the nav SQL write instead of silently falling through to an

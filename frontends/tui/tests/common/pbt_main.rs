@@ -232,6 +232,8 @@ pub fn run(label: &'static str) {
     // Settle hook: the renderer self-drives on the backend runtime, so settling is
     // pure polling — wait until the element count is stable and no "loading"
     // placeholders remain (the TUI mirror of the gpui fixed-point settle).
+    // `wait_for_geometry_ready`'s row predicate stays out: that is a boot gate, and
+    // a transition may legitimately settle on a region with no addressable rows.
     let settle_geometry = geometry.clone();
     let settle: SettleHook = Box::new(move || {
         let mut last = usize::MAX;

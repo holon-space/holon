@@ -123,7 +123,9 @@ impl<R: RefLifecycle + RefBlockTree + RefLayout + RefFocusRoots + RefNavHistoryM
     }
 }
 
-impl<R: RefLifecycle + RefBlockTree + RefNavHistoryMut> TransitionRef<R> for NavigateFocus {
+impl<R: RefLifecycle + RefBlockTree + RefNavHistoryMut + RefFocusRoots> TransitionRef<R>
+    for NavigateFocus
+{
     type Reason = Reason;
 
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
@@ -180,6 +182,17 @@ impl<R: RefLifecycle + RefBlockTree + RefNavHistoryMut> TransitionRef<R> for Nav
     }
 
     fn apply_to_ref(&self, state: &mut R) {
+        // prod's `navigation.focus` is idempotent on the region's current
+        // target: `NavigationProvider::focus` returns before any write, so
+        // there is no history row, no open-pin reset, and no caret re-seat.
+        // `apply_navigate_focus_via` skips the click on the same predicate, so
+        // both sides record the no-op. The generator only emits Main.
+        if state
+            .rendered_focus_root_ids(CapRegion::Main)
+            .contains(&self.block_id)
+        {
+            return;
+        }
         // The whole `focus(region, block_id)` reference effect — idempotency guard,
         // first-visit budget flag, history-row push, open-pin reset, region-focus
         // clear, global-focus set, editor blur — lives in
