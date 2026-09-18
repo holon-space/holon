@@ -1454,6 +1454,14 @@ pub async fn boot_and_seed_wide_windowed_base(
     {
         seed_files.push(("forward-edge-page.org", FORWARD_EDGE_ORG));
     }
+    // The read-only-format document, keyed on the oracle carrying its homes
+    // exactly like the arm above (and like `boot_and_seed_wide`): without the
+    // file, the recipe's page and steps the oracle models never reach
+    // `block_raw`, so `inv-watch-rows-match-ref` reports them missing and
+    // `AttemptIngestCompoundOnReadOnly` finds no row to re-write.
+    if !ref_state.read_only.homes().is_empty() {
+        seed_files.push((READ_ONLY_RECIPE_FILE, KEYSTONE_RECIPE_COOK));
+    }
     let bundle =
         compose_sut_windowed_base_seeded(&set, resolver, &seed_files, &wide_seed_tree()).await;
 
@@ -1511,6 +1519,7 @@ pub async fn boot_and_seed_wide_windowed_base(
         start_expected.extend(FORWARD_EDGE_IDS.into_iter().map(EntityUri::block));
     }
     start_expected.insert(crate::pbt::frontend_slice::components::keystone_boot_journal_id());
+    start_expected.extend(ref_state.read_only.homes().iter().cloned());
     let start_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         converge_projections(&start_handle, Duration::from_millis(300)).await;

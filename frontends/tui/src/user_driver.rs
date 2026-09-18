@@ -650,6 +650,49 @@ impl UserDriver for TuiUserDriver {
         self.await_chord_settled(entity_id, deadline).await
     }
 
+    /// Override: the trait default routes a `state_toggle` click through
+    /// [`Self::click_entity`], whose contract ("a geometry hit-test lands on
+    /// the glyph") this TUI cannot satisfy — it has no mouse arm, so its click
+    /// is navigate-then-Enter and Enter on a Block region OPENS EDIT MODE
+    /// (`app_main.rs`), leaving the task state untouched. Resolve the glyph's
+    /// dispatch from the resolved view tree instead, exactly as
+    /// `ReactiveEngineDriver` does: a keyless driver has no other way to say
+    /// "tap the checkbox", and the tree is the one this renderer paints.
+    ///
+    /// The TUI's `cycle_task_state` chord (Ctrl+T) is NOT a substitute here:
+    /// it reads the prior keyword off the authority and advances one step, so
+    /// it is not idempotent, while the caller's landing loop re-clicks against
+    /// a stale projection precisely because it assumes stall re-clicks are
+    /// no-ops. That combination advanced blocks past the reference.
+    async fn cycle_state_toggle(
+        &self,
+        entity_id: &holon_api::EntityUri,
+        region: &str,
+    ) -> Result<()> {
+        let root_uri = holon_api::root_layout_block_uri();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let resolved = self.engine.snapshot_resolved(&root_uri);
+            if let Some(intent) =
+                holon_frontend::focus_path::state_toggle_cycle_intent(&resolved, entity_id, region)
+            {
+                return self
+                    .synthetic_dispatch(intent.entity_name.as_str(), &intent.op_name, intent.params)
+                    .await;
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "cycle_state_toggle: could not resolve the state_toggle cycle intent for \
+                     {entity_id} in region {region} within 2s. {}",
+                    holon_frontend::focus_path::state_toggle_miss_reason(
+                        &resolved, entity_id, region
+                    )
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// LIMITATION: TUI has no DnD path through `app_handle_input_event`
     /// (no mouse arm, no keyboard equivalent). Stays on the engine
     /// fast-path so the resulting operation is still exercised, just
