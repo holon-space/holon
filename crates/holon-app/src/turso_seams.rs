@@ -732,6 +732,10 @@ impl DocumentManager for LiveDocumentManager {
         // by its header metadata — leave them out so the update seam cannot
         // read a re-parent intent out of a `#+TODO:` change.
         params.remove("parent_id");
+        // `content_type` is birth state whose only SQL writer is the Loro→SQL
+        // projector (invariant 4); the cell registry declines it, so leaving it
+        // in the bag would write the SQL projection directly.
+        params.remove("content_type");
         // Route through the authoritative block-write seam, NOT the SQL
         // command bus: under Loro authority the projector diffs Loro against
         // the SQL row and emits a `Value::REMOVED` sentinel for every property

@@ -125,6 +125,13 @@ are is a full `-p holon -p holon-app` suite (D64.a) and was not run here.
 
 ## Relation to other entries
 
+UNMASKED by this fix:
+`2026-09-20-doc-metadata-sync-writes-content-type-at-the-sql-projection` — the
+first defect the new assert caught. Document-metadata sync had been writing a
+doc-root's `content_type` at the SQL projection under Loro authority, matching
+zero rows on every boot; the assert turned that silent no-op into a loud
+ingest failure.
+
 Discovered through `dense_patch`, but NOT specific to it — see
 `2026-09-17-dense-patch-apply-is-not-atomic` for that tool's own
 partial-apply class. This entry is the underlying write-layer defect and would
