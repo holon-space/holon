@@ -35,8 +35,13 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
 /// Every transition whose declarations are complete enough for the net to
 /// answer. Named rather than counted, so a change says WHICH one moved.
 const EXPECTED_ANALYZABLE: &[&str] = &[
+    "op:block.create",
+    "op:block.delete",
+    "op:block.join_block",
+    "op:block.move_block",
     "op:block.rehome_entity",
     "op:block.set_field",
+    "op:block.split_block",
     "op:type.declare_type",
     "rule:block:journals::action::0",
 ];

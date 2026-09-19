@@ -5,6 +5,7 @@
 mod advice_dismiss_prod_session_wiring;
 mod advice_step4_red;
 mod arc_marking_equality;
+mod arc_truthfulness_over_the_sql_authority;
 mod class_one_invariant_classifier;
 mod cross_medium_caps;
 mod dogfood_recorded_replay;

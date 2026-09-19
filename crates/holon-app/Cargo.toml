@@ -48,6 +48,7 @@ tracing.workspace = true
 futures.workspace = true
 holon = { workspace = true, features = ["test-helpers"] }
 holon-block-roundtrip-testing.workspace = true
+holon-net.workspace = true
 holon-org-format.workspace = true
 proptest.workspace = true
 serde_yaml.workspace = true

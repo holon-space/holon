@@ -5279,6 +5279,7 @@ dependencies = [
  "holon-loro",
  "holon-loro-wiring",
  "holon-mcp-client",
+ "holon-net",
  "holon-org-format",
  "holon-orgmode",
  "holon-plugin-host",

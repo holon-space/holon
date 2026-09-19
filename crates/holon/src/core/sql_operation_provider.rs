@@ -3032,6 +3032,35 @@ impl OperationProvider for SqlOperationProvider {
     }
 
     fn operations(&self) -> Vec<OperationDescriptor> {
+        // These bespoke descriptors are what the catalog actually advertises
+        // for set_field / create / delete, so their arcs and marking delta are
+        // taken from the macro-generated `CrudOperations` descriptors rather
+        // than re-stated — a second hand-written copy is the parallel catalog
+        // the declaration exists to prevent. Those declarations name `block`
+        // places, so they describe this catalog only when this provider is the
+        // block writer.
+        let crud_declaration = |generated: fn(&str, &str, &str, &str) -> OperationDescriptor| {
+            if self.entity_name != holon_api::schema::block::RELATION {
+                return (
+                    holon_api::marking::MarkingDelta::Undeclared,
+                    holon_api::arcs::TransitionArcs::Undeclared,
+                );
+            }
+            let descriptor = generated(
+                &self.entity_name,
+                &self.entity_short_name,
+                &self.table_name,
+                "id",
+            );
+            (descriptor.marking_delta, descriptor.arcs)
+        };
+        let (set_field_delta, set_field_arcs) =
+            crud_declaration(holon_core::__operations_crud_operations::SET_FIELD_OP);
+        let (create_delta, create_arcs) =
+            crud_declaration(holon_core::__operations_crud_operations::CREATE_OP);
+        let (delete_delta, delete_arcs) =
+            crud_declaration(holon_core::__operations_crud_operations::DELETE_OP);
+
         let mut ops = vec![
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -3068,19 +3097,9 @@ impl OperationProvider for SqlOperationProvider {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                marking_delta: holon_api::marking::MarkingDelta::Undeclared,
+                marking_delta: set_field_delta,
                 guard: holon_api::pattern::OpGuard::None,
-                // Single-sourced from the `#[reads]`/`#[emits]` declaration on
-                // `CrudOperations::set_field`: this bespoke descriptor is what the
-                // block catalog actually advertises, so re-stating the arcs here
-                // would be the parallel catalog the declaration exists to prevent.
-                arcs: holon_core::__operations_crud_operations::SET_FIELD_OP(
-                    &self.entity_name,
-                    &self.entity_short_name,
-                    &self.table_name,
-                    "id",
-                )
-                .arcs,
+                arcs: set_field_arcs,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -3099,9 +3118,9 @@ impl OperationProvider for SqlOperationProvider {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                marking_delta: holon_api::marking::MarkingDelta::Undeclared,
+                marking_delta: create_delta,
                 guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
+                arcs: create_arcs,
             },
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
@@ -3156,9 +3175,9 @@ impl OperationProvider for SqlOperationProvider {
                 },
                 trigger: None,
                 bound_params: Default::default(),
-                marking_delta: holon_api::marking::MarkingDelta::Undeclared,
+                marking_delta: delete_delta,
                 guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
+                arcs: delete_arcs,
             },
         ];
 

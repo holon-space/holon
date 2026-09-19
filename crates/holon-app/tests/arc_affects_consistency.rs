@@ -111,12 +111,6 @@ async fn every_declared_ops_emits_covers_its_affects() {
     // The lock's own coverage, ENFORCED rather than printed. A println is
     // invisible under nextest's default capture, so a lock that silently
     // checked nothing would read as a passing gate.
-    //
-    // Today `checked` is legitimately 0: P3 admits ops one at a time and
-    // `set_field` — the first — carries no `#[affects]` (its affected field is
-    // a runtime parameter, as its own doc comment says). The moment a declared
-    // op DOES carry `#[affects]`, zero pairs means the loop stopped working,
-    // and the assert below flips from disclosure to enforcement on its own.
     let declared_with_affects: Vec<&str> = catalog
         .iter()
         .filter(|d| matches!(d.arcs, TransitionArcs::Declared { .. }))
@@ -130,40 +124,6 @@ async fn every_declared_ops_emits_covers_its_affects() {
         "zero affects↦emits pairs were checked, but these declared ops DO carry \
          #[affects]: {declared_with_affects:?}. The lock reported success without \
          comparing anything."
-    );
-
-    if checked == 0 {
-        // Not a failure — but it must be visible. stderr survives nextest
-        // capture on failure and `--nocapture` always; the test NAME carries
-        // the state for anyone reading a green run's list.
-        eprintln!(
-            "[arc-affects-lock] VACUOUS: 0 affects↦emits pairs checked. No declared op \
-             carries #[affects] yet. The mechanism is proven instead by \
-             `declared_emits_cover_the_declared_affects` in holon-macros-test."
-        );
-    }
-}
-
-/// Names the vacuity so it is legible in a green test list, and fails the
-/// moment the disclosure stops being true — at which point this test should be
-/// deleted and the lock above becomes the whole story.
-#[tokio::test(flavor = "multi_thread")]
-async fn arc_affects_lock_is_still_vacuous_over_the_production_catalog() {
-    let engine = block_engine().await;
-    let catalog = engine.available_operations(BLOCK).await;
-
-    let declared_with_affects: Vec<&str> = catalog
-        .iter()
-        .filter(|d| matches!(d.arcs, TransitionArcs::Declared { .. }))
-        .filter(|d| !d.affected_fields.is_empty())
-        .map(|d| d.name.as_str())
-        .collect();
-
-    assert!(
-        declared_with_affects.is_empty(),
-        "the lock is no longer vacuous — {declared_with_affects:?} now declare BOTH \
-         #[affects] and arcs. Delete this test: the disclosure it carries is stale, \
-         and `every_declared_ops_emits_covers_its_affects` is now doing real work."
     );
 }
 

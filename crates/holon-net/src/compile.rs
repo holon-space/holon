@@ -147,6 +147,14 @@ pub fn compile_operation(
         }
     }
 
+    // An aspect names a GROUP of carrier places, so a delta speaks more
+    // coarsely than the arcs half. Where the two overlap on a WRITE, the
+    // `excluded` declaration wins: it is the specific statement, and the only
+    // one that costs a reason (ADR 0031 "declarable-as-EXCLUDED"). Without the
+    // subtraction the coarse half would resurrect a write the declaration
+    // explicitly denies.
+    let excluded = excluded_places(&descriptor.arcs);
+
     match &descriptor.marking_delta {
         MarkingDelta::Undeclared => undeclared.push(UndeclaredHalf::MarkingDelta),
         MarkingDelta::Static { kinds } | MarkingDelta::Envelope { kinds, .. } => {
@@ -159,6 +167,14 @@ pub fn compile_operation(
                 for (aspect, flow) in flows {
                     let Some(flow) = flow else { continue };
                     for place in aspect_places(&kind.kind, aspect)? {
+                        let flow = if excluded.contains(&place) {
+                            let Some(flow) = subtract_write(flow) else {
+                                continue;
+                            };
+                            flow
+                        } else {
+                            flow
+                        };
                         transition.push_arc(plain_arc(place, flow, ArcOrigin::Delta { aspect }));
                     }
                 }
@@ -178,6 +194,33 @@ pub fn compile_operation(
         transition.analyzability = Analyzability::Unanalyzable { undeclared };
     }
     Ok(transition)
+}
+
+/// What is left of a delta-derived flow once the declaration excludes its
+/// place. `ArcEmit::Excluded` is a statement about OUT-arcs only, so every
+/// flow that also reads keeps its read half: a relocate and a consume both
+/// depend on the token they move or take away.
+fn subtract_write(flow: Flow) -> Option<Flow> {
+    match flow {
+        Flow::Read => Some(Flow::Read),
+        Flow::Relocate | Flow::Consume => Some(Flow::Read),
+        Flow::Produce => None,
+    }
+}
+
+/// The places an operation declares it does NOT write. Empty when the arcs
+/// half is undeclared: silence excludes nothing.
+fn excluded_places(arcs: &TransitionArcs) -> BTreeSet<ArcPlace> {
+    match arcs {
+        TransitionArcs::Undeclared => BTreeSet::new(),
+        TransitionArcs::Declared { emits, .. } => emits
+            .iter()
+            .filter_map(|emit| match emit {
+                ArcEmit::Excluded { place, .. } => Some(place.clone()),
+                ArcEmit::Writes(_) => None,
+            })
+            .collect(),
+    }
 }
 
 /// Compile one rule block. A parsed rule is analyzable — guard and emit are
