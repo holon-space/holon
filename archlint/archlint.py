@@ -309,27 +309,74 @@ def run_smells(files: list[Path], smells: list[dict]) -> list[dict]:
     return filter_test_mods(diags, smells)
 
 
-# A rule with `skip_test_mods` fires only above a file's first `#[cfg(test)]`:
-# a test that builds a row and asserts on one of its columns is not the
-# production boundary the rule guards.
+# The 1-based line ranges a file's `#[cfg(test)]` items span, inclusive.
+#
+# A `#[cfg(test)]` on a `mod` covers that module's whole brace extent; on any
+# other item it covers only that item. Taking the attribute as a watershed
+# instead — everything below it is test code — silently unguards every
+# production item a file happens to declare AFTER its test module, which is
+# where the helpers a test module needs are often written.
+#
+# Brace counting is textual: a stray `}` inside a string literal closes a span
+# early (over-reports), while a stray `{` extends it past the module's real end
+# and HIDES later production diagnostics — the direction that matters.
+def cfg_test_spans(lines: list[str]) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    n = len(lines)
+    i = 0
+    while i < n:
+        if not lines[i].strip().startswith("#[cfg(test)]"):
+            i += 1
+            continue
+        start = i
+        # Further attributes may sit between the cfg and the item itself.
+        j = i + 1
+        while j < n and lines[j].strip().startswith("#["):
+            j += 1
+        # Walk to the item's opening brace, stopping at a `;` that ends a
+        # brace-less item (`#[cfg(test)] use …;`).
+        k = j
+        while k < n and "{" not in lines[k] and not lines[k].rstrip().endswith(";"):
+            k += 1
+        if k >= n:
+            spans.append((start + 1, n))
+            break
+        if "{" not in lines[k]:
+            spans.append((start + 1, k + 1))
+            i = k + 1
+            continue
+        depth = 0
+        end = k
+        while end < n:
+            depth += lines[end].count("{") - lines[end].count("}")
+            if depth <= 0:
+                break
+            end += 1
+        end = min(end, n - 1)
+        spans.append((start + 1, end + 1))
+        i = end + 1
+    return spans
+
+
+# A rule with `skip_test_mods` does not fire INSIDE a `#[cfg(test)]` item: a
+# test that builds a row and asserts on one of its columns is not the
+# production boundary the rule guards. Production code that merely sits after
+# such an item is still production code.
 def filter_test_mods(diags: list[dict], smells: list[dict]) -> list[dict]:
     scoped = {s["id"] for s in smells if s.get("skip_test_mods")}
     if not scoped:
         return diags
-    first_test: dict[str, int] = {}
+    spans_by_path: dict[str, list[tuple[int, int]]] = {}
     kept: list[dict] = []
     for d in diags:
         if d["id"] not in scoped:
             kept.append(d)
             continue
         path = d["file"]
-        if path not in first_test:
-            lines = read_lines(path)
-            first_test[path] = next(
-                (i + 1 for i, l in enumerate(lines) if l.strip().startswith("#[cfg(test)]")),
-                1 << 30,
-            )
-        if d["line"] < first_test[path]:
+        if path not in spans_by_path:
+            spans_by_path[path] = cfg_test_spans(read_lines(path))
+        line = d["line"]
+        if not any(lo <= line <= hi for lo, hi in spans_by_path[path]):
             kept.append(d)
     return kept
 

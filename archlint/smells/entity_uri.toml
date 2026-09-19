@@ -89,3 +89,74 @@ error node. \
 To suppress a read that is NOT an identity (sort tie-break, log label, hash \
 key, op-intent param map): // ALLOW(raw_row_id_column): <what it reads, and why it is not an identity>
 """
+
+[[smell]]
+id = "entity_uri_block_panics_on_bad_input"
+# `EntityUri::block(s)` is `EntityUri::new("block", s)`, which PANICS when
+# `block:{s}` forms no URI. The two shapes below hand it exactly the input
+# that is known to be bad:
+#   `unwrap_or_else(|_| EntityUri::block(x))` — the parse of `x` just failed,
+#     so re-scheming it either unwinds on the same value or mints a
+#     `block:`-prefixed phantom nothing downstream matches; and
+#   `EntityUri::block("")` — `block:` parses, so this one is silent: every
+#     row that takes the default collapses onto ONE identity and a keyed
+#     diff stream aliases rows that are not the same row.
+# A failed parse is an error surface (an `error` widget in a render builder,
+# a `Result` where a caller can report it) or a loud `.expect` where the value
+# is internally minted — never a substitute URI.
+#
+# RESIDUAL, deliberately not covered: an eager `let fallback =
+# EntityUri::block(s)` bound before the branch that uses it. A `= EntityUri::
+# block(` pattern cannot tell that apart from the ~50 legitimate production
+# sites that mint a block URI from an id they generated themselves (a fresh
+# UUID, a Loro stable id, a `{peer}:{counter}`), so the rule would report a
+# baseline rather than a smell. The lazy shapes below are the ones that
+# encode "this value already failed to parse".
+pattern = 'unwrap_or_else\(\|_?\|\s*(holon_api::)?EntityUri::block\(|EntityUri::block\(\s*""\s*\)'
+files = "**/*.rs"
+exclude = ["**/target/**", "**/tests/**", "**/crates/holon-integration-tests/**"]
+case_sensitive = true
+skip_test_mods = true
+message = """
+`EntityUri::block(..)` as a parse fallback or an empty-path default: \
+`EntityUri::block` panics when `block:{id}` forms no URI, and `block("")` \
+silently mints one shared phantom identity. Route the failed parse to the \
+site's error surface instead — `ViewModel::error(..)` / `error_banner(..)` in \
+a render builder, a propagated `Result` where a caller can report it, or \
+`.expect(..)` where the value is minted internally and absence is a bug. \
+`EntityUri::try_from_raw(..)` is the fallible bare-or-schemed constructor. \
+To suppress: // ALLOW(entity_uri_block_panics_on_bad_input): <why the input cannot be bad>
+"""
+
+[[smell]]
+id = "raw_block_id_widget_param"
+# A `widget_builder!` signature declaring `block_id: String` /
+# `block_id: Option<String>` makes the macro copy the argument into the
+# `block_id` prop VERBATIM. That prop has one contract — it is the
+# serialization of an `EntityUri`, written by `ViewModel::live_block` /
+# `drawer` — and `ReactiveViewModel::entity_id()` parses it strictly, so a
+# verbatim copy hands it text that is not a URI. `badge` did exactly this and
+# `#{block_id: col("id")}` unwound there on a vault id that forms no URI, and
+# on a legitimate BARE id too, since the prop never carried the schemed form
+# (bugfunnel 2026-09-19-badge-block-id-prop-is-stamped-unclassified).
+#
+# A declarative signature has nowhere to classify, so the builder needs a body
+# that runs `holon_api::row_id_of_str` and then refuses `Unusable`, carries
+# `Entity` SCHEMED, and drops the prop on `Absent`. `badge.rs` is the worked
+# example; `drawer.rs` is the same shape for a positional id.
+pattern = 'block_id:\s*(Option\s*<\s*)?String'
+files = "crates/holon-frontend/src/shadow_builders/**/*.rs"
+exclude = ["**/target/**"]
+case_sensitive = true
+skip_comments = true
+skip_test_mods = true
+message = """
+`block_id: String` / `block_id: Option<String>` in a widget signature: the \
+macro copies the argument into the `block_id` prop verbatim, and \
+`entity_id()` parses that prop strictly — so an id the vault's SQL chose \
+reaches it unclassified and unwinds. Give the builder a body that classifies \
+with `holon_api::row_id_of_str`: refuse `Unusable` via \
+`ViewModel::refused_row(..)`, carry `Entity` in its SCHEMED form, drop the \
+prop on `Absent` (see `shadow_builders/badge.rs`). \
+To suppress: // ALLOW(raw_block_id_widget_param): <why the value cannot be a raw id>
+"""

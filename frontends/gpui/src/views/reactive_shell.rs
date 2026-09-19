@@ -1079,6 +1079,9 @@ fn collect_referenced_cache_keys(node: &ReactiveViewModel, out: &mut HashSet<Cac
 
     match node.widget_name().as_deref() {
         Some("live_block") => {
+            // A block_id that names no entity never reaches a cache entry:
+            // the builder paints an error banner for it and creates no
+            // shell. The two sides must agree, so this side skips it too.
             if let Some(uri) = node
                 .prop_str("block_id")
                 .and_then(|bid| holon_api::row_id_of_str(&bid).entity())

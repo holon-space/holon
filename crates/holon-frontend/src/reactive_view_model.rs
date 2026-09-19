@@ -1540,8 +1540,15 @@ impl ReactiveViewModel {
             // Block boundary — deferred to slot
             "live_block" => {
                 let block_id_str = self.prop_str("block_id").unwrap_or_default();
-                let block_id =
-                    EntityUri::parse(&block_id_str).expect("live_block: invalid entity URI");
+                // `ViewModel::live_block` takes a typed `EntityUri` and is the
+                // prop's only producer, so this arm is unreachable by
+                // construction — but the snapshot feeds every frontend, and a
+                // panic here blanks all of them rather than one node.
+                let Some(block_id) = holon_api::row_id_of_str(&block_id_str).entity() else {
+                    return ViewKind::Error {
+                        message: format!("live_block: block_id {block_id_str:?} names no entity"),
+                    };
+                };
                 match resolve_block {
                     Some(resolve) => ViewKind::LiveBlock {
                         block_id: block_id.to_string(),
@@ -2642,5 +2649,24 @@ mod tests {
             "a stripped id must NOT match; a caller that strips is looking up a key no \
              expand_toggle node ever carries"
         );
+    }
+
+    /// `ViewModel::live_block` takes a typed `EntityUri`, so a `block_id`
+    /// prop that names no entity means something skipped that boundary. The
+    /// snapshot feeds every frontend, so it refuses in the snapshot's own
+    /// error node rather than unwinding and blanking all of them.
+    #[test]
+    fn a_live_block_snapshot_with_an_unusable_block_id_is_an_error_node() {
+        let mut props: HashMap<String, Value> = HashMap::new();
+        props.insert("block_id".to_string(), Value::String("my task".to_string()));
+        let node = ReactiveViewModel::from_widget("live_block", props);
+
+        match node.snapshot().kind {
+            ViewKind::Error { message } => assert!(
+                message.contains("my task"),
+                "the error must name the block_id, got {message:?}"
+            ),
+            other => panic!("expected an error node, got {other:?}"),
+        }
     }
 }

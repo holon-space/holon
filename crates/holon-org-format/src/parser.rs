@@ -392,9 +392,27 @@ pub fn parse_org_file_with(
         );
     }
 
-    let file_id = resolved
-        .map(|bare| EntityUri::block(&bare))
-        .unwrap_or_else(|| generate_file_id(path, root));
+    // An authored `#+ID:` is text a person typed into the file. One that forms
+    // no URI cannot become the document's id, and minting a replacement would
+    // file the page under an id the file does not name — the same data loss the
+    // probe/parse divergence above refuses. So the file is refused whole.
+    //
+    // `try_from_raw`, not `parse("block:{bare}")`: the carrier is authored, so
+    // it can already read `#+ID: block:abc`, and re-scheming that mints
+    // `block:block:abc` — a page id nothing matches (the KF-8 shape). This leg
+    // is idempotent, like the heading leg below.
+    let file_id = match resolved {
+        Some(bare) => EntityUri::try_from_raw(&bare).with_context(|| {
+            format!(
+                "org document id in {} is not usable: `#+ID: {}` forms no URI. An id must \
+                 be a UUID or another URI-safe token (no spaces). Refusing the file rather \
+                 than filing the page under a minted id it does not name.",
+                path.display(),
+                bare,
+            )
+        })?,
+        None => generate_file_id(path, root),
+    };
 
     // Create document block. The first line of content is the title; the
     // `Page` tag marks it as a page (formerly the `name`-bearing variant).
@@ -795,8 +813,22 @@ fn process_headlines(
         let sequence = *sequence_counter;
         *sequence_counter += 1;
 
-        // Extract :ID: property if exists
+        // Extract :ID: property if exists. An authored `:ID:` is text a person
+        // typed, so one that forms no URI is a content error in this file —
+        // refused here, where `EntityUri::from_raw` below would otherwise
+        // unwind inside the URI constructor and take the whole ingest down.
         let (id, needs_write) = extract_or_generate_id(&headline);
+        EntityUri::try_from_raw(&id).with_context(|| {
+            format!(
+                "org heading id in {} is not usable: headline {:?} carries `:ID: {}`, which \
+                 forms no URI. An id must be a UUID or another URI-safe token (no spaces). \
+                 Refusing the file rather than filing the heading under a minted id it \
+                 does not name.",
+                file_id.as_str(),
+                headline.title_raw().trim(),
+                id,
+            )
+        })?;
         if needs_write {
             needs_id.push(id.clone());
         }
@@ -1722,6 +1754,76 @@ mod tests {
         assert!(
             format!("{err:#}").contains("dup"),
             "error must name the duplicate id"
+        );
+    }
+
+    /// An authored `:ID:` is text a person typed. One that forms no URI used
+    /// to unwind inside `EntityUri::new`, taking the whole ingest down; the
+    /// file is now refused with a message naming the file, the headline and
+    /// the id.
+    #[test]
+    fn parse_rejects_a_heading_id_that_forms_no_uri() {
+        let content = "* Buy milk\n:PROPERTIES:\n:ID: my task\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let err = match parse_org_file(&path, content, &EntityUri::no_parent(), &root) {
+            Ok(_) => panic!("a heading :ID: that forms no URI must be refused"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("my task") && msg.contains("Buy milk"),
+            "error must name the id and the headline carrying it: {msg}"
+        );
+    }
+
+    /// The document's own `#+ID:` carrier is the same case.
+    #[test]
+    fn parse_rejects_a_document_id_that_forms_no_uri() {
+        let content = "#+ID: my doc\n* A\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let err = match parse_org_file(&path, content, &EntityUri::no_parent(), &root) {
+            Ok(_) => panic!("a document #+ID: that forms no URI must be refused"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("my doc") && msg.contains("file.org"),
+            "error must name the id and the file: {msg}"
+        );
+    }
+
+    /// The `#+ID:` carrier is authored, so it can already read `block:abc`.
+    /// Re-scheming that mints `block:block:abc`, a page id nothing matches —
+    /// and unlike the constructor it replaced, a plain `parse` of the
+    /// re-schemed string returns Ok, so the wrong id travels silently.
+    #[test]
+    fn a_document_id_that_already_carries_its_scheme_is_not_re_schemed() {
+        let content = "#+ID: block:abc\n* A\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let parsed = parse_org_file(&path, content, &EntityUri::no_parent(), &root)
+            .expect("an already-schemed document id parses");
+        assert_eq!(parsed.document.id.as_str(), "block:abc");
+    }
+
+    /// The heading carrier is idempotent the same way.
+    #[test]
+    fn a_heading_id_that_already_carries_its_scheme_is_not_re_schemed() {
+        let content = "* A\n:PROPERTIES:\n:ID: block:h1\n:END:\n";
+        let path = PathBuf::from("/test/file.org");
+        let root = PathBuf::from("/test");
+        let parsed = parse_org_file(&path, content, &EntityUri::no_parent(), &root)
+            .expect("an already-schemed heading id parses");
+        assert!(
+            parsed.blocks.iter().any(|b| b.id.as_str() == "block:h1"),
+            "expected a block keyed `block:h1`, got {:?}",
+            parsed
+                .blocks
+                .iter()
+                .map(|b| b.id.as_str())
+                .collect::<Vec<_>>()
         );
     }
 

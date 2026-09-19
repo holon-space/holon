@@ -60,3 +60,76 @@ impl ReactiveRowProvider for SyntheticRows {
         ptr_identity(self)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use futures_signals::signal_vec::SignalVecExt;
+    use holon_api::ReactiveRowProvider;
+    use holon_api::Value;
+    use tokio_stream::StreamExt;
+
+    use super::*;
+
+    async fn keys_of(provider: SyntheticRows) -> Vec<String> {
+        let mut stream = provider.keyed_rows_signal_vec().to_stream();
+        let diff = stream.next().await.expect("the provider emits one diff");
+        match diff {
+            futures_signals::signal_vec::VecDiff::Replace { values } => {
+                values.iter().map(|((id, _), _)| id.to_string()).collect()
+            }
+            other => panic!("expected the initial Replace diff, got {other:?}"),
+        }
+    }
+
+    fn row(pairs: &[(&str, &str)]) -> Arc<DataRow> {
+        let mut m: HashMap<String, Value> = HashMap::new();
+        for (k, v) in pairs {
+            m.insert((*k).into(), Value::String((*v).into()));
+        }
+        Arc::new(m)
+    }
+
+    /// Two rows that carry no `id` are two different rows. A stand-in
+    /// `EntityUri::block("")` gave both the SAME key — `block:` parses, so
+    /// nothing failed loudly — and the keyed diff stream aliased them.
+    /// `RowIdentity` keys each on its own content instead.
+    #[tokio::test]
+    async fn two_id_less_rows_keep_two_identities() {
+        let keys = keys_of(SyntheticRows::from_rows(vec![
+            row(&[("content", "first")]),
+            row(&[("content", "second")]),
+        ]))
+        .await;
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0], keys[1], "id-less rows collapsed onto one key");
+        assert!(
+            keys.iter().all(|k| k.starts_with("value:")),
+            "an id-less row is a value row, got {keys:?}"
+        );
+    }
+
+    /// An EMPTY `id` is the same case: `block:` is a valid URI, so the old
+    /// default made every empty-id row one row.
+    #[tokio::test]
+    async fn two_empty_id_rows_keep_two_identities() {
+        let keys = keys_of(SyntheticRows::from_rows(vec![
+            row(&[("id", ""), ("content", "first")]),
+            row(&[("id", ""), ("content", "second")]),
+        ]))
+        .await;
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0], keys[1], "empty-id rows collapsed onto one key");
+        assert!(
+            !keys.iter().any(|k| k == "block:"),
+            "an empty id must not mint the phantom `block:` identity, got {keys:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_keyed_row_with_an_id_keeps_that_id_as_its_key() {
+        let keys = keys_of(SyntheticRows::from_rows(vec![row(&[("id", "block:r1")])])).await;
+        assert_eq!(keys, vec!["block:r1".to_string()]);
+    }
+}

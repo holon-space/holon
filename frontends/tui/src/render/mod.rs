@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 
-use holon_api::EntityUri;
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::ReactiveEngine;
@@ -395,7 +394,18 @@ fn render_live_block(
         );
         return render_plain(node, ops, start_row, start_col, "Recursive block");
     }
-    let uri = EntityUri::parse(&block_id_str).expect("live_block: invalid entity URI");
+    // Same disposition as the gpui builder: a prop that names no entity is
+    // painted where the block would have been, never a panic that takes the
+    // whole frame down.
+    let Some(uri) = holon_api::row_id_of_str(&block_id_str).entity() else {
+        return render_plain(
+            node,
+            ops,
+            start_row,
+            start_col,
+            &format!("live_block: block_id {block_id_str:?} names no entity"),
+        );
+    };
     let inner = ctx.engine.snapshot_reactive(&uri);
     let inner_name = inner.widget_name().unwrap_or_default();
     if inner_name == "empty" || inner_name == "loading" {

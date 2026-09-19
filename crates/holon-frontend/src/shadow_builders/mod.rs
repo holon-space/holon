@@ -153,7 +153,10 @@ pub(crate) fn dispatch_resolve_props(
 ) -> Option<std::collections::HashMap<String, holon_api::Value>> {
     match widget_name {
         "text" => Some(text::resolve_props_from_args(ba)),
-        "badge" => Some(badge::resolve_props_from_args(ba)),
+        // `badge` is deliberately absent: the generated function copies the
+        // `block_id` arg through verbatim, and the builder's body is what
+        // classifies it. Returning `None` here sends a badge's props recompute
+        // through the full interpret, so both paths agree on an unusable id.
         "icon" => Some(icon::resolve_props_from_args(ba)),
         "checkbox" => Some(checkbox::resolve_props_from_args(ba)),
         "source_block" => Some(source_block::resolve_props_from_args(ba)),

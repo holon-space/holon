@@ -3120,6 +3120,8 @@ impl LoroBackend {
         };
         // The child's URI drives the typed `ParentNotFound` if the parent is
         // absent: use the caller-supplied id, else the freshly-minted stable id.
+        // ALLOW(entity_uri_block_panics_on_bad_input): this arm runs only when
+        // `id` is None, where `stable_id` is the UUID minted just above
         let child_uri = id.clone().unwrap_or_else(|| EntityUri::block(&stable_id));
         let request = NewBlockWithProperties {
             parent_id: parent_route.parent.clone(),
@@ -4753,6 +4755,9 @@ impl CoreOperations for LoroBackend {
                     let child_uri = new_block
                         .id
                         .clone()
+                        // ALLOW(entity_uri_block_panics_on_bad_input): this arm
+                        // runs only when `new_block.id` is None, where
+                        // `stable_id` is the UUID minted just above
                         .unwrap_or_else(|| EntityUri::block(&stable_id));
                     let parent_tree_id = resolve_parent_tree_id_for_create(
                         &tree,
