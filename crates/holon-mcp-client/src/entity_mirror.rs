@@ -6,10 +6,13 @@
 //! freshly fetched records against `snapshot()` instead of re-reading the
 //! `DatabaseActor`. After each successful `apply_batch`, the same `Change`
 //! batch is applied to the mirror (`apply`) so it stays byte-for-byte
-//! consistent with the cache table — the engine is the sole writer to these
-//! tables (enforced by the sync-vs-`vtable.write_through` config check), so
-//! applying the committed batch synchronously gives consistency by
-//! construction. No CDC subscription, hence no echo.
+//! consistent with the cache table. No CDC subscription, hence no echo.
+//!
+//! Being the sole writer is NOT enough to make that consistent: the cache
+//! writes `Created` as `INSERT OR IGNORE` and silently skips a row violating
+//! any constraint, so `apply_batch` can return `Ok` having written less than
+//! the batch. The sync engine therefore reads the ids back after every applied
+//! batch and [`reset`](EntityMirror::reset)s this mirror on a mismatch.
 //!
 //! The mirror keys rows by the same `EntityUri` string the sync diff uses (the
 //! prefixed id column parsed to an `EntityUri` and stringified), so a `Deleted`

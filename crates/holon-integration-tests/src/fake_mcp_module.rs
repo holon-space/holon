@@ -293,6 +293,7 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
                 extract_path: None,
                 list_params: HashMap::new(),
                 cursor: None,
+                paginate: None,
                 list_resource: Some(RESOURCE_URI.to_string()),
                 uri_params: HashMap::new(),
                 interval: None,

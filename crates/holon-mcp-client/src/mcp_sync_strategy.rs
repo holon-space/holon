@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use async_trait::async_trait;
 use holon_api::StreamPosition;
@@ -65,7 +66,11 @@ pub struct ToolSync {
     pub list_tool: String,
     pub extract_path: String,
     pub list_params: HashMap<String, serde_json::Value>,
+    /// A resumable sync token, persisted across syncs. Mutually exclusive with
+    /// [`Self::paginate`]; `SyncConfig::into_strategy` refuses both.
     pub cursor: Option<CursorConfig>,
+    /// Paging within one fetch. Followed to exhaustion, never persisted.
+    pub paginate: Option<crate::mcp_sidecar::PaginationConfig>,
     /// Optional per-column field projection applied to each record after
     /// extraction: lifts nested JSON scalars into flat top-level columns (e.g.
     /// Google's `start.dateTime` → `start`). Empty ⇒ records are mapped by name
@@ -158,44 +163,27 @@ pub fn apply_projection(
     Ok(())
 }
 
-#[async_trait]
-impl SyncStrategy for ToolSync {
-    async fn fetch_records(
+impl ToolSync {
+    /// One call to the list tool: its records, and the value of
+    /// `cursor_field` in the response if the caller named one.
+    async fn fetch_page(
         &self,
         surface: &dyn McpCallSurface,
-        token_store: &dyn SyncTokenStore,
-        token_key: &str,
-    ) -> anyhow::Result<FetchResult> {
-        let cursor_value = if let Some(ref cursor_config) = self.cursor {
-            match token_store
-                .load_token(token_key)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?
-            {
-                Some(StreamPosition::Version(bytes)) => {
-                    let cursor_str = String::from_utf8(bytes)?;
-                    debug!(
-                        "[ToolSync] Incremental sync, cursor param {}={}",
-                        cursor_config.request_param, cursor_str
-                    );
-                    Some((cursor_config.request_param.clone(), cursor_str))
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
-
+        cursor_arg: Option<(&str, &str)>,
+        cursor_field: Option<&str>,
+    ) -> anyhow::Result<(
+        Vec<serde_json::Map<String, serde_json::Value>>,
+        Option<String>,
+    )> {
         let mut params: serde_json::Map<String, serde_json::Value> = self
             .list_params
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-
-        if let Some((param_name, cursor_str)) = &cursor_value {
+        if let Some((param_name, value)) = cursor_arg {
             params.insert(
-                param_name.clone(),
-                serde_json::Value::String(cursor_str.clone()),
+                param_name.to_string(),
+                serde_json::Value::String(value.to_string()),
             );
         }
 
@@ -240,12 +228,118 @@ impl SyncStrategy for ToolSync {
             }
         }
 
-        let new_cursor = self.cursor.as_ref().and_then(|cc| {
+        let next = cursor_field.and_then(|field| {
             response
-                .get(&cc.response_field)
+                .get(field)
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .map(str::to_string)
         });
+        Ok((records, next))
+    }
+
+    /// Follow the provider's page cursor until it stops offering one, so the
+    /// caller receives the COMPLETE result set in a single `FetchResult`.
+    ///
+    /// No cursor is returned: a page cursor means nothing outside this loop,
+    /// and returning one would send a mid-set page into the full-sync diff,
+    /// which deletes every row the page does not carry.
+    async fn fetch_all_pages(
+        &self,
+        surface: &dyn McpCallSurface,
+        paging: &crate::mcp_sidecar::PaginationConfig,
+    ) -> anyhow::Result<FetchResult> {
+        // Generous: a provider legitimately past this is not paging, it is
+        // streaming, and the sync pipeline is the wrong shape for it.
+        const MAX_PAGES: usize = 10_000;
+
+        let mut records = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut cursor: Option<String> = None;
+
+        for page in 1..=MAX_PAGES {
+            let arg = cursor
+                .as_deref()
+                .map(|c| (paging.request_param.as_str(), c));
+            let (mut page_records, next) = self
+                .fetch_page(surface, arg, Some(&paging.response_field))
+                .await?;
+            records.append(&mut page_records);
+
+            let Some(next) = next else {
+                info!(
+                    tool = %self.list_tool,
+                    pages = page,
+                    records = records.len(),
+                    "[ToolSync] fetched every page"
+                );
+                return Ok(FetchResult {
+                    records,
+                    new_cursor: None,
+                });
+            };
+
+            if !seen.insert(next.clone()) {
+                anyhow::bail!(
+                    "tool '{}' offered the page cursor {next:?} twice after {} record(s) — the \
+                     provider is looping; refusing to page forever",
+                    self.list_tool,
+                    records.len()
+                );
+            }
+            cursor = Some(next);
+        }
+
+        anyhow::bail!(
+            "tool '{}' still offered a page cursor after {MAX_PAGES} pages ({} records) — \
+             refusing to keep paging",
+            self.list_tool,
+            records.len()
+        )
+    }
+}
+
+#[async_trait]
+impl SyncStrategy for ToolSync {
+    async fn fetch_records(
+        &self,
+        surface: &dyn McpCallSurface,
+        token_store: &dyn SyncTokenStore,
+        token_key: &str,
+    ) -> anyhow::Result<FetchResult> {
+        if let Some(ref paging) = self.paginate {
+            return self.fetch_all_pages(surface, paging).await;
+        }
+
+        let cursor_value = if let Some(ref cursor_config) = self.cursor {
+            match token_store
+                .load_token(token_key)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+            {
+                Some(StreamPosition::Version(bytes)) => {
+                    let cursor_str = String::from_utf8(bytes)?;
+                    debug!(
+                        "[ToolSync] Incremental sync, cursor param {}={}",
+                        cursor_config.request_param, cursor_str
+                    );
+                    Some((cursor_config.request_param.clone(), cursor_str))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let arg = cursor_value
+            .as_ref()
+            .map(|(name, value)| (name.as_str(), value.as_str()));
+        let (records, new_cursor) = self
+            .fetch_page(
+                surface,
+                arg,
+                self.cursor.as_ref().map(|c| c.response_field.as_str()),
+            )
+            .await?;
 
         info!(
             "[ToolSync] Got {} records from '{}'",

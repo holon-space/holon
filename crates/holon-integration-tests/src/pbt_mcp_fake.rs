@@ -236,6 +236,7 @@ impl PbtMcpIntegration {
                     extract_path: None,
                     list_params: HashMap::new(),
                     cursor: None,
+                    paginate: None,
                     list_resource: Some(RESOURCE_URI.to_string()),
                     uri_params: HashMap::new(),
                     interval: None,

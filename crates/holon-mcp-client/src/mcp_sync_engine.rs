@@ -98,6 +98,88 @@ fn record_id(
     Some(EntityUri::from_raw(&raw))
 }
 
+/// The cache did not land the batch the engine handed it.
+///
+/// `QueryableCache` writes every `Created` as `INSERT OR IGNORE`, and SQLite
+/// skips — without erroring — any row violating a constraint, so a batch can
+/// report success having written nothing. The engine therefore reads the ids
+/// back and refuses, because the alternative is a mirror holding rows the
+/// table never accepted and a later full-sync diff deleting rows the provider
+/// still has.
+#[derive(Debug)]
+pub struct CacheDeclinedRows {
+    pub entity: String,
+    /// Rows the engine wrote that the table does not hold.
+    pub missing_from_cache: Vec<String>,
+    /// Rows the table holds that the engine never wrote — an external writer
+    /// touched a table the sync engine owns.
+    pub unexpected_in_cache: Vec<String>,
+}
+
+/// At most five ids, so a wholesale divergence does not produce an unreadable
+/// error.
+fn sample(ids: &[String]) -> String {
+    let shown: Vec<&str> = ids.iter().take(5).map(String::as_str).collect();
+    match ids.len().saturating_sub(shown.len()) {
+        0 => shown.join(", "),
+        rest => format!("{} (+{rest} more)", shown.join(", ")),
+    }
+}
+
+impl std::fmt::Display for CacheDeclinedRows {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sync '{}': ", self.entity)?;
+        if !self.missing_from_cache.is_empty() {
+            write!(
+                f,
+                "the cache reported success but silently declined {} row(s) — {}; a NOT NULL, \
+                 UNIQUE or CHECK violation is skipped by INSERT OR IGNORE, so check the entity's \
+                 sidecar schema against what the provider actually sends",
+                self.missing_from_cache.len(),
+                sample(&self.missing_from_cache)
+            )?;
+        }
+        if !self.unexpected_in_cache.is_empty() {
+            if !self.missing_from_cache.is_empty() {
+                write!(f, "; also ")?;
+            }
+            write!(
+                f,
+                "the table holds {} row(s) this engine never wrote — {}",
+                self.unexpected_in_cache.len(),
+                sample(&self.unexpected_in_cache)
+            )?;
+        }
+        write!(
+            f,
+            ". The batch is refused and the mirror reset; the next sync re-seeds from the table."
+        )
+    }
+}
+
+impl std::error::Error for CacheDeclinedRows {}
+
+/// The ids the engine believes this entity's table holds.
+fn mirror_ids(id_col: &str, mirror: &EntityMirror) -> HashSet<EntityUri> {
+    mirror
+        .snapshot()
+        .iter()
+        .filter_map(|e| match e.get(id_col) {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Integer(n)) => Some(n.to_string()),
+            _ => None,
+        })
+        // ALLOW(entity_uri_from_raw): mirror row id column, already scheme-prefixed
+        .map(|s| EntityUri::from_raw(&s))
+        .collect()
+}
+
+fn sorted(ids: impl Iterator<Item = EntityUri>) -> Vec<String> {
+    let mut out: Vec<String> = ids.map(|u| u.to_string()).collect();
+    out.sort();
+    out
+}
+
 /// Full-sync diff: seed the mirror once, then diff the freshly fetched records
 /// against the engine-owned mirror (never re-reading the `DatabaseActor`),
 /// apply the resulting `Change` batch transactionally, and write the same batch
@@ -196,19 +278,22 @@ async fn apply_full_sync(
         "sync_entity: full sync diff"
     );
 
-    // Debug-only divergence guard: the mirror must match the real cache after a
-    // full sync. A mismatch means an external writer (e.g. a full-resync
-    // `clear_cache`) emptied the table without the engine resetting the mirror.
-    // Release builds rely on the mirror-consistency PBT instead.
-    #[cfg(debug_assertions)]
-    {
-        let cache_id_count = cache.get_all_ids().await?.len();
-        let mirror_len = mirror.len();
-        assert_eq!(
-            mirror_len, cache_id_count,
-            "mirror divergence for '{entity_name}': mirror has {mirror_len} rows, cache has \
-             {cache_id_count} — was the cache cleared without resetting the mirror?"
-        );
+    // A write happened, so the table can have declined part of it. Reading the
+    // ids back is the only way to learn that: `apply_batch` returns Ok either
+    // way. A sync that changed nothing skips the read, which is what keeps the
+    // steady state free of DatabaseActor traffic.
+    if applied > 0 {
+        let cache_ids: HashSet<EntityUri> = cache.get_all_ids().await?.into_iter().collect();
+        let engine_ids = mirror_ids(id_col, mirror);
+        if engine_ids != cache_ids {
+            mirror.reset();
+            return Err(CacheDeclinedRows {
+                entity: entity_name.to_string(),
+                missing_from_cache: sorted(engine_ids.difference(&cache_ids).cloned()),
+                unexpected_in_cache: sorted(cache_ids.difference(&engine_ids).cloned()),
+            }
+            .into());
+        }
     }
 
     Ok(applied)
@@ -237,6 +322,25 @@ async fn apply_incremental(
 
     if !changes.is_empty() {
         cache.apply_batch(&changes, None).await?;
+
+        // Every fetched record must now be in the table. Declining one here is
+        // worse than on the full-sync path: the caller advances the cursor on
+        // Ok, and the provider never offers those records again.
+        let cache_ids: HashSet<EntityUri> = cache.get_all_ids().await?.into_iter().collect();
+        let written: HashSet<EntityUri> = records
+            .iter()
+            .filter_map(|obj| record_id(id_col, scheme, obj))
+            .collect();
+        if !written.is_subset(&cache_ids) {
+            mirror.reset();
+            return Err(CacheDeclinedRows {
+                entity: entity_name.to_string(),
+                missing_from_cache: sorted(written.difference(&cache_ids).cloned()),
+                unexpected_in_cache: Vec::new(),
+            }
+            .into());
+        }
+
         if mirror.is_seeded() {
             mirror.apply(&changes);
         }
@@ -759,6 +863,11 @@ impl SyncableProvider for McpSyncEngine {
             // and keep serving diffs with zero DatabaseActor reads.
             self.reset_all_mirrors();
 
+            // Entities are independent replicas. Aborting the sweep on the
+            // first failure is how one bad page left every entity queued
+            // behind it unfetched, so each is attempted and the failures are
+            // reported together.
+            let mut failures: Vec<String> = Vec::new();
             for (entity_name, strategy) in &self.strategies {
                 let cache = match self.caches.get(entity_name) {
                     Some(c) => c,
@@ -768,8 +877,25 @@ impl SyncableProvider for McpSyncEngine {
                     }
                 };
 
-                self.sync_entity(entity_name, strategy.as_ref(), cache.as_ref())
-                    .await?;
+                if let Err(e) = self
+                    .sync_entity(entity_name, strategy.as_ref(), cache.as_ref())
+                    .await
+                {
+                    warn!(entity = %entity_name, error = %e, "mcp_full_sync: entity failed");
+                    failures.push(format!("{entity_name}: {e}"));
+                }
+            }
+
+            if !failures.is_empty() {
+                failures.sort();
+                return Err(format!(
+                    "mcp_full_sync for provider '{}': {} of {} entities failed — {}",
+                    self.provider_name,
+                    failures.len(),
+                    self.strategies.len(),
+                    failures.join("; ")
+                )
+                .into());
             }
 
             info!("mcp_full_sync: complete");

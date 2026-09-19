@@ -146,15 +146,34 @@ be discovered but carry no mutation.
       list_tool: find-tasks
       extract_path: tasks
       list_params: { filter: "all" }
-      cursor: { request_param: cursor, response_field: nextCursor }
+      paginate: { request_param: cursor, response_field: nextCursor }
 ```
 
-`sync` says how to pull the replica: call `find-tasks`, pull the `tasks` array
-out of the response, page via the `cursor` fields. A full sync (no cursor)
-**diffs** against the cache — inserting new rows, deleting vanished ones — so a
-server-side format change surfaces loudly as an error rather than as silent data
-loss. Derived rollups are declared under a top-level `views:` block (each becomes
-a Turso materialized view; see `claude-history.yaml` for the arg-max idiom).
+`sync` says how to pull the replica: call `find-tasks` and pull the `tasks`
+array out of the response. The fetched set is **diffed** against the cache —
+inserting new rows, deleting vanished ones — so a server-side format change
+surfaces loudly as an error rather than as silent data loss. Derived rollups
+are declared under a top-level `views:` block (each becomes a Turso
+materialized view; see `claude-history.yaml` for the arg-max idiom).
+
+**`paginate:` and `cursor:` are different things.** They look identical in YAML
+and mean opposite lifetimes, so picking the wrong one loses data:
+
+| key | what it is | lifetime |
+|---|---|---|
+| `paginate:` | a PAGE cursor — how to ask for the next page of ONE result set | followed to exhaustion inside a single fetch, then discarded |
+| `cursor:` | a resumable SYNC TOKEN — the provider's "what changed since" marker | persisted across syncs in the sync-token store |
+
+Declaring both is refused at load. If in doubt, ask what the provider does
+when you call the tool with no cursor: if it returns the FIRST PAGE of
+everything, that is `paginate:`; if it returns EVERYTHING THAT CHANGED since
+the token was issued, that is `cursor:`. Todoist's `nextCursor` is pagination.
+
+Declaring a page cursor as `cursor:` is a data-loss bug, not a style choice:
+the next sync resumes mid-result-set, and the last page — which carries no
+cursor — reaches the full-sync diff as if it were the whole table, deleting
+every row it does not carry. See
+`docs/Testing/bugfunnel/entries/2026-09-19-pagination-cursor-stored-as-sync-token-truncates-the-replica.md`.
 
 ### auth (secrets stay out of YAML)
 

@@ -242,8 +242,12 @@ pub struct SyncConfig {
     /// Static parameters passed to the list tool.
     #[serde(default)]
     pub list_params: HashMap<String, serde_json::Value>,
-    /// Optional cursor-based incremental sync configuration (tool sync only).
+    /// Optional resumable incremental sync token (tool sync only). For paging
+    /// through one result set use `paginate` — see [`CursorConfig`].
     pub cursor: Option<CursorConfig>,
+    /// Optional pagination for the list tool (tool sync only): followed to
+    /// exhaustion inside one fetch, never persisted.
+    pub paginate: Option<PaginationConfig>,
     /// Optional per-column field projection (tool sync only): lifts nested JSON
     /// scalars into flat columns (e.g. Google Calendar's `start.dateTime` →
     /// `start`, `start.date` presence → `all_day`). See
@@ -357,14 +361,44 @@ impl SyncConfig {
                 .extract_path
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("list_tool requires extract_path"))?;
+            // The two carry opposite lifetimes for the same-shaped YAML, so a
+            // config that declares both has not decided which it means.
+            if self.cursor.is_some() && self.paginate.is_some() {
+                anyhow::bail!(
+                    "sync for '{list_tool}' declares both `cursor` (a resumable sync token) and \
+                     `paginate` (a within-fetch page cursor); they mean opposite things — declare \
+                     exactly one"
+                );
+            }
             Ok(Box::new(ToolSync {
                 list_tool: list_tool.clone(),
                 extract_path,
                 list_params: self.list_params.clone(),
                 cursor: self.cursor.clone(),
+                paginate: self.paginate.clone(),
                 project: self.project.clone(),
             }))
         } else if let Some(ref list_resource) = self.list_resource {
+            // `ResourceSync` reads one URI and cannot honour any of these.
+            // Accepting them silently would drop a declared intent — for
+            // `paginate` that means a truncated replica, which is the whole
+            // reason this key exists.
+            let tool_only: Vec<&str> = [
+                self.paginate.is_some().then_some("paginate"),
+                self.cursor.is_some().then_some("cursor"),
+                (!self.list_params.is_empty()).then_some("list_params"),
+                (!self.project.is_empty()).then_some("project"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !tool_only.is_empty() {
+                anyhow::bail!(
+                    "sync for resource '{list_resource}' declares {}, which only a `list_tool` \
+                     sync can honour; a resource sync reads the URI whole",
+                    tool_only.join(", ")
+                );
+            }
             let uri = expand_uri_template(list_resource, &self.uri_params)?;
             Ok(Box::new(ResourceSync { uri }))
         } else {
@@ -373,12 +407,33 @@ impl SyncConfig {
     }
 }
 
-/// Cursor configuration for incremental sync.
+/// A RESUMABLE incremental sync token: the provider's "what has changed since"
+/// marker, persisted across syncs through the `SyncTokenStore`.
+///
+/// NOT pagination — that is [`PaginationConfig`]. The two look identical in
+/// YAML and mean opposite things: a sync token must outlive its fetch, a page
+/// cursor must not. Declaring a page cursor here makes the next sync resume
+/// mid-result-set, and the last page (which carries no cursor) then reaches
+/// the full-sync diff as if it were the entire table.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CursorConfig {
-    /// Field in the tool response containing the new cursor value
+    /// Field in the tool response containing the new sync token
     pub response_field: String,
-    /// Parameter name to pass the cursor back to the list tool
+    /// Parameter name to pass the sync token back to the list tool
+    pub request_param: String,
+}
+
+/// Pagination for a list tool: how to ask for the next page of ONE result set.
+///
+/// The engine follows this within a single fetch until the provider stops
+/// offering a cursor, then applies the complete set. A page cursor is never
+/// persisted, because it is meaningless outside the fetch that produced it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PaginationConfig {
+    /// Field in the tool response carrying the next page's cursor. Absent from
+    /// a response ⇒ that was the last page.
+    pub response_field: String,
+    /// Parameter name the cursor is passed back to the list tool as.
     pub request_param: String,
 }
 
@@ -1628,6 +1683,58 @@ tools:
         assert!(
             err.contains("send-thing") && err.contains("key_param"),
             "config error must demand a key_param, got: {err}"
+        );
+    }
+
+    fn strategy_error(sync_yaml: &str) -> String {
+        let yaml = format!(
+            r#"
+entities:
+  x:
+    id_column: id
+    schema:
+      - {{ name: id, sql_type: TEXT, primary_key: true }}
+    sync:
+{sync_yaml}
+tools: {{}}
+"#
+        );
+        let sidecar = McpSidecar::from_yaml(&yaml).expect("sidecar parses");
+        sidecar.entities["x"]
+            .sync
+            .as_ref()
+            .expect("sync present")
+            .into_strategy()
+            .err()
+            .map(|e| e.to_string())
+            .expect("this sync config must be refused")
+    }
+
+    /// A page cursor and a sync token have opposite lifetimes, so a config
+    /// declaring both has not decided which it means.
+    #[test]
+    fn paginate_and_cursor_together_fail_loud() {
+        let err = strategy_error(
+            "      list_tool: t\n      extract_path: rows\n      paginate: { request_param: c, \
+             response_field: n }\n      cursor: { request_param: c, response_field: n }",
+        );
+        assert!(
+            err.contains("paginate") && err.contains("cursor"),
+            "the refusal must name both keys, got: {err}"
+        );
+    }
+
+    /// A resource sync reads one URI whole; silently dropping a declared
+    /// `paginate` would truncate the replica with no error.
+    #[test]
+    fn tool_only_keys_on_a_resource_sync_fail_loud() {
+        let err = strategy_error(
+            "      list_resource: \"x://all\"\n      paginate: { request_param: c, \
+             response_field: n }",
+        );
+        assert!(
+            err.contains("paginate") && err.contains("x://all"),
+            "the refusal must name the dropped key and the resource, got: {err}"
         );
     }
 }

@@ -60,7 +60,7 @@ entities:
       list_tool: find-tasks
       extract_path: tasks
       list_params: { filter: "all" }
-      cursor:
+      paginate:
         request_param: cursor
         response_field: nextCursor
 
@@ -80,7 +80,7 @@ entities:
     sync:
       list_tool: find-projects
       extract_path: projects
-      cursor:
+      paginate:
         request_param: cursor
         response_field: nextCursor
 
