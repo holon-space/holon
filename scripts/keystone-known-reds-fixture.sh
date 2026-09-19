@@ -1,22 +1,37 @@
 #!/usr/bin/env bash
 # Fixture check for scripts/keystone-known-reds.sh.
 #
-# This check replays the archived 2026-07-31 full-depth corpus through the
-# classifier and asserts each still-registered key's hit count is exactly what
-# the corpus contains.
+# This check replays archived full-depth corpora through the classifier and
+# asserts each still-registered key's hit count is exactly what that corpus
+# contains.
 #
 # What it CAN catch: a `Match pattern` edited so it no longer matches the very
 # payload that motivated its row, and an over-broad pattern that starts
 # swallowing a neighbouring signature.
 #
 # What it CANNOT catch — do not rely on it for this: an assertion message
-# REWORDED in production or test code. The corpus is frozen text, so a reword
+# REWORDED in production or test code. A corpus is frozen text, so a reword
 # leaves it classifying exactly as before while the pattern silently stops
 # matching what the code now emits. Only a fresh full-depth run surfaces that.
 #
-# The corpus is committed zstd-compressed next to the hand-authored regressions
-# because it is evidence, not scratch: /tmp is cleared on reboot, and these four
+# Corpora are committed zstd-compressed next to the hand-authored regressions
+# because they are evidence, not scratch: /tmp is cleared on reboot, and these
 # logs are the only decoded record of several families' actual failure payloads.
+#
+# There are TWO, kept in separate dated directories with separate expected
+# files, because a corpus pins patterns against the wording that existed when it
+# was captured and the two wordings differ. Merging them into one frozen set
+# would make it impossible to say which log a count came from — the exact
+# confusion that let `org-blocks-ref-diverge` sit overbroad:
+#
+#   fixture-logs-2026-07-31  the original nightly corpus. Its block-divergence
+#                            payloads predate `render_block_diff`, so they carry
+#                            a whole-snapshot dump and cannot pin any pattern
+#                            that reads the structured diff body.
+#   fixture-logs-2026-09-19  wave-14/15b land-gate logs in the CURRENT format.
+#                            This is what pins the narrowed
+#                            `org-blocks-ref-diverge` and the three
+#                            `ref-diverge-*` rows split out of it.
 #
 # Usage:
 #   scripts/keystone-known-reds-fixture.sh            # check against expected
@@ -24,8 +39,9 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-corpus="$repo_root/crates/holon-integration-tests/hand-authored-regressions/fixture-logs-2026-07-31"
-expected="$corpus/expected-classification.txt"
+regressions="$repo_root/crates/holon-integration-tests/hand-authored-regressions"
+corpus="$regressions/fixture-logs-2026-07-31"
+corpus_current="$regressions/fixture-logs-2026-09-19"
 
 # The four runs that exited non-zero. The corpus also holds the four green runs
 # of the same nights (as the base-rate record: 4 red / 8 total = 50%), but only
@@ -37,46 +53,75 @@ red_runs=(
     keystone-nightly-20260731-193535-run1
 )
 
+# Two wave-14/15b land-gate logs, together covering every shape the
+# block-divergence family emits in the CURRENT `render_block_diff` format: the
+# keystone run carries the `parent_id` shape, the composed run carries both
+# `content` shapes AND the two genuine set-membership excesses that the narrowed
+# `org-blocks-ref-diverge` still claims.
+red_runs_current=(
+    land-w14-keystone-full-1789644096
+    A2-lib-and-composed-1789580360
+)
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 : >"$work/empty.log"
 
-logs=()
-for run in "${red_runs[@]}"; do
-    src="$corpus/$run.log.zst"
-    [ -f "$src" ] || { echo "[fixture] missing corpus log: $src" >&2; exit 2; }
-    zstd -dq -o "$work/$run.log" "$src"
-    logs+=("$work/$run.log")
-done
+bless=0
+[ "${1-}" = "--bless" ] && bless=1
 
-# The classifier exits 1 while any novel signature remains; that is a verdict
-# about the corpus, not about this check, so capture it rather than inherit it.
-raw="$work/classification.txt"
-set +e
-"$repo_root/scripts/keystone-known-reds.sh" "${logs[@]}" >"$raw" 2>&1
-set -e
-
-# Only per-key hit counts are pinned, and only for keys the LIVE registry still
-# carries as `known-red`. The novel count is deliberately NOT pinned: fixing a
-# family removes its row, after which that family's archived panics correctly
-# classify as novel. Pinning the tally would make every successful fix look like
-# a fixture regression — the guard would punish exactly the work it exists to
-# protect.
-summary="$work/summary.txt"
-grep -E '^WARN known-red' "$raw" \
-    | sed -E 's/^(WARN known-red \[[a-z-]+\] x[0-9]+).*/\1/' >"$summary"
-
-# Drop expectations for rows that are no longer `known-red` in the registry —
-# a fixed family is absence, not drift. Everything still registered must match
-# its historical count exactly.
+# Rows the LIVE registry still carries as `known-red`. Expectations for any
+# other key are dropped at check time — a fixed family is absence, not drift.
 live="$work/live-keys.txt"
 awk -F'|' '/^\| *`/ {
     gsub(/^ *`|` *$/, "", $2); gsub(/^ *| *$/, "", $3)
     if ($3 == "known-red") print $2
 }' "$repo_root/docs/Testing/KeystoneKnownReds.md" >"$live"
 
-if [ "${1-}" != "--bless" ] && [ -f "$expected" ]; then
-    filtered="$work/expected-filtered.txt"
+# Replay one corpus and pin its per-key hit counts.
+#
+# Only per-key hit counts are pinned. The novel count is deliberately NOT
+# pinned: fixing a family removes its row, after which that family's archived
+# panics correctly classify as novel. Pinning the tally would make every
+# successful fix look like a fixture regression — the guard would punish
+# exactly the work it exists to protect.
+check_corpus() {
+    local label="$1" dir="$2"
+    shift 2
+    local exp="$dir/expected-classification.txt"
+    local logs=() run src
+    for run in "$@"; do
+        src="$dir/$run.log.zst"
+        [ -f "$src" ] || { echo "[fixture] missing corpus log: $src" >&2; exit 2; }
+        zstd -dqf -o "$work/$run.log" "$src"
+        logs+=("$work/$run.log")
+    done
+
+    # The classifier exits 1 while any novel signature remains; that is a
+    # verdict about the corpus, not about this check, so capture it rather than
+    # inherit it.
+    local raw="$work/$label-classification.txt"
+    set +e
+    "$repo_root/scripts/keystone-known-reds.sh" "${logs[@]}" >"$raw" 2>&1
+    set -e
+
+    local summary="$work/$label-summary.txt"
+    grep -E '^WARN known-red' "$raw" \
+        | sed -E 's/^(WARN known-red \[[a-z-]+\] x[0-9]+).*/\1/' >"$summary"
+
+    if [ "$bless" -eq 1 ]; then
+        cp "$summary" "$exp"
+        echo "[fixture] blessed $label:"
+        sed 's/^/          /' "$exp"
+        return
+    fi
+
+    [ -f "$exp" ] || {
+        echo "[fixture] no expected file for $label — run with --bless" >&2
+        exit 2
+    }
+
+    local filtered="$work/$label-expected-filtered.txt" key
     : >"$filtered"
     while read -r line; do
         key=$(printf '%s' "$line" | sed -E 's/^WARN known-red \[([a-z-]+)\].*/\1/')
@@ -85,30 +130,28 @@ if [ "${1-}" != "--bless" ] && [ -f "$expected" ]; then
         else
             echo "[fixture] skipping [$key] — no longer a known-red row (fixed)."
         fi
-    done <"$expected"
-    expected="$filtered"
-fi
+    done <"$exp"
 
-if [ "${1-}" = "--bless" ]; then
-    cp "$summary" "$expected"
-    echo "[fixture] blessed:"
-    cat "$expected"
+    if ! diff -u "$filtered" "$summary"; then
+        echo ""
+        echo "[fixture] FAIL: a still-registered known-red row no longer classifies the"
+        echo "          ARCHIVED payload it was written for ($label). The corpus is"
+        echo "          immutable, so this is a Match pattern in"
+        echo "          docs/Testing/KeystoneKnownReds.md that drifted from its own"
+        echo "          evidence. Fix the pattern, then --bless."
+        echo "          (Removing a row because its family is FIXED does not land here —"
+        echo "          those keys are skipped, see the lines above.)"
+        exit 1
+    fi
+    echo "[fixture] PASS — classifier verdict on the $label corpus is unchanged."
+}
+
+check_corpus 2026-07-31 "$corpus" "${red_runs[@]}"
+check_corpus 2026-09-19 "$corpus_current" "${red_runs_current[@]}"
+
+if [ "$bless" -eq 1 ]; then
     exit 0
 fi
-
-[ -f "$expected" ] || { echo "[fixture] no expected file — run with --bless" >&2; exit 2; }
-
-if ! diff -u "$expected" "$summary"; then
-    echo ""
-    echo "[fixture] FAIL: a still-registered known-red row no longer classifies the"
-    echo "          ARCHIVED payload it was written for. The corpus is immutable, so"
-    echo "          this is a Match pattern in docs/Testing/KeystoneKnownReds.md that"
-    echo "          drifted from its own evidence. Fix the pattern, then --bless."
-    echo "          (Removing a row because its family is FIXED does not land here —"
-    echo "          those keys are skipped, see the lines above.)"
-    exit 1
-fi
-echo "[fixture] PASS — classifier verdict on the 2026-07-31 corpus is unchanged."
 
 # ---------------------------------------------------------------------------
 # Outcome classification. Distinct from the pattern-drift check above: this
@@ -161,7 +204,8 @@ done
 expect_outcome green-single 0 '^\[known-reds\] PASS: 1 green run' "${green_logs[0]}"
 expect_outcome green-all 0 '^\[known-reds\] PASS: 4 green run' "${green_logs[@]}"
 # A green log alongside a red one must not dilute the red one's verdict.
-expect_outcome green-plus-red 1 '^\[known-reds\] FAIL: ' "${green_logs[0]}" "${logs[0]}"
+expect_outcome green-plus-red 1 '^\[known-reds\] FAIL: ' \
+    "${green_logs[0]}" "$work/${red_runs[0]}.log"
 # The constraint this fix must not break: a run that genuinely failed with no
 # extractable panic stays NOVEL.
 expect_outcome failed-no-signature 1 'run failed but no panic signature' \
