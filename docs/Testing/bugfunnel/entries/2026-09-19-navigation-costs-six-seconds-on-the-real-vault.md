@@ -4,6 +4,7 @@ date: 2026-09-19
 gap: ENVIRONMENT
 secondary: ORACLE
 status: OPEN
+root_cause: per-navigation CREATE MATERIALIZED VIEW of a recursive descendant walk, on the critical path, on a sequential DB actor
 summary: >-
   Pointer-driven navigation on a 3126-block real vault measured p95 6062ms
   interaction-to-visible against a 200ms SLO, with the `focus` dispatch stage
@@ -45,23 +46,57 @@ throughput arm went red.
 
 ## Root cause
 
-Not isolated in this session — the lane stopped at measurement. What the same
-log narrows it to: the projection pipeline runs a FULL pass, not an incremental
-one, and the passes are seconds long.
+ISOLATED by lane `nav-latency-rca` (2026-09-19). Report:
+`lane-logs/nav-latency-rca-report.md`. Measurement files:
+`lane-logs/nav-latency-run1-A-realvault-with-integrations.log`,
+`lane-logs/nav-latency-run2-B-realvault-no-integrations.log`,
+`lane-logs/nav-latency-run3-C-smallvault-no-integrations.log`.
 
-```
-projection (full pass)       n=3  p50 7857ms  p95 12432ms  max 12941ms
-projection (snapshot only)   n=3  p50  334ms
-PROJECTION MODE ATTRIBUTION
-  incremental (O(changed) fast path): 1
-  full (reseed walk):                 2
-  full-pass reasons: coldboot 1 [seed] · oversized 1 [LEAK]
-```
+**The `oversized [LEAK]` projection pass is NOT the cause.** It is a boot event.
+In this entry's own logs the projection block is identical before and after the
+84 clicks (`n=3` both times), so zero projection passes ran during navigation. In
+the RCA run both full passes carry an `org.initial_scan.ingest` span, the
+`oversized` one while ingesting `Now.org` as a 2649-operation batch.
 
-One of the two full passes is attributed `oversized` and tagged `[LEAK]` by the
-script's own classifier — a reseed walk that should have been incremental. With
-`projection doc size: blocks p50=3126` the full-document DFS snapshot is the
-obvious suspect, and it is taken per commit.
+The real cause is three facts stacked:
+
+1. Every first visit to a block mints its own materialized view.
+   `crates/holon/src/api/backend_engine.rs:674` calls
+   `matview_manager.ensure_view(&sql_with_params)`, and the view name hashes the
+   inlined SQL, which embeds the block id. New block, new `CREATE MATERIALIZED
+   VIEW`, on the interaction's critical path.
+2. That view is a recursive descendant closure over the whole `block` table,
+   depth-bounded at 20, with a cycle guard built by string concatenation and
+   tested with `NOT LIKE` against a path string that grows with depth. The
+   definition is quoted in full in the lane report.
+3. The DDL runs inside the sequential Turso actor, which the code itself
+   describes at `crates/holon-turso/src/turso.rs:3255` as parking the entire DB
+   for the duration. The `matview_ddl` event is emitted at
+   `crates/holon-turso/src/turso.rs:3298`.
+
+The cost is O(vault size). Same binary, same host, same minute, only the vault
+swapped:
+
+| vault | navigate e2e p50 | focus dispatch p50 | per-navigation create |
+|---|---|---|---|
+| 3126 blocks | 1108 ms | 1219 ms | 995-1951 ms |
+| 33 blocks | 12 ms | 16 ms | 6-80 ms |
+
+**The 6062 ms in this entry is service time plus queue wait, not one
+navigation.** The pipeline serializes, so a click burst queues. In the RCA run
+seven dispatches entered the backend over 19 s and all closed within 7 ms of
+each other reporting 9073-26057 ms. The oracle line already quoted above says the
+same thing: `drain 1.5 writes/s while saturated`. Honest steady-state numbers on
+the real vault are ~1.1 s cold and ~0.9 s warm, both still 4-15x the SLO.
+
+Refuted along the way: integrations are not the cause (removing them left
+navigate p50 unchanged at 1248 ms and made boot slower), and the process was not
+suspended by macOS (the 30 s memory-monitor timer fired five consecutive beats
+30.00 s apart, one of them inside a 23 s stall).
+
+Not yet isolated: the ~900 ms warm navigation, which creates no view and sits in
+no queue. It is scale-dependent too, and the likely consumer is incremental
+maintenance of `focus_roots` and the same recursive view over 3126 rows.
 
 ## Missing piece
 
@@ -74,8 +109,16 @@ channel cannot judge them either. Neither layer scores real-vault scale.
 
 ## Remedy
 
-Open. Attack the `[LEAK]` attribution first: an `oversized` full pass on a
-steady-state navigation is a reseed that should not be happening, and it is
-worth more than the remaining stage costs put together. Then give the live
-channel a way to run the class-3 budget invariants over a window rather than a
-one-shot sweep, so this is caught by a rung instead of by a dogfood lane.
+Open. Three options, with blast radius, are set out in
+`lane-logs/nav-latency-rca-report.md`: take the create off the critical path via
+the existing `eager_requery_stream` degraded mode; stop minting one view per
+block in favour of a single view keyed by focus root; or make the recursive walk
+cheaper by replacing the string cycle guard. The first is smallest, the second
+has the better ceiling and also caps the unbounded view count (128 views existed
+after boot alone), the third alone will not reach 200 ms.
+
+No covering rung exists and none can be written as an assertion change: the
+keystone runs at a scale where the create is free, and the live channel's class-3
+budget invariants report `skipped`. The missing axis is corpus size. A rung that
+boots a few-thousand-block corpus and gates `e2e.p50.NavigateFocus` would have
+caught this on the first run.

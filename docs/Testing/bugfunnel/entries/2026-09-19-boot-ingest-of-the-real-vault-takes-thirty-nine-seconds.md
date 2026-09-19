@@ -41,11 +41,33 @@ The same asymmetry holds for `matview_ddl` (p50 0 ms, max 9283 ms).
 
 ## Root cause
 
-Not isolated. The distribution says the cost is concentrated, so the next step
-is to name the specific files and the specific view: `boot_parse` p95 3013 ms
-over only 14 samples points at a small number of very large org documents, and
-the 9283 ms `matview_ddl` is one named view, recoverable from the log line's
-`view=` field.
+Partly isolated by lane `nav-latency-rca` (2026-09-19); report
+`lane-logs/nav-latency-rca-report.md`.
+
+Reproduced on a fresh copy of the same vault: 55397 ms with integrations and
+60791 ms without, so integration sync is not the boot cost. Measurement files
+`lane-logs/nav-latency-run1-A-realvault-with-integrations.log` and
+`lane-logs/nav-latency-run2-B-realvault-no-integrations.log`. The host was
+loaded (load average 7-18 on 16 cores with five concurrent rustc), which
+inflates the absolute figures.
+
+Three named components of the aggregate:
+
+1. Two projection full passes, 11738 ms and 6139 ms, both carrying an
+   `org.initial_scan.ingest` span. The second is the `oversized [LEAK]` pass the
+   navigation entry blamed for navigation; it is really a boot pass ingesting
+   `Now.org` as a single 2649-operation batch.
+2. 128 `matview_ddl` events at boot. These are the same per-block materialized
+   views that make navigation slow, paid up front. See the navigation entry for
+   the view shape and the `backend_engine.rs:674` anchor.
+3. A concentrated per-file tail, unchanged from the original report:
+   `boot_file` p50 15 ms with max 15707 ms, `boot_parse` p50 12 ms with max
+   11253 ms over 129 files.
+
+Open question worth resolving before anyone sizes this work: the log reports
+`files=129`, but the vault holds 1029 `.org` files. Either the initial scan is
+scoped far more narrowly than the vault root or 900 files are silently skipped.
+That changes what 39.5 s means.
 
 ## Missing piece
 
