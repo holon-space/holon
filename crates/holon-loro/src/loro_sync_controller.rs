@@ -542,6 +542,16 @@ impl LoroSyncController {
     /// [`LoroProjection`] (the same instance org's initial scan flushes), which
     /// serializes concurrent callers and owns the `last_synced` watermark.
     async fn on_loro_changed(&self) -> Result<ProjectionPass> {
+        // Test-only seam: hold the Loro→SQL projection back by
+        // `HOLON_TEST_PROJECTOR_LAG_MS` so a reader that sees only SQL can be
+        // caught observing a block this projection has not landed yet. Behind
+        // `test-helpers`, so it cannot reach a production build.
+        #[cfg(feature = "test-helpers")]
+        if let Ok(ms) = std::env::var("HOLON_TEST_PROJECTOR_LAG_MS")
+            && let Ok(ms) = ms.parse::<u64>()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
         self.projection.project().await
     }
 }

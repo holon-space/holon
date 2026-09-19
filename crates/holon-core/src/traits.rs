@@ -811,6 +811,21 @@ where
     }
 }
 
+/// The facts a guard may only learn from whatever ACCEPTED a write.
+///
+/// A store whose reads come from a projection of someone else's writes (the SQL
+/// store under Loro authority) cannot answer these from its own tables: the
+/// projection lands later, so a block written moments ago reads back as absent.
+/// Such a store is handed one of these, resolved from the composition root, and
+/// defers to it. A store that IS its own write authority needs none.
+#[async_trait]
+pub trait WriteAuthorityReads: MaybeSendSync {
+    /// Whether the block exists at all.
+    async fn block_exists(&self, id: &EntityUri) -> Result<bool>;
+    /// Whether the block carries the `Page` tag.
+    async fn block_is_page(&self, id: &EntityUri) -> Result<bool>;
+}
+
 /// Read + write helper surface every block store opts into.
 #[async_trait]
 pub trait BlockDataSourceHelpers<T>: BlockQueryHelpers<T> + CrudOperations<T>
@@ -838,6 +853,22 @@ where
             .await?
             .map(|b| b.is_page())
             .unwrap_or(false))
+    }
+
+    /// Authoritative existence check — the companion to
+    /// [`Self::is_page_authoritative`], and for the same reason. A guard that
+    /// asks "does this destination exist" must ask whatever ACCEPTED the write,
+    /// not a projection the write may not have reached: under Loro authority
+    /// the SQL row is written later by the outbound reconcile task, so a block
+    /// created moments earlier in the same compound reads back as absent.
+    ///
+    /// Same placement rationale as `is_page_authoritative`: an internal guard
+    /// read on `BlockDataSourceHelpers`, never a dispatchable operation. The
+    /// default reads the projection, correct for a store that IS its own write
+    /// authority (Loro, the in-memory test substrate); the SQL store overrides
+    /// it when a separate authority is wired.
+    async fn exists_authoritative(&self, id: &EntityUri) -> Result<bool> {
+        Ok(self.get_by_id(id.as_str()).await?.is_some())
     }
 
     /// Create a block AT a pre-minted
@@ -2451,13 +2482,16 @@ where
             Some(is_page) => is_page,
             None if *parent_id == EntityUri::no_parent() => false,
             None => {
-                // Existence from the projection, page-ness from the write
-                // authority. `is_page_authoritative` alone cannot stand in for
-                // the lookup: an absent destination has no tags either, so it
-                // would answer "not a page" instead of refusing the move.
-                let maybe_parent: Option<T> = self.get_by_id(parent_id.as_str()).await?;
-                let _: T =
-                    maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found: {parent_id}"))?;
+                // BOTH facts from the write authority. `is_page_authoritative`
+                // alone cannot stand in for the existence check: an absent
+                // destination has no tags either, so it would answer "not a
+                // page" instead of refusing the move. Reading existence from
+                // the projection instead was a read-your-own-write bug — a
+                // compound that creates a page and then moves children under it
+                // raced the Loro→SQL reconcile and failed with this very error.
+                if !self.exists_authoritative(parent_id).await? {
+                    return Err(anyhow::anyhow!("Parent not found: {parent_id}").into());
+                }
                 self.is_page_authoritative(parent_id).await?
             }
         };

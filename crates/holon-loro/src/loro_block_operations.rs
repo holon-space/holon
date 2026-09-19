@@ -336,6 +336,25 @@ impl DataSource<Block> for LoroBlockOperations {
     }
 }
 
+/// Loro accepts the writes, so the live doc answers both guard facts without a
+/// projection in between. One read serves both: resolving the block already
+/// walks to its node, and its tags ride along.
+#[async_trait]
+impl holon_core::WriteAuthorityReads for LoroBlockOperations {
+    async fn block_exists(&self, id: &holon_api::EntityUri) -> Result<bool> {
+        Ok(<Self as DataSource<Block>>::get_by_id(self, id.as_str())
+            .await?
+            .is_some())
+    }
+
+    async fn block_is_page(&self, id: &holon_api::EntityUri) -> Result<bool> {
+        Ok(<Self as DataSource<Block>>::get_by_id(self, id.as_str())
+            .await?
+            .map(|b| holon_core::BlockEntity::is_page(&b))
+            .unwrap_or(false))
+    }
+}
+
 #[async_trait]
 impl BlockQueryHelpers<Block> for LoroBlockOperations {
     async fn children_ordered(&self, parent_id: &EntityUri) -> Result<Vec<Block>> {

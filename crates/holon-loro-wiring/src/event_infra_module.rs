@@ -30,6 +30,7 @@ use holon_api::capability::SessionCapabilities;
 use holon_api::live_data::LiveData;
 use holon_core::OperationProvider;
 use holon_core::OperationRegistry;
+use holon_core::WriteAuthorityReads;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::cell_registry::EntityCellRegistry;
 use holon_loro::PublishErrorTracker;
@@ -160,6 +161,30 @@ impl Module for EventInfraModule {
                 let block_ops = SqlBlockOperations::new(sql_ops, block_cache)
                     .with_cell_registry(cell_registry)
                     .with_capabilities(caps);
+                // In Full mode Loro accepts block writes and SQL is projected
+                // from it, so the guard reads that must not race a write get
+                // answered by Loro. Resolve the SHARED instance — building a
+                // second one here would be a second writer onto the same doc.
+                //
+                // `optional_resolve_async` is `try_resolve_async().ok()`, which
+                // would turn a genuine resolve failure into the racy SQL path
+                // silently. Only `ServiceNotProvided` legitimately means "no
+                // Loro in this session" (SqlOnly); anything else — including
+                // `CircularDependency` — is a wiring fault and must be loud, as
+                // the BlockFeed `expect` above is.
+                let block_ops = match resolver
+                    .try_resolve_async::<holon_loro::LoroBlockOperations>()
+                    .await
+                {
+                    Ok(authority) => block_ops
+                        .with_write_authority(authority.clone() as Arc<dyn WriteAuthorityReads>),
+                    Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => block_ops,
+                    Err(e) => panic!(
+                        "[EventInfraModule] resolving the block write authority \
+                         (LoroBlockOperations) failed: {e}. Falling back to SQL reads here would \
+                         reinstate the convert_block_to_page parent race silently."
+                    ),
+                };
                 Arc::new(block_ops) as Arc<dyn OperationProvider>
             },
         ));

@@ -255,6 +255,31 @@ hand-authored *FLAGS:
         {{CANON}} --test hand_authored_regressions \
         -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-hand-authored.log
 
+# The projector-lag lock: the committed reproducer for the Loro→SQL
+# read-your-own-write race in `convert_block_to_page` (bugfunnel
+# 2026-09-19-convert-block-to-page-move-races-loro-sql-projection). It is its own
+# test BINARY because the lag is a process-global env var the projector reads on
+# every pass — see the module docs in tests/projector_lag_lock.rs.
+#
+# That binary holds exactly ONE test, so the count is the gate: anything other
+# than `1 passed` is a FAILURE — a filtered or partial run reports `0 passed`
+# with exit 0 and would otherwise prove nothing, which is how this lock sat
+# inert (in no recipe) when it was first committed.
+projector-lag-lock:
+    #!/usr/bin/env bash
+    # pipefail is REQUIRED for the same reason as `hand-authored`: without it the
+    # recipe's status is `tee`'s and a failing test exits 0.
+    set -euo pipefail
+    mkdir -p target/gate-logs
+    LOG=target/gate-logs/projector-lag-lock.log
+    cargo test {{CANON}} --test projector_lag_lock -- --nocapture 2>&1 | tee "$LOG"
+    grep -qE '^test result: ok\. 1 passed' "$LOG" || {
+        echo "FAIL: projector-lag-lock did not report 'test result: ok. 1 passed'."
+        echo "A zero-test or filtered run is a FAILURE, not a pass — the lock proves nothing."
+        grep -E '^test result:' "$LOG" || echo "(no 'test result:' line at all)"
+        exit 1
+    }
+
 # Weave-time full keystone sweep (orchestrator-run, typically in background)
 keystone-full cases='16':
     just pbt general {{cases}}
@@ -1212,35 +1237,37 @@ landing-gate:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    echo "== landing [1/15]: fmt =="
+    echo "== landing [1/16]: fmt =="
     cargo fmt --all -- --check
-    echo "== landing [2/15]: typecheck incl. every test target =="
+    echo "== landing [2/16]: typecheck incl. every test target =="
     just gate-compile
-    echo "== landing [3/15]: browser-target typecheck =="
+    echo "== landing [3/16]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== landing [4/15]: out-of-workspace browser frontend =="
+    echo "== landing [4/16]: out-of-workspace browser frontend =="
     just check-dioxus-web-wasm
-    echo "== landing [5/15]: out-of-workspace wasi worker =="
+    echo "== landing [5/16]: out-of-workspace wasi worker =="
     just check-worker-wasm
-    echo "== landing [6/15]: architecture rules =="
+    echo "== landing [6/16]: architecture rules =="
     just gate-arch
-    echo "== landing [7/15]: @c4 structure matches the committed baseline =="
+    echo "== landing [7/16]: @c4 structure matches the committed baseline =="
     just arch-validate 2>&1 | tee target/gate-logs/landing-arch-validate.log
-    echo "== landing [8/15]: feature map matches the tree =="
+    echo "== landing [8/16]: feature map matches the tree =="
     /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
-    echo "== landing [9/15]: architecture lints (archlint) =="
+    echo "== landing [9/16]: architecture lints (archlint) =="
     just analyze-arch 2>&1 | tee target/gate-logs/landing-analyze-arch.log
-    echo "== landing [10/15]: keystone smoke =="
+    echo "== landing [10/16]: keystone smoke =="
     just keystone-smoke
-    echo "== landing [11/15]: loro consolidator suite =="
+    echo "== landing [11/16]: loro consolidator suite =="
     just loro-suite
-    echo "== landing [12/15]: hand-authored regressions =="
+    echo "== landing [12/16]: hand-authored regressions =="
     just hand-authored
-    echo "== landing [13/15]: latency SLO (D50.a) =="
+    echo "== landing [13/16]: projector-lag lock =="
+    just projector-lag-lock
+    echo "== landing [14/16]: latency SLO (D50.a) =="
     just latency-slo-gate
-    echo "== landing [14/15]: guest wasm artifacts match their source =="
+    echo "== landing [15/16]: guest wasm artifacts match their source =="
     just guests-verify
-    echo "== landing [15/15]: target-gc (D85.c, this lane's own target/ only) =="
+    echo "== landing [16/16]: target-gc (D85.c, this lane's own target/ only) =="
     just target-gc || echo "target-gc: non-fatal (busy or nothing to reclaim), see above"
     echo "== landing gate PASS =="
 

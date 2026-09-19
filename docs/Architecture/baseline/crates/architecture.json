@@ -3002,7 +3002,12 @@
               },
               {
                 "name": "fixture-logs-2026-09-19",
-                "path": "holon-integration-tests/hand-authored-regressions/fixture-logs-2026-09-19"
+                "path": "holon-integration-tests/hand-authored-regressions/fixture-logs-2026-09-19",
+                "files": [
+                  {
+                    "name": "README.md"
+                  }
+                ]
               }
             ]
           },
@@ -4775,6 +4780,9 @@
               },
               {
                 "name": "place_all_restates_total_sibling_order.rs"
+              },
+              {
+                "name": "projector_lag_lock.rs"
               },
               {
                 "name": "refdoc1_remap_totality_replay.rs"

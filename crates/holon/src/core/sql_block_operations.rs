@@ -44,6 +44,7 @@ use holon_core::OriginTaggedWrites;
 use holon_core::Result;
 use holon_core::SqlOnlyCellRegistry;
 use holon_core::UnknownOperationError;
+use holon_core::WriteAuthorityReads;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::block_ordering::MintedPosition;
 use holon_core::block_ordering::OrderKeyMinting;
@@ -86,6 +87,12 @@ pub struct SqlBlockOperations {
     /// upstream consolidator owns order and this component defers). Defaults to
     /// the direct-store profile so non-DI/test construction degrades safely.
     caps: SessionCapabilities,
+    /// Whoever accepts block writes in this session, when that is not this
+    /// component. Under Loro authority the SQL tables are a projection written
+    /// later by the outbound reconcile task, so the guard reads that must not
+    /// race a just-accepted write are answered here instead. `None` means SQL
+    /// IS the authority and its own tables are the truth.
+    write_authority: Option<Arc<dyn WriteAuthorityReads>>,
 }
 
 impl SqlBlockOperations {
@@ -99,6 +106,7 @@ impl SqlBlockOperations {
             cache,
             cell_registry: Arc::new(SqlOnlyCellRegistry::new()),
             caps: SessionCapabilities::detect_and_pin(false),
+            write_authority: None,
         }
     }
 
@@ -116,6 +124,15 @@ impl SqlBlockOperations {
     /// hands it in; this component never asks "is Loro present" itself.
     pub fn with_capabilities(mut self, caps: SessionCapabilities) -> Self {
         self.caps = caps;
+        self
+    }
+
+    /// Name the session's write authority when it is not this component. The
+    /// composition root resolves the SHARED store and hands it in; this
+    /// component never reaches for a Loro-aware type itself, and never builds
+    /// its own (a second store would be a second writer).
+    pub fn with_write_authority(mut self, authority: Arc<dyn WriteAuthorityReads>) -> Self {
+        self.write_authority = Some(authority);
         self
     }
 
@@ -340,7 +357,19 @@ impl BlockDataSourceHelpers<Block> for SqlBlockOperations {
     /// via CDC. Closes the read-snapshot window that let a day-page's child
     /// escape into `journals` during tag-propagation lag (journals-phantom).
     async fn is_page_authoritative(&self, id: &holon_api::EntityUri) -> Result<bool> {
-        self.sql_ops.block_is_page(id.as_str()).await
+        match &self.write_authority {
+            Some(authority) => authority.block_is_page(id).await,
+            None => self.sql_ops.block_is_page(id.as_str()).await,
+        }
+    }
+
+    /// `block_raw` is a projection under Loro authority, so its silence about a
+    /// block means "not projected yet", not "absent". Ask the authority.
+    async fn exists_authoritative(&self, id: &holon_api::EntityUri) -> Result<bool> {
+        match &self.write_authority {
+            Some(authority) => authority.block_exists(id).await,
+            None => Ok(self.get_by_id(id.as_str()).await?.is_some()),
+        }
     }
 
     /// The SQL order owner CAN displace siblings, so it overrides the default

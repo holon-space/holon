@@ -112,6 +112,7 @@ pub use traits::TaskOperations;
 pub use traits::TextOperations;
 pub use traits::UndoAction;
 pub use traits::UnknownOperationError;
+pub use traits::WriteAuthorityReads;
 pub use traits::classify_for_net;
 pub use traits::combine_matview_hooks;
 pub use traits::generate_sync_operation;
