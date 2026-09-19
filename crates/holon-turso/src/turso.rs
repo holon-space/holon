@@ -208,10 +208,11 @@ pub enum DbCommand {
         response: oneshot::Sender<bool>,
     },
 
-    /// Execute multiple statements in a transaction
+    /// Execute multiple statements in a transaction; the reply carries the
+    /// total number of rows the statements changed.
     Transaction {
         statements: Vec<(String, Vec<turso::Value>)>,
-        response: oneshot::Sender<Result<()>>,
+        response: oneshot::Sender<Result<u64>>,
     },
 
     /// Subscribe to CDC events for a specific relation
@@ -971,6 +972,21 @@ impl DbHandle {
     /// This is the highest-volume write path — the change-stream writer submits
     /// here rather than through [`execute`](Self::execute).
     pub async fn transaction(&self, statements: Vec<(String, Vec<turso::Value>)>) -> Result<()> {
+        self.transaction_changes(statements).await.map(|_| ())
+    }
+
+    /// Like [`transaction`](Self::transaction), but returns the total rows the
+    /// statements changed — ONE sum across all of them, not a count per
+    /// statement, so a caller that must attribute the change to a particular
+    /// statement submits it alone.
+    ///
+    /// A caller that must prove its UPDATE actually hit a row — SQL grants an
+    /// UPDATE against a missing row silently — reads the count here instead of
+    /// paying a second SELECT for the same question.
+    pub async fn transaction_changes(
+        &self,
+        statements: Vec<(String, Vec<turso::Value>)>,
+    ) -> Result<u64> {
         let (response_tx, response_rx) = oneshot::channel();
         self.tx
             .send(DbCommand::Transaction {
@@ -3329,7 +3345,7 @@ impl TursoBackend {
         conn: &turso::Connection,
         catalog: &SchemaCatalog,
         statements: Vec<(String, Vec<turso::Value>)>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         tracing::trace!(
             "[TursoBackend] actor_tx_begin: BEGIN TRANSACTION ({} stmts)",
             statements.len()
@@ -3364,7 +3380,8 @@ impl TursoBackend {
         }
 
         // Execute each statement, rolling back on any error
-        let result = Self::execute_statements_in_transaction(conn, catalog, statements).await;
+        let result: Result<u64> =
+            Self::execute_statements_in_transaction(conn, catalog, statements).await;
 
         if result.is_err() {
             // Rollback on error
@@ -3393,29 +3410,30 @@ impl TursoBackend {
             )));
         }
 
-        Ok(())
+        result
     }
 
     /// Execute statements within a transaction (helper for proper error
-    /// handling)
+    /// handling); returns the total rows they changed.
     async fn execute_statements_in_transaction(
         conn: &turso::Connection,
         catalog: &SchemaCatalog,
         statements: Vec<(String, Vec<turso::Value>)>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
+        let mut changed = 0u64;
         for (sql, params) in statements {
             trace_sql_positional("transaction_stmt", &sql, &params);
             let mut stmt = conn.prepare(&sql).await.map_err(|e| {
                 StorageError::DatabaseError(format!("Failed to prepare statement: {}", e))
             })?;
 
-            stmt.execute(params).await.map_err(|e| {
+            changed += stmt.execute(params).await.map_err(|e| {
                 StorageError::DatabaseError(format!("Failed to execute statement: {}", e))
             })?;
 
             Self::note_statement(conn, catalog, &sql).await;
         }
-        Ok(())
+        Ok(changed)
     }
 
     // --- Dependency tracking methods ---

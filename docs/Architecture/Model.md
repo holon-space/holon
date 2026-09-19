@@ -200,6 +200,24 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     document only through a write naming its root or one of its blocks, which
     is exactly what this invariant refuses — and a boot that skips a file's
     ingest loads it from that row rather than rebuilding it.
+15. **A dispatched operation targets an existing subject; the write authority
+    enforces it — for every ROW-backed field, with edge fields the open
+    exception.** The authority is the only party that knows, at write time,
+    whether the subject is there, so both enforce it: Loro resolves the block
+    (`find_doc_for_block`/`get_block`, `crates/holon-loro/src/loro_block_operations.rs`)
+    and SQL asserts the UPDATE's changed-row count
+    (`SqlOperationProvider::assert_row_matched` for a single op,
+    `assert_updated_rows_exist` for a batch) — an UPDATE matching zero rows is
+    a refusal, because SQL grants it silently. An EDGE field is not yet
+    covered: it writes junction rows and never touches the entity row, so there
+    is no changed-row count to read and a ghost subject leaves an orphan edge
+    (`2026-09-20-set-field-on-an-edge-field-of-a-missing-block-writes-an-orphan-junction-row`,
+    OPEN). Any existence check upstream — a UI affordance, an MCP planner's
+    alias resolution — reads a projection and is therefore advisory: it can be
+    stale by the time the write runs, so it narrows what gets offered but never
+    licenses skipping the assert. Telling the UI which transitions are
+    *enabled* is a separate seam (D149), not this one. Pinned by
+    `set_field_missing_subject_test.rs`.
 
 ## Conditions: how a degradation reaches the user (ADR 0035)
 

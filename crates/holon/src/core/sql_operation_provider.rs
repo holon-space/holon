@@ -1794,6 +1794,28 @@ impl SqlOperationProvider {
         }
     }
 
+    /// Postcondition of a single-op `set_field`: the UPDATE it just issued
+    /// matched a row.
+    ///
+    /// SQL grants an UPDATE against a missing row silently — zero rows, no
+    /// error — so a `set_field` naming an id the sink never had, or no longer
+    /// has, returned `Ok` and the caller went on believing the write landed.
+    /// The Loro authority already refuses that (`find_doc_for_block`) and so
+    /// does the batch path
+    /// ([`assert_updated_rows_exist`](Self::assert_updated_rows_exist));
+    /// this is the same refusal for the single-op arm, paid from the driver's
+    /// changed-row count rather than a second SELECT.
+    fn assert_row_matched(&self, changed: u64, id: &str, field: &str) -> Result<()> {
+        if changed > 0 {
+            return Ok(());
+        }
+        Err(format!(
+            "set_field('{field}') on '{id}' matched no row in `{}`: the subject does not exist",
+            self.table_name
+        )
+        .into())
+    }
+
     /// Postcondition of a batch: every row it UPDATEd, and did not itself
     /// create or delete, exists.
     ///
@@ -2781,10 +2803,12 @@ impl SqlOperationProvider {
             marks_sql,
             id.replace('\'', "''"),
         );
-        self.db_handle
+        let changed = self
+            .db_handle
             .execute(&sql, vec![])
             .await
             .map_err(|e| format!("set_field(content rich) UPDATE failed: {e}"))?;
+        self.assert_row_matched(changed, id, "content")?;
 
         // Re-derive the `block_links` junction from the restored marks (the
         // String path gets this from its separate `marks` follow-up; the Object
@@ -3661,22 +3685,27 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // cheaper autocommit path — none carry an FK.
                 let exec_res = if field == "parent_id" {
                     self.db_handle
-                        .transaction(vec![(sql.clone(), vec![])])
+                        .transaction_changes(vec![(sql.clone(), vec![])])
                         .await
                 } else {
-                    self.db_handle.execute(&sql, vec![]).await.map(|_| ())
+                    self.db_handle.execute(&sql, vec![]).await
                 };
-                if let Err(e) = exec_res {
-                    let msg = e.to_string();
-                    // This UPDATE writes ONLY the `parent_id` column, whose sole
-                    // FK is the block parent — so a FK failure here is
-                    // unambiguously the parent (unlike the multi-FK create path).
-                    if field == "parent_id" && Self::is_fk_violation(&msg) {
-                        let parent = value.as_string().unwrap_or_default();
-                        return Err(Self::parent_not_found(id, parent));
+                let changed = match exec_res {
+                    Ok(changed) => changed,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        // This UPDATE writes ONLY the `parent_id` column, whose
+                        // sole FK is the block parent — so a FK failure here is
+                        // unambiguously the parent (unlike the multi-FK create
+                        // path).
+                        if field == "parent_id" && Self::is_fk_violation(&msg) {
+                            let parent = value.as_string().unwrap_or_default();
+                            return Err(Self::parent_not_found(id, parent));
+                        }
+                        return Err(format!("Failed to execute SQL: {}", msg).into());
                     }
-                    return Err(format!("Failed to execute SQL: {}", msg).into());
-                }
+                };
+                self.assert_row_matched(changed, id, field)?;
 
                 // block_links junction (links increment 2): a marks write
                 // replaces the source's derived link rows.
@@ -4835,6 +4864,10 @@ mod sql_operation_provider_diff_test;
 #[cfg(test)]
 #[path = "set_field_property_kinds_test.rs"]
 mod set_field_property_kinds_test;
+
+#[cfg(test)]
+#[path = "set_field_missing_subject_test.rs"]
+mod set_field_missing_subject_test;
 
 #[cfg(test)]
 #[path = "json_value_parse_differential_test.rs"]
