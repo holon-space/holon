@@ -22,7 +22,9 @@
 pub mod analysis;
 pub mod bridge;
 pub mod compile;
+pub mod enabledness;
 pub mod guards;
+pub mod marking;
 pub mod net;
 
 pub use analysis::ConflictReport;
