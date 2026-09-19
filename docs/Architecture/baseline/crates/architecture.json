@@ -288,6 +288,9 @@
                     "name": "queryable_cache.rs"
                   },
                   {
+                    "name": "set_field_missing_subject_test.rs"
+                  },
+                  {
                     "name": "set_field_property_kinds_test.rs"
                   },
                   {
@@ -1961,6 +1964,9 @@
               }
             ],
             "files": [
+              {
+                "name": "batch_rollback.rs"
+              },
               {
                 "name": "block_op_catalog.rs"
               },
@@ -4776,6 +4782,9 @@
                 "name": "mcp_render_org_matches_writeback.rs"
               },
               {
+                "name": "mcp_sync_partial_write_divergence.rs"
+              },
+              {
                 "name": "pairing_reimport_read_only_home.rs"
               },
               {
@@ -5365,6 +5374,9 @@
             "name": "tests",
             "path": "holon-loro/tests",
             "files": [
+              {
+                "name": "batch_rollback_guard.rs"
+              },
               {
                 "name": "layout_create_idempotence.rs"
               },
