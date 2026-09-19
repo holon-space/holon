@@ -1,3 +1,4 @@
+use holon_api::EntityUri;
 use holon_api::render_types::OperationWiring;
 use holon_api::types::EntityName;
 use holon_frontend::expand_toggle::expand_toggle_effects;
@@ -43,7 +44,7 @@ fn ExpandToggleNode(
     children_vm: Vec<ViewModel>,
     operations: Vec<OperationWiring>,
     entity_name: Option<EntityName>,
-    row_id: Option<String>,
+    row_id: Option<EntityUri>,
 ) -> Element {
     // Optimism, bounded: `(snapshot sequence at click, value asked for)`. The
     // glyph must move on the click — the authoritative flip costs a worker
@@ -83,7 +84,7 @@ fn ExpandToggleNode(
                             want,
                             &operations,
                             entity_name.as_ref(),
-                            row_id.as_deref(),
+                            row_id.as_ref(),
                         ),
                         move |err| {
                             prediction.set(None);

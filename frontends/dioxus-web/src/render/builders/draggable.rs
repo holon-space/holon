@@ -19,10 +19,14 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
         return rsx! { RenderNode { node: child_vm } };
     };
 
+    // The typed id travels to `dnd`; the DOM attribute is text, so it is
+    // spelled out here and nowhere upstream.
+    let dom_block_id = block_id.to_string();
+
     rsx! {
         div {
             "data-role": "draggable",
-            "data-block-id": "{block_id}",
+            "data-block-id": "{dom_block_id}",
             draggable: true,
             style: "cursor: grab; display: inline-block;",
             ondragstart: move |_| {

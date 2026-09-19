@@ -1,5 +1,6 @@
 use holon_api::EntityName;
 use holon_api::EntityRef;
+use holon_api::EntityUri;
 use holon_api::StyleFlags;
 use holon_api::Value;
 use holon_api::link_parser::LinkTargetClassifier;
@@ -47,10 +48,13 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
 }
 
 #[component]
-fn RenderedTextNode(content: String, row_id: Option<String>) -> Element {
+fn RenderedTextNode(content: String, row_id: Option<EntityUri>) -> Element {
     // Prefer the node's own row id (GPUI parity); an enclosing live_block's
-    // EntityContext covers nodes whose interpretation dropped it.
-    let entity_id = row_id.or_else(|| try_consume_context::<EntityContext>().map(|c| c.0));
+    // EntityContext covers nodes whose interpretation dropped it. The worker's
+    // focus export speaks the id as text, so it is spelled out here.
+    let entity_id = row_id
+        .map(|uri| uri.to_string())
+        .or_else(|| try_consume_context::<EntityContext>().map(|c| c.0));
 
     // An empty block paints nothing (ruling D5B-8.a); `min-height` is what
     // keeps its row clickable.
@@ -75,8 +79,10 @@ fn RenderedTextNode(content: String, row_id: Option<String>) -> Element {
 /// (click-to-focus) and carry their style attributes; link runs are visually
 /// distinct and clickable — routed by the shared `link_click_action`.
 #[component]
-fn StyledTextNode(segments: Vec<StyledSegment>, row_id: Option<String>) -> Element {
-    let entity_id = row_id.or_else(|| try_consume_context::<EntityContext>().map(|c| c.0));
+fn StyledTextNode(segments: Vec<StyledSegment>, row_id: Option<EntityUri>) -> Element {
+    let entity_id = row_id
+        .map(|uri| uri.to_string())
+        .or_else(|| try_consume_context::<EntityContext>().map(|c| c.0));
     let dom_entity_id = entity_id.clone().unwrap_or_default();
 
     let style = "white-space: pre-wrap; word-break: break-word; min-height: 1.4em; \

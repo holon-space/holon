@@ -1,3 +1,4 @@
+use holon_api::EntityUri;
 use holon_frontend::view_model::ViewKind;
 
 use super::prelude::*;
@@ -19,8 +20,10 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
 }
 
 #[component]
-fn EditableTextNode(content: String, row_id: Option<String>) -> Element {
+fn EditableTextNode(content: String, row_id: Option<EntityUri>) -> Element {
+    // `EditorCell` and the worker's focus authority key on the id as text.
     let entity_id = row_id
+        .map(|uri| uri.to_string())
         .or_else(|| try_consume_context::<EntityContext>().map(|ctx| ctx.0))
         .unwrap_or_else(|| {
             tracing::error!(

@@ -11,11 +11,13 @@
 
 use std::cell::RefCell;
 
+use holon_api::EntityUri;
+
 thread_local! {
-    static DRAG_SOURCE: RefCell<Option<String>> = const { RefCell::new(None) };
+    static DRAG_SOURCE: RefCell<Option<EntityUri>> = const { RefCell::new(None) };
 }
 
-pub fn start_drag(block_id: String) {
+pub fn start_drag(block_id: EntityUri) {
     tracing::info!("[dnd] drag start: {block_id}");
     DRAG_SOURCE.with(|s| *s.borrow_mut() = Some(block_id));
 }
@@ -26,6 +28,6 @@ pub fn clear_drag() {
 
 /// The block id currently being dragged, if any. Non-consuming: `dragend`
 /// (which always fires on the source, drop or no drop) does the cleanup.
-pub fn current_drag() -> Option<String> {
+pub fn current_drag() -> Option<EntityUri> {
     DRAG_SOURCE.with(|s| s.borrow().clone())
 }

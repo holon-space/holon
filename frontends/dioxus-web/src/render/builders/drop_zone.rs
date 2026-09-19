@@ -1,3 +1,4 @@
+use holon_api::EntityUri;
 use holon_frontend::user_driver::build_drop_intent;
 use holon_frontend::view_model::ViewKind;
 
@@ -30,8 +31,13 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
 }
 
 #[component]
-fn DropZoneNode(target_id: Option<String>, entity_name: String, op_name: String) -> Element {
+fn DropZoneNode(target_id: Option<EntityUri>, entity_name: String, op_name: String) -> Element {
     let mut hovered = use_signal(|| false);
+    // DOM attributes are text; the typed id is what the drop dispatches on.
+    let dom_target_id = target_id
+        .as_ref()
+        .map(EntityUri::to_string)
+        .unwrap_or_default();
     let style = if hovered() {
         "height: 8px; margin: 1px 0; border-radius: 2px; background: #4a9eda;"
     } else {
@@ -40,7 +46,7 @@ fn DropZoneNode(target_id: Option<String>, entity_name: String, op_name: String)
     rsx! {
         div {
             "data-role": "drop-zone",
-            "data-target-id": target_id.as_deref().unwrap_or(""),
+            "data-target-id": dom_target_id,
             style: "{style}",
             // dragover must be cancelled to mark the element as a valid
             // drop target (HTML5 DnD contract); only light up for drags
@@ -66,17 +72,8 @@ fn DropZoneNode(target_id: Option<String>, entity_name: String, op_name: String)
                     );
                     return;
                 };
-                let (Some(source), Some(target)) = (
-                    holon_api::row_id_of_str(&source_id).entity(),
-                    holon_api::row_id_of_str(&target).entity(),
-                ) else {
-                    tracing::warn!(
-                        "[dnd] drop {source_id} -> {target} names no entity — ignoring"
-                    );
-                    return;
-                };
                 let Some(intent) = build_drop_intent(
-                    &source,
+                    &source_id,
                     &target,
                     holon_api::EntityName::new(&entity_name),
                     &op_name,

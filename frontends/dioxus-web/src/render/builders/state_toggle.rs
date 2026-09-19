@@ -37,13 +37,15 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
         return rsx! {};
     }
 
+    // `state_toggle_intent*` still key the row as text.
+    let row_id = node.row_id().map(|uri| uri.to_string());
     let intent = match binding {
         StateToggleBinding::Bool => state_toggle_intent_bool(
             field,
             current == "true",
             &node.operations,
             node.entity_name().as_ref(),
-            node.row_id().as_deref(),
+            row_id.as_deref(),
         ),
         StateToggleBinding::Words => state_toggle_intent(
             field,
@@ -51,7 +53,7 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
             states,
             &node.operations,
             node.entity_name().as_ref(),
-            node.row_id().as_deref(),
+            row_id.as_deref(),
         ),
     };
     if intent.is_none() {
