@@ -46,8 +46,8 @@ use crate::reactive_view_model::ReactiveViewModel;
 use crate::row_origin::RowOrigin;
 
 /// Default operation dispatched when a drop completes on a block drop zone.
-/// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable. //
 /// ALLOW(fallback): doc comment describing pre-existing default-op semantics
+/// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable.
 pub const DEFAULT_DROP_OP_NAME: &str = "move_block";
 
 /// Param key for the source block id on a drop dispatch.
@@ -166,8 +166,8 @@ pub trait UserDriver: Send + Sync {
     /// real OS or channel input cannot thread this through the window
     /// pipeline, so chord dispatch falls through to a focus-path that
     /// injects `extra_params` into the matched operation's params.
-    /// This is NOT a fallback — it is the intended path for that feature. //
     /// ALLOW(fallback): doc explicitly says "NOT a fallback"
+    /// This is NOT a fallback — it is the intended path for that feature.
     ///
     /// Returns `true` if the chord matched an operation and was dispatched.
     async fn send_key_chord(
@@ -639,8 +639,13 @@ impl ReactiveEngineDriver {
     /// closes that gap and matches the reference's fresh
     /// `open_active_editor`.
     pub async fn seed_focused_editor(&self, block_id: &EntityUri) -> Result<()> {
+        // Opening the editor also PLACES the caret at end-of-text, because an
+        // open is what consumes a seed: navigation arms one at offset 0 on the
+        // doc's first child and focuses it WITHOUT opening an editor, so
+        // leaving the caret unplaced here let that seed survive to the first
+        // keystroke and route every backspace to `join_block` at offset 0.
         self.editor_mirror
-            .reset_editor_from_authority(&self.engine, block_id)
+            .seed_for_click(&self.engine, block_id)
             .await
     }
 
@@ -852,8 +857,8 @@ impl ReactiveEngineDriver {
     /// Poll for the entity in the resolved tree: nested `live_block`
     /// watches stream in async, so a click that lands immediately after
     /// `apply_start_app` may see an empty list. Same pattern
-    /// `send_key_chord` uses for its router fallback. If the entity is //
     /// ALLOW(fallback): pre-existing doc on router-poll behavior
+    /// `send_key_chord` uses for its router fallback. If the entity is
     /// never found, we fall through to cursor placement — same as GPUI
     /// when nothing intercepts the click.
     pub async fn click_entity_with_modifiers(
@@ -1292,8 +1297,8 @@ impl UserDriver for ReactiveEngineDriver {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
 
-        // Final fallback: if the router never saw the entity within the //
         // ALLOW(fallback): pre-existing one-shot DFS escape hatch with explicit warn
+        // Final fallback: if the router never saw the entity within the
         // poll window, build a fresh engine-snapshot focus path. This is
         // the same pattern GPUI uses for chord resolution when its router
         // is mid-fan-out, and it forces `ensure_watching` for every
@@ -1376,8 +1381,8 @@ impl UserDriver for ReactiveEngineDriver {
                 _ => return None,
             }
         }
-        // Fallback: one-shot DFS+bubble from the tree snapshot. // ALLOW(fallback):
-        // pre-existing one-shot escape hatch when router has no path
+        // ALLOW(fallback): pre-existing one-shot escape hatch when router has no path
+        // Fallback: one-shot DFS+bubble from the tree snapshot.
         let input = WidgetInput::KeyChord {
             keys: chord.0.clone(),
         };

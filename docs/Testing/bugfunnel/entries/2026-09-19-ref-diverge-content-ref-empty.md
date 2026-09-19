@@ -2,8 +2,8 @@
 id: 2026-09-19-ref-diverge-content-ref-empty
 date: 2026-09-19
 gap: ORACLE
-secondary: null
-status: OPEN
+secondary: ENVIRONMENT
+status: PARTIAL
 summary: >-
   The SUT holds block content the reference believes is empty, visible in
   `block_raw` and in SQL as well as in the org and matview projections, and the
@@ -86,20 +86,73 @@ contribute one line each.
 the invariant can report, including content deltas that have nothing to do with
 the set-membership excess the row documents.
 
-**The underlying divergence: NOT root-caused.** The reference model believes
-the block is empty while the store holds text, on both `block_raw` and `sql`.
-Two directions worth testing first, neither validated here:
-
-1. An oracle gap — the reference never models the write that produced the
-   content (the parallel of `org-blocks-ref-diverge` cause A, where the
-   reference's undo over-reverted file-ingested blocks).
-2. A real store defect — content is committed that no modelled operation
-   authorised.
+**The underlying divergence: ROOT-CAUSED — a SUT-driver defect reachable only
+from the PBT harness.** Neither of the two directions first guessed here was
+right: it is not an oracle gap (the reference was correct) and not a store
+defect (no unauthorised write ever happened — the authorised one never
+happened at all).
 
 The recurrence of one exact block and text (`block:vocab-declared` / `"plan"`)
-across six independent runs argues for a deterministic seeded path rather than
-a race, which makes this cheap to reproduce and is why it is the headline
-candidate of the three.
+is explained: it is not a seeded proptest path but a fixed gherkin fixture.
+The failing case is `catalog_suite
+logseq_parity_replay::logseq_parity_corpus_replay`, scenario `The document's
+own #+TODO: vocabulary decides which keywords promote`
+(`crates/holon-integration-tests/tests/fixtures/logseq-parity/tasks.feature:163`),
+which is on the land gate's sanctioned known-red exclusion list and so was
+never looked at.
+
+The mechanism:
+
+1. `NavigateFocus` runs `ReactiveEngine::spawn_caret_seat`
+   (`crates/holon-frontend/src/reactive.rs:3184`), which resolves the
+   document's first caret target — `block:vocab-declared` — arms
+   `caret_seed = (vocab-declared, 0)` and focuses it **without opening an
+   editor**.
+2. `FocusEditableText` clicks that block. The headless driver placed a caret
+   only when the click CHANGED the focused block, so the already-focused
+   target never got one and the nav seed stayed armed.
+3. The first backspace adopted the stale seed. At offset 0 backspace is the
+   structural arm, so all four keystrokes dispatched `join_block`, found no
+   merge target under a Page parent, and no-op'd. Content stayed `"plan"`.
+
+Measured, not inferred — probe output at `lane-logs/repro3-probe.log:1026`:
+`tracked=None armed_seed=Some(0)` with `current_text="plan"`, and
+`[inv-sql-budget] DeleteBackward … writes=0/0` alongside four
+`INSERT INTO operation` rows.
+
+Production GPUI cannot reach this: `grab_focus_and_seed_caret`
+(`frontends/gpui/src/views/editor_view.rs:1237`) applies the seed at the mount
+navigation triggers and **consumes** it, and a GPUI mouse click places the
+caret directly via `set_cursor_position` rather than through a seed. The two
+shipped app drivers (`TuiUserDriver`, `GpuiUserDriver`) each implement their
+own `click_entity` and never delegate to the headless one, so no app path
+reaches it. The divergence is therefore a prod-vs-test parity defect in the
+harness's SUT driver.
+
+## Gap argument
+
+Two escapes are recorded here, and the litmus questions separate them cleanly.
+
+**Primary ORACLE — the masking.** The invariants did their job: three of them
+fired, loudly and every run. What failed is the layer that reads their output.
+The classifier claimed the panic for a row documenting a different shape, so a
+firing invariant produced no actionable signal for nine logs. This is the
+oracle layer failing to distinguish, not a generator or a wiring gap.
+
+**Secondary ENVIRONMENT — the underlying divergence.** Not COVERAGE: the
+interaction was generated, deterministically, every run. Not ORACLE: the
+invariant fired the moment the state was reached. It is the ENVIRONMENT
+litmus in its inverse form — the failing code path exists *only* in the test's
+wiring, because the headless driver models navigation-then-click differently
+from the way GPUI mounts an editor and retires its caret seed. The skill's
+natural remedy for ENVIRONMENT is "make test and prod more similar", which is
+exactly the fix: the editor-open path now places the caret and consumes the
+seed, as the GPUI mount does.
+
+Not FALSE-ALARM. The reference asserted something the product does promise —
+backspace deletes a character — and the scenario's own `Then` steps encode it.
+A real component misbehaved; it simply sits in harness-reachable code rather
+than on an app path.
 
 ## Missing piece
 
@@ -111,7 +164,8 @@ had no way to notice the overbreadth — its 123 archived panics contain no
 
 ## Remedy
 
-PARTIAL — classification fixed, defect open.
+PARTIAL — classification fixed, driver defect fixed, known-red row still
+standing pending a full-depth soak.
 
 - `org-blocks-ref-diverge` narrowed to `field deltas \(0\):`.
 - This shape registered as `ref-diverge-content-ref-empty` (`known-red`,
@@ -142,10 +196,43 @@ PARTIAL — classification fixed, defect open.
   pattern (it is the registry table's column separator). The failure direction
   is safe — an unclassified red is triaged, never silenced.
 
+### The driver defect (lane `content-ref-empty-rca`)
+
+Fixed in two places, both in `holon-frontend`:
+
+- `HeadlessEditorMirror::seed_for_click` now calls `engine.consume_caret_seed`
+  after placing the caret. Placing a caret retires the seed, exactly as GPUI's
+  mount does.
+- `ReactiveEngineDriver::seed_focused_editor` — the editor-open path — routes
+  through `seed_for_click` instead of `reset_editor_from_authority`, so opening
+  an editor places the caret rather than only re-seeding the buffer.
+
+No hand-authored regression was appended: the lock is the existing corpus
+scenario, which flips red → green. Red `lane-logs/repro1-baseline.log`
+(`1 test run: 0 passed, 1 failed`), green `lane-logs/repro5-narrow-fix.log`
+(`2 tests run: 2 passed`, run together with
+`split_block_stale_display_regression` because a broader first attempt — which
+dropped the already-focused guard in `click_entity` outright — reddened that
+test with `reference model cursor_byte=0, SUT tracked caret=5`; the narrow fix
+keeps both green).
+
+GPUI seed ordering was checked, not assumed: the windowed overlay calls
+`seed_focused_editor` on the shared engine after a real GPUI click, so the
+consume could in principle retire a seed the GPUI mount had not yet applied.
+It cannot. `grab_focus_and_seed_caret` runs synchronously inside the mount
+(`editor_view.rs:756`) and on focus arrival (`:1116`), both before the click
+returns, and a click places the caret directly rather than arming a seed. The
+50 caret/seed/editor tests in `holon-gpui --features pbt` show 46 passed / 4
+failed with the fix versus 45 passed / 5 failed on the base — the same 4
+pre-existing failures both sides, no regression.
+
 **RATIFICATION OWED** — triaged, not yet ratified by Martin.
 
-Next step: replay `block:vocab-declared` from one of the six nextest logs as a
-hand-authored regression and decide whether the reference or the store is
-wrong. Because the delta reaches `block_raw` and `sql`, assume the store may be
-at fault rather than reaching for the oracle-bug reflex that causes A and B of
-`org-blocks-ref-diverge` established.
+Next steps:
+
+1. Retire the `ref-diverge-content-ref-empty` known-red registry row and drop
+   `logseq_parity_corpus_replay` from the land gate's sanctioned exclusion
+   list, after one full-depth keystone sweep confirms the shape is gone.
+2. `triage/runs/A2-lib-and-composed.log` carries seven more instances on
+   `block:gen-11` (`sut="uta"`, `sut="a"`) from a different suite. Not
+   investigated; they may or may not share this cause.

@@ -495,6 +495,11 @@ impl HeadlessEditorMirror {
             .lock()
             .unwrap()
             .insert(block_id.clone(), seeded);
+        // Placing the caret retires whatever seed was armed for this block:
+        // GPUI's seed is single-use and consumed by the mount that applies it,
+        // so leaving it armed here lets the next converge or keystroke yank the
+        // caret back to an offset this open has already superseded.
+        engine.consume_caret_seed(block_uri);
         Ok(())
     }
 

@@ -5,11 +5,11 @@
 # as debt-free. Ratchet DOWN: as violations are fixed, regenerate with
 #   ./archlint/archlint --update-baseline
 # See archlint/BURNDOWN.md for the category table and burn-down priority.
-# Snapshot total: 85 violation(s) across 11 rule(s).
+# Snapshot total: 80 violation(s) across 10 rule(s).
 #
 #   deleted_cell_symbol: 2
 #   entity_uri_from_raw: 9
-#   fallback: 11
+#   fallback: 7
 #   frontend-provider-dep: 1
 #   frontend-raw-sql: 3
 #   loro_doc_escape: 17
@@ -31,10 +31,6 @@ entity_uri_from_raw	crates/holon-frontend/src/tour.rs	let entity = AnchorSelecto
 entity_uri_from_raw	crates/holon-frontend/src/tour.rs	under: AnchorSelector::Block(EntityUri::from_raw("page-x")),
 fallback	crates/holon-core/src/boundary_enforcer.rs	/// It is deliberately NOT a silent fallback for a missing decision: there is no
 fallback	crates/holon-frontend/src/config.rs	/// `HOLON_LORO_PEER_ID` env / random fallback. Set it when more than one
-fallback	crates/holon-frontend/src/user_driver.rs	// Final fallback: if the router never saw the entity within the //
-fallback	crates/holon-frontend/src/user_driver.rs	/// This is NOT a fallback — it is the intended path for that feature. //
-fallback	crates/holon-frontend/src/user_driver.rs	/// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable. //
-fallback	crates/holon-frontend/src/user_driver.rs	/// `send_key_chord` uses for its router fallback. If the entity is //
 fallback	frontends/dioxus-web/src/render/builders/mod.rs	// per file. Variants not covered by a file hit the fallback (empty element //
 fallback	frontends/dioxus-web/src/render/builders/mod.rs	/// Fallback arm emitted by `builder_registry!` when a `ViewKind` variant //
 fallback	frontends/gpui/src/user_driver.rs	/// (with a short poll fallback for idle windows, whose `changed()` may not
