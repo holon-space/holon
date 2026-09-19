@@ -99,7 +99,10 @@ fn substitute_outline(expr: RenderExpr) -> RenderExpr {
 fn outline_row(ix: usize) -> ReactiveViewModel {
     let label = format!("outline {ix}");
     let mut data = HashMap::new();
-    data.insert("id".to_string(), Value::String(format!("outline-{ix}")));
+    data.insert(
+        "id".to_string(),
+        Value::String(format!("block:outline-{ix}")),
+    );
     data.insert("content".to_string(), Value::String(label.clone()));
     let mut props = HashMap::new();
     props.insert("content".to_string(), Value::String(label));
@@ -238,7 +241,7 @@ fn render_panel(cx: &mut TestAppContext, backlink_rows: usize, window: Size<gpui
             i.height > 0.0
                 && i.entity_id
                     .as_deref()
-                    .is_some_and(|e| e.starts_with("backlink-"))
+                    .is_some_and(|e| e.starts_with("block:backlink-"))
         })
         .count();
     Rung {

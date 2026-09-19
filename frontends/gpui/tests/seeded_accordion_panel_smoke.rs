@@ -142,10 +142,14 @@ fn substitute_outline(expr: RenderExpr) -> RenderExpr {
 }
 
 /// Data-bound `text` row (see `builders/text.rs`): `data.id` + `field ==
-/// "content"` makes its bounds appear keyed by `entity_id` (`outline-{ix}`).
+/// "content"` makes its bounds appear keyed by `entity_id`
+/// (`block:outline-{ix}`).
 fn outline_row(ix: usize) -> ReactiveViewModel {
     let mut data = HashMap::new();
-    data.insert("id".to_string(), Value::String(format!("outline-{ix}")));
+    data.insert(
+        "id".to_string(),
+        Value::String(format!("block:outline-{ix}")),
+    );
     data.insert(
         "content".to_string(),
         Value::String(format!("outline {ix}")),
@@ -350,7 +354,7 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
 
     // The outline (collection_view stand-in) is present and ABOVE the footer —
     // the scrollable main region, not clipped away by the split.
-    let outline = rows_with_entity_prefix(&snap, "outline-");
+    let outline = rows_with_entity_prefix(&snap, "block:outline-");
     assert!(
         outline.len() >= 3,
         "the outline region above the accordion must render rows (collection_view stand-in).\n{}",

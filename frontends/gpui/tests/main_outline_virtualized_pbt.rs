@@ -59,7 +59,7 @@ const ITEM_COUNT: usize = 1200;
 const VIEWPORT_ROW_CEILING: usize = 600;
 
 fn item_id(ix: usize) -> String {
-    format!("test-item-{ix}")
+    format!("block:test-item-{ix}")
 }
 
 /// A `text` row whose production render path records bounds keyed by `data.id`.
@@ -111,7 +111,7 @@ fn distinct_rows_rendered(registry: &BoundsRegistry) -> HashSet<String> {
         .all_elements()
         .iter()
         .filter_map(|(_, info)| info.entity_id.as_deref())
-        .filter(|id| id.starts_with("test-item-"))
+        .filter(|id| id.starts_with("block:test-item-"))
         .map(|id| id.to_string())
         .collect()
 }
@@ -169,7 +169,7 @@ fn max_visible_row_ix(registry: &BoundsRegistry) -> Option<usize> {
         .iter()
         .filter(|(_, info)| info.height > 0.0)
         .filter_map(|(_, info)| info.entity_id.as_deref())
-        .filter_map(|id| id.strip_prefix("test-item-"))
+        .filter_map(|id| id.strip_prefix("block:test-item-"))
         .filter_map(|n| n.parse::<usize>().ok())
         .max()
 }

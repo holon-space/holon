@@ -102,7 +102,7 @@ fn extract_sidebar_render() -> String {
 
 fn page_row(ix: usize) -> ReactiveViewModel {
     let mut data = HashMap::new();
-    data.insert("id".to_string(), Value::String(format!("page-{ix}")));
+    data.insert("id".to_string(), Value::String(format!("block:page-{ix}")));
     data.insert("content".to_string(), Value::String(format!("Page {ix}")));
     let mut props = HashMap::new();
     props.insert("content".to_string(), Value::String(format!("Page {ix}")));
@@ -307,12 +307,12 @@ fn left_sidebar_scrolls_to_its_last_row(cx: &mut TestAppContext) {
         band.y + band.height - WINDOW_H,
     );
 
-    let pages = rows_with_prefix(&bounds, "page-");
+    let pages = rows_with_prefix(&bounds, "block:page-");
     assert!(
         !pages.is_empty(),
         "the sidebar must render page rows at all"
     );
-    let integrations = rows_with_prefix(&bounds, "integration-");
+    let integrations = rows_with_prefix(&bounds, "block:integration-");
 
     // The LAST authored row in the sidebar column is the last Integrations
     // row. At scroll maximum it must be fully inside the window.

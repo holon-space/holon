@@ -97,7 +97,10 @@ fn named_source_row(row: &std::sync::Arc<holon_api::widget_spec::DataRow>) -> Re
 }
 
 fn canned_live_query_row(prefix: &str, ix: usize) -> ReactiveViewModel {
-    let id = format!("{prefix}-{ix}");
+    // Schemed, as a row reaching the frontend is: the binding records the
+    // canonical URI as the row's `entity_id`, so a bare id here would be
+    // normalised to this same string and never match a bare probe.
+    let id = format!("block:{prefix}-{ix}");
     let label = format!("{prefix} reference {ix}");
     let mut data = std::collections::HashMap::new();
     data.insert("id".to_string(), holon_api::Value::String(id));

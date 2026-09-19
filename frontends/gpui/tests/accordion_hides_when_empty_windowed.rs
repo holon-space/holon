@@ -120,7 +120,7 @@ fn text_row(id: String, label: String) -> ReactiveViewModel {
 
 fn outline_collection() -> ReactiveViewModel {
     let items: Vec<ReactiveViewModel> = (0..OUTLINE_N)
-        .map(|i| text_row(format!("outline-{i}"), format!("outline {i}")))
+        .map(|i| text_row(format!("block:outline-{i}"), format!("outline {i}")))
         .collect();
     ReactiveViewModel {
         collection: Some(Arc::new(ReactiveView::new_static_with_layout(
@@ -236,7 +236,7 @@ fn painted_backlinks(snap: &BoundsSnapshot) -> usize {
             i.height > 0.0
                 && i.entity_id
                     .as_deref()
-                    .is_some_and(|e| e.starts_with("backlink-"))
+                    .is_some_and(|e| e.starts_with("block:backlink-"))
         })
         .count()
 }
@@ -315,7 +315,10 @@ fn without_the_flag_an_empty_accordion_keeps_its_title(cx: &mut TestAppContext) 
 // ── The live shape (R2, R3) ────────────────────────────────────────────────
 
 fn backlink_row(ix: usize) -> Arc<ReactiveViewModel> {
-    Arc::new(text_row(format!("backlink-{ix}"), format!("backlink {ix}")))
+    Arc::new(text_row(
+        format!("block:backlink-{ix}"),
+        format!("backlink {ix}"),
+    ))
 }
 
 /// `column( <outline>, divider, accordion(hide_when_empty, <content>) )` — the

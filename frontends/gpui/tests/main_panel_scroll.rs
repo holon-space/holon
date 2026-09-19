@@ -56,7 +56,7 @@ const ITEM_COUNT: usize = 80;
 const FAR_IX: usize = 60;
 
 fn item_id(ix: usize) -> String {
-    format!("test-item-{ix}")
+    format!("block:test-item-{ix}")
 }
 
 /// A `text` row whose production render path records bounds keyed by `data.id`

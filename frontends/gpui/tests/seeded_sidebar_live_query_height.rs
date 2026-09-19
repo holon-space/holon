@@ -19,9 +19,9 @@
 //!
 //! The `integration_state` rows come from `TestServices`' canned
 //! `watch_query_live` (`support/mod.rs`), which recognises the seeded SQL and
-//! yields data-bound `text` rows keyed `integration-{ix}` — so this asserts
-//! RENDERED ROWS, not just the region box, which is exactly the assertion the
-//! BugFunnel COVERAGE row says nothing in the suite made.
+//! yields data-bound `text` rows keyed `block:integration-{ix}` — so this
+//! asserts RENDERED ROWS, not just the region box, which is exactly the
+//! assertion the BugFunnel COVERAGE row says nothing in the suite made.
 //!
 //! Run: `cargo test -p holon-gpui --test seeded_sidebar_live_query_height`
 
@@ -172,7 +172,7 @@ fn seeded_sidebar_live_query_paints_nonzero_height(cx: &mut TestAppContext) {
     // zero height must not pass).
     // `support::TestServices` ids the canned integration rows `integration-<n>`
     // (its `watch_query_live` picks the prefix off the query's table name).
-    let rows = rows_with_entity_prefix(&snap, "integration-");
+    let rows = rows_with_entity_prefix(&snap, "block:integration-");
     assert!(
         rows.len() >= 3,
         "the Integrations section must render its `integration_state` rows; found {} \

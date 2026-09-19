@@ -191,6 +191,44 @@ impl EntityUri {
         Self::new("file", &buf.into_string())
     }
 
+    // -- Condition --
+
+    /// The entity a degraded-state row names: `condition:<subject>:<kind>`.
+    ///
+    /// Both parts are percent-encoded, as [`Self::file`] encodes a path: the
+    /// subject is an integration name from config, so it is not the caller's
+    /// to promise URI-safe. The row's `id` column carries this, and the render
+    /// binding classifies that column — an id that formed no URI would cost
+    /// the row its identity in the bounds registry.
+    /// Both parts must be non-empty: an empty subject mints
+    /// `condition::<kind>`, whose `:`-leading id no parser accepts as
+    /// schemed, so it silently re-schemes to `block:condition:…`. A
+    /// condition about nothing is a programming error, so it fails here
+    /// rather than downstream.
+    pub fn condition(subject: &str, kind: &str) -> Self {
+        use fluent_uri::encoding::EString;
+        use fluent_uri::encoding::encoder::Data;
+        use fluent_uri::encoding::encoder::Path;
+        assert!(
+            !subject.is_empty(),
+            "EntityUri::condition({subject:?}, {kind:?}): a condition names the thing it is about"
+        );
+        assert!(
+            !kind.is_empty(),
+            "EntityUri::condition({subject:?}, {kind:?}): a condition names its kind"
+        );
+        let mut buf = EString::<Path>::new();
+        buf.encode::<Data>(subject);
+        buf.push(':');
+        buf.encode::<Data>(kind);
+        let path = buf.into_string();
+        // Not [`Self::new`]: its double-scheme guard reads the path as a BARE
+        // id, and this one is two parts joined by `:`, so a subject spelled
+        // `block` would trip it on a perfectly well-formed URI.
+        Self::parse(&format!("condition:{path}"))
+            .expect("percent-encoded, non-empty parts always form a URI")
+    }
+
     // -- Sentinel --
 
     pub fn no_parent() -> Self {
@@ -565,5 +603,64 @@ mod tests {
         let parsed = EntityUri::parse(&s).unwrap();
         assert_eq!(uri, parsed);
         assert!(parsed.is_file());
+    }
+
+    /// The `condition:` scheme is an ENTITY scheme, so a condition row's id
+    /// must survive the one classifier every `id` column goes through.
+    #[test]
+    fn a_condition_uri_classifies_as_its_own_entity() {
+        let uri = EntityUri::condition("todoist", "integration-connect-failed");
+        assert_eq!(
+            uri.to_string(),
+            "condition:todoist:integration-connect-failed"
+        );
+        assert!(!uri.is_block(), "a condition is not a block");
+        assert_eq!(
+            crate::widget_spec::row_id_of_str(uri.as_str()).entity(),
+            Some(uri.clone()),
+            "the classifier must return the same URI, not a re-schemed one"
+        );
+    }
+
+    /// A subject can be a canonical file path (`loro_seams.rs`), so the
+    /// separator must stay unambiguous when the subject carries `/` or `:`.
+    #[test]
+    fn an_awkward_subject_still_round_trips_through_the_classifier() {
+        for subject in ["/Users/m/a b/vault.org", "host:1234", "a%b", "todoist"] {
+            let uri = EntityUri::condition(subject, "integration-connect-failed");
+            assert_eq!(
+                crate::widget_spec::row_id_of_str(uri.as_str()).entity(),
+                Some(uri.clone()),
+                "subject {subject:?} must round-trip, got {uri}"
+            );
+        }
+    }
+
+    /// A subject spelled like a known scheme is well-formed here — the
+    /// double-scheme guard that rejects it is about BARE ids, not about a
+    /// two-part condition name.
+    #[test]
+    fn a_subject_spelled_like_a_scheme_is_accepted() {
+        for subject in ["block", "file", "sentinel"] {
+            let uri = EntityUri::condition(subject, "integration-connect-failed");
+            assert_eq!(uri.scheme(), "condition", "got {uri}");
+            assert!(
+                crate::widget_spec::row_id_of_str(uri.as_str())
+                    .entity()
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "names the thing it is about")]
+    fn an_empty_condition_subject_fails_loudly() {
+        let _ = EntityUri::condition("", "integration-connect-failed");
+    }
+
+    #[test]
+    #[should_panic(expected = "names its kind")]
+    fn an_empty_condition_kind_fails_loudly() {
+        let _ = EntityUri::condition("todoist", "");
     }
 }

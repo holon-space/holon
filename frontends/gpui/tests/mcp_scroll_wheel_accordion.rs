@@ -63,7 +63,7 @@ const VIEWPORT_H: f32 = 400.0;
 const BACKLINK_COUNT: usize = 80;
 
 fn backlink_id(ix: usize) -> String {
-    format!("backlink-{ix}")
+    format!("block:backlink-{ix}")
 }
 
 /// Production-faithful `text` row (see `builders/text.rs`): `data.id` +

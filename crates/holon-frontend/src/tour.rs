@@ -88,7 +88,9 @@ impl AnchorSelector {
     /// `entity_id` instead (see [`resolve_anchor`]).
     pub fn geometry_key(&self) -> Option<String> {
         match self {
-            Self::Block(id) => Some(format!("render-entity-{}", id.id())),
+            // The FULL URI, as `render_entity_view` keys the element with.
+            // `id()` strips the scheme and matches nothing it is asked for.
+            Self::Block(id) => Some(format!("render-entity-{}", id.as_str())),
             Self::Panel(p) => Some(format!("panel:{}", p.as_str())),
             Self::Entity(_) => None,
         }
@@ -223,7 +225,9 @@ pub enum AnchorResolution {
 /// the real GPUI `BoundsRegistry` implements.
 pub fn resolve_anchor(anchor: &AnchorSelector, geo: &dyn GeometryProvider) -> AnchorResolution {
     let info = match anchor {
-        AnchorSelector::Entity(id) => geo.find_by_entity_id(id.id()),
+        // The FULL URI: every writer records the canonical form as
+        // `entity_id`, so a scheme-stripped scan finds nothing.
+        AnchorSelector::Entity(id) => geo.find_by_entity_id(id.as_str()),
         _ => anchor.geometry_key().and_then(|key| geo.element_info(&key)),
     };
     match info {
@@ -441,7 +445,13 @@ mod tests {
     fn resolves_panel_and_block_anchors_and_reports_missing() {
         let mut m = HashMap::new();
         m.insert("panel:sidebar".to_string(), info(None));
-        m.insert("render-entity-page-x".to_string(), info(Some("page-x")));
+        // Production-shaped: `render_entity_view` keys the element with the
+        // row's FULL URI and every writer records the full URI as `entity_id`.
+        // A bare key here would let a scheme-stripping reader pass.
+        m.insert(
+            "render-entity-block:page-x".to_string(),
+            info(Some("block:page-x")),
+        );
         let geo = MockGeometry(m);
 
         let sidebar = AnchorSelector::Panel(WellKnownPanel::Sidebar);

@@ -79,7 +79,7 @@ fn text_row(id: &str) -> ReactiveViewModel {
 /// rows actually arrive.
 fn band_row(rows: usize) -> (ReactiveViewModel, Arc<ReactiveView>) {
     let items: Vec<ReactiveViewModel> = (0..rows)
-        .map(|i| text_row(&format!("band-row-{i:02}")))
+        .map(|i| text_row(&format!("block:band-row-{i:02}")))
         .collect();
     let inner = Arc::new(ReactiveView::new_static_with_layout(
         items,
@@ -98,11 +98,11 @@ fn band_row(rows: usize) -> (ReactiveViewModel, Arc<ReactiveView>) {
 /// `columns( column( <outline collection> ) )` — the production main-panel
 /// shape (same as `main_outline_virtualized_pbt::main_panel_columns_root`).
 fn page_root(band_rows: usize) -> (Arc<ReactiveViewModel>, Arc<ReactiveView>) {
-    let mut items = vec![text_row("pre-0"), text_row("pre-1")];
+    let mut items = vec![text_row("block:pre-0"), text_row("block:pre-1")];
     let (band, band_view) = band_row(band_rows);
     items.push(band);
-    items.push(text_row("sib"));
-    items.extend((0..POST_ROWS).map(|i| text_row(&format!("post-{i:02}"))));
+    items.push(text_row("block:sib"));
+    items.extend((0..POST_ROWS).map(|i| text_row(&format!("block:post-{i:02}"))));
 
     let outline = Arc::new(ReactiveView::new_static_with_layout(
         items,
@@ -146,7 +146,7 @@ fn row_box(bounds: &BoundsRegistry, entity_id: &str) -> Option<(f32, f32)> {
 fn assert_band_and_sibling_disjoint(bounds: &BoundsRegistry, expected_rows: usize, phase: &str) {
     let painted: Vec<(String, f32, f32)> = (0..expected_rows)
         .filter_map(|i| {
-            let id = format!("band-row-{i:02}");
+            let id = format!("block:band-row-{i:02}");
             row_box(bounds, &id).map(|(y, h)| (id, y, h))
         })
         .collect();
@@ -163,7 +163,7 @@ fn assert_band_and_sibling_disjoint(bounds: &BoundsRegistry, expected_rows: usiz
         .iter()
         .map(|(_, y, h)| y + h)
         .fold(f32::MIN, f32::max);
-    let (sib_top, sib_height) = row_box(bounds, "sib").unwrap_or_else(|| {
+    let (sib_top, sib_height) = row_box(bounds, "block:sib").unwrap_or_else(|| {
         panic!("precondition ({phase}): the row after the band must be painted")
     });
 
@@ -173,7 +173,7 @@ fn assert_band_and_sibling_disjoint(bounds: &BoundsRegistry, expected_rows: usiz
         .filter(|(_, i)| {
             i.entity_id
                 .as_deref()
-                .is_some_and(|id| id.starts_with("post-"))
+                .is_some_and(|id| id.starts_with("block:post-"))
         })
         .count();
     eprintln!(
@@ -264,7 +264,7 @@ fn outline_reserves_the_height_a_grown_band_paints(cx: &mut TestAppContext) {
     {
         let mut items = band.items.lock_mut();
         for i in INITIAL_ROWS..BAND_ROWS {
-            items.push_cloned(Arc::new(text_row(&format!("band-row-{i:02}"))));
+            items.push_cloned(Arc::new(text_row(&format!("block:band-row-{i:02}"))));
         }
     }
     entity.update(&mut vcx.clone(), |_, cx| cx.notify());

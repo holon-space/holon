@@ -51,7 +51,7 @@ const SIDEBAR_LOCAL: &str = "default-left-sidebar";
 
 fn page_row(ix: usize) -> ReactiveViewModel {
     let mut data = HashMap::new();
-    data.insert("id".to_string(), Value::String(format!("page-{ix}")));
+    data.insert("id".to_string(), Value::String(format!("block:page-{ix}")));
     data.insert("content".to_string(), Value::String(format!("Page {ix}")));
     let mut props = HashMap::new();
     props.insert("content".to_string(), Value::String(format!("Page {ix}")));
@@ -178,7 +178,7 @@ fn run_sidebar_wheel(cx: &mut TestAppContext, with_switcher: bool) -> (f32, f32)
     });
     vcx.run_until_parked();
     bounds.flush();
-    let before = visible_height(&bounds, &format!("page-{FAR_IX}")).unwrap_or(0.0);
+    let before = visible_height(&bounds, &format!("block:page-{FAR_IX}")).unwrap_or(0.0);
     simulate_wheel_at(
         vcx,
         point(px(SIDEBAR_W / 2.0), px(VIEWPORT_H / 2.0)),
@@ -186,7 +186,7 @@ fn run_sidebar_wheel(cx: &mut TestAppContext, with_switcher: bool) -> (f32, f32)
     );
     vcx.run_until_parked();
     bounds.flush();
-    let after = visible_height(&bounds, &format!("page-{FAR_IX}")).unwrap_or(0.0);
+    let after = visible_height(&bounds, &format!("block:page-{FAR_IX}")).unwrap_or(0.0);
     (before, after)
 }
 

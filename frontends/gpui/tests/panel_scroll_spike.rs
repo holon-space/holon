@@ -42,9 +42,16 @@ const TARGET_IX: usize = 45;
 const VIEWPORT_W: f32 = 400.0;
 const VIEWPORT_H: f32 = 300.0;
 
+/// Production-shaped: a row reaching the frontend carries its scheme, and the
+/// binding records that canonical form as the row's `entity_id`. A bare
+/// `test-item-N` here would be normalised to the same thing and then never
+/// match a probe written in the bare form.
 fn item_id(ix: usize) -> String {
-    format!("test-item-{ix}")
+    format!("block:test-item-{ix}")
 }
+
+/// The prefix every fixture row's `entity_id` carries in the registry.
+const ITEM_ID_PREFIX: &str = "block:test-item-";
 
 /// Build a `text` ReactiveViewModel whose render path (`builders/text.rs:68`)
 /// records bounds keyed by `row_id` IFF `data.id` is set AND `props.field`
@@ -236,7 +243,7 @@ fn virtualized_list_bounds_stay_viewport_sized(cx: &mut TestAppContext) {
         .all_elements()
         .iter()
         .filter_map(|(_, info)| info.entity_id.as_deref().map(str::to_string))
-        .filter(|id| id.starts_with("test-item-"))
+        .filter(|id| id.starts_with(ITEM_ID_PREFIX))
         .collect();
 
     assert!(
@@ -283,7 +290,7 @@ fn visible_index_scroll_reveals_far_row(cx: &mut TestAppContext) {
     let shell = entity
         .read_with(vcx, |fv, _| fv.reactive_shell(&view))
         .expect("ReactiveShell entity not in cache");
-    // ALLOW(entity_uri_from_raw): test fixture row id (schemeless, matches
+    // ALLOW(entity_uri_from_raw): test fixture row id (already schemed, matches
     // text_item's data.id)
     let target_uri = holon_api::EntityUri::from_raw(&item_id(TARGET_IX));
     let ix = shell
@@ -373,7 +380,7 @@ fn sidebar_column_nested_collection_paints_and_commits_bounds(cx: &mut TestAppCo
         .all_elements()
         .iter()
         .filter_map(|(_, info)| info.entity_id.as_deref().map(str::to_string))
-        .filter(|id| id.starts_with("test-item-"))
+        .filter(|id| id.starts_with(ITEM_ID_PREFIX))
         .collect();
 
     // Every one of the handful of page rows must paint (they all fit the
@@ -469,7 +476,7 @@ fn main_panel_collection_view_paints_nonzero_height_in_column(cx: &mut TestAppCo
         .all_elements()
         .iter()
         .filter_map(|(_, info)| info.entity_id.as_deref().map(str::to_string))
-        .filter(|id| id.starts_with("test-item-"))
+        .filter(|id| id.starts_with(ITEM_ID_PREFIX))
         .collect();
 
     for ix in 0..SIDEBAR_PAGE_COUNT {

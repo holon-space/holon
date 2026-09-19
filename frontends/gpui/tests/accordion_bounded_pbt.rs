@@ -48,10 +48,10 @@ use support::simulate_wheel_at;
 const EPS: f32 = 1.5;
 
 fn outline_id(ix: usize) -> String {
-    format!("outline-{ix}")
+    format!("block:outline-{ix}")
 }
 fn backlink_id(ix: usize) -> String {
-    format!("backlink-{ix}")
+    format!("block:backlink-{ix}")
 }
 
 /// Production-faithful `text` row (see `builders/text.rs`): `data.id` +

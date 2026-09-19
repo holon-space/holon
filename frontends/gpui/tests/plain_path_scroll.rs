@@ -55,7 +55,10 @@ const LEGACY_SRC: &str = "column(collection_view(), divider(), \
 
 fn outline_row(ix: usize) -> ReactiveViewModel {
     let mut data = HashMap::new();
-    data.insert("id".to_string(), Value::String(format!("outline-{ix}")));
+    data.insert(
+        "id".to_string(),
+        Value::String(format!("block:outline-{ix}")),
+    );
     data.insert(
         "content".to_string(),
         Value::String(format!("outline {ix}")),
@@ -217,7 +220,7 @@ fn run_scroll_case(cx: &mut TestAppContext, with_sidebar: bool, use_vms: bool) -
     });
     vcx.run_until_parked();
     bounds.flush();
-    let before = visible_height(&bounds, &format!("outline-{FAR_IX}")).unwrap_or(0.0);
+    let before = visible_height(&bounds, &format!("block:outline-{FAR_IX}")).unwrap_or(0.0);
     simulate_wheel_at(
         vcx,
         point(px(VIEWPORT_W / 2.0), px(VIEWPORT_H / 2.0)),
@@ -225,7 +228,7 @@ fn run_scroll_case(cx: &mut TestAppContext, with_sidebar: bool, use_vms: bool) -
     );
     vcx.run_until_parked();
     bounds.flush();
-    let after = visible_height(&bounds, &format!("outline-{FAR_IX}")).unwrap_or(0.0);
+    let after = visible_height(&bounds, &format!("block:outline-{FAR_IX}")).unwrap_or(0.0);
     (before, after)
 }
 
@@ -362,7 +365,7 @@ fn run_shell_case(
     });
     vcx.run_until_parked();
     bounds.flush();
-    let before = visible_height(&bounds, &format!("outline-{FAR_IX}")).unwrap_or(0.0);
+    let before = visible_height(&bounds, &format!("block:outline-{FAR_IX}")).unwrap_or(0.0);
     simulate_wheel_at(
         vcx,
         point(px(VIEWPORT_W / 2.0), px(VIEWPORT_H / 2.0)),
@@ -370,7 +373,7 @@ fn run_shell_case(
     );
     vcx.run_until_parked();
     bounds.flush();
-    let after = visible_height(&bounds, &format!("outline-{FAR_IX}")).unwrap_or(0.0);
+    let after = visible_height(&bounds, &format!("block:outline-{FAR_IX}")).unwrap_or(0.0);
     (before, after)
 }
 

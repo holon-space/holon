@@ -53,13 +53,23 @@ fn text_item(id: String, label: String) -> ReactiveViewModel {
 /// `footer_rows` tall enough to exceed the cap so the px-cap engages.
 fn sticky_root(content_rows: usize, footer_rows: usize, fraction: f64) -> Arc<ReactiveViewModel> {
     let content: Vec<Arc<ReactiveViewModel>> = (0..content_rows)
-        .map(|i| Arc::new(text_item(format!("crow-{i}"), format!("content row {i}"))))
+        .map(|i| {
+            Arc::new(text_item(
+                format!("block:crow-{i}"),
+                format!("content row {i}"),
+            ))
+        })
         .collect();
     let mut content_col = ReactiveViewModel::from_widget("column", HashMap::new());
     content_col.children = content;
 
     let footer_children: Vec<Arc<ReactiveViewModel>> = (0..footer_rows)
-        .map(|i| Arc::new(text_item(format!("frow-{i}"), format!("footer row {i}"))))
+        .map(|i| {
+            Arc::new(text_item(
+                format!("block:frow-{i}"),
+                format!("footer row {i}"),
+            ))
+        })
         .collect();
     let mut acc_props = HashMap::new();
     acc_props.insert("title".to_string(), Value::String("Sticky footer".into()));
@@ -298,7 +308,12 @@ fn journals_root(
         children.push(Arc::new(col));
     }
     let footer_children: Vec<Arc<ReactiveViewModel>> = (0..footer_rows)
-        .map(|i| Arc::new(text_item(format!("frow-{i}"), format!("footer row {i}"))))
+        .map(|i| {
+            Arc::new(text_item(
+                format!("block:frow-{i}"),
+                format!("footer row {i}"),
+            ))
+        })
         .collect();
     let mut acc_props = HashMap::new();
     acc_props.insert("title".to_string(), Value::String("Journals".into()));
@@ -353,7 +368,7 @@ fn journals_multi_section_engages_all_three_invariants(cx: &mut TestAppContext) 
     let pre_top = footer_top(&pre_obs);
     let outer_id = "section:section-stack:0";
     let outer_pre = y_of(&pre_obs, outer_id);
-    let footer_row_pre = y_of(&pre_obs, "frow-0");
+    let footer_row_pre = y_of(&pre_obs, "block:frow-0");
 
     // (1) inv-sticky-accordion-spec over the multi-section render.
     let sut = StickyLayoutSut {
@@ -375,7 +390,7 @@ fn journals_multi_section_engages_all_three_invariants(cx: &mut TestAppContext) 
         outer_offset_before: outer_pre,
         outer_offset_after: y_of(&post_list, outer_id),
         footer_offset_before: footer_row_pre,
-        footer_offset_after: y_of(&post_list, "frow-0"),
+        footer_offset_after: y_of(&post_list, "block:frow-0"),
     };
 
     // (2)+(3) wheel invariants over the OUTER-LIST wheel.
@@ -391,7 +406,7 @@ fn journals_multi_section_engages_all_three_invariants(cx: &mut TestAppContext) 
     let ftop_now = footer_top(&post_list);
     let footer_pos = gpui::point(px(220.0), px(ftop_now + 30.0));
     let outer_before_footer = y_of(&post_list, outer_id);
-    let footer_row_before = y_of(&post_list, "frow-0");
+    let footer_row_before = y_of(&post_list, "block:frow-0");
     support::simulate_wheel_at(vcx, footer_pos, px(60.0));
     settle(&entity, vcx, &bounds);
     let post_footer = observe(&bounds);
@@ -403,7 +418,7 @@ fn journals_multi_section_engages_all_three_invariants(cx: &mut TestAppContext) 
         outer_offset_before: outer_before_footer,
         outer_offset_after: y_of(&post_footer, outer_id),
         footer_offset_before: footer_row_before,
-        footer_offset_after: y_of(&post_footer, "frow-0"),
+        footer_offset_after: y_of(&post_footer, "block:frow-0"),
     };
     sa::set_wheel_observation(Some(obs_footer));
     let sut3 = StickyLayoutSut {
