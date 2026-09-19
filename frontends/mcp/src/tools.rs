@@ -511,19 +511,148 @@ fn plan_block_ids(
     Ok(ids)
 }
 
+/// Which counter one applied op advances.
+#[derive(Debug, Clone, Copy)]
+enum AppliedKind {
+    Created,
+    Updated,
+    Moved,
+    Deleted,
+}
+
 /// Apply a plan's ops in order — `dense_patch`'s engine half.
 ///
 /// Resolution runs to completion first (`plan_block_ids`), so a plan that
-/// cannot apply in full is refused before the first dispatch.
+/// cannot apply in full is refused before the first dispatch. A failure the
+/// ENGINE raises once dispatching has begun cannot be undone (see
+/// [`partial_apply_error`]), so it is reported row by row instead.
 async fn apply_plan(
     service: &HolonService,
     plan: &crate::dense_patch::PatchPlan,
     file_id: &EntityUri,
 ) -> Result<AppliedCounts, rmcp::ErrorData> {
+    let new_ids = plan_block_ids(plan)?;
+
+    let mut counts = AppliedCounts::default();
+    for (index, op) in plan.ops.iter().enumerate() {
+        match dispatch_patch_op(service, op, &new_ids, file_id).await {
+            Ok(AppliedKind::Created) => counts.created += 1,
+            Ok(AppliedKind::Updated) => counts.updated += 1,
+            Ok(AppliedKind::Moved) => counts.moved += 1,
+            Ok(AppliedKind::Deleted) => counts.deleted += 1,
+            Err(cause) => return Err(partial_apply_error(plan, &new_ids, index, cause)),
+        }
+    }
+
+    Ok(counts)
+}
+
+/// A plan row as a partial-apply report names it.
+///
+/// A create's minted id is disclosed ONLY for a row that actually ran: an id
+/// minted for an op that never dispatched addresses no row in the store, and
+/// under the same `block` key the applied rows use it would send a reconciling
+/// caller hunting a phantom.
+fn patch_op_row(
+    op: &crate::dense_patch::PatchOp,
+    new_ids: &HashMap<usize, MintedBlock>,
+    dispatched: Dispatched,
+) -> serde_json::Value {
+    use crate::dense_patch::PatchOp;
+
+    let mut row = describe_patch_op(op);
+    if let PatchOp::Create { temp, .. } = op {
+        let minted = new_ids
+            .get(temp)
+            .unwrap_or_else(|| panic!("plan_block_ids mints every create; #{temp} is missing"));
+        let obj = row
+            .as_object_mut()
+            .expect("describe_patch_op emits a JSON object");
+        match dispatched {
+            Dispatched::Yes => obj.insert("block".into(), serde_json::json!(minted.uri)),
+            Dispatched::No => obj.insert("block".into(), serde_json::json!(null)),
+        };
+    }
+    row
+}
+
+/// Whether a reported plan row reached the engine — which decides whether its
+/// minted id addresses anything.
+#[derive(Debug, Clone, Copy)]
+enum Dispatched {
+    Yes,
+    No,
+}
+
+/// The report a mid-plan engine failure owes its caller.
+///
+/// `dense_patch` holds no transaction over its ops and cannot acquire one: the
+/// only batch write seam in the tree is
+/// `OriginTaggedWrites::execute_batch_with_origin`, implemented by
+/// `SqlOperationProvider` alone, and neither `move_block` nor `set_field` has a
+/// `BatchOp` form — so under the Loro CRUD authority the desktop app runs, no
+/// seam exists at all. Op `index` failing therefore leaves ops `0..index`
+/// committed, and naming them is what keeps the caller's retry from duplicating
+/// them.
+fn partial_apply_error(
+    plan: &crate::dense_patch::PatchPlan,
+    new_ids: &HashMap<usize, MintedBlock>,
+    index: usize,
+    cause: rmcp::ErrorData,
+) -> rmcp::ErrorData {
+    let applied: Vec<_> = plan.ops[..index]
+        .iter()
+        .map(|op| patch_op_row(op, new_ids, Dispatched::Yes))
+        .collect();
+    let not_applied: Vec<_> = plan.ops[index + 1..]
+        .iter()
+        .map(|op| patch_op_row(op, new_ids, Dispatched::No))
+        .collect();
+    // The failing op reached the engine, so its minted id may address a row.
+    let failed = patch_op_row(&plan.ops[index], new_ids, Dispatched::Yes);
+
+    let message = if applied.is_empty() {
+        format!(
+            "the patch applied NOTHING before its first op failed — no later op ran, and only op \
+             1 itself may have partly landed. Cause: {}",
+            cause.message
+        )
+    } else {
+        format!(
+            "PARTIAL APPLY: op {} of {} failed, and the {} op(s) before it ARE in the store — \
+             dense_patch is not transactional, so nothing rolled them back. Do NOT re-apply this \
+             patch as-is: reconcile the rows under `applied` first (op {} may itself have partly \
+             landed). Cause: {}",
+            index + 1,
+            plan.ops.len(),
+            applied.len(),
+            index + 1,
+            cause.message
+        )
+    };
+
+    rmcp::ErrorData::internal_error(
+        message,
+        Some(serde_json::json!({
+            "partial_apply": !applied.is_empty(),
+            "applied": applied,
+            "failed": failed,
+            "not_applied": not_applied,
+        })),
+    )
+}
+
+/// Dispatch ONE plan op, resolving its references against the plan's minted
+/// ids.
+async fn dispatch_patch_op(
+    service: &HolonService,
+    op: &crate::dense_patch::PatchOp,
+    new_ids: &HashMap<usize, MintedBlock>,
+    file_id: &EntityUri,
+) -> Result<AppliedKind, rmcp::ErrorData> {
     use crate::dense_patch::PatchOp;
     use crate::dense_patch::Ref as PRef;
 
-    let new_ids = plan_block_ids(plan)?;
     let minted = |t: usize| -> Result<&MintedBlock, rmcp::ErrorData> {
         new_ids.get(&t).ok_or_else(|| {
             rmcp::ErrorData::internal_error(
@@ -540,103 +669,97 @@ async fn apply_plan(
         })
     };
 
-    let mut counts = AppliedCounts::default();
-    for op in &plan.ops {
-        match op {
-            PatchOp::Create {
-                temp,
-                parent,
-                after,
-                title,
-                task_state,
-            } => {
-                let minted = minted(*temp)?;
-                let parent_id = resolve(parent)?;
-                let mut storage: StorageEntity = HashMap::new();
-                storage.insert("id".into(), Value::String(minted.uri.clone()));
-                storage.insert("parent_id".into(), Value::String(parent_id));
-                storage.insert("content".into(), Value::String(title.clone()));
-                storage.insert("content_type".into(), Value::String("text".to_string()));
-                storage.insert("ID".into(), Value::String(minted.bare.clone()));
-                if let Some(st) = task_state {
-                    storage.insert("task_state".into(), Value::String(st.keyword.clone()));
-                    storage.insert(
-                        "task_state_category".into(),
-                        Value::String(st.category.as_str().to_string()),
-                    );
-                }
-                // Create AND position in one op via the canonical positional
-                // key: `after_block_id` places the new block immediately after
-                // its predecessor sibling atomically across both providers.
-                if let Some(a) = after {
-                    let after_id = resolve(a)?;
-                    storage.insert(
-                        POSITION_AFTER_BLOCK_ID_PARAM.into(),
-                        Value::String(after_id),
-                    );
-                }
-                service
-                    .execute_operation(&EntityName::new("block"), "create", storage)
-                    .await
-                    .map_err(|e| {
-                        rmcp::ErrorData::internal_error(format!("create failed: {e:#}"), None)
-                    })?;
-                counts.created += 1;
+    match op {
+        PatchOp::Create {
+            temp,
+            parent,
+            after,
+            title,
+            task_state,
+        } => {
+            let minted = minted(*temp)?;
+            let parent_id = resolve(parent)?;
+            let mut storage: StorageEntity = HashMap::new();
+            storage.insert("id".into(), Value::String(minted.uri.clone()));
+            storage.insert("parent_id".into(), Value::String(parent_id));
+            storage.insert("content".into(), Value::String(title.clone()));
+            storage.insert("content_type".into(), Value::String("text".to_string()));
+            storage.insert("ID".into(), Value::String(minted.bare.clone()));
+            if let Some(st) = task_state {
+                storage.insert("task_state".into(), Value::String(st.keyword.clone()));
+                storage.insert(
+                    "task_state_category".into(),
+                    Value::String(st.category.as_str().to_string()),
+                );
             }
-            PatchOp::UpdateTitle { block_id, title } => {
-                set_field(
-                    service,
-                    block_id.as_str(),
-                    "content",
-                    Value::String(title.clone()),
-                )
-                .await?;
-                counts.updated += 1;
+            // Create AND position in one op via the canonical positional
+            // key: `after_block_id` places the new block immediately after
+            // its predecessor sibling atomically across both providers.
+            if let Some(a) = after {
+                let after_id = resolve(a)?;
+                storage.insert(
+                    POSITION_AFTER_BLOCK_ID_PARAM.into(),
+                    Value::String(after_id),
+                );
             }
-            PatchOp::SetState {
-                block_id,
-                task_state,
-            } => {
-                let (kw, cat) = match task_state {
-                    Some(st) => (st.keyword.clone(), st.category.as_str().to_string()),
-                    None => (String::new(), String::new()),
-                };
-                set_field(service, block_id.as_str(), "task_state", Value::String(kw)).await?;
-                set_field(
-                    service,
-                    block_id.as_str(),
-                    "task_state_category",
-                    Value::String(cat),
-                )
-                .await?;
-                counts.updated += 1;
-            }
-            PatchOp::Move {
-                block_id,
-                parent,
-                after,
-            } => {
-                let parent_id = resolve(parent)?;
-                let after_id = after.as_ref().map(&resolve).transpose()?;
-                move_block_after(service, block_id.as_str(), &parent_id, after_id.as_deref())
-                    .await?;
-                counts.moved += 1;
-            }
-            PatchOp::Delete { block_id } => {
-                let mut storage: StorageEntity = HashMap::new();
-                storage.insert("id".into(), Value::String(block_id.as_str().to_string()));
-                service
-                    .execute_operation(&EntityName::new("block"), "delete", storage)
-                    .await
-                    .map_err(|e| {
-                        rmcp::ErrorData::internal_error(format!("delete failed: {e:#}"), None)
-                    })?;
-                counts.deleted += 1;
-            }
+            service
+                .execute_operation(&EntityName::new("block"), "create", storage)
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(format!("create failed: {e:#}"), None)
+                })?;
+            Ok(AppliedKind::Created)
+        }
+        PatchOp::UpdateTitle { block_id, title } => {
+            set_field(
+                service,
+                block_id.as_str(),
+                "content",
+                Value::String(title.clone()),
+            )
+            .await?;
+            Ok(AppliedKind::Updated)
+        }
+        PatchOp::SetState {
+            block_id,
+            task_state,
+        } => {
+            let (kw, cat) = match task_state {
+                Some(st) => (st.keyword.clone(), st.category.as_str().to_string()),
+                None => (String::new(), String::new()),
+            };
+            set_field(service, block_id.as_str(), "task_state", Value::String(kw)).await?;
+            set_field(
+                service,
+                block_id.as_str(),
+                "task_state_category",
+                Value::String(cat),
+            )
+            .await?;
+            Ok(AppliedKind::Updated)
+        }
+        PatchOp::Move {
+            block_id,
+            parent,
+            after,
+        } => {
+            let parent_id = resolve(parent)?;
+            let after_id = after.as_ref().map(&resolve).transpose()?;
+            move_block_after(service, block_id.as_str(), &parent_id, after_id.as_deref()).await?;
+            Ok(AppliedKind::Moved)
+        }
+        PatchOp::Delete { block_id } => {
+            let mut storage: StorageEntity = HashMap::new();
+            storage.insert("id".into(), Value::String(block_id.as_str().to_string()));
+            service
+                .execute_operation(&EntityName::new("block"), "delete", storage)
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(format!("delete failed: {e:#}"), None)
+                })?;
+            Ok(AppliedKind::Deleted)
         }
     }
-
-    Ok(counts)
 }
 
 /// One-line JSON description of a planned patch op (for dense_patch dry_run).
@@ -3382,7 +3505,13 @@ impl HolonMcpServer {
                        them (with their subtrees). Optimistic concurrency: if any block you touch \
                        changed since dense_query, the whole patch is REJECTED with a conflict list \
                        (re-run dense_query and retry). Set `dry_run: true` to preview the planned \
-                       operations without applying. A stale/unknown handle is a loud error."
+                       operations without applying. A stale/unknown handle is a loud error. \
+                       REJECTIONS APPLY NOTHING (unknown handle, conflict, a plan whose \
+                       references do not all resolve — all refuse before the first write), but \
+                       the batch is NOT transactional: if the engine fails once writing has \
+                       begun, the error is a PARTIAL APPLY report naming every plan row that DID \
+                       land (`applied`) and every row that did not (`not_applied`). Re-applying \
+                       after that report duplicates the landed rows — reconcile them first."
     )]
     async fn dense_patch(
         &self,
@@ -5439,6 +5568,35 @@ pub(crate) mod engine_harness {
             .expect("insert seeded row");
     }
 
+    /// Which rows the write authority holds under `parent_id`, id-only.
+    pub(super) async fn child_ids(
+        engine: &holon::api::BackendEngine,
+        parent_id: &str,
+    ) -> Vec<String> {
+        engine
+            .db_handle()
+            .query(
+                &format!(
+                    "SELECT id FROM {} WHERE parent_id = $parent_id ORDER BY id",
+                    holon::storage::BLOCK_WRITE_TABLE
+                ),
+                HashMap::from([(
+                    "parent_id".to_string(),
+                    holon_api::Value::String(parent_id.to_string()),
+                )]),
+            )
+            .await
+            .expect("list children")
+            .into_iter()
+            .map(|row| {
+                row.get("id")
+                    .and_then(|v| v.as_string())
+                    .expect("every block row carries an id")
+                    .to_string()
+            })
+            .collect()
+    }
+
     /// How many rows the write authority holds under `parent_id`.
     pub(super) async fn child_count(engine: &holon::api::BackendEngine, parent_id: &str) -> usize {
         engine
@@ -6181,6 +6339,7 @@ mod dense_patch_atomicity_tests {
     use super::apply_plan;
     use super::engine_harness::await_projected;
     use super::engine_harness::child_count;
+    use super::engine_harness::child_ids;
     use super::engine_harness::fresh_engine;
     use super::engine_harness::seed_row;
     use super::engine_harness::server;
@@ -6269,5 +6428,164 @@ mod dense_patch_atomicity_tests {
 
         assert_eq!(counts.created, 2);
         assert_eq!(child_count(&engine, ROOT).await, 2);
+    }
+
+    /// An ENGINE-level failure on op 2 of 3 — a move of a block that is not
+    /// there, refused by the engine and not by any plan gate.
+    ///
+    /// Op 1 is committed by then and cannot be rolled back, so the contract is
+    /// disclosure: the error must name op 1 as applied and op 3 as not, and
+    /// the store must match that report exactly. A caller told only "move
+    /// failed" retries the whole plan and duplicates op 1.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_engine_failure_midway_reports_exactly_what_landed() {
+        let engine = fresh_engine().await;
+        seed_row(&engine, ROOT, "sentinel:no_parent", "root").await;
+        await_projected(&engine, &[ROOT]).await;
+        let server = server(engine.clone());
+
+        let plan = PatchPlan {
+            ops: vec![
+                create(0, "first"),
+                PatchOp::Move {
+                    block_id: EntityUri::block("ghost"),
+                    parent: PRef::Root,
+                    after: None,
+                },
+                create(1, "third"),
+            ],
+            verify: Vec::new(),
+        };
+
+        let err = apply_plan(&server.service(), &plan, &EntityUri::block("root"))
+            .await
+            .expect_err("op 2 moves a block that does not exist");
+
+        assert!(
+            err.message.contains("PARTIAL APPLY"),
+            "a batch that wrote before it failed must say so: {}",
+            err.message
+        );
+        let data = err.data.expect("a partial apply reports its rows");
+        assert_eq!(data["partial_apply"], serde_json::json!(true));
+        assert_eq!(
+            data["applied"].as_array().expect("applied rows").len(),
+            1,
+            "op 1 landed and must be listed: {data}"
+        );
+        assert_eq!(data["applied"][0]["title"], serde_json::json!("first"));
+        assert_eq!(data["failed"]["op"], serde_json::json!("move"));
+        assert_eq!(
+            data["not_applied"]
+                .as_array()
+                .expect("not-applied rows")
+                .len(),
+            1,
+            "op 3 never ran and must be listed as such: {data}"
+        );
+        assert_eq!(data["not_applied"][0]["title"], serde_json::json!("third"));
+        // An id minted for an op that never ran addresses no row; disclosing
+        // it under the same key the applied rows use sends a reconciling
+        // caller after a phantom. The key must be PRESENT and explicitly
+        // null — indexing a missing key also yields null, so the weaker
+        // assertion would pass if the field were simply dropped.
+        let not_applied_row = data["not_applied"][0]
+            .as_object()
+            .expect("a not-applied row is a JSON object");
+        assert_eq!(
+            not_applied_row.get("block"),
+            Some(&serde_json::Value::Null),
+            "a not-applied create must carry an explicit null id, not a minted \
+             one and not a missing key: {data}"
+        );
+
+        // The report is only worth anything if the store agrees with it.
+        let applied_id = data["applied"][0]["block"]
+            .as_str()
+            .expect("an applied create names the row it minted")
+            .to_string();
+        assert_eq!(
+            child_count(&engine, ROOT).await,
+            1,
+            "exactly the one op the report calls applied is in the store"
+        );
+        assert_eq!(
+            child_ids(&engine, ROOT).await,
+            vec![applied_id],
+            "the id the report names is the id the store holds"
+        );
+    }
+
+    /// A failure on the FIRST op wrote nothing, and saying "partial" there
+    /// would send the caller reconciling rows that do not exist.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failure_on_the_first_op_reports_nothing_applied() {
+        let engine = fresh_engine().await;
+        seed_row(&engine, ROOT, "sentinel:no_parent", "root").await;
+        await_projected(&engine, &[ROOT]).await;
+        let server = server(engine.clone());
+
+        let plan = PatchPlan {
+            ops: vec![
+                PatchOp::Move {
+                    block_id: EntityUri::block("ghost"),
+                    parent: PRef::Root,
+                    after: None,
+                },
+                create(0, "second"),
+            ],
+            verify: Vec::new(),
+        };
+
+        let err = apply_plan(&server.service(), &plan, &EntityUri::block("root"))
+            .await
+            .expect_err("op 1 moves a block that does not exist");
+
+        assert!(
+            err.message.contains("applied NOTHING"),
+            "a batch that failed before its first write must say so: {}",
+            err.message
+        );
+        let data = err.data.expect("the report is emitted either way");
+        assert_eq!(data["partial_apply"], serde_json::json!(false));
+        assert_eq!(child_count(&engine, ROOT).await, 0);
+    }
+
+    /// The hazard the report exists to prevent, pinned so it cannot be
+    /// mistaken for a solved one: re-running a plan that partly applied
+    /// duplicates every op that already landed. Until `dense_patch` can take a
+    /// transaction, the report is the caller's ONLY protection.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_blind_retry_after_a_partial_apply_duplicates_the_landed_rows() {
+        let engine = fresh_engine().await;
+        seed_row(&engine, ROOT, "sentinel:no_parent", "root").await;
+        await_projected(&engine, &[ROOT]).await;
+        let server = server(engine.clone());
+
+        let plan = PatchPlan {
+            ops: vec![
+                create(0, "first"),
+                PatchOp::Move {
+                    block_id: EntityUri::block("ghost"),
+                    parent: PRef::Root,
+                    after: None,
+                },
+            ],
+            verify: Vec::new(),
+        };
+
+        for attempt in 1..=2 {
+            let outcome = apply_plan(&server.service(), &plan, &EntityUri::block("root")).await;
+            assert!(
+                outcome.is_err(),
+                "attempt {attempt} must fail on the ghost move"
+            );
+        }
+
+        assert_eq!(
+            child_count(&engine, ROOT).await,
+            2,
+            "two attempts, two copies of op 1 — this is what the report warns about"
+        );
     }
 }

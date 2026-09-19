@@ -76,7 +76,9 @@ proving the refusal is the plan's fault and not the applier's.
 
 Not closed by this fix: an ENGINE-level failure mid-loop (a DB error on the
 third op) still leaves the first two committed — the batch has no transaction.
-That remains OPEN in `2026-09-17-dense-patch-apply-is-not-atomic`. Closing it
-needs one atomic dispatch of the whole plan (pre-minted ids make the ops
-independent, so `OriginTaggedWrites::execute_batch_with_origin` is the seam),
-which is an architecture change this lane did not take.
+Lane `dense-patch-atomic` then established that
+`OriginTaggedWrites::execute_batch_with_origin` is NOT a usable seam for this
+(no implementor under the Loro CRUD authority the desktop app runs, and
+`move_block`/`set_field` have no `BatchOp` form) and mitigated it with a loud
+partial-apply report instead. See `2026-09-17-dense-patch-apply-is-not-atomic`,
+status MITIGATED.
