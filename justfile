@@ -538,6 +538,132 @@ latency-gate ceilings='docs/Testing/latency-ceilings.txt':
     fi
     exit "$gate"
 
+# Latency SCALE gate — the same deterministic replay as `latency-gate`, but
+# over a soak-seeded few-thousand-block vault and against SLO-derived ceilings
+# instead of a measured ratchet. It is the covering rung for the navigation
+# entry in docs/Testing/bugfunnel/entries/: navigation mints one materialized
+# view per first-visited block, and that mint costs O(vault), so the cost is
+# invisible at the 33-block scale every other rung runs at.
+#
+# The gated rung is `e2e.p50.navigate` — the stage and origin the SLO itself
+# names. The harness's `total.*` rungs are report-only: `action_total` includes
+# a whole-SUT convergence wait no user waits for, and `total.SetupWatch` is
+# structurally false-green because a watch registration returns before its view
+# is minted. The ceilings file argues both at length, and every run prints
+# `scripts/latency/mint_attribution.py`, which scores the mints on their own
+# events instead of inside a borrowed window.
+#
+# THE GATE IS RED AT SCALE AND GREEN ON A SMALL CORPUS ON AN UNMODIFIED TREE,
+# BY DESIGN. Do NOT add it to `landing-gate` until the fix lands. See
+# docs/Testing/soak/README.md.
+#
+# `size` and `per_doc` must yield at least one soak page per navigation in the
+# corpus; the recipe refuses to run otherwise rather than replay against blocks
+# that do not exist.
+#
+# `max_load` screens the HOST, so a busy machine yields exit 3 UNJUDGED instead
+# of a red that looks like a regression. Load average, not the sibling gate's
+# mean `matview_ddl`: at soak scale that covariate is dominated by the very
+# mints this rung scores, so it would reject every run when the defect is worst
+# and go quiet once it is fixed. Machine-local, like the ceilings.
+#
+# `settle_ms` is the boot and per-action convergence CAP, not a sleep — a
+# settled SUT returns in one quiet floor. It has to grow with the seed (at 3200
+# blocks a 30s cap is not enough to resolve the boot's Loro-sync handle), and
+# every size must use the SAME value or the sizes are not comparable.
+#
+#   just latency-scale-gate                    # 1600 blocks / 32 pages — the gate
+#   just latency-scale-gate 204 6              # ~200 blocks / 34 pages — the control
+latency-scale-gate size='1600' per_doc='50' settle_ms='180000' max_load='32' ceilings='docs/Testing/latency-scale-ceilings.txt':
+    #!/usr/bin/env bash
+    # pipefail so a `tee`'d failure cannot report success (see `hand-authored`).
+    set -euo pipefail
+    # Tree assertion: a failed `cd` must never yield a green that ran nothing
+    # (a gate exited 0 having run 0 tests in the WRONG tree, 2026-07-25).
+    corpus=crates/holon-integration-tests/hand-authored-regressions/latency-scale.jsonl
+    for f in scripts/measure_latency.py scripts/latency/mint_attribution.py {{ceilings}} "$corpus" \
+             crates/holon-integration-tests/tests/latency_scale_gate.rs; do
+        [ -f "$f" ] || { echo "latency-scale-gate: wrong tree — missing $f" >&2; exit 2; }
+    done
+    # 1-minute load average, read the same way before and after the run.
+    # An unreadable reading is fatal, never admitted: awk compares an empty
+    # string to the limit LEXICALLY and prints "not busy", so a silent parse
+    # failure would disable the screen exactly when nobody is looking.
+    # `assert_load` is separate because a bare `exit` inside `read_load` would
+    # leave only its command substitution, not the recipe.
+    read_load() { uptime | sed 's/.*averages*: *//' | tr -s ' ,' ' ' | cut -d' ' -f1; }
+    assert_load() {
+        case "$1" in
+            "" | *[!0-9.]* | *.*.*)
+                echo "latency-scale-gate: cannot parse a load average out of \`uptime\` (got '${1}') — the host screen would silently admit every run" >&2
+                return 1 ;;
+        esac
+    }
+    navs=$(grep -o 'block:soak-doc-' "$corpus" | wc -l | tr -d ' ')
+    pages=$(( ({{size}} + {{per_doc}} - 1) / {{per_doc}} ))
+    if [ "$pages" -lt "$navs" ]; then
+        echo "latency-scale-gate: size={{size}} per_doc={{per_doc}} seeds only $pages soak pages; the corpus navigates to $navs" >&2
+        exit 2
+    fi
+    log="$(mktemp -t holon-latency-scale-gate)"
+    echo "latency-scale-gate: size={{size}} per_doc={{per_doc}} settle_ms={{settle_ms}} pages=$pages corpus_navigations=$navs"
+    echo "latency-scale-gate: run log $log"
+    # Screened BEFORE the run as well as after, so a machine that is already
+    # busy costs seconds rather than the full boot-and-replay.
+    load_before="$(read_load)"
+    assert_load "$load_before" || exit 2
+    echo "latency-scale-gate: load before $load_before (limit {{max_load}})"
+    uptime
+    if [ "$(awk -v a="$load_before" -v l={{max_load}} 'BEGIN { print (a > l) ? 1 : 0 }')" -eq 1 ]; then
+        echo "latency-scale-gate: UNJUDGED (not red) — host load $load_before is already over the {{max_load}} limit before the run; wall-clock rungs would be inflated. Re-run on a quiet machine."
+        exit 3
+    fi
+    # The workload's own correctness has other gates; this gate's subject is
+    # latency, so a non-zero test exit is DISCLOSED rather than fatal — a run
+    # that died early loses samples, which the --min-samples floor turns into a
+    # hard failure below.
+    status=0
+    HOLON_SOAK_SEED_BLOCKS={{size}} HOLON_SOAK_BLOCKS_PER_DOC={{per_doc}} \
+        HOLON_SOAK_SHAPE=wide HOLON_SOAK_SETTLE_MS={{settle_ms}} \
+        RUST_LOG="holon_latency=debug" \
+        cargo test {{CANON}} \
+        --test latency_scale_gate -- --nocapture > "$log" 2>&1 || status=$?
+    [ "$status" -eq 0 ] || echo "latency-scale-gate: NOTE — replay exited $status; latency data below is still judged (see $log)"
+    # The SUT's own live block count, asserted at boot by wide_e2e and echoed
+    # here: a seed that never reached the store would otherwise let every rung
+    # pass at small-corpus speed.
+    seed_line="$(grep -m1 '\[soak-seed\] live_blocks=' "$log" || true)"
+    if [ -z "$seed_line" ]; then
+        echo "latency-scale-gate: the SUT never disclosed a seeded block count — the corpus did not boot at scale (see $log)" >&2
+        exit 2
+    fi
+    echo "latency-scale-gate: $seed_line"
+    # Where the per-block mints actually land. Printed before the verdict
+    # because the verdict's own `total.*` rows cannot show it: the mint falls
+    # outside the window of the transition that caused it.
+    python3 scripts/latency/mint_attribution.py "$log"
+    gate=0
+    # Contention screening is off HERE and screened on host load instead — see
+    # the recipe header and the ceilings file.
+    python3 scripts/measure_latency.py "$log" --ratchet {{ceilings}} --min-samples 30 \
+        --max-contention-ms 0 || gate=$?
+    # Load is judged AFTER the run so a machine that got busy mid-run is caught
+    # too. A busy host inflates every wall-clock rung, so its verdict is
+    # UNJUDGED (3), never RED (1) — a red must mean the tree, not the machine.
+    load_after="$(read_load)"
+    assert_load "$load_after" || exit 2
+    echo "latency-scale-gate: load after $load_after (before $load_before, limit {{max_load}})"
+    busy=$(awk -v a="$load_before" -v b="$load_after" -v l={{max_load}} \
+        'BEGIN { print (a > l || b > l) ? 1 : 0 }')
+    if [ "$busy" -eq 1 ]; then
+        echo "latency-scale-gate: UNJUDGED (not red) — host load $load_before/$load_after over the {{max_load}} limit; wall-clock rungs are inflated. Re-run on a quiet machine."
+        exit 3
+    fi
+    if [ "$gate" -eq 3 ]; then
+        echo "latency-scale-gate: INVALID (not red) — nothing was judged; see $log."
+    fi
+    exit "$gate"
+
 # The latency SLO as a GATE (Martin's ruling D50.a) — two rungs plus their own
 # wiring check, three tests in one headless binary; the last step of
 # `landing-gate`.

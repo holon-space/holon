@@ -1,0 +1,107 @@
+# Latency SCALE ceilings — cold navigation at a few-thousand-block corpus, ms.
+#
+# Read docs/Testing/latency-ceilings.txt first. Everything that file says about
+# WHAT IS MEASURED, about the UI/facade origin split, and about why a gated
+# statistic is a p50 rather than a p95 applies here unchanged. This file states
+# only what differs.
+#
+# ── WHAT THIS FILE IS, AND WHAT IT IS NOT ──────────────────────────────────
+# The sibling file is a REGRESSION RATCHET: each ceiling is a measured p50
+# times 1.6, it may only move down, and it says nothing about whether the tree
+# is fast enough. This file is the opposite kind of artifact. Its one ceiling
+# is the project SLO (interaction -> projection-visible < 200 ms), not anything
+# measured, so it does not move when the tree gets faster and it is never
+# recalibrated.
+#
+# CONSEQUENCE, STATED UP FRONT: this gate is RED on an unmodified tree at the
+# sizes it is meant to run at, and GREEN on a small corpus. It was authored
+# that way, as the covering rung for the navigation-latency entry in
+# docs/Testing/bugfunnel/entries/. It is not part of `landing-gate` and must
+# not be added to one until the fix for that entry lands.
+#
+# ── WHY THE GATED RUNG IS `e2e`, AND WHY THE `total.*` RUNGS CANNOT BE ─────
+# The gated rung is `e2e.p50.navigate`: the prod correlator's
+# interaction -> projection-visible measurement, origin=ui, which is the exact
+# quantity the SLO names and the runtime oracle judges. Nothing else here is
+# gated, and two earlier candidates were withdrawn for reasons worth keeping.
+#
+# `total.<Transition>` is the harness's own `action_total`. It is production
+# dispatch PLUS `settle_after_apply` — a whole-SUT fixed-point wait over Loro
+# sync, the doc store, org idle, the block feed and the reactive epoch. A user
+# waits for none of that, so an SLO constant does not belong on it. Measured:
+# `total.p50.NavigateFocus` is 214-235 ms on the 33-block keystone corpus,
+# already over 200 ms where no vault-scale cost exists at all. A rung that is
+# red at every size carries no information about scale, and the fix this gate
+# covers could never turn it green.
+#
+# `total.SetupWatch` is worse than uninformative, it is structurally FALSE-
+# GREEN. A watch registration returns BEFORE its view is minted: the
+# `CREATE MATERIALIZED VIEW` lands after that window closes, inside whichever
+# transition runs next. Measured at 1600 blocks: the rung read 53-101 ms while
+# the mints it is supposed to score ran at ~1.3 s each just outside it. The
+# mints are scored on their own events instead, by
+# `scripts/latency/mint_attribution.py`, which every run of the recipe prints.
+#
+# THE STATISTIC IS A p50 AGAINST A p95 THRESHOLD, DELIBERATELY. The SLO is a
+# p95 and the sibling file's measurements show p95 flaps up to 3.35x on
+# unmodified code at replay-scale sample counts. Gating the p50 at the p95's
+# number is therefore both stabler and STRICTER than the SLO — a tree that
+# clears it has real headroom, and a tree that fails it is not failing on
+# noise.
+#
+# WHY THIS CORPUS CAN GATE `e2e.navigate`
+# The correlator closes an entry only when a delivered batch carries a row for
+# the target, so its sample count is data-dependent: a WARM document switch
+# re-shows an already-materialized page, delivers nothing, and yields no
+# sample. A gate cannot rest on a population that moves with the workload's
+# warm/cold mix.
+#
+# This corpus removes the dependency rather than tolerating it. Every
+# navigation goes to a DISTINCT never-visited page, so every one delivers rows
+# and the count is fixed by construction, not by luck: n=33 in all five runs
+# measured across two sessions, at three different corpus sizes.
+#
+# (An earlier version of this paragraph justified the separate corpus by
+# claiming the ratchet corpus yields ONE `e2e.navigate` sample from 24
+# navigations. That figure came from the sibling file and is stale — three
+# runs of the ratchet corpus measured n=25 every time. The real merit is the
+# one above: cold distinct pages make the count structural. The sibling file
+# is corrected too.)
+#
+# ── WHY THE CORPUS IS SEEDED, AND WHAT GUARDS THE RUN ──────────────────────
+# `just latency-scale-gate` replays latency-scale.jsonl over a soak-seeded
+# vault, so this ceiling is only meaningful at the size the recipe pins. The
+# recipe prints the size it booted and the SUT's own live block count, and the
+# boot fails loud if the vault under-seeded.
+#
+# The sibling gate's contention screen is UNUSABLE here and the recipe does not
+# use it. Its covariate is the mean `matview_ddl` duration, which at soak scale
+# is dominated by the very per-block mints this rung exists to score — the
+# screen would reject every run as too busy exactly when the defect is worst,
+# and it would go quiet again once the defect is fixed. A confounded covariate
+# cannot screen anything. The recipe screens on host LOAD AVERAGE instead,
+# before and after the run, and exits 3 UNJUDGED rather than 1 RED when the
+# host is too busy.
+#
+# The 32 default is calibrated, not guessed, on three runs of the 204-block
+# control (16 cores): load 10 gave `e2e.p50.navigate` 44 ms, load 26 gave
+# 45 ms, and a verifier's run at load 38 gave 277 ms — green, green, and a
+# false red on a corpus with no vault-scale cost in it. The breakdown is
+# between 26 and 38, so 32 admits a normally-busy dev host and rejects the one
+# that manufactures a red. Machine-local, exactly like the ceilings below.
+#
+# Format is the sibling file's: `<e2e|total>.<p50|p95>.<action> = ms` for a
+# GATED rung, `report.<...>` with no value for a REPORT-ONLY one.
+
+# ── GATED rung ───────────────────────────────────────────────────────────────
+e2e.p50.navigate = 200   # the SLO, on the stage and origin the SLO names
+
+# ── REPORT-ONLY rungs ────────────────────────────────────────────────────────
+# Printed every run, never able to fail the build. The `total.*` pair is here
+# so a reader can see the harness-side picture and the window artifact
+# described above; neither is a verdict.
+report.e2e.p95.navigate
+report.total.p50.NavigateFocus
+report.total.p95.NavigateFocus
+report.total.p50.SetupWatch
+report.total.p95.SetupWatch

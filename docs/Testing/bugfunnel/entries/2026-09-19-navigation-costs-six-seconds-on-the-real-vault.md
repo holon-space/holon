@@ -117,8 +117,52 @@ cheaper by replacing the string cycle guard. The first is smallest, the second
 has the better ceiling and also caps the unbounded view count (128 views existed
 after boot alone), the third alone will not reach 200 ms.
 
-No covering rung exists and none can be written as an assertion change: the
+No covering rung existed and none could be written as an assertion change: the
 keystone runs at a scale where the create is free, and the live channel's class-3
 budget invariants report `skipped`. The missing axis is corpus size. A rung that
 boots a few-thousand-block corpus and gates `e2e.p50.NavigateFocus` would have
 caught this on the first run.
+
+## Covering rung
+
+`just latency-scale-gate` (lane `nav-latency-rung`, 2026-09-19). It boots a
+soak-seeded vault, replays
+`crates/holon-integration-tests/hand-authored-regressions/latency-scale.jsonl`
+through `crates/holon-integration-tests/tests/latency_scale_gate.rs` — 32
+navigations to 32 DISTINCT never-visited pages, so every one pays a fresh view
+mint — and judges the result against the SLO-derived ceilings in
+`docs/Testing/latency-scale-ceilings.txt`.
+
+The gated rung is `e2e.p50.navigate` — the prod correlator's
+interaction-to-visible stage at `origin=ui`, which is the stage and population
+this entry's SLO names. It is GREEN on the small corpus and RED at scale; a
+rung red at every size would say nothing about scale. The test itself passes
+in every run (`test result: ok. 1 passed`), so the only thing failing is the
+latency verdict.
+
+Three runs, same settle budget, all admitted by the recipe's host-load screen
+(load 14-17 on 16 cores):
+
+| seeded blocks | e2e.p50.navigate | verdict | per-mint mean |
+|---|---|---|---|
+| 204 | 44.0 ms | green | 86.1 ms |
+| 1600 | 473.0 ms | RED | 434.2 ms |
+| 3200 | 1362.0 ms | RED | 1269.9 ms |
+
+**The headless rung CONFIRMS the matview-mint attribution above.** The right
+column is the mean duration of the replay-phase `watch_view_*` DDL events,
+scored on their own events by `scripts/latency/mint_attribution.py`: 86 ms to
+1270 ms, 14.7x for 15.7x the blocks — near-linear in vault size. The mint is
+the scale cost, exactly as this entry's root-cause section says.
+
+Reading those mints out of the harness's own `action_total` windows does NOT
+work, and an earlier version of this rung got it wrong that way. A watch
+registration returns BEFORE its view is minted, so the DDL lands after the
+`SetupWatch` window closes and inside the next transition's. `SetupWatch`
+consequently reads 32-165 ms at every size while the mints it caused run for
+up to 6.6 s just outside it. That is why the `total.*` rungs here are
+report-only and the mints are scored separately.
+
+Logs: `lane-logs/d1-scale-204-b.log` (green, exit 0),
+`lane-logs/d1-scale-1600.log`, `lane-logs/d1-scale-3200.log`. The rung is
+deliberately NOT in `landing-gate` while this entry is open.

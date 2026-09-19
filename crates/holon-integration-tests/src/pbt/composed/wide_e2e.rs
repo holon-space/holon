@@ -1198,8 +1198,23 @@ pub async fn boot_and_seed_wide_with_peer_id(
     // surface in the SUT store with no matching oracle seed entry → a false
     // `inv-blocks-match-ref` divergence. Off (count 0) this is skipped
     // entirely; the keystone is untouched.
-    if crate::pbt::composed::soak_seed::soak_block_count() > 0 {
+    // A scale rung whose seed never reached the SUT measures the small-corpus
+    // pipeline and passes vacuously, so the floor is asserted from the SUT's own
+    // store rather than trusted from the env var. 10% slack covers the boot
+    // scaffold accounting, not a partial drain.
+    let seeded = crate::pbt::composed::soak_seed::soak_block_count();
+    if seeded > 0 {
         converge_projections(&handle, crate::pbt::composed::soak_seed::soak_settle()).await;
+        let live = sut_ids(&caps).await.len();
+        let floor = seeded * 9 / 10;
+        eprintln!("[soak-seed] live_blocks={live} requested={seeded} floor={floor}");
+        assert!(
+            live >= floor,
+            "[soak-seed] boot under-seeded — live_blocks={live} < floor {floor} for \
+             HOLON_SOAK_SEED_BLOCKS={seeded}. The boot ended unsettled, so anything measured \
+             here is the cost of an empty vault. Raise HOLON_SOAK_SETTLE_MS or investigate the \
+             boot drain."
+        );
     }
 
     // Fork B (dogfood #4): the boot auto-create rule fires today's journal

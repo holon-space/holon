@@ -15,11 +15,23 @@
 # Both exist because the prod correlator's sample count is DATA-DEPENDENT: it
 # closes an entry only when a delivered CDC batch carries a row for the target,
 # so an interaction that produces no delta never yields a sample. Navigation is
-# the sharp case — a warm document switch re-shows an already-materialized page,
-# delivers no rows, and is therefore invisible to `e2e` (measured: 24 replayed
-# NavigateFocus transitions produce ONE `e2e.navigate` sample). A ratchet cannot
-# rest on a rung whose sample count moves, so navigation is gated on
-# `total.NavigateFocus`, which is emitted once per transition by construction.
+# the sharp case: a warm document switch that re-shows an already-materialized
+# page delivers no rows and is invisible to `e2e`. `total.NavigateFocus` is
+# emitted once per transition by construction, so it cannot move for that
+# reason, which is why navigation is gated there.
+#
+# CORRECTED 2026-09-20. This paragraph used to say that 24 replayed
+# NavigateFocus transitions produce ONE `e2e.navigate` sample. That figure is
+# stale: three runs of this corpus in one session measured n=25 every time
+# (p50 6.0 / 15.0 / 6.0 ms). The MECHANISM above is real and unchanged — a
+# delta-free interaction still yields no sample — but on today's corpus the
+# count does not collapse, so "e2e.navigate cannot be gated here" no longer
+# follows from a measurement. Leaving the rung on `total.NavigateFocus` is
+# still the conservative choice, because a count that depends on the corpus's
+# warm/cold mix can move when the corpus is edited; re-examining it is a
+# reasonable thing for a future lane to do, and
+# docs/Testing/latency-scale-ceilings.txt shows what gating the `e2e` stage
+# looks like on a corpus where every navigation is cold by construction.
 #
 # Consequence worth knowing: the runtime latency-slo oracle inherits the same
 # blind spot, so it observes only the cold-navigation tail, not every switch.
