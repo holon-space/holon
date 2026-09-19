@@ -215,6 +215,8 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // length of the sync.
     ("crates/holon-loro/src/device_pairing_op.rs", 2),
     ("crates/holon-loro/src/import_atomicity_probe.rs", 7),
+    // cfg(test) probe that measures raw-doc `revert_to` semantics on purpose (D146).
+    ("crates/holon-loro/src/revert_to_rollback_probe.rs", 7),
     // +2: `layout_writer` and `block_sort_key`'s global arm, both re-wrapping an
     // existing `Arc<LoroDoc>` via `from_existing` so the wrapper keeps the same
     // boundary lock.
