@@ -2999,6 +2999,10 @@
                     "path": "holon-integration-tests/hand-authored-regressions/fixture-logs-2026-07-31/synthetic"
                   }
                 ]
+              },
+              {
+                "name": "fixture-logs-2026-09-19",
+                "path": "holon-integration-tests/hand-authored-regressions/fixture-logs-2026-09-19"
               }
             ]
           },
@@ -5309,6 +5313,9 @@
                 "name": "peer_import.rs"
               },
               {
+                "name": "revert_to_rollback_probe.rs"
+              },
+              {
                 "name": "roster_sidecar.rs"
               },
               {
@@ -5364,6 +5371,9 @@
               },
               {
                 "name": "undo_history_trim_probe.rs"
+              },
+              {
+                "name": "with_write_is_isolation_not_rollback.rs"
               }
             ]
           }
