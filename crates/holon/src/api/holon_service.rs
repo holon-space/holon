@@ -83,6 +83,13 @@ impl HolonService {
         &self.engine
     }
 
+    /// The block write authority's rollback capability, when this session's
+    /// authority has one. A caller that dispatches a multi-op batch and gets
+    /// `None` owes its user a partial-apply disclosure.
+    pub fn batch_rollback(&self) -> Option<&dyn holon_core::batch_rollback::BatchRollback> {
+        self.engine.batch_rollback()
+    }
+
     // ── Query operations ──────────────────────────────────────────────
 
     /// Build a `QueryContext` from explicit context_id / context_parent_id.

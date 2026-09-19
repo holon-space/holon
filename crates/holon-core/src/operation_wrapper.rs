@@ -126,6 +126,10 @@ where
         self.inner.identity_minter()
     }
 
+    fn batch_rollback(&self) -> Option<&dyn crate::batch_rollback::BatchRollback> {
+        self.inner.batch_rollback()
+    }
+
     /// Forwarded like every other non-sync method: this decorator only takes a
     /// position on post-operation sync. Taking the trait's `None` default
     /// would answer "cannot read marks" for a provider that can — and the

@@ -169,6 +169,15 @@ pub trait OperationProvider: Send + Sync {
         None
     }
 
+    /// The batch-rollback capability of this provider, present only on a
+    /// block CRUD authority whose store can be carried back to an earlier
+    /// version (the CRDT one). Mirrors [`Self::identity_minter`]: default
+    /// `None`, and a caller handed `None` owes its user a partial-apply
+    /// disclosure instead of a silent half-write.
+    fn batch_rollback(&self) -> Option<&dyn crate::batch_rollback::BatchRollback> {
+        None
+    }
+
     /// Read the currently-stored `(content, marks)` of a block row, for the
     /// CRUD authority that owns block state.
     ///

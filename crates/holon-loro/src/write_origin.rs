@@ -74,6 +74,9 @@ pub enum WriteOrigin {
     /// nothing. The label exists so that if a stray batch ever DOES reach it,
     /// those ops land excluded from undo rather than under the empty origin.
     SnapshotFlush,
+    /// Carrying the document back to the version a failed multi-op batch
+    /// started from.
+    BatchRollback,
     /// A test or probe write. Production code never produces this; the label
     /// is what the probe calls itself, so a stray origin in a log names its
     /// test.
@@ -114,6 +117,7 @@ impl WriteOrigin {
             Self::SyncImport => "sync_import",
             Self::ShareLifecycle => "share_lifecycle",
             Self::DevicePairing => "device_pairing",
+            Self::BatchRollback => "batch_rollback",
             Self::Probe(label) => label,
         }
     }
@@ -137,6 +141,7 @@ mod tests {
             WriteOrigin::SyncImport,
             WriteOrigin::ShareLifecycle,
             WriteOrigin::DevicePairing,
+            WriteOrigin::BatchRollback,
             WriteOrigin::Probe("some_test"),
         ];
         let undoable: Vec<_> = every
@@ -163,6 +168,7 @@ mod tests {
             WriteOrigin::SyncImport,
             WriteOrigin::ShareLifecycle,
             WriteOrigin::DevicePairing,
+            WriteOrigin::BatchRollback,
         ];
         let mut strings: Vec<String> = every.iter().map(|o| o.as_origin().to_string()).collect();
         strings.sort();

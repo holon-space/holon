@@ -13,6 +13,7 @@
 //! - `TaskOperations`: Task-specific operations (set_state, set_priority,
 //!   set_due_date)
 
+pub mod batch_rollback;
 pub mod block_op_catalog;
 pub mod block_ordering;
 pub mod boundary_enforcer;
@@ -40,6 +41,11 @@ pub mod undo;
 pub mod util;
 pub mod write_tier_gate;
 
+pub use batch_rollback::AuthorityVersion;
+pub use batch_rollback::BatchRollback;
+pub use batch_rollback::BatchWindow;
+pub use batch_rollback::DocVersion;
+pub use batch_rollback::RollbackRefused;
 pub use boundary_enforcer::BoundaryEnforcer;
 pub use boundary_enforcer::BoundaryRejection;
 pub use boundary_enforcer::InertBoundaryEnforcer;

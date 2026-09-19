@@ -220,6 +220,13 @@ impl BackendEngine {
         &self.db_handle
     }
 
+    /// The block write authority's rollback capability, when this session's
+    /// authority has one (the CRDT store). `None` under the SQL authority.
+    pub fn batch_rollback(&self) -> Option<&dyn holon_core::batch_rollback::BatchRollback> {
+        use holon_core::OperationProvider;
+        self.dispatcher.batch_rollback()
+    }
+
     /// Get the profile resolver for entity profile resolution
     pub fn profile_resolver(&self) -> &Arc<dyn crate::entity_profile::ProfileResolving> {
         &self.profile_resolver

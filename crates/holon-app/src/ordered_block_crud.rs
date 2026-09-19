@@ -135,6 +135,10 @@ impl OperationProvider for OrderedBlockCrud {
         self.inner.identity_minter()
     }
 
+    fn batch_rollback(&self) -> Option<&dyn holon_core::batch_rollback::BatchRollback> {
+        self.inner.batch_rollback()
+    }
+
     /// Forwarded like every other non-ordering method: this decorator only
     /// takes a position on placement. Defaulting instead would answer `None`
     /// for a provider that can read the row, silently blinding the

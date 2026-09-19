@@ -9,10 +9,12 @@ summary: >-
   the two gates that errored both return BEFORE any dispatch, so those errors
   applied nothing — but the handler holds no transaction, so a mid-loop failure
   really can leave a batch half-applied and a retry really can duplicate rows.
-  A mid-loop failure is now a LOUD partial-apply report naming every row that
-  landed. No TRANSACTIONAL seam exists on either leg; compensating rollback via
-  the pinned Loro's unused `revert_to` is measured viable but only behind a
-  guard, because it destroys a peer's concurrent write.
+  Under the CRDT write authority a mid-loop failure is now ROLLED BACK by a
+  guarded `revert_to` across every document a block write routes to, and the
+  loud partial-apply report is the disclosed fallback whenever the guard
+  refuses: SqlOnly mode, a window another writer touched, a trimmed history, or
+  a document that has no pre-batch version. No TRANSACTIONAL seam exists on
+  either leg — the rollback compensates, it does not span both authorities.
 ---
 
 ## Bug
@@ -130,9 +132,11 @@ look at that fixture's vault before it is used for anything.
 
 ## Remedy
 
-MITIGATED by lane `dense-patch-atomic`, base `5543f4bc`, plus a verifier delta
-round. A loud partial-apply report is what landed. A compensating rollback is
-measured viable and specified but not wired; see the correction below.
+MITIGATED in two steps. The loud partial-apply report landed first (lane
+`dense-patch-atomic`, base `5543f4bc`, plus a verifier delta round). The
+guarded `revert_to` rollback landed second (lane `dense-revert-guard`, base
+`a31fa0df`, D146.a) and is described under "Guarded rollback" below; the report
+is now the fallback the guard's refusals fall through to.
 
 ### No transactional seam exists, on either leg
 
@@ -165,11 +169,8 @@ There is no write seam that can carry a `dense_patch` plan as one unit.
   is destroyed), and a revert across a shallow-snapshot boundary fails with
   `SwitchToVersionBeforeShallowRoot`. So rollback is viable only behind a
   guard that compares `oplog_vv()` per peer against the pre-batch vector and
-  refuses when anyone else wrote; that guard is implemented and tested in the
-  probe. Wiring it into `dense_patch` needs `LoroDocumentStore` resolved at the
-  MCP layer and a Loro-mode test harness (the mcp crate's harness is SqlOnly),
-  and is deliberately left as follow-up rather than shipped untested on the leg
-  where a mistake deletes a peer's data.
+  refuses when anyone else wrote. That guard is production code under
+  "Guarded rollback" below; the probe remains as its measurement.
 - `LoroDocument::with_write` is the
   natural candidate and does NOT serve: it gives ISOLATION, not rollback.
   MEASURED (`crates/holon-loro/tests/with_write_is_isolation_not_rollback.rs`,
@@ -231,17 +232,74 @@ Red log (pre-fix, op 1 persisted and the error disclosed nothing):
 `lane-logs/01-red-probe.log` — `PROBE error: move_block on block:ghost failed:
 … Block not found` with `child_count == 1`. Green: `lane-logs/02-green-dense-patch.log`.
 
+### Guarded rollback (D146.a)
+
+`OperationProvider::batch_rollback()` (`crates/holon-core/src/traits.rs`)
+mirrors `identity_minter`: default `None`, `Some(self)` on
+`LoroBlockOperations`, and `OperationDispatcher` returns the one rollback-capable
+provider in the wired set. `BackendEngine` and `HolonService` expose it, so
+`dense_patch` reaches the capability without naming a Loro type.
+
+The capability is `holon_core::batch_rollback`. `observe()` reads every
+document a block write can route to — the vault document, the device-local
+layout document, and each shared subtree document, the same set
+`LoroBackend::resolve_write_target_sync` routes over — and returns each one's
+per-peer op counts plus its frontier. The frontier is RECORDED rather than
+recomputed from the counters: measured, after a history trim
+`vv_to_frontiers` on the reloaded document yields a frontier `revert_to`
+accepts, so a recomputed target silently carries the store to a version nobody
+asked for.
+
+`BatchWindow` holds what a rollback needs to be provably safe, and is explicit
+about the limit. A remote peer's ops are attributable wherever they are
+measured, so one anywhere in the window refuses. A LOCAL write carries no batch
+identity — the authority attributes ops to a peer, not to a caller — so it is
+separable only across an interval in which the batch wrote nothing:
+`apply_plan` observes between ops and any advance there poisons the window. A
+local write that commits while one of the batch's own ops is in flight is
+attributed to the batch and is NOT detected; see the two 2026-09-19 entries.
+
+`apply_plan` opens a window before its first dispatch and, on a mid-loop
+failure, attempts the rollback. Success is a `ROLLED BACK` error carrying
+`rollback: "rolled_back"`, an empty `applied` and the dispatched rows under
+`reverted`; the caller may re-apply the whole corrected patch. A refusal keeps
+the `PARTIAL APPLY` report and adds `rollback_refused` with the reason, which
+names the document it concerns. Every refusal is decided before the first
+revert, so a refused rollback leaves the store exactly as the failed batch left
+it; `RollbackRefused::Incomplete` is the one variant that does not claim this
+and it names what it did revert.
+
+| test | asserts |
+|---|---|
+| `crates/holon-loro/tests/batch_rollback_guard.rs` (6) | a window the batch alone wrote is rolled back; a local write between two ops refuses and survives; a peer's write refuses and survives; a batch write into the layout document is rolled back too; an intruding layout write refuses and names that document; a window opened before the shallow root refuses typed |
+| `mod dense_patch_rollback_tests` (`frontends/mcp/src/tools.rs`, 3) | a 3-op plan whose op 3 fails is rolled back at the Loro authority and the SQL projection converges on it; a successful patch projects its rows (the control that gives the previous assertion teeth); a peer op inside the window refuses and discloses |
+| `crates/holon-core/src/batch_rollback.rs` (7) | the window admits the batch's own ops, poisons on a local write between ops, keeps the FIRST intruder, refuses a remote write anywhere, measures other routable documents, treats a document that appeared inside the window as all-advance, and refuses one that left the routing set |
+
+Red logs, all by inversion with byte-for-byte restore: with the capability
+forced to `None`, `lane-logs/RED-1-no-rollback.log` reports `PARTIAL APPLY: op
+3 of 3 … the 2 op(s) before it ARE in the store`. With the per-peer guard
+removed, `lane-logs/RED-2-guard-removed.log` and
+`lane-logs/RED-2b-guard-removed-loro.log` destroy the peer's write. With the
+between-ops check removed, `lane-logs/RED-3-local-write-unguarded.log`. With
+the document enumeration cut back to the vault document,
+`lane-logs/RED-4-vault-doc-only.log`. Green: `lane-logs/d1-loro-guard-2.log`,
+`lane-logs/d1-mcp-rollback-2.log`.
+
 ### Still open, ordered by value per unit of work:
 
-1. **Rollback via `revert_to`, behind the peer guard** — measured viable (see
-   the correction above), and the highest-value open item. Needs
-   `LoroDocumentStore` resolved at the MCP layer, a Loro-mode test harness,
-   and the loud report kept as the disclosed fallback for three cases: SqlOnly
-   mode, a window a peer wrote into, and a shallow-snapshot boundary.
-2. **A real transaction seam** across the operation engine and both
+1. **A local write inside one of the batch's own ops is still destroyed.**
+   Recorded as `2026-09-19-rollback-destroys-a-concurrent-local-write`
+   (PARTIAL). Needs a batch identity on every write, or a lock across the
+   batch, and the choice is a ruling rather than a lane decision.
+2. **The undo journal is not rewound with the store.** A rolled-back op's
+   journal entry, if one was pushed, still names a row the rollback removed.
+   MCP dispatches as `OpOrigin::Agent`, which pushes no undo entry today
+   (`crates/holon-api/src/operation_engine.rs:116`), so the two are consistent
+   now; a change that journals agent ops must rewind them here too.
+3. **A real transaction seam** across the operation engine and both
    authorities. Removes the class outright instead of compensating for it, and
    would serve every batch writer rather than this one tool.
-3. **Or make the plan idempotent instead**, which meets the caller's real need
+4. **Or make the plan idempotent instead**, which meets the caller's real need
    (a safe retry) without a transaction: mint each new block's uuid
    deterministically from the projection handle plus the plan's temp index, so
    re-running the same plan re-creates the SAME ids and
@@ -249,11 +307,11 @@ Red log (pre-fix, op 1 persisted and the error disclosed nothing):
    duplicating it. Cheaper than (1) and not mutually exclusive with it. Not
    taken here — it widens this lane's scope and needs a ruling on whether a
    retry should also bypass the conflict gate.
-4. **Make the conflict rejection say what it knows**, and publish the handle TTL
+5. **Make the conflict rejection say what it knows**, and publish the handle TTL
    in the tool descriptions (or return the handle's issue time with it), so the
    caller is not left inferring whether to re-apply.
-5. **Lift the invariant into the keystone.** The three tests above live at the
-   applier's own boundary; the MCP round trip at
+6. **Lift the invariant into the keystone.** Every test above lives at the
+   applier's or the authority's own boundary; the MCP round trip at
    `crates/holon-integration-tests/src/pbt/composed/live_mcp.rs:718` still
    judges nothing on failure, so a fault-injected `dense_patch` there would
    cover the whole drive rather than the applier alone.

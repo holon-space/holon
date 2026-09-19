@@ -1452,6 +1452,22 @@ fn duplicate_operations(ops: &[OperationDescriptor]) -> Vec<String> {
 
 #[async_trait]
 impl OperationProvider for OperationDispatcher {
+    /// The one rollback-capable provider in the wired set.
+    ///
+    /// Runtime-declared providers are not searched: a declared type brings its
+    /// own table, never the block store whose version a batch is measured
+    /// against.
+    fn batch_rollback(&self) -> Option<&dyn holon_core::batch_rollback::BatchRollback> {
+        let mut found = self.providers.iter().filter_map(|p| p.batch_rollback());
+        let first = found.next();
+        assert!(
+            found.next().is_none(),
+            "two providers offer batch rollback; a batch point taken from one would carry the \
+             other's store back to a version it never had"
+        );
+        first
+    }
+
     /// Get all operations from all registered providers
     ///
     /// Aggregates operations from all providers and includes wildcard

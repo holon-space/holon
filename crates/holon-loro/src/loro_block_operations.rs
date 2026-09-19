@@ -15,6 +15,7 @@
 //! CDC events; the watermark on `LoroSyncController` is the single source
 //! of truth for "what has been propagated."
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -31,18 +32,23 @@ use holon_api::block::Block;
 use holon_api::block::BlockContent;
 use holon_api::repository::CoreOperations;
 use holon_api::repository::Traversal;
+use holon_core::AuthorityVersion;
+use holon_core::BatchRollback;
+use holon_core::BatchWindow;
 use holon_core::BlockDataSourceHelpers;
 use holon_core::BlockOperations;
 use holon_core::BlockQueryHelpers;
 use holon_core::CompletionStateInfo;
 use holon_core::CrudOperations;
 use holon_core::DataSource;
+use holon_core::DocVersion;
 use holon_core::FieldDelta;
 use holon_core::MarkOperations;
 use holon_core::OperationProvider;
 use holon_core::OperationRegistry;
 use holon_core::OperationResult;
 use holon_core::Result;
+use holon_core::RollbackRefused;
 use holon_core::TaskOperations;
 use holon_core::TextOperations;
 use holon_core::UnknownOperationError;
@@ -87,6 +93,44 @@ impl LoroBlockOperations {
     /// Get the shared doc store (same instance used for writes).
     pub fn shared_doc_store(&self) -> Arc<RwLock<LoroDocumentStore>> {
         self.doc_store.clone()
+    }
+
+    /// Every document a block write can reach, named as a [`BatchWindow`]
+    /// names it.
+    ///
+    /// The same set [`LoroBackend::resolve_write_target_sync`] routes over:
+    /// the device-local layout document (which it probes FIRST), the vault
+    /// document, and each shared subtree document.
+    async fn routable_docs(&self) -> Result<Vec<(String, Arc<crate::LoroDocument>)>> {
+        let store = self.doc_store.read().await;
+        let mut docs = Vec::new();
+        for (name, scope) in [
+            (VAULT_DOC, DocScope::Global),
+            (LAYOUT_DOC, DocScope::Layout),
+        ] {
+            docs.push((
+                name.to_string(),
+                store
+                    .get_doc(scope)
+                    .await
+                    .map_err(|e| format!("{name} document: {e}"))?,
+            ));
+        }
+        if let Some(shared) = &self.shared_trees {
+            for id in shared.shared_tree_ids() {
+                let doc = shared.get_shared_doc(&id).ok_or_else(|| {
+                    format!("shared tree {id} left the registry between listing and lookup")
+                })?;
+                // Re-wrapping the same `Arc<LoroDoc>` resolves to the same
+                // doc-boundary lock, so the guard reads shared subtrees under
+                // the same exclusion as the vault document.
+                docs.push((
+                    format!("shared:{id}"),
+                    Arc::new(crate::LoroDocument::from_existing(doc, id)),
+                ));
+            }
+        }
+        Ok(docs)
     }
 
     /// Get the block backend: the global doc plus the device-local layout doc,
@@ -1568,8 +1612,156 @@ impl TextOperations<Block> for LoroBlockOperations {
     }
 }
 
+/// How many ops the document has seen from each peer.
+fn peer_counters(doc: &loro::LoroDoc) -> BTreeMap<u64, i64> {
+    doc.oplog_vv()
+        .iter()
+        .map(|(peer, count)| (*peer, i64::from(*count)))
+        .collect()
+}
+
+fn frontiers_of(version: &DocVersion) -> loro::Frontiers {
+    version
+        .frontier
+        .iter()
+        .map(|(peer, counter)| {
+            let counter = i32::try_from(*counter)
+                .unwrap_or_else(|_| panic!("op counter {counter} for peer {peer} exceeds Loro's"));
+            loro::ID::new(*peer, counter)
+        })
+        .collect()
+}
+
+fn refusal_of(doc: &str, err: loro::LoroError) -> RollbackRefused {
+    match err {
+        loro::LoroError::SwitchToVersionBeforeShallowRoot => RollbackRefused::HistoryTrimmed {
+            doc: doc.to_string(),
+        },
+        other => RollbackRefused::Unreachable {
+            doc: doc.to_string(),
+            detail: other.to_string(),
+        },
+    }
+}
+
+/// The vault document's name in a [`BatchWindow`].
+const VAULT_DOC: &str = "vault";
+/// The device-local layout document's name in a [`BatchWindow`].
+const LAYOUT_DOC: &str = "layout";
+
+/// `revert_to` carries a whole document back, so the batch window must hold
+/// nothing but the batch's own ops, in every document a block write can reach.
+/// The per-peer version vector is what says whose the window's ops were, which
+/// is why the guard compares that.
+#[async_trait]
+impl BatchRollback for LoroBlockOperations {
+    async fn observe(&self) -> Result<AuthorityVersion> {
+        let mut docs = BTreeMap::new();
+        for (name, doc) in self.routable_docs().await? {
+            let local_peer = doc.peer_id();
+            // The write guard, not the read guard: a version read while a
+            // write batch is in flight names a state nothing can return to.
+            let version = doc
+                .with_write(crate::write_origin::WriteOrigin::BatchRollback, |txn| {
+                    Ok(DocVersion {
+                        local_peer,
+                        counters: peer_counters(txn),
+                        frontier: txn
+                            .oplog_frontiers()
+                            .iter()
+                            .map(|id| (id.peer, i64::from(id.counter)))
+                            .collect(),
+                    })
+                })
+                .map_err(|e| format!("reading {name}'s version: {e}"))?;
+            docs.insert(name, version);
+        }
+        Ok(AuthorityVersion::new(docs))
+    }
+
+    async fn rollback_to(&self, window: &BatchWindow) -> std::result::Result<(), RollbackRefused> {
+        if let Some(refusal) = window.intruder() {
+            return Err(refusal.clone());
+        }
+        let unreachable = |detail: String| RollbackRefused::Unreachable {
+            doc: "the write authority".to_string(),
+            detail,
+        };
+        let now = self
+            .observe()
+            .await
+            .map_err(|e| unreachable(e.to_string()))?;
+        if let Some(refusal) = window.start().remote_advance_over(&now) {
+            return Err(refusal);
+        }
+
+        // Every refusal is decided here, before the first revert, so a refused
+        // rollback leaves the store exactly as the failed batch left it.
+        let mut targets = Vec::new();
+        for (name, doc) in self
+            .routable_docs()
+            .await
+            .map_err(|e| unreachable(e.to_string()))?
+        {
+            let Some(start) = window.start().docs().get(&name) else {
+                return Err(RollbackRefused::Unreachable {
+                    doc: name,
+                    detail: "the document joined the write authority's routing set inside the \
+                             batch window, so it has no pre-batch version to return to"
+                        .to_string(),
+                });
+            };
+            let after = now
+                .docs()
+                .get(&name)
+                .expect("routable_docs and observe enumerate the same documents");
+            if start.frontier == after.frontier {
+                continue;
+            }
+            let target = frontiers_of(start);
+            let reachable = doc
+                .with_write(crate::write_origin::WriteOrigin::BatchRollback, |txn| {
+                    Ok(txn.frontiers_to_vv(&target).is_some())
+                })
+                .map_err(|e| RollbackRefused::Unreachable {
+                    doc: name.clone(),
+                    detail: e.to_string(),
+                })?;
+            if !reachable {
+                return Err(RollbackRefused::HistoryTrimmed { doc: name });
+            }
+            targets.push((name, doc, target));
+        }
+
+        let mut reverted: Vec<String> = Vec::new();
+        for (name, doc, target) in targets {
+            let outcome = doc
+                .with_write(crate::write_origin::WriteOrigin::BatchRollback, |txn| {
+                    Ok(txn.revert_to(&target))
+                })
+                .unwrap_or_else(|e| Err(loro::LoroError::Unknown(e.to_string().into())));
+            match outcome {
+                Ok(()) => reverted.push(name),
+                Err(e) if reverted.is_empty() => return Err(refusal_of(&name, e)),
+                Err(e) => {
+                    return Err(RollbackRefused::Incomplete {
+                        reverted,
+                        doc: name,
+                        detail: e.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl OperationProvider for LoroBlockOperations {
+    fn batch_rollback(&self) -> Option<&dyn BatchRollback> {
+        Some(self)
+    }
+
     fn operations(&self) -> Vec<OperationDescriptor> {
         use holon_core::__operations_block_operations;
         use holon_core::__operations_crud_operations;
