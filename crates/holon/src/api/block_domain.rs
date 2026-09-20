@@ -606,12 +606,26 @@ impl<'a> BlockDomain<'a> {
         &self,
         block_id: &EntityUri,
     ) -> Result<(RenderExpr, RowChangeStream)> {
+        // The root is JOINED IN from `watch_context` rather than inlined as a
+        // literal. That is what lets one matview serve every focus root: the
+        // SQL text no longer varies per block, so its content-addressed view
+        // name does not either, and a first visit costs no `CREATE
+        // MATERIALIZED VIEW`. `watch_key` rides through the recursion so the
+        // demux can hand each watch its own rows.
+        //
+        // The seed takes only `root` rows, so a `leaf` watch gets no
+        // descendant closure it never asked for. One row per place keeps the
+        // seed unique without a DISTINCT, which this shape does not survive:
+        // with one the view empties out against its own recompute
+        // (navigation.sql names the measurement).
         let sql = format!(
-            "WITH RECURSIVE subtree AS ( \
-               SELECT b.id AS node_id, 0 AS depth, CAST(b.id AS TEXT) AS visited \
-               FROM {table} b WHERE b.id = $block_id \
+            "WITH RECURSIVE subtree(watch_key, node_id, depth, visited) AS ( \
+               SELECT wc.watch_key, b.id, 0, CAST(b.id AS TEXT) \
+               FROM watch_context wc JOIN {table} b ON b.id = wc.context_id \
+               WHERE wc.kind = 'root' \
                UNION ALL \
-               SELECT child.id, subtree.depth + 1, subtree.visited || ',' || CAST(child.id AS TEXT) \
+               SELECT subtree.watch_key, child.id, subtree.depth + 1, \
+                      subtree.visited || ',' || CAST(child.id AS TEXT) \
                FROM subtree \
                JOIN {table} child ON child.parent_id = subtree.node_id \
                LEFT JOIN block_tags pt ON pt.block_id = subtree.node_id AND pt.tag = 'Page' \
@@ -619,13 +633,24 @@ impl<'a> BlockDomain<'a> {
                  AND ',' || subtree.visited || ',' NOT LIKE '%,' || CAST(child.id AS TEXT) || ',%' \
                  AND (subtree.depth = 0 OR pt.block_id IS NULL) \
              ) \
-             SELECT d.* FROM subtree JOIN {table} d ON d.id = subtree.node_id",
+             SELECT d.*, subtree.watch_key AS watch_key \
+             FROM subtree JOIN {table} d ON d.id = subtree.node_id",
             table = crate::storage::BLOCK_READ_TABLE,
         );
-        let mut params = HashMap::new();
-        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
 
-        let change_stream = self.engine.query_and_watch(sql, params, None).await?;
+        // Namespaced: `watch_ui` and the leaf path can watch the same block at
+        // the same time, and each membership row is dropped when ITS stream
+        // closes.
+        let key = format!("root:{block_id}");
+        let change_stream = self
+            .engine
+            .query_and_watch_keyed(
+                sql,
+                &key,
+                block_id.as_str(),
+                crate::api::backend_engine::WatchViewKind::Root,
+            )
+            .await?;
         let render_expr = self.collection_render_expr(block_id).await?;
 
         Ok((render_expr, change_stream))
@@ -635,14 +660,25 @@ impl<'a> BlockDomain<'a> {
         &self,
         block_id: &EntityUri,
     ) -> Result<(RenderExpr, RowChangeStream)> {
+        // Same shape-keying as `render_region_root`: the block enters through
+        // `watch_context` instead of a literal, so every leaf watch shares one
+        // matview.
         let sql = format!(
-            "SELECT * FROM {table} WHERE id = $block_id",
+            "SELECT b.*, wc.watch_key AS watch_key FROM {table} b \
+             JOIN watch_context wc ON b.id = wc.context_id WHERE wc.kind = 'leaf'",
             table = crate::storage::BLOCK_READ_TABLE,
         );
-        let mut params = HashMap::new();
-        params.insert("block_id".to_string(), Value::String(block_id.to_string()));
 
-        let change_stream = self.engine.query_and_watch(sql, params, None).await?;
+        let key = format!("leaf:{block_id}");
+        let change_stream = self
+            .engine
+            .query_and_watch_keyed(
+                sql,
+                &key,
+                block_id.as_str(),
+                crate::api::backend_engine::WatchViewKind::Leaf,
+            )
+            .await?;
 
         let render_expr = RenderExpr::FunctionCall {
             name: "render_entity".to_string(),

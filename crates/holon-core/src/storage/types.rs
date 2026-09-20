@@ -50,6 +50,15 @@ pub enum StorageError {
     #[error("Database error: {0}")]
     DatabaseError(String),
 
+    /// The database actor is gone, so no statement can reach the database any
+    /// more. Only process teardown produces this, and it is its own variant
+    /// because a caller running during teardown must tell it apart from a
+    /// statement that failed against a LIVE database: the first is expected
+    /// and the second is a defect. Message kept verbatim — the reboot and
+    /// shutdown suites match it as text.
+    #[error("Database error: Actor channel closed")]
+    ActorGone,
+
     /// DDL naming resources that no schema provider registers. Distinct from a
     /// dependency *timeout*: nothing is coming, so the caller must disclose it
     /// now instead of parking.

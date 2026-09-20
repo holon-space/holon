@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use anyhow::Result;
 use holon_api::BatchWithMetadata;
 use holon_api::EntityName;
@@ -9,6 +10,7 @@ use holon_api::QueryContext;
 use holon_api::QueryLanguage;
 use holon_api::Value;
 use holon_core::storage::types::StorageEntity;
+use holon_core::storage::types::StorageError;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 
@@ -40,6 +42,168 @@ use crate::storage::turso::RowChangeStream;
 const PRQL_STDLIB: &str = include_str!("../../sql/prql_stdlib.prql");
 
 use crate::api::block_domain::BlockDomain;
+
+/// Which shared view shape a membership row belongs to.
+///
+/// The descendant view and the single-block view read the same table, so
+/// without this each would also maintain the other's rows — a `Leaf` watch
+/// would get a full subtree closure it never asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchViewKind {
+    /// The recursive descendant view of a focus root.
+    Root,
+    /// The single row of one block.
+    Leaf,
+}
+
+impl WatchViewKind {
+    /// The value stored in `watch_context.kind` and matched by each view.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WatchViewKind::Root => "root",
+            WatchViewKind::Leaf => "leaf",
+        }
+    }
+}
+
+/// One watch's claim on a place's `watch_context` row, given up when the
+/// watch ends.
+///
+/// A row says "some live watch is looking at this subtree", and the shared
+/// views maintain every subtree their rows name. A row no watch holds any
+/// more is therefore not a cosmetic leak: it keeps a subtree incrementally
+/// maintained on every write, forever, for nobody. Tying the claim to a value
+/// means it cannot outlive its watch by construction — not by a later write
+/// happening to arrive, which is the one thing a quiet database never does.
+///
+/// The row is SHARED by every watch on the place, so this guard releases only
+/// as the last owner, and by the nonce the row carries. Correct while one
+/// engine owns the database file; see [`WatchPlaces`].
+struct WatchContextGuard {
+    db_handle: DbHandle,
+    places: WatchPlaces,
+    /// This engine's count of releases that failed against a LIVE database.
+    failures: Arc<std::sync::atomic::AtomicU64>,
+    watch_key: String,
+    nonce: String,
+}
+
+/// Which watches of ONE engine hold each place's membership row, and the
+/// nonce the row carries.
+///
+/// The row is shared — one place, one row, whatever number of panels look at
+/// it — so no single watch may delete it; only the LAST one may. The set
+/// cannot live in the row: a row per watch duplicates the shared view's
+/// output, and neither way of collapsing the duplicates survives this engine
+/// (navigation.sql names the measurements). So the owners live beside the
+/// watches, on the ENGINE that owns the database — never in a process-global,
+/// which two engines holding the same block ids on two databases would share,
+/// each ending the other's rows.
+///
+/// PRECONDITION: one engine per database file. Two engines over ONE file each
+/// keep half the truth — the newer one's release takes the row the older one
+/// still watches, and the older one reports that row as unowned.
+type WatchPlaces = Arc<std::sync::Mutex<HashMap<String, PlaceClaims>>>;
+
+/// The live watches on one place, and the nonce of the row they hold.
+struct PlaceClaims {
+    owners: std::collections::HashSet<String>,
+    /// The nonce the place's row currently carries: the LATEST registration's,
+    /// which is not always the last owner's. The departing last owner deletes
+    /// by this, never by its own nonce, or a watch that outlived the watch
+    /// that superseded it would leave the row behind.
+    row_nonce: String,
+}
+
+impl Drop for WatchContextGuard {
+    fn drop(&mut self) {
+        let db_handle = self.db_handle.clone();
+        let failures = self.failures.clone();
+        let watch_key = std::mem::take(&mut self.watch_key);
+        let nonce = std::mem::take(&mut self.nonce);
+
+        // Give up this watch's claim. Another panel on the same place keeps
+        // the row — and its subtree — alive, and this watch issues no
+        // statement at all: the place is still watched, so there is nothing
+        // to say.
+        let row_nonce = {
+            let mut places = self.places.lock().expect("watch places mutex");
+            let Some(claims) = places.get_mut(&watch_key) else {
+                tracing::warn!(
+                    watch_key = %watch_key,
+                    "a watch ended on a place this engine no longer tracks"
+                );
+                return;
+            };
+            claims.owners.remove(&nonce);
+            if !claims.owners.is_empty() {
+                return;
+            }
+            places
+                .remove(&watch_key)
+                .expect("the entry was just borrowed")
+                .row_nonce
+        };
+
+        // `spawn_actor` is `tokio::spawn`, which PANICS with no runtime — and
+        // a panic in `Drop` during an unwind aborts the process. No runtime
+        // means the process is tearing down, so the row is the next boot's
+        // truncate to remove, not a leak against a live database.
+        if tokio::runtime::Handle::try_current().is_err() {
+            tracing::warn!(
+                watch_key = %watch_key,
+                "no runtime to delete the membership row of a finished watch; the next boot's \
+                 truncate removes it"
+            );
+            return;
+        }
+
+        crate::util::spawn_actor(async move {
+            // The last owner is gone, so the place itself is no longer
+            // watched. A successor can re-take it while this delete is still
+            // queued, which is why the statement names the ROW — the nonce
+            // the place carried when this watch was last to hold it — and not
+            // only the place.
+            match db_handle
+                .execute(
+                    "DELETE FROM watch_context WHERE watch_key = ? AND nonce = ?",
+                    vec![
+                        turso::Value::Text(watch_key.clone()),
+                        turso::Value::Text(row_nonce.clone()),
+                    ],
+                )
+                .await
+            {
+                Ok(1) => {}
+                Ok(matched) => {
+                    // A successor re-took the place, or a boot truncate
+                    // removed the row: either way the row this watch held is
+                    // gone, which is what the delete wanted.
+                    tracing::warn!(
+                        watch_key = %watch_key,
+                        matched,
+                        "the membership row of a finished watch was already gone"
+                    );
+                }
+                Err(StorageError::ActorGone) => {
+                    tracing::warn!(
+                        watch_key = %watch_key,
+                        "the database actor is gone, so the membership row of a finished watch \
+                         stays until the next boot truncates it"
+                    );
+                }
+                Err(e) => {
+                    failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::error!(
+                        watch_key = %watch_key,
+                        "failed to drop the membership row of a finished watch; its subtree stays \
+                         incrementally maintained for nobody: {e}"
+                    );
+                }
+            }
+        });
+    }
+}
 
 /// Main render engine managing database, query compilation, and operations
 pub struct BackendEngine {
@@ -92,6 +256,25 @@ pub struct BackendEngine {
     /// the engine). `None` in configs that never install one (tests,
     /// no-advice sessions).
     _advice_reconciler: Option<Arc<crate::sync::AdviceReconcilerHandle>>,
+    /// Which watches of THIS engine hold each place's membership row. See
+    /// [`WatchPlaces`]; it is also what
+    /// [`Self::unowned_watch_context_rows`] compares the table against, so a
+    /// leak is caught as STATE rather than by counting the failures that
+    /// happen to be loud.
+    watch_places: WatchPlaces,
+    /// Keyed watches this engine has opened, ever.
+    ///
+    /// The re-open waste is what D163.a wants to stay visible: with a stable
+    /// key the snapshot reads dedup back down, so a budget's read count no
+    /// longer shows how many watches an action re-opened. This does. Per
+    /// engine, so a reader can attribute it — a process-wide counter read by
+    /// tests running in parallel attributes nothing and underflows on the
+    /// subtraction.
+    watch_opens: Arc<std::sync::atomic::AtomicU64>,
+    /// Releases that failed against a LIVE database. The row survives its
+    /// watch, which [`Self::unowned_watch_context_rows`] then reports as
+    /// state; this counter says the database also refused.
+    watch_release_failures: Arc<std::sync::atomic::AtomicU64>,
     /// Keeps the clock scheduler's ticking task alive (ADR 0024 P5,
     /// time-as-data). `None` until installed in
     /// `create_initialized_engine`; the boot guard there fails loud if it
@@ -146,6 +329,9 @@ impl BackendEngine {
                 holon_core::integration_attribution::IntegrationAttribution::new(),
             rule_status: crate::api::rule_status::RuleStatusHandle::new(),
             accepted_rules: crate::api::accepted_rules::AcceptedRuleHandle::new(),
+            watch_places: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            watch_opens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            watch_release_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             _advice_reconciler: None,
             _clock_scheduler: None,
         })
@@ -278,6 +464,135 @@ impl BackendEngine {
         }
         let view_name = self.matview_manager.ensure_view(sql).await?;
         self.matview_manager.subscribe_cdc(&view_name).await
+    }
+
+    /// Keyed watches this engine has opened, ever. Sample it around an action
+    /// to get that action's re-opens.
+    pub fn watch_context_opens(&self) -> u64 {
+        self.watch_opens.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The places this engine currently watches, for diagnostics.
+    pub fn watched_places(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .watch_places
+            .lock()
+            .expect("watch places mutex")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// Releases of this engine that failed against a live database. Must be
+    /// 0; the rows they leave are also reported by
+    /// [`Self::unowned_watch_context_rows`].
+    pub fn watch_release_failures(&self) -> u64 {
+        self.watch_release_failures
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Membership rows in the database that no LIVE watch of this engine owns,
+    /// described one per entry.
+    ///
+    /// The state a leak leaves, whatever produced it: a failed delete, a
+    /// delete never issued, a delete that matched nothing. Counting failures
+    /// can only see the loud ones, so the oracle reads the rows instead. Call
+    /// it at quiescence — a watch that has just ended gives up its claim
+    /// synchronously but its DELETE is on the actor, so the row legitimately
+    /// outlives the claim for as long as that takes.
+    pub async fn unowned_watch_context_rows(&self) -> Result<Vec<String>> {
+        let rows = self
+            .db_handle
+            .query("SELECT watch_key, nonce FROM watch_context", HashMap::new())
+            .await
+            .context("reading watch_context for the ownership oracle")?;
+        let places = self.watch_places.lock().expect("watch places mutex");
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let (Some(Value::String(key)), Some(Value::String(nonce))) =
+                    (row.get("watch_key"), row.get("nonce"))
+                else {
+                    return Some(format!("a watch_context row with no key/nonce: {row:?}"));
+                };
+                match places.get(key) {
+                    Some(claims) if &claims.row_nonce == nonce => None,
+                    Some(claims) => Some(format!(
+                        "{key} (nonce {nonce}) — the place is watched but under nonce {}, so this \
+                         row belongs to no live watch",
+                        claims.row_nonce
+                    )),
+                    None => Some(format!(
+                        "{key} (nonce {nonce}) — no live watch holds this place, so its subtree \
+                         stays incrementally maintained on every later write"
+                    )),
+                }
+            })
+            .collect())
+    }
+
+    /// Record which subtree a watch is looking at, and hand back the row's
+    /// guard.
+    ///
+    /// The guard is what makes the row's lifetime a fact of the program rather
+    /// than a hope: it is returned by the call that registers, so every `?`
+    /// between here and a live subscription unwinds it, and it is moved into
+    /// the stream's forwarding task afterwards so the row goes when the
+    /// consumer drops the stream.
+    async fn register_watch_context(
+        &self,
+        watch_key: &str,
+        context_id: &str,
+        kind: WatchViewKind,
+    ) -> Result<WatchContextGuard> {
+        // ALLOW(identity_minting): names one live SUBSCRIPTION's claim on a
+        // session-scoped UI row, not an entity; it never enters Loro, org or a
+        // block id.
+        let nonce = uuid::Uuid::new_v4().to_string();
+        // Claimed BEFORE the write, so a concurrent last-owner drop on the
+        // same place cannot see an empty set and delete the row this watch is
+        // about to depend on. The claim also becomes the row's nonce: the
+        // `INSERT OR REPLACE` below is what the place's row will carry.
+        {
+            let mut places = self.watch_places.lock().expect("watch places mutex");
+            let claims = places
+                .entry(watch_key.to_string())
+                .or_insert_with(|| PlaceClaims {
+                    owners: std::collections::HashSet::new(),
+                    row_nonce: nonce.clone(),
+                });
+            claims.owners.insert(nonce.clone());
+            claims.row_nonce = nonce.clone();
+        }
+        let guard = WatchContextGuard {
+            db_handle: self.db_handle.clone(),
+            places: self.watch_places.clone(),
+            failures: self.watch_release_failures.clone(),
+            watch_key: watch_key.to_string(),
+            nonce: nonce.clone(),
+        };
+
+        self.db_handle
+            .transaction(vec![(
+                "INSERT OR REPLACE INTO watch_context (watch_key, context_id, kind, nonce) VALUES \
+                 (?, ?, ?, ?)"
+                    .to_string(),
+                vec![
+                    turso::Value::Text(watch_key.to_string()),
+                    turso::Value::Text(context_id.to_string()),
+                    turso::Value::Text(kind.as_str().to_string()),
+                    turso::Value::Text(nonce),
+                ],
+            )])
+            .await
+            .with_context(|| {
+                format!("registering watch_context row {watch_key} -> {context_id}")
+            })?;
+        self.watch_opens
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(guard)
     }
 
     /// Register an entity type at runtime (e.g., from MCP integration).
@@ -577,6 +892,58 @@ impl BackendEngine {
         ))
     }
 
+    /// Watch ONE subtree through a SHAPE-KEYED shared view.
+    ///
+    /// The ordinary watch path inlines the focused block's id into the SQL, so
+    /// the content-addressed view name varies per block and every first visit
+    /// pays a `CREATE MATERIALIZED VIEW` that walks the whole block table on
+    /// the interaction path. Here the root enters as DATA — a `watch_context`
+    /// row joined into the query — so the SQL text, and therefore the view, is
+    /// the same for every block of this shape.
+    ///
+    /// `watch_key` names the PLACE and routes the rows; `context_id` must be a
+    /// function of it, because the views deduplicate the membership by key and
+    /// two context ids under one key would send both watches both subtrees.
+    pub async fn query_and_watch_keyed(
+        &self,
+        sql: String,
+        watch_key: &str,
+        context_id: &str,
+        kind: WatchViewKind,
+    ) -> Result<RowChangeStream> {
+        // Every watch inserts its OWN row under the shared key, so a place's
+        // closure lives while any of its watches does and no watch can end
+        // another's. The key stays stable across re-opens, which is what keeps
+        // the snapshot read an identical binding, and the views dedup the
+        // rows so the closure is computed once per key however many watches
+        // hold it.
+        //
+        // The membership row must land before the view is queried, or the
+        // snapshot is empty and the first render shows nothing. From here to
+        // the `prepend_initial_data` call the guard is live on the stack, so
+        // every `?` below takes the row with it.
+        let guard = self
+            .register_watch_context(watch_key, context_id, kind)
+            .await?;
+
+        let transformed_sql = self.apply_sql_transforms(&sql);
+        let view_name = self.matview_manager.ensure_view(&transformed_sql).await?;
+        let cdc_stream = self
+            .matview_manager
+            .subscribe_cdc_keyed(&view_name, Some(watch_key))
+            .await?;
+        let data = self
+            .matview_manager
+            .query_view_for_key(&view_name, watch_key, None)
+            .await?;
+        Ok(Self::prepend_initial_data_owning(
+            data,
+            &view_name,
+            cdc_stream,
+            Some(guard),
+        ))
+    }
+
     /// Watch a query for changes via CDC streaming
     ///
     /// Returns a stream of RowChange events from the underlying database.
@@ -600,6 +967,15 @@ impl BackendEngine {
         self.bind_context_params(&mut params, &ctx);
 
         let sql_with_params = Self::inline_parameters(&sql, &params);
+        // Same diagnostic as `query_and_watch`: without it this path's views are
+        // unattributable, and it is the one that still mints per placement.
+        if std::env::var("HOLON_TRACE_VIEWS").is_ok() {
+            tracing::warn!(
+                view_name = %crate::sync::MatviewManager::compute_view_name(&sql_with_params),
+                sql = %sql_with_params,
+                "[diag-cdc-leak] query_and_watch: SQL → view"
+            );
+        }
         let view_name = self.matview_manager.ensure_view(&sql_with_params).await?;
         self.matview_manager.subscribe_cdc(&view_name).await
     }
@@ -864,6 +1240,8 @@ impl BackendEngine {
                 },
             }
         };
+        // Rows here are produced locally and already scoped to this stream,
+        // so there is no shared relation to route within.
         let created = |row: StorageEntity, relation: &str| RowChange {
             relation_name: relation.to_string(),
             change: Change::Created {
@@ -873,6 +1251,7 @@ impl BackendEngine {
                     trace_id: None,
                 },
             },
+            watch_key: None,
         };
 
         crate::util::spawn_actor(async move {
@@ -941,6 +1320,7 @@ impl BackendEngine {
                                     trace_id: None,
                                 },
                             },
+                            watch_key: None,
                         });
                     }
                 }
@@ -973,7 +1353,23 @@ impl BackendEngine {
     fn prepend_initial_data(
         initial_rows: Vec<holon_core::storage::types::StorageEntity>,
         view_name: &str,
+        cdc_stream: RowChangeStream,
+    ) -> RowChangeStream {
+        Self::prepend_initial_data_owning(initial_rows, view_name, cdc_stream, None)
+    }
+
+    /// `prepend_initial_data`, plus ownership of the watch's membership row.
+    ///
+    /// The forwarding task is the last thing that outlives a handed-out
+    /// stream, so it is where the guard belongs. It waits on the consumer
+    /// closing as well as on the CDC stream, because a watch usually ends on
+    /// a database that has gone quiet — waiting only for the next batch would
+    /// hold the row until something unrelated happened to write.
+    fn prepend_initial_data_owning(
+        initial_rows: Vec<holon_core::storage::types::StorageEntity>,
+        view_name: &str,
         mut cdc_stream: RowChangeStream,
+        guard: Option<WatchContextGuard>,
     ) -> RowChangeStream {
         use holon_api::streaming::Batch;
         use holon_api::streaming::BatchMetadata;
@@ -997,6 +1393,7 @@ impl BackendEngine {
                             trace_id: None,
                         },
                     },
+                    watch_key: None,
                 })
                 .collect();
             let initial_batch = WithMetadata {
@@ -1012,14 +1409,27 @@ impl BackendEngine {
                     degraded: None,
                 },
             };
+            // Moved in so the row lives exactly as long as this task, and
+            // named so it reads as ownership rather than an unused binding.
+            let _watch_context = guard;
+
             if tx.send(initial_batch).await.is_err() {
                 return;
             }
 
-            // Forward CDC stream
-            while let Some(batch) = cdc_stream.next().await {
-                if tx.send(batch).await.is_err() {
-                    break;
+            loop {
+                tokio::select! {
+                    // The consumer dropped the stream. This is the ordinary
+                    // way a watch ends and it produces no CDC traffic at all.
+                    () = tx.closed() => break,
+                    next = cdc_stream.next() => match next {
+                        Some(batch) => {
+                            if tx.send(batch).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    },
                 }
             }
         });

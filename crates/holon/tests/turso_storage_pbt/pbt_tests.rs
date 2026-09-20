@@ -651,6 +651,7 @@ fn apply_to_reference(
                                 trace_id: None,
                             },
                         },
+                        watch_key: None,
                     };
                     changes_vec.lock().unwrap().push(change);
                 }
@@ -700,6 +701,7 @@ fn apply_to_reference(
                                 trace_id: None,
                             },
                         },
+                        watch_key: None,
                     };
                     changes_vec.lock().unwrap().push(change);
                 }
@@ -755,6 +757,7 @@ fn apply_to_reference(
                                 trace_id: None,
                             },
                         },
+                        watch_key: None,
                     };
                     changes_vec.lock().unwrap().push(change);
 

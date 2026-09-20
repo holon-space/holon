@@ -72,6 +72,7 @@ pub mod viewmodel_shows_source_when_no_query;
 pub mod viewmodel_snapshot;
 pub mod viewmodel_state_toggle_correct;
 pub mod viewmodel_tree_virtual_slots;
+pub mod watch_context_rows_owned;
 pub mod watch_rows_match_ref;
 pub mod wheel_occlusion_routing;
 pub mod wheel_two_mode_motion_law;

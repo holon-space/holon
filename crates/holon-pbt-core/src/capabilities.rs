@@ -1503,6 +1503,32 @@ pub trait SutBackend {
     async fn live_focus_root_rows(&self) -> Vec<(String, String)>;
 }
 
+/// Membership rows of the shared keyed views that no live watch owns.
+///
+/// A SEPARATE cap from [`SutBackend`] because only a SUT with a real
+/// `BackendEngine` can answer it: the question pairs a table's contents with
+/// the watches that engine currently holds. A slice with no keyed watches
+/// does not register it and the invariant DESELECTS, rather than passing
+/// vacuously over a table that was never written.
+#[holon_macros::capmap_adapter]
+pub trait SutWatchContext {
+    /// One description per row in `watch_context` that no LIVE watch owns.
+    /// Empty is the invariant. Read after quiescence — a just-ended watch
+    /// releases its row through the database actor, so the row briefly
+    /// outlives the watch by design.
+    async fn unowned_watch_context_rows(&self) -> Vec<String>;
+
+    /// Keyed watches this SUT's engine has opened, ever. The invariant
+    /// reports the rise across its own window, which is the re-open count of
+    /// the transition just applied.
+    async fn watch_context_opens(&self) -> u64;
+
+    /// The places the SUT's engine holds right now. Reported beside the
+    /// unowned rows so a green check says WHICH places were live, not merely
+    /// that nothing was orphaned.
+    async fn watched_places(&self) -> Vec<String>;
+}
+
 /// The ordering encoding the observer's block projection carries alongside each
 /// block — the `sort_key` column of the `block` matview.
 ///

@@ -261,11 +261,15 @@ crate::cap_transition! {
             // because the task_state write is skipped while the block carries
             // no keyword to clear; over-charging only loosens a ceiling, and
             // the shape (linear in the keyword-headed prefix) is the point.
-            writes: if state.content_writes_reach_sql() {
-                2 * chars + source_keystrokes
-            } else {
-                chars + source_keystrokes
-            },
+            // Plus one `watch_context` delete per keystroke: the render
+            // re-opens about one watch per keystroke and every ended watch
+            // owes its membership row a delete (D168.b).
+            writes: chars
+                + if state.content_writes_reach_sql() {
+                    2 * chars + source_keystrokes
+                } else {
+                    chars + source_keystrokes
+                },
             ddl: 0,
             tolerance: 5,
         }

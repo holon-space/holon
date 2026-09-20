@@ -318,6 +318,33 @@ reason, then impl to green), the fix flips this case through three states:
 
 A sibling lane owns fix (2)+(3). This entry is the lock that proves it.
 
+### Liveness case for the watch-ownership oracle (2026-09-21)
+
+**`watch-context-place-stays-owned-across-re-opens-and-navigation`** — create a
+block, focus its editor, navigate away. Green, and it is a LIVENESS case in the
+`create-block-smoke` sense: it proves `inv-watch-context-rows-owned` (every
+`watch_context` membership row belongs to a live watch) engages and holds over
+9 keyed watch re-opens.
+
+What it deliberately does NOT do is red when the release is disabled, and the
+reason is measured rather than assumed — the invariant prints the places held
+at every check, and the case shows `places=["root:block:structural-page"]`
+throughout. One place is held from the first transition to the last: every open
+re-opens that key (which supersedes, so nothing is released), and `NavigateFocus`
+is a sidebar CLICK, so it can only target sidebar PAGES, which render through the
+query-source path and register no place at all. A place is abandoned only at
+teardown, where no invariant runs.
+
+Reaching the abandoned-place state needs a transition that re-roots the main
+panel on a plain block. `JumpToSearchHit` already issues
+`navigation.focus{region: "main", block_id}`; it is narrowed to page hits at
+`transitions/jump_to_search_hit.rs:112` and `:149` because a content hit reds
+`inv-viewmodel-tree-virtual-slots` (that file's doc, lines 15-22). So closing
+the gap is relaxing that precondition **and** answering the oracle question
+behind it — queued, not part of the lane that added this case. Until then the
+oracle's teeth are pinned at unit level by
+`holon::watch_context_membership_leak::the_ownership_oracle_names_a_row_no_watch_owns`.
+
 ## What a hand-authored regression covers — vs. a unit test
 
 Honest assessment (Martin's mid-term question: could these replace some unit

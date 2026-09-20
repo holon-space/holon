@@ -62,6 +62,11 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // frontend slice supplies it (production CacheBlockReader + OrgRenderer).
         invariants::org_render_fixed_point::wire(),
         invariants::no_orphan::wire(),
+        // Every `watch_context` row belongs to a live watch: the shared keyed
+        // views maintain one subtree per row, so an orphaned row is standing
+        // IVM work for a panel that is gone. Needs `SutWatchContext`, which
+        // only a SUT with a real engine supplies.
+        invariants::watch_context_rows_owned::wire(),
         // Birth contract (#34a): every block the projection exposes carries an
         // id, a resolvable parent, and a MINTED fractional position. Needs
         // `SutOrderKeys` on top of `SutBackend` — the position facet is not on

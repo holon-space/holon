@@ -812,7 +812,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
 
         response_rx
             .await
@@ -833,7 +833,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
 
         response_rx
             .await
@@ -861,7 +861,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
 
         response_rx
             .await
@@ -883,7 +883,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
         response_rx
             .await
             .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
@@ -899,7 +899,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
 
         let outcome = response_rx.await.map_err(|_| {
             StorageError::DatabaseError("Actor response channel closed".to_string())
@@ -931,7 +931,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
 
         response_rx
             .await
@@ -961,7 +961,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
         response_rx
             .await
             .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
@@ -994,7 +994,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
 
         response_rx
             .await
@@ -1013,7 +1013,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
 
         response_rx
             .await
@@ -1031,7 +1031,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
 
         response_rx
             .await
@@ -1046,7 +1046,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
 
         response_rx
             .await
@@ -1061,7 +1061,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
 
         response_rx.await.map_err(|_| {
             StorageError::DatabaseError("Actor response channel closed".to_string())
@@ -1103,7 +1103,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
 
         // Timeout to detect missing mark_available() calls.
         // wasm32 has no tokio runtime under wasm_bindgen_futures::spawn_local,
@@ -1159,7 +1159,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
 
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         {
@@ -1204,7 +1204,7 @@ impl DbHandle {
         self.tx
             .send(DbCommand::MarkAvailable { resources })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))
+            .map_err(|_| StorageError::ActorGone)
     }
 
     /// Check if a resource is currently available.
@@ -1219,7 +1219,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
 
         response_rx
             .await
@@ -1246,7 +1246,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
         Self::await_view_response(response_rx, "acquire_view_lease", view_name).await
     }
 
@@ -1263,7 +1263,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
         Self::await_view_response(response_rx, "ensure_pinned_view", view_name).await
     }
 
@@ -1310,7 +1310,7 @@ impl DbHandle {
                 response: response_tx,
             })
             .await
-            .map_err(|_| StorageError::DatabaseError("Actor channel closed".to_string()))?;
+            .map_err(|_| StorageError::ActorGone)?;
         response_rx
             .await
             .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
@@ -1652,7 +1652,21 @@ pub(crate) fn default_turso_config() -> TursoDatabaseConfig {
 pub struct RowChange {
     pub relation_name: String,
     pub change: ChangeData,
+    /// Which watch this row belongs to, for a SHAPE-KEYED shared view — one
+    /// matview serving every watch of the same query shape, with the subtree
+    /// root joined in as data rather than baked into the view's SQL.
+    ///
+    /// It has to be captured here rather than read off the row downstream:
+    /// `ChangeData::Deleted` carries only an id, so by the time a delete
+    /// reaches a subscriber the column it would be filtered on is gone.
+    /// `None` for an ordinary view, which routes by relation name alone.
+    pub watch_key: Option<String>,
 }
+
+/// The column a shape-keyed shared view projects to say which watch a row
+/// belongs to. Stripped from every row before delivery: it is routing
+/// metadata, not part of the watched query's result.
+pub const WATCH_KEY_COLUMN: &str = "watch_key";
 
 /// The type of change and associated data
 ///
@@ -1684,8 +1698,12 @@ pub type RowChangeStream = ReceiverStream<BatchWithMetadata<RowChange>>;
 /// `holon_api::reactive::coalesce()`.
 pub(crate) fn coalesce_row_changes(changes: Vec<RowChange>) -> Vec<RowChange> {
     let mut slots: Vec<Option<RowChange>> = changes.into_iter().map(Some).collect();
-    let mut pending_deletes: HashMap<(String, String), usize> = HashMap::new();
-    let mut pending_inserts: HashMap<(String, String), usize> = HashMap::new();
+    // Keyed by the WATCH too, not only the relation and the row: a shape-keyed
+    // shared view is one relation that many watches read, and the same row can
+    // be in two of their subtrees. Coalescing across watches would let one
+    // watch's insert cancel another's delete.
+    let mut pending_deletes: HashMap<(String, Option<String>, String), usize> = HashMap::new();
+    let mut pending_inserts: HashMap<(String, Option<String>, String), usize> = HashMap::new();
 
     for idx in 0..slots.len() {
         let Some(change) = slots[idx].clone() else {
@@ -1710,7 +1728,11 @@ pub(crate) fn coalesce_row_changes(changes: Vec<RowChange>) -> Vec<RowChange> {
             ChangeData::Updated { id, .. } => id.clone(),
             ChangeData::FieldsChanged { entity_id, .. } => entity_id.clone(),
         };
-        let key = (change.relation_name.clone(), entity_id);
+        let key = (
+            change.relation_name.clone(),
+            change.watch_key.clone(),
+            entity_id,
+        );
 
         match &change.change {
             ChangeData::Deleted { .. } => {
@@ -1748,6 +1770,7 @@ pub(crate) fn coalesce_row_changes(changes: Vec<RowChange>) -> Vec<RowChange> {
                             data: data.clone(),
                             origin: origin.clone(),
                         },
+                        watch_key: change.watch_key.clone(),
                     });
                 } else {
                     pending_inserts.insert(key, idx);
@@ -2388,7 +2411,18 @@ impl TursoBackend {
             ));
         }
 
+        /// Take the routing column off a shared view's row: captured so the
+        /// demux can route the change, removed so it never reaches a
+        /// consumer as if it were part of the query's result.
+        fn take_watch_key(data: &mut StorageEntity) -> Option<String> {
+            match data.remove(WATCH_KEY_COLUMN) {
+                Some(Value::String(s)) => Some(s),
+                _ => None,
+            }
+        }
+
         for change in event.changes.iter() {
+            let mut row_watch_key: Option<String> = None;
             let change_data = match &change.change {
                 DatabaseChangeType::Insert { .. } => match change.parse_record() {
                     Ok(values) => {
@@ -2409,6 +2443,7 @@ impl TursoBackend {
                                 }
                             };
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
+                        row_watch_key = take_watch_key(&mut data);
                         let origin = extract_change_origin_from_data(&data);
                         record(&mut origins, &origin);
                         ChangeData::Created { data, origin }
@@ -2445,6 +2480,7 @@ impl TursoBackend {
                                 }
                             };
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
+                        row_watch_key = take_watch_key(&mut data);
                         let origin = extract_change_origin_from_data(&data);
                         record(&mut origins, &origin);
                         let entity_id = data
@@ -2492,6 +2528,7 @@ impl TursoBackend {
                                 }
                             };
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
+                        row_watch_key = take_watch_key(&mut data);
                         let entity_id = data
                             .get("id")
                             .and_then(|v| match v {
@@ -2534,6 +2571,7 @@ impl TursoBackend {
             raw_changes.push(RowChange {
                 relation_name: event.relation_name.clone(),
                 change: change_data,
+                watch_key: row_watch_key,
             });
         }
 
@@ -4562,6 +4600,7 @@ mod cdc_coalescer_tests {
                     trace_id: None,
                 },
             },
+            watch_key: None,
         }
     }
 
@@ -4575,6 +4614,7 @@ mod cdc_coalescer_tests {
                     trace_id: None,
                 },
             },
+            watch_key: None,
         }
     }
 
@@ -4593,6 +4633,7 @@ mod cdc_coalescer_tests {
                     trace_id: None,
                 },
             },
+            watch_key: None,
         }
     }
 
@@ -4668,6 +4709,90 @@ mod cdc_coalescer_tests {
             make_insert("view1", "id2", "value"),
         ]);
         assert_eq!(result.len(), 2);
+    }
+
+    fn keyed(mut change: RowChange, watch_key: &str) -> RowChange {
+        change.watch_key = Some(watch_key.to_string());
+        change
+    }
+
+    /// One row leaving watch A's subtree and entering watch B's is TWO facts,
+    /// one per watch, and a shared view carries both in one batch.
+    ///
+    /// They collide on `(relation, entity_id)`: the shared parameterized view
+    /// is one relation, and the row is one block. Only the routing key tells
+    /// them apart, so coalescing that ignores it turns A's "the row left" and
+    /// B's "the row arrived" into a single fact — and whichever watch does not
+    /// own the survivor is never told.
+    #[test]
+    fn coalesce_keeps_both_watches_facts_when_a_row_moves_between_their_subtrees() {
+        let result = coalesce_row_changes(vec![
+            keyed(make_insert("shared", "block:x", "v"), "root:B"),
+            keyed(make_delete("shared", "block:x"), "root:A"),
+        ]);
+
+        assert_eq!(
+            result.len(),
+            2,
+            "a move between two watches must not cancel out: {result:?}"
+        );
+        let for_a = result
+            .iter()
+            .find(|c| c.watch_key.as_deref() == Some("root:A"))
+            .expect("watch A must still be told the row left its subtree");
+        assert!(
+            matches!(for_a.change, ChangeData::Deleted { .. }),
+            "watch A's fact is a delete, got {:?}",
+            for_a.change
+        );
+        let for_b = result
+            .iter()
+            .find(|c| c.watch_key.as_deref() == Some("root:B"))
+            .expect("watch B must still be told the row arrived");
+        assert!(
+            matches!(for_b.change, ChangeData::Created { .. }),
+            "watch B's fact is an insert, got {:?}",
+            for_b.change
+        );
+    }
+
+    /// The same move in the other order must not become one `Updated` carrying
+    /// the arriving watch's key: that silently drops the leaving watch's
+    /// delete, so it keeps rendering a row that is no longer in its subtree.
+    #[test]
+    fn coalesce_does_not_merge_one_watchs_delete_with_anothers_insert() {
+        let result = coalesce_row_changes(vec![
+            keyed(make_delete("shared", "block:x"), "root:A"),
+            keyed(make_insert("shared", "block:x", "v"), "root:B"),
+        ]);
+
+        assert_eq!(
+            result.len(),
+            2,
+            "a delete for one watch and an insert for another are not one update: {result:?}"
+        );
+        let for_a = result
+            .iter()
+            .find(|c| c.watch_key.as_deref() == Some("root:A"))
+            .expect("watch A must still be told the row left its subtree");
+        assert!(
+            matches!(for_a.change, ChangeData::Deleted { .. }),
+            "watch A's fact is a delete, got {:?}",
+            for_a.change
+        );
+    }
+
+    /// Within ONE watch the delete/insert pair still collapses — the fix is
+    /// per-key coalescing, not no coalescing.
+    #[test]
+    fn coalesce_still_collapses_a_delete_insert_pair_inside_one_watch() {
+        let result = coalesce_row_changes(vec![
+            keyed(make_delete("shared", "block:x"), "root:A"),
+            keyed(make_insert("shared", "block:x", "v"), "root:A"),
+        ]);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0].change, ChangeData::Updated { .. }));
+        assert_eq!(result[0].watch_key.as_deref(), Some("root:A"));
     }
 
     #[test]

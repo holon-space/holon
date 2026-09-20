@@ -38,7 +38,7 @@ use holon_pbt_core::composition::CapId;
 use holon_pbt_core::null_ref::null_ref_cap_ids;
 use holon_pbt_core::null_ref::null_ref_caps;
 
-/// The class-1 set, pinned: 35 of the catalog's 89 registered invariants. A new
+/// The class-1 set, pinned: 36 of the catalog's 91 registered invariants. A new
 /// invariant that reads the reference model self-classifies OUT of this list
 /// (its `needs()` names a `Ref*` cap); one that does not lands IN it and must
 /// be added here deliberately — the act of editing this list is the act of
@@ -85,6 +85,7 @@ const CLASS_ONE: &[&str] = &[
     "inv-viewmodel-no-error-widgets",
     "inv-viewmodel-shows-source-when-no-query",
     "inv-viewmodel-snapshot",
+    "inv-watch-context-rows-owned",
     "inv-wheel-occlusion-routing",
     "inv-wheel-two-mode-motion-law",
     "inv-window-focus-matches-engine-focus",

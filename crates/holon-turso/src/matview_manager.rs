@@ -29,6 +29,7 @@ use crate::sql_parser::parse_sql;
 use crate::turso::DbHandle;
 use crate::turso::RowChange;
 use crate::turso::RowChangeStream;
+use crate::turso::WATCH_KEY_COLUMN;
 use crate::turso::priority;
 use crate::util::strip_order_by;
 
@@ -523,6 +524,11 @@ enum DemuxCommand {
     /// their initial query.
     Subscribe {
         view_name: String,
+        /// `Some` for a subscriber of a SHAPE-KEYED shared view: it receives
+        /// only the rows carrying this key, with the routing column already
+        /// stripped. `None` receives the view's batches whole, which is every
+        /// pre-existing subscriber.
+        watch_key: Option<String>,
         tx: mpsc::Sender<BatchWithMetadata<RowChange>>,
         ack: oneshot::Sender<()>,
     },
@@ -667,14 +673,48 @@ impl MatviewManager {
     ///
     /// Reads from the broadcast channel and fans out to per-view subscribers.
     /// Dead subscribers (closed channels) are pruned on each batch.
+    ///
+    /// This loop runs only when a write produces CDC, so it is not a place
+    /// from which anything may conclude that a watch has ENDED — on a quiet
+    /// database it never runs at all. A keyed watch's `watch_context` row is
+    /// owned by its `WatchContextGuard` instead.
     fn spawn_demux(
         cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
     ) -> mpsc::Sender<DemuxCommand> {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<DemuxCommand>(64);
         let mut broadcast_rx = cdc_broadcast.subscribe();
         crate::util::spawn_actor(async move {
-            let mut subscribers: HashMap<String, Vec<mpsc::Sender<BatchWithMetadata<RowChange>>>> =
-                HashMap::new();
+            /// One registered consumer: its routing key, and where to send.
+            struct Sub {
+                watch_key: Option<String>,
+                tx: mpsc::Sender<BatchWithMetadata<RowChange>>,
+            }
+            /// Deliver one batch. `false` means this subscriber is finished and
+            /// must be dropped.
+            fn send_batch(
+                tx: &mpsc::Sender<BatchWithMetadata<RowChange>>,
+                batch: BatchWithMetadata<RowChange>,
+                view_name: &str,
+            ) -> bool {
+                match tx.try_send(batch) {
+                    Ok(()) => true,
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // A dropped delta would silently corrupt the subscriber's
+                        // incremental state forever (lost rows / ghost rows). Close the
+                        // stream instead so the consumer sees the end-of-stream and must
+                        // resubscribe via watch(), re-querying initial rows.
+                        tracing::error!(
+                            "[MatviewManager] CDC subscriber for '{}' is full; closing its \
+                             stream (delivering a partial delta stream would corrupt \
+                             incremental consumers)",
+                            view_name
+                        );
+                        false
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => false,
+                }
+            }
+            let mut subscribers: HashMap<String, Vec<Sub>> = HashMap::new();
             let mut cmd_rx_open = true;
 
             loop {
@@ -688,9 +728,12 @@ impl MatviewManager {
                     // Process new subscriber registrations (only when channel is open)
                     maybe_cmd = cmd_rx.recv(), if cmd_rx_open => {
                         match maybe_cmd {
-                            Some(DemuxCommand::Subscribe { view_name, tx, ack }) => {
-                                tracing::info!("[Demux] Registered subscriber for '{}'", view_name);
-                                subscribers.entry(view_name).or_default().push(tx);
+                            Some(DemuxCommand::Subscribe { view_name, watch_key, tx, ack }) => {
+                                tracing::info!(
+                                    "[Demux] Registered subscriber for '{}' key={:?}",
+                                    view_name, watch_key
+                                );
+                                subscribers.entry(view_name).or_default().push(Sub { watch_key, tx });
                                 // Receiver gone = caller aborted before registration
                                 // completed; nothing to notify.
                                 let _ = ack.send(());
@@ -722,24 +765,32 @@ impl MatviewManager {
                                     }
                                 }
                                 if let Some(senders) = subscribers.get_mut(view_name) {
-                                    senders.retain(|tx| {
-                                        match tx.try_send(batch.clone()) {
-                                            Ok(()) => true,
-                                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                                // A dropped delta would silently corrupt the
-                                                // subscriber's incremental state forever (lost
-                                                // rows / ghost rows). Close the stream instead so
-                                                // the consumer sees the end-of-stream and must
-                                                // resubscribe via watch(), re-querying initial rows.
-                                                tracing::error!(
-                                                    "[MatviewManager] CDC subscriber for '{}' is full; \
-                                                     closing its stream (delivering a partial delta \
-                                                     stream would corrupt incremental consumers)",
-                                                    view_name
-                                                );
-                                                false
+                                    // A keyed subscriber owns one watch on a shared
+                                    // relation, so it sees only its own rows. An
+                                    // empty result is not delivered: forwarding
+                                    // other watches' traffic as empty batches would
+                                    // multiply the churn every consumer already has
+                                    // to settle.
+                                    //
+                                    // Dropping a dead subscriber here frees the
+                                    // delivery slot only. The membership row is
+                                    // owned by the watch's own guard
+                                    // (`WatchContextGuard`), because a watch
+                                    // usually ends on a database that has gone
+                                    // quiet and this loop only ever runs on a
+                                    // write.
+                                    senders.retain(|sub| match &sub.watch_key {
+                                        None => send_batch(&sub.tx, batch.clone(), view_name),
+                                        Some(key) => {
+                                            let mut mine = batch.clone();
+                                            mine.inner.items.retain(|item| {
+                                                item.watch_key.as_deref() == Some(key.as_str())
+                                            });
+                                            if mine.inner.items.is_empty() {
+                                                !sub.tx.is_closed()
+                                            } else {
+                                                send_batch(&sub.tx, mine, view_name)
                                             }
-                                            Err(mpsc::error::TrySendError::Closed(_)) => false,
                                         }
                                     });
                                     if senders.is_empty() {
@@ -931,6 +982,16 @@ impl MatviewManager {
 
         self.ddl_creates.fetch_add(1, Ordering::Relaxed);
         self.mark_view_known(&view_name).await;
+        // The one choke point every mint passes through, whichever watch API
+        // asked for it. Attributing a mint to its SQL from any other place
+        // misses the callers that do not go through `query_and_watch`.
+        if std::env::var("HOLON_TRACE_VIEWS").is_ok() {
+            tracing::warn!(
+                view_name = %view_name,
+                sql = %sql,
+                "[diag-cdc-leak] query_and_watch: SQL → view"
+            );
+        }
         tracing::debug!("[MatviewManager] Successfully created view: {}", view_name);
         Ok(view_name)
     }
@@ -1003,6 +1064,43 @@ impl MatviewManager {
         self.query_view_ordered(view_name, None).await
     }
 
+    /// `query_view` restricted to ONE watch of a shape-keyed shared view.
+    ///
+    /// The routing column is dropped from every row: it selects the watch, it
+    /// is not part of the watched query's result, and a consumer that saw it
+    /// would render it.
+    #[tracing::instrument(skip(self))]
+    pub async fn query_view_for_key(
+        &self,
+        view_name: &str,
+        watch_key: &str,
+        order_by: Option<&str>,
+    ) -> Result<Vec<StorageEntity>> {
+        let mut params = HashMap::new();
+        params.insert(
+            "watch_key".to_string(),
+            Value::String(watch_key.to_string()),
+        );
+        let select_sql = match order_by {
+            Some(clause) => format!(
+                "SELECT *, rowid AS _rowid FROM {view_name} WHERE {WATCH_KEY_COLUMN} = \
+                 $watch_key {clause}"
+            ),
+            None => format!(
+                "SELECT *, rowid AS _rowid FROM {view_name} WHERE {WATCH_KEY_COLUMN} = $watch_key"
+            ),
+        };
+        let mut rows = self
+            .db_handle
+            .query(&select_sql, params)
+            .await
+            .with_context(|| format!("Failed to query view {view_name} for {watch_key}"))?;
+        for row in &mut rows {
+            row.remove(WATCH_KEY_COLUMN);
+        }
+        Ok(rows)
+    }
+
     /// `query_view` with the definition's `ORDER BY` re-applied.
     ///
     /// The matview body cannot carry an `ORDER BY` (Turso IVM rejects Sort),
@@ -1057,12 +1155,33 @@ impl MatviewManager {
     /// the demux's registration ack before returning, so a subsequent query
     /// is guaranteed to observe registration-before-query ordering.
     pub async fn subscribe_cdc(&self, view_name: &str) -> Result<RowChangeStream> {
+        self.subscribe_cdc_keyed(view_name, None).await
+    }
+
+    /// `subscribe_cdc` for a SHAPE-KEYED shared view: one matview serves every
+    /// watch of the same query shape, and `watch_key` selects this watch's
+    /// rows out of it.
+    ///
+    /// The filter runs in the demux rather than in the consumer because a
+    /// `Deleted` change carries no row: the key has to be read while the
+    /// deleted row is still in hand, which happens in the CDC conversion
+    /// (`RowChange::watch_key`).
+    pub async fn subscribe_cdc_keyed(
+        &self,
+        view_name: &str,
+        watch_key: Option<&str>,
+    ) -> Result<RowChangeStream> {
         let (tx, rx) = mpsc::channel(1024);
         let (ack_tx, ack_rx) = oneshot::channel();
-        tracing::info!("[MatviewManager] subscribe_cdc('{}')", view_name);
+        tracing::info!(
+            "[MatviewManager] subscribe_cdc('{}') key={:?}",
+            view_name,
+            watch_key
+        );
         self.demux_cmd_tx
             .send(DemuxCommand::Subscribe {
                 view_name: view_name.to_string(),
+                watch_key: watch_key.map(str::to_string),
                 tx,
                 ack: ack_tx,
             })

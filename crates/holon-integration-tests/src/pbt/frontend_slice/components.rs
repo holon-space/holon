@@ -2443,6 +2443,24 @@ impl SutBackend for HeadlessFrontendComponent {
 }
 
 #[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutWatchContext for HeadlessFrontendComponent {
+    async fn unowned_watch_context_rows(&self) -> Vec<String> {
+        self.engine()
+            .unowned_watch_context_rows()
+            .await
+            .expect("reading watch_context for the ownership oracle")
+    }
+
+    async fn watch_context_opens(&self) -> u64 {
+        self.engine().watch_context_opens()
+    }
+
+    async fn watched_places(&self) -> Vec<String> {
+        self.engine().watched_places()
+    }
+}
+
+#[async_trait::async_trait(?Send)]
 impl crate::pbt::net_cap::SutDerivedNet for HeadlessFrontendComponent {
     async fn derived_net(&self) -> holon_net::CompiledNet {
         crate::pbt::net_cap::derived_net_of(&self.engine())
@@ -4741,6 +4759,10 @@ impl HeadlessFrontendComponent {
         caps.insert(self.clone() as Arc<dyn SutViewSelection>);
         caps.insert(self.clone() as Arc<dyn SutBackend>);
         caps.insert(self.clone() as Arc<dyn SutOrderKeys>);
+        // The engine behind this component is the one that opens keyed
+        // watches, so it is the one that can say which membership rows no
+        // live watch owns.
+        caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::SutWatchContext>);
         // ADR 0032 net totality: this component owns the production dispatcher,
         // so it is the one that can answer both "what does the net describe"
         // and "what did this run fire".

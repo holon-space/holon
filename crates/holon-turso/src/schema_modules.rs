@@ -788,6 +788,7 @@ impl SchemaModule for NavigationSchemaModule {
             Resource::schema("navigation_cursor"),
             Resource::schema("current_focus"),
             Resource::schema("focus_roots"),
+            Resource::schema("watch_context"),
         ]
     }
 
@@ -811,6 +812,13 @@ impl SchemaModule for NavigationSchemaModule {
                 Err(e) => return Err(e),
             }
         }
+
+        // Session-scoped: a membership row that outlived its session has no
+        // owner, and leaving it would keep a subtree maintained for a watch
+        // that no longer exists.
+        db_handle
+            .execute("DELETE FROM watch_context", Vec::new())
+            .await?;
 
         tracing::info!("[NavigationSchemaModule] Reconciling navigation matviews");
         let views: &[(&str, &str)] = &[

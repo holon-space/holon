@@ -766,6 +766,9 @@
               },
               {
                 "name": "undo_move_block_e2e.rs"
+              },
+              {
+                "name": "watch_context_membership_leak.rs"
               }
             ]
           }
@@ -3294,6 +3297,9 @@
                             "name": "viewmodel_tree_virtual_slots.rs"
                           },
                           {
+                            "name": "watch_context_rows_owned.rs"
+                          },
+                          {
                             "name": "watch_rows.rs"
                           },
                           {
@@ -3669,6 +3675,9 @@
                           },
                           {
                             "name": "viewmodel_tree_virtual_slots.rs"
+                          },
+                          {
+                            "name": "watch_context_rows_owned.rs"
                           },
                           {
                             "name": "watch_rows_match_ref.rs"
@@ -4361,6 +4370,9 @@
                   },
                   {
                     "name": "phantom_loro_exists_repro.rs"
+                  },
+                  {
+                    "name": "watch_context_boot_purge.rs"
                   },
                   {
                     "name": "wiki_link_ingest_marks_junction.rs"
@@ -7791,6 +7803,9 @@
               },
               {
                 "name": "unregistered_dependency_fast_fail.rs"
+              },
+              {
+                "name": "watch_context_dedup_maintenance.rs"
               },
               {
                 "name": "watch_preserves_order.rs"

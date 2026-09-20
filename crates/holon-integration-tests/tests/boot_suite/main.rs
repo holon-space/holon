@@ -15,4 +15,5 @@ mod marks_lengthening_batch_no_quarantine;
 mod mcp_mirrored_entity_write_authority;
 mod pairing_deferred_reimport_boots;
 mod phantom_loro_exists_repro;
+mod watch_context_boot_purge;
 mod wiki_link_ingest_marks_junction;
