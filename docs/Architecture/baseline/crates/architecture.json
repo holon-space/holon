@@ -4758,7 +4758,13 @@
                 "name": "bisection_pbt.rs"
               },
               {
+                "name": "catalog_analyzability_census.rs"
+              },
+              {
                 "name": "cook_vault_ingest.rs"
+              },
+              {
+                "name": "enabledness_query_production_cost.rs"
               },
               {
                 "name": "general_e2e_composed_pbt.rs"
@@ -6302,10 +6308,16 @@
                 "name": "compile.rs"
               },
               {
+                "name": "enabledness.rs"
+              },
+              {
                 "name": "guards.rs"
               },
               {
                 "name": "lib.rs"
+              },
+              {
+                "name": "marking.rs"
               },
               {
                 "name": "net.rs"
@@ -6321,6 +6333,9 @@
               },
               {
                 "name": "catalog_totality.rs"
+              },
+              {
+                "name": "enabledness.rs"
               },
               {
                 "name": "guard_classifier_pbt.rs"
