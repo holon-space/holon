@@ -1448,6 +1448,9 @@
                 "name": "boundary_behavior_correspondence.rs"
               },
               {
+                "name": "catalog_totality.rs"
+              },
+              {
                 "name": "cell_leg_delta_delivery.rs"
               },
               {
@@ -4373,6 +4376,9 @@
                   },
                   {
                     "name": "arc_marking_equality.rs"
+                  },
+                  {
+                    "name": "arc_truthfulness_over_the_sql_authority.rs"
                   },
                   {
                     "name": "class_one_invariant_classifier.rs"
