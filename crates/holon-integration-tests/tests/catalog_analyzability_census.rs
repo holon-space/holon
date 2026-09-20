@@ -18,10 +18,12 @@
 //! @pbt covers catalog-analyzability-census — which catalog transitions the
 //! derived net can analyze
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use holon_integration_tests::TestEnvironmentBuilder;
 use holon_net::Analyzability;
+use holon_net::guards::ResidueCause;
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     Arc::new(
@@ -46,6 +48,21 @@ const EXPECTED_ANALYZABLE: &[&str] = &[
     "rule:block:journals::action::0",
 ];
 
+/// Every transition still carrying a guard predicate the arc language cannot
+/// express, named with its count. Residue is what the enabledness query
+/// cannot answer for, so this set SHRINKING is the measure of progress on the
+/// arc language, and this set growing is a regression.
+///
+/// The one entry left is a NEGATED EXISTENCE test
+/// (`not block_exists("Journals/{today}")`), which needs the inhibitor rather
+/// than the hop: emptiness of a place, not a second entity's attributes.
+const EXPECTED_RESIDUE: &[(&str, usize)] = &[("rule:block:journals::action::0", 1)];
+
+/// Residue by CAUSE, so the totals say WHICH language gap is costing what.
+/// `negation` is the one the next increment closes: there is no De Morgan
+/// pass, so a negated conjunct is opaque whatever it wraps.
+const EXPECTED_RESIDUE_BY_CAUSE: &[(&str, usize)] = &[("negation", 1)];
+
 const VAULT: &str =
     "#+TITLE: Census\n#+ID: census-doc\n* Node\n:PROPERTIES:\n:ID: census-n0\n:END:\n";
 
@@ -62,6 +79,8 @@ fn catalog_analyzability_census() {
         let net = env.engine().derived_net().expect("derive the net");
 
         let mut analyzable: Vec<String> = Vec::new();
+        let mut residue: Vec<(String, usize)> = Vec::new();
+        let mut by_cause: BTreeMap<&'static str, usize> = BTreeMap::new();
         let mut rows: Vec<String> = Vec::new();
         for transition in &net.transitions {
             let verdict = match &transition.analyzability {
@@ -73,26 +92,44 @@ fn catalog_analyzability_census() {
                     format!("Unanalyzable{undeclared:?}")
                 }
             };
+            if !transition.residue.is_empty() {
+                residue.push((
+                    transition.key().as_str().to_string(),
+                    transition.residue.len(),
+                ));
+                for entry in &transition.residue {
+                    *by_cause
+                        .entry(ResidueCause::of(&entry.predicate).as_str())
+                        .or_default() += 1;
+                }
+            }
             rows.push(format!(
                 "[census] {:<46} {:<34} arcs={:<3} residue={}",
                 transition.key().as_str(),
                 verdict,
-                transition.arcs.len(),
+                transition.arcs().len(),
                 transition.residue.len()
             ));
         }
         rows.sort();
         analyzable.sort();
+        residue.sort();
         for row in &rows {
             eprintln!("{row}");
         }
 
         let total = net.transitions.len();
         eprintln!(
-            "[census] TOTALS transitions={total} analyzable={} unanalyzable={}",
+            "[census] TOTALS transitions={total} analyzable={} unanalyzable={} \
+             residue_predicates={} transitions_with_residue={}",
             analyzable.len(),
-            total - analyzable.len()
+            total - analyzable.len(),
+            residue.iter().map(|(_, n)| n).sum::<usize>(),
+            residue.len()
         );
+        for (cause, count) in &by_cause {
+            eprintln!("[census] residue cause {cause:<16} {count}");
+        }
 
         assert!(
             total > 0,
@@ -104,6 +141,24 @@ fn catalog_analyzability_census() {
             "the analyzable set moved. Declaring both halves on more operations is the goal, so \
              a GROWN set means this constant is stale — widen it. A SHRUNK set means a \
              declaration was lost and the enabledness query silently stopped answering for it."
+        );
+        let by_cause: Vec<(&str, usize)> = by_cause.into_iter().collect();
+        assert_eq!(
+            by_cause, EXPECTED_RESIDUE_BY_CAUSE,
+            "the residue causes moved. Each cause is one gap in the arc language, so a cause \
+             emptying is progress and this constant is then stale; a cause appearing means a \
+             guard shape stopped compiling."
+        );
+        let expected_residue: Vec<(String, usize)> = EXPECTED_RESIDUE
+            .iter()
+            .map(|(key, n)| ((*key).to_string(), *n))
+            .collect();
+        assert_eq!(
+            residue, expected_residue,
+            "the residue set moved. Residue SHRINKING is the goal — every predicate the arc \
+             language learns to express leaves this set, so a smaller set means this constant \
+             is stale. A GROWN set means a guard stopped compiling to arcs and the enabledness \
+             query quietly went back to answering Unknown for it."
         );
     });
 }

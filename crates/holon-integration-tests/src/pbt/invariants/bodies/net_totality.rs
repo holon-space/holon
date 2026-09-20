@@ -144,7 +144,7 @@ mod tests {
                 op: op.to_string(),
             },
             analyzability,
-            arcs: Vec::new(),
+            modes: vec![holon_net::TransitionMode::new(Vec::new())],
             residue: Vec::new(),
         }
     }

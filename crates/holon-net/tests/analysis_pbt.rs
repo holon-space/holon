@@ -15,6 +15,7 @@ use holon_net::Flow;
 use holon_net::NetArc;
 use holon_net::NetTransition;
 use holon_net::TransitionKey;
+use holon_net::TransitionMode;
 use holon_net::TransitionSource;
 use holon_net::compile::compile_rule;
 use holon_net::net::UndeclaredHalf;
@@ -75,7 +76,7 @@ fn arb_transition(index: usize) -> impl Strategy<Value = NetTransition> {
             } else {
                 Analyzability::Analyzable
             },
-            arcs,
+            modes: vec![TransitionMode::new(arcs)],
             residue: vec![],
         })
 }
@@ -87,16 +88,16 @@ fn arb_net() -> impl Strategy<Value = CompiledNet> {
 }
 
 fn writes(t: &NetTransition) -> BTreeSet<String> {
-    t.arcs
-        .iter()
+    t.arcs()
+        .into_iter()
         .filter(|a| matches!(a.flow, Flow::Produce | Flow::Relocate))
         .map(|a| a.place.to_string())
         .collect()
 }
 
 fn reads(t: &NetTransition) -> BTreeSet<String> {
-    t.arcs
-        .iter()
+    t.arcs()
+        .into_iter()
         .filter(|a| matches!(a.flow, Flow::Read | Flow::Consume | Flow::Relocate))
         .map(|a| a.place.to_string())
         .collect()
@@ -116,6 +117,13 @@ fn key(net: &CompiledNet, index: usize) -> TransitionKey {
 }
 
 proptest! {
+    // Auto-persisted seed files are banned: a permanent regression belongs in
+    // `hand-authored-regressions/keystone.jsonl`, not in a file proptest
+    // writes behind the author's back.
+    #![proptest_config(ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
     /// Per-place writer/reader sets equal a naive recount, and unanalyzable
     /// transitions are listed, never silently conflict-free.
     #[test]
@@ -221,10 +229,13 @@ emit:
     )
     .expect("the journal rule parses");
     let net = CompiledNet {
-        transitions: vec![compile_rule(&holon_net::RuleSource {
-            block_id: "block:rule-daily-journal".to_string(),
-            acceptance: holon_net::RuleAcceptance::Running(rule),
-        })],
+        transitions: vec![
+            compile_rule(&holon_net::RuleSource {
+                block_id: "block:rule-daily-journal".to_string(),
+                acceptance: holon_net::RuleAcceptance::Running(rule),
+            })
+            .expect("the journal rule is within the compiler's bounds"),
+        ],
     };
     let rule_key = TransitionKey::rule("block:rule-daily-journal");
     let report = holon_net::cycles(&net);
@@ -236,7 +247,7 @@ emit:
             .collect::<Vec<_>>(),
         vec![vec![rule_key.clone()]],
         "emit produces the places the inhibitor footprint reads: {:#?}",
-        net.transitions[0].arcs
+        net.transitions[0].arcs()
     );
 
     let conflict = holon_net::conflicts(&net);

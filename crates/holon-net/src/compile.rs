@@ -17,17 +17,21 @@ use holon_rules::HolonRule;
 use holon_rules::TemplateSegment;
 
 use crate::bridge::NetEntity;
+use crate::bridge::TransitionKey;
 use crate::bridge::TransitionSource;
 use crate::guards::ClassifiedGuard;
+use crate::guards::ResidueCause;
 use crate::guards::classify_guard;
 use crate::net::Analyzability;
 use crate::net::ArcOrigin;
 use crate::net::Aspect;
 use crate::net::CompiledNet;
 use crate::net::Flow;
+use crate::net::GuardResidue;
 use crate::net::NetArc;
 use crate::net::NetCompileError;
 use crate::net::NetTransition;
+use crate::net::TransitionMode;
 use crate::net::UndeclaredHalf;
 use crate::net::aspect_places;
 
@@ -90,7 +94,7 @@ pub fn derive_net(
         transitions.push(compile_operation(descriptor)?);
     }
     for rule in rules {
-        transitions.push(compile_rule(rule));
+        transitions.push(compile_rule(rule)?);
     }
     for transition in &transitions {
         let key = transition.key();
@@ -107,39 +111,35 @@ pub fn derive_net(
 pub fn compile_operation(
     descriptor: &OperationDescriptor,
 ) -> Result<NetTransition, NetCompileError> {
-    let mut transition = NetTransition {
-        source: TransitionSource::Operation {
-            entity: NetEntity::parse(descriptor.entity_name.as_str()).map_err(|source| {
-                NetCompileError::UnkeyableOperation {
-                    op: descriptor.name.clone(),
-                    source,
-                }
-            })?,
-            op: descriptor.name.clone(),
-        },
-        analyzability: Analyzability::Analyzable,
-        arcs: Vec::new(),
-        residue: Vec::new(),
+    let source = TransitionSource::Operation {
+        entity: NetEntity::parse(descriptor.entity_name.as_str()).map_err(|source| {
+            NetCompileError::UnkeyableOperation {
+                op: descriptor.name.clone(),
+                source,
+            }
+        })?,
+        op: descriptor.name.clone(),
     };
+    // The arcs every mode shares: what the declaration states, before the
+    // guard's own disjunction splits them.
+    let mut base: Vec<NetArc> = Vec::new();
     let mut undeclared = Vec::new();
 
     match &descriptor.arcs {
         TransitionArcs::Undeclared => undeclared.push(UndeclaredHalf::Arcs),
         TransitionArcs::Declared { reads, emits } => {
             for place in reads {
-                transition.push_arc(plain_arc(
-                    place.clone(),
-                    Flow::Read,
-                    ArcOrigin::DeclaredRead,
-                ));
+                push_arc(
+                    &mut base,
+                    plain_arc(place.clone(), Flow::Read, ArcOrigin::DeclaredRead),
+                );
             }
             for emit in emits {
                 match emit {
-                    ArcEmit::Writes(place) => transition.push_arc(plain_arc(
-                        place.clone(),
-                        Flow::Produce,
-                        ArcOrigin::DeclaredEmit,
-                    )),
+                    ArcEmit::Writes(place) => push_arc(
+                        &mut base,
+                        plain_arc(place.clone(), Flow::Produce, ArcOrigin::DeclaredEmit),
+                    ),
                     // A declared non-write: no arc, by declaration.
                     ArcEmit::Excluded { .. } => {}
                 }
@@ -175,25 +175,50 @@ pub fn compile_operation(
                         } else {
                             flow
                         };
-                        transition.push_arc(plain_arc(place, flow, ArcOrigin::Delta { aspect }));
+                        push_arc(
+                            &mut base,
+                            plain_arc(place, flow, ArcOrigin::Delta { aspect }),
+                        );
                     }
                 }
             }
         }
     }
 
-    if let OpGuard::Declared { guard, .. } = &descriptor.guard {
-        let ClassifiedGuard { arcs, residue } = classify_guard(guard);
-        for arc in arcs {
-            transition.push_arc(arc);
+    let (modes, residue) = match &descriptor.guard {
+        OpGuard::Declared { guard, .. } => {
+            let classified = classify_guard(guard, source.key().as_str())?;
+            (classified.modes, classified.residue)
         }
-        transition.residue = residue;
-    }
+        _ => (vec![TransitionMode::new(Vec::new())], Vec::new()),
+    };
+    let modes = modes.into_iter().map(|m| merge_base(&base, m)).collect();
 
-    if !undeclared.is_empty() {
-        transition.analyzability = Analyzability::Unanalyzable { undeclared };
+    let analyzability = if undeclared.is_empty() {
+        Analyzability::Analyzable
+    } else {
+        Analyzability::Unanalyzable { undeclared }
+    };
+    Ok(NetTransition::new(source, analyzability, modes, residue))
+}
+
+/// Prepend the declaration's shared arcs to one guard mode, deduplicated.
+fn merge_base(base: &[NetArc], mode: TransitionMode) -> TransitionMode {
+    let mut arcs = base.to_vec();
+    for arc in mode.arcs {
+        push_arc(&mut arcs, arc);
     }
-    Ok(transition)
+    TransitionMode {
+        arcs,
+        hops: mode.hops,
+    }
+}
+
+/// Append `arc`, skipping an exact duplicate.
+fn push_arc(arcs: &mut Vec<NetArc>, arc: NetArc) {
+    if !arcs.contains(&arc) {
+        arcs.push(arc);
+    }
 }
 
 /// What is left of a delta-derived flow once the declaration excludes its
@@ -227,54 +252,82 @@ fn excluded_places(arcs: &TransitionArcs) -> BTreeSet<ArcPlace> {
 /// fully declared by parse — and `active` is the watcher's own verdict. A block
 /// the watcher never parsed becomes an `Unanalyzable` transition with no arcs:
 /// declared automation whose declaration cannot be read.
-pub fn compile_rule(source: &RuleSource) -> NetTransition {
+pub fn compile_rule(source: &RuleSource) -> Result<NetTransition, NetCompileError> {
     let Some(rule) = source.acceptance.rule() else {
-        return NetTransition {
-            source: TransitionSource::Rule {
+        return Ok(NetTransition::new(
+            TransitionSource::Rule {
                 block_id: source.block_id.clone(),
                 // No parsed rule, so no authored name — the block id is the
                 // only handle that exists.
                 name: source.block_id.clone(),
                 active: false,
             },
-            analyzability: Analyzability::Unanalyzable {
+            Analyzability::Unanalyzable {
                 undeclared: vec![UndeclaredHalf::Arcs, UndeclaredHalf::MarkingDelta],
             },
-            arcs: Vec::new(),
-            residue: Vec::new(),
-        };
+            vec![TransitionMode::new(Vec::new())],
+            Vec::new(),
+        ));
     };
-    let ClassifiedGuard { arcs, residue } = classify_guard(&rule.guard);
-    let mut transition = NetTransition {
-        source: TransitionSource::Rule {
-            block_id: source.block_id.clone(),
-            name: rule.name.as_str().to_string(),
-            active: source.acceptance.is_running(),
-        },
-        analyzability: Analyzability::Analyzable,
-        arcs: Vec::new(),
-        residue,
+    let key = TransitionKey::rule(&source.block_id);
+    // A rule block is USER content discovered reactively. One over-budget
+    // guard must cost that rule its analyzability, never the whole net, so
+    // the bound is absorbed here into the same `Unanalyzable` shape an
+    // unparseable rule already takes — carrying the typed reason so the
+    // census can name it. A trait-declared guard keeps raising
+    // (`compile_operation`): that is a programming error with no user content
+    // behind it, and the build is the right place to catch it.
+    let ClassifiedGuard { modes, residue } = match classify_guard(&rule.guard, key.as_str()) {
+        Ok(classified) => classified,
+        Err(error) => {
+            let cause = match &error {
+                NetCompileError::TooManyModes { .. } => ResidueCause::TooManyModes,
+                NetCompileError::HopChainTooLong { .. } => ResidueCause::HopChainTooLong,
+                other => unreachable!("classify_guard raises only bound errors, got {other}"),
+            };
+            return Ok(NetTransition::new(
+                TransitionSource::Rule {
+                    block_id: source.block_id.clone(),
+                    name: rule.name.as_str().to_string(),
+                    active: source.acceptance.is_running(),
+                },
+                Analyzability::Unanalyzable {
+                    undeclared: vec![UndeclaredHalf::Arcs],
+                },
+                vec![TransitionMode::new(Vec::new())],
+                vec![GuardResidue {
+                    predicate: rule.guard.body.clone(),
+                    cause,
+                }],
+            ));
+        }
     };
-    for arc in arcs {
-        transition.push_arc(arc);
-    }
+    // The emit's produced places belong to every mode: whichever disjunct
+    // enables the rule, firing writes the same row.
+    let mut emitted: Vec<NetArc> = Vec::new();
 
     if let Some(emit) = &rule.emit {
         // A ratcheted create: a new row (existence), placed under the emit
         // root (placement), named per the template (content).
         for field in [block::ID, block::PARENT_ID, block::CONTENT] {
-            transition.push_arc(plain_arc(
-                ArcPlace::new(block::RELATION, field),
-                Flow::Produce,
-                ArcOrigin::RuleEmit,
-            ));
+            push_arc(
+                &mut emitted,
+                plain_arc(
+                    ArcPlace::new(block::RELATION, field),
+                    Flow::Produce,
+                    ArcOrigin::RuleEmit,
+                ),
+            );
         }
         if emit.place.is_page() {
-            transition.push_arc(plain_arc(
-                ArcPlace::new(block::RELATION, block::TAGS),
-                Flow::Produce,
-                ArcOrigin::RuleEmit,
-            ));
+            push_arc(
+                &mut emitted,
+                plain_arc(
+                    ArcPlace::new(block::RELATION, block::TAGS),
+                    Flow::Produce,
+                    ArcOrigin::RuleEmit,
+                ),
+            );
         }
         if emit
             .name
@@ -282,14 +335,40 @@ pub fn compile_rule(source: &RuleSource) -> NetTransition {
             .iter()
             .any(|s| matches!(s, TemplateSegment::Builtin(_)))
         {
-            transition.push_arc(plain_arc(
-                ArcPlace::new(clock::RELATION, clock::TODAY),
-                Flow::Read,
-                ArcOrigin::RuleEmit,
-            ));
+            push_arc(
+                &mut emitted,
+                plain_arc(
+                    ArcPlace::new(clock::RELATION, clock::TODAY),
+                    Flow::Read,
+                    ArcOrigin::RuleEmit,
+                ),
+            );
         }
     }
-    transition
+
+    let modes = modes
+        .into_iter()
+        .map(|mode| {
+            let mut arcs = mode.arcs;
+            for arc in &emitted {
+                push_arc(&mut arcs, arc.clone());
+            }
+            TransitionMode {
+                arcs,
+                hops: mode.hops,
+            }
+        })
+        .collect();
+    Ok(NetTransition::new(
+        TransitionSource::Rule {
+            block_id: source.block_id.clone(),
+            name: rule.name.as_str().to_string(),
+            active: source.acceptance.is_running(),
+        },
+        Analyzability::Analyzable,
+        modes,
+        residue,
+    ))
 }
 
 fn plain_arc(place: ArcPlace, flow: Flow, origin: ArcOrigin) -> NetArc {

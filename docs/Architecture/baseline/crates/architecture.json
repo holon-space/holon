@@ -1502,6 +1502,9 @@
                 "name": "invalid_connection_config_boots_degraded.rs"
               },
               {
+                "name": "is_program_net_agrees_with_the_profile.rs"
+              },
+              {
                 "name": "loro_seam_edge_fields.rs"
               },
               {
@@ -4761,6 +4764,9 @@
                 "name": "advice_live_mcp_gate.rs"
               },
               {
+                "name": "authority_name_chain_under_lag.rs"
+              },
+              {
                 "name": "bisection_pbt.rs"
               },
               {
@@ -4777,6 +4783,9 @@
               },
               {
                 "name": "hand_authored_regressions.rs"
+              },
+              {
+                "name": "hop_step_cost.rs"
               },
               {
                 "name": "latency_scale_gate.rs"
@@ -6338,13 +6347,25 @@
                 "name": "analysis_pbt.rs"
               },
               {
+                "name": "analysis_soundness.rs"
+              },
+              {
                 "name": "catalog_totality.rs"
+              },
+              {
+                "name": "correlated_hop.rs"
               },
               {
                 "name": "enabledness.rs"
               },
               {
                 "name": "guard_classifier_pbt.rs"
+              },
+              {
+                "name": "hop_predicate_agreement.rs"
+              },
+              {
+                "name": "refinement_agreement.rs"
               },
               {
                 "name": "transition_key.rs"

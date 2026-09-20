@@ -114,6 +114,7 @@ mod tests {
             parent_id: parent.map(str::to_string),
             properties: HashMap::new(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
+            columns: HashMap::new(),
         }
     }
 

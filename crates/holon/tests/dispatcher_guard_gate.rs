@@ -113,6 +113,7 @@ fn page(id: &str, tags: &[&str]) -> WorldBlock {
         parent_id: None,
         properties: Default::default(),
         tags: tags.iter().map(|t| t.to_string()).collect(),
+        columns: std::collections::HashMap::new(),
     }
 }
 

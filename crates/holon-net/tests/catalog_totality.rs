@@ -79,8 +79,8 @@ fn compiled_arcs_agree_with_the_declarations() {
     for (op, transition) in ops.iter().zip(&net.transitions) {
         let arc_places = |origin: ArcOrigin| -> BTreeSet<String> {
             transition
-                .arcs
-                .iter()
+                .arcs()
+                .into_iter()
                 .filter(|a| a.origin == origin)
                 .map(|a| a.place.to_string())
                 .collect()
@@ -138,8 +138,8 @@ fn compiled_arcs_agree_with_the_declarations() {
                 }
             }
             let delta_places: BTreeSet<String> = transition
-                .arcs
-                .iter()
+                .arcs()
+                .into_iter()
                 .filter(|a| matches!(a.origin, ArcOrigin::Delta { .. }))
                 .map(|a| a.place.to_string())
                 .collect();
@@ -193,8 +193,8 @@ fn undeclared_halves_are_unanalyzable_and_distinct_from_declared_empty() {
     );
     assert!(
         !transition("empty_arcs")
-            .arcs
-            .iter()
+            .arcs()
+            .into_iter()
             .any(|a| matches!(a.origin, ArcOrigin::DeclaredRead | ArcOrigin::DeclaredEmit)),
         "declared-empty arcs contribute no arc-declaration arcs"
     );

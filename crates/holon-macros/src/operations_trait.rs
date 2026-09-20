@@ -1772,6 +1772,14 @@ fn pattern_tokens(pattern: &Pattern) -> proc_macro2::TokenStream {
             let inner = pattern_tokens(inner);
             quote! { holon_api::pattern::Pattern::Parent(Box::new(#inner)) }
         }
+        Pattern::Child(inner) => {
+            let inner = pattern_tokens(inner);
+            quote! { holon_api::pattern::Pattern::Child(Box::new(#inner)) }
+        }
+        Pattern::Sibling(inner) => {
+            let inner = pattern_tokens(inner);
+            quote! { holon_api::pattern::Pattern::Sibling(Box::new(#inner)) }
+        }
         Pattern::Not(inner) => {
             let inner = pattern_tokens(inner);
             quote! { holon_api::pattern::Pattern::Not(Box::new(#inner)) }

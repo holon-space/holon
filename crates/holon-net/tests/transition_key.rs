@@ -241,7 +241,7 @@ fn an_unparseable_rule_block_is_inactive_and_unanalyzable() {
         "no parsed rule means neither half is declared",
     );
     assert!(
-        transition.arcs.is_empty(),
+        transition.arcs().is_empty(),
         "an unreadable declaration yields no arcs, and the Unanalyzable slot is what says so",
     );
 }
@@ -268,7 +268,7 @@ fn a_parked_rule_stays_analyzable_but_inactive() {
         .expect("the parked rule is in the net");
     assert_eq!(parked.analyzability, holon_net::Analyzability::Analyzable);
     assert!(
-        !parked.arcs.is_empty(),
+        !parked.arcs().is_empty(),
         "a parked rule's declaration is still readable, so it still has arcs",
     );
     assert!(matches!(

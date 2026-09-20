@@ -1,13 +1,17 @@
 //! Classifier totality over the generated guard grammar.
 //!
 //! The model side walks the pattern tree independently of the classifier's
-//! traversal (conjunct split, refinement short-cuts): it collects every leaf
-//! atom and maps each to its places in one flat pass. The properties pin that
-//! no conjunct and no named place is ever dropped, whatever the nesting.
+//! traversal (disjunctive normal form, hop peeling, refinement short-cuts):
+//! it collects every leaf atom and maps each to its places in one flat pass.
+//! The properties pin that no named place is ever dropped whatever the
+//! nesting, that every mode is a usable firing mode, and that nothing the arc
+//! language can express is left in residue.
 
 use std::collections::BTreeSet;
 
 use holon_net::ArcOrigin;
+use holon_net::MAX_HOP_CHAIN;
+use holon_net::MAX_MODES;
 use holon_net::guards::classify_guard;
 use holon_pattern::Value;
 use holon_pattern::pattern::BuiltinRef;
@@ -62,6 +66,7 @@ fn arb_pattern() -> impl Strategy<Value = Pattern> {
     leaf.prop_recursive(3, 24, 4, |inner| {
         prop_oneof![
             inner.clone().prop_map(|p| Pattern::Parent(Box::new(p))),
+            inner.clone().prop_map(|p| Pattern::Sibling(Box::new(p))),
             inner.clone().prop_map(|p| Pattern::Not(Box::new(p))),
             prop::collection::vec(inner.clone(), 1..4).prop_map(Pattern::And),
             prop::collection::vec(inner, 1..4).prop_map(Pattern::Or),
@@ -75,14 +80,6 @@ fn arb_subject() -> impl Strategy<Value = Subject> {
         Just(Subject::Block),
         Just(Subject::Relation("integration".to_string())),
     ]
-}
-
-/// Model conjunct count: nested `And`s flattened, everything else one.
-fn model_conjuncts(pattern: &Pattern) -> usize {
-    match pattern {
-        Pattern::And(ps) => ps.iter().map(model_conjuncts).sum(),
-        _ => 1,
-    }
 }
 
 /// Model place walk: every leaf's places, one flat recursion, the mapping
@@ -116,8 +113,11 @@ fn model_places(pattern: &Pattern, out: &mut BTreeSet<String>) {
                 out.insert("clock.today".to_string());
             }
         }
-        Pattern::Parent(inner) => {
+        Pattern::Parent(inner) | Pattern::Child(inner) | Pattern::Sibling(inner) => {
+            // A hop reads both places it traverses: the cell it follows and
+            // the identity it lands on.
             out.insert("block.parent_id".to_string());
+            out.insert("block.id".to_string());
             model_places(inner, out);
         }
         Pattern::And(ps) | Pattern::Or(ps) => {
@@ -138,21 +138,69 @@ fn model_subject_place(subject: &Subject) -> String {
 }
 
 proptest! {
-    /// Every conjunct lands in exactly one bucket: one refinement arc, or one
-    /// residue entry.
+    // Auto-persisted seed files are banned: a permanent regression belongs in
+    // `hand-authored-regressions/keystone.jsonl`, not in a file proptest
+    // writes behind the author's back.
+    #![proptest_config(ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+    /// Every mode is a firing mode a caller can evaluate: it exists, it binds
+    /// the subject, and the disjunctive normal form stays bounded.
     #[test]
-    fn every_conjunct_is_classified_exactly_once(
+    fn every_mode_is_well_formed_and_bounded(
         body in arb_pattern(),
         subject in arb_subject(),
     ) {
-        let guard = Guard { subject, body: body.clone() };
-        let classified = classify_guard(&guard);
-        let refinements = classified
-            .arcs
-            .iter()
-            .filter(|a| a.origin == ArcOrigin::GuardRefinement)
-            .count();
-        prop_assert_eq!(refinements + classified.residue.len(), model_conjuncts(&body));
+        let guard = Guard { subject: subject.clone(), body };
+        let Ok(classified) = classify_guard(&guard, "op:block.probe") else {
+            // Over a bound the guard does not compile at all, which the
+            // bound tests cover; these laws speak about compiled guards.
+            return Ok(());
+        };
+        prop_assert!(!classified.modes.is_empty(), "a guard compiles to at least one mode");
+        prop_assert!(
+            classified.modes.len() <= MAX_MODES,
+            "the normal form must stay bounded, got {} modes",
+            classified.modes.len()
+        );
+        let subject_place = model_subject_place(&subject);
+        for mode in &classified.modes {
+            prop_assert!(
+                mode.arcs.iter().any(|a| a.origin == ArcOrigin::Subject
+                    && a.place.to_string() == subject_place),
+                "every mode binds the guard's subject"
+            );
+        }
+    }
+
+    /// Every arc of a correlated group names that group's binding, so one
+    /// token answers the whole hop. Splitting a hop's conjunction across
+    /// tokens is the unsoundness this representation exists to prevent.
+    #[test]
+    fn a_hop_group_binds_all_of_its_arcs(
+        body in arb_pattern(),
+        subject in arb_subject(),
+    ) {
+        let guard = Guard { subject, body };
+        let Ok(classified) = classify_guard(&guard, "op:block.probe") else {
+            // Over a bound the guard does not compile at all, which the
+            // bound tests cover; these laws speak about compiled guards.
+            return Ok(());
+        };
+        for mode in &classified.modes {
+            for group in &mode.hops {
+                prop_assert!(!group.arcs.is_empty(), "an empty hop group tests nothing");
+                prop_assert!(
+                    group.correlation.hops.len() <= MAX_HOP_CHAIN,
+                    "a hop chain must stay inside the bound"
+                );
+                for arc in &group.arcs {
+                    prop_assert_eq!(arc.binding.as_ref(), Some(&group.binding));
+                    prop_assert!(arc.refinement.is_some(), "a hop arc carries its predicate");
+                }
+            }
+        }
     }
 
     /// No named place is dropped: the union of the classifier's arc places
@@ -163,10 +211,15 @@ proptest! {
         subject in arb_subject(),
     ) {
         let guard = Guard { subject: subject.clone(), body: body.clone() };
-        let classified = classify_guard(&guard);
+        let Ok(classified) = classify_guard(&guard, "op:block.probe") else {
+            // Over a bound the guard does not compile at all, which the
+            // bound tests cover; these laws speak about compiled guards.
+            return Ok(());
+        };
         let sut: BTreeSet<String> = classified
-            .arcs
+            .modes
             .iter()
+            .flat_map(|m| m.all_arcs())
             .map(|a| a.place.to_string())
             .collect();
         let mut model = BTreeSet::new();
@@ -183,10 +236,15 @@ proptest! {
         subject in arb_subject(),
     ) {
         let guard = Guard { subject, body };
-        let classified = classify_guard(&guard);
+        let Ok(classified) = classify_guard(&guard, "op:block.probe") else {
+            // Over a bound the guard does not compile at all, which the
+            // bound tests cover; these laws speak about compiled guards.
+            return Ok(());
+        };
         for arc in classified
-            .arcs
+            .modes
             .iter()
+            .flat_map(|m| m.all_arcs())
             .filter(|a| a.origin == ArcOrigin::GuardRefinement)
         {
             prop_assert!(arc.refinement.is_some());

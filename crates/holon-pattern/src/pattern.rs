@@ -140,6 +140,22 @@ pub enum Pattern {
     /// block is legal. A 2-valued `EXISTS` in SQL, so it stays sound under
     /// `Not`.
     Parent(Box<Pattern>),
+    /// Some child of the subject block satisfies the inner pattern — the
+    /// inverse of [`Pattern::Parent`]. Block-driven only.
+    ///
+    /// Existential like its inverse, so a childless block never matches and
+    /// `not child(...)` stays sound. Composing the two reaches a sibling:
+    /// `parent(child(p))` is "my parent has a child satisfying `p`", the
+    /// subject itself included.
+    Child(Box<Pattern>),
+    /// Some OTHER block with the same parent satisfies the inner pattern.
+    ///
+    /// Not sugar for `parent(child(...))`, which needs the parent to be a ROW
+    /// and so answers `false` for a root block. This is keyed on `parent_id`
+    /// directly, the way the profile's `rule_sibling(parent_id)` lookup is, so
+    /// two roots are siblings of one another. The subject is excluded, so a
+    /// block never matches through itself.
+    Sibling(Box<Pattern>),
     And(Vec<Pattern>),
     Or(Vec<Pattern>),
     Not(Box<Pattern>),
@@ -229,6 +245,10 @@ pub struct WorldBlock {
     pub parent_id: Option<String>,
     pub properties: HashMap<String, Value>,
     pub tags: Vec<String>,
+    /// The block relation's declared columns, by name — what a
+    /// `block.<column>` comparison reads. A column this map does not hold is
+    /// absent, which a 2-valued comparison never matches.
+    pub columns: HashMap<String, Value>,
 }
 
 /// The in-memory evaluator's world: a block collection + the clock's `today`
@@ -441,7 +461,9 @@ impl Pattern {
             Pattern::Field { .. }
             | Pattern::HasTag(_)
             | Pattern::BlockExists(_)
-            | Pattern::Parent(_) => Err(GuardEvalError::NeedsBlockSubject {
+            | Pattern::Parent(_)
+            | Pattern::Child(_)
+            | Pattern::Sibling(_) => Err(GuardEvalError::NeedsBlockSubject {
                 predicate: "this predicate",
                 subject: format!("relation {relation:?}"),
             }),
@@ -484,6 +506,37 @@ impl Pattern {
                     None => Ok(false),
                 }
             }
+            Pattern::Child(inner) => {
+                let block = block_row("child")?;
+                for candidate in &world.blocks {
+                    if candidate.parent_id.as_deref() != Some(block.id.as_str()) {
+                        continue;
+                    }
+                    if inner.matches(&SubjectRow::Block(candidate), world, subject)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Pattern::Sibling(inner) => {
+                let block = block_row("sibling")?;
+                // An ABSENT parent cell has no siblings. The store's root
+                // parent is an explicit sentinel, never null, so a null
+                // parent is not a legal row and two of them are not each
+                // other's siblings — the same answer SQL's `=` gives.
+                let Some(parent) = block.parent_id.as_deref() else {
+                    return Ok(false);
+                };
+                for candidate in &world.blocks {
+                    if candidate.id == block.id || candidate.parent_id.as_deref() != Some(parent) {
+                        continue;
+                    }
+                    if inner.matches(&SubjectRow::Block(candidate), world, subject)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
             Pattern::And(ps) => {
                 for p in ps {
                     if !p.matches(row, world, subject)? {
@@ -509,15 +562,19 @@ fn field_value(block: &WorldBlock, field: &FieldRef) -> Option<Value> {
     match field {
         FieldRef::Name => Some(Value::String(block.name.clone())),
         FieldRef::Property(k) => block.properties.get(k).cloned(),
-        // A relation column names no part of a block; the block world binds
-        // none of them.
-        FieldRef::Column { .. } => None,
+        // Under a block subject a `block.<column>` comparison reads the
+        // subject's own column (`Guard::from_body`). A column the row does not
+        // hold is absent, which a 2-valued comparison never matches.
+        FieldRef::Column { name, .. } => block.columns.get(name).cloned(),
     }
 }
 
 /// 2-valued comparison. A missing field is never a match (fail-shut), mirroring
 /// [`crate::Predicate`]'s numeric comparisons and the SQL `IS NOT NULL` guard.
-fn compare_2valued(lhs: Option<&Value>, op: CmpOp, rhs: &Value) -> bool {
+/// Two-valued comparison: an absent left side satisfies nothing, not even
+/// `!=`. Public so the arc evaluator in `holon_net` decides a refinement the
+/// same way a guard decides the conjunct it was compiled from.
+pub fn compare_2valued(lhs: Option<&Value>, op: CmpOp, rhs: &Value) -> bool {
     match op {
         CmpOp::Eq => lhs == Some(rhs),
         CmpOp::Ne => lhs != Some(rhs),
@@ -639,16 +696,30 @@ struct SqlCtx<'a> {
     schema: &'a dyn SchemaAbstraction,
     /// The subject alias and, for a clock subject, the resolved `{today}` SQL.
     subject: SqlSubject,
-    /// How many [`Pattern::Parent`] hops deep we are; keeps the ancestor
-    /// aliases (`par1`, `par2`, …) distinct along a nesting chain.
+    /// How many hops deep we are; keeps the hop aliases (`par1`, `ch2`, …)
+    /// distinct along a nesting chain, whichever directions it mixes.
     parent_depth: usize,
 }
 
 impl<'a> SqlCtx<'a> {
     /// The context one `parent(...)` hop up, binding the ancestor alias.
     fn up(&self) -> (String, SqlCtx<'a>) {
+        self.hop("par")
+    }
+
+    /// The context one `child(...)` hop down, binding the descendant alias.
+    fn down(&self) -> (String, SqlCtx<'a>) {
+        self.hop("ch")
+    }
+
+    /// The context one `sibling(...)` hop across, binding the sibling alias.
+    fn across(&self) -> (String, SqlCtx<'a>) {
+        self.hop("sib")
+    }
+
+    fn hop(&self, prefix: &str) -> (String, SqlCtx<'a>) {
         let depth = self.parent_depth + 1;
-        let alias = format!("par{depth}");
+        let alias = format!("{prefix}{depth}");
         (
             alias.clone(),
             SqlCtx {
@@ -771,11 +842,20 @@ impl Pattern {
                 op,
                 rhs,
             } => {
-                let SqlSubject::Relation { alias } = &ctx.subject else {
-                    return Err(GuardEvalError::WrongWorld {
-                        relation: relation.clone(),
-                    });
+                // A block subject reads the block relation's own columns;
+                // any other relation needs a relation subject to iterate.
+                let alias = match &ctx.subject {
+                    SqlSubject::Relation { alias } => alias.clone(),
+                    SqlSubject::Block { alias } if relation == crate::schema::block::RELATION => {
+                        alias.clone()
+                    }
+                    _ => {
+                        return Err(GuardEvalError::WrongWorld {
+                            relation: relation.clone(),
+                        });
+                    }
                 };
+                let alias = &alias;
                 // The column is checked against the relation's declared field
                 // list when the guard parses, so it is an identifier here.
                 let rhs = operand_sql(rhs, ctx)?;
@@ -805,6 +885,33 @@ impl Pattern {
                     ctx.schema.id_column(&par),
                     ctx.schema.parent_id_column(&alias),
                     inner.to_sql(&up)?,
+                )
+            }
+            Pattern::Child(inner) => {
+                let alias = block_alias("child")?;
+                let (ch, down) = ctx.down();
+                format!(
+                    "EXISTS (SELECT 1 FROM {} {ch} WHERE {} = {} AND {})",
+                    ctx.schema.block_relation(),
+                    ctx.schema.parent_id_column(&ch),
+                    ctx.schema.id_column(&alias),
+                    inner.to_sql(&down)?,
+                )
+            }
+            Pattern::Sibling(inner) => {
+                let alias = block_alias("sibling")?;
+                let (sib, across) = ctx.across();
+                format!(
+                    // `=` and not `IS`: a null parent matches nothing, which
+                    // is what an absent parent cell means (see the in-memory
+                    // arm). The store's root parent is a stored sentinel.
+                    "EXISTS (SELECT 1 FROM {} {sib} WHERE {} = {} AND {} <> {} AND {})",
+                    ctx.schema.block_relation(),
+                    ctx.schema.parent_id_column(&sib),
+                    ctx.schema.parent_id_column(&alias),
+                    ctx.schema.id_column(&sib),
+                    ctx.schema.id_column(&alias),
+                    inner.to_sql(&across)?,
                 )
             }
             Pattern::And(ps) => {
@@ -1007,6 +1114,20 @@ impl Guard {
         let uses_block = pattern_uses_block_predicate(&body);
 
         if let Some(relation) = sole_column_relation(&body)? {
+            // `block.<column>` under a block subject is the subject's OWN
+            // column, so it composes with the block predicates rather than
+            // conflicting with them. Any other relation needs its own subject
+            // to iterate, which a block predicate has no row of.
+            if relation == crate::schema::block::RELATION {
+                if uses_builtin {
+                    return Err(GuardParseError::MixedSubject);
+                }
+                validate_declared_columns(&relation, &body)?;
+                return Ok(Guard {
+                    subject: Subject::Block,
+                    body,
+                });
+            }
             if uses_builtin || uses_block {
                 return Err(GuardParseError::RelationAndBlockPredicate { relation });
             }
@@ -1060,7 +1181,10 @@ fn collect_column_relation(p: &Pattern, found: &mut Option<String>) -> Result<()
             }
             Ok(())
         }
-        Pattern::Not(inner) | Pattern::Parent(inner) => collect_column_relation(inner, found),
+        Pattern::Not(inner)
+        | Pattern::Parent(inner)
+        | Pattern::Child(inner)
+        | Pattern::Sibling(inner) => collect_column_relation(inner, found),
     }
 }
 
@@ -1082,6 +1206,22 @@ fn validate_columns(relation: &str, body: &Pattern) -> Result<(), GuardParseErro
             relation: relation.to_string(),
         });
     }
+    validate_declared_columns(relation, body)
+}
+
+/// Every column the body names must be declared by the relation. No binding is
+/// required: the block subject iterates blocks, not a queryable relation.
+fn validate_declared_columns(relation: &str, body: &Pattern) -> Result<(), GuardParseError> {
+    let entity = crate::schema::builtin_entity(relation).ok_or_else(|| {
+        GuardParseError::UnknownRelation {
+            relation: relation.to_string(),
+            known: crate::schema::BUILTIN_SCHEMAS
+                .iter()
+                .map(|s| s.relation)
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    })?;
     for column in column_names(body) {
         if entity.field(&column).is_none() {
             return Err(GuardParseError::UnknownColumn {
@@ -1107,7 +1247,10 @@ fn column_names(p: &Pattern) -> Vec<String> {
         } => vec![name.clone()],
         Pattern::Field { .. } | Pattern::HasTag(_) | Pattern::BlockExists(_) => vec![],
         Pattern::And(ps) | Pattern::Or(ps) => ps.iter().flat_map(column_names).collect(),
-        Pattern::Not(inner) | Pattern::Parent(inner) => column_names(inner),
+        Pattern::Not(inner)
+        | Pattern::Parent(inner)
+        | Pattern::Child(inner)
+        | Pattern::Sibling(inner) => column_names(inner),
     }
 }
 
@@ -1120,7 +1263,9 @@ fn pattern_uses_builtin(p: &Pattern) -> bool {
             .iter()
             .any(|s| matches!(s, PathSegment::Builtin(_))),
         Pattern::And(ps) | Pattern::Or(ps) => ps.iter().any(pattern_uses_builtin),
-        Pattern::Not(p) | Pattern::Parent(p) => pattern_uses_builtin(p),
+        Pattern::Not(p) | Pattern::Parent(p) | Pattern::Child(p) | Pattern::Sibling(p) => {
+            pattern_uses_builtin(p)
+        }
     }
 }
 
@@ -1130,7 +1275,11 @@ fn pattern_uses_block_predicate(p: &Pattern) -> bool {
             field: FieldRef::Column { .. },
             ..
         } => false,
-        Pattern::Field { .. } | Pattern::HasTag(_) | Pattern::Parent(_) => true,
+        Pattern::Field { .. }
+        | Pattern::HasTag(_)
+        | Pattern::Parent(_)
+        | Pattern::Child(_)
+        | Pattern::Sibling(_) => true,
         Pattern::BlockExists(_) => false,
         Pattern::And(ps) | Pattern::Or(ps) => ps.iter().any(pattern_uses_block_predicate),
         Pattern::Not(p) => pattern_uses_block_predicate(p),
@@ -1340,15 +1489,20 @@ impl TokenParser {
         if self.bump().as_deref() != Some("(") {
             return Err(GuardParseError::UnexpectedToken { token: name });
         }
-        // `parent` takes a nested predicate, not a string argument.
-        if name == "parent" {
+        // The hops take a nested predicate, not a string argument.
+        if let "parent" | "child" | "sibling" = name.as_str() {
             let inner = self.parse_or()?;
             if self.bump().as_deref() != Some(")") {
                 return Err(GuardParseError::UnexpectedEnd {
                     expected: "closing `)`".to_string(),
                 });
             }
-            return Ok(Pattern::Parent(Box::new(inner)));
+            let inner = Box::new(inner);
+            return Ok(match name.as_str() {
+                "parent" => Pattern::Parent(inner),
+                "child" => Pattern::Child(inner),
+                _ => Pattern::Sibling(inner),
+            });
         }
         let arg = self.bump().ok_or(GuardParseError::UnexpectedEnd {
             expected: "a string argument".to_string(),
@@ -1515,7 +1669,13 @@ mod tests {
             ),
             ("integration.not_a_column == \"a\"", "not_a_column"),
             ("nonesuch.field == \"a\"", "nonesuch"),
-            ("block.content == \"a\"", "block"),
+            // A block column the relation does NOT declare stays refused;
+            // a declared one is now the subject block's own column.
+            ("block.not_a_column == \"a\"", "not_a_column"),
+            (
+                "block.content == \"a\" and integration.config_status == \"b\"",
+                "integration",
+            ),
             ("integration.config_status = \"a\"", "="),
         ];
         for (text, fragment) in cases {
@@ -1536,7 +1696,77 @@ mod tests {
             parent_id: parent.map(|s| s.to_string()),
             properties: HashMap::new(),
             tags: tags.iter().map(|s| s.to_string()).collect(),
+            columns: HashMap::new(),
         }
+    }
+
+    /// Two blocks with an ABSENT parent are not each other's siblings. The
+    /// store's root parent is an explicit sentinel, never null, so a null
+    /// parent is not a legal row — and SQL's `=` gives the same answer, which
+    /// is what keeps the two evaluators together (the agreement PBT draws
+    /// `Sibling` over exactly such worlds).
+    #[test]
+    fn an_absent_parent_has_no_siblings() {
+        let g = Guard {
+            subject: Subject::Block,
+            body: Pattern::Sibling(Box::new(Pattern::HasTag("Page".to_string()))),
+        };
+        let world = InMemoryWorld::new(
+            vec![wb("a", "A", None, &[]), wb("b", "B", None, &["Page"])],
+            "d",
+        );
+        assert!(
+            !g.evaluate(&world)
+                .expect("a block guard evaluates")
+                .enabled(),
+            "a null parent matches nothing, so neither root has a sibling"
+        );
+
+        // With the stored sentinel they ARE siblings, which is the shape
+        // production actually holds.
+        let rooted = InMemoryWorld::new(
+            vec![
+                wb("a", "A", Some("sentinel:no_parent"), &[]),
+                wb("b", "B", Some("sentinel:no_parent"), &["Page"]),
+            ],
+            "d",
+        );
+        assert!(
+            g.evaluate(&rooted)
+                .expect("a block guard evaluates")
+                .enabled(),
+            "two blocks under the stored root sentinel ARE siblings"
+        );
+    }
+
+    /// A body whose only column relation is `block` binds the BLOCK
+    /// subject, not `Subject::Relation("block")`: under a block subject
+    /// `block.<column>` is the subject's own column, which is what lets it
+    /// compose with `parent`/`child`/`sibling`. Pinned because this is a
+    /// change in meaning for a public parse function, not an extension.
+    #[test]
+    fn a_lone_block_column_body_binds_the_block_subject() {
+        let g = Guard::parse("block.content_type == \"source\"").expect("parses");
+        assert_eq!(g.subject, Subject::Block);
+        let mixed = Guard::parse("block.content_type == \"source\" and has_tag(\"Page\")")
+            .expect("a block column composes with a block predicate");
+        assert_eq!(mixed.subject, Subject::Block);
+
+        // And the column is read off the SUBJECT'S OWN row: binding the
+        // subject is only half the meaning, and a comparison satisfied by
+        // some other block would make the hops meaningless.
+        let mut carrier = wb("carrier", "Carrier", None, &[]);
+        carrier
+            .columns
+            .insert("content_type".to_string(), Value::String("source".into()));
+        let world = InMemoryWorld::new(vec![wb("plain", "Plain", None, &[]), carrier], "d");
+        assert_eq!(
+            g.evaluate(&world)
+                .expect("a block guard evaluates")
+                .bindings,
+            vec![Binding::Block("carrier".to_string())],
+            "only the block whose own column holds `source` binds"
+        );
     }
 
     #[test]
@@ -1709,6 +1939,7 @@ mod tests {
                 parent_id: parent_tags.map(|_| "p".to_string()),
                 properties: HashMap::new(),
                 tags: child_tags.iter().map(|s| s.to_string()).collect(),
+                columns: HashMap::new(),
             }];
             if let Some(pt) = parent_tags {
                 blocks.push(WorldBlock {
@@ -1717,6 +1948,7 @@ mod tests {
                     parent_id: None,
                     properties: HashMap::new(),
                     tags: pt.iter().map(|s| s.to_string()).collect(),
+                    columns: HashMap::new(),
                 });
             }
             let world = InMemoryWorld::new(blocks, "2026-08-10");

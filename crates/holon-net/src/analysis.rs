@@ -72,7 +72,7 @@ pub fn conflicts(net: &CompiledNet) -> ConflictReport {
         for place in transition.read_places() {
             readers.entry(place).or_default().insert(key.clone());
         }
-        for arc in &transition.arcs {
+        for arc in transition.arcs() {
             if arc.origin == ArcOrigin::GuardFootprint {
                 footprint_touch.insert((&arc.place, key.clone()));
             }

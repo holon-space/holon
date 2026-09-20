@@ -47,8 +47,11 @@ async fn setup_db(world: &InMemoryWorld) -> DbHandle {
     let (backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
     std::mem::forget(backend);
     for ddl in [
-        "CREATE TABLE block (id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT, properties \
-         TEXT NOT NULL DEFAULT '{}')",
+        // `content_type` is the block relation's own column, distinct from
+        // `name`: a `block.<column>` comparison under a block subject reads
+        // it, and the in-memory world reads the matching `columns` entry.
+        "CREATE TABLE block (id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT, \
+         content_type TEXT, properties TEXT NOT NULL DEFAULT '{}')",
         "CREATE TABLE block_tags (block_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY \
          (block_id, tag))",
         "CREATE TABLE clock (today TEXT PRIMARY KEY)",
@@ -66,12 +69,17 @@ async fn setup_db(world: &InMemoryWorld) -> DbHandle {
         let props = serde_json::to_string(&b.properties).expect("props json");
         handle
             .execute(
-                "INSERT INTO block (id, name, parent_id, properties) VALUES (?, ?, ?, ?)",
+                "INSERT INTO block (id, name, parent_id, content_type, properties) VALUES \
+                 (?, ?, ?, ?, ?)",
                 vec![
                     turso::Value::Text(b.id.clone()),
                     turso::Value::Text(b.name.clone()),
                     match &b.parent_id {
                         Some(p) => turso::Value::Text(p.clone()),
+                        None => turso::Value::Null,
+                    },
+                    match b.columns.get("content_type").and_then(Value::as_string) {
+                        Some(v) => turso::Value::Text(v.to_string()),
                         None => turso::Value::Null,
                     },
                     turso::Value::Text(props),
@@ -180,6 +188,7 @@ fn wb(id: &str, name: &str, parent: Option<&str>, tags: &[&str], kind: Option<&s
         parent_id: parent.map(str::to_string),
         properties,
         tags: tags.iter().map(|s| s.to_string()).collect(),
+        columns: HashMap::new(),
     }
 }
 
@@ -348,12 +357,19 @@ fn world_strategy() -> impl Strategy<Value = InMemoryWorld> {
                     let mut tags: Vec<String> = tags.into_iter().map(str::to_string).collect();
                     tags.sort();
                     tags.dedup();
+                    // The block relation's own column, varied with `kind` so
+                    // generated bodies find both matches and misses.
+                    let mut columns = HashMap::new();
+                    if let Some(k) = kind {
+                        columns.insert("content_type".to_string(), Value::String(k.to_string()));
+                    }
                     WorldBlock {
                         id: format!("b{i}"),
                         name: name.to_string(),
                         parent_id: parent,
                         properties,
                         tags,
+                        columns,
                     }
                 })
                 .collect();
@@ -394,6 +410,17 @@ fn block_body_strategy() -> impl Strategy<Value = Pattern> {
             op: if ne { CmpOp::Ne } else { CmpOp::Eq },
             rhs: Operand::Lit(Value::String(v.to_string())),
         }),
+        // A block-subject `block.<column>` comparison: the subject's OWN
+        // column, distinct from its name, and dual-evaluated like every
+        // other leaf.
+        (prop::sample::select(KINDS), any::<bool>()).prop_map(|(v, ne)| Pattern::Field {
+            field: FieldRef::Column {
+                relation: "block".to_string(),
+                name: "content_type".to_string(),
+            },
+            op: if ne { CmpOp::Ne } else { CmpOp::Eq },
+            rhs: Operand::Lit(Value::String(v.to_string())),
+        }),
         (prop::sample::select(NAMES), prop::sample::select(NAMES)).prop_map(|(a, b)| {
             Pattern::BlockExists(PathPattern {
                 segments: vec![
@@ -404,12 +431,14 @@ fn block_body_strategy() -> impl Strategy<Value = Pattern> {
         }),
     ];
     // `Parent` joins the recursion so the oracle stays TOTAL over the
-    // block-driven grammar: every leaf is reachable under a parent hop and
-    // every parent hop under And/Or/Not.
+    // block-driven grammar: every leaf is reachable under either hop and
+    // every hop under And/Or/Not.
     leaf.prop_recursive(3, 12, 3, |inner| {
         prop_oneof![
             inner.clone().prop_map(|p| Pattern::Not(Box::new(p))),
             inner.clone().prop_map(|p| Pattern::Parent(Box::new(p))),
+            inner.clone().prop_map(|p| Pattern::Child(Box::new(p))),
+            inner.clone().prop_map(|p| Pattern::Sibling(Box::new(p))),
             prop::collection::vec(inner.clone(), 1..3).prop_map(Pattern::And),
             prop::collection::vec(inner, 1..3).prop_map(Pattern::Or),
         ]

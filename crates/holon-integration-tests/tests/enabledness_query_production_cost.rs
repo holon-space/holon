@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use holon_api::ArcPlace;
 use holon_api::ArcRelation;
 use holon_api::EntityUri;
 use holon_integration_tests::TestEnvironment;
@@ -112,6 +113,18 @@ struct RowMarking {
 impl Marking for RowMarking {
     fn present(&self, _: &ArcRelation, _: &EntityUri) -> bool {
         self.present
+    }
+
+    /// The analyzable transitions of the production catalog carry no
+    /// refinement and no hop, so timing them never reads a cell. A catalog
+    /// that grows one must fail loudly here rather than be timed against a
+    /// marking that answers nothing.
+    fn value(&self, place: &ArcPlace, _: &EntityUri) -> Option<holon_api::Value> {
+        unreachable!("the timed net read `{place}`; this harness times shape only")
+    }
+
+    fn matching(&self, to: &ArcPlace, _: &holon_api::Value) -> Vec<EntityUri> {
+        unreachable!("the timed net hopped through `{to}`; this harness times shape only")
     }
 }
 
