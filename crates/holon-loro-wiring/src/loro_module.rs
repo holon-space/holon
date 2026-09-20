@@ -175,6 +175,15 @@ impl Module for LoroModule {
                     registry =
                         registry.with_write_tier(authority, tokio::runtime::Handle::current());
                 }
+                // A keystroke the doc's write lock refuses is a lost edit, and
+                // the frontends only log the error. The cell discloses it
+                // instead — resolved non-optionally, so a root that stops
+                // providing the bus fails here rather than silently shipping
+                // an editor that loses keystrokes in silence.
+                let bus = resolver
+                    .resolve_async::<Arc<holon_api::ConditionBus>>()
+                    .await;
+                registry = registry.with_condition_bus((*bus).clone());
                 Shared::new(registry)
             }),
         );

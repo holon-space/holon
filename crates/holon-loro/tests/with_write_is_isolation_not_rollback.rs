@@ -8,11 +8,14 @@
 //! the batch interior. Read quickly, that sounds like a transaction. It is
 //! not, and this file pins the difference by measuring it.
 //!
-//! VERDICT: a closure that returns `Err` keeps every mutation it already made,
-//! and the NEXT successful batch commits them under ITS origin. So a failed
-//! batch is not undone — it is deferred and re-labelled, which is strictly
-//! worse for a caller than a failure it can see. Any future attempt to build
-//! all-or-nothing block writes on `with_write` has to defeat this test first.
+//! VERDICT: a closure that returns `Err` keeps every mutation it already
+//! made. The scope does flush them under its OWN origin before its guard
+//! drops, so they are attributed to the batch that made them — but they are
+//! not undone. Any future attempt to build all-or-nothing block writes on
+//! `with_write` has to defeat this test first.
+
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use anyhow::Result;
 use anyhow::bail;
@@ -44,12 +47,20 @@ fn a_failed_write_batch_keeps_its_earlier_mutations() -> Result<()> {
     Ok(())
 }
 
-/// The half that makes the first one dangerous: the pending ops a failed batch
-/// left behind ride out on the next unrelated commit, carrying THAT batch's
-/// origin rather than their own.
+/// The half that used to make the first one dangerous: the failed batch's ops
+/// once rode out on the next unrelated commit, carrying THAT batch's origin
+/// rather than their own. They are now flushed by the scope that made them, so
+/// each op reaches subscribers under the origin of its own writer.
 #[test]
-fn a_later_batch_commits_what_the_failed_one_left_pending() -> Result<()> {
+fn a_failed_batch_commits_its_own_ops_under_its_own_origin() -> Result<()> {
     let doc = LoroDocument::new("with_write_leak".to_string())?;
+
+    let origins: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen = origins.clone();
+    // ALLOW(loro_doc_escape): subscription registration, a blessed use.
+    let _sub = doc.doc().subscribe_root(Arc::new(move |event| {
+        seen.lock().unwrap().push(event.origin.to_string());
+    }));
 
     let outcome = doc.with_write(WriteOrigin::Probe("failing_batch"), |d| {
         d.get_text("content").insert(0, "STEP-ONE")?;
@@ -67,7 +78,15 @@ fn a_later_batch_commits_what_the_failed_one_left_pending() -> Result<()> {
     assert_eq!(
         text_of(&doc)?,
         "LATER|STEP-ONE",
-        "the failed batch's op is still in the doc and rode out on the next commit"
+        "the failed batch's op is still in the doc — this is isolation, not rollback"
+    );
+    assert_eq!(
+        *origins.lock().unwrap(),
+        vec![
+            WriteOrigin::Probe("failing_batch").as_origin(),
+            WriteOrigin::Probe("later_unrelated_write").as_origin(),
+        ],
+        "each op must reach subscribers under the origin of the batch that made it"
     );
 
     Ok(())

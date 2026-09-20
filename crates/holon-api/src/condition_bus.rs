@@ -120,6 +120,14 @@ pub enum ConditionKind {
     /// All-clear: none. The file is read-only for as long as its format is, so
     /// the condition is true for the session.
     EditRefusedReadOnlyFormat { format: String },
+    /// A typed edit never reached the store because the editor could not take
+    /// the document's write lock. `subject` is the block being typed into, and
+    /// `detail` is the lock's own account of why. The keystroke is lost: the
+    /// editor holds text the store does not.
+    ///
+    /// All-clear: none. Nothing re-applies the lost keystroke, so the notice
+    /// stands until the user retypes and the session restarts.
+    LocalEditNotApplied { detail: String },
     /// The org write-back stream died and its supervisor could not keep it
     /// alive — edits reach Loro + SQL but stop reaching disk. String carries
     /// the supervisor's escalation summary (what died, how often).
@@ -320,6 +328,7 @@ impl ConditionKind {
     pub const VAULT_FILE_EMPTIED: &'static str = "vault-file-emptied";
     pub const WRITEBACK_DEGRADED: &'static str = "writeback-degraded";
     pub const EDIT_REFUSED_READ_ONLY_FORMAT: &'static str = "edit-refused-read-only-format";
+    pub const LOCAL_EDIT_NOT_APPLIED: &'static str = "local-edit-not-applied";
     pub const BEARER_TICKET_ENROLLMENT: &'static str = "bearer-ticket-enrollment";
     pub const OWNER_RECOVERY_CODE_NOT_SHOWN: &'static str = "owner-recovery-code-not-shown";
 
@@ -350,6 +359,7 @@ impl ConditionKind {
             Self::PairingReimportedLocalContent { .. } => Self::PAIRING_REIMPORTED_LOCAL_CONTENT,
             Self::PairingReimportDeferred { .. } => Self::PAIRING_REIMPORT_DEFERRED,
             Self::EditRefusedReadOnlyFormat { .. } => Self::EDIT_REFUSED_READ_ONLY_FORMAT,
+            Self::LocalEditNotApplied { .. } => Self::LOCAL_EDIT_NOT_APPLIED,
             Self::BearerTicketEnrollment { .. } => Self::BEARER_TICKET_ENROLLMENT,
             Self::OwnerRecoveryCodeNotShown => Self::OWNER_RECOVERY_CODE_NOT_SHOWN,
         }

@@ -204,6 +204,13 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // Two `UndoManager::new(&doc)` handoffs. The manager is a long-lived
     // observer registered on the document, the same shape as a subscription.
     ("crates/holon-loro/tests/undo_history_trim_probe.rs", 2),
+    // A subscription that records each commit's origin, so the measurement can
+    // show a failed batch's ops carrying the origin of the batch that made
+    // them. Registration only — the callback never reads the doc.
+    (
+        "crates/holon-loro/tests/with_write_is_isolation_not_rollback.rs",
+        1,
+    ),
     ("crates/holon-loro-testing/src/sut_loro.rs", 3),
     // +1: the layout doc's retained container handle, same cell-backing rationale
     // as the global one.
@@ -224,7 +231,10 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // +1: the origin-watching subscription the scope-origin tests register.
     // +1: the stray-batch pin, which must build the state a broken write path
     // would leave behind and so cannot go through `with_write`.
-    ("crates/holon-loro/src/loro_document.rs", 5),
+    // Five long-lived subscription/transport registrations, plus the flush
+    // tests' own commit-observing subscriber (`with_write` must be shown
+    // reaching subscribers on the panic path).
+    ("crates/holon-loro/src/loro_document.rs", 6),
     // +1: the `rehydrate_over` test helper. `rehydrate_shared_trees` is async and
     // so cannot run inside `with_read`'s synchronous closure — the same reason
     // the one production caller below (`loro_module.rs`) carries an escape. The

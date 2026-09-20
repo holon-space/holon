@@ -5264,6 +5264,9 @@
             ],
             "files": [
               {
+                "name": "batch_tag_probe.rs"
+              },
+              {
                 "name": "block_cell_registry.rs"
               },
               {
@@ -5310,6 +5313,9 @@
               },
               {
                 "name": "iroh_sync_adapter.rs"
+              },
+              {
+                "name": "keystroke_lock_wait_probe.rs"
               },
               {
                 "name": "layout_migration.rs"

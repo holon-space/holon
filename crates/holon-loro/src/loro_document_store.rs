@@ -45,6 +45,7 @@ impl DocScope {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn snapshot_name(self) -> &'static str {
         match self {
             DocScope::Global => GLOBAL_SNAPSHOT_NAME,
@@ -72,6 +73,7 @@ pub struct LoroDocumentStore {
     /// Counts `save_all` calls to schedule periodic history compaction
     /// (see `save_all`). `Arc` so clones share one schedule (the struct is
     /// `Clone`; a per-clone counter would compact on every clone's first save).
+    #[cfg(not(target_arch = "wasm32"))]
     save_counter: Arc<std::sync::atomic::AtomicU64>,
     /// Peer id to mint both docs under. `None` = the env/random default
     /// in `LoroDocument::new`. Two instances in ONE process must each
@@ -90,6 +92,7 @@ pub struct LoroDocumentStore {
 pub const GLOBAL_DOC_ID: &str = "holon_tree";
 pub const GLOBAL_SNAPSHOT_NAME: &str = "holon_tree.loro";
 const LAYOUT_DOC_ID: &str = "holon_layout";
+#[cfg(not(target_arch = "wasm32"))]
 const LAYOUT_SNAPSHOT_NAME: &str = "holon_layout.loro";
 
 impl LoroDocumentStore {
@@ -99,6 +102,7 @@ impl LoroDocumentStore {
             layout_doc: Arc::new(RwLock::new(None)),
             storage_dir,
             doc_id_aliases: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(not(target_arch = "wasm32"))]
             save_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             peer_id: None,
             text_undo: Arc::new(std::sync::OnceLock::new()),
@@ -165,6 +169,7 @@ impl LoroDocumentStore {
         &self.storage_dir
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn snapshot_path(&self, scope: DocScope) -> PathBuf {
         self.storage_dir.join(scope.snapshot_name())
     }
@@ -195,7 +200,7 @@ impl LoroDocumentStore {
         }
         let doc_id = scope.doc_id();
 
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        #[cfg(not(target_arch = "wasm32"))]
         let doc = {
             let snapshot_path = self.snapshot_path(scope);
             if snapshot_path.exists() {
@@ -243,9 +248,9 @@ impl LoroDocumentStore {
             }
         };
 
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        #[cfg(target_arch = "wasm32")]
         let doc = {
-            info!("Creating in-memory {doc_id} LoroTree (wasm32 demo, no persistence)");
+            info!("Creating in-memory {doc_id} LoroTree (wasm, no snapshot persistence)");
             let fresh = Arc::new(LoroDocument::new_with_peer_id(
                 doc_id.to_string(),
                 self.peer_id,
@@ -289,7 +294,7 @@ impl LoroDocumentStore {
         self.get_doc(DocScope::Global).await
     }
 
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn save_all(&self) -> Result<()> {
         use std::sync::atomic::Ordering;
         // Periodic history compaction: every Nth save (incl. the first save of
@@ -321,9 +326,11 @@ impl LoroDocumentStore {
         Ok(())
     }
 
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    /// No-op on wasm: the snapshot writer is the native atomic-replacement
+    /// helper (`holon_filesystem::fs_port`), so both documents stay in memory
+    /// for the lifetime of the instance.
+    #[cfg(target_arch = "wasm32")]
     pub async fn save_all(&self) -> Result<()> {
-        // wasm32 demo is in-memory only; no persistence.
         Ok(())
     }
 

@@ -63,6 +63,10 @@ pub struct BlockCellRegistry {
     /// answers both). Resolution is async and `live_field_any` is not, hence
     /// the handle.
     write_tier: Option<(Arc<dyn WriteTierAuthority>, tokio::runtime::Handle)>,
+    /// Where an editor cell discloses a keystroke the doc's write lock
+    /// refused. Absent in the SqlOnly and test registries, whose cells then
+    /// return the error without raising a condition.
+    bus: Option<Arc<holon_api::ConditionBus>>,
     /// Arms the vault's text-undo manager the first time an EDITOR cell is
     /// handed out, and a runtime to do it on.
     ///
@@ -97,6 +101,7 @@ impl BlockCellRegistry {
             backend,
             write_tier: None,
             text_undo_arm: None,
+            bus: None,
         }
     }
 
@@ -109,6 +114,14 @@ impl BlockCellRegistry {
         runtime: tokio::runtime::Handle,
     ) -> Self {
         self.write_tier = Some((authority, runtime));
+        self
+    }
+
+    /// Disclose a keystroke the document's write lock refuses. Without this
+    /// an editor cell returns the error and the frontends log it, so the user
+    /// keeps text the store never took.
+    pub fn with_condition_bus(mut self, bus: Arc<holon_api::ConditionBus>) -> Self {
+        self.bus = Some(bus);
         self
     }
 
@@ -187,6 +200,7 @@ impl BlockCellRegistry {
             backend,
             write_tier: None,
             text_undo_arm: None,
+            bus: None,
         }
     }
 
@@ -321,7 +335,8 @@ impl EntityCellRegistry for BlockCellRegistry {
             }
             return self.cache.get_or_construct::<String, _>(uri, field, || {
                 let (doc, text) = self.resolve_loro_text_container(&block_id_owned)?;
-                let backing = LoroTextCellBacking::new(doc, text)?;
+                let backing =
+                    LoroTextCellBacking::disclosing(doc, text, self.bus.clone(), uri.to_string())?;
                 Ok(Arc::new(backing) as Arc<dyn CellBacking<String>>)
             });
         }

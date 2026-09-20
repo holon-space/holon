@@ -19,6 +19,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::Weak;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -33,9 +35,15 @@ const LOCK_WAIT_BUDGET: Duration = Duration::from_secs(30);
 /// Identity of the inner doc a lock guards. Stable for the doc's lifetime.
 type DocKey = usize;
 
+#[derive(Clone)]
 pub(crate) struct DocLock {
     key: DocKey,
     lock: Arc<RwLock<()>>,
+    /// Threads parked on [`Self::write`]. It costs one `Arc<AtomicUsize>` per
+    /// doc in the registry, and two SeqCst RMWs on the contended path only —
+    /// a path that is already about to park for up to [`LOCK_WAIT_BUDGET`].
+    /// An uncontended acquire never touches it.
+    waiting: Arc<AtomicUsize>,
 }
 
 impl DocLock {
@@ -44,7 +52,7 @@ impl DocLock {
     pub(crate) fn for_doc(doc: &Arc<LoroDoc>) -> Self {
         /// The weak handle proves the entry's doc is still alive; the lock is
         /// what callers share.
-        type Entry = (Weak<LoroDoc>, Arc<RwLock<()>>);
+        type Entry = (Weak<LoroDoc>, Arc<RwLock<()>>, Arc<AtomicUsize>);
         static REGISTRY: OnceLock<Mutex<HashMap<DocKey, Entry>>> = OnceLock::new();
         let key = Arc::as_ptr(doc) as DocKey;
         let mut map = REGISTRY
@@ -55,18 +63,74 @@ impl DocLock {
         // `Weak` is dead belonged to a freed doc that happened to sit at the
         // same address — dropping it cannot steal a lock still in use.
         if map.len() > 64 {
-            map.retain(|_, (weak, _)| weak.strong_count() > 0);
+            map.retain(|_, (weak, _, _)| weak.strong_count() > 0);
         }
-        if map.get(&key).is_some_and(|(w, _)| w.strong_count() == 0) {
+        if map.get(&key).is_some_and(|(w, _, _)| w.strong_count() == 0) {
             map.remove(&key);
         }
-        let lock = map
-            .entry(key)
-            .or_insert_with(|| (Arc::downgrade(doc), Arc::new(RwLock::new(()))))
-            .1
-            .clone();
-        Self { key, lock }
+        let entry = map.entry(key).or_insert_with(|| {
+            (
+                Arc::downgrade(doc),
+                Arc::new(RwLock::new(())),
+                Arc::new(AtomicUsize::new(0)),
+            )
+        });
+        Self {
+            key,
+            lock: entry.1.clone(),
+            waiting: entry.2.clone(),
+        }
     }
+
+    /// How many threads are parked waiting to write this doc.
+    ///
+    /// A test that must know a writer is BLOCKED — not merely running — reads
+    /// this; nothing in production does.
+    #[cfg(test)]
+    pub(crate) fn writers_waiting(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst)
+    }
+
+    /// Whether THIS thread currently holds this doc's write guard.
+    ///
+    /// Production enforcement lives in [`mutate_guarded`], which asks the same
+    /// question of the document a mutation lands in. This method answers it
+    /// for a caller that holds the lock rather than the doc: the tests read it
+    /// from inside a commit's subscriber callback to prove the flush itself
+    /// was exclusive.
+    #[cfg(test)]
+    pub(crate) fn this_thread_holds_write(&self) -> bool {
+        held(self.key).writes > 0
+    }
+}
+
+/// Perform a loro mutation, refusing unless this thread holds the write guard
+/// of the document the mutation lands in.
+///
+/// Every writer that mutates loro state through a retained container handle
+/// goes through here — the editor's text cell and the block backend alike.
+/// The check sits AT the mutation and not at the enclosing scope on purpose:
+/// an op applied outside the guard stays pending in the document's shared
+/// transaction, so the next writer's commit carries it under THAT writer's
+/// origin, and a check at the scope entry stays green while the mutation moves
+/// out from under it.
+///
+/// `doc` identifies the document the same way [`DocLock`] keys on it, so
+/// either the `Arc<LoroDoc>` a writer holds or the `WriteTxn` a `with_write`
+/// closure receives can be passed directly.
+pub(crate) fn mutate_guarded<R>(
+    doc: &LoroDoc,
+    what: &str,
+    f: impl FnOnce() -> Result<R>,
+) -> Result<R> {
+    if held(std::ptr::from_ref(doc) as DocKey).writes == 0 {
+        bail!(
+            "{what} ran without the document write guard. Its ops stay pending in the \
+             document's shared transaction until some other writer commits them under \
+             that writer's origin."
+        );
+    }
+    f()
 }
 
 /// What this thread already holds for a given doc. Read/write nesting through
@@ -139,13 +203,31 @@ impl DocLock {
                  A read guard cannot be upgraded; hoist the write out of the enclosing read."
             );
         }
-        let Some(_guard) = self.lock.try_write_for(LOCK_WAIT_BUDGET) else {
-            bail!(
-                "doc '{doc_id}': timed out after {LOCK_WAIT_BUDGET:?} waiting for the doc write \
-                 lock. Another thread is holding it — a doc-lock callback that re-enters the doc, \
-                 or a writer blocked on I/O."
-            );
+        // Uncontended acquires skip the counter and the timeout machinery
+        // entirely; only a thread that is about to park announces itself.
+        //
+        // This fast path lets an arriving writer barge past writers already
+        // parked, which is deliberate: the barging writer is usually the
+        // keystroke path, whose hold is ~0.03 ms, and typing must not queue
+        // behind a snapshot save. A writer that keeps losing is still bounded
+        // by LOCK_WAIT_BUDGET, after which it fails loud instead of hanging.
+        let guard = match self.lock.try_write() {
+            Some(guard) => guard,
+            None => {
+                self.waiting.fetch_add(1, Ordering::SeqCst);
+                let parked = self.lock.try_write_for(LOCK_WAIT_BUDGET);
+                self.waiting.fetch_sub(1, Ordering::SeqCst);
+                let Some(guard) = parked else {
+                    bail!(
+                        "doc '{doc_id}': timed out after {LOCK_WAIT_BUDGET:?} waiting for the doc \
+                         write lock. Another thread is holding it — a doc-lock callback that \
+                         re-enters the doc, or a writer blocked on I/O."
+                    );
+                };
+                guard
+            }
         };
+        let _guard = guard;
         enter(self.key, true);
         let _depth = DepthGuard {
             key: self.key,

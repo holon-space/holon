@@ -15,12 +15,16 @@
 //!
 //! Re-exported into `holon::sync` so existing `holon::sync::*` paths resolve.
 
+#[cfg(test)]
+mod batch_tag_probe;
 pub mod block_cell_registry;
 pub mod capability;
 pub mod consolidator;
 pub mod container_registry;
 pub mod deleted_container_purge;
 pub mod durable_state;
+#[cfg(test)]
+mod keystroke_lock_wait_probe;
 
 #[cfg(all(
     feature = "iroh-sync",

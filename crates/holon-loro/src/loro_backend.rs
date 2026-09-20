@@ -673,21 +673,31 @@ fn diff_blocks_changed(a: &SnapshotBlock, b: &SnapshotBlock) -> bool {
 
 // -- Writing block data to tree node metadata --
 
-fn update_text_field(meta: &loro::LoroMap, key: &str, new_text: &str) -> anyhow::Result<()> {
+fn update_text_field(
+    doc: &loro::LoroDoc,
+    meta: &loro::LoroMap,
+    key: &str,
+    new_text: &str,
+) -> anyhow::Result<()> {
     let text = crate::mergeable_child::ensure_text(meta, key)?;
-    text.update(new_text, Default::default())
-        .map_err(|e| anyhow::anyhow!("LoroText update failed: {:?}", e))?;
-    Ok(())
+    crate::doc_lock::mutate_guarded(doc, "a block text-field write", || {
+        text.update(new_text, Default::default())
+            .map_err(|e| anyhow::anyhow!("LoroText update failed: {:?}", e))
+    })
 }
 
-fn write_content_to_meta(meta: &loro::LoroMap, content: &BlockContent) -> anyhow::Result<()> {
+fn write_content_to_meta(
+    doc: &loro::LoroDoc,
+    meta: &loro::LoroMap,
+    content: &BlockContent,
+) -> anyhow::Result<()> {
     match content {
         BlockContent::Text { raw } => {
             meta.insert(
                 CONTENT_TYPE,
                 loro::LoroValue::from(ContentType::Text.to_string().as_str()),
             )?;
-            update_text_field(meta, CONTENT_RAW, raw)?;
+            update_text_field(doc, meta, CONTENT_RAW, raw)?;
         }
         BlockContent::RichText { text, marks } => {
             // Write the text, then apply the inline marks as Loro Peritext — the
@@ -702,7 +712,7 @@ fn write_content_to_meta(meta: &loro::LoroMap, content: &BlockContent) -> anyhow
                 CONTENT_TYPE,
                 loro::LoroValue::from(ContentType::Text.to_string().as_str()),
             )?;
-            update_text_field(meta, CONTENT_RAW, text)?;
+            update_text_field(doc, meta, CONTENT_RAW, text)?;
             let loro_text = crate::mergeable_child::ensure_text(meta, CONTENT_RAW)?;
             // Clear every known mark key over the full range first so a re-write
             // with fewer marks drops the stale ones, then set the current spans.
@@ -727,14 +737,14 @@ fn write_content_to_meta(meta: &loro::LoroMap, content: &BlockContent) -> anyhow
                 CONTENT_TYPE,
                 loro::LoroValue::from(ContentType::Image.to_string().as_str()),
             )?;
-            update_text_field(meta, CONTENT_RAW, path)?;
+            update_text_field(doc, meta, CONTENT_RAW, path)?;
         }
         BlockContent::Source(source) => {
             meta.insert(CONTENT_TYPE, loro::LoroValue::from("source"))?;
             if let Some(lang) = &source.language {
                 meta.insert(SOURCE_LANGUAGE, loro::LoroValue::from(lang.as_str()))?;
             }
-            update_text_field(meta, SOURCE_CODE, &source.source)?;
+            update_text_field(doc, meta, SOURCE_CODE, &source.source)?;
             if let Some(name) = &source.name {
                 meta.insert(SOURCE_NAME, loro::LoroValue::from(name.as_str()))?;
             }
@@ -1143,6 +1153,7 @@ fn set_birth_widening_ms(ms: u64) {
 }
 
 fn write_new_node(
+    doc: &loro::LoroDoc,
     tree: &loro::LoroTree,
     id_cache: &Arc<Mutex<HashMap<String, loro::TreeID>>>,
     request: &NewBlockWithProperties,
@@ -1167,7 +1178,7 @@ fn write_new_node(
     widen_birth_window();
     let meta = tree.get_meta(node)?;
     meta.insert(STABLE_ID, loro::LoroValue::from(stable_id.as_str()))?;
-    write_content_to_meta(&meta, &request.content)?;
+    write_content_to_meta(doc, &meta, &request.content)?;
     replace_properties_in_meta(&meta, &request.properties)?;
     // Tags are edge fields (block_tags), stored in Loro meta as a JSON list
     // under "tags" (mirrors `set_block_tags`). Carrying them in the create
@@ -2660,7 +2671,7 @@ impl LoroBackend {
                 } else {
                     CONTENT_RAW
                 };
-                update_text_field(&meta, field, new_text)?;
+                update_text_field(doc, &meta, field, new_text)?;
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
@@ -2701,7 +2712,7 @@ impl LoroBackend {
             .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
-                write_content_to_meta(&meta, content)?;
+                write_content_to_meta(doc, &meta, content)?;
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
@@ -2780,25 +2791,28 @@ impl LoroBackend {
                     ));
                 }
 
-                update_text_field(&meta, CONTENT_RAW, new_text)?;
+                update_text_field(doc, &meta, CONTENT_RAW, new_text)?;
 
                 // Re-apply marks. First clear every known mark key over the
                 // full text range so removed marks disappear; then set the
                 // new ones. `mark` is idempotent for the same key+range.
                 let text = crate::mergeable_child::ensure_text(&meta, CONTENT_RAW)?;
-                let len_chars = text.len_unicode();
-                if len_chars > 0 {
-                    for key in holon_api::InlineMark::all_loro_keys() {
-                        text.unmark(0..len_chars, key)
-                            .map_err(|e| anyhow::anyhow!("LoroText unmark {key}: {:?}", e))?;
+                crate::doc_lock::mutate_guarded(doc, "a block mark rewrite", || {
+                    let len_chars = text.len_unicode();
+                    if len_chars > 0 {
+                        for key in holon_api::InlineMark::all_loro_keys() {
+                            text.unmark(0..len_chars, key)
+                                .map_err(|e| anyhow::anyhow!("LoroText unmark {key}: {:?}", e))?;
+                        }
                     }
-                }
-                for span in &marks_owned {
-                    let key = span.mark.loro_key();
-                    let value: loro::LoroValue = mark_to_loro_value(&span.mark);
-                    text.mark(span.start..span.end, key, value)
-                        .map_err(|e| anyhow::anyhow!("LoroText mark {key}: {:?}", e))?;
-                }
+                    for span in &marks_owned {
+                        let key = span.mark.loro_key();
+                        let value: loro::LoroValue = mark_to_loro_value(&span.mark);
+                        text.mark(span.start..span.end, key, value)
+                            .map_err(|e| anyhow::anyhow!("LoroText mark {key}: {:?}", e))?;
+                    }
+                    Ok(())
+                })?;
 
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
@@ -2856,8 +2870,10 @@ impl LoroBackend {
                 let text = crate::mergeable_child::ensure_text(&meta, CONTENT_RAW)?;
                 let key = mark_owned.loro_key();
                 let value: loro::LoroValue = mark_to_loro_value(&mark_owned);
-                text.mark(range.clone(), key, value)
-                    .map_err(|e| anyhow::anyhow!("LoroText mark {key}: {:?}", e))?;
+                crate::doc_lock::mutate_guarded(doc, "an inline-mark write", || {
+                    text.mark(range.clone(), key, value)
+                        .map_err(|e| anyhow::anyhow!("LoroText mark {key}: {:?}", e))
+                })?;
 
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
@@ -2898,8 +2914,10 @@ impl LoroBackend {
                 let meta = tree.get_meta(tree_id)?;
 
                 let text = crate::mergeable_child::ensure_text(&meta, CONTENT_RAW)?;
-                text.unmark(range.clone(), &key_owned)
-                    .map_err(|e| anyhow::anyhow!("LoroText unmark {key_owned}: {:?}", e))?;
+                crate::doc_lock::mutate_guarded(doc, "an inline-mark removal", || {
+                    text.unmark(range.clone(), &key_owned)
+                        .map_err(|e| anyhow::anyhow!("LoroText unmark {key_owned}: {:?}", e))
+                })?;
 
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
@@ -2999,8 +3017,10 @@ impl LoroBackend {
                 }
 
                 let text = crate::mergeable_child::ensure_text(&meta, CONTENT_RAW)?;
-                text.insert(pos, &s_owned)
-                    .map_err(|e| anyhow::anyhow!("LoroText insert at {pos}: {:?}", e))?;
+                crate::doc_lock::mutate_guarded(doc, "a block text insert", || {
+                    text.insert(pos, &s_owned)
+                        .map_err(|e| anyhow::anyhow!("LoroText insert at {pos}: {:?}", e))
+                })?;
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
@@ -3044,8 +3064,10 @@ impl LoroBackend {
                 }
 
                 let text = crate::mergeable_child::ensure_text(&meta, CONTENT_RAW)?;
-                text.delete(pos, len)
-                    .map_err(|e| anyhow::anyhow!("LoroText delete {len} at {pos}: {:?}", e))?;
+                crate::doc_lock::mutate_guarded(doc, "a block text delete", || {
+                    text.delete(pos, len)
+                        .map_err(|e| anyhow::anyhow!("LoroText delete {len} at {pos}: {:?}", e))
+                })?;
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
@@ -3133,7 +3155,7 @@ impl LoroBackend {
         let (created_block, tree_id) = write_doc
             .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
-                let (block, node) = write_new_node(&tree, &id_cache, &request, now)?;
+                let (block, node) = write_new_node(doc, &tree, &id_cache, &request, now)?;
                 doc.commit();
                 Ok((block, node))
             })
@@ -3227,7 +3249,7 @@ impl LoroBackend {
                     let tree = doc.get_tree(TREE_NAME);
                     let mut out: Vec<(usize, Block, loro::TreeID)> = Vec::new();
                     for (idx, request) in &members {
-                        let (block, node) = write_new_node(&tree, &id_cache, request, now)?;
+                        let (block, node) = write_new_node(doc, &tree, &id_cache, request, now)?;
                         id_cache
                             .lock()
                             .unwrap()
@@ -4481,7 +4503,7 @@ impl CoreOperations for LoroBackend {
             .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let meta = tree.get_meta(tree_id)?;
-                write_content_to_meta(&meta, &content)?;
+                write_content_to_meta(doc, &meta, &content)?;
                 meta.insert("updated_at", loro::LoroValue::from(self.now_millis()))?;
                 doc.commit();
                 Ok(())
@@ -4768,7 +4790,7 @@ impl CoreOperations for LoroBackend {
                     let node = tree.create(parent_tree_id)?;
                     let meta = tree.get_meta(node)?;
                     meta.insert(STABLE_ID, loro::LoroValue::from(stable_id.as_str()))?;
-                    write_content_to_meta(&meta, &new_block.content)?;
+                    write_content_to_meta(doc, &meta, &new_block.content)?;
                     meta.insert("created_at", loro::LoroValue::from(now))?;
                     meta.insert("updated_at", loro::LoroValue::from(now))?;
 
@@ -5639,17 +5661,25 @@ mod incremental_tests {
 
     /// A doc whose block tree assigns fractional indices (prod invariant, ADR
     /// 0005) so every live node projects a real sort key.
-    fn new_fi_doc() -> LoroDoc {
-        let doc = LoroDoc::new();
+    fn new_fi_doc() -> Arc<LoroDoc> {
+        let doc = Arc::new(LoroDoc::new());
         doc.get_tree(TREE_NAME).enable_fractional_index(0);
         doc
+    }
+
+    /// Run a write under the document's write guard, the way production's
+    /// `with_write` does. The guarded writers under test refuse without it.
+    pub(super) fn guarded<R>(doc: &Arc<LoroDoc>, f: impl FnOnce() -> anyhow::Result<R>) -> R {
+        crate::doc_lock::DocLock::for_doc(doc)
+            .write("test write", f)
+            .expect("the test write must hold the doc guard")
     }
 
     /// Create a block node under `parent` (`None` = tree root) with STABLE_ID
     /// `sid` and text `content`, committing it. Mirrors the meta the prod
     /// create path writes (`create_block_with_properties`).
     fn create_node(
-        doc: &LoroDoc,
+        doc: &Arc<LoroDoc>,
         parent: Option<loro::TreeID>,
         sid: &str,
         content: &str,
@@ -5658,13 +5688,15 @@ mod incremental_tests {
         let node = tree.create(parent).unwrap();
         let meta = tree.get_meta(node).unwrap();
         meta.insert(STABLE_ID, loro::LoroValue::from(sid)).unwrap();
-        write_content_to_meta(
-            &meta,
-            &BlockContent::Text {
-                raw: content.to_string(),
-            },
-        )
-        .unwrap();
+        guarded(doc, || {
+            write_content_to_meta(
+                doc,
+                &meta,
+                &BlockContent::Text {
+                    raw: content.to_string(),
+                },
+            )
+        });
         doc.commit();
         node
     }
@@ -5943,13 +5975,13 @@ mod concurrent_child_creation_semantics {
 
     /// Two peers that both see a tree node whose child container at the key
     /// under test does not exist yet — the fork point of a first-creation race.
-    fn forked_pair_on_shared_node() -> (LoroDoc, LoroDoc, loro::TreeID) {
-        let a = LoroDoc::new();
+    fn forked_pair_on_shared_node() -> (Arc<LoroDoc>, Arc<LoroDoc>, loro::TreeID) {
+        let a = Arc::new(LoroDoc::new());
         a.set_peer_id(1).unwrap();
         let node = a.get_tree(TREE_NAME).create(None).unwrap();
         a.commit();
 
-        let b = LoroDoc::new();
+        let b = Arc::new(LoroDoc::new());
         b.set_peer_id(2).unwrap();
         b.import(&a.export(loro::ExportMode::Snapshot).unwrap())
             .unwrap();
@@ -5976,9 +6008,13 @@ mod concurrent_child_creation_semantics {
     fn concurrent_first_text_creation_merges_both_peers_text() {
         let (a, b, node) = forked_pair_on_shared_node();
 
-        update_text_field(&meta_of(&a, node), CONTENT_RAW, "alpha").unwrap();
+        super::incremental_tests::guarded(&a, || {
+            update_text_field(&a, &meta_of(&a, node), CONTENT_RAW, "alpha")
+        });
         a.commit();
-        update_text_field(&meta_of(&b, node), CONTENT_RAW, "beta").unwrap();
+        super::incremental_tests::guarded(&b, || {
+            update_text_field(&b, &meta_of(&b, node), CONTENT_RAW, "beta")
+        });
         b.commit();
 
         sync(&a, &b);
@@ -6058,7 +6094,7 @@ mod concurrent_child_creation_semantics {
         legacy.insert(0, "written before the migration").unwrap();
         a.commit();
 
-        let err = update_text_field(&meta, CONTENT_RAW, "new")
+        let err = update_text_field(&a, &meta, CONTENT_RAW, "new")
             .expect_err("prod must not write through a legacy op-id child");
 
         assert!(

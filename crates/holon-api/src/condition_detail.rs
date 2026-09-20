@@ -74,6 +74,10 @@ impl ConditionKind {
             // opens to see the stale projection.
             Self::SharedSubtreeNotMaterialized { file } => ConditionDetail::prose(file.clone()),
 
+            Self::LocalEditNotApplied { detail } => ConditionDetail::prose(format!(
+                "what you typed into {subject} is not in the store — retype it. {detail}"
+            )),
+
             Self::EditRefusedReadOnlyFormat { format } => ConditionDetail::prose(format!(
                 "{subject} is {format}, which Holon reads but cannot write — edit the file on disk"
             )),

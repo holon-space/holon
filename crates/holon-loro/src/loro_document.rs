@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -67,6 +68,27 @@ impl<'a> WriteTxn<'a> {
         self.doc.import_with(update, &self.origin.as_origin())?;
         self.doc.set_next_commit_origin(&self.origin.as_origin());
         Ok(())
+    }
+}
+
+/// Flushes the scope's ops however the scope ends — return, `?` or panic.
+struct FlushOnDrop<'a, 'b> {
+    txn: &'a WriteTxn<'b>,
+}
+
+impl Drop for FlushOnDrop<'_, '_> {
+    fn drop(&mut self) {
+        // The flush is unconditional, including while unwinding: ops left
+        // pending ride out on the next writer's commit under ITS origin.
+        //
+        // A subscriber that panics here aborts the process when the scope is
+        // ALREADY unwinding, and that is the wanted outcome: loro's
+        // `SubscriberSet::retain` is not panic-safe (it moves the subscriber
+        // map out and writes it back only after the callbacks), so a caught
+        // panic leaves the document with no subscribers at all and livelocks
+        // the next thread to commit it — a silently deaf document, which this
+        // project ranks below a crash.
+        self.txn.commit();
     }
 }
 
@@ -202,15 +224,32 @@ impl LoroDocument {
     /// that made it.
     ///
     /// The guard is held across the whole closure *and* the trailing
-    /// `commit()`, so no reader, exporter or saver can observe the batch
-    /// interior — the invariant the [`WriteTxn`] token names.
+    /// `commit()`, so no reader, exporter or saver that TAKES THE GUARD can
+    /// observe the batch interior — the invariant the [`WriteTxn`] token
+    /// names. It binds guarded access only: a reader holding the raw
+    /// `Arc<LoroDoc>` sees uncommitted ops, because loro applies a local op to
+    /// document state immediately and the commit only moves it into the
+    /// oplog. For a multi-op batch that unguarded reader can therefore observe
+    /// an interior state no writer intended — the editor's render and caret
+    /// paths read unguarded and may show it until the commit event converges
+    /// them (`batch_tag_probe` verdicts 3 and 4).
+    ///
+    /// The scope never ends with ops still pending: it flushes on the error
+    /// path and on panic too, because the pending transaction is shared per
+    /// document and the next writer's commit would otherwise carry these ops
+    /// under its own origin. A failed batch's ops are therefore committed, not
+    /// discarded — the pinned loro offers no abort.
     ///
     /// The `commit()` fires Loro subscribers on this thread while the guard is
-    /// still held. **A subscription callback must not touch the doc**: it must
-    /// take what it needs from the event's own diff and hand it on over a
-    /// channel. Re-reading the doc from a callback on another thread's behalf
-    /// would block that thread; the doc-lock's timeout reports it rather than
-    /// hanging, but the fix is always to keep the callback pure.
+    /// still held, EXCEPT for an emission loro defers: a diff raised while a
+    /// subscriber is already being called is queued
+    /// (`loro-internal/src/subscription.rs:107-118`) and delivered by whichever
+    /// thread next drains the queue. **A subscription callback must not touch
+    /// the doc**: it must take what it needs from the event's own diff and
+    /// hand it on over a channel. Re-reading the doc from a callback on
+    /// another thread's behalf would block that thread; the doc-lock's
+    /// timeout reports it rather than hanging, but the fix is always to
+    /// keep the callback pure.
     pub fn with_write<F, R>(&self, origin: WriteOrigin, f: F) -> Result<R>
     where
         F: FnOnce(&WriteTxn) -> Result<R>,
@@ -227,17 +266,23 @@ impl LoroDocument {
             doc: &self.doc,
             origin,
         };
-        let result = f(&txn)?;
-
-        // Flush the transaction so the origin-tagged commit actually fires and
-        // subscribers observe `origin`. Loro batches changes until an explicit
-        // `commit()` or an implicit one (export/import); tree/text ops alone do
-        // not commit. This used to happen implicitly via the diagnostic
-        // `export` below — once that was gated behind DEBUG (perf), non-debug
-        // log levels stopped committing here and silently dropped the origin
-        // tag. `WriteTxn::commit` arms the origin first, so this flush is
-        // labelled whether or not the closure already committed.
-        txn.commit();
+        // Loro batches ops until an explicit `commit()`; tree and text ops
+        // alone do not commit, and the pending transaction is per-DOCUMENT.
+        // So a scope that returns without flushing leaves its ops for whoever
+        // commits next, and they reach subscribers under THAT writer's origin.
+        // Flushing from `Drop` is what makes the rule hold on the `?` path and
+        // on an unwinding panic, not only on the happy path, and
+        // `WriteTxn::commit` arms the origin so the flush carries this scope's
+        // own label either way.
+        //
+        // This flushes a FAILED batch's ops rather than discarding them: the
+        // pinned loro exposes no way to abort a transaction
+        // (`abort_txn` is `pub(crate)`), and `with_write` is isolation, not
+        // rollback (`tests/with_write_is_isolation_not_rollback.rs`).
+        let result = {
+            let _flush = FlushOnDrop { txn: &txn };
+            f(&txn)
+        }?;
 
         // Diagnostic only: exporting the owned update log is O(doc-size), and
         // this ran on EVERY write purely to log a byte count — making bulk
@@ -309,21 +354,21 @@ impl LoroDocument {
     /// Sealed through [`Self::export_snapshot`]'s read guard: the bytes are
     /// captured at a commit boundary, so what lands on disk can never be a
     /// write batch's interior.
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn save_to_file(&self, path: &Path) -> Result<()> {
         let snapshot = self.export_snapshot()?;
-        write_atomic(path, &snapshot)?;
+        holon_filesystem::fs_port::write_atomic_blocking(path, &snapshot)?;
         debug!("Saved LoroDoc snapshot to {}", path.display());
         Ok(())
     }
 
     /// Like [`save_to_file`] but writes a history-compacted snapshot
     /// ([`export_compact_snapshot`]).
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn save_compact_to_file(&self, path: &Path) -> Result<()> {
         let snapshot = self.export_compact_snapshot()?;
         let len = snapshot.len();
-        write_atomic(path, &snapshot)?;
+        holon_filesystem::fs_port::write_atomic_blocking(path, &snapshot)?;
         debug!(
             "Saved compacted LoroDoc snapshot to {} ({} bytes)",
             path.display(),
@@ -332,13 +377,13 @@ impl LoroDocument {
         Ok(())
     }
 
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load_from_file(path: &Path, doc_id: String) -> Result<Self> {
         Self::load_from_file_with_peer_id(path, doc_id, None)
     }
 
     /// [`Self::load_from_file`] with the peer id supplied by the caller.
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load_from_file_with_peer_id(
         path: &Path,
         doc_id: String,
@@ -362,20 +407,121 @@ impl LoroDocument {
     }
 }
 
-/// Crash-safe file write: temp file in the same directory, then rename.
-/// A crash mid-save previously truncated the snapshot (plain `fs::write`),
-/// losing the whole document store.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp-write");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A panicking batch unwinds normally and still flushes, with the
+    /// document's subscribers watching.
+    ///
+    /// The flush runs from a destructor, so this also pins that the ordinary
+    /// case does NOT abort: only a subscriber panicking during the unwinding
+    /// flush does, and that abort is deliberate (see `FlushOnDrop`).
+    #[test]
+    fn a_panicking_batch_unwinds_and_still_flushes_under_live_subscribers() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        let doc = LoroDocument::new("panic-with-subscribers".to_string()).unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counted = seen.clone();
+        // ALLOW(loro_doc_escape): subscription registration, a blessed use.
+        let _sub = doc.doc().subscribe_root(Arc::new(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            doc.with_write(WriteOrigin::BlockOps, |txn| -> Result<()> {
+                txn.get_text("t").insert(0, "half")?;
+                panic!("the closure panicked mid-batch")
+            })
+        }));
+        assert!(
+            outcome.is_err(),
+            "the closure's panic must reach the caller"
+        );
+        assert_eq!(
+            doc.with_read(|d| Ok(d.get_pending_txn_len())).unwrap(),
+            0,
+            "the panicking scope must still flush: the ops would otherwise ride \
+             out under the next writer's origin"
+        );
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "the flush must reach the document's subscribers"
+        );
+    }
+
+    /// A panicking batch must not leave its ops pending: unwinding releases
+    /// the guard, and ops still pending at that point ride out on the next
+    /// writer's commit under that writer's origin — a route no `?`-shaped fix
+    /// covers.
+    #[test]
+    fn a_panicking_batch_leaves_nothing_pending() {
+        let doc = LoroDocument::new("panicking-batch".to_string()).unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            doc.with_write(WriteOrigin::BlockOps, |txn| -> Result<()> {
+                txn.get_text("t").insert(0, "half")?;
+                panic!("the closure panicked mid-batch")
+            })
+        }));
+        assert!(outcome.is_err(), "the panic must propagate");
+        assert_eq!(
+            doc.with_read(|d| Ok(d.get_pending_txn_len())).unwrap(),
+            0,
+            "the panicking batch dropped its write guard with ops still pending"
+        );
+    }
+
+    /// Two savers of the same snapshot must not destroy each other's temp.
+    ///
+    /// `LoroDocumentStore::save_all` runs under a read lock, so an ingest
+    /// write-back and a user write can be replacing the same path at once. A
+    /// shared temp name makes the second `rename` find no source and fail
+    /// `ENOENT`, which surfaces as a failed block operation.
+    ///
+    /// The interleaving is a real race, so the assertion is over a population
+    /// of rounds rather than one.
+    #[test]
+    fn concurrent_snapshot_saves_do_not_steal_each_others_temp() {
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = Arc::new(dir.path().join("global.loro"));
+        let doc = Arc::new(LoroDocument::new("concurrent-save".to_string()).unwrap());
+        doc.insert_text("t", 0, "some bytes worth snapshotting")
+            .unwrap();
+
+        let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let rounds = 300;
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let (doc, path, errors) = (doc.clone(), path.clone(), errors.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..rounds {
+                        if let Err(e) = doc.save_to_file(&path) {
+                            errors.lock().unwrap().push(e.to_string());
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        let errors = errors.lock().unwrap();
+        assert!(
+            errors.is_empty(),
+            "{} of {} concurrent snapshot saves failed, first: {}",
+            errors.len(),
+            rounds * 2,
+            errors.first().unwrap()
+        );
+    }
 
     #[test]
     fn test_create_loro_document() -> Result<()> {

@@ -343,6 +343,15 @@ const EDIT_REFUSED_READ_ONLY_FORMAT: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const LOCAL_EDIT_NOT_APPLIED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Your edit was not saved",
+    icons::BLOCKED,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const WRITEBACK_DEGRADED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Edits are not reaching disk",
@@ -478,6 +487,7 @@ impl ConditionKind {
             Self::VaultFileEmptied => VAULT_FILE_EMPTIED,
             Self::SharedSubtreeNotMaterialized { .. } => SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::EditRefusedReadOnlyFormat { .. } => EDIT_REFUSED_READ_ONLY_FORMAT,
+            Self::LocalEditNotApplied { .. } => LOCAL_EDIT_NOT_APPLIED,
             Self::WritebackDegraded(_) => WRITEBACK_DEGRADED,
             Self::IntegrationConnectFailed { .. } => INTEGRATION_CONNECT_FAILED,
             Self::IntegrationNeedsAuth { .. } => INTEGRATION_NEEDS_AUTH,
