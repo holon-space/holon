@@ -4767,6 +4767,9 @@
                 "name": "hand_authored_regressions.rs"
               },
               {
+                "name": "latency_scale_gate.rs"
+              },
+              {
                 "name": "latency_slo_gate.rs"
               },
               {
