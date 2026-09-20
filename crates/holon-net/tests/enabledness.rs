@@ -293,6 +293,38 @@ fn a_hop_binds_one_token_for_all_its_arcs() {
     assert_eq!(sole_offer(&net, &joined), Offer::Enabled);
 }
 
+/// The relation screen must cover a group's own arcs, not only its hop
+/// endpoints. A refinement on a place the marking does not hold is
+/// undecidable; answering it from an absent cell would refuse confidently on
+/// a relation this marking never saw.
+#[test]
+fn a_group_arc_outside_the_subject_relation_is_undecidable() {
+    let mut foreign = refined("hosted_kind", "program");
+    foreign.place = ArcPlace::new("capability", "hosted_kind");
+    let group = CorrelatedGroup {
+        binding: BindingVar::new("hop0"),
+        correlation: Correlation {
+            hops: vec![Hop::sibling()],
+            exclude_subject: true,
+        },
+        arcs: vec![foreign],
+    };
+    let mut t = transition("move_block", vec![arc("id", Flow::Read)]);
+    t.modes[0].hops.push(group);
+    let net = net_of(vec![t]);
+
+    let siblings = Rows::empty()
+        .with_cell("block:subject", "block.parent_id", "block:home")
+        .with_cell("block:subject", "block.id", "block:subject")
+        .with_cell("block:other", "block.parent_id", "block:home")
+        .with_cell("block:other", "block.id", "block:other");
+    let offer = sole_offer(&net, &siblings);
+    assert!(
+        matches!(&offer, Offer::Unknown { why } if why.contains("capability.hosted_kind")),
+        "a group arc on another relation must not be decided from this marking: {offer:?}"
+    );
+}
+
 /// A sibling hop over two blocks whose parent cell is EXPLICITLY null.
 ///
 /// `holon_pattern`'s in-memory and SQL legs both answer that an absent parent

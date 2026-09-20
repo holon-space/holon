@@ -235,6 +235,14 @@ fn group_verdict(
             }
         }
     }
+    for arc in &group.arcs {
+        if &arc.place.relation != subject_relation {
+            return Verdict::CannotSay(format!(
+                "the guard on `{}` leaves a marking scoped to one `{subject_relation}`",
+                arc.place
+            ));
+        }
+    }
     if !marking.present(subject_relation, subject) {
         return Verdict::Refuses(format!(
             "`{subject}` does not exist, so the hop `${}` binds nothing",

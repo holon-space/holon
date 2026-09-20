@@ -30,7 +30,14 @@ pub trait Marking {
 
     /// One hop step: every entity whose `to` cell holds `value`.
     ///
-    /// The only method with a cost — measured at 1.229 ms p50 over 3255 blocks
-    /// (D150.c increment 0), about the price of a primary-key lookup.
+    /// **It MUST materialize the reached rows** (D165.a): every [`value`] the
+    /// evaluator then asks about an entity this returned has to be answerable
+    /// without a second trip to the store. The lookup already scans those
+    /// rows, so carrying their cells back costs nothing — and not carrying
+    /// them turns one hop into one read per reached entity, growing the
+    /// offer's cost with the family's width and taking it past the D152.a
+    /// rung.
+    ///
+    /// [`value`]: Marking::value
     fn matching(&self, to: &ArcPlace, value: &Value) -> Vec<EntityUri>;
 }

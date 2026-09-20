@@ -106,8 +106,15 @@ fn block_id(doc: usize, headline: usize) -> String {
     format!("eq-d{doc:04}-h{headline:03}")
 }
 
-fn wide_id(headline: usize) -> String {
-    format!("eq-wide-h{headline:03}")
+/// The p95 sibling fan-out of a real vault, which D165.a makes the GATED
+/// case. The measured distribution at this scale is min 1 / p50 2 / p95 5,
+/// so five is the width an ordinary offer actually faces.
+fn p95_fanout() -> usize {
+    env_usize("HOLON_HOP_FANOUT_P95", 5)
+}
+
+fn family_id(prefix: &str, headline: usize) -> String {
+    format!("eq-{prefix}-h{headline:03}")
 }
 
 fn synthesized_document(doc: usize, n: usize) -> String {
@@ -129,13 +136,15 @@ fn synthesized_document(doc: usize, n: usize) -> String {
 /// One parent, `n` children, all at level 1. Only the child that sorts LAST
 /// by id satisfies the timed refinement, so the evaluation walks the whole
 /// family before it can answer — the hop's worst case, not its luckiest.
-fn flat_document(n: usize) -> String {
+fn flat_document(label: &str, prefix: &str, n: usize) -> String {
     let mut out = String::with_capacity(n * 160);
-    out.push_str("#+TITLE: Enabledness Wide\n#+ID: eq-doc-wide\n");
+    out.push_str(&format!(
+        "#+TITLE: Enabledness {label}\n#+ID: eq-doc-{prefix}\n"
+    ));
     for i in 0..n {
         out.push_str(&format!(
-            "* Wide {i}\n:PROPERTIES:\n:ID: {}\n:END:\n",
-            wide_id(i)
+            "* {label} {i}\n:PROPERTIES:\n:ID: {}\n:END:\n",
+            family_id(prefix, i)
         ));
     }
     out
@@ -143,8 +152,8 @@ fn flat_document(n: usize) -> String {
 
 /// The headline text of the last flat child — the one cell in the family
 /// that the timed refinement matches.
-fn last_wide_content() -> String {
-    format!("Wide {}", fanout() - 1)
+fn last_content(label: &str, n: usize) -> String {
+    format!("{label} {}", n - 1)
 }
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
@@ -288,11 +297,11 @@ impl Marking for SqlMarking<'_> {
     }
 }
 
-/// `sibling(block.task_state == "DONE")` — the containment shape, compiled
+/// `sibling(block.content == <last child>)` — the containment shape, compiled
 /// the way production would compile it. One column on one sibling, which is
 /// the cheapest refinement the language has: anything richer would measure
 /// the refinement rather than the hop.
-fn sibling_hop_net() -> CompiledNet {
+fn sibling_hop_net(match_content: String) -> CompiledNet {
     let guard = Guard {
         subject: Subject::Block,
         body: Pattern::Sibling(Box::new(Pattern::Field {
@@ -301,7 +310,7 @@ fn sibling_hop_net() -> CompiledNet {
                 name: "content".to_string(),
             },
             op: CmpOp::Eq,
-            rhs: Operand::Lit(Value::String(last_wide_content())),
+            rhs: Operand::Lit(Value::String(match_content)),
         })),
     };
     let classified =
@@ -386,8 +395,14 @@ fn one_hop_cost_in_the_production_composition() {
                 synthesized_document(doc, h),
             );
         }
-        builder =
-            builder.with_org_file("Enabledness/Wide.org".to_string(), flat_document(fanout()));
+        builder = builder.with_org_file(
+            "Enabledness/Wide.org".to_string(),
+            flat_document("Wide", "wide", fanout()),
+        );
+        builder = builder.with_org_file(
+            "Enabledness/Narrow.org".to_string(),
+            flat_document("Narrow", "narrow", p95_fanout()),
+        );
 
         let t_boot = Instant::now();
         let world = builder.build(rt.clone()).await.expect("boot the vault");
@@ -436,18 +451,12 @@ fn one_hop_cost_in_the_production_composition() {
 
         let engine = world.engine();
         let relation = ArcRelation::block();
-        // A child of the widest family: the hop's worst ordinary case.
-        let subject_raw = wide_id(fanout() / 2);
-        // ALLOW(entity_uri_from_raw): a test-authored bare org id; `block_raw`
-        // stores the schemed form.
-        let subject = EntityUri::from_raw(&subject_raw);
 
         let production = engine.derived_net().expect("derive the net");
         eprintln!(
             "[hop-cost] catalog: {} transitions",
             production.transitions.len()
         );
-        let hop_net = sibling_hop_net();
 
         let mut derive = Vec::with_capacity(n);
         for _ in 0..n {
@@ -459,55 +468,145 @@ fn one_hop_cost_in_the_production_composition() {
 
         // Blocking SQL from inside the sync `Marking` methods; the runtime is
         // multi-threaded, so the worker hands its other tasks off first.
-        let (p50_prod, p50_prefetch, p50_per_entity) = tokio::task::block_in_place(|| {
+        let (p50_prod, narrow, wide) = tokio::task::block_in_place(|| {
             let handle = tokio::runtime::Handle::current();
 
-            let prod_marking = SqlMarking::new(handle.clone(), &world, subject.clone(), true);
+            // ALLOW(entity_uri_from_raw): test-authored bare org ids;
+            // `block_raw` stores the schemed form.
+            let any_subject = EntityUri::from_raw(&family_id("wide", fanout() / 2));
+            let prod_marking = SqlMarking::new(handle.clone(), &world, any_subject.clone(), true);
             let p50_prod = report(
                 "evaluate(), production net",
-                time_evaluate(n, &production, &prod_marking, &relation, &subject),
+                time_evaluate(n, &production, &prod_marking, &relation, &any_subject),
             );
 
-            let prefetch = SqlMarking::new(handle.clone(), &world, subject.clone(), true);
-            let p50_prefetch = report(
-                "evaluate() + hop, prefetch",
-                time_evaluate(n, &hop_net, &prefetch, &relation, &subject),
+            let narrow = time_family(
+                &handle,
+                &world,
+                &relation,
+                n,
+                "Narrow",
+                "narrow",
+                p95_fanout(),
             );
-            assert_hop_was_real(&prefetch, &hop_net, &relation, &subject);
-
-            let per_entity = SqlMarking::new(handle, &world, subject.clone(), false);
-            let p50_per_entity = report(
-                "evaluate() + hop, per-entity",
-                time_evaluate(n, &hop_net, &per_entity, &relation, &subject),
-            );
-            assert_hop_was_real(&per_entity, &hop_net, &relation, &subject);
-
-            (p50_prod, p50_prefetch, p50_per_entity)
+            let wide = time_family(&handle, &world, &relation, n, "Wide", "wide", fanout());
+            (p50_prod, narrow, wide)
         });
 
         eprintln!(
-            "[hop-cost] SUM OF p50 STEPS, no hop           = {:.3} ms",
+            "[hop-cost] SUM OF p50 STEPS, no hop                  = {:.3} ms",
             p50_derive + p50_prod
         );
+        let gated = p50_derive + narrow.prefetch;
         eprintln!(
-            "[hop-cost] SUM OF p50 STEPS, hop prefetch     = {:.3} ms   (D152.a rung: 5 ms)",
-            p50_derive + p50_prefetch
+            "[hop-cost] SUM p50, p95 fan-out ({:>2}), prefetch      = {gated:.3} ms   \
+             (D165.a GATE: {D165A_GATE_MS} ms)",
+            p95_fanout()
         );
         eprintln!(
-            "[hop-cost] SUM OF p50 STEPS, hop per-entity   = {:.3} ms   (D152.a rung: 5 ms)",
-            p50_derive + p50_per_entity
+            "[hop-cost] SUM p50, p95 fan-out ({:>2}), per-entity    = {:.3} ms",
+            p95_fanout(),
+            p50_derive + narrow.per_entity
+        );
+        eprintln!(
+            "[hop-cost] SUM p50, wide fan-out ({:>2}), prefetch     = {:.3} ms   \
+             (D165.a: printed + ratcheted)",
+            fanout(),
+            p50_derive + wide.prefetch
+        );
+        eprintln!(
+            "[hop-cost] SUM p50, wide fan-out ({:>2}), per-entity   = {:.3} ms",
+            fanout(),
+            p50_derive + wide.per_entity
+        );
+
+        // D165.a: the p95 fan-out case is the RUNG, and it is gated. The wide
+        // case is printed and ratcheted by the report, not asserted — the
+        // harness header records the 4.7x run-to-run spread that makes a wall
+        // clock a poor assertion, and five siblings leaves enough headroom to
+        // survive it while fifty does not.
+        assert!(
+            gated <= D165A_GATE_MS,
+            "the p95 fan-out case must fit the D152.a rung with a conforming (prefetching) \
+             marking: {gated:.3} ms > {D165A_GATE_MS} ms"
         );
     });
 }
 
+/// The D152.a rung, as D165.a scopes it: the p95 fan-out case is gated, the
+/// wide case is printed.
+const D165A_GATE_MS: f64 = 5.0;
+
+/// One family's two figures.
+struct FamilyCost {
+    prefetch: f64,
+    per_entity: f64,
+}
+
+/// Time both markings against one family, with the conformance check after
+/// each. Returns the two p50s.
+fn time_family(
+    handle: &tokio::runtime::Handle,
+    world: &TestEnvironment,
+    relation: &ArcRelation,
+    n: usize,
+    label: &str,
+    prefix: &str,
+    width: usize,
+) -> FamilyCost {
+    // ALLOW(entity_uri_from_raw): a test-authored bare org id; `block_raw`
+    // stores the schemed form.
+    let subject = EntityUri::from_raw(&family_id(prefix, width / 2));
+    let net = sibling_hop_net(last_content(label, width));
+
+    let prefetch_marking = SqlMarking::new(handle.clone(), world, subject.clone(), true);
+    let prefetch = report(
+        &format!("evaluate() + hop, {label} ({width}), prefetch"),
+        time_evaluate(n, &net, &prefetch_marking, relation, &subject),
+    );
+    let prefetch_reads = assert_hop_was_real(&prefetch_marking, &net, relation, &subject, width);
+
+    let per_entity_marking = SqlMarking::new(handle.clone(), world, subject.clone(), false);
+    let per_entity = report(
+        &format!("evaluate() + hop, {label} ({width}), per-entity"),
+        time_evaluate(n, &net, &per_entity_marking, relation, &subject),
+    );
+    let per_entity_reads =
+        assert_hop_was_real(&per_entity_marking, &net, relation, &subject, width);
+
+    // D165.a's contract, checked mechanically: a conforming `matching()`
+    // materializes the reached rows, so ONE hop costs exactly two statements
+    // whatever the family's width. The non-conforming marking is detected by
+    // the same counter, and the gap is what the contract buys.
+    assert_eq!(
+        prefetch_reads, 2,
+        "a conforming marking answers one hop in two statements ({label}, width {width})"
+    );
+    assert_eq!(
+        per_entity_reads,
+        width + 1,
+        "the violating marking must be detected by its read count ({label}, width {width})"
+    );
+    eprintln!(
+        "[hop-cost] D165.a conformance, {label} ({width}): prefetch {prefetch_reads} \
+         statement(s) vs per-entity {per_entity_reads}"
+    );
+
+    FamilyCost {
+        prefetch,
+        per_entity,
+    }
+}
+
 /// The figures above are worth nothing unless the timed evaluation hopped.
-/// Re-runs the same evaluation once, with the traffic counters read after it.
+/// Re-runs the same evaluation once and returns the statements it issued.
 fn assert_hop_was_real(
     marking: &SqlMarking<'_>,
     net: &CompiledNet,
     relation: &ArcRelation,
     subject: &EntityUri,
-) {
+    width: usize,
+) -> usize {
     marking.reset();
     let offers = evaluate(net, marking, relation, subject);
     let traffic = marking.traffic.borrow();
@@ -526,7 +625,7 @@ fn assert_hop_was_real(
     // above is of less work than a sibling predicate can cost.
     assert_eq!(
         traffic.refinement_reads_off_subject,
-        fanout() - 1,
+        width - 1,
         "the refinement must have been tested against every reached sibling: {traffic:?}"
     );
     assert_eq!(
@@ -537,8 +636,8 @@ fn assert_hop_was_real(
     assert_eq!(
         offers[0].offer,
         Offer::Enabled,
-        "the widest family's last child is DONE, so the hop must find it; the rows it saw were \
-         {:?}",
+        "the family's last child carries the matched content, so the hop must find it; the rows \
+         it saw were {:?}",
         marking
             .rows
             .borrow()
@@ -546,4 +645,5 @@ fn assert_hop_was_real(
             .filter_map(|r| r.get("content").cloned())
             .collect::<Vec<_>>()
     );
+    traffic.queries
 }

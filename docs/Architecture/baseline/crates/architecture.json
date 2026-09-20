@@ -4770,6 +4770,9 @@
                 "name": "bisection_pbt.rs"
               },
               {
+                "name": "capability_hop_cost.rs"
+              },
+              {
                 "name": "catalog_analyzability_census.rs"
               },
               {
@@ -4828,6 +4831,9 @@
               },
               {
                 "name": "single_large_document_scale.rs"
+              },
+              {
+                "name": "single_read_attribution.rs"
               },
               {
                 "name": "stale_rewrite_sibling_order.rs"
