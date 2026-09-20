@@ -8,6 +8,11 @@ holon_macros::widget_builder! {
             .or(ba.args.get_template("item"));
         match shared_live_query_build(&ba, __item_template) {
             Ok(result) => {
+                // Every `RenderExpr` has a JSON form: its maps are keyed by
+                // String, and `dynamic_to_value` refuses the one scalar that
+                // has none (a non-finite float).
+                let __render_expr_json = serde_json::to_string(&result.render_expr)
+                    .expect("a RenderExpr always serialises");
                 let mut __props = std::collections::HashMap::new();
                 // The spec decides which props the node carries, so the
                 // platform layer reads one arm or the other and never has to
@@ -32,8 +37,7 @@ holon_macros::widget_builder! {
                 if let Some(ref ctx_id) = result.query_context_id {
                     __props.insert("query_context_id".to_string(), Value::String(ctx_id.clone()));
                 }
-                __props.insert("render_expr".to_string(),
-                    Value::String(serde_json::to_string(&result.render_expr).unwrap_or_default()));
+                __props.insert("render_expr".to_string(), Value::String(__render_expr_json));
                 ViewModel {
                     slot: Some(crate::reactive_view_model::ReactiveSlot::new(result.content)),
                     ..ViewModel::from_widget("live_query", __props)

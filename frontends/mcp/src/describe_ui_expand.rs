@@ -374,3 +374,79 @@ mod context_id_tests {
         assert!(err.to_string().contains("my task"), "{err}");
     }
 }
+
+/// The expansion path as a production consumer reaches it: a `live_query`
+/// interpreted from render-DSL source and snapshotted, never a hand-built
+/// [`ViewKind::LiveQuery`].
+#[cfg(test)]
+mod interpreted_node_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use super::DeferredPolicy;
+    use super::EngineResolver;
+    use super::resolve_deferred;
+
+    const FIXTURE_SQL: &str = "SELECT provider_name FROM integration_state WHERE enabled = 1 \
+                               ORDER BY provider_name ASC";
+
+    async fn seed_providers(engine: &holon::api::BackendEngine) {
+        for (provider, status) in [("todoist", "Connected"), ("claude-history", "Pending")] {
+            engine
+                .db_handle()
+                .execute_values(
+                    &format!(
+                        "INSERT INTO integration_state \
+                         (id, provider_name, enabled, status, config_status, configurable, \
+                         configure_progress, updated_at) \
+                         VALUES ('integration:{provider}', '{provider}', 1, '{status}', \
+                         'unconfigured', 0, '', '2026-09-20 00:00:00')"
+                    ),
+                    vec![],
+                )
+                .await
+                .expect("insert integration_state fixture row");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_interpreted_live_query_expands_to_its_real_rows() {
+        let engine = crate::tools::engine_harness::fresh_engine().await;
+        seed_providers(&engine).await;
+
+        let control = engine
+            .db_handle()
+            .query(FIXTURE_SQL, HashMap::new())
+            .await
+            .expect("control query");
+        assert_eq!(
+            control.len(),
+            2,
+            "fixture must supply 2 rows before the render is judged; got {control:?}"
+        );
+
+        holon_frontend::shadow_builders::register_render_dsl_widget_names();
+        let src = format!(
+            "live_query(#{{sql: \"{FIXTURE_SQL}\", item_template: \
+             list(#{{item_template: text(col(\"provider_name\"))}})}})"
+        );
+        let expr = holon_api::render_dsl::parse_render_dsl(&src).expect("live_query source parses");
+
+        let services: Arc<dyn holon_frontend::reactive::BuilderServices> =
+            Arc::new(holon_app::HeadlessBuilderServices::new(engine));
+        let mut vm = services
+            .interpret(&expr, &holon_frontend::RenderContext::default())
+            .snapshot();
+
+        let resolver = EngineResolver {
+            services: services.clone(),
+        };
+        resolve_deferred(&mut vm, DeferredPolicy::Expand(&resolver)).await;
+
+        let rendered = vm.pretty_print(0);
+        assert!(
+            rendered.contains("todoist") && rendered.contains("claude-history"),
+            "an interpreted live_query must expand to both seeded providers; got:\n{rendered}"
+        );
+    }
+}

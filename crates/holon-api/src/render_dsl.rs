@@ -606,7 +606,7 @@ pub fn dynamic_to_render_expr(d: &Dynamic) -> Result<RenderExpr> {
     } else {
         // Primitive → Literal
         Ok(RenderExpr::Literal {
-            value: dynamic_to_value(d),
+            value: dynamic_to_value(d)?,
         })
     }
 }
@@ -646,19 +646,30 @@ fn map_to_function_call(map: &RhaiMap) -> Result<RenderExpr> {
     Ok(RenderExpr::FunctionCall { name, args })
 }
 
-fn dynamic_to_value(d: &Dynamic) -> Value {
+fn dynamic_to_value(d: &Dynamic) -> Result<Value> {
     if d.is_int() {
-        Value::Integer(d.as_int().unwrap())
+        Ok(Value::Integer(d.as_int().unwrap()))
     } else if d.is_float() {
-        Value::Float(d.as_float().unwrap())
+        let float = d.as_float().unwrap();
+        // A render expression is stored and shipped as JSON, which has no
+        // infinity or NaN: `serde_json` writes `null` for them and reports
+        // success, so the expression a consumer reads back is not the one
+        // written here.
+        if !float.is_finite() {
+            anyhow::bail!(
+                "render literal {float} is not a finite number, so it cannot survive the JSON \
+                 form a render expression is stored in"
+            );
+        }
+        Ok(Value::Float(float))
     } else if d.is_bool() {
-        Value::Boolean(d.as_bool().unwrap())
+        Ok(Value::Boolean(d.as_bool().unwrap()))
     } else if d.is_string() {
-        Value::String(d.clone().into_string().unwrap())
+        Ok(Value::String(d.clone().into_string().unwrap()))
     } else if d.is_unit() {
-        Value::Null
+        Ok(Value::Null)
     } else {
-        Value::String(format!("{d:?}"))
+        Ok(Value::String(format!("{d:?}")))
     }
 }
 
@@ -682,6 +693,22 @@ mod tests {
             "chain_ops",
         ]);
         parse_render_dsl(source)
+    }
+
+    /// A non-finite literal has no JSON form — `serde_json` writes it as
+    /// `null` and reports success, so a node prop would carry a different
+    /// expression than the author wrote.
+    #[test]
+    fn a_non_finite_float_literal_is_refused() {
+        for source in ["text(1e400)", "text(-1e400)", "text(1e309 * 1.0)"] {
+            let err = parse(source)
+                .map(|expr| format!("{expr:?}"))
+                .expect_err(&format!("{source} must not parse into a render expression"));
+            assert!(
+                format!("{err:#}").contains("finite"),
+                "{source}: the refusal must name the problem; got {err:#}"
+            );
+        }
     }
 
     #[test]

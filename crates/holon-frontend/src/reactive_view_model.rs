@@ -1129,6 +1129,21 @@ impl ReactiveViewModel {
             .map(|s| s.to_string())
     }
 
+    /// Names a `live_query` node in an error a user reads: the block it runs
+    /// in, else what it reads from.
+    fn live_query_identity(&self) -> String {
+        if let Some(id) = self.prop_str("query_context_id") {
+            return format!("in block {id}");
+        }
+        if let Some(query) = self.prop_str("query") {
+            return format!("over query {query:?}");
+        }
+        match self.prop_str("source") {
+            Some(source) => format!("over source {source:?}"),
+            None => "with no context, query or source".to_string(),
+        }
+    }
+
     /// Get a bool property.
     pub fn prop_bool(&self, key: &str) -> Option<bool> {
         self.props.lock_ref().get(key).and_then(|v| v.as_bool())
@@ -1213,6 +1228,10 @@ impl ReactiveViewModel {
         }
     }
 
+    /// A prop this rejects is a node whose producer skipped a typed
+    /// boundary. The snapshot feeds every frontend, so such a node becomes
+    /// [`ViewKind::Error`] here: one blank node, not an unwind that blanks
+    /// all of them.
     fn to_view_kind(
         &self,
         expr: &RenderExpr,
@@ -1540,10 +1559,6 @@ impl ReactiveViewModel {
             // Block boundary — deferred to slot
             "live_block" => {
                 let block_id_str = self.prop_str("block_id").unwrap_or_default();
-                // `ViewModel::live_block` takes a typed `EntityUri` and is the
-                // prop's only producer, so this arm is unreachable by
-                // construction — but the snapshot feeds every frontend, and a
-                // panic here blanks all of them rather than one node.
                 let Some(block_id) = holon_api::row_id_of_str(&block_id_str).entity() else {
                     return ViewKind::Error {
                         message: format!("live_block: block_id {block_id_str:?} names no entity"),
@@ -1562,21 +1577,43 @@ impl ReactiveViewModel {
                     },
                 }
             }
-            "live_query" => ViewKind::LiveQuery {
-                content: Box::new(
-                    self.slot
-                        .as_ref()
-                        .map(|s| match resolve_block {
-                            Some(rb) => s.snapshot_resolved(rb),
-                            None => s.snapshot(),
-                        })
-                        .unwrap_or_default(),
-                ),
-                query: self.prop_str("query"),
-                query_lang: self.prop_str("query_lang"),
-                query_context_id: self.prop_str("query_context_id"),
-                render_expr: None, // TODO: store in props as serialized
-            },
+            "live_query" => {
+                // The template every `live_query` builder writes: without it
+                // no consumer can resolve the node's rows, so its absence is
+                // as much a broken node as an unreadable one.
+                let render_expr = match self.prop_str("render_expr") {
+                    None => Err(format!(
+                        "live_query {}: no readable render_expr prop, so its rows cannot be \
+                         resolved",
+                        self.live_query_identity()
+                    )),
+                    Some(json) => serde_json::from_str::<RenderExpr>(&json).map_err(|e| {
+                        format!(
+                            "live_query {}: render_expr prop {json:?} is no render expression \
+                             ({e})",
+                            self.live_query_identity()
+                        )
+                    }),
+                };
+                match render_expr {
+                    Err(message) => ViewKind::Error { message },
+                    Ok(render_expr) => ViewKind::LiveQuery {
+                        content: Box::new(
+                            self.slot
+                                .as_ref()
+                                .map(|s| match resolve_block {
+                                    Some(rb) => s.snapshot_resolved(rb),
+                                    None => s.snapshot(),
+                                })
+                                .unwrap_or_default(),
+                        ),
+                        query: self.prop_str("query"),
+                        query_lang: self.prop_str("query_lang"),
+                        query_context_id: self.prop_str("query_context_id"),
+                        render_expr: Some(render_expr),
+                    },
+                }
+            }
             "render_entity" => ViewKind::RenderBlock {
                 content: Box::new(
                     self.slot
@@ -2667,6 +2704,33 @@ mod tests {
                 "the error must name the block_id, got {message:?}"
             ),
             other => panic!("expected an error node, got {other:?}"),
+        }
+    }
+
+    /// The `live_query` builder always writes the template into the props, so
+    /// a node without a readable one came from somewhere that skipped it — and
+    /// the silently-absent template is the defect this arm exists to refuse
+    /// (`2026-09-20-snapshot-conversion-drops-live-query-render-expr`).
+    #[test]
+    fn a_live_query_snapshot_without_a_readable_render_expr_is_an_error_node() {
+        for missing in [None, Some(Value::Integer(5))] {
+            let mut props: HashMap<String, Value> = HashMap::new();
+            props.insert(
+                "query_context_id".to_string(),
+                Value::String("block:42".to_string()),
+            );
+            if let Some(value) = missing.clone() {
+                props.insert("render_expr".to_string(), value);
+            }
+            let node = ReactiveViewModel::from_widget("live_query", props);
+
+            match node.snapshot().kind {
+                ViewKind::Error { message } => assert!(
+                    message.contains("render_expr") && message.contains("block:42"),
+                    "the error must name the prop and the node, got {message:?}"
+                ),
+                other => panic!("{missing:?}: expected an error node, got {other:?}"),
+            }
         }
     }
 }
