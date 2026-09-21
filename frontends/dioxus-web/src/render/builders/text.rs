@@ -9,26 +9,43 @@ use super::prelude::*;
 /// The tradeoff: a `text()` that explicitly asks for 14 is indistinguishable
 /// from one that asked for nothing, and defers to the stylesheet.
 ///
-/// The `style` keyword and the `empty` placeholder are NOT on the snapshot:
-/// the shadow builder carries them as props and GPUI resolves them at paint
-/// time, but `ViewKind::Text` has no field for either, so `#{style: "h1"}`
-/// and `#{empty: "(untitled)"}` cannot reach this frontend at all. Giving
-/// them a home needs a snapshot-shape change, which is an open decision.
+/// `text_style` is the semantic type-scale keyword (`#{style: "h1"}`),
+/// carried unresolved on the snapshot and resolved here through
+/// `render_eval::text_style_treatment` — the one resolver every frontend
+/// calls, so size and weight cannot drift apart per platform. A title
+/// therefore paints as a title wherever the `page_title` role puts it, not
+/// only where `index.html`'s positional document-title rule reaches, and an
+/// h1's inline `font-size` deliberately outranks that rule (same 28px scale;
+/// the rule's line-height, colour and letter-spacing still apply, and it
+/// keeps titling the first-child spans the role did NOT style).
+///
+/// The `empty` placeholder is still NOT on the snapshot — the shadow builder
+/// carries it as a prop and only GPUI resolves it — so `#{empty:
+/// "(untitled)"}` cannot reach this frontend.
 pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     let ViewKind::Text {
         content,
         bold,
         size,
         color,
+        style: text_style,
     } = &node.kind
     else {
         return rsx! {};
     };
+    let treatment = text_style
+        .as_deref()
+        .and_then(holon_api::render_eval::text_style_treatment);
+    let bold = *bold || treatment.is_some_and(|t| t.bold);
     let mut style = String::new();
-    if *size != holon_frontend::view_model::default_text_size() {
-        style.push_str(&format!("font-size: {size}px;"));
+    match treatment {
+        Some(t) => style.push_str(&format!("font-size: {}px;", t.size)),
+        None if *size != holon_frontend::view_model::default_text_size() => {
+            style.push_str(&format!("font-size: {size}px;"));
+        }
+        None => {}
     }
-    if *bold {
+    if bold {
         style.push_str("font-weight: bold;");
     }
     if let Some(c) = color {

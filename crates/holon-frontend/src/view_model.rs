@@ -187,6 +187,14 @@ pub enum ViewKind {
         size: f32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         color: Option<String>,
+        /// The semantic type-scale keyword (`#{style: "h1"}`), carried
+        /// UNRESOLVED: `size` still holds the builder default, and each
+        /// platform resolves the keyword through
+        /// `holon_api::render_eval::text_style_treatment` at render time. A
+        /// consumer that wants to know "is this a title" reads this, not the
+        /// pixel size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<String>,
     },
     Badge {
         label: String,
@@ -1117,6 +1125,7 @@ impl ViewModel {
                 bold: false,
                 size: default_text_size(),
                 color: None,
+                style: None,
             },
             LeafWidget::Badge => ViewKind::Badge {
                 label: value.to_display_string(),
@@ -1146,6 +1155,7 @@ impl ViewModel {
                     bold: false,
                     size: default_text_size(),
                     color: None,
+                    style: None,
                 }
             }
         };

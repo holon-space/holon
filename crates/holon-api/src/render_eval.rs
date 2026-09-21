@@ -178,6 +178,27 @@ pub fn text_style_font_size(style: &str) -> Option<f32> {
     }
 }
 
+/// Everything a `style` keyword does to a `text()` render: the type scale and
+/// the weight.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextStyleTreatment {
+    pub size: f32,
+    pub bold: bool,
+}
+
+/// Resolve a semantic text `style` keyword into its full treatment.
+///
+/// Every frontend calls THIS, not `text_style_font_size`, so size and weight
+/// cannot drift apart per platform: a keyword the scale does not know yields
+/// `None` and changes nothing at all, rather than one frontend bolding an
+/// unrecognized `h7` that another leaves at body weight.
+pub fn text_style_treatment(style: &str) -> Option<TextStyleTreatment> {
+    Some(TextStyleTreatment {
+        size: text_style_font_size(style)?,
+        bold: style.starts_with('h'),
+    })
+}
+
 /// Resolve what a `text(..)` widget shows: the real `content`, or a disclosed
 /// placeholder when `content` is empty. `empty_placeholder` is the `#{empty:
 /// ..}` named arg (`text(col("content"), #{empty: "(untitled)"})`). Returns the
@@ -1770,6 +1791,22 @@ mod mutation_gap_tests {
         // resolving to body size — the exact swallow that hid the title bug.
         assert_eq!(text_style_font_size("h7"), None);
         assert_eq!(text_style_font_size(""), None);
+    }
+
+    #[test]
+    fn text_style_treatment_bolds_only_recognized_headings() {
+        // A heading carries both halves of the treatment.
+        let h1 = text_style_treatment("h1").expect("h1 is a known style");
+        assert_eq!(h1.size, text_style_font_size("h1").unwrap());
+        assert!(h1.bold, "a heading is bold");
+        // `body` is in the scale but is not a heading.
+        assert!(!text_style_treatment("body").expect("body is known").bold);
+        // An unrecognized keyword yields NO treatment — not a bold body-size
+        // one. `h7` looks like a heading and is not in the scale; resolving
+        // size and weight separately let one frontend bold it while another
+        // did not.
+        assert_eq!(text_style_treatment("h7"), None);
+        assert_eq!(text_style_treatment(""), None);
     }
 
     #[test]

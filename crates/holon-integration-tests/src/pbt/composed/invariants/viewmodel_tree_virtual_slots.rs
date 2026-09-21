@@ -1,6 +1,6 @@
 //! `inv-viewmodel-tree-virtual-slots` — the rendered ViewModel tree's virtual
 //! creation slots are last-child, and the focused page title uses the
-//! `page_title` (bare-text) block-profile variant. `Needs SutRenderer +
+//! `page_title` (h1) block-profile variant. `Needs SutRenderer +
 //! RefBlockTree`: the renderer supplies the widget tree; `RefBlockTree`
 //! supplies the `Main`-region focus roots. Selected by any slice with a
 //! renderer — the frontend slice's real headless `ReactiveEngine`.

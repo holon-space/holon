@@ -143,7 +143,7 @@ impl<R: RefLifecycle + RefBlockTree + RefNavHistoryMut + RefGlobalFocus> Transit
             // PAGES only, for now. A jump to a CONTENT hit is a real
             // production gesture, but it reds `inv-viewmodel-tree-virtual-slots`:
             // a non-page focus root still renders somewhere as a `tree_item`
-            // carrying a state_toggle, which that oracle reads as the
+            // carrying a `rendered_text`, which that oracle reads as the
             // wrong-variant dogfood regression. Whether the oracle or the
             // content-hit render is wrong is not this transition's question.
             check(state.is_page_block(&self.hit), Reason::FocusedNotText),

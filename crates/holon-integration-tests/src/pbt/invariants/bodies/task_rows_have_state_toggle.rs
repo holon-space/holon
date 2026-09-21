@@ -20,14 +20,16 @@
 //! Exemptions — rows that legitimately render as a title/header without a
 //! toggle, each derived ref-side so the check cannot be fooled by the very
 //! `role: "page_title"` misfire it guards against:
-//! - focus roots of Main and Sidebar (the zoomed-into block and pinned sidebar
-//!   heads render as page-title headers by design),
 //! - `Page` blocks (embedded-page headers render title-only),
 //! - layout blocks (scaffolding never renders as a task row).
+//!
+//! Focus roots are NOT exempt. They were, on the reasoning that a zoomed-into
+//! block and a pinned head "render as page-title headers by design" — but a
+//! header is a presentation and a task state is data, and the title role now
+//! carries the toggle when the block has one (`block_profile.yaml`
+//! `page_title_task`). A task that is a focus root must show its state like
+//! any other task row.
 
-use std::collections::BTreeSet;
-
-use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::EntityUri;
 use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefTaskState;
@@ -95,11 +97,6 @@ where
 
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
         let root = sut.widget_tree_snapshot().await;
-        let exempt: BTreeSet<EntityUri> = ref_
-            .focus_root_ids(CapRegion::Main)
-            .into_iter()
-            .chain(ref_.focus_root_ids(CapRegion::Sidebar))
-            .collect();
         let is_checked_task = |id: &str| {
             let Ok(uri) = EntityUri::parse(id) else {
                 return false;
@@ -112,10 +109,7 @@ where
             let is_task = ref_
                 .task_state_of(&uri)
                 .is_some_and(|state| !state.is_empty());
-            is_task
-                && !exempt.contains(&uri)
-                && !ref_.is_page_block(&uri)
-                && !ref_.is_layout_block(&uri)
+            is_task && !ref_.is_page_block(&uri) && !ref_.is_layout_block(&uri)
         };
         let missing = task_tree_rows_missing_state_toggle(&root, &is_checked_task);
         if missing.is_empty() {

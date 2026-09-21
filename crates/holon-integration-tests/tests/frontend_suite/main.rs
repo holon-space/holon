@@ -11,6 +11,8 @@ mod local_ui_state_precedence;
 mod navigate_back_keeps_panel_populated;
 #[cfg(feature = "pbt")]
 mod now_query_task_rows_render_structured;
+#[cfg(feature = "pbt")]
+mod page_title_survives_a_never_task_block;
 mod perspective_slot_resolution;
 mod sidebar_modifier_click_open_tab_probe;
 mod split_block_stale_display_regression;

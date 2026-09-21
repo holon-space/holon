@@ -77,8 +77,11 @@ pub(crate) fn view_model_to_snapshot(
             props.insert("field".into(), field.clone());
             props.insert("content".into(), content.clone());
         }
-        ViewKind::Text { content, .. } => {
+        ViewKind::Text { content, style, .. } => {
             props.insert("content".into(), content.clone());
+            if let Some(style) = style {
+                props.insert("style".into(), style.clone());
+            }
         }
         ViewKind::Badge { label } => {
             props.insert("label".into(), label.clone());
@@ -326,6 +329,7 @@ mod tests {
                 bold: false,
                 size: 14.0,
                 color: None,
+                style: None,
             },
             occurrence,
             ..Default::default()

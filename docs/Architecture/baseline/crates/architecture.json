@@ -4577,6 +4577,9 @@
                     "name": "now_query_task_rows_render_structured.rs"
                   },
                   {
+                    "name": "page_title_survives_a_never_task_block.rs"
+                  },
+                  {
                     "name": "perspective_slot_resolution.rs"
                   },
                   {

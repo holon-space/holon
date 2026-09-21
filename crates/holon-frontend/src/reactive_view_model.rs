@@ -1262,6 +1262,7 @@ impl ReactiveViewModel {
                 bold: self.prop_bool("bold").unwrap_or(false),
                 size: self.prop_f64("size").unwrap_or(14.0) as f32,
                 color: self.prop_str("color"),
+                style: self.prop_str("style"),
             },
             "badge" => ViewKind::Badge {
                 label: self.prop_str("label").unwrap_or_default(),

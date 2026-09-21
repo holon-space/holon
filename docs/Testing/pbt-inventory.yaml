@@ -1326,14 +1326,15 @@ components:
   requires_sut_caps:
   - SutRenderer
   slips-if-removed:
-  - the "add new block" slot renders above the page title, or the title renders as an editable state_toggle
-    row instead of an h1; both dogfood regressions ship (devlog 2026-07-05)
+  - the "add new block" slot renders above the page title, or the title renders as an ordinary editable
+    outline row instead of an h1; both dogfood regressions ship (devlog 2026-07-05)
   oracle:
   - internal-consistency — R:RefBlockTree only LOCATES the Main focus roots; nothing from ref is compared
-    as an expected value, the assertions are structural (slot order, no state_toggle in title subtree)
+    as an expected value, the assertions are structural (slot order, no editable/rendered text in the
+    title subtree)
   covers:
   - virtual-slot-misorder + page-title-wrong-variant — creation slot not last child; focused page title
-    on the default (state_toggle) variant instead of the page_title bare-text variant
+    on the default (rendered_text) or editing (editable_text) variant instead of the page_title h1 variant
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/watch_rows_match_ref.rs
   kind: invariant
   invariant_ids:
@@ -2579,6 +2580,19 @@ components:
   kind: harness
   covers:
   - forward-edge-ingest — forward-edge ingest abort regression
+- file: crates/holon-integration-tests/tests/frontend_suite/page_title_survives_a_never_task_block.rs
+  kind: harness
+  requires_sut_caps:
+  - SutFocusWrite
+  - SutNavHistoryDrive
+  - SutRenderer
+  covers:
+  - never-task-title-loses-its-h1 + never-task-title-grows-a-task-control — a block with no task_state
+    property, holding the page_title role, renders the h1 title treatment and no state_toggle
+  slips-if-removed:
+  - a title condition that reads `task_state` silently stops matching every ordinary page and head and
+    they degrade to outline rows, or the task title variant loses its has_task_state gate and every page,
+    document and query title grows a task control — with no test saying so either way
 - file: crates/holon-integration-tests/tests/fts_query_block_e2e.rs
   kind: harness
   feature_gates:

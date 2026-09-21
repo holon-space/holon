@@ -2,13 +2,14 @@
 //!
 //! @pbt oracle internal-consistency — R:RefBlockTree only LOCATES the Main
 //!   focus roots; nothing from ref is compared as an expected value, the
-//!   assertions are structural (slot order, no state_toggle in title subtree)
+//!   assertions are structural (slot order, no editable/rendered text in the
+//!   title subtree)
 //! @pbt covers virtual-slot-misorder + page-title-wrong-variant — creation
-//!   slot not last child; focused page title on the default (state_toggle)
-//!   variant instead of the page_title bare-text variant
+//!   slot not last child; focused page title on the default (rendered_text)
+//!   or editing (editable_text) variant instead of the page_title h1 variant
 //! @pbt slips-if-removed the "add new block" slot renders above the page
-//!   title, or the title renders as an editable state_toggle row instead of
-//!   an h1; both dogfood regressions ship (devlog 2026-07-05)
+//!   title, or the title renders as an ordinary editable outline row instead
+//!   of an h1; both dogfood regressions ship (devlog 2026-07-05)
 //!
 //! Locks in two GPUI render regressions the app currently exhibits — both
 //! observed during dogfood triage, see
@@ -25,16 +26,15 @@
 //! 2. **Focused page title rendered with the wrong block-profile variant.** The
 //!    focused page's title block (the `Main`-region focus root, a level-0 block
 //!    that the tree overrides to `role == "page_title"`) must render via the
-//!    `page_title` variant — a bare `text` h1 node (`text(col("content"),
-//!    #{style: "h1"})`). The GPUI app instead renders it with the `default`
-//!    variant, whose fingerprint is a `state_toggle` widget inside a row
-//!    (`column(row(… state_toggle …), drop_zone())`). The focus-root id occurs
-//!    MULTIPLE times in the snapshot (left-sidebar row, main-panel title row,
-//!    …), so we check EVERY occurrence and assert none of their subtrees
-//!    contains a `state_toggle` — stopping at the pre-order first match only
-//!    ever inspected the sidebar row and was vacuously green. Blocks are
-//!    flattened siblings in the tree collection (not nested widgets), so a
-//!    focus-root node's subtree is that block's own rendering only.
+//!    `page_title` variant — an h1 `text` node beside the block's state toggle.
+//!    The GPUI app instead renders it with the `default` variant, whose
+//!    fingerprint is `rendered_text` (or `editable_text` once the `editing`
+//!    variant takes over). The focus-root id occurs MULTIPLE times in the
+//!    snapshot (left-sidebar row, main-panel title row, …), so we check EVERY
+//!    occurrence — stopping at the pre-order first match only ever inspected
+//!    the sidebar row and was vacuously green. Blocks are flattened siblings in
+//!    the tree collection (not nested widgets), so a focus-root node's subtree
+//!    is that block's own rendering only.
 //!
 //! A tree collection with NO virtual slot is NOT a failure (the original stub
 //! treated an absent creation slot as warn-level); such a container simply has
@@ -155,10 +155,15 @@ where
         }
 
         // ── Bug 2: focused page title must use the `page_title` variant ─────
-        // The page_title variant is a bare `text` h1; the `default` variant's
-        // fingerprint is a `state_toggle`. Within one collection blocks are
+        // The page_title variant draws its content as an h1 `text`; every
+        // outline-row variant draws it as `rendered_text`, or `editable_text`
+        // once `editing` takes over. Within one collection blocks are
         // flattened siblings, so a block node's subtree is that block's own
-        // rendering — a `state_toggle` in it means the wrong variant fired.
+        // rendering — either of those kinds means the wrong variant fired.
+        // The discriminator is the TEXT widget, not the state toggle: a title
+        // backed by a task carries its toggle by design (bugfunnel
+        // 2026-08-25-flat-query-task-rows-render-as-page-title-blobs), and
+        // every variant that draws a toggle also draws one of these two.
         for focus_root in ref_.focus_root_ids(CapRegion::Main) {
             // The focus-root id occurs MULTIPLE times in the snapshot (left
             // sidebar row, main-panel title row, …). Stopping at the pre-order
@@ -167,7 +172,7 @@ where
             // rendering through — vacuity found during triage, see
             // devlog/2026-07-05. Check EVERY occurrence: per the `eq("level",0)`
             // page_title rule the focus root is a level-0 row wherever it is a
-            // tree root, and no occurrence of it may carry a state_toggle.
+            // tree root, and no occurrence of it may carry an outline-row text.
             // A snapshot with no occurrence of the id stays a non-failure
             // (same "not rendered here" gate as before).
             // A `live_block` carries the id of the block it DELEGATES to, and
@@ -179,17 +184,17 @@ where
                 .filter(|n| n.kind != "live_block")
                 .filter(|n| n.entity_id.as_deref() == Some(focus_root.as_str()))
             {
-                let toggles = block_node
+                let row_texts = block_node
                     .walk()
-                    .filter(|n| n.kind == "state_toggle")
+                    .filter(|n| n.kind == "rendered_text" || n.kind == "editable_text")
                     .count();
-                if toggles > 0 {
+                if row_texts > 0 {
                     let kinds: Vec<&str> = block_node.walk().map(|n| n.kind.as_str()).collect();
                     return InvariantResult::Fail(format!(
                         "[inv-viewmodel-tree-virtual-slots] focused page title block '{}' \
-                         rendered via the `default` variant ({toggles} state_toggle widget(s) in \
-                         occurrence kind '{}', subtree {kinds:?}) instead of the bare-`text` \
-                         `page_title` variant",
+                         rendered via an outline-row variant ({row_texts} \
+                         rendered_text/editable_text widget(s) in occurrence kind '{}', subtree \
+                         {kinds:?}) instead of the h1 `page_title` variant",
                         focus_root.as_str(),
                         block_node.kind,
                     ));

@@ -4668,9 +4668,9 @@ impl SutErrorLog for HeadlessFrontendComponent {
 // through `DriverBoundFrontendWrite` (`register_gesture_writes`); these direct
 // impls exist for the make-or-break PROBE tests (and the `assert_cap_union`
 // compile check) that exercise the component directly rather than through a
-// composed `CapMap`. Same bodies, bound to `self.driver()`. `SutMutate` is
-// intentionally NOT among them — no direct caller needs it, so `state_toggle`
-// toggling has a single path (the shim's `toggle_state_via`).
+// composed `CapMap`. Same bodies, bound to `self.driver()`, so the gesture
+// still has ONE implementation — the `*_via` body — whichever way it is
+// reached.
 #[async_trait::async_trait(?Send)]
 impl SutFocusWrite for HeadlessFrontendComponent {
     // ALLOW(unused_param): region is fixed to main by the click-driven focus path
@@ -4681,6 +4681,14 @@ impl SutFocusWrite for HeadlessFrontendComponent {
 
     async fn apply_focus_editable_text(&self, id: &EntityUri) {
         self.apply_focus_editable_text_via(self.driver().as_ref(), id)
+            .await;
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl SutMutate for HeadlessFrontendComponent {
+    async fn toggle_state(&self, block_id: &EntityUri, new_state: CycleTarget) {
+        self.toggle_state_via(self.driver().as_ref(), block_id, new_state)
             .await;
     }
 }

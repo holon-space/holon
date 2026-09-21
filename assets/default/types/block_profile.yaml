@@ -15,6 +15,17 @@ entity_name: block
 
 computed:
   is_task: 'task_state != ()'
+  # What the task-row oracles mean by "is a task": a task_state that is BOUND
+  # and non-empty. `is_task` alone is not that test — a bound empty string is
+  # `!= ()`, and a title that keyed on it would draw a toggle whose only state
+  # is the empty one.
+  #
+  # Reading this field makes `task_state` a REQUIRED column of the condition,
+  # and on a block that never carried one it is structurally unbound — which
+  # `eval_condition` treats as a silent non-match. So only the variant that
+  # NEEDS a task state may read it; a variant that must match the ordinary
+  # case must not.
+  has_task_state: 'task_state != () && task_state != ""'
   is_source: 'content_type == "source"'
   is_image: 'content_type == "image"'
   # Query/render machinery that must be hidden (spacer) rather than shown as raw
@@ -68,6 +79,27 @@ computed:
   bullet_shape: 'if collapsed != () && collapsed != 0 { "orgmode" } else { "circle" }'
 
 variants:
+  # `role: "page_title"` says "this row heads its region" — a zoomed-into
+  # block, a pinned subtree head (`index.org` right sidebar), a flat query's
+  # level-0 row. None of those stop the block being a TASK, and a title that
+  # drops the state toggle drops the affordance a pinned task is pinned for.
+  #
+  # The two title variants are ordered by RANK, not by exclusive conditions:
+  # `page_title` keeps the bare role predicate, so it matches whatever the
+  # task variant does not — including the ordinary block whose `task_state`
+  # is unbound and whose `has_task_state` therefore silently fails. Splitting
+  # them on mutually exclusive predicates instead would put `task_state` in
+  # BOTH conditions and leave a never-task title matching NEITHER.
+  #
+  # `align` stays the row default (center) with no `mt`: the outline variants
+  # nudge by `mt: 10` because `rendered_text` is multi-line and must top-align,
+  # whereas an h1 has no stable offset to nudge by — its 28px glyph sits in a
+  # 26px declared line box (`render_eval::text_style_font_size`,
+  # `builders/text.rs`), so any constant here would be guesswork.
+  - name: page_title_task
+    priority: 3
+    condition: 'role == "page_title" && has_task_state'
+    render: 'row(#{gap: 2}, state_toggle(col("task_state"), #{states: col("todo_states")}), text(col("content"), #{style: "h1"}))'
   - name: page_title
     priority: 2
     condition: 'role == "page_title"'
@@ -149,14 +181,14 @@ variants:
   # row leaves the badge nothing and the mark disappears for exactly the long
   # blocks (bugfunnel 2026-09-08-long-conflict-copy-paints-no-badge-at-all).
   #
-  # Priority 3 — above EVERY other variant, because the disclosure outranks the
+  # Priority 4 — above EVERY other variant, because the disclosure outranks the
   # presentation: a conflict copy of a rule head or of a `Page`-tagged block
   # would otherwise render as its card or its embedded page with no mark at
   # all, which is the silent merge this variant exists to prevent. A variant's
   # render expression is the whole row, so the card cannot also draw; the copy
   # reads as an ordinary row until the user resolves it.
   - name: pairing_conflict
-    priority: 3
+    priority: 4
     condition: 'is_def_var("pairing_conflict_of") && pairing_conflict_of != () && !is_focused'
     render: >-
       column(row(#{gap: 2, align: "start"}, selectable(draggable(icon(col("bullet_shape"), #{size: 12, color: "primary", mt: 12})), #{shift_action: focus_pin(#{region: "right_sidebar", block_id: col("id")})}), state_toggle(col("task_state"), #{states: col("todo_states"), mt: 10}), rendered_text(col("content"))), row(badge("kept from this device before pairing", #{block_id: col("id")})), drop_zone())

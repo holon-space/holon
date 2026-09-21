@@ -67,11 +67,13 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     // single place both the initial build and the fast-path props recompute
     // funnel through, so the size can never regress to body size on a CDC
     // recompute. The semantic style wins over the numeric `size:` default.
-    if let Some(style) = node.prop_str("style") {
-        if let Some(scale) = holon_api::render_eval::text_style_font_size(&style) {
-            size = scale;
-            bold = bold || style.starts_with('h');
-        }
+    if let Some(treatment) = node
+        .prop_str("style")
+        .as_deref()
+        .and_then(holon_api::render_eval::text_style_treatment)
+    {
+        size = treatment.size;
+        bold = bold || treatment.bold;
     }
 
     // `marks` lives on the row data, not on props — it doesn't go through the

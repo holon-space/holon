@@ -200,7 +200,13 @@
       /* ── Drop zone highlight (drag feedback) ────────────────────────── */
       [data-role="drop-zone"] { transition: background 80ms ease, height 80ms ease; }
 
-      /* ── Document title (first block of the focused reading column) ──── */
+      /* ── Document title (first block of the focused reading column) ────
+         Positional, for the first-child rows the `page_title` role did NOT
+         style: an outline row (`rendered-text` / `editor-cell`) and a
+         header span with no `#{style:}` keyword. A `text(#{style: "h1"})`
+         emits an inline font-size/weight from the shared type scale, which
+         outranks this rule — by design, since the role is the better
+         signal; the line-height, colour and tracking below still apply. */
       .holon-columns > [data-layout="flex"] > [data-block-id] > *:first-child > div:first-child {
         margin-bottom: 6px;
       }
