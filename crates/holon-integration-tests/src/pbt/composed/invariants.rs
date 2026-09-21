@@ -64,6 +64,7 @@ pub mod remote_list_mirror_matches_ref;
 pub mod reseed_leak;
 pub mod sticky_accordion_spec;
 pub mod typed_matview_matches_ref;
+pub mod view_model_matches_store;
 pub mod wheel_occlusion_routing;
 pub mod wheel_two_mode_motion_law;
 // `navigation_focus` is now auto-derived by `capability_pair! { pub trait Focus

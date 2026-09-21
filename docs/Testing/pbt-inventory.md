@@ -35,9 +35,10 @@ Source: `docs/Testing/pbt-inventory.yaml`; regenerate with `python3 scripts/pbt_
 | inv-source-language-iff-source | internal-consistency — source_language present iff content_type is Source, over the SUT write-side snapshot (no ref) | — | SutBackend | — | source-lang-projection — a Source row that lost its language or a Text/Image row that grew one |
 | inv-sql-budget | budget — per-transition SQL read/write/DDL + wall + RSS counts vs an expected budget (canonical id home; body dispatched via composed::span_metrics::InvComposedBudget) | — | — | otel-testing | perf-regression — a transition issuing N+1 / over-budget SQL or blowing the wall / memory ceiling |
 | inv-task-state-storage-coherence | correspondence — each block's task_state in BOTH SUT stores (SQL `block_raw.properties` and the Loro tag projection) is compared to the REFERENCE (`RefTaskState::task_state_of`). Store-to-store coherence falls out: if both equal the ref, they equal each other. Re-anchored from the former SUT↔SUT comparison (F4) so a shared enrichment/CDC bug writing the same wrong value to BOTH stores can no longer stay green. | RefTaskState | SutLoroTaskState SutSqlProjection | — | loro-sql-desync — either store disagrees with the ref (and so, transitively, with the other) on presence or value of task_state |
-| inv-undo-redo-reference-heal | roundtrip — on a COMPLETED undo→redo round trip (redo-gated burned-id set non-empty), no base-table reference site may still name the burned id. Reference-prediction-free — compares the SUT against the harness reconcile's burned record, not against an oracle projection. | RefUndoRedoBurned | SutBackend SutFocus SutSqlProjection | HOLON_PBT_UNDO_REDO_HEAL | undo-redo-reference-heal — references to a block whose identity a `Redo` re-minted (undo deletes the tail, redo re-executes the forward op and mints a FRESH uuid) |
+| inv-undo-redo-reference-heal | roundtrip — on a COMPLETED undo→redo round trip (redo-gated burned-id set non-empty), no base-table reference site may still name the burned id. Reference-prediction-free — compares the SUT against the harness reconcile's burned record, not against an oracle projection. | RefUndoRedoBurned | SutBackend SutFocus SutSqlProjection | — | undo-redo-reference-heal — references to a block whose identity a `Redo` re-minted (undo deletes the tail, redo re-executes the forward op and mints a FRESH uuid) |
 | inv-value-fn-provider-arg-variance-13 | internal-consistency — structural well-formedness of the SUT ProviderStabilityReport (bottom_dock presence, provider rows, cache identity); vfn13 is metamorphic (pass-1 identities reappear in pass-2) | RefGlobalFocus RefLayout | SutFrontendEmissions | — | provider-cache-wiring — the ReactiveEngine / interpret_pure / ProviderCache coupling drops rows, churns Arc identity, or flickers |
 | inv-value-fn-provider-identity | correspondence — each intermediate ViewModel StateToggle.current vs the ref task_state, over drained emission toggles | RefBlockTree RefTaskState | SutFrontendEmissions | — | cdc-enrichment-glitch — a transient wrong StateToggle in an intermediate emission that a later structural re-render masks |
+| inv-view-model-matches-store-at-quiescence | internal-consistency — the UI read model (published at the Loro commit, before the SQL write), the projection's private diff base `live`, and the SQL index must state the same block set once everything settles | — | SutReadModel | — | read-model-drift — a delta the commit point published but never projected, a delta the projection wrote but never published, and a reseed that leaves the read model holding rows Loro retracted |
 | inv-viewmodel-decompiled-rows-match-query | sut-internal — SUT decompiled rendered `content` vs SUT query data_rows `content` (ordered equality, filtered to ref visible_columns); DOCTRINE-SUSPECT: ref models no interpret_pure display tree, so the query result is the closest in-SUT ground truth and no ref render exists | — | SutRenderer | — | row-drop — the interpreter renders an ordered SUBSET of the query rows (a dropped row the old subset-only check let pass) |
 | inv-viewmodel-editable-text-triggers | internal-consistency | — | SutRenderer | — | editable-text-trigger-wiring — render-DSL regression: editor has bound ops but no input triggers |
 | inv-viewmodel-entity-ids-subset-of-data | correspondence | RefLayout | SutRenderer | — | phantom-entity — a rendered entity id that is neither a root query-data row nor a ref-known block |
@@ -215,10 +216,17 @@ flowchart LR
   inv_task_state_storage_coherence --> SutLoroTaskState
   inv_task_state_storage_coherence --> SutSqlProjection
   inv_undo_redo_reference_heal(["inv-undo-redo-reference-heal"])
+  inv_undo_redo_reference_heal --> SutBackend
+  SutFocus[SutFocus]
+  inv_undo_redo_reference_heal --> SutFocus
+  inv_undo_redo_reference_heal --> SutSqlProjection
   inv_value_fn_provider_arg_variance_13(["inv-value-fn-provider-arg-variance-13"])
   inv_value_fn_provider_arg_variance_13 --> SutFrontendEmissions
   inv_value_fn_provider_identity(["inv-value-fn-provider-identity"])
   inv_value_fn_provider_identity --> SutFrontendEmissions
+  inv_view_model_matches_store_at_quiescence(["inv-view-model-matches-store-at-quiescence"])
+  SutReadModel[SutReadModel]
+  inv_view_model_matches_store_at_quiescence --> SutReadModel
   inv_viewmodel_decompiled_rows_match_query(["inv-viewmodel-decompiled-rows-match-query"])
   inv_viewmodel_decompiled_rows_match_query --> SutRenderer
   inv_viewmodel_editable_text_triggers(["inv-viewmodel-editable-text-triggers"])

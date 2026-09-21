@@ -72,6 +72,56 @@ same UI generation, blanking the Main panel >3s; fix lane running. The
 creation-slot panic is that violation's loud witness — do not silence the
 witness, fix the delivery.)
 
+The mechanism on the UI read model is
+`LiveData::replace_all` (`crates/holon-api/src/live_data.rs`), which goes
+through `MutableBTreeMap::replace_cloned` and so emits ONE `MapDiff::Replace`.
+The Loro projection's reseed calls it immediately before it swaps its own diff
+base (`crates/holon-loro/src/loro_sync_controller.rs`, the `may_seed_live`
+arm). `insert`/`remove` in a loop is the violation this corollary names; a
+producer that re-derives its whole set must use `replace_all`.
+
+### 3b. The read model is emitted at the commit, before the index write
+
+D172.a. In CRDT mode Loro is the authority and SQL is a derived index, so the
+UI's read model is published when the Loro commit is projected — **before**
+the SQL sink write — and the projection's `live` map stays a private diff base
+that advances only after that write commits. Three rules make this a second
+*consumer* of one diff rather than a second *source of truth*:
+
+- **Deduplicate at the source.** Publish the projection's `staging` (already
+  stripped of no-ops by `blocks_differ`), never the raw `changed` set.
+  Re-publishing an unchanged row is the churn this model exists to remove.
+- **No lock across the publish.** Emit owned values after the `live` guard has
+  dropped. A `MutableBTreeMap` write while holding the projection's
+  `StdMutex` is a deadlock/jank hazard.
+- **Ordering is the projection's, not the publisher's.** `project()` is
+  serialized on `project_lock`, so consecutive commits publish in commit
+  order. Publishing outside that lock would let an older keystroke land after
+  a newer one.
+
+**A pass can publish twice.** The delta goes out before the pass branches,
+and two of the three branches (an unarmed delete, an FK-ungrounded batch)
+route to the full walk instead of writing the sink incrementally — which then
+publishes an atomic snapshot over it. So the contract is "the read model never
+lags the authority", not "exactly one publish per commit"; a consumer must
+tolerate a snapshot arriving after a delta it already applied. `replace_all`
+makes that second publish one generation, so the overlap is invisible
+downstream.
+
+Because the read model leads the index, a single read-model/SQL difference is
+the ordinary in-flight window, not a defect; only a *persistent* one is. And a
+failed sink write means the **index** is wrong, not the read model: the
+correction is to disclose (a condition on the bus) and repair by reseed —
+never to roll the UI back to a stale index. **Every leg that can fail after a
+publish discloses**, through one definition
+(`LoroProjection::disclose_read_model_ahead_of_index`) that both the
+incremental apply and the full walk call — a leg that failed quietly would
+leave the UI ahead of the index with nothing said. Pinned by
+`inv-view-model-matches-store-at-quiescence`, which compares read model ⇄
+`live` ⇄ SQL at quiescence with a bounded wait, and whose capability is
+present exactly where a Loro projection is: a slice without one deselects the
+invariant, rather than reporting agreement against an empty comparison.
+
 ### 4. Error policy in combinators: fatal vs encoded fallback
 
 A combinator's `Err` item ends the stream permanently — correct for corrupt

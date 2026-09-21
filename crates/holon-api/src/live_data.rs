@@ -293,8 +293,8 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     /// written directly has no such boundary; giving it parse functions it can
     /// never legitimately reach would invite a `subscribe` that silently did
     /// the wrong thing, so they refuse instead.
-    pub fn in_memory() -> Arc<Self> {
-        Self::new(
+    pub fn in_memory() -> AuthoredLiveData<T> {
+        AuthoredLiveData(Self::new(
             Vec::new(),
             |_| {
                 anyhow::bail!(
@@ -306,7 +306,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                     "this LiveData has no storage behind it — nothing can be ingested into it"
                 )
             },
-        )
+        ))
     }
 
     /// Drop `key`, reporting whether it was there.
@@ -615,6 +615,54 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
 /// cleanly (`LiveData::new` already returns an `Arc`). Available in both
 /// modes — the backing matview exists with or without Loro.
 pub struct BlockFeed(pub Arc<LiveData<crate::block::Block>>);
+
+/// A [`LiveData`] whose HOLDER is the authority — the handle
+/// [`LiveData::in_memory`] returns.
+///
+/// It exists for one reason: [`replace_all`](Self::replace_all) lives here and
+/// nowhere else. A whole-set replacement invalidates the CDC bookkeeping a
+/// matview mirror keeps (`rowid_to_key`, which is how a CDC delete finds its
+/// key, and the per-key `provenance` log), and the mirror has no way to
+/// rebuild either from a set it did not ingest. Rather than leave the two
+/// silently stale on a mirror, the operation is simply not reachable from one:
+/// `LiveData::new` yields an `Arc<LiveData<T>>` with no `replace_all` on it.
+///
+/// Everything else forwards by `Deref`, so a holder still reads and writes
+/// through the ordinary API.
+///
+/// The guarantee is CRATE-SCOPED: the tuple field is private, so no crate
+/// outside `holon-api` can wrap a CDC-fed mirror, but `in_memory` and
+/// `ConditionBus` construct it from inside. Within this module, wrapping a
+/// `LiveData::new` mirror is still possible and still wrong.
+pub struct AuthoredLiveData<T: Clone + Send + Sync + 'static>(Arc<LiveData<T>>);
+
+impl<T: Clone + Send + Sync + 'static> AuthoredLiveData<T> {
+    /// Replace the whole content in ONE generation — the atomic re-snapshot.
+    ///
+    /// `MutableBTreeMap::replace_cloned` emits a single `MapDiff::Replace`, so
+    /// a subscriber never observes the intermediate empty state a
+    /// clear-then-insert would publish. A producer that re-derives its whole
+    /// set (the Loro projection's reseed) must use this: delivered as removes
+    /// followed by inserts, a grouping combinator downstream sees every group
+    /// go empty and blanks the surface (Reactivity.md corollary 3).
+    pub fn replace_all(&self, items: BTreeMap<String, Arc<T>>) {
+        self.0.items.lock_mut().replace_cloned(items);
+        self.0.items_changed.notify_waiters();
+    }
+
+    /// The shared handle a consumer reads through.
+    pub fn shared(&self) -> Arc<LiveData<T>> {
+        self.0.clone()
+    }
+}
+
+impl<T: Clone + Send + Sync + 'static> std::ops::Deref for AuthoredLiveData<T> {
+    type Target = LiveData<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[cfg(test)]
 mod tests {

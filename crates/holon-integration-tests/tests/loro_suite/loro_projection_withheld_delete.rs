@@ -61,6 +61,8 @@ async fn an_armed_unsettled_pass_owes_the_delete_it_withheld() -> Result<()> {
         sink.clone() as Arc<dyn OriginTaggedWrites>,
         sink.clone() as Arc<dyn SinkReader>,
         tempdir.path().join("sc.sync"),
+        holon_api::block_read_model::BlockReadModel::new(),
+        Arc::new(holon_api::ConditionBus::new()),
     );
     projection.arm();
 

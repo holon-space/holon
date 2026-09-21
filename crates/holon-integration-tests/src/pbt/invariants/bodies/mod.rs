@@ -32,6 +32,7 @@ pub mod paint_text_styling;
 pub mod two_instance_convergence;
 pub mod two_writer_peer_writes_land;
 pub mod typed_matview_matches_ref;
+pub mod view_model_matches_store;
 // `navigation_focus` moved to `capability_pair!`'s `compare_navigation_focus`
 // in holon-pbt-core (auto-derived `inv-navigation-focus`); body file deleted.
 pub mod companion_has_no_child_page_headings;

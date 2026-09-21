@@ -2257,6 +2257,38 @@ impl LoroBackend {
         )
     }
 
+    /// Does a DELETED node carrying `id` exist in the global or layout tree?
+    ///
+    /// The complement of [`Self::is_live_anywhere_sync`] for diagnosis: both
+    /// answer "not live", but a tombstone means the authority once held the
+    /// block and let it go, while neither means the authority never knew it.
+    /// Scans `get_nodes(true)` (deleted included) under the doc-boundary
+    /// lock, so it is O(tree) and for diagnostics only — never a hot path.
+    pub fn has_tombstoned_node(&self, id: &str) -> bool {
+        let docs = std::iter::once(&self.collab_doc).chain(self.layout_doc.as_ref());
+        for wrapper in docs {
+            let found = wrapper.with_read(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                for node in tree.get_nodes(true) {
+                    let Ok(meta) = tree.get_meta(node.id) else {
+                        continue;
+                    };
+                    if crate::settled_read::read_stable_id(&meta).as_deref() != Some(id) {
+                        continue;
+                    }
+                    if tree.is_node_deleted(&node.id).unwrap_or(false) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            });
+            if found.unwrap_or(false) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Route a write for block `id` to the doc that holds its live node.
     ///
     /// Layout doc first (a bounded walk that settles the device-local ids),

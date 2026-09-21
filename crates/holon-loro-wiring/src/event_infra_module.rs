@@ -66,6 +66,8 @@ fn sql_cell_set_field_writer(sql_ops: Arc<SqlOperationProvider>) -> holon_core::
 // The BlockFeed newtype itself lives in holon-api (live_data) so backend-blind
 // consumers (holon-orgmode) can resolve it without a `holon` dependency; this
 // module provides it over the block matview's CDC stream.
+use holon_api::block_read_model::BlockDeltaSource;
+use holon_api::block_read_model::BlockReadModel;
 use holon_api::live_data::BlockFeed;
 
 /// DI module for shared block infrastructure.
@@ -84,6 +86,20 @@ impl Module for EventInfraModule {
 
         injector.provide(Provider::root(move |_| {
             Shared::new(PublishErrorTracker::new())
+        }));
+
+        // The UI read model (D172.a). Built here — not in the Loro module —
+        // because the port is backend-blind: `holon-loro` owns the only
+        // production producer today, and F3 adds the SqlOnly one, but a
+        // consumer resolves the same `BlockDeltaSource` either way. Nothing
+        // reads it yet; consumers flip onto it one at a time from F1b, each
+        // deleting its `BlockFeed` use in the same increment.
+        injector.provide::<Arc<BlockReadModel>>(Provider::root(move |_| {
+            Shared::new(BlockReadModel::new())
+        }));
+        injector.provide::<dyn BlockDeltaSource>(Provider::root(move |resolver| {
+            let model = resolver.resolve::<Arc<BlockReadModel>>();
+            (*model).clone() as Arc<dyn BlockDeltaSource>
         }));
 
         // Shared convergent block feed (`LiveData<Block>` over the `block`

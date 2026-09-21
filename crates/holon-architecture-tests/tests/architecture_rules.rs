@@ -52,6 +52,47 @@ fn archlint_all_passes() {
     }
 }
 
+/// `holon-frontend` must never depend on `holon-loro` (D172.a, F1a layering).
+///
+/// The read model's port lives in `holon-api`, which already owns `LiveData`,
+/// `group_by` and `home_by`; `holon-loro` implements it and `holon-app` wires
+/// it. A frontend that reached for the producer directly would bind the UI to
+/// one storage backend and make the SqlOnly producer (F3) unimplementable —
+/// and it would do so invisibly, because the code would compile and work in
+/// the Loro config that every developer runs.
+///
+/// Checked at the manifest, not at `use` sites: without the dependency no
+/// `use holon_loro` can exist, so this is the edge itself rather than one of
+/// its symptoms.
+#[test]
+fn holon_frontend_does_not_depend_on_holon_loro() {
+    let manifest = repo_root().join("crates/holon-frontend/Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
+
+    // `package = "holon-loro"` catches the rename escape
+    // (`x = { package = "holon-loro" }`), which a name-prefix match alone
+    // reads as an unrelated crate.
+    let offenders: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter(|line| {
+            line.starts_with("holon-loro")
+                || line.contains("dep:holon-loro")
+                || line.contains(r#"package = "holon-loro""#)
+        })
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "crates/holon-frontend/Cargo.toml declares a dependency on holon-loro: {offenders:?}.\n\
+         The frontend reads the block read model through the `BlockDeltaSource` port in \
+         holon-api; holon-loro is one producer of it (holon-app wires them). Depending on the \
+         producer directly pins the UI to the CRDT backend and blocks F3's SqlOnly producer."
+    );
+}
+
 const LATENCY_TARGET_MARKER: &str = r#"target: "holon_latency""#;
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {

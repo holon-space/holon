@@ -702,6 +702,16 @@ pub struct LoroProjection {
     /// `loro::Subscription` unsubscribes, so these are held for the
     /// projection's lifetime.
     subscriptions: StdMutex<Vec<loro::Subscription>>,
+    /// The UI read model, published at the Loro commit BEFORE the sink write.
+    /// A second consumer of the same diff, never a second source of truth:
+    /// `live` above stays the private diff base and still advances only after
+    /// the sink write commits, so the two can be compared at quiescence.
+    read_model: Arc<holon_api::block_read_model::BlockReadModel>,
+    /// Where a read-model-ahead-of-index divergence is disclosed. The run
+    /// loop's own `SqlProjectionFailed` banner only fires after
+    /// `RECONCILE_MAX_ATTEMPTS`, which says nothing about the window in which
+    /// the UI has already shown a change SQL rejected.
+    degraded: Arc<holon_api::condition_bus::ConditionBus>,
 }
 
 impl LoroProjection {
@@ -711,6 +721,8 @@ impl LoroProjection {
         command_bus: Arc<dyn OriginTaggedWrites>,
         sink_reader: Arc<dyn SinkReader>,
         sidecar_path: PathBuf,
+        read_model: Arc<holon_api::block_read_model::BlockReadModel>,
+        degraded: Arc<holon_api::condition_bus::ConditionBus>,
     ) -> Self {
         // A `LoroProjection` exists only in the Loro-present config (it IS the
         // Loro→SQL projection), so the consolidator is pinned to Loro.
@@ -736,7 +748,15 @@ impl LoroProjection {
             pending_reseed_reason: StdMutex::new(None),
             wake: Arc::new(Notify::new()),
             subscriptions: StdMutex::new(Vec::new()),
+            read_model,
+            degraded,
         }
+    }
+
+    /// The UI read model this projection publishes into. Handed to consumers
+    /// as a [`holon_api::block_read_model::BlockDeltaSource`].
+    pub fn read_model(&self) -> Arc<holon_api::block_read_model::BlockReadModel> {
+        self.read_model.clone()
     }
 
     /// The wake signal the doc subscriptions fire and the controller's run loop
@@ -826,6 +846,14 @@ impl LoroProjection {
     /// Org assets via `create_in_tree` intents, incl. the raw-inserted seed
     /// layout) has populated Loro, so that Loro is now the complete authority
     /// and deletes of sink-only rows are legitimate. Idempotent.
+    /// Whether the DELETE pass is armed. An unarmed projection withholds
+    /// deletes, so SQL can legitimately hold rows Loro has tombstoned —
+    /// a diagnostic a differential oracle needs in order to say WHY the two
+    /// disagree instead of only that they do.
+    pub fn is_armed(&self) -> bool {
+        self.armed.load(Ordering::SeqCst)
+    }
+
     pub fn arm(&self) {
         self.armed.store(true, Ordering::SeqCst);
     }
@@ -860,6 +888,8 @@ impl LoroProjection {
         command_bus: Arc<dyn OriginTaggedWrites>,
         sink_reader: Arc<dyn SinkReader>,
         storage_dir: &std::path::Path,
+        read_model: Arc<holon_api::block_read_model::BlockReadModel>,
+        degraded: Arc<holon_api::condition_bus::ConditionBus>,
     ) -> Self {
         let sidecar_path = storage_dir.join(SIDECAR_FILENAME);
         let last_synced = Arc::new(StdMutex::new(load_sidecar_blocking(&sidecar_path)));
@@ -869,6 +899,8 @@ impl LoroProjection {
             command_bus,
             sink_reader,
             sidecar_path,
+            read_model,
+            degraded,
         )
     }
 
@@ -1069,6 +1101,18 @@ impl LoroProjection {
                             !armed && deletes > 0,
                         )
                     };
+                    // EMIT-AT-COMMIT. The `live` guard has dropped, so nothing
+                    // is held across the publish. `staging` (not `changed`) is
+                    // what goes out: the scoped block above already dropped
+                    // every no-op through `blocks_differ`, and republishing
+                    // those is the churn this model exists to remove.
+                    //
+                    // Published unconditionally, ahead of all three branches
+                    // below — including the two that route to the full reseed
+                    // instead of writing the sink. In CRDT mode Loro is the
+                    // authority, so `staging` is already true; the reseed that
+                    // follows re-publishes an atomic snapshot over it.
+                    self.read_model.publish_delta(&staging);
                     if has_unarmed_delete {
                         // The unarmed delete gate lives on the full walk, which
                         // withholds deletes and reports the pass complete
@@ -1138,6 +1182,7 @@ impl LoroProjection {
                                 self.seeded.store(false, Ordering::SeqCst);
                                 *self.pending_reseed_reason.lock().unwrap() =
                                     Some(FullReason::SinkFail);
+                                self.disclose_read_model_ahead_of_index(&e);
                                 return Err(e);
                             }
                         }
@@ -1295,6 +1340,7 @@ impl LoroProjection {
             // so a retry pass (which sees only `seeded == false`) is labeled by
             // its true cause — a sink write failure — not mislabeled `coldboot`.
             *self.pending_reseed_reason.lock().unwrap() = Some(FullReason::SinkFail);
+            self.disclose_read_model_ahead_of_index(&e);
             return Err(e);
         }
 
@@ -1314,6 +1360,12 @@ impl LoroProjection {
             let mut idx = collab.with_read(|doc| Ok(crate::loro_backend::build_tid_index(doc)))?;
             idx.extend(layout.with_read(|doc| Ok(crate::loro_backend::build_tid_index(doc)))?);
             *self.tid_index.lock().unwrap() = idx;
+            // ATOMIC RE-SNAPSHOT. A reseed replaces the whole set, so the read
+            // model gets it in ONE generation. Delivered as retractions
+            // followed by assertions it would take every downstream group
+            // through empty, blanking the surface mid-reseed (Reactivity.md
+            // corollary 3).
+            self.read_model.publish_snapshot(&after);
             *self.live.lock().unwrap() = after;
             *self.layout_last_synced.lock().unwrap() = layout_current;
             self.seeded.store(true, Ordering::SeqCst);
@@ -1330,6 +1382,27 @@ impl LoroProjection {
         // base that grounds it — can pay it. Saying so lets the run loop
         // re-drive instead of treating a partial projection as finished.
         Ok(pass_outcome(ungrounded))
+    }
+
+    /// A failed sink write leaves the SQL index behind the Loro authority.
+    /// Loro is the authority, so the correction is to disclose and repair,
+    /// never to roll the UI back to a stale index.
+    ///
+    /// One definition, called from both legs that can fail — and the sentence
+    /// says only what is true of both. On the incremental leg the delta is
+    /// already published, so the outline is ahead; on a cold-boot full walk
+    /// `publish_snapshot` runs only after a successful write (`:1358`), so
+    /// nothing was published and the outline may be empty. "The UI has
+    /// already shown it" was false in the second case, and so was "the
+    /// outline already reflects it".
+    fn disclose_read_model_ahead_of_index(&self, e: &anyhow::Error) {
+        self.degraded.emit(holon_api::condition_bus::Condition {
+            subject: GLOBAL_PROJECTION_SUBJECT.to_string(),
+            reason: holon_api::condition_bus::ConditionKind::SqlProjectionFailed(format!(
+                "the search index rejected a batch, so index-backed views (search, queries) \
+                 may lag the outline until the next reseed repairs them: {e}"
+            )),
+        });
     }
 
     /// Apply the diff ops through the consolidator and advance the watermark.

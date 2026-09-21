@@ -448,6 +448,12 @@ components:
   - RefBlockTree
   - RefTaskState
   - SutFrontendEmissions
+- file: crates/holon-integration-tests/src/pbt/composed/invariants/view_model_matches_store.rs
+  kind: invariant-wiring
+  requires_sut_caps:
+  - SutReadModel
+  declared_needs:
+  - SutReadModel
 - file: crates/holon-integration-tests/src/pbt/composed/invariants/viewmodel_decompiled_rows_match_query.rs
   kind: invariant-wiring
   requires_sut_caps:
@@ -1202,6 +1208,23 @@ components:
   covers:
   - cdc-enrichment-glitch — a transient wrong StateToggle in an intermediate emission that a later structural
     re-render masks
+- file: crates/holon-integration-tests/src/pbt/invariants/bodies/view_model_matches_store.rs
+  kind: invariant
+  invariant_ids:
+  - inv-view-model-matches-store-at-quiescence
+  requires_sut_caps:
+  - SutReadModel
+  oracle:
+  - internal-consistency — the UI read model (published at the Loro commit, before the SQL write), the
+    projection's private diff base `live`, and the SQL index must state the same block set once everything
+    settles
+  slips-if-removed:
+  - 'a read model that is a SECOND SOURCE OF TRUTH rather than a second consumer of one diff: no other
+    invariant compares it against either the diff base or the index, so a producer that silently stopped
+    publishing would leave every render green against a frozen mirror'
+  covers:
+  - read-model-drift — a delta the commit point published but never projected, a delta the projection
+    wrote but never published, and a reseed that leaves the read model holding rows Loro retracted
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/viewmodel_decompiled_rows_match_query.rs
   kind: invariant
   invariant_ids:
@@ -2641,6 +2664,13 @@ components:
   kind: harness
   covers:
   - restart-persistence(loro-unseeded) — true-restart twin,
+- file: crates/holon-integration-tests/tests/loro_suite/loro_read_model_publish_ordering_and_disclosure.rs
+  kind: harness
+  covers:
+  - read-model-publish-ordering — no consumer sees a newer publish before an older one, because publishes
+    are serialized with the commits
+  - read-model-ahead-of-index-disclosure — a failed sink write raises `SqlProjectionFailed` and the three-way
+    oracle reports the window
 - file: crates/holon-integration-tests/tests/loro_sync_controller_pbt.rs
   kind: harness
   covers:

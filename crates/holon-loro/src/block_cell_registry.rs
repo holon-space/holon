@@ -1058,6 +1058,25 @@ impl EntityCellRegistry for BlockCellRegistry {
 }
 
 impl BlockCellRegistry {
+    /// What the Loro tree knows about `id` — the distinction a differential
+    /// oracle needs to name the cause of a SQL/Loro disagreement.
+    ///
+    /// `Tombstoned` and `Never` look identical to every "is it live" query,
+    /// yet they mean opposite things: a tombstone with a surviving
+    /// `block_raw` row is a withheld or lost DELETE (an index fault), while
+    /// `Never` is the declared unseeded-vault class where SQL owns the row
+    /// (`live_children`'s warn above, and its twin in
+    /// `FileSyncController::on_file_changed`).
+    pub async fn loro_node_state(&self, id: &str) -> LoroNodeState {
+        if self.backend.is_live_anywhere(id).await {
+            return LoroNodeState::Live;
+        }
+        if self.backend.has_tombstoned_node(id) {
+            return LoroNodeState::Tombstoned;
+        }
+        LoroNodeState::Never
+    }
+
     /// Read a block's authoritative Loro fractional index — the value the
     /// outbound snapshot projection writes to SQL `sort_key`. Returns `None` in
     /// SqlOnly mode, where SQL itself owns `sort_key`. A read accessor for
@@ -1477,4 +1496,17 @@ mod tests {
         assert_eq!(cell.current(), "");
         Ok(())
     }
+}
+
+/// What the Loro tree knows about a block id. See
+/// [`BlockCellRegistry::loro_node_state`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoroNodeState {
+    /// A live node: the authority holds the block.
+    Live,
+    /// A node the tree once had and DELETED. A surviving `block_raw` row is
+    /// then a withheld or lost delete, not an ownership class.
+    Tombstoned,
+    /// No node, live or dead, has ever carried this id in this tree.
+    Never,
 }

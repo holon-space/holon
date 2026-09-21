@@ -34,6 +34,7 @@ use holon::api::BackendEngine;
 use holon_api::Block;
 use holon_api::EntityUri;
 use holon_api::QueryLanguage;
+use holon_api::block_read_model::BlockDeltaSource;
 use holon_app::HeadlessBuilderServices;
 use holon_frontend::FrontendSession;
 use holon_frontend::ReactiveEngineDriver;
@@ -68,6 +69,7 @@ use holon_pbt_core::capabilities::SutOrderKeys;
 use holon_pbt_core::capabilities::SutOrgRead;
 use holon_pbt_core::capabilities::SutOrgRender;
 use holon_pbt_core::capabilities::SutQueryResults;
+use holon_pbt_core::capabilities::SutReadModel;
 use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::capabilities::SutSeamMutate;
 use holon_pbt_core::capabilities::SutSqlProjection;
@@ -3366,6 +3368,185 @@ impl SutMatviews for HeadlessFrontendComponent {
     }
 }
 
+/// `SutReadModel` — the three-way read for
+/// `inv-view-model-matches-store-at-quiescence` (D172.a). Reads all three
+/// statements of the block set that the CRDT write path produces: the read
+/// model published at the Loro commit, the projection's private diff base
+/// `live`, and the SQL index. `None` when no Loro projection is wired (SqlOnly
+/// slices), so the body deselects honestly instead of comparing empties.
+#[async_trait::async_trait(?Send)]
+impl SutReadModel for HeadlessFrontendComponent {
+    async fn read_model_triple(&self) -> holon_pbt_core::capabilities::ReadModelObservation {
+        // Unconditional: `register_non_gesture` only hands out `SutReadModel`
+        // when this resolves, so an absent projection here is a wiring bug, not
+        // a slice without one.
+        let projection = self.resolve_read_model_projection();
+
+        let mut model: Vec<Vec<String>> = projection
+            .read_model()
+            .blocks()
+            .read()
+            .values()
+            .map(|s| snapshot_row(s))
+            .collect();
+
+        // RED-vector fault seam, mirroring `HOLON_PBT_MATVIEW_STALE`. DEFAULT
+        // OFF: unset, this is a no-op with zero prod/test impact. Armed, it
+        // withholds rows from the read model on EVERY read, so the divergence
+        // never stabilizes inside the body's bounded wait and the invariant
+        // fails end-to-end naming the rows.
+        //
+        // `all` is the deliberately STATELESS STRAWMAN — a read model that
+        // publishes nothing. An oracle that passes against it is vacuous, so
+        // this is the value the red-for-the-right-reason log is taken with.
+        // `one` withholds a single (lexicographically first) row: block ids
+        // are minted at run time, so unlike the matview seam's static view
+        // names there is nothing stable to name. A literal `block:…` id still
+        // works for a targeted repro.
+        if let Ok(arm) = std::env::var("HOLON_PBT_VIEWMODEL_STALE") {
+            let before = model.len();
+            model.sort();
+            match arm.as_str() {
+                "all" => model.clear(),
+                "one" => {
+                    model.remove(0);
+                }
+                id => model.retain(|row| row.first().map(String::as_str) != Some(id)),
+            }
+            assert!(
+                model.len() < before,
+                "HOLON_PBT_VIEWMODEL_STALE={arm:?} withheld nothing from a read model of \
+                 {before} rows — arm it with `all`, `one`, or a real block id"
+            );
+        }
+
+        let mut live: Vec<Vec<String>> = projection
+            .live_snapshot()
+            .values()
+            .map(snapshot_row)
+            .collect();
+
+        let mut sql: Vec<Vec<String>> = self
+            .sql_query("SELECT id, parent_id, sort_key, content FROM block_raw")
+            .await
+            .iter()
+            .filter(|r| {
+                // The self-parented FK sentinel is a schema row, not a block;
+                // Loro never holds it, so comparing it would fail every run.
+                Self::cell(r, "id").is_some_and(|id| id.starts_with("block:"))
+            })
+            .filter_map(|r| {
+                Some(read_model_row(
+                    &Self::cell(r, "id")?,
+                    &Self::cell(r, "parent_id")?,
+                    &Self::cell(r, "sort_key")?,
+                    &Self::cell(r, "content").unwrap_or_default(),
+                ))
+            })
+            .collect();
+
+        model.sort();
+        live.sort();
+        sql.sort();
+
+        // DIAGNOSTICS for every SQL row the diff base lacks — never a
+        // filter. Asking the LORO TREE (live / tombstoned / never) is what
+        // separates "the authority never knew this block" from "the
+        // authority deleted it and the index kept the row", and the armed
+        // flag says whether the DELETE pass was even running. A red then
+        // arrives with its cause attached.
+        let live_ids: std::collections::HashSet<&String> =
+            live.iter().filter_map(|r| r.first()).collect();
+        let registry = self
+            .injector()
+            .try_resolve::<holon_loro::block_cell_registry::BlockCellRegistry>()
+            .expect(
+                "this component booted with Loro on, so a BlockCellRegistry must be wired — \
+                 without it a disagreement cannot be attributed",
+            );
+        let armed = projection.is_armed();
+        let mut sql_only_diagnostics = Vec::new();
+        for row in &sql {
+            let Some(id) = row.first() else { continue };
+            if live_ids.contains(id) {
+                continue;
+            }
+            let state = registry.loro_node_state(id).await;
+            sql_only_diagnostics.push(format!(
+                "{id}: loro_node={state:?} projection_armed={armed}"
+            ));
+        }
+        sql_only_diagnostics.sort();
+
+        holon_pbt_core::capabilities::ReadModelObservation {
+            model,
+            live,
+            sql,
+            sql_only_diagnostics,
+        }
+    }
+}
+
+impl HeadlessFrontendComponent {
+    /// Whether this component publishes a read model — the BOOT decision,
+    /// knowable at registration time.
+    ///
+    /// Registration runs moments after the boot, before the projection is
+    /// resolvable from the injector, so asking the injector there deselects
+    /// the invariant on exactly the arms that do have a read model. The boot
+    /// flag has no such race.
+    pub(crate) fn publishes_a_read_model(&self) -> bool {
+        self.boot_params.loro_enabled
+    }
+
+    /// The Loro projection that publishes the read model. Reached only from
+    /// the `SutReadModel` body, i.e. only where registration already decided
+    /// this component has one — so an unresolvable projection is a wiring bug
+    /// and fails loudly rather than reporting "nothing to compare".
+    pub(crate) fn resolve_read_model_projection(
+        &self,
+    ) -> Arc<holon_loro::loro_sync_controller::LoroProjection> {
+        self.injector()
+            .try_resolve::<holon_loro::loro_sync_controller::LoroProjection>()
+            .expect(
+                "this component booted with Loro on, so a LoroProjection must be wired — without \
+                 it the read model has no producer",
+            )
+    }
+}
+
+/// The canonical row shape all three layers reduce to. One constructor so the
+/// three readers cannot disagree about field order.
+fn read_model_row(id: &str, parent_id: &str, sort_key: &str, content: &str) -> Vec<String> {
+    vec![
+        id.to_string(),
+        parent_id.to_string(),
+        sort_key.to_string(),
+        content.to_string(),
+    ]
+}
+
+/// A Loro-side `SnapshotBlock` as a comparison row.
+///
+/// `content` goes through the store's OWN canonicalization
+/// (`holon_api::content_canonical`, the single definition the SQL write path
+/// and the editor's echo rule also call). The store trims trailing whitespace
+/// — and the first line of a text block — when it writes, so the authority and
+/// the index legitimately differ by exactly that transform. Comparing the raw
+/// strings would make every block with trailing whitespace a permanent false
+/// divergence; hard-coding a trim here instead of calling the shared function
+/// would let the two drift. Anything the store does NOT canonicalize away is
+/// still a real divergence and still fails.
+fn snapshot_row(s: &holon_api::block::SnapshotBlock) -> Vec<String> {
+    let is_source = s.block.content_type == holon_api::ContentType::Source;
+    read_model_row(
+        &s.block.id.to_string(),
+        &s.block.parent_id.to_string(),
+        &s.sort_key,
+        &holon_api::content_canonical::canonicalize_stored_content(&s.block.content, is_source),
+    )
+}
+
 /// `SutFocus` over the live Turso navigation projection — the real
 /// teeth for `inv-navigation-focus` / `inv-focus-roots`. Split off
 /// `SutSqlProjection` (C-5, 2026-07-02) so a storage-only slice that drives no
@@ -4825,6 +5006,26 @@ impl HeadlessFrontendComponent {
         // block matviews live (this component's real Turso projection) so the
         // differential runs on the same slice that maintains them.
         caps.insert(self.clone() as Arc<dyn SutMatviews>);
+        // `SutReadModel` — the read-model/live/SQL three-way for
+        // `inv-view-model-matches-store-at-quiescence`. Present EXACTLY when a
+        // Loro projection exists to publish a read model: a frontend booted
+        // with Loro off has nothing to compare, and registering the cap there
+        // made the invariant report "engaged and Ok" against an empty triple —
+        // agreement and vacuity are indistinguishable in the summary.
+        if self.publishes_a_read_model() {
+            caps.insert(self.clone() as Arc<dyn SutReadModel>);
+        } else {
+            // An ARMED red-vector seam with no read model to break would sail
+            // through as a deselect. That is the failure mode the seam exists
+            // to expose, so refuse the run instead.
+            assert!(
+                std::env::var("HOLON_PBT_VIEWMODEL_STALE").is_err(),
+                "HOLON_PBT_VIEWMODEL_STALE is armed but this slice booted no Loro projection, so \
+                 there is no read model for the seam to withhold rows from and \
+                 inv-view-model-matches-store-at-quiescence would DESELECT — a green run that \
+                 proves nothing. Draw a slice that boots Loro, or unset the seam."
+            );
+        }
         caps.insert(self.clone() as Arc<dyn SutFsWrites>);
         caps.insert(self.clone() as Arc<dyn SutOrgRender>);
         // The home-profile binding, read through production's resolver.

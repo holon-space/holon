@@ -443,7 +443,7 @@ pub struct ConditionBus {
     /// frontend keeping its own mirror of it — which is what let a glyph and a
     /// banner disagree. Nothing in it touches storage, so the bus is the
     /// authority in every configuration.
-    conditions: Arc<LiveData<Condition>>,
+    conditions: crate::live_data::AuthoredLiveData<Condition>,
     /// When each condition in effect was first raised.
     ///
     /// The holder is keyed by subject-then-kind, so ITS order is alphabetical,
@@ -479,7 +479,7 @@ impl ConditionBus {
     /// `conditions` row source is registered over, so a rendered collection
     /// and a bus subscriber read the same set by construction.
     pub fn conditions(&self) -> Arc<LiveData<Condition>> {
-        Arc::clone(&self.conditions)
+        self.conditions.shared()
     }
 
     /// Raise a condition: recorded as current state (replacing any prior entry

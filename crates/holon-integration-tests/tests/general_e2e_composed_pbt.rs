@@ -82,6 +82,9 @@ fn general_e2e_composed_pbt() {
         );
         Ok(())
     });
+    // An ARMED read-model seam that never had a read model to break would pass
+    // here having exercised nothing; refuse before the run is called green.
+    holon_integration_tests::pbt::invariants::bodies::view_model_matches_store::assert_engaged_if_armed();
     match result {
         Ok(()) => guard.set_green(),
         // Stays red; panic recorded via the global hook. The message replicates

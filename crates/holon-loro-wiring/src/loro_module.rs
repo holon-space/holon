@@ -225,11 +225,16 @@ impl Module for LoroModule {
                 let sink_reader: Arc<dyn holon_loro::SinkReader> =
                     Arc::new(holon::storage::TursoSinkReader::new(db_handle));
                 let doc_store_arc = Arc::new(RwLock::new((*doc_store).clone()));
+                let read_model =
+                    resolver.resolve::<Arc<holon_api::block_read_model::BlockReadModel>>();
+                let degraded = resolver.resolve::<Arc<holon_api::condition_bus::ConditionBus>>();
                 let projection = holon_loro::loro_sync_controller::LoroProjection::from_storage(
                     doc_store_arc,
                     command_bus,
                     sink_reader,
                     &config.storage_dir,
+                    (*read_model).clone(),
+                    (*degraded).clone(),
                 );
                 // The incremental input leg must exist before the org initial
                 // scan starts flushing this projection: the scan resolves it as

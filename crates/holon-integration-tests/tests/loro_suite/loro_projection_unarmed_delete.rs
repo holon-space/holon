@@ -57,6 +57,8 @@ async fn subscribed_projection() -> Result<(
         sink.clone() as Arc<dyn OriginTaggedWrites>,
         sink.clone() as Arc<dyn SinkReader>,
         tempdir.path().join("sc.sync"),
+        holon_api::block_read_model::BlockReadModel::new(),
+        Arc::new(holon_api::ConditionBus::new()),
     );
     projection.install_doc_subscriptions().await?;
     Ok((tempdir, doc_store, sink, projection))

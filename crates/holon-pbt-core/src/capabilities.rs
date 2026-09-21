@@ -136,6 +136,56 @@ pub trait SutMatviews {
     -> Vec<(String, Vec<Vec<String>>, Vec<Vec<String>>)>;
 }
 
+/// One block as all three layers of the CRDT write path can state it, reduced
+/// to the fields every layer carries: `(id, parent_id, sort_key, content)`.
+/// Canonical `Vec<String>` rather than a struct because the three sources
+/// parse out of three different representations and the body is a pure
+/// multiset comparison.
+pub type ReadModelRow = Vec<String>;
+
+/// SUT-side differential observation for
+/// `inv-view-model-matches-store-at-quiescence` (D172.a).
+///
+/// The read model is published at the Loro commit, BEFORE the SQL sink write;
+/// `live` is the projection's private diff base and advances only AFTER that
+/// write commits; SQL is the index. At quiescence all three must state the
+/// same block set — a persistent disagreement means the UI is showing
+/// something neither the authority's diff base nor the index agrees with.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReadModelObservation {
+    /// What the commit-point publish has put in front of the UI.
+    pub model: Vec<ReadModelRow>,
+    /// The projection's private diff base.
+    pub live: Vec<ReadModelRow>,
+    /// The SQL index. Compared strictly; nothing is excluded.
+    pub sql: Vec<ReadModelRow>,
+    /// One line per `sql` row the diff base does NOT have, saying what the
+    /// Loro tree knows about it (live / tombstoned / never) and whether the
+    /// projection's DELETE pass was armed.
+    ///
+    /// DIAGNOSTICS, never a filter. The comparison is strict: an earlier
+    /// draft excluded rows whose block had no live Loro node, on the theory
+    /// that they were the declared unseeded-vault class — but that exclusion
+    /// could not distinguish "never had a node" from "Loro deleted it and the
+    /// index kept the row", which is an index fault, and no shipped case ever
+    /// exercised it. An exclusion with no witness is a hole, so it is gone and
+    /// this says WHY a disagreement exists instead of hiding it.
+    pub sql_only_diagnostics: Vec<String>,
+}
+
+#[holon_macros::capmap_adapter]
+pub trait SutReadModel {
+    /// The read model, the diff base, the index, and per-row diagnostics for
+    /// any SQL row the diff base lacks — rows canonically sorted.
+    ///
+    /// Total, not `Option`. "This slice has no Loro projection" is answered by
+    /// the capability being ABSENT — the invariant then deselects through
+    /// `Needs` and the engagement summary says so. A cap that is present but
+    /// answers "nothing to compare" is indistinguishable from agreement in the
+    /// summary, which is how the oracle went silently vacuous.
+    async fn read_model_triple(&self) -> ReadModelObservation;
+}
+
 // ─── Reference-side: BlockTree ────────────────────────────────────────
 
 /// Read-side block-tree queries used by Phase 5 T0 transitions and their

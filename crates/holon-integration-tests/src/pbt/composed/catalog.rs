@@ -267,6 +267,11 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // keystone slice over the real Turso projection supplies it. Fast-path
         // (already consistent) on the common case, so it adds no per-tick cost.
         invariants::matview_recompute_matches::wire(),
+        // D172.a: the read model published at the Loro commit, the
+        // projection's private diff base `live`, and the SQL index agree at
+        // quiescence. Needs `SutReadModel`; only a slice booting a real Loro
+        // projection supplies it. Fast-path on agreement, so no per-tick cost.
+        invariants::view_model_matches_store::wire(),
         // Undo→redo referential round trip (observability, 2026-07-26): prod's
         // redo re-executes the forward op and mints a FRESH id, so a block that
         // comes back after an undo comes back with a NEW identity. Every

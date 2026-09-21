@@ -17,6 +17,7 @@ pub mod action_dsl;
 pub mod auth;
 pub mod block;
 pub mod block_mutation;
+pub mod block_read_model;
 pub mod block_write_field;
 pub mod capability;
 pub mod change_set;

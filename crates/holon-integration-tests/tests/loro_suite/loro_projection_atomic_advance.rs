@@ -51,6 +51,8 @@ async fn failed_sink_write_neither_advances_base_nor_drops_change() -> Result<()
         sink.clone() as Arc<dyn OriginTaggedWrites>,
         sink.clone() as Arc<dyn SinkReader>,
         tempdir.path().join("sc.sync"),
+        holon_api::block_read_model::BlockReadModel::new(),
+        Arc::new(holon_api::ConditionBus::new()),
     );
     projection.arm();
 

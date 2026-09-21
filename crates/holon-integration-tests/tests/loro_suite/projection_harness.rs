@@ -51,6 +51,11 @@ pub(crate) struct MemorySink {
     /// stable-id → merged param map (the persisted block rows the projection
     /// diffs against via `read_blocks`).
     blocks: StdMutex<HashMap<String, StorageEntity>>,
+    /// Run at the top of every `execute_batch_with_origin`, i.e. INSIDE
+    /// `project()`'s critical section and after the commit-point publish. A
+    /// test that needs to observe the world mid-apply installs one; unset by
+    /// default, so every other test is unaffected.
+    apply_hook: StdMutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl MemorySink {
@@ -60,7 +65,12 @@ impl MemorySink {
             apply_calls: AtomicUsize::new(0),
             read_calls: AtomicUsize::new(0),
             blocks: StdMutex::new(HashMap::new()),
+            apply_hook: StdMutex::new(None),
         }
+    }
+
+    pub(crate) fn set_apply_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.apply_hook.lock().unwrap() = Some(hook);
     }
 
     pub(crate) fn set_fail(&self, v: bool) {
@@ -147,6 +157,10 @@ impl OriginTaggedWrites for MemorySink {
     ) -> DatasourceResult<Vec<OperationResult>> {
         assert_eq!(entity_name, "block", "sink only knows the 'block' entity");
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
+        let hook = self.apply_hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
 
         if self.fail.load(Ordering::SeqCst) {
             return Err("MemorySink: injected sink-write failure (batch rolled back)".into());

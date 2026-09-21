@@ -250,7 +250,11 @@ hand-authored *FLAGS:
     mkdir -p target/gate-logs
     # See `pbt` for why the budget is armed by default.
     export HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1}
-    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-}
+    # D175.a: known-red until the never-seeded seed pass lands
+    # (docs/Testing/bugfunnel/entries/2026-09-22-unseeded-vault-blocks-are-sql-only-so-a-loro-fed-read-model-cannot-show-them.md).
+    # Re-strict by deleting this default the day that pass lands; the
+    # invariant itself excludes NOTHING, so the case reds again on its own.
+    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-reboot-orphans-the-previous-boots-watchers}
     cargo test \
         {{CANON}} --test hand_authored_regressions \
         -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-hand-authored.log

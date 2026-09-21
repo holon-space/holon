@@ -1025,6 +1025,9 @@
                 "name": "block_mutation.rs"
               },
               {
+                "name": "block_read_model.rs"
+              },
+              {
                 "name": "block_write_field.rs"
               },
               {
@@ -3267,6 +3270,9 @@
                             "name": "value_fn_provider_identity.rs"
                           },
                           {
+                            "name": "view_model_matches_store.rs"
+                          },
+                          {
                             "name": "viewmodel_decompiled_rows_match_query.rs"
                           },
                           {
@@ -3648,6 +3654,9 @@
                           },
                           {
                             "name": "value_fn_provider_identity.rs"
+                          },
+                          {
+                            "name": "view_model_matches_store.rs"
                           },
                           {
                             "name": "viewmodel_decompiled_rows_match_query.rs"
@@ -4613,6 +4622,9 @@
                 "path": "holon-integration-tests/tests/loro_suite",
                 "files": [
                   {
+                    "name": "loro_completed_and_block_type_reach_sql.rs"
+                  },
+                  {
                     "name": "loro_create_persists_prod_session.rs"
                   },
                   {
@@ -4634,6 +4646,9 @@
                     "name": "loro_projection_withheld_delete.rs"
                   },
                   {
+                    "name": "loro_read_model_publish_ordering_and_disclosure.rs"
+                  },
+                  {
                     "name": "loro_restart_unseeded_vault.rs"
                   },
                   {
@@ -4647,6 +4662,9 @@
                   },
                   {
                     "name": "projection_harness.rs"
+                  },
+                  {
+                    "name": "read_model_second_writer_census.rs"
                   }
                 ]
               },
@@ -4834,6 +4852,9 @@
               },
               {
                 "name": "projector_lag_lock.rs"
+              },
+              {
+                "name": "read_model_field_parity.rs"
               },
               {
                 "name": "refdoc1_remap_totality_replay.rs"
