@@ -7775,6 +7775,9 @@
                 "name": "matview_lease_actor.rs"
               },
               {
+                "name": "matview_point_read_index.rs"
+              },
+              {
                 "name": "matview_version_skew_boot.rs"
               },
               {

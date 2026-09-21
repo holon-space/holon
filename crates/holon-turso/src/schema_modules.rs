@@ -583,6 +583,30 @@ fn block_matview_select_with_computed(
     )
 }
 
+/// Index a materialized view on each of `columns`, one plain single-column
+/// index per entry.
+///
+/// Plain only: the fork refuses UNIQUE, partial, expression and `USING`
+/// indexes on a view, and an ORDER BY (index-organized) view cannot carry one
+/// at all. Callers emit this right after their `reconcile_named_view`, because
+/// the index lives and dies with the view it indexes.
+async fn create_matview_indexes(db_handle: &DbHandle, view: &str, columns: &[&str]) -> Result<()> {
+    for column in columns {
+        db_handle
+            .execute_ddl(&format!(
+                "CREATE INDEX IF NOT EXISTS idx_{view}_{column} ON {view}({column})"
+            ))
+            .await
+            .map_err(|e| {
+                StorageError::DatabaseError(format!(
+                    "indexing matview '{view}' on '{column}' failed, so every point read on it \
+                     would stay a full scan: {e}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
 /// `block` matview schema module.
 ///
 /// Hydrates `block_raw` rows with the edge-typed fields (`tags`, `requires`,
@@ -636,6 +660,14 @@ impl SchemaModule for BlockMatviewSchemaModule {
         let created = reconcile_named_view(db_handle, "block", &block_matview_select(&descriptors))
             .await
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        // `block` is a join matview, so a point read on it is a full scan of
+        // the whole hydrated relation unless it is indexed — 4.8 ms per lookup
+        // at 3200 blocks against 12 µs indexed, on every read in
+        // `block_domain` and every `id = ? OR parent_id = ?` watch population.
+        // Emitted unconditionally, not only on the `created` branch: DROP VIEW
+        // takes the view's indexes with it, and a database written before the
+        // index existed must get it on the next boot.
+        create_matview_indexes(db_handle, "block", &["id", "parent_id"]).await?;
         if created {
             tracing::info!("[BlockMatviewSchemaModule] block matview created/updated");
         } else {
@@ -759,6 +791,7 @@ impl SchemaModule for BlockHierarchySchemaModule {
         )
         .await
         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+        create_matview_indexes(db_handle, "block_with_path", &["id"]).await?;
         if created {
             tracing::info!("[BlockHierarchySchemaModule] block_with_path view created/updated");
         } else {
