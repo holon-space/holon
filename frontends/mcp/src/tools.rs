@@ -2749,7 +2749,7 @@ impl HolonMcpServer {
                         )
                     },
                 )?;
-                if sync.last_synced_frontiers() != current {
+                if !sync.is_settled_at(&current) {
                     moving.push("loro");
                 }
             }

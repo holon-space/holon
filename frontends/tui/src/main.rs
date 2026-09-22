@@ -88,7 +88,10 @@ async fn main() -> CommonResult<()> {
 
     // Stop the session's watchers, then close the store — before the container
     // teardown below, which drops the handles they read through.
-    if let Err(e) = holon_app::shutdown_session(&app.injector()).await {
+    // Its error is the process's exit status, returned after the container
+    // teardown below has still run.
+    let session_shutdown = holon_app::shutdown_session(&app.injector()).await;
+    if let Err(e) = &session_shutdown {
         tracing::error!("Session shutdown failed: {e:#}");
     }
 
@@ -100,7 +103,7 @@ async fn main() -> CommonResult<()> {
         Err(_) => tracing::warn!("Shutdown timed out after {timeout:?}"),
     }
 
-    Ok(())
+    session_shutdown.map_err(|e| miette::miette!("Session shutdown failed: {e:#}"))
 }
 
 fn tui_log_path() -> std::path::PathBuf {

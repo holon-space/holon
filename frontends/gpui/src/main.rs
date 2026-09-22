@@ -332,11 +332,12 @@ fn main() -> Result<()> {
 
     // Stop the session's watchers, then close the store. One definition, in
     // `holon_app`, shared with the TUI and the test harness.
-    runtime.block_on(async {
-        if let Err(e) = holon_app::shutdown_session(&injector).await {
-            tracing::error!("Session shutdown failed: {e:#}");
-        }
-    });
+    // Its error is the process's exit status, returned after the container
+    // teardown below has still run.
+    let session_shutdown = runtime.block_on(holon_app::shutdown_session(&injector));
+    if let Err(e) = &session_shutdown {
+        tracing::error!("Session shutdown failed: {e:#}");
+    }
 
     // Container teardown — fires GpuiModule::on_stop (MCP server stop, etc.)
     runtime.block_on(async {
@@ -348,5 +349,5 @@ fn main() -> Result<()> {
         }
     });
 
-    Ok(())
+    session_shutdown
 }
