@@ -3471,7 +3471,12 @@ impl SutReadModel for HeadlessFrontendComponent {
             if live_ids.contains(id) {
                 continue;
             }
-            let state = registry.loro_node_state(id).await;
+            // ALLOW(entity_uri_from_raw): a `block_raw.id` SQL row value
+            let uri = EntityUri::from_raw(id);
+            let state = registry
+                .loro_node_state(&uri)
+                .await
+                .unwrap_or_else(|e| panic!("loro_node_state({id}): {e:#}"));
             sql_only_diagnostics.push(format!(
                 "{id}: loro_node={state:?} projection_armed={armed}"
             ));

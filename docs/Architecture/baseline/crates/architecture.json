@@ -2001,6 +2001,9 @@
                 "name": "cell_registry.rs"
               },
               {
+                "name": "consolidator.rs"
+              },
+              {
                 "name": "core.rs"
               },
               {
@@ -2050,6 +2053,9 @@
               },
               {
                 "name": "sync_gate.rs"
+              },
+              {
+                "name": "text_format.rs"
               },
               {
                 "name": "traits.rs"
@@ -4184,6 +4190,9 @@
                     "name": "mod.rs"
                   },
                   {
+                    "name": "model_consolidator.rs"
+                  },
+                  {
                     "name": "net_cap.rs"
                   },
                   {
@@ -5370,6 +5379,9 @@
               },
               {
                 "name": "loro_blocks_datasource.rs"
+              },
+              {
+                "name": "loro_consolidator.rs"
               },
               {
                 "name": "loro_document.rs"

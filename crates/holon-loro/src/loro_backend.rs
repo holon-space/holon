@@ -34,6 +34,8 @@ use holon_api::repository::NewBlock;
 use holon_api::repository::P2POperations;
 use holon_api::streaming::ChangeNotifications;
 use holon_api::streaming::ChangeSubscribers;
+use holon_core::consolidator::Seen;
+use holon_core::consolidator::Version;
 use tokio::sync::mpsc;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
@@ -1229,6 +1231,20 @@ fn write_new_node(
     Ok((block, node))
 }
 
+/// A frontier as a consolidator [`Version`]: Loro's own binary encoding, hex.
+fn encode_version(frontiers: &loro::Frontiers) -> Version {
+    Version::new(hex::encode(frontiers.encode()))
+}
+
+fn decode_version(version: &Version) -> Result<loro::Frontiers, ApiError> {
+    let bytes = hex::decode(version.as_str()).map_err(|e| ApiError::InternalError {
+        message: format!("version {version} is not a Loro frontier encoding: {e}"),
+    })?;
+    loro::Frontiers::decode(&bytes).map_err(|e| ApiError::InternalError {
+        message: format!("version {version} does not decode as Loro frontiers: {e}"),
+    })
+}
+
 /// Is this node deleted (or unknown) in the tree's CURRENT state? Used by the
 /// snapshot readers to distinguish a torn walk — a concurrent commit deleted
 /// the node between enumeration and the per-node reads — from a genuine
@@ -2259,34 +2275,41 @@ impl LoroBackend {
 
     /// Does a DELETED node carrying `id` exist in the global or layout tree?
     ///
-    /// The complement of [`Self::is_live_anywhere_sync`] for diagnosis: both
-    /// answer "not live", but a tombstone means the authority once held the
-    /// block and let it go, while neither means the authority never knew it.
-    /// Scans `get_nodes(true)` (deleted included) under the doc-boundary
-    /// lock, so it is O(tree) and for diagnostics only — never a hot path.
-    pub fn has_tombstoned_node(&self, id: &str) -> bool {
+    /// The complement of [`Self::is_live_anywhere_sync`]: both answer "not
+    /// live", but a tombstone means the authority once held the block and let
+    /// it go, while neither means the authority never knew it. Scans
+    /// `get_nodes(true)` (deleted included) under the doc-boundary lock:
+    /// O(tree).
+    pub fn has_tombstoned_node(&self, id: &EntityUri) -> Result<bool, ApiError> {
         let docs = std::iter::once(&self.collab_doc).chain(self.layout_doc.as_ref());
         for wrapper in docs {
-            let found = wrapper.with_read(|doc| {
-                let tree = doc.get_tree(TREE_NAME);
-                for node in tree.get_nodes(true) {
-                    let Ok(meta) = tree.get_meta(node.id) else {
-                        continue;
-                    };
-                    if crate::settled_read::read_stable_id(&meta).as_deref() != Some(id) {
-                        continue;
+            let found = wrapper
+                .with_read(|doc| {
+                    let tree = doc.get_tree(TREE_NAME);
+                    for node in tree.get_nodes(true) {
+                        let meta = tree
+                            .get_meta(node.id)
+                            .map_err(|e| anyhow::anyhow!("get_meta({:?}): {e}", node.id))?;
+                        if crate::settled_read::read_stable_id(&meta).as_deref() != Some(id.id()) {
+                            continue;
+                        }
+                        if tree
+                            .is_node_deleted(&node.id)
+                            .map_err(|e| anyhow::anyhow!("is_node_deleted({:?}): {e}", node.id))?
+                        {
+                            return Ok(true);
+                        }
                     }
-                    if tree.is_node_deleted(&node.id).unwrap_or(false) {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            });
-            if found.unwrap_or(false) {
-                return true;
+                    Ok(false)
+                })
+                .map_err(|e| ApiError::InternalError {
+                    message: format!("has_tombstoned_node({id}): {e:#}"),
+                })?;
+            if found {
+                return Ok(true);
             }
         }
-        false
+        Ok(false)
     }
 
     /// Route a write for block `id` to the doc that holds its live node.
@@ -3860,6 +3883,53 @@ impl LoroBackend {
             .map_err(|e| ApiError::InternalError {
                 message: format!("lamport_height: {e}"),
             })
+    }
+
+    /// The live doc's oplog frontiers as a [`Version`].
+    pub async fn head_version(&self) -> Result<Version, ApiError> {
+        self.collab_doc
+            .with_read(|doc| Ok(encode_version(&doc.oplog_frontiers())))
+            .map_err(|e| ApiError::InternalError {
+                message: format!("head_version: {e}"),
+            })
+    }
+
+    /// Is `a` in `b`'s past? `Err` when either version is not in this doc's
+    /// history, which includes a version older than a compaction trimmed.
+    pub async fn is_ancestor(&self, a: &Version, b: &Version) -> Result<bool, ApiError> {
+        let a = decode_version(a)?;
+        let b = decode_version(b)?;
+        self.collab_doc
+            .with_read(|doc| {
+                doc.cmp_frontiers(&a, &b)
+                    .map_err(|e| anyhow::anyhow!("cmp_frontiers: {e}"))
+            })
+            .map(|ord| {
+                matches!(
+                    ord,
+                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                )
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("is_ancestor: {e}"),
+            })
+    }
+
+    /// What this tree's history says about stable id `id`.
+    ///
+    /// A deleted node keeps its TreeID across a compacted snapshot
+    /// (`LoroDocument::export_compact_snapshot`) but loses its meta, and with
+    /// it the stable id — so after compaction a deleted id answers `Never`.
+    /// Scans the deleted nodes as well as the live ones: O(nodes including
+    /// tombstones).
+    pub async fn ever_seen(&self, id: &EntityUri) -> Result<Seen, ApiError> {
+        if self.is_live_anywhere(id.as_str()).await {
+            return Ok(Seen::Live);
+        }
+        if self.has_tombstoned_node(id)? {
+            return Ok(Seen::Deleted(self.head_version().await?));
+        }
+        Ok(Seen::Never)
     }
 
     /// The Loro tree's fractional index for `id` — the adapter's internal

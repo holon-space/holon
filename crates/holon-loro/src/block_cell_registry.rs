@@ -29,6 +29,7 @@ use holon_core::cell::CellBacking;
 use holon_core::cell_registry::CellCache;
 use holon_core::cell_registry::EntityCellRegistry;
 use holon_core::cell_registry::EntityCellRegistryExt;
+use holon_core::consolidator::Seen;
 use loro::LoroDoc;
 use loro::LoroText;
 
@@ -770,6 +771,13 @@ impl EntityCellRegistry for BlockCellRegistry {
         Ok(out)
     }
 
+    async fn entity_ever_seen(&self, id: &EntityUri) -> Result<Seen> {
+        self.backend
+            .ever_seen(id)
+            .await
+            .map_err(|e| anyhow!("entity_ever_seen({id}): {e}"))
+    }
+
     /// Children of `parent_id` in authoritative Loro tree order (full-URI
     /// form, e.g. `"block:foo"`). Returns `None` in SqlOnly mode, where the
     /// SQL cache is the order authority. Used by `BlockOrdering::children`
@@ -777,14 +785,6 @@ impl EntityCellRegistry for BlockCellRegistry {
     /// the Loro tree via `create_in_tree` — during the initial scan the
     /// outbound projector is not running yet, so the SQL cache is empty for
     /// freshly-created blocks and a cache read would spuriously time out.
-    /// Whether `id` has a node in the authoritative Loro tree. `None` in
-    /// SqlOnly mode (no separate tree to ask). `Some(false)` is the
-    /// pre-Loro-vault upgrade signal consumed by `BlockOrdering::in_tree`.
-    async fn live_in_tree(&self, id: &str) -> Result<Option<bool>> {
-        let backend = self.backend.clone();
-        Ok(Some(backend.is_live_anywhere(id).await))
-    }
-
     async fn live_children(&self, parent_id: &str) -> Result<Option<Vec<String>>> {
         let backend = self.backend.clone();
         // Unseeded-vault guard (same family as the `create_entity`
@@ -1067,14 +1067,14 @@ impl BlockCellRegistry {
     /// `Never` is the declared unseeded-vault class where SQL owns the row
     /// (`live_children`'s warn above, and its twin in
     /// `FileSyncController::on_file_changed`).
-    pub async fn loro_node_state(&self, id: &str) -> LoroNodeState {
-        if self.backend.is_live_anywhere(id).await {
-            return LoroNodeState::Live;
+    pub async fn loro_node_state(&self, id: &EntityUri) -> Result<LoroNodeState> {
+        if self.backend.is_live_anywhere(id.as_str()).await {
+            return Ok(LoroNodeState::Live);
         }
-        if self.backend.has_tombstoned_node(id) {
-            return LoroNodeState::Tombstoned;
+        if self.backend.has_tombstoned_node(id)? {
+            return Ok(LoroNodeState::Tombstoned);
         }
-        LoroNodeState::Never
+        Ok(LoroNodeState::Never)
     }
 
     /// Read a block's authoritative Loro fractional index — the value the
@@ -1494,6 +1494,53 @@ mod tests {
         // working cell.
         let cell: Cell<String> = registry.as_ref().live_field::<String>(&uri, "content")?;
         assert_eq!(cell.current(), "");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ever_seen_separates_a_tombstone_from_a_never() -> Result<()> {
+        let never_registry = BlockCellRegistry::with_loro_doc(make_loro_doc_with_block("seeded"));
+        assert_eq!(
+            never_registry
+                .entity_ever_seen(&EntityUri::block("unheard-of"))
+                .await?,
+            Seen::Never,
+            "an id no node ever carried is Never"
+        );
+        assert_eq!(
+            never_registry
+                .entity_ever_seen(&EntityUri::block("seeded"))
+                .await?,
+            Seen::Live,
+            "a created node is Live"
+        );
+
+        let doc = make_loro_doc_with_block("deleted");
+        let registry = BlockCellRegistry::with_loro_doc(doc.clone());
+        let tree_id = registry
+            .backend
+            .resolve_to_tree_id("deleted")
+            .await
+            .expect("precondition: the node exists, so the delete has something to tombstone");
+        crate::multi_peer::delete_block(&doc, tree_id);
+
+        match registry
+            .entity_ever_seen(&EntityUri::block("deleted"))
+            .await?
+        {
+            Seen::Deleted(version) => assert!(
+                !version.as_str().is_empty(),
+                "the tombstone is reported against a version, not a bare flag"
+            ),
+            other => panic!("a deleted id must report Deleted, got {other:?}"),
+        }
+        assert!(
+            !registry
+                .entity_ever_seen(&EntityUri::block("deleted"))
+                .await?
+                .admits_adoption(),
+            "a tombstoned id is never an adoption candidate"
+        );
         Ok(())
     }
 }

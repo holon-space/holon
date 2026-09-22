@@ -27,6 +27,7 @@ use holon_api::Value;
 use crate::block_ordering::BlockCreateRequest;
 use crate::cell::Cell;
 use crate::cell::CellBacking;
+use crate::consolidator::Seen;
 
 /// Registry surface used by chord ops, frontend handlers, and sync
 /// providers. Implementations live per entity type
@@ -161,11 +162,11 @@ pub trait EntityCellRegistry: Send + Sync {
         Ok(vec![false; requests.len()])
     }
 
-    /// Is this entity in the authoritative tree? `None` means this registry
-    /// holds no tree to answer from and the caller must decide from SQL — it is
-    /// NOT "no".
-    async fn live_in_tree(&self, _: &str) -> Result<Option<bool>> {
-        Ok(None)
+    /// What the authoritative tree's history says about this entity.
+    /// [`Seen::NoHistory`] means this registry holds no tree to answer from
+    /// and the caller must decide from SQL — it is NOT "no".
+    async fn entity_ever_seen(&self, _: &EntityUri) -> Result<Seen> {
+        Ok(Seen::NoHistory)
     }
 
     /// The authoritative children of `parent_id`, in order. `None` means this

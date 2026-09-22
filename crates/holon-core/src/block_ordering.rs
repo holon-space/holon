@@ -16,6 +16,7 @@ use holon_api::BlockContent;
 use holon_api::EntityUri;
 use holon_api::capability::Consolidator;
 
+use crate::consolidator::Seen;
 use crate::traits::Result;
 
 /// One block-create intent for [`BlockOrdering::create_in_tree_batch`] — the
@@ -197,16 +198,11 @@ pub trait BlockOrdering: Send + Sync {
         Ok(out)
     }
 
-    /// Whether `id` has a node in the separate authoritative tree.
-    /// `Ok(None)` from the trait default, when there is no separate tree —
-    /// SqlOnly, or a backing where the store IS the tree — so the question
-    /// doesn't apply. `Ok(Some(false))` is the pre-Loro-vault upgrade
-    /// signal: the block exists in the SQL store but the Loro tree never
-    /// adopted it (no seed pass ran when `[loro] enabled` flipped on). The
-    /// org-scan reconciler uses this to re-seed such blocks via
-    /// [`create_in_tree`](Self::create_in_tree).
-    async fn in_tree(&self, _: &EntityUri) -> Result<Option<bool>> {
-        Ok(None)
+    /// What the separate authoritative tree's history says about `id`.
+    /// [`Seen::NoHistory`] from the trait default, where there is no separate
+    /// tree to ask.
+    async fn ever_seen(&self, _: &EntityUri) -> Result<Seen> {
+        Ok(Seen::NoHistory)
     }
 
     /// True when a separate upstream consolidator owns block writes — i.e. the
@@ -494,17 +490,17 @@ mod default_contract_tests {
 
     #[tokio::test]
     async fn default_mode_signals_are_sql_only() {
-        // SqlOnly-mode contracts: no separate tree (`in_tree` = None, the
-        // question doesn't apply), no upstream consolidator, and therefore
+        // SqlOnly-mode contracts: no separate tree (`ever_seen` = NoHistory,
+        // the question doesn't apply), no upstream consolidator, and therefore
         // the Store consolidator owns order. Flipping any of these silently
         // changes write routing (org-scan re-seed, command-bus create skip).
         let ordering = RecordingOrdering {
             places: Mutex::new(Vec::new()),
         };
-        assert_eq!(
-            ordering.in_tree(&EntityUri::block("A")).await.unwrap(),
-            None
-        );
+        assert!(matches!(
+            ordering.ever_seen(&EntityUri::block("A")).await.unwrap(),
+            Seen::NoHistory
+        ));
         assert!(
             !ordering
                 .create_in_tree(

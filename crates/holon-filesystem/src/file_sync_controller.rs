@@ -1501,25 +1501,26 @@ impl FileSyncController {
     /// active store? The caller has already proven the SQL side (its stored
     /// `content_hash` matched the disk bytes); this proves the Loro side.
     ///
-    /// - SqlOnly mode (Loro not an active store): `in_tree` answers `None`, so
-    ///   the check degrades to SQL-only — the historical behavior. `true`.
-    /// - Loro mode: the doc's root block (`block:<#+ID>`) must resolve to a
-    ///   Loro tree node. `Some(false)` is the reset hole — SQL kept the row but
-    ///   the Loro tree was reset to empty — so refuse the skip and re-ingest.
+    /// - SqlOnly mode (Loro not an active store): the tree answers `NoHistory`,
+    ///   so the check degrades to SQL-only — `true`.
+    /// - Loro mode: the doc's root block (`block:<#+ID>`) must be LIVE. `Never`
+    ///   and `Deleted` are both the reset hole — SQL kept the row but the Loro
+    ///   tree was reset to empty, or the document was deleted and the delete
+    ///   never projected — so refuse the skip and re-ingest.
     ///
     /// Takes the doc-root the CALLER parsed out of the file: a fast path that
     /// cannot name the document can neither prove this nor record where the
     /// document lives, so the id is resolved once, before the gate, and its
     /// absence makes the whole fast path unreachable.
     async fn content_present_in_all_stores(&self, root: &EntityUri) -> Result<bool> {
-        let present = self
+        let seen = self
             .ordering
-            .in_tree(root)
+            .ever_seen(root)
             .await
-            .map_err(|e| anyhow::anyhow!("[FileSyncController] in_tree({root}): {e:#}"))?;
-        debug!(root = %root, ?present, "[FileSyncController] in_tree probe");
-        // None → no separate tree (SqlOnly): SQL is the only active store.
-        Ok(present.unwrap_or(true))
+            .map_err(|e| anyhow::anyhow!("[FileSyncController] ever_seen({root}): {e:#}"))?;
+        debug!(root = %root, ?seen, "[FileSyncController] ever_seen probe");
+        // A store with no history to ask (SqlOnly) is the only active store.
+        Ok(!seen.is_absent_from_history())
     }
 
     /// Boot store-health sweep (dogfood 2026-07-21, BugFunnel row 295): repair
@@ -4188,10 +4189,10 @@ impl FileSyncController {
                 && matches!(self.ordering.consolidator(), Consolidator::Upstream)
                 && self
                     .ordering
-                    .in_tree(&block.id)
+                    .ever_seen(&block.id)
                     .await
-                    .map_err(|e| anyhow::anyhow!("in_tree({}): {e:#}", block.id))?
-                    == Some(false);
+                    .map_err(|e| anyhow::anyhow!("ever_seen({}): {e:#}", block.id))?
+                    .is_absent_from_history();
             if needs_reseed {
                 let parent_uri = if block.parent_id == new_parse.document.id {
                     document_uri.clone()

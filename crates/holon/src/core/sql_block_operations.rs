@@ -681,9 +681,9 @@ impl BlockOrdering for SqlBlockOperations {
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
     }
 
-    async fn in_tree(&self, id: &EntityUri) -> Result<Option<bool>> {
+    async fn ever_seen(&self, id: &EntityUri) -> Result<holon_core::consolidator::Seen> {
         self.cell_registry
-            .live_in_tree(id.as_str())
+            .entity_ever_seen(id)
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
     }

@@ -32,6 +32,7 @@ use holon_api::types::Tags;
 use holon_api::types::TaskState;
 use holon_api::types::Timestamp;
 use holon_core::block_ordering::BlockOrdering;
+use holon_core::consolidator::Seen;
 use holon_core::traits::Result as BlockOrderingResult;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
@@ -2415,8 +2416,12 @@ mod fast_path_loro_presence_tests {
                 .map(|ids| ids.iter().map(|s| EntityUri::from_raw(s)).collect())
                 .unwrap_or_default())
         }
-        async fn in_tree(&self, _: &EntityUri) -> BlockOrderingResult<Option<bool>> {
-            Ok(Some(self.root_in_tree.load(AtomicOrdering::SeqCst)))
+        async fn ever_seen(&self, _: &EntityUri) -> BlockOrderingResult<Seen> {
+            Ok(if self.root_in_tree.load(AtomicOrdering::SeqCst) {
+                Seen::Live
+            } else {
+                Seen::Never
+            })
         }
         async fn update_in_tree(
             &self,

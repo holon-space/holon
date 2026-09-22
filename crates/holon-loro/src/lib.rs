@@ -25,6 +25,7 @@ pub mod deleted_container_purge;
 pub mod durable_state;
 #[cfg(test)]
 mod keystroke_lock_wait_probe;
+pub mod loro_consolidator;
 
 #[cfg(all(
     feature = "iroh-sync",
