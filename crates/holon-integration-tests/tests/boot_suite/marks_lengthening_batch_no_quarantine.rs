@@ -129,6 +129,8 @@ fn lengthening_content_with_tail_marks_ingests_whole() {
             persisted.iter().all(|p| *p),
             "the authority declined a probe create: {persisted:?}"
         );
+        // The org ingest projects its creates into SQL before it sends updates.
+        env.wait_for_loro_quiescence(Duration::from_secs(30)).await;
 
         for round in 1..=ROUNDS {
             let content = body(round);
@@ -247,6 +249,8 @@ fn shortening_content_with_tail_marks_keeps_exact_spans() {
             persisted.iter().all(|p| *p),
             "the authority declined a probe create: {persisted:?}"
         );
+        // The org ingest projects its creates into SQL before it sends updates.
+        env.wait_for_loro_quiescence(Duration::from_secs(30)).await;
 
         for round in (0..SHORTENING_ROUNDS).rev() {
             let content = body(round);

@@ -167,17 +167,12 @@ impl LoroSyncSut for StubSut {
 
         match transition {
             GroupTransition::Restart => {
-                // Shut down the controller, persist the current primary
-                // doc, then re-create the controller. The startup
-                // reconcile runs against the persisted watermark.
+                // A crash once the projection is quiescent: nothing saves on
+                // the way down, so the reload sees only what the projection
+                // itself put on disk. The startup reconcile runs against the
+                // persisted watermark.
+                self.wait_for_quiescence().await;
                 self.stop_controller().await;
-                {
-                    let store = self.doc_store.read().await;
-                    store
-                        .save_all()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("save_all on Restart: {}", e))?;
-                }
                 // Re-create the store itself so the .loro file is reloaded
                 // fresh from disk.
                 self.doc_store = Arc::new(RwLock::new(LoroDocumentStore::new(

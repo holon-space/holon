@@ -153,16 +153,8 @@ impl LoroBlockOperations {
     }
 
     /// Find the backend containing a block (always the global backend).
-    async fn find_doc_for_block(&self, _: &str) -> Result<(String, LoroBackend)> {
-        let backend = self.get_backend("").await?;
-        Ok((backend.doc_id().to_string(), backend))
-    }
-
-    /// Save the global document after modification.
-    async fn save_doc(&self, _: &str) -> Result<()> {
-        let store = self.doc_store.read().await;
-        store.save_all().await?;
-        Ok(())
+    async fn find_doc_for_block(&self, _: &str) -> Result<LoroBackend> {
+        self.get_backend("").await
     }
 
     /// Dismiss one advice lesson under an anchor (ADR 0021 suppression + ADR
@@ -191,7 +183,7 @@ impl LoroBlockOperations {
         let lesson_uri = EntityUri::parse_owned(lesson_id.to_string())
             .map_err(|e| format!("dismiss_advice: invalid 'lesson_id' URI {lesson_id:?}: {e}"))?;
 
-        let (doc_path, backend) = self.find_doc_for_block(anchor_id).await?;
+        let backend = self.find_doc_for_block(anchor_id).await?;
         // Fail loud on a missing anchor — never silently write a fresh set.
         let anchor = backend
             .get_block(anchor_id)
@@ -206,7 +198,6 @@ impl LoroBlockOperations {
             .set_block_advice_suppressed(anchor_id, &suppressed)
             .await
             .map_err(|e| format!("dismiss_advice: {e}"))?;
-        self.save_doc(&doc_path).await?;
         Ok(OperationResult::irreversible(vec![]))
     }
 
@@ -230,7 +221,7 @@ impl LoroBlockOperations {
             .and_then(|v| v.as_string())
             .ok_or("add_tag: missing 'tag' parameter")?;
 
-        let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        let backend = self.find_doc_for_block(id).await?;
         // Fail loud on a missing block — never silently write a fresh set.
         let block = backend
             .get_block(id)
@@ -288,7 +279,6 @@ impl LoroBlockOperations {
             .set_block_tags(id, &tags.to_vec())
             .await
             .map_err(|e| format!("add_tag: {e}"))?;
-        self.save_doc(&doc_path).await?;
         // `tags` is a junction/meta field the column-only staleness reader
         // cannot fingerprint, so the delta is `history_only` — recorded in the
         // history relation but excluded from the undo precondition.
@@ -313,7 +303,7 @@ impl LoroBlockOperations {
             .and_then(|v| v.as_string())
             .ok_or("remove_tag: missing 'tag' parameter")?;
 
-        let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        let backend = self.find_doc_for_block(id).await?;
         let block = backend
             .get_block(id)
             .await
@@ -352,7 +342,6 @@ impl LoroBlockOperations {
             .set_block_tags(id, &tags.to_vec())
             .await
             .map_err(|e| format!("remove_tag: {e}"))?;
-        self.save_doc(&doc_path).await?;
         let changes = vec![FieldDelta::history_only(
             id,
             "tags",
@@ -500,7 +489,7 @@ fn edge_string_targets(value: &Value, field: &str) -> std::result::Result<Vec<St
 #[async_trait]
 impl CrudOperations<Block> for LoroBlockOperations {
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult> {
-        let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        let backend = self.find_doc_for_block(id).await?;
 
         // Capture the prior block state ONCE, up front, so we can build both a
         // provably-correct inverse AND a staleness fingerprint (`changes`) for
@@ -792,8 +781,6 @@ impl CrudOperations<Block> for LoroBlockOperations {
                     .map_err(|e| format!("Failed to update property: {}", e))?;
             }
         }
-
-        self.save_doc(&doc_path).await?;
 
         // Propagation to downstream consumers is handled by `LoroSyncController`
         // via `doc.subscribe_root`. `changes` is NOT a second write path (the
@@ -1109,7 +1096,6 @@ impl CrudOperations<Block> for LoroBlockOperations {
         }
 
         // Save
-        self.save_doc(&doc_id).await?;
 
         // Re-fetch the block to get updated properties
         let block_with_props = backend
@@ -1147,7 +1133,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
     }
 
     async fn delete(&self, id: &str) -> Result<OperationResult> {
-        let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        let backend = self.find_doc_for_block(id).await?;
 
         // Capture the FULL block state BEFORE deleting so a LEAF delete is
         // identity-invertible: the inverse is a `create` with the SAME id,
@@ -1219,8 +1205,6 @@ impl CrudOperations<Block> for LoroBlockOperations {
             .delete_block(id)
             .await
             .map_err(|e| format!("Failed to delete block: {}", e))?;
-
-        self.save_doc(&doc_path).await?;
 
         // Leaf: exact create-inverse. Forward fingerprint mirrors the SqlOnly
         // authority — the `id` field is present pre-delete and absent after, so
@@ -1423,7 +1407,7 @@ impl MarkOperations<Block> for LoroBlockOperations {
             format!("apply_mark: mark_json parse error: {e}; payload was: {mark_json}")
         })?;
 
-        let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        let backend = self.find_doc_for_block(id).await?;
         // Capture the EXACT prior rich content (text + FULL mark set) BEFORE the
         // mark write. The inverse restores it atomically via the whole-set
         // `content=Object` path (`update_block_marked`), which clears every mark
@@ -1443,7 +1427,6 @@ impl MarkOperations<Block> for LoroBlockOperations {
             .apply_inline_mark(id, start..end, &mark)
             .await
             .map_err(|e| format!("apply_inline_mark: {e}"))?;
-        self.save_doc(&doc_path).await?;
         let inverse = block_op(
             "set_field",
             HashMap::from([
@@ -1483,7 +1466,7 @@ impl MarkOperations<Block> for LoroBlockOperations {
             .into());
         }
 
-        let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        let backend = self.find_doc_for_block(id).await?;
         // Capture the EXACT prior rich content (text + FULL mark set) BEFORE the
         // removal so the inverse restores the captured prior mark set for the
         // affected range — atomically via the whole-set `content=Object`
@@ -1498,7 +1481,6 @@ impl MarkOperations<Block> for LoroBlockOperations {
             .remove_inline_mark(id, start..end, &key)
             .await
             .map_err(|e| format!("remove_inline_mark: {e}"))?;
-        self.save_doc(&doc_path).await?;
         let inverse = block_op(
             "set_field",
             HashMap::from([
@@ -1519,7 +1501,7 @@ impl TextOperations<Block> for LoroBlockOperations {
     async fn insert_text(&self, id: &str, pos: i64, text: String) -> Result<OperationResult> {
         let pos_usize = usize::try_from(pos)
             .map_err(|_| format!("insert_text: pos must be non-negative, got {pos}"))?;
-        let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        let backend = self.find_doc_for_block(id).await?;
         // Capture prior content so the projected `content` column can be
         // fingerprinted (arms the undo stale-guard, same as set_field("content")).
         let old_content = backend
@@ -1531,7 +1513,6 @@ impl TextOperations<Block> for LoroBlockOperations {
             .insert_text(id, pos_usize, &text)
             .await
             .map_err(|e| format!("insert_text: {e}"))?;
-        self.save_doc(&doc_path).await?;
         let new_content = backend
             .get_block(id)
             .await
@@ -1567,7 +1548,7 @@ impl TextOperations<Block> for LoroBlockOperations {
             .map_err(|_| format!("delete_text: pos must be non-negative, got {pos}"))?;
         let len_usize = usize::try_from(len)
             .map_err(|_| format!("delete_text: len must be non-negative, got {len}"))?;
-        let (doc_path, backend) = self.find_doc_for_block(id).await?;
+        let backend = self.find_doc_for_block(id).await?;
         // Capture the exact substring about to be deleted (Unicode-scalar range
         // [pos, pos+len)) so the inverse can re-insert it verbatim. Char-indexed
         // to match LoroText's scalar positions.
@@ -1585,7 +1566,6 @@ impl TextOperations<Block> for LoroBlockOperations {
             .delete_text(id, pos_usize, len_usize)
             .await
             .map_err(|e| format!("delete_text: {e}"))?;
-        self.save_doc(&doc_path).await?;
         let new_content = backend
             .get_block(id)
             .await
@@ -1981,7 +1961,12 @@ mod advice_dismiss_tests {
             )
             .await
             .expect("anchor block");
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
         let anchor_id = anchor.id.to_string();
         (ops, dir, anchor_id)
     }
@@ -2625,7 +2610,12 @@ mod advice_dismiss_tests {
         ops.set_field(&c2, "content", object_content("bold mid", &[bold(0, 4)]))
             .await
             .expect("rich content");
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
 
         // Order before delete: c1, c2, c3.
         assert_eq!(
@@ -2695,7 +2685,12 @@ mod advice_dismiss_tests {
 
         let c1 = seed_child(&backend, &anchor, "c1", "first").await;
         let c2 = seed_child(&backend, &anchor, "c2", "second").await;
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
 
         let result = ops.delete(&c1).await.expect("delete c1");
         let inverse = match &result.undo {
@@ -2728,7 +2723,12 @@ mod advice_dismiss_tests {
         ops.set_field(&c, "content", object_content(text, &[bold(0, 4)]))
             .await
             .expect("rich multibyte");
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
 
         let result = ops.delete(&c).await.expect("delete");
         let inverse = match &result.undo {
@@ -2751,7 +2751,12 @@ mod advice_dismiss_tests {
 
         let parent = seed_child(&backend, &anchor, "p", "parent").await;
         let _gc = seed_child(&backend, &parent, "gc", "grandchild").await;
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
 
         // Destructive-delete ruling 2026-07-21: a bare `delete` NEVER cascades a
         // subtree — it fails loud and names the two explicit opt-in ops. The
@@ -2792,7 +2797,12 @@ mod advice_dismiss_tests {
         ops.execute_operation(&EntityName::new("block"), "create", create_params)
             .await
             .expect("create named source block");
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
 
         let src = "block:src".to_string();
 
@@ -2847,7 +2857,12 @@ mod advice_dismiss_tests {
 
         let c1 = seed_child(&backend, &anchor, "c1", "first").await;
         let c2 = seed_child(&backend, &anchor, "c2", "last").await;
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
 
         // Create `cmid` under the anchor, positioned AFTER c1 via the
         // canonical `after_block_id` positional key.
@@ -2862,7 +2877,12 @@ mod advice_dismiss_tests {
         ops.execute_operation(&EntityName::new("block"), "create", create_params)
             .await
             .expect("positioned create");
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
 
         let cmid = "block:cmid".to_string();
 
@@ -3089,7 +3109,12 @@ mod advice_dismiss_tests {
                 .await
                 .unwrap_or_else(|e| panic!("set {field}: {e}"));
         }
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
 
         let result = ops.delete(&c).await.expect("delete");
         let inverse = match &result.undo {
@@ -3155,7 +3180,12 @@ mod intent_boundary_tests {
         let backend = ops.get_backend("").await.expect("backend");
         let root = backend.create_placeholder_root("root").await.expect("root");
         let root_uri = EntityUri::parse_owned(root).expect("root uri");
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
 
         let mut fields: StorageEntity = HashMap::new();
         fields.insert("parent_id".into(), Value::String(root_uri.to_string()));
@@ -3263,7 +3293,12 @@ mod tag_op_tests {
     async fn add_tag_is_idempotent() {
         let (ops, _dir, backend) = ops_and_backend().await;
         make_block(&backend, "x", EntityUri::no_parent()).await;
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
 
         let first = run(&ops, "add_tag", "block:x", "todo").await;
         assert_eq!(tags_of(&backend, "block:x").await, vec!["todo".to_string()]);
@@ -3278,7 +3313,12 @@ mod tag_op_tests {
     async fn remove_tag_is_targeted_and_idempotent() {
         let (ops, _dir, backend) = ops_and_backend().await;
         make_block(&backend, "x", EntityUri::no_parent()).await;
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
         run(&ops, "add_tag", "block:x", "a").await;
         run(&ops, "add_tag", "block:x", "b").await;
 
@@ -3294,7 +3334,12 @@ mod tag_op_tests {
     async fn add_tag_inverse_round_trips() {
         let (ops, _dir, backend) = ops_and_backend().await;
         make_block(&backend, "x", EntityUri::no_parent()).await;
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
 
         let result = run(&ops, "add_tag", "block:x", "todo").await;
         let inverse = match result.undo {
@@ -3320,7 +3365,12 @@ mod tag_op_tests {
         let (ops, _dir, backend) = ops_and_backend().await;
         make_block(&backend, "parent", EntityUri::no_parent()).await;
         make_block(&backend, "child", EntityUri::block("parent")).await;
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
 
         // Parent is a non-page block → reject.
         let mut params: StorageEntity = HashMap::new();
@@ -3355,7 +3405,12 @@ mod tag_op_tests {
         let (ops, _dir, backend) = ops_and_backend().await;
         make_block(&backend, "parent", EntityUri::no_parent()).await;
         make_block(&backend, "child", EntityUri::block("parent")).await;
-        ops.save_doc("").await.expect("save");
+        ops.shared_doc_store()
+            .read()
+            .await
+            .save_all()
+            .await
+            .expect("save");
         run(&ops, "add_tag", "block:parent", PAGE_TAG).await;
         run(&ops, "add_tag", "block:child", PAGE_TAG).await;
 

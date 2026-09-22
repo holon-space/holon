@@ -48,7 +48,6 @@ const REQUIRED_SPANS: &[&str] = &[
     "dispatcher.execute_operation",
     "backend.execute_operation",
     "execute",
-    "export",
     "commit_internal",
     "provider.orgmode.sync_changes",
 ];

@@ -784,6 +784,13 @@ async fn compose_sut_seeded_impl(
             frontend_sync_handle.clone(),
         ))
         .register(&mut loro_caps);
+        if let (Some(store), Some(sync)) = (&frontend_loro_store, &frontend_sync_handle) {
+            Arc::new(holon_loro_testing::LoroSnapshotDurability::new(
+                store,
+                sync.clone(),
+            ))
+            .register(&mut loro_caps);
+        }
         // The peer-mesh surface (`SutLoro`) is contributed whenever the `doc_store` it
         // drives over is the SAME doc whose mutations reach the canonical `SutBackend`
         // the block invariants read — so a merged peer block is observable there:

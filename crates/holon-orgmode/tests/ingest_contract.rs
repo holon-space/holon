@@ -389,6 +389,10 @@ impl holon_core::downstream_projection::DownstreamProjection for DirectProjectio
     ) -> holon_core::traits::Result<holon_core::downstream_projection::ProjectionPass> {
         Ok(holon_core::downstream_projection::ProjectionPass::Converged)
     }
+
+    async fn consolidator_behind_sink(&self) -> holon_core::traits::Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Ordering double that lands `create_in_tree` into the block store, so the

@@ -5604,6 +5604,10 @@ mod tests {
         async fn flush(&self) -> holon_core::traits::Result<holon_core::ProjectionPass> {
             Ok(self.0)
         }
+
+        async fn consolidator_behind_sink(&self) -> holon_core::traits::Result<bool> {
+            Ok(false)
+        }
     }
 
     /// Like `make_backend`, but wires a `RecordingSqlOps` so mount/descendant

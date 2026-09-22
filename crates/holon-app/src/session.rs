@@ -119,6 +119,25 @@ pub async fn shutdown_session(injector: &fluxdi::Injector) -> Result<()> {
         .shutdown(holon_api::lifecycle::DEFAULT_SHUTDOWN_TIMEOUT)
         .await?;
 
+    // `LoroConfig` is registered exactly when the CRDT layer is on.
+    if injector
+        .try_resolve::<holon_loro_wiring::LoroConfig>()
+        .is_ok()
+    {
+        let store = injector
+            .try_resolve::<holon_loro::LoroDocumentStore>()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "shutdown: a CRDT session must resolve its LoroDocumentStore to save it, but \
+                     resolution failed: {e}"
+                )
+            })?;
+        store
+            .save_all()
+            .await
+            .map_err(|e| anyhow::anyhow!("shutdown: saving the Loro snapshot failed: {e:#}"))?;
+    }
+
     // Which substrate this container holds is a registered value, so a Turso
     // wiring whose engine will not resolve is a failure, not "no actor here".
     match *injector.resolve::<holon::di::StorageSelector>() {

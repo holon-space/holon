@@ -1612,6 +1612,16 @@ pub trait SutLoroTaskState {
     async fn loro_task_state_of(&self, block_id: &str) -> Option<String>;
 }
 
+/// The on-disk `.loro` snapshot measured against what the SQL projection
+/// already reflects. Wired only where the Loro store persists and a live
+/// projection writes SQL from it.
+#[holon_macros::capmap_adapter]
+pub trait SutLoroDurability {
+    /// `None` when the snapshot on disk holds every Loro change the projection
+    /// has written to SQL; otherwise what is missing from it.
+    async fn loro_snapshot_lag(&self) -> Option<String>;
+}
+
 // ─── ViewModel/Renderer cluster ──────────────────────────────────────
 //
 // Binds: ViewModel-touching invariants (`inv-viewmodel-*`,

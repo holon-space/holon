@@ -5,3 +5,4 @@
 pub mod loro_blocks_match_ref;
 pub mod loro_children_match_ref;
 pub mod loro_no_errors;
+pub mod loro_snapshot_covers_projection;

@@ -58,4 +58,10 @@ pub trait DownstreamProjection: Send + Sync {
     /// [`ProjectionPass::Incomplete`] — it is not an error, but it is not
     /// success either.
     async fn flush(&self) -> Result<ProjectionPass>;
+
+    /// Whether the sink already reflects consolidator changes the
+    /// consolidator's loaded state does not hold: it was reloaded from a
+    /// snapshot older than the sink. The sink and the per-file content hashes
+    /// then prove nothing about what the consolidator holds.
+    async fn consolidator_behind_sink(&self) -> Result<bool>;
 }

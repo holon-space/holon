@@ -11,6 +11,7 @@ mod loro_projection_unarmed_delete;
 mod loro_projection_withheld_delete;
 mod loro_read_model_publish_ordering_and_disclosure;
 mod loro_restart_unseeded_vault;
+mod loro_snapshot_durability;
 mod loro_sync_controller_pbt;
 mod loro_unseeded_vault_split;
 mod projection_harness;

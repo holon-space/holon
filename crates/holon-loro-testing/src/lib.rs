@@ -48,6 +48,7 @@
 pub mod component;
 #[cfg(test)]
 mod convergence_pbt;
+pub mod durability;
 pub mod invariants;
 pub mod peer_ops;
 pub mod quiescence;
@@ -57,6 +58,7 @@ pub mod sut_loro;
 pub mod transitions;
 
 pub use component::LoroBackendComponent;
+pub use durability::LoroSnapshotDurability;
 use holon_pbt_core::contribution::CrateId;
 use holon_pbt_core::contribution::PbtContribution;
 use holon_pbt_core::contribution::PbtFootprint;
@@ -76,6 +78,7 @@ pub fn pbt_contribution() -> PbtContribution {
             invariants::loro_no_errors::wire(),
             invariants::loro_children_match_ref::wire(),
             invariants::loro_blocks_match_ref::wire(),
+            invariants::loro_snapshot_covers_projection::wire(),
         ],
         cap_installers: Vec::new(),
         generators: Vec::new(),

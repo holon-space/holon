@@ -142,6 +142,10 @@ impl DownstreamProjection for CountingProjection {
         *self.0.lock().unwrap() += 1;
         Ok(ProjectionPass::Converged)
     }
+
+    async fn consolidator_behind_sink(&self) -> holon_core::Result<bool> {
+        Ok(false)
+    }
 }
 
 struct Fixture {

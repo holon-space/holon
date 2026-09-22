@@ -329,23 +329,6 @@ async fn loro_snapshot_path(env: &TestEnvironment) -> Option<std::path::PathBuf>
     Some(dir.join("holon_tree.loro"))
 }
 
-/// Force the live Loro store to write its snapshot to disk, so the PreRestart
-/// shapes damage REAL persisted data instead of planting a novel file.
-/// `wait_for_loro_quiescence` only settles the sync controller; it does not
-/// promise a flush, which left the injector fabricating a 4-byte file most
-/// runs.
-async fn persist_loro_snapshot(env: &TestEnvironment) -> Result<(), String> {
-    let store = env
-        .loro_doc_store()
-        .ok_or_else(|| "Loro is disabled in this environment".to_string())?;
-    store
-        .read()
-        .await
-        .save_all()
-        .await
-        .map_err(|e| format!("save_all failed: {e:#}"))
-}
-
 /// Overwrite/delete the Loro snapshot with the shape's bytes.
 ///
 /// `Ok(description)` = real persisted data was damaged. `Err(description)` =
@@ -599,14 +582,9 @@ pub async fn run_loro_scenario(
     injected: &AtomicBool,
 ) -> Result<ScenarioReport, SetupFailure> {
     let (pre_raw, pre_ui) = setup_seeded_app(env).await?;
+    // The projection saves the snapshot before each pass reaches SQL, so a
+    // quiescent session already has it on disk.
     env.wait_for_loro_quiescence(Duration::from_secs(15)).await;
-    // Quiescence settles the sync controller but does NOT promise a flush, so
-    // force the snapshot to disk — otherwise the injector plants a novel file.
-    if let Err(e) = persist_loro_snapshot(env).await {
-        return Err(SetupFailure(format!(
-            "could not persist Loro snapshot: {e}"
-        )));
-    }
     // Resolve the snapshot path WHILE RUNNING — `stop_app` clears the store.
     let snap_path = loro_snapshot_path(env).await;
     reset_problems();

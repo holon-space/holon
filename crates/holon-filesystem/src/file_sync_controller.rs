@@ -1437,6 +1437,24 @@ impl FileSyncController {
             }
         }
 
+        // A matching hash proves the consolidator holds the file's blocks only
+        // while the consolidator is not behind the sink that stamped the hash.
+        let consolidator_behind_sink = match &self.downstream {
+            Some(downstream) => downstream.consolidator_behind_sink().await.map_err(|e| {
+                anyhow::anyhow!("[FileSyncController] consolidator_behind_sink: {e}")
+            })?,
+            None => false,
+        };
+        if consolidator_behind_sink {
+            warn!(
+                "[FileSyncController] the Loro snapshot loaded at boot is older than the SQL \
+                 index (it lost writes SQL already holds), so no file hash proves what Loro \
+                 holds: re-ingesting all {} files this boot to restore the lost blocks",
+                self.last_projection_hash.len()
+            );
+            self.last_projection_hash.clear();
+        }
+
         // last_projection (full rendered string) is intentionally NOT eagerly
         // populated by walking every block — it's a session-only cache used
         // for echo suppression, populated lazily on first miss by
@@ -9048,6 +9066,10 @@ mod downstream_flush_tests {
                 .unwrap()
                 .next()
                 .unwrap_or(ProjectionPass::Converged))
+        }
+
+        async fn consolidator_behind_sink(&self) -> holon_core::traits::Result<bool> {
+            Ok(false)
         }
     }
 

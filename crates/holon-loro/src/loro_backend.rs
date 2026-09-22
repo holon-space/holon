@@ -6420,8 +6420,8 @@ mod half_born_node_tests {
         (live.len(), half_born)
     }
 
-    /// Every block operation ends in `save_doc` → `LoroDocumentStore::save_all`
-    /// (`loro_block_operations.rs`, ~13 call sites), so a save on one task can
+    /// The projection saves the snapshot on its own task
+    /// (`LoroDocumentStore::save_all` before every sink write), so a save can
     /// land in another task's create window. This drives exactly that: the save
     /// thread wakes in the middle of a deliberately widened create.
     ///

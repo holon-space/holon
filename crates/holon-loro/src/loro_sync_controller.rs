@@ -1424,6 +1424,15 @@ impl LoroProjection {
         mode: &str,
         reason: &str,
     ) -> Result<()> {
+        // Every pass read the tree before this point, so the saved snapshot
+        // holds at least what the sink and the sidecar are about to reflect.
+        self.doc_store
+            .read()
+            .await
+            .save_all()
+            .await
+            .context("save the Loro snapshot before the SQL sink reflects it")?;
+
         // FK-safe create ordering — the single write chokepoint's guarantee.
         // The `block_raw.parent_id` self-FK is DEFERRABLE INITIALLY DEFERRED, but
         // the Turso fork only *decrements* the deferred-FK counter on a parent-key
@@ -1572,6 +1581,21 @@ impl holon_core::DownstreamProjection for LoroProjection {
         self.project()
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
+    }
+
+    /// The synced watermark is advanced only after the snapshot is saved, so a
+    /// loaded global doc missing any of its ids was reloaded from a snapshot
+    /// that lost writes SQL already holds.
+    async fn consolidator_behind_sink(&self) -> holon_core::traits::Result<bool> {
+        let (collab, _) = self
+            .docs()
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?;
+        let loaded = collab
+            .with_read(|doc| Ok(doc.oplog_vv()))
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?;
+        let synced = self.last_synced.lock().unwrap().clone();
+        Ok(synced.iter().any(|id| !loaded.includes_id(id)))
     }
 }
 

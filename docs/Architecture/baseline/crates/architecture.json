@@ -4661,6 +4661,9 @@
                     "name": "loro_restart_unseeded_vault.rs"
                   },
                   {
+                    "name": "loro_snapshot_durability.rs"
+                  },
+                  {
                     "name": "loro_sync_controller_pbt.rs"
                   },
                   {
@@ -5542,6 +5545,9 @@
                   },
                   {
                     "name": "loro_no_errors.rs"
+                  },
+                  {
+                    "name": "loro_snapshot_covers_projection.rs"
                   }
                 ]
               },
@@ -5576,6 +5582,9 @@
               },
               {
                 "name": "convergence_pbt.rs"
+              },
+              {
+                "name": "durability.rs"
               },
               {
                 "name": "invariants.rs"

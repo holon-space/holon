@@ -394,12 +394,11 @@ mod tests {
         assert_eq!(got, vec!["a", "b"]);
     }
 
-    /// Persistence: a mutation through `LoroBlockOperations` (which calls
-    /// `save_doc` → `LoroDocumentStore::save_all`) must survive reopening a
-    /// fresh store over the same `storage_dir` — the file-backed no-Turso
-    /// durability guarantee the prod wiring relies on.
+    /// A mutation through `LoroBlockOperations` lands in the store's document,
+    /// so the store's save persists it across reopening a fresh store over the
+    /// same `storage_dir`.
     #[tokio::test]
-    async fn loro_block_op_persists_across_store_reopen() {
+    async fn loro_block_op_persists_across_store_save_and_reopen() {
         use holon_api::Value;
         use holon_core::CrudOperations;
 
@@ -420,14 +419,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            let ops = LoroBlockOperations::new(Arc::new(RwLock::new(doc_store)));
+            let ops = LoroBlockOperations::new(Arc::new(RwLock::new(doc_store.clone())));
             ops.set_field(
                 child.id.as_str(),
                 "content",
                 Value::String("persisted".into()),
             )
             .await
-            .unwrap(); // save_doc → save_all writes the .loro snapshot to `dir`
+            .unwrap();
+            doc_store.save_all().await.unwrap();
             child.id.to_string()
         }; // drop everything — only the on-disk snapshot remains
 

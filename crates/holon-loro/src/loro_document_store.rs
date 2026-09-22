@@ -75,6 +75,11 @@ pub struct LoroDocumentStore {
     /// `Clone`; a per-clone counter would compact on every clone's first save).
     #[cfg(not(target_arch = "wasm32"))]
     save_counter: Arc<std::sync::atomic::AtomicU64>,
+    /// The oplog frontiers each snapshot file holds, keyed by doc id. Held
+    /// across a whole `save_all`, so two savers cannot rename their files in
+    /// the opposite order to their exports.
+    #[cfg(not(target_arch = "wasm32"))]
+    saved: Arc<tokio::sync::Mutex<HashMap<&'static str, loro::Frontiers>>>,
     /// Peer id to mint both docs under. `None` = the env/random default
     /// in `LoroDocument::new`. Two instances in ONE process must each
     /// inject their own — the env var is process-global and would collide.
@@ -104,6 +109,8 @@ impl LoroDocumentStore {
             doc_id_aliases: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(not(target_arch = "wasm32"))]
             save_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(not(target_arch = "wasm32"))]
+            saved: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             peer_id: None,
             text_undo: Arc::new(std::sync::OnceLock::new()),
         }
@@ -294,9 +301,34 @@ impl LoroDocumentStore {
         self.get_doc(DocScope::Global).await
     }
 
+    /// Write every loaded document whose committed state is not on disk yet;
+    /// a document already saved at its current frontiers is skipped.
+    ///
+    /// Anything that makes a Loro change visible outside the document (the SQL
+    /// projection, a session quit) calls this first, so the snapshot on disk is
+    /// never behind what the rest of the system already reflects.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn save_all(&self) -> Result<()> {
         use std::sync::atomic::Ordering;
+
+        use anyhow::Context;
+
+        let mut saved = self.saved.lock().await;
+        let mut behind = Vec::new();
+        for scope in [DocScope::Global, DocScope::Layout] {
+            let slot = self.doc_slot(scope).read().await;
+            let Some(doc) = slot.as_ref() else { continue };
+            // Read before the export, so the recorded frontiers never claim
+            // more than the file holds.
+            let frontiers = doc.with_read(|d| Ok(d.oplog_frontiers()))?;
+            if saved.get(scope.doc_id()) != Some(&frontiers) {
+                behind.push((scope, doc.clone(), frontiers));
+            }
+        }
+        if behind.is_empty() {
+            return Ok(());
+        }
+
         // Periodic history compaction: every Nth save (incl. the first save of
         // a session, which sheds history accumulated in prior sessions) write a
         // shallow snapshot instead of a full one. Holon undo replays the
@@ -310,18 +342,19 @@ impl LoroDocumentStore {
             .unwrap_or(true)
             && n.is_multiple_of(COMPACT_EVERY);
 
-        for scope in [DocScope::Global, DocScope::Layout] {
-            let doc = self.doc_slot(scope).read().await;
-            let Some(d) = doc.as_ref() else { continue };
+        for (scope, doc, frontiers) in behind {
             let path = self.snapshot_path(scope);
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create the Loro dir {}", parent.display()))?;
             }
             if compact {
-                d.save_compact_to_file(&path)?;
+                doc.save_compact_to_file(&path)
             } else {
-                d.save_to_file(&path)?;
+                doc.save_to_file(&path)
             }
+            .with_context(|| format!("save {} to {}", scope.doc_id(), path.display()))?;
+            saved.insert(scope.doc_id(), frontiers);
         }
         Ok(())
     }
