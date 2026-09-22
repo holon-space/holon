@@ -260,7 +260,6 @@ fn a_real_id_inside_a_template_still_becomes_a_typed_edge() {
 #[test]
 fn instantiating_the_shipped_compass_problem_yields_a_real_contributes_to_edge() {
     use holon_api::template_instantiation::InstantiateRequest;
-    use holon_api::template_instantiation::TemplateNode;
     use holon_api::template_instantiation::plan_instantiation;
 
     let asset = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/default/Compass.org");
@@ -285,18 +284,8 @@ fn instantiating_the_shipped_compass_problem_yields_a_real_contributes_to_edge()
         "the slot must reach the store as authored, else instantiation has nothing to substitute"
     );
 
-    let node = TemplateNode {
-        id: root.id.id().to_string(),
-        parent_id: String::new(),
-        content: root.content.clone(),
-        properties: Some(
-            serde_json::to_string(&root.properties_map()).expect("properties serialize"),
-        ),
-        ..TemplateNode::default()
-    };
-
     let request = InstantiateRequest {
-        template_id: node.id.clone(),
+        template_id: root.id.as_str().to_string(),
         target_parent: "block:target-page".to_string(),
         context_key: "test-instantiation".to_string(),
         bindings: [
@@ -309,7 +298,12 @@ fn instantiating_the_shipped_compass_problem_yields_a_real_contributes_to_edge()
         replace_block: None,
     };
 
-    let plan = plan_instantiation(std::slice::from_ref(&node), &request)
+    let root = holon_api::StoredBlock {
+        block: root.clone(),
+        block_type: None,
+        completed: None,
+    };
+    let plan = plan_instantiation(std::slice::from_ref(&root), &request)
         .expect("instantiating the shipped compass-problem template must succeed");
 
     let created = plan.creates.first().expect("one create for the root");

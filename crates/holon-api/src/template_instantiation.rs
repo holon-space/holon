@@ -14,6 +14,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 
+use crate::Block;
 // Property keys live in `crate::template` (single spelling shared with the
 // frontend picker); re-exported here so existing `TEMPLATE_MARKER_PROPERTY`
 // references and `{TEMPLATE_MARKER_PROPERTY}` format strings keep resolving.
@@ -22,11 +23,11 @@ use crate::MarkSpan;
 // `StorageEntity` is the SAME `HashMap<Arc<str>, Value>` alias in both crates;
 // this planner is pure and backend-free, so it uses holon-api's own alias.
 use crate::StorageEntity;
+use crate::StoredBlock;
 pub use crate::TEMPLATE_MARKER_PROPERTY;
 pub use crate::TEMPLATE_VARS_PROPERTY;
 use crate::Value;
 use crate::effect_id::deterministic_instance_id;
-use crate::marks_from_json;
 use crate::marks_to_json;
 
 /// The org identity property (`:ID:` drawer entry, lifted into `properties` by
@@ -189,28 +190,6 @@ impl InstantiateRequest {
     }
 }
 
-/// One node of a loaded template subtree, in the shape the planner consumes.
-/// Produced by a `TemplateSource` implementation (in the `holon` crate) from
-/// its storage rows.
-#[derive(Clone, Debug, Default)]
-pub struct TemplateNode {
-    pub id: String,
-    pub parent_id: String,
-    pub content: String,
-    pub content_type: String,
-    pub block_type: String,
-    pub sort_key: String,
-    pub collapsed: bool,
-    pub widget_only: bool,
-    pub completed: bool,
-    pub source_language: Option<String>,
-    pub source_name: Option<String>,
-    /// The row's `properties` JSON (an object), if any.
-    pub properties: Option<String>,
-    /// The row's `marks` JSON (a `Vec<MarkSpan>` array), if any.
-    pub marks: Option<String>,
-}
-
 /// The computed instantiation: ordered (parent-before-child) `create` param
 /// maps plus the instance root id.
 #[derive(Clone, Debug)]
@@ -220,16 +199,18 @@ pub struct InstantiationPlan {
 }
 
 /// Build the instantiation plan. `nodes` must be the template subtree in
-/// parent-before-child order with the template root first (siblings in
-/// `sort_key` order so copied children keep their relative order).
+/// parent-before-child order with the template root first and siblings in
+/// order: the creates come out in that order, and each lands as its parent's
+/// last child, so the instance keeps the template's sibling order.
 pub fn plan_instantiation(
-    nodes: &[TemplateNode],
+    nodes: &[StoredBlock],
     request: &InstantiateRequest,
 ) -> Result<InstantiationPlan> {
-    let root = nodes
+    let root = &nodes
         .first()
-        .with_context(|| format!("template '{}' has no blocks", request.template_id))?;
-    if root.id != request.template_id {
+        .with_context(|| format!("template '{}' has no blocks", request.template_id))?
+        .block;
+    if root.id.as_str() != request.template_id {
         bail!(
             "template subtree root '{}' does not match requested template_id '{}'",
             root.id,
@@ -244,10 +225,10 @@ pub fn plan_instantiation(
         );
     }
     let vars = match template_marker_value(&root_props, TEMPLATE_VARS_PROPERTY) {
-        Some(serde_json::Value::String(raw)) => TemplateVars::parse(raw)
+        Some(Value::String(raw)) => TemplateVars::parse(raw)
             .with_context(|| format!("template '{}': invalid template_vars", root.id))?,
         Some(other) => bail!(
-            "template '{}': '{TEMPLATE_VARS_PROPERTY}' must be a string, got {other}",
+            "template '{}': '{TEMPLATE_VARS_PROPERTY}' must be a string, got {other:?}",
             root.id
         ),
         None => TemplateVars::default(),
@@ -296,10 +277,10 @@ pub fn plan_instantiation(
         }
         Ok(())
     };
-    for node in nodes {
+    for StoredBlock { block: node, .. } in nodes {
         check_text(&node.content)?;
         for value in parse_properties(node)?.values() {
-            if let serde_json::Value::String(s) = value {
+            if let Value::String(s) = value {
                 check_text(s)?;
             }
         }
@@ -315,14 +296,15 @@ pub fn plan_instantiation(
 
     // Second pass: mint ids, substitute, and build the create params.
     let mut id_map: BTreeMap<&str, String> = BTreeMap::new();
-    for node in nodes {
+    for StoredBlock { block: node, .. } in nodes {
         let new_id =
-            deterministic_instance_id(&request.template_id, &request.context_key, &node.id);
+            deterministic_instance_id(&request.template_id, &request.context_key, node.id.as_str());
         id_map.insert(node.id.as_str(), new_id.as_str().to_string());
     }
 
     let mut creates = Vec::with_capacity(nodes.len());
-    for (index, node) in nodes.iter().enumerate() {
+    for (index, stored) in nodes.iter().enumerate() {
+        let node = &stored.block;
         let is_root = index == 0;
         let new_parent = if is_root {
             request.target_parent.clone()
@@ -340,15 +322,10 @@ pub fn plan_instantiation(
         };
 
         let (content, replacements) = substitute(&node.content, &effective)?;
-        let marks = match &node.marks {
-            Some(json) if !json.is_empty() => {
-                let spans = marks_from_json(json)
-                    .with_context(|| format!("template node '{}': invalid marks JSON", node.id))?;
-                let remapped = remap_marks(&spans, &replacements);
-                Some(marks_to_json(&remapped))
-            }
-            _ => None,
-        };
+        let marks = node
+            .marks
+            .as_ref()
+            .map(|spans| marks_to_json(&remap_marks(spans, &replacements)));
 
         let mut props = parse_properties(node)?;
         // Strip identity/meta properties that must not propagate (the `ID`
@@ -358,9 +335,9 @@ pub fn plan_instantiation(
             props.remove(*key);
         }
         for value in props.values_mut() {
-            if let serde_json::Value::String(s) = value {
+            if let Value::String(s) = value {
                 let (substituted, _) = substitute(s, &effective)?;
-                *value = serde_json::Value::String(substituted);
+                *value = Value::String(substituted);
             }
         }
         if is_root {
@@ -368,7 +345,7 @@ pub fn plan_instantiation(
             remove_template_marker(&mut props, TEMPLATE_VARS_PROPERTY);
             props.insert(
                 INSTANCE_OF_PROPERTY.to_string(),
-                serde_json::Value::String(request.template_id.clone()),
+                Value::String(request.template_id.clone()),
             );
         }
 
@@ -379,20 +356,11 @@ pub fn plan_instantiation(
         put("id", Value::String(id_map[node.id.as_str()].clone()));
         put("parent_id", Value::String(new_parent));
         put("content", Value::String(content));
-        put("content_type", Value::String(node.content_type.clone()));
-        put("block_type", Value::String(node.block_type.clone()));
+        put("content_type", Value::String(node.content_type.to_string()));
         put("collapsed", Value::Boolean(node.collapsed));
         put("widget_only", Value::Boolean(node.widget_only));
-        put("completed", Value::Boolean(node.completed));
-        if !is_root {
-            // Copying the template's fractional keys preserves sibling order
-            // inside the instance. The root's key is left to the provider —
-            // it lands among existing siblings of `target_parent` like any
-            // rule-created block.
-            put("sort_key", Value::String(node.sort_key.clone()));
-        }
         if let Some(lang) = &node.source_language {
-            put("source_language", Value::String(lang.clone()));
+            put("source_language", Value::String(lang.to_string()));
         }
         if let Some(name) = &node.source_name {
             put("source_name", Value::String(name.clone()));
@@ -400,10 +368,14 @@ pub fn plan_instantiation(
         if let Some(marks_json) = marks {
             put("marks", Value::String(marks_json));
         }
+        if let Some(block_type) = &stored.block_type {
+            put("block_type", Value::String(block_type.clone()));
+        }
+        if let Some(completed) = stored.completed {
+            put("completed", Value::Boolean(completed));
+        }
         if !props.is_empty() {
-            let json =
-                serde_json::to_string(&serde_json::Value::Object(props.into_iter().collect()))
-                    .expect("property map serialization is total");
+            let json = serde_json::to_string(&props).expect("property map serialization is total");
             put("properties", Value::String(json));
         }
         creates.push(params);
@@ -415,51 +387,39 @@ pub fn plan_instantiation(
     })
 }
 
-fn parse_properties(node: &TemplateNode) -> Result<BTreeMap<String, serde_json::Value>> {
-    match &node.properties {
-        None => Ok(BTreeMap::new()),
-        Some(raw) if raw.trim().is_empty() => Ok(BTreeMap::new()),
-        Some(raw) => {
-            let parsed: serde_json::Value = serde_json::from_str(raw).with_context(|| {
-                format!("template node '{}': properties is not valid JSON", node.id)
-            })?;
-            match parsed {
-                serde_json::Value::Object(map) => Ok(map.into_iter().collect()),
-                other => bail!(
-                    "template node '{}': properties must be a JSON object, got {other}",
-                    node.id
-                ),
-            }
-        }
-    }
+fn parse_properties(node: &Block) -> Result<BTreeMap<String, Value>> {
+    node.properties
+        .iter()
+        .map(|(k, v)| match v {
+            Value::Removed(_) => bail!(
+                "template node '{}': property '{k}' holds the write-leg removal sentinel",
+                node.id
+            ),
+            v => Ok((k.clone(), v.clone())),
+        })
+        .collect()
 }
 
 /// Case-insensitive lookup for template-marker keys. Delegates the casing rule
 /// to the shared authority in `crate::template` so the planner and the
 /// frontend picker can never diverge on `:TEMPLATE:` (org, uppercase) vs
 /// `template` (programmatic, lowercase).
-fn template_marker_key<'a>(
-    props: &'a BTreeMap<String, serde_json::Value>,
-    marker: &str,
-) -> Option<&'a String> {
+fn template_marker_key<'a>(props: &'a BTreeMap<String, Value>, marker: &str) -> Option<&'a String> {
     let matched =
         crate::template::find_template_marker_key(props.keys().map(String::as_str), marker)?;
     props.get_key_value(matched).map(|(k, _)| k)
 }
 
 fn template_marker_value<'a>(
-    props: &'a BTreeMap<String, serde_json::Value>,
+    props: &'a BTreeMap<String, Value>,
     marker: &str,
-) -> Option<&'a serde_json::Value> {
+) -> Option<&'a Value> {
     template_marker_key(props, marker).and_then(|k| props.get(k))
 }
 
 /// Remove a template-marker key case-insensitively, returning the
 /// actual key that was removed (if any).
-fn remove_template_marker(
-    props: &mut BTreeMap<String, serde_json::Value>,
-    marker: &str,
-) -> Option<String> {
+fn remove_template_marker(props: &mut BTreeMap<String, Value>, marker: &str) -> Option<String> {
     let key = template_marker_key(props, marker).cloned();
     if let Some(ref k) = key {
         props.remove(k);
@@ -568,23 +528,41 @@ fn remap_marks(spans: &[MarkSpan], replacements: &[Replacement]) -> Vec<MarkSpan
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EntityUri;
     use crate::InlineMark;
+    use crate::marks_from_json;
 
-    fn node(id: &str, parent: &str, content: &str) -> TemplateNode {
-        TemplateNode {
-            id: id.to_string(),
-            parent_id: parent.to_string(),
+    fn node(id: &str, parent: &str, content: &str) -> Block {
+        Block {
+            id: EntityUri::from_raw(id),
+            parent_id: EntityUri::from_raw(parent),
             content: content.to_string(),
-            content_type: "text".to_string(),
-            block_type: "text".to_string(),
-            sort_key: "A0".to_string(),
-            ..TemplateNode::default()
+            ..Block::default()
         }
     }
 
-    fn template_root(id: &str, content: &str, vars: &str) -> TemplateNode {
+    fn plan(
+        nodes: impl IntoIterator<Item = Block>,
+        request: &InstantiateRequest,
+    ) -> Result<InstantiationPlan> {
+        let nodes: Vec<StoredBlock> = nodes
+            .into_iter()
+            .map(|block| StoredBlock {
+                block,
+                block_type: None,
+                completed: None,
+            })
+            .collect();
+        plan_instantiation(&nodes, request)
+    }
+
+    fn props(json: &str) -> std::collections::HashMap<String, Value> {
+        serde_json::from_str(json).expect("test properties are a JSON object")
+    }
+
+    fn template_root(id: &str, content: &str, vars: &str) -> Block {
         let mut n = node(id, "block:somewhere", content);
-        n.properties = Some(format!(r#"{{"template":"t","template_vars":"{vars}"}}"#));
+        n.properties = props(&format!(r#"{{"template":"t","template_vars":"{vars}"}}"#));
         n
     }
 
@@ -621,12 +599,11 @@ mod tests {
     #[test]
     fn plan_substitutes_content_and_properties_with_bindings_and_defaults() {
         let mut root = template_root("block:tpl", "{{date}}", "date, mood=neutral");
-        root.properties = Some(
-            r#"{"template":"t","template_vars":"date, mood=neutral","note":"feeling {{mood}}"}"#
-                .to_string(),
+        root.properties = props(
+            r#"{"template":"t","template_vars":"date, mood=neutral","note":"feeling {{mood}}"}"#,
         );
         let child = node("block:c1", "block:tpl", "Mood check: {{mood}} on {{date}}");
-        let plan = plan_instantiation(&[root, child], &request(&[("date", "2026-07-12")])).unwrap();
+        let plan = plan([root, child], &request(&[("date", "2026-07-12")])).unwrap();
 
         assert_eq!(plan.creates.len(), 2);
         let root_params = &plan.creates[0];
@@ -658,12 +635,11 @@ mod tests {
         // id — on org writeback+reload the duplicate collides and destroys the
         // template file. The denylist must strip "ID" from EVERY node.
         let mut root = template_root("block:tpl", "hi", "");
-        root.properties = Some(
-            r#"{"template":"t","template_vars":"","ID":"tpl-daily","keep":"yes"}"#.to_string(),
-        );
+        root.properties =
+            props(r#"{"template":"t","template_vars":"","ID":"tpl-daily","keep":"yes"}"#);
         let mut child = node("block:c1", "block:tpl", "child");
-        child.properties = Some(r#"{"ID":"tpl-daily-child","keep":"yes"}"#.to_string());
-        let plan = plan_instantiation(&[root, child], &request(&[])).unwrap();
+        child.properties = props(r#"{"ID":"tpl-daily-child","keep":"yes"}"#);
+        let plan = plan([root, child], &request(&[])).unwrap();
 
         for params in &plan.creates {
             let props: serde_json::Value =
@@ -679,9 +655,33 @@ mod tests {
     }
 
     #[test]
+    fn stored_block_type_and_completed_are_copied_and_absent_ones_stay_absent() {
+        let nodes = [
+            StoredBlock {
+                block: template_root("block:tpl", "root", ""),
+                block_type: Some("note".to_string()),
+                completed: Some(true),
+            },
+            StoredBlock {
+                block: node("block:c1", "block:tpl", "child"),
+                block_type: None,
+                completed: None,
+            },
+        ];
+        let plan = plan_instantiation(&nodes, &request(&[])).unwrap();
+        assert_eq!(get_str(&plan.creates[0], "block_type"), "note");
+        assert_eq!(
+            plan.creates[0].get("completed"),
+            Some(&Value::Boolean(true))
+        );
+        assert_eq!(plan.creates[1].get("block_type"), None);
+        assert_eq!(plan.creates[1].get("completed"), None);
+    }
+
+    #[test]
     fn missing_binding_fails_loud_listing_all() {
         let root = template_root("block:tpl", "{{date}} and {{title}}", "date, title");
-        let err = plan_instantiation(&[root], &request(&[])).unwrap_err();
+        let err = plan([root], &request(&[])).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("missing bindings"), "got: {msg}");
         assert!(msg.contains("date") && msg.contains("title"), "got: {msg}");
@@ -690,7 +690,7 @@ mod tests {
     #[test]
     fn undeclared_variable_reference_fails_loud() {
         let root = template_root("block:tpl", "{{typo}}", "date");
-        let err = plan_instantiation(&[root], &request(&[("date", "2026-07-12")])).unwrap_err();
+        let err = plan([root], &request(&[("date", "2026-07-12")])).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("undeclared variable") && msg.contains("typo"),
@@ -701,15 +701,14 @@ mod tests {
     #[test]
     fn unknown_binding_key_fails_loud() {
         let root = template_root("block:tpl", "{{date}}", "date");
-        let err =
-            plan_instantiation(&[root], &request(&[("date", "d"), ("nope", "x")])).unwrap_err();
+        let err = plan([root], &request(&[("date", "d"), ("nope", "x")])).unwrap_err();
         assert!(format!("{err:#}").contains("binding 'nope' is not declared"));
     }
 
     #[test]
     fn non_template_root_fails_loud() {
         let root = node("block:tpl", "block:p", "just a block");
-        let err = plan_instantiation(&[root], &request(&[])).unwrap_err();
+        let err = plan([root], &request(&[])).unwrap_err();
         assert!(format!("{err:#}").contains("is not a template"));
     }
 
@@ -721,14 +720,14 @@ mod tests {
                 node("block:c1", "block:tpl", "child"),
             ]
         };
-        let a = plan_instantiation(&mk(), &request(&[("date", "d")])).unwrap();
-        let b = plan_instantiation(&mk(), &request(&[("date", "d")])).unwrap();
+        let a = plan(mk(), &request(&[("date", "d")])).unwrap();
+        let b = plan(mk(), &request(&[("date", "d")])).unwrap();
         assert_eq!(a.root_id, b.root_id, "same context key → same ids");
         assert_eq!(get_str(&a.creates[1], "id"), get_str(&b.creates[1], "id"));
 
         let mut other = request(&[("date", "d")]);
         other.context_key = "another-key".to_string();
-        let c = plan_instantiation(&mk(), &other).unwrap();
+        let c = plan(mk(), &other).unwrap();
         assert_ne!(a.root_id, c.root_id, "different context key → new instance");
     }
 
@@ -754,8 +753,8 @@ mod tests {
                 mark: InlineMark::Bold,
             },
         ];
-        root.marks = Some(marks_to_json(&spans));
-        let plan = plan_instantiation(&[root], &request(&[("date", "2026-07-12")])).unwrap();
+        root.marks = Some(spans);
+        let plan = plan([root], &request(&[("date", "2026-07-12")])).unwrap();
         let params = &plan.creates[0];
         assert_eq!(get_str(params, "content"), "see 2026-07-12 now");
         let remapped = marks_from_json(get_str(params, "marks")).unwrap();
@@ -768,7 +767,7 @@ mod tests {
     #[test]
     fn unterminated_slot_fails_loud() {
         let root = template_root("block:tpl", "broken {{date", "date");
-        let err = plan_instantiation(&[root], &request(&[("date", "d")])).unwrap_err();
+        let err = plan([root], &request(&[("date", "d")])).unwrap_err();
         assert!(format!("{err:#}").contains("unterminated"));
     }
 

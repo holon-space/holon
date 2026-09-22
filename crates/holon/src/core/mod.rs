@@ -6,6 +6,7 @@ pub(crate) mod properties_bag_write;
 pub mod queryable_cache;
 pub mod sql_block_operations;
 pub mod sql_operation_provider;
+pub mod sql_write_authority;
 pub mod task_keyword_cycle;
 pub mod task_keyword_promotion;
 pub mod traits;

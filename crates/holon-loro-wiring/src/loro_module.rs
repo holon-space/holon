@@ -139,6 +139,9 @@ impl Module for LoroModule {
             };
             Shared::new(ops)
         }));
+        injector.provide::<dyn holon_core::WriteAuthorityReads>(Provider::root(|resolver| {
+            resolver.resolve::<LoroBlockOperations>() as Arc<dyn holon_core::WriteAuthorityReads>
+        }));
 
         // Register a Loro-aware `BlockCellRegistry`. `SqlBlockOperations`
         // consumes this so chord-time `split_block` / `join_block` reads

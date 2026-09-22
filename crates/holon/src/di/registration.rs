@@ -172,10 +172,17 @@ async fn create_initialized_engine(
     clock: Arc<dyn holon_api::Clock>,
     attribution: holon_core::integration_attribution::IntegrationAttribution,
     shutdown: Arc<holon_api::lifecycle::SessionShutdown>,
+    block_write_authority: Option<Arc<dyn holon_core::WriteAuthorityReads>>,
 ) -> Result<BackendEngine> {
     let backend_guard = backend.read().await;
     let db_handle = backend_guard.handle().clone();
     drop(backend_guard);
+    // No separate authority registered means SQL accepts block writes itself.
+    let block_write_authority = block_write_authority.unwrap_or_else(|| {
+        Arc::new(crate::core::sql_write_authority::SqlWriteAuthority::new(
+            db_handle.clone(),
+        ))
+    });
 
     let type_profiles = holon_profiles::type_profiles_from_registry(type_registry);
 
@@ -198,6 +205,7 @@ async fn create_initialized_engine(
         profile_resolver.clone(),
         build_sql_transformers(db_handle.schema_catalog()),
         graph_schema_registry,
+        block_write_authority,
     )
     .context("Failed to create BackendEngine")?;
     engine.install_integration_attribution(attribution);
@@ -664,6 +672,21 @@ pub fn register_core_services_with_backend(
                 // otherwise — fresh-db GPUI boot panicked in seed_default_layout).
                 let _history = inj.resolve_async::<DbReady<HistoryTables>>().await;
 
+                // Only `ServiceNotProvided` means "SQL is the authority"; any
+                // other resolve failure is a wiring fault, and reading the
+                // lagging projection instead would hide it.
+                let block_write_authority = match inj
+                    .try_resolve_async::<dyn holon_core::WriteAuthorityReads>()
+                    .await
+                {
+                    Ok(authority) => Some(authority),
+                    Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => None,
+                    Err(e) => panic!(
+                        "boot [component=turso stage=engine-resolve]: resolving the block write \
+                         authority failed: {e}"
+                    ),
+                };
+
                 Shared::new(
                     create_initialized_engine(
                         backend,
@@ -678,6 +701,7 @@ pub fn register_core_services_with_backend(
                         .clone(),
                         inj.resolve_async::<holon_api::lifecycle::SessionShutdown>()
                             .await,
+                        block_write_authority,
                     )
                     .await
                     // fluxdi async providers return `T`, not `Result<T>`, and

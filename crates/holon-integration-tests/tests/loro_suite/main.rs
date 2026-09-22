@@ -16,3 +16,4 @@ mod loro_sync_controller_pbt;
 mod loro_unseeded_vault_split;
 mod projection_harness;
 mod read_model_second_writer_census;
+mod template_instantiation_stored_columns;

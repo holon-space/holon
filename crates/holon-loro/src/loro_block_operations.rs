@@ -386,6 +386,28 @@ impl holon_core::WriteAuthorityReads for LoroBlockOperations {
             .map(|b| holon_core::BlockEntity::is_page(&b))
             .unwrap_or(false))
     }
+
+    async fn subtree(
+        &self,
+        root: &holon_api::EntityUri,
+    ) -> Result<Option<Vec<holon_api::StoredBlock>>> {
+        let backend = self.get_backend("").await?;
+        let root = match backend.get_stored_block(root.as_str()).await {
+            Ok(root) => root,
+            Err(ApiError::BlockNotFound { .. }) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let mut nodes = vec![root];
+        let mut next = 0;
+        while next < nodes.len() {
+            let parent = nodes[next].block.id.clone();
+            for child in backend.list_children(parent.as_str()).await? {
+                nodes.push(backend.get_stored_block(&child).await?);
+            }
+            next += 1;
+        }
+        Ok(Some(nodes))
+    }
 }
 
 #[async_trait]
@@ -1094,8 +1116,6 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 .await
                 .map_err(|e| format!("create: set position for {}: {e}", block.id))?;
         }
-
-        // Save
 
         // Re-fetch the block to get updated properties
         let block_with_props = backend

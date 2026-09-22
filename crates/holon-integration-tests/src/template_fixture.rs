@@ -184,31 +184,32 @@ mod tests {
     /// engine than the one under test.
     #[test]
     fn the_remap_agrees_with_production_plan_instantiation() {
+        use holon_api::Block;
+        use holon_api::EntityUri;
+        use holon_api::Value;
         use holon_api::template_instantiation::InstantiateRequest;
-        use holon_api::template_instantiation::TemplateNode;
         use holon_api::template_instantiation::plan_instantiation;
 
-        let root = TemplateNode {
-            id: TPL_ROOT.to_string(),
-            parent_id: String::new(),
+        let root = Block {
+            id: EntityUri::from_raw(TPL_ROOT),
             content: TPL_ROOT_CONTENT.to_string(),
-            content_type: "text".to_string(),
-            block_type: "text".to_string(),
-            sort_key: "A0".to_string(),
-            properties: Some(format!(
-                r#"{{"template":"t","template_vars":"{TPL_VARS}"}}"#
-            )),
-            ..TemplateNode::default()
+            properties: [
+                ("template".to_string(), Value::String("t".to_string())),
+                (
+                    "template_vars".to_string(),
+                    Value::String(TPL_VARS.to_string()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..Block::default()
         };
-        let child = TemplateNode {
-            id: TPL_CHILD.to_string(),
-            parent_id: TPL_ROOT.to_string(),
+        let child = Block {
+            id: EntityUri::from_raw(TPL_CHILD),
+            parent_id: EntityUri::from_raw(TPL_ROOT),
             content: TPL_CHILD_CONTENT.to_string(),
-            content_type: "text".to_string(),
-            block_type: "text".to_string(),
-            sort_key: "A0".to_string(),
-            marks: Some(tpl_child_marks_json()),
-            ..TemplateNode::default()
+            marks: Some(tpl_child_marks()),
+            ..Block::default()
         };
         let bindings = date("xyz");
         let request = InstantiateRequest {
@@ -218,7 +219,12 @@ mod tests {
             bindings: bindings.iter().cloned().collect(),
             replace_block: None,
         };
-        let plan = plan_instantiation(&[root, child], &request).expect("plan");
+        let nodes = [root, child].map(|block| holon_api::StoredBlock {
+            block,
+            block_type: None,
+            completed: None,
+        });
+        let plan = plan_instantiation(&nodes, &request).expect("plan");
 
         let expected_child = instantiated_child(&bindings);
         let child_params = &plan.creates[1];

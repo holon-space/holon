@@ -528,9 +528,13 @@ mod tests {
             let mut params = StorageEntity::new();
             params.insert("id".into(), Value::String(id.to_string()));
             params.insert("content".into(), Value::String(content.to_string()));
-            if let Some(p) = parent {
-                params.insert("parent_id".into(), Value::String(p.to_string()));
-            }
+            params.insert(
+                "parent_id".into(),
+                Value::String(parent.map_or_else(
+                    || holon_api::EntityUri::no_parent().to_string(),
+                    str::to_string,
+                )),
+            );
             if let Some((name, vars)) = props {
                 params.insert("template".into(), Value::String(name.to_string()));
                 params.insert("template_vars".into(), Value::String(vars.to_string()));
@@ -669,9 +673,13 @@ mod tests {
             let mut params = StorageEntity::new();
             params.insert("id".into(), Value::String(id.to_string()));
             params.insert("content".into(), Value::String(content.to_string()));
-            if let Some(p) = parent {
-                params.insert("parent_id".into(), Value::String(p.to_string()));
-            }
+            params.insert(
+                "parent_id".into(),
+                Value::String(parent.map_or_else(
+                    || holon_api::EntityUri::no_parent().to_string(),
+                    str::to_string,
+                )),
+            );
             if let Some((name, vars)) = props {
                 params.insert("template".into(), Value::String(name.to_string()));
                 params.insert("template_vars".into(), Value::String(vars.to_string()));

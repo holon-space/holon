@@ -3932,6 +3932,39 @@ impl LoroBackend {
         Ok(Seen::Never)
     }
 
+    /// The block plus the `block_type` and `completed` values its meta holds;
+    /// both live in the property map, which [`Block::properties`] never shows.
+    pub async fn get_stored_block(&self, id: &str) -> Result<holon_api::StoredBlock, ApiError> {
+        let target = self.resolve_write_target(id).await?;
+        let (read_doc, tree_id) = self.target_doc(&target);
+        read_doc
+            .with_read(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                let block = read_block_from_tree(&tree, tree_id, get_node_parent(&tree, tree_id));
+                let meta = tree
+                    .get_meta(tree_id)
+                    .map_err(|e| anyhow::anyhow!("get_meta({tree_id:?}): {e}"))?;
+                let block_type = match read_scalar_field_from_meta(&meta, "block_type") {
+                    None => None,
+                    Some(Value::String(s)) => Some(s),
+                    Some(other) => anyhow::bail!("block_type is not a string: {other:?}"),
+                };
+                let completed = match read_scalar_field_from_meta(&meta, "completed") {
+                    None => None,
+                    Some(Value::Boolean(b)) => Some(b),
+                    Some(other) => anyhow::bail!("completed is not a boolean: {other:?}"),
+                };
+                Ok(holon_api::StoredBlock {
+                    block,
+                    block_type,
+                    completed,
+                })
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("get_stored_block({id}): {e:#}"),
+            })
+    }
+
     /// The Loro tree's fractional index for `id` — the adapter's internal
     /// ordering encoding the projector writes to SQL `sort_key` (ADR 0005).
     /// `None` when the node carries no index yet. Tie-disambiguated the same

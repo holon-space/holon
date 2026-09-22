@@ -45,7 +45,7 @@ pub async fn wait_for_loro_quiescence_on(
                 .doc()
                 .oplog_frontiers()
         };
-        if handle.last_synced_frontiers() == current {
+        if handle.last_synced_frontiers() == current && handle.pending_is_empty() {
             span.record("attempts", attempts);
             span.record("timed_out", false);
             return Ok(());

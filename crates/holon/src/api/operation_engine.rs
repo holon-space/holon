@@ -136,10 +136,10 @@ pub struct DispatchingOperationEngine {
     /// discarded (D116.a). Non-zero is disclosed on the degraded bus by the
     /// session wiring; zero is the ordinary case.
     discarded_at_boot: usize,
-    /// Read capability for `instantiate_template`
-    /// (docs/Proposals/Templating-2026-07-12.md). `None` on a wiring without a
-    /// queryable block projection — the operation then fails loud, disclosed.
-    template_source: Option<Arc<dyn crate::api::template_source::TemplateSource>>,
+    /// Whoever accepts block writes, read by `instantiate_template`
+    /// (docs/Proposals/Templating-2026-07-12.md) so a template written moments
+    /// ago is found. `None` disables the operation, disclosed.
+    write_authority: Option<Arc<dyn holon_core::WriteAuthorityReads>>,
     /// Resolver for the owning document's `#+TODO:` vocabulary, consulted by
     /// every path that parses or cycles a task keyword. `None` on a wiring
     /// without a queryable block projection — those paths then fall back to the
@@ -539,7 +539,7 @@ impl DispatchingOperationEngine {
             text_undo: std::sync::OnceLock::new(),
             discarded_at_boot: 0,
             history: None,
-            template_source: None,
+            write_authority: None,
             vocabulary_source: None,
             trust_policy: Arc::new(TrustPolicy::trust_all()),
             entity_write_locks: EntityWriteLocks::default(),
@@ -590,13 +590,13 @@ impl DispatchingOperationEngine {
         self
     }
 
-    /// Wire the template read capability, enabling the engine-level
+    /// Wire the block write authority, enabling the engine-level
     /// `instantiate_template` operation on the `block` entity.
-    pub fn with_template_source(
+    pub fn with_write_authority(
         mut self,
-        source: Arc<dyn crate::api::template_source::TemplateSource>,
+        authority: Arc<dyn holon_core::WriteAuthorityReads>,
     ) -> Self {
-        self.template_source = Some(source);
+        self.write_authority = Some(authority);
         self
     }
 
@@ -657,7 +657,7 @@ impl DispatchingOperationEngine {
             clock: Arc::new(SystemClock),
             text_undo: std::sync::OnceLock::new(),
             history: None,
-            template_source: None,
+            write_authority: None,
             vocabulary_source: None,
             trust_policy: Arc::new(TrustPolicy::trust_all()),
             entity_write_locks: EntityWriteLocks::default(),
@@ -1016,17 +1016,21 @@ impl DispatchingOperationEngine {
         use holon_api::template_instantiation::InstantiateRequest;
         use holon_api::template_instantiation::plan_instantiation;
 
-        let source = self.template_source.as_ref().ok_or_else(|| {
+        let authority = self.write_authority.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "instantiate_template requires a template source — not wired in this session (no \
-                 queryable block projection)"
+                "instantiate_template requires the block write authority — not wired in this \
+                 session"
             )
         })?;
         let request = InstantiateRequest::from_params(params)?;
         // Fail loud on a bogus target_parent — silently creating an orphaned
         // subtree violates the C2a invariant (every block has a reachable
         // parent chain to a page root).
-        if !source.exists(&request.target_parent).await? {
+        if !authority
+            .block_exists(&EntityUri::parse(&request.target_parent)?)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+        {
             bail!(
                 "instantiate_template: target_parent '{}' does not exist",
                 request.target_parent
@@ -1036,11 +1040,18 @@ impl DispatchingOperationEngine {
         // in-place instantiation against a stale id fails loud without leaving
         // a half-instantiated orphan subtree behind.
         if let Some(replace_id) = &request.replace_block
-            && !source.exists(replace_id).await?
+            && !authority
+                .block_exists(&EntityUri::parse(replace_id)?)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?
         {
             bail!("instantiate_template: replace_block '{replace_id}' does not exist");
         }
-        let nodes = source.load_subtree(&request.template_id).await?;
+        let nodes = authority
+            .subtree(&EntityUri::parse(&request.template_id)?)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| anyhow::anyhow!("template '{}' not found", request.template_id))?;
         let plan = plan_instantiation(&nodes, &request)?;
 
         let block_entity = EntityName::new("block");
@@ -2572,7 +2583,7 @@ impl DispatchingOperationEngine {
     /// reached through the template picker rather than as a bare entry — a
     /// different question, not a disagreement about what runs.
     pub fn firable_block_synthetic_descriptors(&self) -> Result<Vec<OperationDescriptor>> {
-        Self::block_synthetic_descriptors(self.template_source.is_some())
+        Self::block_synthetic_descriptors(self.write_authority.is_some())
     }
 
     /// Coerce a sub-trust-threshold dispatch into a proposal emission
@@ -3131,7 +3142,7 @@ impl OperationEngine for DispatchingOperationEngine {
             // a startup failure, so a booted process holds a set already
             // admitted.
             ops.extend(
-                Self::block_synthetic_descriptors(self.template_source.is_some()).expect(
+                Self::block_synthetic_descriptors(self.write_authority.is_some()).expect(
                     "the engine-synthetic block descriptors are validated where they are built, \
                      so this read follows a set the boot gates already admitted",
                 ),
@@ -3143,7 +3154,7 @@ impl OperationEngine for DispatchingOperationEngine {
     async fn has_operation(&self, entity_name: &str, op_name: &str) -> bool {
         if entity_name == "block"
             && op_name == INSTANTIATE_TEMPLATE_OP
-            && self.template_source.is_some()
+            && self.write_authority.is_some()
         {
             return true;
         }
@@ -3293,8 +3304,8 @@ mod instantiate_template_tests {
     use crate::storage::BLOCK_WRITE_TABLE;
 
     /// A test engine with the `block` SQL operation provider registered,
-    /// mirroring the `action_watcher` test harness. `BackendEngine::new` wires
-    /// the Turso [`TemplateSource`] automatically.
+    /// mirroring the `action_watcher` test harness. No Loro is wired, so SQL
+    /// is the block write authority.
     async fn block_engine() -> Arc<BackendEngine> {
         create_test_engine_with_providers(":memory:".into(), |module| {
             module.with_operation_provider_factory(|backend| {
@@ -3312,11 +3323,16 @@ mod instantiate_template_tests {
         .unwrap()
     }
 
+    /// A block given no `parent_id` is a top-level block under the root
+    /// sentinel.
     async fn create_block(engine: &BackendEngine, fields: &[(&str, Value)]) {
-        let params: StorageEntity = fields
+        let mut params: StorageEntity = fields
             .iter()
             .map(|(k, v)| (Arc::from(*k), v.clone()))
             .collect();
+        params
+            .entry(Arc::from("parent_id"))
+            .or_insert_with(|| Value::String(EntityUri::no_parent().to_string()));
         engine
             .execute_operation(&EntityName::new("block"), "create", params, OpOrigin::User)
             .await
@@ -3619,6 +3635,10 @@ mod instantiate_template_tests {
                 "create",
                 params(&[
                     ("id", Value::String("block:tpl".into())),
+                    (
+                        "parent_id",
+                        Value::String(EntityUri::no_parent().to_string()),
+                    ),
                     ("content", Value::String("{{date}}".into())),
                     ("template", Value::String("daily".into())),
                     ("template_vars", Value::String("date, mood=neutral".into())),

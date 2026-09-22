@@ -211,6 +211,7 @@ pub use block::PAGE_TAG;
 pub use block::ResultOutput;
 pub use block::SnapshotBlock;
 pub use block::SourceBlock;
+pub use block::StoredBlock;
 pub use block::blocks_by_document;
 // Re-export the intent ChangeSet vocabulary (block-sync rework, Phase 2)
 pub use block_write_field::{BlockWriteField, BlockWriteFieldError, PropertyKey};

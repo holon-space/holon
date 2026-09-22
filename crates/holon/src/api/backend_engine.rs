@@ -219,6 +219,9 @@ pub struct BackendEngine {
     /// operation methods delegate here so dispatch/undo/redo logic lives in one
     /// place shared with the no-Turso wiring.
     op_engine: DispatchingOperationEngine,
+    /// Whoever accepts block writes; handed to every `op_engine` this engine
+    /// builds.
+    block_write_authority: Arc<dyn holon_core::WriteAuthorityReads>,
     /// Manages materialized view lifecycle (creation, CDC, querying).
     matview_manager: crate::sync::MatviewManager,
     /// Entity profile resolver for per-row render + operation resolution
@@ -297,6 +300,7 @@ impl BackendEngine {
         profile_resolver: Arc<dyn crate::entity_profile::ProfileResolving>,
         sql_transformers: Vec<Box<dyn SqlTransformer>>,
         graph_schema_registry: crate::storage::graph_schema::GraphSchemaRegistry,
+        block_write_authority: Arc<dyn holon_core::WriteAuthorityReads>,
     ) -> Result<Self> {
         let ddl_mutex = Arc::new(tokio::sync::Mutex::new(()));
         let matview_manager = crate::sync::MatviewManager::new(db_handle.clone(), ddl_mutex);
@@ -311,14 +315,13 @@ impl BackendEngine {
         ));
         let op_engine = DispatchingOperationEngine::new(dispatcher.clone())
             .with_history_store(history)
-            .with_template_source(Arc::new(
-                crate::api::template_source::TursoTemplateSource::new(db_handle.clone()),
-            ));
+            .with_write_authority(block_write_authority.clone());
         Ok(Self {
             db_handle,
             dispatcher,
             table_to_entity_map: Arc::new(RwLock::new(HashMap::new())),
             op_engine,
+            block_write_authority,
             matview_manager,
             profile_resolver,
             sql_transformers,
@@ -1561,9 +1564,7 @@ impl BackendEngine {
         )
         .await?
         .with_history_store(history)
-        .with_template_source(Arc::new(
-            crate::api::template_source::TursoTemplateSource::new(self.db_handle.clone()),
-        ))
+        .with_write_authority(self.block_write_authority.clone())
         .with_task_vocabulary_source(Arc::new(
             crate::api::task_vocabulary_source::SqlTaskVocabularySource::new(
                 self.db_handle.clone(),
@@ -2983,10 +2984,10 @@ mod tests {
 
     /// The sub-fork settled by measurement: two production sites pass different
     /// arguments to `block_synthetic_descriptors` — `di::registration` passes
-    /// `false`, `available_operations` passes `template_source.is_some()`. The
+    /// `false`, `available_operations` passes `write_authority.is_some()`. The
     /// net must describe what can FIRE, and `has_operation` is the gate that
     /// decides that, so this asserts the net agrees with the gate rather than
-    /// with either literal. Green in both wirings (template source present or
+    /// with either literal. Green in both wirings (write authority present or
     /// not), which is what makes it a measurement and not a guess.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_net_admits_instantiate_template_exactly_when_dispatch_does() {

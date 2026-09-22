@@ -3446,6 +3446,10 @@ async fn instantiate_template_deterministic_gate() {
             {
                 let mut p = holon_api::StorageEntity::new();
                 p.insert("id".into(), Value::String("block:tpl".into()));
+                p.insert(
+                    "parent_id".into(),
+                    Value::String(holon_api::EntityUri::no_parent().to_string()),
+                );
                 p.insert("content".into(), Value::String("{{date}}".into()));
                 p.insert("template".into(), Value::String("t".into()));
                 p.insert(

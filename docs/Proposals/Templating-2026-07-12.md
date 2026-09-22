@@ -11,8 +11,8 @@ C2b history relation, C6 clock relation, C7 `ParsedTask` boundary parser.
 
 **PARTIALLY LANDED.** The `template_instantiation` module
 (`crates/holon/src/core/template_instantiation.rs`), `deterministic_instance_id`
-(`crates/holon-api/src/effect_id.rs:106`), and `TemplateSource` trait
-(`crates/holon/src/api/template_source.rs`) are shipped. Template blocks are
+(`crates/holon-api/src/effect_id.rs:106`), and the template read through
+`WriteAuthorityReads::subtree` (`crates/holon-core/src/traits.rs`) are shipped. Template blocks are
 ordinary org subtrees with `:TEMPLATE:` / `:TEMPLATE_VARS:` properties.
 
 Still open (§9 v1 map):
@@ -182,10 +182,12 @@ wirings. It is advertised via a synthetic `OperationDescriptor` in
 it like any other operation.
 
 Reading the template needs a read capability the bare dispatcher does not
-have, so the engine carries an optional `TemplateSource` (Turso-backed in
-`BackendEngine`; a session without one fails loud:
-"instantiate_template requires a template source — not wired in this
-session"). Falls back visibly, never silently.
+have, so the engine carries the session's block write authority
+(`WriteAuthorityReads`: Loro when Loro accepts block writes, else the SQL
+write tables). It never reads the SQL projection, which trails a Loro write, so
+a template written moments before its instantiation is found (D148.a). A
+session without one fails loud: "instantiate_template requires the block write
+authority — not wired in this session".
 
 ## 6. The rule form (ADR 0024, integration point)
 
@@ -254,8 +256,8 @@ the existing content pipeline, no template-specific handling.
 - No compound undo entry (one entry per created block for User origin).
 - No `after`/position hint for the instance root among its new siblings
   (provider default, same as journal-rule creates today).
-- Loro-only (no-Turso) sessions have no `TemplateSource` wired and fail
-  loud; wiring a Loro subtree reader is a follow-up.
+- Loro-only (no-Turso) sessions have no write authority wired into their
+  operation engine and fail loud.
 - Substitution only in content and string property values — not in
   `source_name`, tags, or edge fields.
 
@@ -265,19 +267,18 @@ the existing content pipeline, no template-specific handling.
   `deterministic_instance_id(template_id, context_key, source_node_id)`.
 - `crates/holon/src/core/template_instantiation.rs` — pure planning core:
   `TemplateVars::parse`, `InstantiateRequest::from_params` (typed boundary),
-  `TemplateNode`, `plan_instantiation(...) -> Result<InstantiationPlan>`
+  `plan_instantiation(&[Block], ...) -> Result<InstantiationPlan>`
   (ordered create-param maps; all fail-loud rules from §4), mark-span offset
   mapping. Unit-tested without any backend.
-- `crates/holon/src/api/operation_engine.rs` — `TemplateSource` trait,
-  interception in `execute_operation`, synthetic descriptor in
-  `available_operations` / `has_operation`.
-- `crates/holon/src/api/template_source.rs` — `TemplateSource` trait +
-  `TursoTemplateSource` (BFS over `block_raw`). Note: `DbHandle::query`
-  deserializes JSON TEXT columns (`properties`, `marks`) into structured
-  `Value::Object`/`Value::Array`, so the row reader re-serializes them to the
-  JSON string the planner re-parses (`json_column_to_string`).
-- `crates/holon/src/api/backend_engine.rs` — `TursoTemplateSource` wired at
-  both engine constructions.
+- `crates/holon/src/api/operation_engine.rs` — interception in
+  `execute_operation`, synthetic descriptor in `available_operations` /
+  `has_operation`; reads the template via `WriteAuthorityReads::subtree`.
+- `crates/holon-loro/src/loro_block_operations.rs` /
+  `crates/holon/src/core/sql_write_authority.rs` — the two `subtree`
+  implementations (Loro tree; SQL write tables when SQL is the authority).
+- `crates/holon/src/di/registration.rs` — resolves `dyn WriteAuthorityReads`
+  (registered by the Loro module) and falls back to `SqlWriteAuthority` only
+  when none is provided.
 - Tests: planning unit tests (bindings, defaults, missing/unknown bindings
   fail loud, deterministic ids, mark offsets); engine integration tests
   (instantiate twice same `context_key` → converged, different key → second

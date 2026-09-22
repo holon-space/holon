@@ -356,6 +356,7 @@ pub struct LoroSyncController {
 /// session's `SessionShutdown`. Tests inspect the controller state through the
 /// accessors on the handle.
 pub struct LoroSyncControllerHandle {
+    projection: Arc<LoroProjection>,
     /// The shared `block` matview feed (`LiveData`). Held only to keep its CDC
     /// subscribe actor alive for other consumers (the reactive cache) — the
     /// runtime SQL→Loro mirror that used to consume it is retired (Loro is the
@@ -377,6 +378,11 @@ impl LoroSyncControllerHandle {
     /// asserting on downstream state.
     pub fn last_synced_frontiers(&self) -> Frontiers {
         self.last_synced.lock().unwrap().clone()
+    }
+
+    /// See [`LoroProjection::pending_is_empty`].
+    pub fn pending_is_empty(&self) -> bool {
+        self.projection.pending_is_empty()
     }
 
     /// Number of errors the controller has logged since startup. Used by the
@@ -467,6 +473,7 @@ impl LoroSyncController {
         self.wake.notify_one();
 
         // Capture handles for the returned LoroSyncControllerHandle.
+        let projection = self.projection.clone();
         let last_synced = self.last_synced.clone();
         let error_count = self.error_count.clone();
         let wake = self.wake.clone();
@@ -500,6 +507,7 @@ impl LoroSyncController {
         });
 
         Ok(LoroSyncControllerHandle {
+            projection,
             _block_live: block_live,
             last_synced,
             error_count,
@@ -825,13 +833,12 @@ impl LoroProjection {
         self.layout_pending.clone()
     }
 
-    /// Whether the pending-facts queue is currently empty. Exposed so a settle
-    /// detector can, if it wants concurrent-commit settle-correctness, require
-    /// an empty queue in addition to `last_synced == oplog_frontiers` (see
-    /// the drain-protocol note in `project()`). Not consumed by the
-    /// keystone.
+    /// Whether both pending-facts queues are empty. A commit that lands while
+    /// a pass is in flight leaves its facts here after that pass has already
+    /// advanced `last_synced` to the commit's frontiers, so a settle detector
+    /// must require this as well as `last_synced == oplog_frontiers`.
     pub fn pending_is_empty(&self) -> bool {
-        self.pending.lock().unwrap().is_empty()
+        self.pending.lock().unwrap().is_empty() && self.layout_pending.lock().unwrap().is_empty()
     }
 
     /// Phase 2 shadow counters `(agreements, divergences)`: how many projection

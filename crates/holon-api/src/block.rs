@@ -1202,6 +1202,16 @@ pub mod block_wire_vec {
     }
 }
 
+/// A block with the stored `block_type` and `completed` columns, which
+/// [`Block`] has no slot for, as its write authority holds them. `None` means
+/// the store holds no value for that column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredBlock {
+    pub block: Block,
+    pub block_type: Option<String>,
+    pub completed: Option<bool>,
+}
+
 /// A block paired with its **internal fractional index** `sort_key` — the
 /// ordering encoding a storage adapter keeps alongside the block (e.g. the
 /// Loro tree's `fractional_index`, hex-formatted). The domain `Block` no

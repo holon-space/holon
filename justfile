@@ -261,30 +261,32 @@ hand-authored *FLAGS:
         {{CANON}} --test hand_authored_regressions \
         -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-hand-authored.log
 
-# The projector-lag lock: the committed reproducer for the Loro→SQL
-# read-your-own-write race in `convert_block_to_page` (bugfunnel
-# 2026-09-19-convert-block-to-page-move-races-loro-sql-projection). It is its own
-# test BINARY because the lag is a process-global env var the projector reads on
-# every pass — see the module docs in tests/projector_lag_lock.rs.
+# The projector-lag lock: committed reproducers for Loro→SQL read-your-own-write
+# races — `convert_block_to_page` (bugfunnel
+# 2026-09-19-convert-block-to-page-move-races-loro-sql-projection) and
+# `instantiate_template` reading its definition. Each is its own test BINARY
+# because the lag is a process-global env var the projector reads on every pass
+# — see the module docs in tests/projector_lag_lock.rs.
 #
-# That binary holds exactly ONE test, so the count is the gate: anything other
+# Each binary holds exactly ONE test, so the count is the gate: anything other
 # than `1 passed` is a FAILURE — a filtered or partial run reports `0 passed`
-# with exit 0 and would otherwise prove nothing, which is how this lock sat
-# inert (in no recipe) when it was first committed.
+# with exit 0 and would otherwise prove nothing.
 projector-lag-lock:
     #!/usr/bin/env bash
     # pipefail is REQUIRED for the same reason as `hand-authored`: without it the
     # recipe's status is `tee`'s and a failing test exits 0.
     set -euo pipefail
     mkdir -p target/gate-logs
-    LOG=target/gate-logs/projector-lag-lock.log
-    cargo test {{CANON}} --test projector_lag_lock -- --nocapture 2>&1 | tee "$LOG"
-    grep -qE '^test result: ok\. 1 passed' "$LOG" || {
-        echo "FAIL: projector-lag-lock did not report 'test result: ok. 1 passed'."
-        echo "A zero-test or filtered run is a FAILURE, not a pass — the lock proves nothing."
-        grep -E '^test result:' "$LOG" || echo "(no 'test result:' line at all)"
-        exit 1
-    }
+    for BIN in projector_lag_lock template_instantiation_under_lag; do
+        LOG=target/gate-logs/projector-lag-lock-$BIN.log
+        cargo test {{CANON}} --test "$BIN" -- --nocapture 2>&1 | tee "$LOG"
+        grep -qE '^test result: ok\. 1 passed' "$LOG" || {
+            echo "FAIL: $BIN did not report 'test result: ok. 1 passed'."
+            echo "A zero-test or filtered run is a FAILURE, not a pass — the lock proves nothing."
+            grep -E '^test result:' "$LOG" || echo "(no 'test result:' line at all)"
+            exit 1
+        }
+    done
 
 # Weave-time full keystone sweep (orchestrator-run, typically in background)
 keystone-full cases='16':
