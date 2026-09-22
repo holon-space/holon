@@ -82,6 +82,10 @@ fn snapshot_path(env: &TestEnvironment) -> std::path::PathBuf {
     dir.join(holon_loro::GLOBAL_SNAPSHOT_NAME)
 }
 
+fn sidecar_path(snapshot: &std::path::Path) -> std::path::PathBuf {
+    snapshot.with_file_name(holon_loro::loro_sync_controller::SIDECAR_FILENAME)
+}
+
 async fn snapshot_holds(path: &std::path::Path, id: &str) -> bool {
     let doc = LoroDocument::load_from_file(path, "probe".to_string())
         .unwrap_or_else(|e| panic!("the snapshot at {} does not load: {e:#}", path.display()));
@@ -151,6 +155,22 @@ fn an_ingested_block_is_on_disk_once_sql_shows_it() {
 /// bring the block back into the authority from the file.
 #[test]
 fn a_stale_snapshot_gets_its_missing_ingested_block_back_at_boot() {
+    boot_over_a_stale_snapshot(SidecarAtBoot::Kept);
+}
+
+/// Without the sidecar nothing records what SQL was synced from, so the boot
+/// must not trust the stale snapshot either.
+#[test]
+fn a_stale_snapshot_without_its_sidecar_gets_its_missing_ingested_block_back_at_boot() {
+    boot_over_a_stale_snapshot(SidecarAtBoot::Deleted);
+}
+
+enum SidecarAtBoot {
+    Kept,
+    Deleted,
+}
+
+fn boot_over_a_stale_snapshot(sidecar: SidecarAtBoot) {
     let rt = runtime();
     rt.clone().block_on(async move {
         let mut env = TestEnvironment::new(rt).expect("TestEnvironment::new");
@@ -184,6 +204,9 @@ fn a_stale_snapshot_gets_its_missing_ingested_block_back_at_boot() {
         settle(&env).await;
         env.stop_app().await.expect("stop_app after boot-2");
         std::fs::write(&path, &stale).expect("put the stale snapshot back");
+        if let SidecarAtBoot::Deleted = sidecar {
+            std::fs::remove_file(sidecar_path(&path)).expect("delete the watermark sidecar");
+        }
 
         env.start_app(true).await.expect("boot-3 start_app");
         assert_eq!(
@@ -218,4 +241,55 @@ fn a_stale_snapshot_gets_its_missing_ingested_block_back_at_boot() {
             on_disk.contains("blk-appended")
         );
     });
+}
+
+/// A sidecar that exists but does not decode is refused at boot, naming the
+/// file.
+#[test]
+fn a_corrupt_sidecar_fails_the_boot() {
+    const GARBAGE: [u8; 3] = [0xFF, 0xFF, 0xFF];
+    assert!(
+        loro::Frontiers::decode(&GARBAGE).is_err(),
+        "premise: the garbage bytes must not decode as frontiers"
+    );
+    let rt = runtime();
+    let mut env = TestEnvironment::new(rt.clone()).expect("TestEnvironment::new");
+    let sidecar = rt.block_on(async {
+        env.write_org_file("vault.org", VAULT_ORG)
+            .await
+            .expect("write vault.org");
+        env.start_app(true).await.expect("boot-1 start_app");
+        wait_for_sql_row(&env, "block:blk-first").await;
+        settle(&env).await;
+        let sidecar = sidecar_path(&snapshot_path(&env));
+        env.stop_app().await.expect("stop_app after boot-1");
+        sidecar
+    });
+    assert!(
+        sidecar.exists(),
+        "premise: boot 1 wrote its sidecar at {}",
+        sidecar.display()
+    );
+    std::fs::write(&sidecar, GARBAGE).expect("corrupt the sidecar");
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.block_on(env.start_app(true))
+    }));
+    let failure = match outcome {
+        Ok(Ok(())) => panic!(
+            "boot 2 succeeded over the corrupt sidecar at {}",
+            sidecar.display()
+        ),
+        Ok(Err(e)) => format!("{e:#}"),
+        Err(panic) => panic
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_else(|| "<non-string panic>".to_string()),
+    };
+    assert!(
+        failure.contains(&sidecar.display().to_string()),
+        "the boot failure must name the corrupt sidecar {}: {failure}",
+        sidecar.display()
+    );
 }

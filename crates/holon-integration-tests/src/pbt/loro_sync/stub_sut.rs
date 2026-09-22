@@ -101,7 +101,7 @@ impl StubSut {
             &self.storage_dir,
             holon_api::block_read_model::BlockReadModel::new(),
             Arc::new(holon_api::ConditionBus::new()),
-        ));
+        )?);
         let controller =
             LoroSyncController::new(projection, Arc::new(holon_api::ConditionBus::new()));
         // The stub exercises the EventBus inbound/outbound path with in-memory

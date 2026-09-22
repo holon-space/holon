@@ -238,7 +238,8 @@ impl Module for LoroModule {
                     &config.storage_dir,
                     (*read_model).clone(),
                     (*degraded).clone(),
-                );
+                )
+                .unwrap_or_else(|e| panic!("[LoroModule] build the Loro projection: {e:#}"));
                 // The incremental input leg must exist before the org initial
                 // scan starts flushing this projection: the scan resolves it as
                 // `dyn DownstreamProjection` and drives one flush per file,

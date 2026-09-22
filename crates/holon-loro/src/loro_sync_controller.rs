@@ -385,6 +385,13 @@ impl LoroSyncControllerHandle {
         self.projection.pending_is_empty()
     }
 
+    /// Whether every Loro change up to `current` (the global doc's
+    /// `oplog_frontiers`) has reached the sink. The one settle predicate for
+    /// every quiescence detector.
+    pub fn is_settled_at(&self, current: &Frontiers) -> bool {
+        &self.last_synced_frontiers() == current && self.pending_is_empty()
+    }
+
     /// Number of errors the controller has logged since startup. Used by the
     /// bridge invariant `I3 — no silent drops`.
     pub fn error_count(&self) -> usize {
@@ -647,6 +654,9 @@ pub struct LoroProjection {
     /// projection.
     sink_reader: Arc<dyn SinkReader>,
     sidecar_path: PathBuf,
+    /// No sidecar existed when this projection was built, so nothing records
+    /// which Loro changes the sink already reflects.
+    sidecar_absent_at_boot: bool,
     /// Serializes concurrent `project()` calls (controller run loop vs org
     /// flush) so two callers can't both fork at the same watermark and emit
     /// overlapping diffs.
@@ -745,6 +755,7 @@ impl LoroProjection {
             consolidator,
             sink_reader,
             sidecar_path,
+            sidecar_absent_at_boot: false,
             project_lock: tokio::sync::Mutex::new(()),
             armed: Arc::new(AtomicBool::new(false)),
             live: StdMutex::new(HashMap::new()),
@@ -897,18 +908,23 @@ impl LoroProjection {
         storage_dir: &std::path::Path,
         read_model: Arc<holon_api::block_read_model::BlockReadModel>,
         degraded: Arc<holon_api::condition_bus::ConditionBus>,
-    ) -> Self {
+    ) -> Result<Self> {
         let sidecar_path = storage_dir.join(SIDECAR_FILENAME);
-        let last_synced = Arc::new(StdMutex::new(load_sidecar_blocking(&sidecar_path)));
-        Self::new(
-            doc_store,
-            last_synced,
-            command_bus,
-            sink_reader,
-            sidecar_path,
-            read_model,
-            degraded,
-        )
+        let loaded = load_sidecar_blocking(&sidecar_path)?;
+        let sidecar_absent_at_boot = loaded.is_none();
+        let last_synced = Arc::new(StdMutex::new(loaded.unwrap_or_default()));
+        Ok(Self {
+            sidecar_absent_at_boot,
+            ..Self::new(
+                doc_store,
+                last_synced,
+                command_bus,
+                sink_reader,
+                sidecar_path,
+                read_model,
+                degraded,
+            )
+        })
     }
 
     /// The shared `last_synced` watermark Arc. `LoroSyncController` holds the
@@ -1592,8 +1608,15 @@ impl holon_core::DownstreamProjection for LoroProjection {
 
     /// The synced watermark is advanced only after the snapshot is saved, so a
     /// loaded global doc missing any of its ids was reloaded from a snapshot
-    /// that lost writes SQL already holds.
+    /// that lost writes SQL already holds. Without a watermark, any sink row
+    /// may be such a write.
     async fn consolidator_behind_sink(&self) -> holon_core::traits::Result<bool> {
+        if self.sidecar_absent_at_boot {
+            let sink = self.read_sql_snapshot().await.map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() },
+            )?;
+            return Ok(!sink.is_empty());
+        }
         let (collab, _) = self
             .docs()
             .await
@@ -1608,43 +1631,37 @@ impl holon_core::DownstreamProjection for LoroProjection {
 
 // -- Sidecar helpers -------------------------------------------------------
 
-fn load_sidecar_blocking(path: &std::path::Path) -> Frontiers {
-    match std::fs::read(path) {
-        Ok(bytes) => match Frontiers::decode(&bytes) {
-            Ok(f) => {
-                info!(
-                    "[LoroSyncController] Loaded sidecar from {} ({} bytes)",
-                    path.display(),
-                    bytes.len()
-                );
-                f
-            }
-            Err(e) => {
-                warn!(
-                    "[LoroSyncController] Sidecar at {} exists but is corrupt ({}); starting with \
-                     empty watermark.",
-                    path.display(),
-                    e
-                );
-                Frontiers::default()
-            }
-        },
+/// `None` when no sidecar exists.
+fn load_sidecar_blocking(path: &std::path::Path) -> Result<Option<Frontiers>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             info!(
                 "[LoroSyncController] No sidecar at {} — starting with empty watermark",
                 path.display()
             );
-            Frontiers::default()
+            return Ok(None);
         }
         Err(e) => {
-            warn!(
-                "[LoroSyncController] Failed to read sidecar {}: {}",
-                path.display(),
-                e
-            );
-            Frontiers::default()
+            return Err(anyhow::anyhow!(
+                "reading the sync watermark sidecar {}: {e}",
+                path.display()
+            ));
         }
-    }
+    };
+    let frontiers = Frontiers::decode(&bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "the sync watermark sidecar {} ({} bytes) does not decode: {e}",
+            path.display(),
+            bytes.len()
+        )
+    })?;
+    info!(
+        "[LoroSyncController] Loaded sidecar from {} ({} bytes)",
+        path.display(),
+        bytes.len()
+    );
+    Ok(Some(frontiers))
 }
 
 pub(crate) fn is_empty_frontiers(f: &Frontiers) -> bool {

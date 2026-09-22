@@ -87,7 +87,7 @@ pub(crate) async fn converge_signals(
                 .expect("converge_signals: get_doc(Global) failed")
                 .doc()
                 .oplog_frontiers();
-            if sync.last_synced_frontiers() != current {
+            if !sync.is_settled_at(&current) {
                 active = true;
             }
         }
