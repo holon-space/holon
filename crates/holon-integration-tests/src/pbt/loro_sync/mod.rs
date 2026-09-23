@@ -66,9 +66,9 @@ pub trait LoroSyncSut: Send + Sync + std::fmt::Debug {
     /// sees it. Used by `I1 — downstream mirror`.
     async fn downstream_snapshot(&self) -> BTreeMap<String, BlockSnapshot>;
 
-    /// Current `last_synced` frontiers on the controller. `I2 — watermark
-    /// never exceeds oplog`.
-    async fn last_synced_frontiers(&self) -> Frontiers;
+    /// The controller's settle predicate at `current`
+    /// (`LoroSyncControllerHandle::is_settled_at`). `I2`.
+    fn is_settled_at(&self, current: &Frontiers) -> bool;
 
     /// Current `oplog_frontiers` on the SUT's primary Loro doc.
     async fn primary_oplog_frontiers(&self) -> Frontiers;
@@ -128,13 +128,12 @@ pub async fn check_bridge_invariants<S: LoroSyncSut + ?Sized>(sut: &S) {
         "I1 FAILED: downstream store does not mirror SUT primary Loro doc"
     );
 
-    // I2 — watermark monotonicity: `last_synced` should never exceed
-    // `oplog_frontiers`, and once quiescent should equal it.
-    let last = sut.last_synced_frontiers().await;
+    // I2 — once quiescent, every Loro change has reached the sink.
     let current = sut.primary_oplog_frontiers().await;
-    assert_eq!(
-        last, current,
-        "I2 FAILED: last_synced_frontiers != primary oplog_frontiers after quiescence",
+    assert!(
+        sut.is_settled_at(&current),
+        "I2 FAILED: the controller is not settled at the primary oplog frontiers {current:?} \
+         after quiescence",
     );
 
     // I3 — no silent drops.

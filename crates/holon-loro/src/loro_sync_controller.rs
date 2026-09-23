@@ -1581,14 +1581,8 @@ impl LoroProjection {
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     async fn persist_sidecar(&self) -> Result<()> {
-        if let Some(parent) = self.sidecar_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create sidecar parent dir {}", parent.display()))?;
-        }
         let bytes = self.last_synced.lock().unwrap().encode();
-        std::fs::write(&self.sidecar_path, bytes)
-            .with_context(|| format!("write sidecar {}", self.sidecar_path.display()))?;
-        Ok(())
+        write_sidecar(&self.sidecar_path, &bytes)
     }
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -1630,6 +1624,37 @@ impl holon_core::DownstreamProjection for LoroProjection {
 }
 
 // -- Sidecar helpers -------------------------------------------------------
+
+/// Replaces the sidecar atomically: an undecodable sidecar fails the boot, so a
+/// crash mid-write must leave the previous one in place.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn write_sidecar(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("sidecar path {} has no parent", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("create sidecar parent dir {}", parent.display()))?;
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let tmp = path.with_extension(format!(
+        "sync.{}-{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = std::fs::File::create(&tmp)
+        .with_context(|| format!("create temp sidecar {}", tmp.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("write temp sidecar {}", tmp.display()))?;
+    file.sync_all()
+        .with_context(|| format!("fsync temp sidecar {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} onto {}", tmp.display(), path.display()))?;
+    std::fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .with_context(|| format!("fsync sidecar dir {}", parent.display()))?;
+    Ok(())
+}
 
 /// `None` when no sidecar exists.
 fn load_sidecar_blocking(path: &std::path::Path) -> Result<Option<Frontiers>> {
@@ -2012,6 +2037,53 @@ mod redrive_tests {
 /// org scan (gate never opened) and a torn-down session (every gate holder
 /// dropped) both have to resolve into a DISCLOSED degraded start, because a
 /// projector that never runs strands every Loro change short of the SQL sink.
+#[cfg(test)]
+mod sidecar_tests {
+    use super::*;
+
+    /// A reader racing the writer sees either the old sidecar or the new one,
+    /// never a truncated or partial file.
+    #[test]
+    fn a_reader_never_observes_a_partial_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(SIDECAR_FILENAME);
+        let a = vec![0xAA_u8; 256 * 1024];
+        let b = vec![0xBB_u8; 256 * 1024];
+        write_sidecar(&path, &a).expect("initial sidecar");
+
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (path, done) = (path.clone(), done.clone());
+            let (a, b) = (a.clone(), b.clone());
+            std::thread::spawn(move || {
+                let mut torn = Vec::new();
+                let mut reads = 0_usize;
+                while !done.load(Ordering::SeqCst) {
+                    let seen = std::fs::read(&path).expect("the sidecar is always present");
+                    reads += 1;
+                    if seen != a && seen != b {
+                        torn.push(seen.len());
+                    }
+                }
+                (reads, torn)
+            })
+        };
+        for i in 0..400 {
+            write_sidecar(&path, if i % 2 == 0 { &b } else { &a }).expect("rewrite sidecar");
+        }
+        done.store(true, Ordering::SeqCst);
+        let (reads, torn) = reader.join().expect("reader thread");
+        assert!(reads > 0, "the reader never ran, so this proves nothing");
+        assert!(
+            torn.is_empty(),
+            "{} of {reads} reads saw a partial sidecar (byte lengths {:?}, expected {})",
+            torn.len(),
+            &torn[..torn.len().min(10)],
+            a.len()
+        );
+    }
+}
+
 #[cfg(test)]
 mod boot_gate_tests {
     use super::*;

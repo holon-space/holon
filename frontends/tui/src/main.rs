@@ -91,9 +91,6 @@ async fn main() -> CommonResult<()> {
     // Its error is the process's exit status, returned after the container
     // teardown below has still run.
     let session_shutdown = holon_app::shutdown_session(&app.injector()).await;
-    if let Err(e) = &session_shutdown {
-        tracing::error!("Session shutdown failed: {e:#}");
-    }
 
     // Container teardown — fires TuiModule::on_stop (MCP server stop, etc.)
     let timeout = std::time::Duration::from_secs(10);

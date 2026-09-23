@@ -164,9 +164,8 @@ impl WideHandle {
 ///
 /// 1. **Turso CDC** — `cdc_emitted_watermark` stable for one quiet floor (the
 ///    `block_raw` matview the block invariants query is CDC-fed).
-/// 2. **Loro** — the sync controller's `last_synced_frontiers()` catches up to
-///    the authority doc's `oplog_frontiers()` (a peer/merge write projects
-///    async).
+/// 2. **Loro** — the sync controller is settled (`is_settled_at`) at the
+///    authority doc's `oplog_frontiers()` (a peer/merge write projects async).
 /// 3. **org** — the file-sync controller's `OrgSyncIdleSignal` goes quiescent
 ///    (the org re-render `inv-blocks-match-ref/org` reads has drained).
 ///

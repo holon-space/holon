@@ -127,6 +127,13 @@ impl StubSut {
         Ok(())
     }
 
+    /// The controller runs between transitions; only `apply` stops it.
+    fn handle(&self) -> &LoroSyncControllerHandle {
+        self.controller_handle
+            .as_ref()
+            .expect("the loro_sync controller is stopped outside a transition")
+    }
+
     async fn stop_controller(&mut self) {
         self.controller_shutdown = None;
         // Dropping the handle stops the run loop's owner. The `subscribe_root`
@@ -225,23 +232,20 @@ impl LoroSyncSut for StubSut {
     }
 
     async fn wait_for_quiescence(&mut self) {
-        let Some(handle) = self.controller_handle.as_ref() else {
-            return;
-        };
-        // Poll: `last_synced == oplog_frontiers` means the controller has
-        // caught up with every Loro mutation observed so far.
+        let handle = self.handle();
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
         loop {
             let current = self.primary_oplog_frontiers().await;
-            let last = handle.last_synced_frontiers();
-            if last == current {
+            if handle.is_settled_at(&current) {
                 return;
             }
             if tokio::time::Instant::now() >= deadline {
                 panic!(
-                    "[StubSut::wait_for_quiescence] timeout: last={:?} current={:?} errors={}",
-                    last,
+                    "[StubSut::wait_for_quiescence] timeout: last={:?} current={:?} \
+                     pending_empty={} errors={}",
+                    handle.last_synced_frontiers(),
                     current,
+                    handle.pending_is_empty(),
                     handle.error_count()
                 );
             }
@@ -253,11 +257,8 @@ impl LoroSyncSut for StubSut {
         self.stub_ops.snapshot().await
     }
 
-    async fn last_synced_frontiers(&self) -> Frontiers {
-        self.controller_handle
-            .as_ref()
-            .map(|h| h.last_synced_frontiers())
-            .unwrap_or_default()
+    fn is_settled_at(&self, current: &Frontiers) -> bool {
+        self.handle().is_settled_at(current)
     }
 
     async fn primary_oplog_frontiers(&self) -> Frontiers {

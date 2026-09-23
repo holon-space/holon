@@ -1212,6 +1212,45 @@ pub struct StoredBlock {
     pub completed: Option<bool>,
 }
 
+impl StoredBlock {
+    /// The one parse of the two stored columns, shared by every write
+    /// authority. `block_type` is text; `completed` is a boolean or its 0/1
+    /// integer encoding.
+    pub fn from_stored(
+        block: Block,
+        block_type: Option<Value>,
+        completed: Option<Value>,
+    ) -> Result<Self, String> {
+        let block_type = match block_type {
+            None => None,
+            Some(Value::String(s)) => Some(s),
+            Some(other) => {
+                return Err(format!(
+                    "{}: stored block_type is not text: {other:?}",
+                    block.id
+                ));
+            }
+        };
+        let completed = match completed {
+            None => None,
+            Some(Value::Boolean(b)) => Some(b),
+            Some(Value::Integer(0)) => Some(false),
+            Some(Value::Integer(1)) => Some(true),
+            Some(other) => {
+                return Err(format!(
+                    "{}: stored completed is neither a boolean nor 0/1: {other:?}",
+                    block.id
+                ));
+            }
+        };
+        Ok(Self {
+            block,
+            block_type,
+            completed,
+        })
+    }
+}
+
 /// A block paired with its **internal fractional index** `sort_key` — the
 /// ordering encoding a storage adapter keeps alongside the block (e.g. the
 /// Loro tree's `fractional_index`, hex-formatted). The domain `Block` no
@@ -1274,6 +1313,24 @@ impl From<SnapshotBlockWire> for SnapshotBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_columns_parse_absent_as_none_and_refuse_mistyped_values() {
+        let parse = |bt: Option<Value>, done: Option<Value>| {
+            StoredBlock::from_stored(Block::default(), bt, done)
+                .map(|s| (s.block_type, s.completed))
+        };
+        assert_eq!(parse(None, None), Ok((None, None)));
+        assert_eq!(
+            parse(Some(Value::String("note".into())), Some(Value::Integer(1))),
+            Ok((Some("note".to_string()), Some(true)))
+        );
+        assert!(parse(Some(Value::Integer(5)), None).is_err());
+        assert!(parse(Some(Value::Null), None).is_err());
+        assert!(parse(None, Some(Value::Null)).is_err());
+        assert!(parse(None, Some(Value::Integer(2))).is_err());
+    }
+
     #[test]
     fn block_schema_has_correct_jsonb_fields() {
         let schema = Block::type_definition();

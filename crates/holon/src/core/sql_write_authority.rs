@@ -42,39 +42,16 @@ impl SqlWriteAuthority {
         rows.into_iter()
             .map(|row| {
                 let context = || format!("{BLOCK_WRITE_TABLE} row with {predicate} = '{bound}'");
-                let block_type = match row.get("block_type") {
-                    Some(Value::String(s)) => s.clone(),
-                    other => {
-                        return Err(format!(
-                            "{}: block_type is not a string: {other:?}",
-                            context()
-                        )
-                        .into());
-                    }
-                };
-                let completed = match row.get("completed") {
-                    Some(Value::Boolean(b)) => *b,
-                    Some(Value::Integer(0)) => false,
-                    Some(Value::Integer(1)) => true,
-                    other => {
-                        return Err(format!(
-                            "{}: completed is not a boolean: {other:?}",
-                            context()
-                        )
-                        .into());
-                    }
-                };
+                let block_type = row.get("block_type").cloned();
+                let completed = row.get("completed").cloned();
                 let mut entity = DynamicEntity::new("block");
                 for (key, value) in row {
                     entity.set(key, value);
                 }
                 let block =
                     Block::from_entity(entity).map_err(|e| format!("{}: {e}", context()))?;
-                Ok(StoredBlock {
-                    block,
-                    block_type: Some(block_type),
-                    completed: Some(completed),
-                })
+                StoredBlock::from_stored(block, block_type, completed)
+                    .map_err(|e| format!("{}: {e}", context()).into())
             })
             .collect()
     }

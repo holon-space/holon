@@ -3944,21 +3944,12 @@ impl LoroBackend {
                 let meta = tree
                     .get_meta(tree_id)
                     .map_err(|e| anyhow::anyhow!("get_meta({tree_id:?}): {e}"))?;
-                let block_type = match read_scalar_field_from_meta(&meta, "block_type") {
-                    None => None,
-                    Some(Value::String(s)) => Some(s),
-                    Some(other) => anyhow::bail!("block_type is not a string: {other:?}"),
-                };
-                let completed = match read_scalar_field_from_meta(&meta, "completed") {
-                    None => None,
-                    Some(Value::Boolean(b)) => Some(b),
-                    Some(other) => anyhow::bail!("completed is not a boolean: {other:?}"),
-                };
-                Ok(holon_api::StoredBlock {
+                holon_api::StoredBlock::from_stored(
                     block,
-                    block_type,
-                    completed,
-                })
+                    read_scalar_field_from_meta(&meta, "block_type"),
+                    read_scalar_field_from_meta(&meta, "completed"),
+                )
+                .map_err(anyhow::Error::msg)
             })
             .map_err(|e| ApiError::InternalError {
                 message: format!("get_stored_block({id}): {e:#}"),

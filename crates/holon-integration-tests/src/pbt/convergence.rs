@@ -22,8 +22,8 @@ use crate::test_environment::pbt_quiet_floor;
 ///
 /// 1. **Turso CDC** — `cdc_emitted_watermark` stable for one quiet floor (the
 ///    `block_raw` matview the block invariants query is CDC-fed).
-/// 2. **Loro** — the sync controller's `last_synced_frontiers()` catches up to
-///    the authority doc's `oplog_frontiers()` (a peer/merge write projects
+/// 2. **Loro** — the sync controller is settled (`is_settled_at`) at the
+///    authority doc's `oplog_frontiers()` (a peer/merge write projects
 ///    asynchronously).
 /// 3. **block-matview mirror** — the `BlockFeed`'s `consumed_seq` stops
 ///    advancing (the org write-back reads that mirror, so its ARRIVAL, not
