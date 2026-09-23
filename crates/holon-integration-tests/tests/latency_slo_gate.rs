@@ -224,9 +224,11 @@ fn require_a_judgeable_host() {
 /// Boot a fresh SUT and drive the burst through the production fire-and-forget
 /// door, wave by wave. Returns the measured window.
 ///
-/// A wave is dispatched back-to-back; the next one waits for (a) a delivery
-/// after the current wave was dispatched, so each wave is its own pass, and
-/// (b) room in the correlator for a whole wave, so no clock is evicted.
+/// A wave is dispatched back-to-back; the next one waits until a write OF THIS
+/// WAVE has been delivered, so each wave is its own pass. Every write closes
+/// exactly one clock (one target each), so more deliveries than all earlier
+/// waves' writes means one of this wave's landed. At most a wave minus one is
+/// then pending, so the next wave never evicts a clock.
 fn measure_burst() -> SloWindow {
     const _: () = assert!(2 * WAVE_WRITES <= MAX_PENDING);
     let (sut, _ref_state) = boot();
@@ -239,7 +241,6 @@ fn measure_burst() -> SloWindow {
     sut.runtime().block_on(async {
         engine.ui_state().set_detached_dispatch(true);
         for wave in 0..BURST_WAVES {
-            let delivered_before = probe.snapshot(ClockOrigin::Ui).len();
             for j in 0..WAVE_WRITES {
                 let i = wave * WAVE_WRITES + j;
                 let mut params = HashMap::new();
@@ -255,20 +256,18 @@ fn measure_burst() -> SloWindow {
                 .await
                 .expect("the detached door accepts a content write");
             }
-            let dispatched = (wave + 1) * WAVE_WRITES;
+            let earlier_waves = wave * WAVE_WRITES;
             let started = std::time::Instant::now();
             loop {
                 let delivered = probe.snapshot(ClockOrigin::Ui).len();
-                if delivered > delivered_before
-                    && dispatched - delivered + WAVE_WRITES <= MAX_PENDING
-                {
+                if delivered > earlier_waves {
                     break;
                 }
                 assert!(
                     started.elapsed() < WAVE_DEADLINE,
-                    "[latency-slo gate] wave {wave}: {delivered} of {dispatched} dispatched \
-                     writes delivered after {WAVE_DEADLINE:?} ({delivered_before} before this \
-                     wave) — the pipeline stopped retiring the burst"
+                    "[latency-slo gate] wave {wave}: {delivered} deliveries after \
+                     {WAVE_DEADLINE:?}, none of them from this wave ({earlier_waves} writes were \
+                     dispatched before it) — the pipeline stopped retiring the burst"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
@@ -421,7 +420,7 @@ fn latency_slo_rung_throughput_floor() {
         .iter()
         .map(|s| s.in_flight)
         .max()
-        .expect("the loss budget admits only a non-empty burst");
+        .expect("measure_burst asserted every one of the burst's writes landed");
     assert!(
         max_in_flight >= 2,
         "[latency-slo gate] no burst write was dispatched behind another: the deepest queue any \

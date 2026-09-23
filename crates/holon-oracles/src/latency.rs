@@ -543,7 +543,8 @@ mod tests {
     /// test would notice.
     ///
     /// Drives a saturated stretch retiring one delivery per 150ms — ~6.7
-    /// writes/s, under the floor — as batches that each leave a backlog.
+    /// writes/s, under the floor: 20 writes dispatched together, each `ms`
+    /// counting back to that one dispatch.
     #[test]
     fn a_slow_drain_paints_a_throughput_banner() {
         let fired = violations_around("THROUGHPUT", |layer| {
@@ -556,12 +557,10 @@ mod tests {
                         action = "set_field",
                         block = "block:slow-drain",
                         origin = "ui",
-                        ms = 40u64,
+                        ms = 150 * (i + 1),
                         contended = false,
-                        in_flight = i + 2,
-                        // Never reaches zero: the queue stays non-empty, so
-                        // every gap is a saturated interval.
-                        backlog = 20 - i,
+                        in_flight = i + 1,
+                        backlog = 19 - i,
                         delivery_batch = i,
                         "holon_latency",
                     );
@@ -646,7 +645,7 @@ mod tests {
         let fired = violations_around("service p95", |layer| {
             let subscriber = tracing_subscriber::registry().with(layer);
             tracing::subscriber::with_default(subscriber, || {
-                for _ in 0..40 {
+                for i in 0..40u64 {
                     tracing::info!(
                         target: "holon_latency",
                         stage = "e2e",
@@ -656,6 +655,8 @@ mod tests {
                         in_flight = 1u64,
                         backlog = 0u64,
                         contended = false,
+                        // Present, so the event reaches the origin check.
+                        delivery_batch = i,
                         "holon_latency",
                     );
                 }
