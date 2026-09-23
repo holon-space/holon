@@ -98,6 +98,7 @@ pub use traits::BlockDataSourceHelpers;
 pub use traits::BlockEntity;
 pub use traits::BlockOperations;
 pub use traits::BlockQueryHelpers;
+pub use traits::ChainBreak;
 pub use traits::CompletionStateInfo;
 pub use traits::CrudAuthority;
 pub use traits::CrudOperations;
@@ -117,6 +118,7 @@ pub use traits::OperationProvider;
 pub use traits::OperationRegistry;
 pub use traits::OperationResult;
 pub use traits::OriginTaggedWrites;
+pub use traits::OwningPage;
 pub use traits::RenameOperations;
 pub use traits::Result;
 pub use traits::StreamProvider;
@@ -132,6 +134,7 @@ pub use traits::classify_for_net;
 pub use traits::combine_matview_hooks;
 pub use traits::generate_sync_operation;
 pub use traits::has_sync_fan_out_name;
+pub use traits::owning_page_by_hops;
 // Re-export macro-generated operation dispatch functions
 pub use traits::{
     __operations_block_operations, __operations_crud_operations, __operations_mark_operations,

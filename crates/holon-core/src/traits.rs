@@ -882,6 +882,88 @@ pub trait WriteAuthorityReads: MaybeSendSync {
     /// `root` and every descendant: root first, parent before child, siblings
     /// in order. `None` when `root` does not exist.
     async fn subtree(&self, root: &EntityUri) -> Result<Option<Vec<holon_api::StoredBlock>>>;
+    /// The ids of `parent`'s children, in sibling order. `Err` when the
+    /// authority does not hold `parent`.
+    async fn children(&self, parent: &EntityUri) -> Result<Vec<EntityUri>>;
+    /// The nearest `Page` at or above `id`.
+    async fn owning_page(&self, id: &EntityUri) -> Result<OwningPage> {
+        owning_page_by_hops(self, id).await
+    }
+}
+
+/// Deeper than any real outline; reaching it means the chain cannot end.
+pub const MAX_OWNING_PAGE_WALK: usize = 1024;
+
+/// Where a block's owning document stands in the write authority.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OwningPage {
+    /// The nearest `Page`-tagged block at or above the start.
+    Page(holon_api::StoredBlock),
+    /// The chain reaches the root sentinel with no `Page` on it.
+    NoOwner,
+    /// The authority does not hold the start block.
+    Absent,
+    Broken(ChainBreak),
+}
+
+/// Why a parent chain names no owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChainBreak {
+    /// The chain revisits this block.
+    ParentCycle(EntityUri),
+    /// A block names this parent, which the authority does not hold.
+    MissingParent(EntityUri),
+    /// Longer than [`MAX_OWNING_PAGE_WALK`].
+    TooDeep,
+}
+
+impl std::fmt::Display for ChainBreak {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChainBreak::ParentCycle(at) => write!(f, "the parent chain cycles through `{at}`"),
+            ChainBreak::MissingParent(parent) => {
+                write!(
+                    f,
+                    "the parent chain names `{parent}`, which the write authority does not hold"
+                )
+            }
+            ChainBreak::TooDeep => {
+                write!(
+                    f,
+                    "the parent chain is longer than {MAX_OWNING_PAGE_WALK} blocks"
+                )
+            }
+        }
+    }
+}
+
+/// [`WriteAuthorityReads::owning_page`] as one `block` read per hop.
+pub async fn owning_page_by_hops<A: WriteAuthorityReads + ?Sized>(
+    authority: &A,
+    id: &EntityUri,
+) -> Result<OwningPage> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut cur = id.clone();
+    for _ in 0..MAX_OWNING_PAGE_WALK {
+        if cur.is_no_parent() {
+            return Ok(OwningPage::NoOwner);
+        }
+        if !seen.insert(cur.clone()) {
+            return Ok(OwningPage::Broken(ChainBreak::ParentCycle(cur)));
+        }
+        let Some(stored) = authority.block(&cur).await? else {
+            return Ok(if cur == *id {
+                OwningPage::Absent
+            } else {
+                OwningPage::Broken(ChainBreak::MissingParent(cur))
+            });
+        };
+        if stored.block.is_page() {
+            return Ok(OwningPage::Page(stored));
+        }
+        cur = stored.block.parent_id.clone();
+    }
+    Ok(OwningPage::Broken(ChainBreak::TooDeep))
 }
 
 /// Read + write helper surface every block store opts into.
@@ -3632,6 +3714,116 @@ mod trait_unit_tests {
         assert!(
             err.to_string().contains("dotted entity name"),
             "the refusal must name the dot as the reason; got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod owning_page_walk_tests {
+    use std::collections::HashMap;
+
+    use holon_api::block::Block;
+
+    use super::*;
+
+    /// `(id, parent, is_page)` rows; `children` is never asked by the walk.
+    struct Rows(HashMap<EntityUri, (EntityUri, bool)>);
+
+    impl Rows {
+        fn new(rows: &[(&str, &str, bool)]) -> Self {
+            let uri = |s: &str| EntityUri::parse(s).expect("test uri");
+            Self(
+                rows.iter()
+                    .map(|(id, parent, page)| (uri(id), (uri(parent), *page)))
+                    .collect(),
+            )
+        }
+    }
+
+    #[async_trait]
+    impl WriteAuthorityReads for Rows {
+        async fn block_exists(&self, id: &EntityUri) -> Result<bool> {
+            Ok(self.0.contains_key(id))
+        }
+        async fn block_is_page(&self, id: &EntityUri) -> Result<bool> {
+            Ok(self.0.get(id).is_some_and(|(_, page)| *page))
+        }
+        async fn block(&self, id: &EntityUri) -> Result<Option<holon_api::StoredBlock>> {
+            Ok(self.0.get(id).map(|(parent, page)| {
+                let mut block = Block::new_text(id.clone(), parent.clone(), "");
+                block.set_page(*page);
+                holon_api::StoredBlock {
+                    block,
+                    block_type: None,
+                    completed: None,
+                }
+            }))
+        }
+        async fn subtree(&self, _: &EntityUri) -> Result<Option<Vec<holon_api::StoredBlock>>> {
+            unreachable!("the owning-page walk reads no subtree")
+        }
+        async fn children(&self, _: &EntityUri) -> Result<Vec<EntityUri>> {
+            unreachable!("the owning-page walk reads no children")
+        }
+    }
+
+    fn uri(s: &str) -> EntityUri {
+        EntityUri::parse(s).expect("test uri")
+    }
+
+    async fn walk(rows: &Rows, id: &str) -> String {
+        match rows.owning_page(&uri(id)).await.expect("walk") {
+            OwningPage::Page(page) => format!("Page({})", page.block.id),
+            other => format!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_walk_names_each_answer() {
+        let root = EntityUri::no_parent().to_string();
+        let rows = Rows::new(&[
+            ("block:p", &root, true),
+            ("block:a", "block:p", false),
+            ("block:b", "block:a", false),
+            ("block:loose", &root, false),
+            ("block:c1", "block:c2", false),
+            ("block:c2", "block:c1", false),
+            ("block:orphan", "block:gone", false),
+        ]);
+        assert_eq!(walk(&rows, "block:b").await, "Page(block:p)");
+        assert_eq!(walk(&rows, "block:p").await, "Page(block:p)");
+        assert_eq!(walk(&rows, "block:loose").await, "NoOwner");
+        assert_eq!(walk(&rows, "block:nothing").await, "Absent");
+        assert_eq!(
+            walk(&rows, "block:c1").await,
+            format!(
+                "{:?}",
+                OwningPage::Broken(ChainBreak::ParentCycle(uri("block:c1")))
+            )
+        );
+        assert_eq!(
+            walk(&rows, "block:orphan").await,
+            format!(
+                "{:?}",
+                OwningPage::Broken(ChainBreak::MissingParent(uri("block:gone")))
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chain_longer_than_the_bound_is_broken() {
+        let root = EntityUri::no_parent().to_string();
+        let ids: Vec<String> = (0..=MAX_OWNING_PAGE_WALK)
+            .map(|i| format!("block:n{i}"))
+            .collect();
+        let mut rows = vec![(ids[0].as_str(), root.as_str(), false)];
+        for pair in ids.windows(2) {
+            rows.push((pair[1].as_str(), pair[0].as_str(), false));
+        }
+        let rows = Rows::new(&rows);
+        assert_eq!(
+            walk(&rows, ids.last().expect("chain")).await,
+            format!("{:?}", OwningPage::Broken(ChainBreak::TooDeep))
         );
     }
 }

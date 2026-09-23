@@ -6,7 +6,6 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use holon_api::Block;
-use holon_api::DynamicEntity;
 use holon_api::EntityUri;
 use holon_api::PAGE_TAG;
 use holon_api::StoredBlock;
@@ -14,9 +13,9 @@ use holon_api::Value;
 use holon_core::WriteAuthorityReads;
 
 use super::traits::Result;
-use super::traits::TryFromEntity;
 use crate::storage::BLOCK_WRITE_TABLE;
 use crate::storage::DbHandle;
+use crate::storage::HYDRATED_BLOCK_COLUMNS;
 
 /// Deeper than any real outline; reaching it means a stored `parent_id` cycle.
 const MAX_SUBTREE_DEPTH: usize = 512;
@@ -32,7 +31,8 @@ impl SqlWriteAuthority {
 
     async fn blocks_where(&self, predicate: &str, bound: &str) -> Result<Vec<StoredBlock>> {
         let sql = format!(
-            "SELECT * FROM {BLOCK_WRITE_TABLE} WHERE {predicate} = $bound ORDER BY sort_key, id"
+            "SELECT {HYDRATED_BLOCK_COLUMNS} FROM {BLOCK_WRITE_TABLE} b WHERE b.{predicate} = \
+             $bound ORDER BY b.sort_key, b.id"
         );
         let params = HashMap::from([("bound".to_string(), Value::String(bound.to_string()))]);
         let rows =
@@ -44,12 +44,7 @@ impl SqlWriteAuthority {
                 let context = || format!("{BLOCK_WRITE_TABLE} row with {predicate} = '{bound}'");
                 let block_type = row.get("block_type").cloned();
                 let completed = row.get("completed").cloned();
-                let mut entity = DynamicEntity::new("block");
-                for (key, value) in row {
-                    entity.set(key, value);
-                }
-                let block =
-                    Block::from_entity(entity).map_err(|e| format!("{}: {e}", context()))?;
+                let block = Block::try_from(row).map_err(|e| format!("{}: {e:#}", context()))?;
                 StoredBlock::from_stored(block, block_type, completed)
                     .map_err(|e| format!("{}: {e}", context()).into())
             })
@@ -113,5 +108,29 @@ impl WriteAuthorityReads for SqlWriteAuthority {
             level = start..nodes.len();
         }
         Ok(Some(nodes))
+    }
+
+    async fn children(&self, parent: &EntityUri) -> Result<Vec<EntityUri>> {
+        let sql = format!(
+            "SELECT id FROM {BLOCK_WRITE_TABLE} WHERE parent_id = $parent ORDER BY sort_key, id"
+        );
+        let params = HashMap::from([("parent".to_string(), Value::String(parent.to_string()))]);
+        let rows = self
+            .db_handle
+            .query(&sql, params)
+            .await
+            .map_err(|e| format!("children of {parent}: {e}"))?;
+        if rows.is_empty() && !self.block_exists(parent).await? {
+            return Err(
+                format!("children of {parent}: the write authority holds no such block").into(),
+            );
+        }
+        rows.into_iter()
+            .map(|row| match row.get("id") {
+                Some(Value::String(id)) => EntityUri::parse(id)
+                    .map_err(|e| format!("child `{id}` of {parent}: {e}").into()),
+                other => Err(format!("children of {parent}: row id is {other:?}").into()),
+            })
+            .collect()
     }
 }

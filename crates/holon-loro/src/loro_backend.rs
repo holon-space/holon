@@ -586,6 +586,24 @@ fn read_block_from_tree(
 // resolving.
 pub use holon_api::SnapshotBlock;
 
+/// The block at `node` plus the `block_type` and `completed` values its meta
+/// holds.
+fn stored_block_at(
+    tree: &loro::LoroTree,
+    node: loro::TreeID,
+) -> anyhow::Result<holon_api::StoredBlock> {
+    let block = read_block_from_tree(tree, node, get_node_parent(tree, node));
+    let meta = tree
+        .get_meta(node)
+        .map_err(|e| anyhow::anyhow!("get_meta({node:?}): {e}"))?;
+    holon_api::StoredBlock::from_stored(
+        block,
+        read_scalar_field_from_meta(&meta, "block_type"),
+        read_scalar_field_from_meta(&meta, "completed"),
+    )
+    .map_err(anyhow::Error::msg)
+}
+
 /// Read the `tags` JSON-encoded list from a node's metadata. Returns an empty
 /// `Vec` when the key is absent ("no tags"). Malformed JSON in a present value
 /// is a corruption of metadata we wrote ourselves — fail loud rather than
@@ -3938,21 +3956,45 @@ impl LoroBackend {
         let target = self.resolve_write_target(id).await?;
         let (read_doc, tree_id) = self.target_doc(&target);
         read_doc
-            .with_read(|doc| {
-                let tree = doc.get_tree(TREE_NAME);
-                let block = read_block_from_tree(&tree, tree_id, get_node_parent(&tree, tree_id));
-                let meta = tree
-                    .get_meta(tree_id)
-                    .map_err(|e| anyhow::anyhow!("get_meta({tree_id:?}): {e}"))?;
-                holon_api::StoredBlock::from_stored(
-                    block,
-                    read_scalar_field_from_meta(&meta, "block_type"),
-                    read_scalar_field_from_meta(&meta, "completed"),
-                )
-                .map_err(anyhow::Error::msg)
-            })
+            .with_read(|doc| stored_block_at(&doc.get_tree(TREE_NAME), tree_id))
             .map_err(|e| ApiError::InternalError {
                 message: format!("get_stored_block({id}): {e:#}"),
+            })
+    }
+
+    /// The nearest `Page` at or above `id`, walked under ONE read of the
+    /// global doc. `None` when `id` lives in the layout doc or a shared
+    /// subtree, whose chains leave their own doc.
+    pub fn owning_page_in_global_tree(
+        &self,
+        id: &str,
+    ) -> Result<Option<holon_core::OwningPage>, ApiError> {
+        let tree_id = match self.resolve_write_target_sync(id) {
+            Ok(WriteTarget::Global(tree_id)) => tree_id,
+            Ok(WriteTarget::Layout(_) | WriteTarget::Shared { .. }) => return Ok(None),
+            Err(ApiError::BlockNotFound { .. }) => return Ok(Some(holon_core::OwningPage::Absent)),
+            Err(e) => return Err(e),
+        };
+        self.collab_doc
+            .with_read(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                let mut node = tree_id;
+                for _ in 0..holon_core::traits::MAX_OWNING_PAGE_WALK {
+                    if node_is_page(&tree, node)? {
+                        return Ok(holon_core::OwningPage::Page(stored_block_at(&tree, node)?));
+                    }
+                    match get_node_parent(&tree, node) {
+                        Some(parent) => node = parent,
+                        None => return Ok(holon_core::OwningPage::NoOwner),
+                    }
+                }
+                Ok(holon_core::OwningPage::Broken(
+                    holon_core::ChainBreak::TooDeep,
+                ))
+            })
+            .map(Some)
+            .map_err(|e| ApiError::InternalError {
+                message: format!("owning_page({id}): {e:#}"),
             })
     }
 

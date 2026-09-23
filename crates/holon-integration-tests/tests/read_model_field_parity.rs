@@ -122,9 +122,9 @@ const PARITY: &[(&str, Parity)] = &[
 fn hydrated_columns() -> Vec<String> {
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../holon-app/src/turso_seams.rs"
+        "/../holon-turso/src/block_table_names.rs"
     ))
-    .expect("read turso_seams.rs");
+    .expect("read block_table_names.rs");
     let start = src
         .find("const HYDRATED_BLOCK_COLUMNS: &str = ")
         .expect("HYDRATED_BLOCK_COLUMNS not found — the constant was renamed or moved");
