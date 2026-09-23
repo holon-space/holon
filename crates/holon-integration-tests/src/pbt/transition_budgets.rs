@@ -16,10 +16,11 @@ use std::time::Duration;
 // Budget formulas + inputs live in holon-pbt-core (Phase 1a Step 1); re-exported
 // so existing `crate::pbt::transition_budgets::…` import sites keep resolving.
 pub use holon_pbt_core::budget::{
-    CACHE_EVENT_READS, CARET_SEAT_READS, CLICK_JITTER_TOLERANCE, ExpectedSql, JOURNAL_READS,
-    MutationKind, NAV_DML_READS, NAV_RENDER_FAN_READS, OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS,
-    OPEN_TAB_INSERT_CLICK_RESOLVE_READS, PIN_BLOCK_CLICK_RESOLVE_READS, REACTIVE_BASE,
-    READS_PER_WATCH, SqlBudget, cdc_tolerance, docs_tolerance, expected_sql_for_kind,
+    CACHE_EVENT_READS, CARET_SEAT_READS, CLICK_JITTER_TOLERANCE, DEPARTING_ROOT_RERENDER_READS,
+    ExpectedSql, JOURNAL_READS, MutationKind, NAV_DML_READS, NAV_RENDER_FAN_READS,
+    OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS, OPEN_TAB_INSERT_CLICK_RESOLVE_READS,
+    PIN_BLOCK_CLICK_RESOLVE_READS, REACTIVE_BASE, READS_PER_WATCH, SqlBudget, cdc_tolerance,
+    docs_tolerance, expected_sql_for_kind,
 };
 use holon_pbt_core::types::Mutation;
 
@@ -115,6 +116,7 @@ struct CardinalityProbe {
     scale: usize,
     first_visit: bool,
     open_tab_activated: bool,
+    open_tab_departed_root: bool,
     content_writes_sql: bool,
     keystroke_created_its_target: bool,
 }
@@ -140,6 +142,9 @@ impl holon_pbt_core::capabilities::RefSqlCardinality for CardinalityProbe {
     }
     fn last_open_tab_activated(&self) -> bool {
         self.open_tab_activated
+    }
+    fn last_open_tab_departed_root(&self) -> bool {
+        self.open_tab_departed_root
     }
     fn last_keystroke_created_its_target(&self) -> bool {
         self.keystroke_created_its_target
@@ -179,23 +184,26 @@ pub fn declared_complexity_class(
     const LARGE: usize = 64;
     for first_visit in [false, true] {
         for open_tab_activated in [false, true] {
-            for content_writes_sql in [false, true] {
-                for keystroke_created_its_target in [false, true] {
-                    let at = |scale| {
-                        transition.expected_sql(&CardinalityProbe {
-                            scale,
-                            first_visit,
-                            open_tab_activated,
-                            content_writes_sql,
-                            keystroke_created_its_target,
-                        })
-                    };
-                    let small = at(SMALL);
-                    let large = at(LARGE);
-                    if (small.reads, small.writes, small.ddl)
-                        != (large.reads, large.writes, large.ddl)
-                    {
-                        return ComplexityClass::StateDependent;
+            for open_tab_departed_root in [false, true] {
+                for content_writes_sql in [false, true] {
+                    for keystroke_created_its_target in [false, true] {
+                        let at = |scale| {
+                            transition.expected_sql(&CardinalityProbe {
+                                scale,
+                                first_visit,
+                                open_tab_activated,
+                                open_tab_departed_root,
+                                content_writes_sql,
+                                keystroke_created_its_target,
+                            })
+                        };
+                        let small = at(SMALL);
+                        let large = at(LARGE);
+                        if (small.reads, small.writes, small.ddl)
+                            != (large.reads, large.writes, large.ddl)
+                        {
+                            return ComplexityClass::StateDependent;
+                        }
                     }
                 }
             }

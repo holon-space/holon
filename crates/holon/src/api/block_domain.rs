@@ -42,6 +42,59 @@ pub const REQUIRES_DONE_HAVING_SQL: &str = "GROUP BY b.id\nHAVING count(br.requi
 /// reach the panel; the cycle guard in the same CTE covers malformed parentage.
 const MAX_ROOT_SUBTREE_DEPTH: u32 = 20;
 
+/// The blocks a region's navigation cursor rests on, one row per region, keyed
+/// by the block. `render_entity` renders such a block as its whole subtree and
+/// any other query-less block as a leaf, so this relation is an INPUT of the
+/// render: `watch_ui` subscribes to it keyed by its block and re-renders when
+/// the block enters or leaves it.
+pub const FOCUS_ROOT_MEMBERSHIP_SQL: &str = "SELECT fr.region AS region, fr.root_id AS watch_key \
+     FROM focus_roots fr JOIN navigation_cursor nc ON nc.region = fr.region AND nc.history_id = \
+     fr.history_id";
+
+/// The shape-keyed descendant view every focus-root watch shares.
+///
+/// The root is JOINED IN from `watch_context` rather than inlined as a
+/// literal, so the SQL text — and the content-addressed view name — is the
+/// same for every block and is created once, at boot
+/// (`BackendEngine::preload_keyed_watch_views`). `watch_key` rides through the
+/// recursion so the demux can hand each watch its own rows.
+///
+/// The seed takes only `root` rows, so a `leaf` watch gets no descendant
+/// closure it never asked for. One row per place keeps the seed unique without
+/// a DISTINCT, which this shape does not survive: with one the view empties
+/// out against its own recompute (navigation.sql names the measurement).
+pub(crate) fn root_subtree_watch_sql() -> String {
+    format!(
+        "WITH RECURSIVE subtree(watch_key, node_id, depth, visited) AS ( \
+           SELECT wc.watch_key, b.id, 0, CAST(b.id AS TEXT) \
+           FROM watch_context wc JOIN {table} b ON b.id = wc.context_id \
+           WHERE wc.kind = 'root' \
+           UNION ALL \
+           SELECT subtree.watch_key, child.id, subtree.depth + 1, \
+                  subtree.visited || ',' || CAST(child.id AS TEXT) \
+           FROM subtree \
+           JOIN {table} child ON child.parent_id = subtree.node_id \
+           LEFT JOIN block_tags pt ON pt.block_id = subtree.node_id AND pt.tag = 'Page' \
+           WHERE subtree.depth < {MAX_ROOT_SUBTREE_DEPTH} \
+             AND ',' || subtree.visited || ',' NOT LIKE '%,' || CAST(child.id AS TEXT) || ',%' \
+             AND (subtree.depth = 0 OR pt.block_id IS NULL) \
+         ) \
+         SELECT d.*, subtree.watch_key AS watch_key \
+         FROM subtree JOIN {table} d ON d.id = subtree.node_id",
+        table = crate::storage::BLOCK_READ_TABLE,
+    )
+}
+
+/// The shape-keyed single-block view every leaf watch shares: the block
+/// enters through `watch_context`, like [`root_subtree_watch_sql`].
+pub(crate) fn leaf_watch_sql() -> String {
+    format!(
+        "SELECT b.*, wc.watch_key AS watch_key FROM {table} b \
+         JOIN watch_context wc ON b.id = wc.context_id WHERE wc.kind = 'leaf'",
+        table = crate::storage::BLOCK_READ_TABLE,
+    )
+}
+
 /// A watched block has no row in the store.
 ///
 /// A STATE a watch can be in, not a failed render: the row may not be projected
@@ -581,9 +634,8 @@ impl<'a> BlockDomain<'a> {
 
     /// Whether a region's navigation cursor currently rests on `block_id`.
     async fn is_focus_root(&self, block_id: &EntityUri) -> Result<bool> {
-        let sql = "SELECT fr.root_id FROM focus_roots fr JOIN navigation_cursor nc ON nc.region = \
-                   fr.region AND nc.history_id = fr.history_id WHERE fr.root_id = $block_id"
-            .to_string();
+        let sql =
+            format!("SELECT region FROM ({FOCUS_ROOT_MEMBERSHIP_SQL}) WHERE watch_key = $block_id");
         let mut params = HashMap::new();
         params.insert("block_id".to_string(), Value::String(block_id.to_string()));
 
@@ -606,37 +658,7 @@ impl<'a> BlockDomain<'a> {
         &self,
         block_id: &EntityUri,
     ) -> Result<(RenderExpr, RowChangeStream)> {
-        // The root is JOINED IN from `watch_context` rather than inlined as a
-        // literal. That is what lets one matview serve every focus root: the
-        // SQL text no longer varies per block, so its content-addressed view
-        // name does not either, and a first visit costs no `CREATE
-        // MATERIALIZED VIEW`. `watch_key` rides through the recursion so the
-        // demux can hand each watch its own rows.
-        //
-        // The seed takes only `root` rows, so a `leaf` watch gets no
-        // descendant closure it never asked for. One row per place keeps the
-        // seed unique without a DISTINCT, which this shape does not survive:
-        // with one the view empties out against its own recompute
-        // (navigation.sql names the measurement).
-        let sql = format!(
-            "WITH RECURSIVE subtree(watch_key, node_id, depth, visited) AS ( \
-               SELECT wc.watch_key, b.id, 0, CAST(b.id AS TEXT) \
-               FROM watch_context wc JOIN {table} b ON b.id = wc.context_id \
-               WHERE wc.kind = 'root' \
-               UNION ALL \
-               SELECT subtree.watch_key, child.id, subtree.depth + 1, \
-                      subtree.visited || ',' || CAST(child.id AS TEXT) \
-               FROM subtree \
-               JOIN {table} child ON child.parent_id = subtree.node_id \
-               LEFT JOIN block_tags pt ON pt.block_id = subtree.node_id AND pt.tag = 'Page' \
-               WHERE subtree.depth < {MAX_ROOT_SUBTREE_DEPTH} \
-                 AND ',' || subtree.visited || ',' NOT LIKE '%,' || CAST(child.id AS TEXT) || ',%' \
-                 AND (subtree.depth = 0 OR pt.block_id IS NULL) \
-             ) \
-             SELECT d.*, subtree.watch_key AS watch_key \
-             FROM subtree JOIN {table} d ON d.id = subtree.node_id",
-            table = crate::storage::BLOCK_READ_TABLE,
-        );
+        let sql = root_subtree_watch_sql();
 
         // Namespaced: `watch_ui` and the leaf path can watch the same block at
         // the same time, and each membership row is dropped when ITS stream
@@ -660,14 +682,7 @@ impl<'a> BlockDomain<'a> {
         &self,
         block_id: &EntityUri,
     ) -> Result<(RenderExpr, RowChangeStream)> {
-        // Same shape-keying as `render_region_root`: the block enters through
-        // `watch_context` instead of a literal, so every leaf watch shares one
-        // matview.
-        let sql = format!(
-            "SELECT b.*, wc.watch_key AS watch_key FROM {table} b \
-             JOIN watch_context wc ON b.id = wc.context_id WHERE wc.kind = 'leaf'",
-            table = crate::storage::BLOCK_READ_TABLE,
-        );
+        let sql = leaf_watch_sql();
 
         let key = format!("leaf:{block_id}");
         let change_stream = self

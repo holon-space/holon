@@ -553,8 +553,6 @@ pub struct MatviewManager {
     /// mutex guarding create-if-absent. Both come from [`shared_for_database`],
     /// so every manager on one database sees one cache and one mutex.
     known_views: Arc<tokio::sync::RwLock<HashSet<String>>>,
-    /// Reap epoch `known_views` was established under; see [`SharedViewState`].
-    validated_at: Arc<AtomicU64>,
     /// Counters for measuring cache effectiveness. `cache_hits` is the number
     /// of `ensure_view`/`preload` calls that returned via the in-memory cache
     /// without a `view_exists` SQL round trip. `exists_calls` is the number of
@@ -570,10 +568,6 @@ pub struct MatviewManager {
 struct SharedViewState {
     known_views: Arc<tokio::sync::RwLock<HashSet<String>>>,
     ddl_mutex: Arc<tokio::sync::Mutex<()>>,
-    /// Reap epoch the cache's contents were established under. The actor drops
-    /// views on its own schedule (`reap_view`), so a name learned before a reap
-    /// says nothing about the schema now.
-    validated_at: Arc<AtomicU64>,
 }
 
 /// Live databases' [`SharedViewState`], keyed by the address of the database's
@@ -617,8 +611,9 @@ fn shared_for_database(
     let state = SharedViewState {
         known_views: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
         ddl_mutex: seed_mutex,
-        validated_at: Arc::new(AtomicU64::new(db_handle.reap_epoch())),
     };
+    // A fresh cache knows nothing, so drops noted before it are no news.
+    db_handle.take_dropped_views();
     table.insert(key, (witness, state.clone()));
     state
 }
@@ -637,7 +632,6 @@ impl MatviewManager {
             fdw_backed_tables: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
             hook: Arc::new(tokio::sync::RwLock::new(None)),
             known_views: shared.known_views,
-            validated_at: shared.validated_at,
             cache_hits: Arc::new(AtomicU64::new(0)),
             exists_calls: Arc::new(AtomicU64::new(0)),
             ddl_creates: Arc::new(AtomicU64::new(0)),
@@ -1245,14 +1239,16 @@ impl MatviewManager {
 
     /// Whether the cache still vouches for `view_name`.
     ///
-    /// A reap since the cache was established discards it wholesale rather than
-    /// tracking which names died: reaps are rare next to hits, and each
-    /// surviving view costs one `view_exists` probe to re-learn.
+    /// The actor notes every view it drops, with the views depending on it;
+    /// those names alone are forgotten, so a drop elsewhere costs no probe
+    /// here.
     async fn is_view_known(&self, view_name: &str) -> bool {
-        let epoch = self.db_handle.reap_epoch();
-        if self.validated_at.swap(epoch, Ordering::Relaxed) != epoch {
-            self.known_views.write().await.clear();
-            return false;
+        let dropped = self.db_handle.take_dropped_views();
+        if !dropped.is_empty() {
+            let mut known = self.known_views.write().await;
+            for name in &dropped {
+                known.remove(name);
+            }
         }
         self.known_views.read().await.contains(view_name)
     }

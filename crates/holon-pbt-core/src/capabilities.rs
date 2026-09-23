@@ -3283,6 +3283,10 @@ pub trait RefSqlCardinality {
     /// switches on it because the two branches issue different SQL, and the
     /// post-apply state cannot tell them apart.
     fn last_open_tab_activated(&self) -> bool;
+    /// True iff the last `open_tab` moved its region's cursor off a block that
+    /// was the region's focus root. That block's watcher re-renders it as a
+    /// leaf (`FocusRootChange`), which the budget charges separately.
+    fn last_open_tab_departed_root(&self) -> bool;
 
     /// True iff the most recent keystroke ALSO created the block it wrote to —
     /// a caret seated in a creation slot, where typing is a text edit whose

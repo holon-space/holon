@@ -52,6 +52,11 @@ pub async fn preload_startup_views(
         engine.preload_views(queries).await?;
     }
 
+    engine
+        .preload_keyed_watch_views()
+        .await
+        .context("Failed to preload the shared watch views")?;
+
     tracing::debug!("[DI] preload_startup_views: completed");
     Ok(())
 }

@@ -38,12 +38,13 @@ use validated::Validated;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::CARET_SEAT_READS;
 #[cfg(feature = "otel-testing")]
+use crate::pbt::transition_budgets::DEPARTING_ROOT_RERENDER_READS;
+#[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::JOURNAL_READS;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::NAV_DML_READS;
-#[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::OPEN_TAB_INSERT_CLICK_RESOLVE_READS;
@@ -157,10 +158,20 @@ crate::cap_transition! {
         } else {
             OPEN_TAB_INSERT_CLICK_RESOLVE_READS
         };
+        let departure = if state.last_open_tab_departed_root() {
+            DEPARTING_ROOT_RERENDER_READS
+        } else {
+            0
+        };
         ExpectedSql {
             // `+ CARET_SEAT_READS`: open_tab carries a target into main, so it
             // seats a caret there like `navigation.focus` (D97.a).
-            reads: REACTIVE_BASE + JOURNAL_READS + NAV_DML_READS + click_resolve + CARET_SEAT_READS,
+            reads: REACTIVE_BASE
+                + JOURNAL_READS
+                + NAV_DML_READS
+                + click_resolve
+                + CARET_SEAT_READS
+                + departure,
             writes: 0,
             ddl: 0,
             tolerance: 0,

@@ -106,9 +106,15 @@ pub const OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS: usize = 10;
 /// A tolerance of even 1 would destroy that: the branch delta IS 1, so the
 /// activate ceiling would reach the insert cost and a backwards flag would sail
 /// through. Anything this transition measures other than exactly 25 (activate)
-/// or exactly 26 (insert) — each including `CARET_SEAT_READS` — is DATA:
-/// report and model it, never pad it away.
+/// or exactly 26 (insert) — each including `CARET_SEAT_READS`, plus
+/// `DEPARTING_ROOT_RERENDER_READS` when the click moved the cursor off a focus
+/// root — is DATA: report and model it, never pad it away.
 pub const OPEN_TAB_INSERT_CLICK_RESOLVE_READS: usize = 11;
+
+/// Reads of the leaf re-render of the block a region's cursor leaves: its
+/// watcher re-runs `render_entity` on `FocusRootChange` — the query-source
+/// load, the focus-root check, and the leaf view's snapshot for its key.
+pub const DEPARTING_ROOT_RERENDER_READS: usize = 3;
 
 /// What seating the caret in the destination costs (D97.a): a navigation into
 /// region `main` that names a target resolves the destination's first editable

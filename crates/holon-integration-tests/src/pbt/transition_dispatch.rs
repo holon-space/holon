@@ -594,6 +594,9 @@ mod cap_transition_generic_arm_selftest {
             fn last_open_tab_activated(&self) -> bool {
                 false
             }
+            fn last_open_tab_departed_root(&self) -> bool {
+                false
+            }
             fn last_keystroke_created_its_target(&self) -> bool {
                 false
             }

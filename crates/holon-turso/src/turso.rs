@@ -901,18 +901,9 @@ impl DbHandle {
             .await
             .map_err(|_| StorageError::ActorGone)?;
 
-        let outcome = response_rx.await.map_err(|_| {
-            StorageError::DatabaseError("Actor response channel closed".to_string())
-        })?;
-        // Every drop issued from OUTSIDE the actor arrives here — the base-view
-        // rebuild cascade (`drop_dependent_views`), advice synthesis, the MCP
-        // sidecar. Bumping at this boundary rather than at each of them is what
-        // stops a future caller from dropping a view that readers still believe
-        // in. The actor's own reaps never pass through here and bump themselves.
-        if outcome.is_ok() && drops_a_view(sql) {
-            self.matview_stats.note_reap();
-        }
-        outcome
+        response_rx
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
     }
 
     /// Register a foreign data wrapper as a virtual table.
@@ -1376,9 +1367,9 @@ impl DbHandle {
         &self.cdc_broadcast
     }
 
-    /// Current reap epoch of this database — see `MatviewStats::reap_epoch`.
-    pub(crate) fn reap_epoch(&self) -> u64 {
-        self.matview_stats.reap_epoch()
+    /// Views dropped since the last call — see `MatviewStats::take_dropped`.
+    pub(crate) fn take_dropped_views(&self) -> Vec<String> {
+        self.matview_stats.take_dropped()
     }
 
     /// A witness for "which database is this?", shared by every clone of this
@@ -1825,17 +1816,20 @@ fn ddl_target_name(sql: &str) -> &str {
     "ddl"
 }
 
-/// Whether `sql` removes a view — `DROP VIEW`, with or without `IF EXISTS`.
-/// Turso spells a materialized view's removal the same way.
-fn drops_a_view(sql: &str) -> bool {
+/// The view a `DROP VIEW [IF EXISTS] <name>` statement drops; `None` for any
+/// other statement. Turso spells a materialized view's removal the same way.
+fn dropped_view_name(sql: &str) -> Option<&str> {
     let mut tokens = sql.split_whitespace();
-    let Some(first) = tokens.next() else {
-        return false;
-    };
-    first.eq_ignore_ascii_case("drop")
-        && tokens
-            .next()
-            .is_some_and(|kind| kind.eq_ignore_ascii_case("view"))
+    if !tokens.next()?.eq_ignore_ascii_case("drop") || !tokens.next()?.eq_ignore_ascii_case("view")
+    {
+        return None;
+    }
+    let mut name = tokens.next()?;
+    if name.eq_ignore_ascii_case("if") {
+        tokens.next()?;
+        name = tokens.next()?;
+    }
+    Some(name.trim_end_matches(';').trim_matches('"'))
 }
 
 fn trace_sql(tag: &str, sql: &str) {
@@ -2751,8 +2745,14 @@ impl TursoBackend {
             }
 
             DbCommand::ExecuteDdl { sql, response } => {
+                // Every drop issued from OUTSIDE the actor arrives here — the
+                // base-view rebuild cascade, advice synthesis, the MCP sidecar.
+                // The actor's own reaps note theirs where they drop.
                 let result = match Self::screen_conflict_replace_ddl(&sql) {
-                    Ok(()) => Self::handle_ddl(conn, &state.schema_catalog, &sql).await,
+                    Ok(()) => match Self::note_view_drop(conn, state, &sql).await {
+                        Ok(()) => Self::handle_ddl(conn, &state.schema_catalog, &sql).await,
+                        Err(e) => Err(e),
+                    },
                     Err(e) => Err(e),
                 };
                 if result.is_ok()
@@ -3881,6 +3881,24 @@ impl TursoBackend {
         Self::reap_view(conn, state, view_name).await;
     }
 
+    /// Note the view `sql` drops, with every view depending on it, before the
+    /// drop runs. A no-op for any statement that is not a `DROP VIEW`.
+    async fn note_view_drop(conn: &turso::Connection, state: &ActorState, sql: &str) -> Result<()> {
+        let Some(name) = dropped_view_name(sql) else {
+            return Ok(());
+        };
+        let mut closure = crate::matview_manager::dependent_views_on_conn(conn, name)
+            .await
+            .map_err(|e| {
+                StorageError::DatabaseError(format!(
+                    "enumerating the views that depend on '{name}' before dropping it: {e}"
+                ))
+            })?;
+        closure.push(name.to_string());
+        state.matview_stats.note_dropped(closure);
+        Ok(())
+    }
+
     /// Drop an unleased, unpinned view together with its dependents.
     async fn reap_view(conn: &turso::Connection, state: &mut ActorState, view_name: &str) {
         let dependents =
@@ -3911,6 +3929,7 @@ impl TursoBackend {
 
         let mut doomed = dependents;
         doomed.push(view_name.to_string());
+        state.matview_stats.note_dropped(doomed.iter().cloned());
         for name in &doomed {
             if let Err(e) = Self::handle_ddl(
                 conn,
@@ -3940,8 +3959,6 @@ impl TursoBackend {
                 .available_resources
                 .remove(&Resource::schema(name.clone()));
         }
-        // Anyone caching "this view exists" is now wrong.
-        state.matview_stats.note_reap();
         state.publish_matview_stats();
         tracing::debug!(view = %view_name, "[TursoBackend::Actor] reaped unleased matview");
     }
@@ -3967,12 +3984,9 @@ impl TursoBackend {
             let Some(Value::String(name)) = row.get("name") else {
                 continue;
             };
-            Self::handle_ddl(
-                conn,
-                &state.schema_catalog,
-                &format!("DROP VIEW IF EXISTS {name}"),
-            )
-            .await?;
+            let drop_sql = format!("DROP VIEW IF EXISTS {name}");
+            Self::note_view_drop(conn, state, &drop_sql).await?;
+            Self::handle_ddl(conn, &state.schema_catalog, &drop_sql).await?;
             crate::matview_manager::cleanup_orphaned_dbsp_state_on_conn(conn, name)
                 .await
                 .map_err(|e| {
@@ -4004,7 +4018,6 @@ impl TursoBackend {
             }
         }
         state.generation += 1;
-        state.matview_stats.note_reap();
         state.publish_matview_stats();
 
         if dropped > 0 {

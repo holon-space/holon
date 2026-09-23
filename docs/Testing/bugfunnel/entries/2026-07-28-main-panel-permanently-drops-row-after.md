@@ -3,7 +3,7 @@ id: 2026-07-28-main-panel-permanently-drops-row-after
 date: 2026-07-28
 gap: ORACLE
 secondary: ENVIRONMENT
-status: OPEN
+status: FIXED
 summary: >-
   Main panel PERMANENTLY DROPS one row after a NavigateFocus-away-and-back
   around a SplitBlock/BlockToPage sequence: the block exists in `block_raw`,
@@ -76,3 +76,8 @@ on panel rebuild; the evidence refutes that. → FIXED 2026-07-28: same turso
 fix stack 80ed4a4a covers the insert-miss dual — ~2/4→0/30 red over 30 fresh
 processes with the set-equality oracle engaged (15/15 per tick certified);
 case UN-QUARANTINED (PR #129), keystone-smoke green on this signature
+
+Re-verified 2026-09-24: `main-panel-drops-refocused-split-block` passed in
+the full `just hand-authored` run on adb627e9, a descendant of main without
+the dropped-row watcher fix. It also passed 10/10 isolated runs in the
+dropped-row lane (ffcb5394 plus that fix).

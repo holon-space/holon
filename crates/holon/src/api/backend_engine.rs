@@ -469,6 +469,15 @@ impl BackendEngine {
         self.matview_manager.subscribe_cdc(&view_name).await
     }
 
+    /// `subscribe_sql` for a view whose `watch_key` column routes each row:
+    /// the stream carries only the changes of rows keyed `watch_key`.
+    pub async fn subscribe_sql_keyed(&self, sql: &str, watch_key: &str) -> Result<RowChangeStream> {
+        let view_name = self.matview_manager.ensure_view(sql).await?;
+        self.matview_manager
+            .subscribe_cdc_keyed(&view_name, Some(watch_key))
+            .await
+    }
+
     /// Keyed watches this engine has opened, ever. Sample it around an action
     /// to get that action's re-opens.
     pub fn watch_context_opens(&self) -> u64 {
@@ -655,6 +664,25 @@ impl BackendEngine {
             self.matview_manager.preload(&sql_with_params).await?;
         }
         tracing::info!("[BackendEngine] preload_views: completed");
+        Ok(())
+    }
+
+    /// Create the views every `watch_ui` shares — the focus-root membership
+    /// trigger and the two shape-keyed render views — so no watch pays their
+    /// DDL on the interaction path. Each is created from the exact text its
+    /// watch later asks for, or the watch would create a second view.
+    pub async fn preload_keyed_watch_views(&self) -> Result<()> {
+        self.matview_manager
+            .ensure_view(crate::api::block_domain::FOCUS_ROOT_MEMBERSHIP_SQL)
+            .await?;
+        for sql in [
+            crate::api::block_domain::root_subtree_watch_sql(),
+            crate::api::block_domain::leaf_watch_sql(),
+        ] {
+            self.matview_manager
+                .ensure_view(&self.apply_sql_transforms(&sql))
+                .await?;
+        }
         Ok(())
     }
 

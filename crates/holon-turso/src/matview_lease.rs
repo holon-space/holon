@@ -36,10 +36,10 @@ pub struct MatviewStats {
     leased_views: AtomicU64,
     active_leases: AtomicU64,
     pinned: AtomicU64,
-    /// Bumped every time the actor drops a view out from under its users.
-    /// Readers that cache "this view exists" compare against it to learn that
-    /// their answer is stale — see `MatviewManager`'s shared view state.
-    reap_epoch: AtomicU64,
+    /// Views dropped out from under their users, each with every view that
+    /// depends on it, since the cache of known views last drained this list —
+    /// see `MatviewManager`'s shared view state, its one consumer.
+    dropped: std::sync::Mutex<Vec<String>>,
 }
 
 /// Sample of [`MatviewStats`]. Coherent as a whole: the actor publishes all
@@ -55,16 +55,19 @@ pub struct MatviewStatsSnapshot {
 }
 
 impl MatviewStats {
-    /// Current reap epoch. Changes iff the actor has dropped a view since it
-    /// was last read.
-    pub fn reap_epoch(&self) -> u64 {
-        self.reap_epoch.load(Ordering::Relaxed)
+    /// Record views about to be dropped. Called by the actor, BEFORE the drop,
+    /// from every path that removes a view it did not just create, with the
+    /// transitive closure of the views that depend on them.
+    pub(crate) fn note_dropped(&self, names: impl IntoIterator<Item = String>) {
+        self.dropped
+            .lock()
+            .expect("dropped-views mutex")
+            .extend(names);
     }
 
-    /// Record that views were dropped. Called by the actor from every path
-    /// that removes a view it did not just create.
-    pub(crate) fn note_reap(&self) {
-        self.reap_epoch.fetch_add(1, Ordering::Release);
+    /// Every view noted as dropped since the last call.
+    pub(crate) fn take_dropped(&self) -> Vec<String> {
+        std::mem::take(&mut *self.dropped.lock().expect("dropped-views mutex"))
     }
 
     pub fn snapshot(&self) -> MatviewStatsSnapshot {

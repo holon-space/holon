@@ -263,7 +263,9 @@ impl RefNavHistoryMut for ReferenceState {
         // set: `focus` CLOSES the region's other rows, `open_tab` leaves them
         // open (`provider.rs::open_tab` inserts without a close sweep), so the
         // region accumulates background tabs.
-        let already_current = self.current_focus(region).as_ref() == Some(block_id);
+        let previous = self.current_focus(region);
+        let already_current = previous.as_ref() == Some(block_id);
+        self.ui.tab.last_open_tab_departed_root = previous.is_some() && !already_current;
         self.ui.tab.last_navigate_first_visit =
             self.ui.tab.seen_focus_targets.insert(block_id.clone());
 

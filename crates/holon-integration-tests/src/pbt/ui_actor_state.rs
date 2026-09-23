@@ -94,6 +94,11 @@ pub struct UITabState {
     /// pick which of the two `OPEN_TAB_*_READS` ceilings applies.
     pub last_open_tab_activated: bool,
 
+    /// Whether the most recent `open_tab` moved its region's cursor off a
+    /// block that was the region's focus root. Recorded by `nav_open_tab`
+    /// because post-apply the previous root is gone from the state.
+    pub last_open_tab_departed_root: bool,
+
     /// Whether the most recent keystroke also CREATED the block it wrote to
     /// (a caret in a creation slot). Recorded by the ref's slot-birth apply
     /// because `expected_sql` only sees the post-apply state, where the block
@@ -124,6 +129,7 @@ impl UITabState {
             seen_focus_targets: HashSet::new(),
             last_navigate_first_visit: false,
             last_open_tab_activated: false,
+            last_open_tab_departed_root: false,
             last_keystroke_created_its_target: false,
             last_backspace_joins: 0,
         }

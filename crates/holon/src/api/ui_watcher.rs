@@ -31,6 +31,10 @@ use crate::storage::turso::RowChangeStream;
 enum RenderTrigger {
     /// Block or children changed in the database — increment generation.
     StructuralChange,
+    /// The block became, or stopped being, a region's focus root, which
+    /// decides whether it renders as its subtree or as a leaf — increment
+    /// generation.
+    FocusRootChange,
     /// User requested a different entity profile variant — same generation,
     /// but the data forwarder restarts with the updated profile context
     /// (fixing the stale-context bug in the previous implementation).
@@ -59,6 +63,12 @@ pub async fn watch_ui(engine: Arc<BackendEngine>, block_id: EntityUri) -> Result
     );
 
     let struct_stream = engine.subscribe_sql(&structural_sql).await?;
+    let focus_stream = engine
+        .subscribe_sql_keyed(
+            crate::api::block_domain::FOCUS_ROOT_MEMBERSHIP_SQL,
+            block_id.as_str(),
+        )
+        .await?;
 
     let (output_tx, output_rx) = mpsc::channel(64);
     let (command_tx, command_rx) = mpsc::channel(16);
@@ -73,7 +83,13 @@ pub async fn watch_ui(engine: Arc<BackendEngine>, block_id: EntityUri) -> Result
     // Merge structural CDC + commands into a single trigger stream.
     let profile_resolver = engine.profile_resolver().clone();
     let profile_signal = profile_resolver.profile_signal();
-    let trigger_stream = merge_triggers(struct_stream, command_rx, profile_signal, &mut aborts);
+    let trigger_stream = merge_triggers(
+        struct_stream,
+        focus_stream,
+        command_rx,
+        profile_signal,
+        &mut aborts,
+    );
 
     let watcher_handle = tokio::spawn(run_reactive_watcher(
         trigger_stream,
@@ -97,14 +113,19 @@ impl UiWatcher for BackendEngine {
     }
 }
 
-/// Merge structural CDC events, WatcherCommands, and profile cache changes
-/// into a single `RenderTrigger` stream, prepended with an `Initial` trigger.
+/// Merge structural CDC events, focus-root membership CDC, WatcherCommands, and
+/// profile cache changes into a single `RenderTrigger` stream, prepended with
+/// an `Initial` trigger.
 ///
-/// All four spawned actors register their abort handles with `aborts` so that
+/// Every input `render_entity` reads must be one of these triggers: an input
+/// that changes without one leaves the watcher rendering a stale decision.
+///
+/// All spawned actors register their abort handles with `aborts` so that
 /// dropping the owning `WatchHandle` cancels them immediately rather than
 /// waiting for their (possibly long-lived) source streams to terminate.
 fn merge_triggers(
     struct_stream: RowChangeStream,
+    focus_stream: RowChangeStream,
     command_rx: mpsc::Receiver<WatcherCommand>,
     profile_signal: futures_signals::signal::Mutable<Arc<crate::entity_profile::ProfileCache>>,
     aborts: &mut ActorAbortGuard,
@@ -133,6 +154,17 @@ fn merge_triggers(
         }
     });
     aborts.push(struct_handle.abort_handle());
+
+    let tx_focus = tx.clone();
+    let focus_handle = tokio::spawn(async move {
+        tokio::pin!(focus_stream);
+        while let Some(_batch) = focus_stream.next().await {
+            if tx_focus.send(RenderTrigger::FocusRootChange).await.is_err() {
+                break;
+            }
+        }
+    });
+    aborts.push(focus_handle.abort_handle());
 
     // Commands → RenderTrigger::VariantChange
     let tx_cmd = tx.clone();
@@ -192,6 +224,12 @@ async fn run_reactive_watcher(
             RenderTrigger::StructuralChange => {
                 generation += 1;
                 tracing::info!("[UiWatcher] Structural CDC for block '{block_id}' — re-rendering");
+            }
+            RenderTrigger::FocusRootChange => {
+                generation += 1;
+                tracing::info!(
+                    "[UiWatcher] Focus-root membership of block '{block_id}' changed — re-rendering"
+                );
             }
             RenderTrigger::VariantChange(v) => {
                 variant = Some(v.clone());
