@@ -246,9 +246,6 @@
                     "name": "task_vocabulary_source.rs"
                   },
                   {
-                    "name": "template_source.rs"
-                  },
-                  {
                     "name": "types.rs"
                   },
                   {
@@ -301,6 +298,9 @@
                   },
                   {
                     "name": "sql_operation_provider_diff_test.rs"
+                  },
+                  {
+                    "name": "sql_write_authority.rs"
                   },
                   {
                     "name": "task_keyword_cycle.rs"
@@ -4677,6 +4677,12 @@
                   },
                   {
                     "name": "read_model_second_writer_census.rs"
+                  },
+                  {
+                    "name": "stored_block_column_shapes.rs"
+                  },
+                  {
+                    "name": "template_instantiation_stored_columns.rs"
                   }
                 ]
               },
@@ -4857,6 +4863,9 @@
                 "name": "mcp_sync_partial_write_divergence.rs"
               },
               {
+                "name": "move_guard_under_lag.rs"
+              },
+              {
                 "name": "pairing_reimport_read_only_home.rs"
               },
               {
@@ -4888,6 +4897,12 @@
               },
               {
                 "name": "subtree_of_bfs_cost_turso.rs"
+              },
+              {
+                "name": "task_keyword_under_lag.rs"
+              },
+              {
+                "name": "template_instantiation_under_lag.rs"
               },
               {
                 "name": "two_instance_composed_pbt.rs"
