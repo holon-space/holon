@@ -73,7 +73,10 @@
 //!   [`touched_entities`]). Closes the matching entries and emits, per closure:
 //!
 //!   `tracing::info!(target="holon_latency", stage="e2e", action, block,
-//!   origin, source, ms, in_flight, backlog)`
+//!   origin, source, ms, in_flight, backlog, delivery_batch)`
+//!
+//!   `delivery_batch` names the `rows_delivered` call that closed the entry,
+//!   so a consumer can tell which samples one applied batch retired together.
 //!
 //! # Two clocks, never one number
 //!
@@ -138,6 +141,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -370,7 +374,9 @@ static PENDING: Mutex<Registry> = Mutex::new(Registry {
     facade: Vec::new(),
 });
 /// Per-ORIGIN capacity: one origin's burst can never evict another's entries.
-const MAX_PENDING: usize = 64;
+pub const MAX_PENDING: usize = 64;
+/// Sequence of `rows_delivered` calls; every sample one call closes shares it.
+static DELIVERY_BATCH: AtomicU64 = AtomicU64::new(0);
 const EXPIRY: Duration = Duration::from_secs(30);
 
 /// Extract the op-instance token from op params: the editor stamps `write_seq`
@@ -772,6 +778,7 @@ pub fn rows_delivered<'a>(
     for e in expired {
         disclose_expired(&e);
     }
+    let delivery_batch = DELIVERY_BATCH.fetch_add(1, Ordering::Relaxed) + 1;
     for c in closed {
         // End-to-end (interaction -> PROJECTION-VISIBLE): closes on the tokio
         // CDC actor the moment the batch is applied to the reactive mirror —
@@ -801,6 +808,7 @@ pub fn rows_delivered<'a>(
             // foreign traffic shared the pipeline anyway, which is what tells an
             // uncontended sample from a queued one (D119.a rounds 2-3).
             contended = c.contended,
+            delivery_batch,
             "holon_latency",
         );
     }

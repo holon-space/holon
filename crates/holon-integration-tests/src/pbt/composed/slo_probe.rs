@@ -141,6 +141,7 @@ struct E2eVisitor {
     in_flight: Option<u64>,
     backlog: Option<u64>,
     contended: Option<bool>,
+    delivery_batch: Option<u64>,
 }
 
 impl tracing::field::Visit for E2eVisitor {
@@ -149,6 +150,7 @@ impl tracing::field::Visit for E2eVisitor {
             "ms" => self.ms = Some(value),
             "in_flight" => self.in_flight = Some(value),
             "backlog" => self.backlog = Some(value),
+            "delivery_batch" => self.delivery_batch = Some(value),
 
             _ => {}
         }
@@ -211,14 +213,14 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
         // A rung that silently scored an unscoreable sample would be the exact
         // vacuous-pass this gate exists to prevent, so a missing queue depth is
         // a panic on the emitting thread rather than a defaulted `1`.
-        let (Some(ms), Some(in_flight), Some(backlog), Some(contended)) =
-            (v.ms, v.in_flight, v.backlog, v.contended)
+        let (Some(ms), Some(in_flight), Some(backlog), Some(contended), Some(delivery_batch)) =
+            (v.ms, v.in_flight, v.backlog, v.contended, v.delivery_batch)
         else {
             panic!(
-                "slo probe: an `e2e` event lacked ms/in_flight/backlog/contended (ms={:?} \
-                 in_flight={:?} backlog={:?} contended={:?}) — the correlator's emission and \
-                 this probe have diverged",
-                v.ms, v.in_flight, v.backlog, v.contended
+                "slo probe: an `e2e` event lacked ms/in_flight/backlog/contended/delivery_batch \
+                 (ms={:?} in_flight={:?} backlog={:?} contended={:?} delivery_batch={:?}) — the \
+                 correlator's emission and this probe have diverged",
+                v.ms, v.in_flight, v.backlog, v.contended, v.delivery_batch
             );
         };
         // Same reasoning as the queue depths: a sample nobody can attribute to a
@@ -242,6 +244,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
                 backlog: backlog as usize,
                 contended,
                 delivered_at: Instant::now(),
+                delivery_batch,
             });
     }
 }

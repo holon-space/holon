@@ -218,6 +218,7 @@ struct LatencyFields {
     in_flight: Option<u64>,
     backlog: Option<u64>,
     contended: Option<bool>,
+    delivery_batch: Option<u64>,
 }
 
 impl LatencyFields {
@@ -240,6 +241,7 @@ impl Visit for LatencyFields {
             "blocks" => self.blocks = Some(value),
             "in_flight" => self.in_flight = Some(value),
             "backlog" => self.backlog = Some(value),
+            "delivery_batch" => self.delivery_batch = Some(value),
 
             _ => {}
         }
@@ -305,13 +307,16 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
             // every queued sample as service time and restore the exact
             // false-banner behaviour this rung replaces, so an event without
             // the fields is dropped and disclosed rather than guessed at.
-            let (Some(in_flight), Some(backlog), Some(contended)) =
-                (fields.in_flight, fields.backlog, fields.contended)
-            else {
+            let (Some(in_flight), Some(backlog), Some(contended), Some(delivery_batch)) = (
+                fields.in_flight,
+                fields.backlog,
+                fields.contended,
+                fields.delivery_batch,
+            ) else {
                 tracing::warn!(
                     target: "holon_oracles",
                     oracle = "latency-slo",
-                    "[latency-slo] an `e2e` event carried no queue depths — this sample is \
+                    "[latency-slo] an `e2e` event carried no queue depths or delivery batch — this sample is \
                      unscoreable and the SLO rungs are running on partial evidence",
                 );
                 return;
@@ -340,6 +345,7 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
                 backlog: backlog as usize,
                 contended,
                 delivered_at: Instant::now(),
+                delivery_batch,
             });
         } else if ms > self.slo_ms {
             // Diagnostic attribution: which pipeline stage ate the budget.
@@ -409,7 +415,7 @@ mod tests {
     ) {
         let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, || {
-            for _ in 0..n {
+            for i in 0..n {
                 tracing::info!(
                     target: "holon_latency",
                     stage = "e2e",
@@ -420,6 +426,7 @@ mod tests {
                     in_flight = in_flight as u64,
                     backlog = backlog as u64,
                     contended = false,
+                    delivery_batch = i as u64,
                     "holon_latency",
                 );
             }
@@ -478,6 +485,7 @@ mod tests {
                         in_flight = i + 1,
                         backlog = 59 - i,
                         contended = false,
+                        delivery_batch = i,
                         "holon_latency",
                     );
                 }
@@ -554,6 +562,7 @@ mod tests {
                         // Never reaches zero: the queue stays non-empty, so
                         // every gap is a saturated interval.
                         backlog = 20 - i,
+                        delivery_batch = i,
                         "holon_latency",
                     );
                     // Real wall time — the drain rate is measured against the
@@ -604,6 +613,7 @@ mod tests {
                         in_flight = 1u64,
                         backlog = 0u64,
                         contended = false,
+                        delivery_batch = i,
                         "holon_latency",
                     );
                 }

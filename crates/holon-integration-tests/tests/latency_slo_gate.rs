@@ -59,6 +59,7 @@ use holon::api::holon_service::HolonService;
 use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::Value;
+use holon_api::latency_e2e::MAX_PENDING;
 use holon_api::latency_slo::ClockOrigin;
 use holon_api::latency_slo::MIN_DRAIN_INTERVALS;
 use holon_api::latency_slo::MIN_SERVICE_SAMPLES;
@@ -90,13 +91,23 @@ use proptest_state_machine::StateMachineTest;
 /// coalesced.
 const PACED_WRITES: usize = 40;
 
-/// Burst writes. Far past [`MIN_DRAIN_INTERVALS`], because only the SATURATED
-/// intervals count and how many of them a burst produces depends on how the
-/// dispatch loop races the drain. Measured at 40 writes: 26 / 36 / 15 saturated
-/// intervals across three runs, the last of them too few to judge at all. A
-/// deeper burst keeps the queue non-empty for long enough that the statistic
-/// rests on a stretch rather than on the race.
-const BURST_WRITES: usize = 150;
+/// Burst waves. The projector drains its whole queue per pass, so one wave
+/// can retire in ONE delivery batch — a single saturated interval however
+/// deep the wave is. Each wave therefore guarantees at least one interval, and
+/// the wave count is what puts the rung past [`MIN_DRAIN_INTERVALS`].
+const BURST_WAVES: usize = 5;
+
+/// Writes per wave. Kept at or below half the correlator's per-origin capacity
+/// (`MAX_PENDING`), so a wave plus the unretired rest of the previous one never
+/// evicts a pending clock — an evicted clock is a write the rung cannot see.
+const WAVE_WRITES: usize = 30;
+
+const BURST_WRITES: usize = BURST_WAVES * WAVE_WRITES;
+
+/// How long a wave may go without its first delivery, or the queue without
+/// draining room for the next wave. The correlator expires a clock at 30s, so
+/// waiting longer would only measure its expiry.
+const WAVE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The block every write lands on. Born-equal id, so oracle and SUT share it
 /// and no synthetic→real reconcile is in the measured path.
@@ -210,25 +221,14 @@ fn require_a_judgeable_host() {
     );
 }
 
-/// Fraction of dispatched burst writes that may fail to produce a delivery.
+/// Boot a fresh SUT and drive the burst through the production fire-and-forget
+/// door, wave by wave. Returns the measured window.
 ///
-/// The fire-and-forget door returns `Ok` the moment it hands the intent off, so
-/// a downstream failure is invisible to the caller — measured, 150 dispatches
-/// yielded 62-63 deliveries (~59% loss) while the rung reported a rate as if
-/// nothing had been lost. A rung that silently measures a partly-failing
-/// pipeline understates retirement and calibrates its floor against the
-/// understatement.
-///
-/// The loss is a HARNESS artifact (see the burst-loss note in the bugfunnel
-/// entry), so this budget is set where it is to keep the rung honest about the
-/// artifact rather than to certify it: the run's output line always states
-/// landed/dispatched, and a loss worse than this fails loudly instead of being
-/// absorbed into the rate.
-const MAX_BURST_LOSS: f64 = 0.75;
-
-/// Boot a fresh SUT and drive one burst through the production fire-and-forget
-/// door. Returns the measured window.
+/// A wave is dispatched back-to-back; the next one waits for (a) a delivery
+/// after the current wave was dispatched, so each wave is its own pass, and
+/// (b) room in the correlator for a whole wave, so no clock is evicted.
 fn measure_burst() -> SloWindow {
+    const _: () = assert!(2 * WAVE_WRITES <= MAX_PENDING);
     let (sut, _ref_state) = boot();
     let engine = sut
         .handle()
@@ -238,19 +238,40 @@ fn measure_burst() -> SloWindow {
     let probe = SloProbe::arm();
     sut.runtime().block_on(async {
         engine.ui_state().set_detached_dispatch(true);
-        for i in 0..BURST_WRITES {
-            let mut params = HashMap::new();
-            params.insert("id".to_string(), Value::String(burst_target(i)));
-            params.insert("field".to_string(), Value::String("content".to_string()));
-            // Distinct per write: an identity re-commit produces no CDC delta,
-            // so it would yield no sample and silently shrink the burst.
-            params.insert("value".to_string(), Value::String(format!("burst {i}")));
-            dispatch_intent_through_armed_door(
-                &engine,
-                OperationIntent::new(EntityName::new("block"), "set_field".to_string(), params),
-            )
-            .await
-            .expect("the detached door accepts a content write");
+        for wave in 0..BURST_WAVES {
+            let delivered_before = probe.snapshot(ClockOrigin::Ui).len();
+            for j in 0..WAVE_WRITES {
+                let i = wave * WAVE_WRITES + j;
+                let mut params = HashMap::new();
+                params.insert("id".to_string(), Value::String(burst_target(i)));
+                params.insert("field".to_string(), Value::String("content".to_string()));
+                // Distinct per write: an identity re-commit produces no CDC delta,
+                // so it would yield no sample and silently shrink the burst.
+                params.insert("value".to_string(), Value::String(format!("burst {i}")));
+                dispatch_intent_through_armed_door(
+                    &engine,
+                    OperationIntent::new(EntityName::new("block"), "set_field".to_string(), params),
+                )
+                .await
+                .expect("the detached door accepts a content write");
+            }
+            let dispatched = (wave + 1) * WAVE_WRITES;
+            let started = std::time::Instant::now();
+            loop {
+                let delivered = probe.snapshot(ClockOrigin::Ui).len();
+                if delivered > delivered_before
+                    && dispatched - delivered + WAVE_WRITES <= MAX_PENDING
+                {
+                    break;
+                }
+                assert!(
+                    started.elapsed() < WAVE_DEADLINE,
+                    "[latency-slo gate] wave {wave}: {delivered} of {dispatched} dispatched \
+                     writes delivered after {WAVE_DEADLINE:?} ({delivered_before} before this \
+                     wave) — the pipeline stopped retiring the burst"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
         }
         engine.ui_state().set_detached_dispatch(false);
     });
@@ -258,24 +279,22 @@ fn measure_burst() -> SloWindow {
     let window = probe.snapshot(ClockOrigin::Ui);
     drop(probe);
 
-    // Disclose the shortfall on EVERY run, not only when it is fatal: the rate
-    // below is deliveries per second, so a reader has to know how many of the
-    // dispatched writes ever became one.
+    // The fire-and-forget door returns `Ok` the moment it hands the intent
+    // off, so a downstream failure is invisible to the caller; this count is
+    // the only place it shows. The waves never exceed the correlator's
+    // capacity, so every dispatched write must close a clock.
     let landed = window.len();
-    let loss = 1.0 - (landed as f64 / BURST_WRITES as f64);
     eprintln!(
         "[latency-slo gate] burst: {landed}/{BURST_WRITES} dispatched writes produced a \
-         delivery ({:.0}% lost)",
-        loss * 100.0,
+         delivery in {BURST_WAVES} waves of {WAVE_WRITES}",
     );
-    assert!(
-        loss <= MAX_BURST_LOSS,
-        "[latency-slo gate] the burst lost {:.0}% of its writes ({landed}/{BURST_WRITES} landed), \
-         over the {:.0}% budget. The fire-and-forget door reports Ok regardless, so this is the \
-         only place the shortfall is visible — the drain rate below it would be measuring a \
-         mostly-failing pipeline.",
-        loss * 100.0,
-        MAX_BURST_LOSS * 100.0,
+    assert_eq!(
+        landed,
+        BURST_WRITES,
+        "[latency-slo gate] only {landed} of {BURST_WRITES} burst writes produced a delivery. \
+         No wave can evict a pending clock, so each missing one is a write the pipeline never \
+         made visible. Window: {}",
+        window.report(),
     );
     window
 }
@@ -370,22 +389,17 @@ fn latency_slo_rung_service_time_p95() {
 ///
 /// **REPORT-ONLY on the rate.** The floor is computed and printed, but a rate
 /// below it does not fail this test; the floor's own falsification lives in
-/// `holon_api::latency_slo`'s `throughput_rung_fails_a_slow_drain`. On hosts
-/// the contention covariate admitted, an unmodified tree measured 27.0/s and
-/// 9.5/s — a 2.8x spread with the covariate reading quiet both times, so no
-/// floor between them is anything but a coin flip, and a floor below them both
-/// is decoration.
+/// `holon_api::latency_slo`'s `throughput_rung_fails_a_slow_drain`.
 ///
 /// This is the treatment `docs/Testing/latency-ceilings.txt` already gives its
 /// two SplitBlock rungs: measured and printed every run, unable to fail a build
-/// until the slow mode is attributed. What DOES fail here is structural — a
-/// burst that did not saturate, or one that produced no samples — because those
-/// mean the rung measured nothing, which must never read as a pass.
+/// until calibrated. What DOES fail here is structural — a burst that never had
+/// two interactions in flight, one that closed fewer saturated intervals than a
+/// verdict needs, or one that lost a write — because those mean the rung
+/// measured nothing, which must never read as a pass.
 ///
-/// To promote it to a gate: attribute the spread (the CDC actor's batching
-/// granularity is the prime suspect — the same 150 writes retire in 3 batches
-/// on one run and many more on the next), then calibrate per the ceilings
-/// file's methodology.
+/// To promote it to a gate, calibrate per the ceilings file's methodology (see
+/// `THROUGHPUT_FLOOR_WRITES_PER_SEC`).
 #[test]
 fn latency_slo_rung_throughput_floor() {
     let _turn = RUNG_LOCK
@@ -400,13 +414,29 @@ fn latency_slo_rung_throughput_floor() {
         window.len(),
         window.drain_interval_count(),
     );
-    // A burst that never saturated measured nothing about drain rate. That is
-    // an unusable run, not a fast one.
+    // A burst that never had two interactions in flight measured nothing about
+    // drain rate. That is an unusable run, not a fast one.
+    let max_in_flight = window
+        .samples()
+        .iter()
+        .map(|s| s.in_flight)
+        .max()
+        .expect("the loss budget admits only a non-empty burst");
+    assert!(
+        max_in_flight >= 2,
+        "[latency-slo gate] no burst write was dispatched behind another: the deepest queue any \
+         of the {} deliveries saw at dispatch was {max_in_flight}. The detached dispatch door \
+         serialized the burst, so drain rate is unmeasurable. Window: {}",
+        window.len(),
+        window.report(),
+    );
     assert!(
         window.drain_interval_count() >= MIN_DRAIN_INTERVALS,
-        "[latency-slo gate] the burst produced only {} saturated intervals out of {} \
-         deliveries — the detached dispatch door did not put multiple interactions in flight, \
-         so drain rate is unmeasurable. This rung cannot pass on this evidence. Window: {}",
+        "[latency-slo gate] {} interactions were in flight at once, yet the {BURST_WAVES}-wave \
+         burst produced only {} saturated intervals out of {} deliveries — each wave waits for \
+         a delivery before the next is dispatched, so every wave should close at least one. \
+         Window: {}",
+        max_in_flight,
         window.drain_interval_count(),
         window.len(),
         window.report(),
