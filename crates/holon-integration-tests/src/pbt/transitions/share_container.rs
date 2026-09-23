@@ -72,8 +72,16 @@ impl<R: RefSharedView + RefSharedViewMut> TransitionRef<R> for ShareContainer {
 
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         // Once only: re-sharing an already-shared vault is a no-op that would
-        // just burn ticks the sequence needs for syncing.
-        check(!state.is_shared(), Reason::VaultAlreadyShared)
+        // just burn ticks the sequence needs for syncing. Never after a
+        // per-page share: pairing refuses a receiver that holds a mount (D73.a).
+        let checks: Vec<Validated<(), Reason>> = vec![
+            check(!state.is_shared(), Reason::VaultAlreadyShared),
+            check(state.page_shares().is_empty(), Reason::PreconditionFailed),
+        ];
+        checks
+            .into_iter()
+            .collect::<Validated<Vec<()>, _>>()
+            .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut R) {

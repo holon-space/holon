@@ -3880,6 +3880,17 @@ pub trait SutTwoInstance {
     /// synthetic→real reconcile, so the model needs to name the block it
     /// predicts without a second reconcile map.
     async fn peer_create_block(&self, parent: &EntityUri, content: &str, id: &EntityUri);
+
+    /// Share the OWNER's page `page` through the production per-page share
+    /// (`share_subtree`) and accept it on the RECEIVER under
+    /// `receiver_parent` (`accept_shared_subtree`). A refused op is a panic,
+    /// never a no-op: the placement oracles would otherwise judge a share that
+    /// never happened.
+    async fn share_page(&self, page: &EntityUri, receiver_parent: &EntityUri);
+
+    /// Move `id` under `new_parent` on the RECEIVER through its production
+    /// `move_block` op.
+    async fn move_on_receiver(&self, id: &EntityUri, new_parent: &EntityUri);
 }
 
 /// SUT-side observation of the RECEIVER instance's projections. Separate from
@@ -3923,6 +3934,10 @@ pub trait SutReceiverBackend {
     /// state under a pairwise fork-and-sync fixed point? `None` when either
     /// document is unavailable (the invariant then skips that layer, honestly).
     async fn crdt_converged(&self) -> Option<bool>;
+
+    /// The receiver's `block_raw` rows, after settle — the receiver twin of
+    /// [`SutBackend::block_raw_snapshot`].
+    async fn receiver_block_raw_snapshot(&self) -> Vec<holon_api::Block>;
 }
 
 /// One block the RECEIVER authored, as the two-writer model predicts it: where
@@ -3932,6 +3947,21 @@ pub trait SutReceiverBackend {
 pub struct PeerWrite {
     pub parent: EntityUri,
     pub content: String,
+}
+
+/// One page the owner shared with the receiver through the per-page share, as
+/// the model predicts its PLACEMENT (the Overlay proposal's placement record):
+/// where the receiver hangs it, and where the owner keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageShare {
+    /// The receiver-side parent the page sits under: the accept target, then
+    /// wherever the receiver last moved it.
+    pub receiver_parent: EntityUri,
+    /// The owner-side parent at share time. No owner-side transition moves a
+    /// shared page, so a receiver move must leave this untouched.
+    pub owner_parent: EntityUri,
+    /// Whether the receiver has moved the page since it accepted the share.
+    pub moved: bool,
 }
 
 /// Reference-side view of what the receiver is ENTITLED to hold, and how many
@@ -3972,6 +4002,15 @@ pub trait RefSharedView {
     /// than the model's lower bound), so the oracle never asserts their
     /// ABSENCE — only that the delivered ones are present.
     fn peer_writes_pending(&self) -> BTreeMap<EntityUri, PeerWrite>;
+
+    /// Pages the owner shared through the per-page share, keyed by page id.
+    fn page_shares(&self) -> BTreeMap<EntityUri, PageShare>;
+
+    /// Owner pages a per-page share may name: user documents not yet shared.
+    fn shareable_pages(&self) -> Vec<EntityUri>;
+
+    /// Receiver pages a shared page may be placed under.
+    fn receiver_pages(&self) -> Vec<EntityUri>;
 }
 
 /// Write side of [`RefSharedView`] — the two model mutations the sharing
@@ -3994,6 +4033,12 @@ pub trait RefSharedViewMut: RefSharedView {
 
     /// Record a block the RECEIVER authored, pending delivery.
     fn note_peer_write(&mut self, id: EntityUri, write: PeerWrite);
+
+    /// Record a per-page share of `page`, accepted under `receiver_parent`.
+    fn note_page_share(&mut self, page: EntityUri, receiver_parent: EntityUri);
+
+    /// Record the receiver moving the shared `page` under `new_parent`.
+    fn note_placed_root_move(&mut self, page: &EntityUri, new_parent: EntityUri);
 }
 
 #[cfg(test)]

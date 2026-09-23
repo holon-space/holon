@@ -144,25 +144,26 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     while any per-subtree mount exists —
     [ADR 0033](../adr/0033-own-device-pairing-whole-store-replication.md).
 
-    The mount node is projected as a **Page** so the subtree owns a dedicated
-    file, and there is a deliberate **Loro↔SQL shape difference at the mount
-    boundary** the keystone oracles are taught to MAP (never skip): the mount
-    id ≡ the shared page's id — when a PAGE `P` is shared the mount adopts `P`'s
-    identity and `P`'s node FOLDS onto the mount in the SQL/org projection
-    (P's children reparent to the mount, P's own row is dropped) while `P`
-    stays uncollapsed in the shared Loro doc. **Not yet built (D198.a):** the
-    SQL projection still mints a fresh mount id for a page share and copies
-    only `P`'s title and tags. When a plain BLOCK is shared the
-    mount is a synthetic container page. A mount page never sits under a
-    non-page (Amendment A: it bubbles to the nearest page ancestor). Shares
-    never nest: `share_subtree` refuses a subtree that holds a mount or sits
-    inside a share (ADR 0028 A7).
+    The mount node is a **placement record**, never a block (Overlay
+    proposal, [docs/Proposals/Overlay-2026-09-23.md](../Proposals/Overlay-2026-09-23.md)
+    §2, D198.a): it decides where the shared subtree hangs on THIS device and
+    nothing else, and the global projection never emits it. When a PAGE `P` is
+    shared, `P` keeps its identity on every peer — ONE SQL row with `id = P`,
+    `parent_id`/`sort_key` from the mount, every other field from `P` in the
+    shared doc; `P`'s children keep `P` as their parent, and `P` owns its own
+    file. A move of `P` writes the mount, never the shared doc, so where a peer
+    places a shared page is that peer's own data. When a plain BLOCK is shared
+    the share projection writes the mount as a synthetic container page the
+    block hangs under. A
+    mount never sits under a non-page (Amendment A: it bubbles to the nearest
+    page ancestor), and a device holds at most one mount per share (a second
+    accept is refused). Shares never nest: `share_subtree` refuses a subtree
+    that holds a mount or sits inside a share (ADR 0028 A7).
     `owning_page` follows this FILE model — a block in a block share answers
     its mount page in both write authorities; a block in a page share answers
-    `P` in Loro, and the fresh mount in SQL until D198.a lands. Loro's
-    `children` follow its write model (the host lists the shared root, not the
-    mount), so code needing a block's page calls `owning_page` and never walks
-    parents (D197.a).
+    `P` in both. Loro's `children` follow its write model (the host lists the
+    shared root, not the mount), so code needing a block's page calls
+    `owning_page` and never walks parents (D197.a).
 12. **Every field write resolves a cell backing** — content and scalars do so
     in both modes: `LoroTextCellBacking`/`LoroMetaCellBacking<T>` in Full,
     `LwwTextCellBacking`/`LwwScalarBacking<T>` in SqlOnly (via

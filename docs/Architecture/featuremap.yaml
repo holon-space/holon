@@ -696,6 +696,14 @@ areas:
         mode_axes: Transport; File adapter
         entry: "[Model.md](Model.md)"
         unpinned_exempt: the oracles map the shape difference instead
+      - feature: Page-share placement
+        what: A shared page keeps its identity on every peer; where a peer hangs it is that peer's own placement record
+        transitions: [SharePage, MovePlacedRoot]
+        invariants: [inv-share-mount-carries-page-identity, inv-overlay-placement-local]
+        pin_note: "*two-instance slice only*"
+        ruled_by: "Model.md inv 11; [Overlay proposal](../Proposals/Overlay-2026-09-23.md) (D198.a, D201.a)"
+        mode_axes: Transport
+        entry: "`crates/holon-loro/src/loro_share_backend.rs`"
       - feature: Encrypted relay
         what: Server-blind relay transport
         pin_note: "*(design only)*"

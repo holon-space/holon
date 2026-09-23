@@ -222,23 +222,27 @@ async fn sharing_a_page_keeps_it_in_the_sidebar() {
     let (mount_id, _ticket) = share_trip(&backend).await;
 
     assert_eq!(
-        tags_of(&handle, &mount_id).await,
+        tags_of(&handle, "block:trip").await,
         vec!["Page".to_string(), "Travel".to_string()],
-        "the mount must carry the shared root's whole tag set — every tag-driven \
-         query has the sidebar's blind spot, not just the sidebar"
+        "the shared page keeps its own row and its whole tag set (D198.a) — every \
+         tag-driven query has the sidebar's blind spot, not just the sidebar"
+    );
+    assert!(
+        tags_of(&handle, &mount_id).await.is_empty(),
+        "the mount is a placement record and must claim no tag"
     );
     assert_eq!(
         sidebar_titles(&handle).await,
         vec!["Trip planning".to_string()],
-        "the shared page vanished from the sidebar: its mount is not a `Page` in \
-         the `block_tags` junction the sidebar selects on"
+        "the shared page vanished from the sidebar: it is not a `Page` in the \
+         `block_tags` junction the sidebar selects on"
     );
 }
 
 /// P-CONTAINER-CLAIMS-NOTHING: sharing a NON-page block wraps it in a synthetic
 /// container page, and a container is not the block. It gets `Page` (it owns an
 /// on-disk org file) and nothing else: the shared root's row SURVIVES on this
-/// path — `project_descendants_to_sql` drops it only for a page — so a tag
+/// path — as a shared page's row does — so a tag
 /// copied onto the container would exist twice, and the container would surface
 /// in tag feeds it has nothing to do with.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -268,10 +272,9 @@ async fn sharing_a_non_page_block_leaves_its_tags_on_the_block() {
     );
 }
 
-/// P-ACCEPT-IS-A-PAGE: the accepter's mount is a page in its own sidebar too.
-/// This is where the miss cost the most — accept a share, see nothing, with no
-/// error to explain it. The accepter mints its own mount id, so the sidebar
-/// query (not an id comparison) is the only peer-independent oracle.
+/// P-ACCEPT-IS-A-PAGE: the accepted page is a page in the accepter's sidebar
+/// too. This is where the miss cost the most — accept a share, see nothing,
+/// with no error to explain it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn accepting_a_shared_page_puts_it_in_the_sidebar() {
     let dir_a = TempDir::new().unwrap();
@@ -301,9 +304,13 @@ async fn accepting_a_shared_page_puts_it_in_the_sidebar() {
         .to_string();
 
     assert_eq!(
-        tags_of(&handle_b, &mount_b).await,
+        tags_of(&handle_b, "block:trip").await,
         vec!["Page".to_string(), "Travel".to_string()],
-        "the accepter's mount must carry the shared root's tag set"
+        "the accepter holds the shared page under its own id, with its tag set (D198.a)"
+    );
+    assert!(
+        tags_of(&handle_b, &mount_b).await.is_empty(),
+        "the accepter's mount is a placement record and must claim no tag"
     );
     assert!(
         sidebar_titles(&handle_b)

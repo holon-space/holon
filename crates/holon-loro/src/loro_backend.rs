@@ -1625,6 +1625,11 @@ pub fn snapshot_blocks_from_doc_settled(
                 continue;
             }
         }
+        // A mount is a placement record, not a block: the share projection
+        // owns the row of the tree it places.
+        if is_mount_node(&tree, node.id) {
+            continue;
+        }
         let parent_tid = get_node_parent(&tree, node.id);
         let block = read_block_from_tree(&tree, node.id, parent_tid);
         // The fractional index is the Loro adapter's internal ordering encoding
@@ -1694,6 +1699,32 @@ pub fn snapshot_blocks_from_doc_settled(
         blocks.insert(block.id.to_string(), SnapshotBlock { block, sort_key });
     }
     (blocks, settled)
+}
+
+/// The SQL sort key of one live node: its fractional index, tie-disambiguated
+/// within its sibling group exactly as the snapshot projection does. `None`
+/// when the node carries no fractional index.
+pub(crate) fn node_sort_key(tree: &loro::LoroTree, node: loro::TreeID) -> Option<String> {
+    let siblings = match get_node_parent(tree, node) {
+        Some(p) => tree.children(p).unwrap_or_default(),
+        None => tree.roots(),
+    };
+    let keys = effective_sibling_sort_keys(tree, &siblings);
+    siblings
+        .iter()
+        .position(|t| *t == node)
+        .and_then(|i| keys[i].clone())
+}
+
+/// The block uri of `node`'s parent, or the no-parent sentinel for a root.
+pub(crate) fn node_parent_uri(
+    tree: &loro::LoroTree,
+    node: loro::TreeID,
+) -> anyhow::Result<EntityUri> {
+    match get_node_parent(tree, node) {
+        Some(parent) => Ok(block_uri_from_meta(&tree.get_meta(parent)?, parent)),
+        None => Ok(EntityUri::no_parent()),
+    }
 }
 
 /// Effective SQL sort keys for one sibling group, in Loro's true child order
@@ -2013,6 +2044,21 @@ pub fn incremental_block_changes(
         }
     });
 
+    // A delete cascades to the node's descendants while the batch names only
+    // the node, and Loro no longer lists a deleted node's children. So a
+    // batch that deletes anything retracts every indexed node THIS tree knows
+    // is gone — the index also carries the other doc's nodes, which this tree
+    // does not know at all.
+    if !deleted.is_empty() {
+        deleted.extend(
+            tid_index
+                .keys()
+                .filter(|t| matches!(tree.is_node_deleted(t), Ok(true)))
+                .copied()
+                .collect::<Vec<_>>(),
+        );
+    }
+
     let mut group_keys: HashMap<loro::TreeParentId, HashMap<loro::TreeID, Option<String>>> =
         HashMap::new();
     let mut changed: HashMap<String, Option<SnapshotBlock>> = HashMap::new();
@@ -2026,6 +2072,9 @@ pub fn incremental_block_changes(
             if let Some(sid) = tid_index.remove(&node) {
                 changed.insert(sid, None);
             }
+            continue;
+        }
+        if is_mount_node(&tree, node) {
             continue;
         }
         match read_one_node_snapshot(&tree, node, &mut group_keys) {
@@ -2944,6 +2993,81 @@ impl LoroBackend {
             WriteTarget::Shared { doc, tree_id, .. } => {
                 Ok(is_mount_node(&doc.get_tree(TREE_NAME), *tree_id))
             }
+        }
+    }
+
+    /// The global-tree mount that PLACES `target`, when `target` is the root of
+    /// a page share. A page share keeps the page's identity on both peers: the
+    /// page's fields live in the shared doc, while where it hangs is this
+    /// device's own mount node (the Overlay proposal's placement record). So
+    /// the page's parent is read from, and a move of the page is written to,
+    /// the mount — never the shared doc.
+    ///
+    /// `None` for every other target, including a block share's root, which
+    /// sits under the synthetic container its mount projects as.
+    fn placement_mount(&self, target: &WriteTarget) -> Result<Option<loro::TreeID>, ApiError> {
+        let WriteTarget::Shared {
+            shared_tree_id,
+            doc,
+            tree_id,
+        } = target
+        else {
+            return Ok(None);
+        };
+        let tree = doc.get_tree(TREE_NAME);
+        if get_node_parent(&tree, *tree_id).is_some()
+            || !read_block_from_tree(&tree, *tree_id, None).is_page()
+        {
+            return Ok(None);
+        }
+        let mount = self
+            .collab_doc
+            .with_read(|global| {
+                Ok(crate::shared_tree::find_mount_node(
+                    &global.get_tree(TREE_NAME),
+                    shared_tree_id,
+                ))
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("placement_mount: read global tree failed: {e}"),
+            })?;
+        mount.map(Some).ok_or_else(|| ApiError::InvalidOperation {
+            message: format!(
+                "the root of shared tree {shared_tree_id} is a page, but no mount in this                  device's tree places it — the share is loaded without its placement record"
+            ),
+        })
+    }
+
+    /// Where a mount sits in the global tree: its parent's uri and its stable
+    /// id.
+    fn mount_placement(&self, mount: loro::TreeID) -> Result<(EntityUri, EntityUri), ApiError> {
+        self.collab_doc
+            .with_read(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                Ok((
+                    node_parent_uri(&tree, mount)?,
+                    block_uri_from_meta(&tree.get_meta(mount)?, mount),
+                ))
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("mount_placement: read global tree failed: {e}"),
+            })
+    }
+
+    /// The node a structural move of `id` relocates, and the uri that node
+    /// answers to in its own doc: `id` itself, or — for a page-share root — the
+    /// mount that places it.
+    async fn resolve_move_subject(
+        &self,
+        id: &EntityUri,
+    ) -> Result<(WriteTarget, EntityUri), ApiError> {
+        let target = self.resolve_write_target_checked(id.as_str()).await?;
+        match self.placement_mount(&target)? {
+            Some(mount) => {
+                let (_, mount_uri) = self.mount_placement(mount)?;
+                Ok((WriteTarget::Global(mount), mount_uri))
+            }
+            None => Ok((target, id.clone())),
         }
     }
 
@@ -3867,10 +3991,10 @@ impl LoroBackend {
 
         // Reject a cross-doc re-parent (into/out of a shared subtree) before any
         // mutation; same-doc re-parents route to the owning doc.
-        let source_target = self.resolve_write_target_checked(id).await?;
         // ALLOW(entity_uri_from_raw): id &str backend API param (accepts both id
         // formats)
         let moved = EntityUri::from_raw(id);
+        let (source_target, _) = self.resolve_move_subject(&moved).await?;
         let parent_route = self
             .resolve_write_target_for_parent(&requested_parent_uri, Some(&moved))
             .await?;
@@ -3942,10 +4066,10 @@ impl LoroBackend {
 
         // Reject a cross-doc positioned move before any mutation; same-doc moves
         // route to the owning doc.
-        let source_target = self.resolve_write_target_checked(target_id).await?;
         // ALLOW(entity_uri_from_raw): target_id &str backend API param (accepts both id
         // formats)
         let moved = EntityUri::from_raw(target_id);
+        let (source_target, _) = self.resolve_move_subject(&moved).await?;
         let parent_route = self
             .resolve_write_target_for_parent(&requested_parent_uri, Some(&moved))
             .await?;
@@ -3966,7 +4090,13 @@ impl LoroBackend {
         // Predecessor must resolve within the same owning doc. `resolve_write_target`
         // hands back that doc's TreeID (TreeIDs are globally unique).
         let predecessor = match predecessor_id {
-            Some(p) => Some(self.target_doc(&self.resolve_write_target(p).await?).1),
+            Some(p) => {
+                let anchor = self.resolve_write_target(p).await?;
+                Some(match self.placement_mount(&anchor)? {
+                    Some(mount) => mount,
+                    None => self.target_doc(&anchor).1,
+                })
+            }
             None => None,
         };
         let id_cache = if source_target.doc_key() == DocKey::Global {
@@ -4483,15 +4613,7 @@ impl LoroBackend {
                 if tree.fractional_index(tree_id).is_none() {
                     return Ok(None);
                 }
-                let siblings = match get_node_parent(&tree, tree_id) {
-                    Some(p) => tree.children(p).unwrap_or_default(),
-                    None => tree.roots(),
-                };
-                let keys = effective_sibling_sort_keys(&tree, &siblings);
-                Ok(siblings
-                    .iter()
-                    .position(|t| *t == tree_id)
-                    .and_then(|i| keys[i].clone()))
+                Ok(node_sort_key(&tree, tree_id))
             })
             .map_err(|e| ApiError::InternalError {
                 message: format!("block_sort_key({id}): {e}"),
@@ -4928,12 +5050,18 @@ impl CoreOperations for LoroBackend {
         // return `BlockNotFound`; `resolve_write_target` finds it in the owning
         // shared doc and hands back that doc's TreeID (only valid against it).
         let target = self.resolve_write_target(id).await?;
+        let placed_under = match self.placement_mount(&target)? {
+            Some(mount) => Some(self.mount_placement(mount)?.0),
+            None => None,
+        };
         let (read_doc, tree_id) = self.target_doc(&target);
         read_doc
             .with_read(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
-                let parent_tid = get_node_parent(&tree, tree_id);
-                Ok(read_block_from_tree(&tree, tree_id, parent_tid))
+                Ok(match placed_under.clone() {
+                    Some(parent) => read_block_from_tree_with_parent(&tree, tree_id, parent),
+                    None => read_block_from_tree(&tree, tree_id, get_node_parent(&tree, tree_id)),
+                })
             })
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to get block: {}", e),
@@ -5239,15 +5367,7 @@ impl CoreOperations for LoroBackend {
         // destination-parent resolve to different docs (into/out of a shared
         // subtree, or between two shared subtrees) is not expressible as a
         // single Loro `mov`. Same-doc moves route to the owning doc.
-        let source_target = self.resolve_write_target(id.as_str()).await?;
-        if self.target_is_mount(&source_target)? {
-            return Err(ApiError::InvalidOperation {
-                message: format!(
-                    "block {id} is a mount node; moving a mount is an unshare concern, not a \
-                     block move"
-                ),
-            });
-        }
+        let (source_target, subject) = self.resolve_move_subject(id).await?;
         let parent_route = self
             .resolve_write_target_for_parent(&new_parent, Some(id))
             .await?;
@@ -5281,7 +5401,7 @@ impl CoreOperations for LoroBackend {
             .with_read(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 Ok(BlockMutation::Move {
-                    id: id.clone(),
+                    id: subject.clone(),
                     new_parent: new_parent.clone(),
                     after: after.clone(),
                 }
@@ -6374,6 +6494,40 @@ mod incremental_tests {
             !index.contains_key(&half_born),
             "a node whose STABLE_ID has not landed was never projected, so the index must not \
              claim an id for it: {index:?}"
+        );
+    }
+
+    /// A delete cascades: deleting a subtree root takes its descendants with it
+    /// while the batch names only the root (the share prune does exactly this).
+    /// Every descendant the projection indexed must be retracted too, or the
+    /// diff base keeps rows the authority no longer holds.
+    #[test]
+    fn a_cascading_subtree_delete_retracts_every_indexed_descendant() {
+        let doc = new_fi_doc();
+        let p = create_node(&doc, None, "P", "page");
+        let a = create_node(&doc, Some(p), "A", "child");
+        let g = create_node(&doc, Some(a), "G", "grandchild");
+        let mut tid_index = build_tid_index(&doc);
+
+        doc.get_tree(TREE_NAME).delete(p).unwrap();
+        doc.commit();
+        let pending = vec![PendingChange::Delete {
+            old_parent: loro::TreeParentId::Root,
+            target: p,
+        }];
+
+        let (changed, _) = incremental_block_changes(&doc, &pending, &mut tid_index).unwrap();
+
+        for sid in ["P", "A", "G"] {
+            assert!(
+                matches!(changed.get(&schemed(sid)), Some(None)),
+                "{sid} went with its deleted ancestor and must be retracted; changed = \
+                 {changed:?}"
+            );
+        }
+        assert!(
+            !tid_index.contains_key(&a) && !tid_index.contains_key(&g),
+            "retracted descendants leave the index: {tid_index:?}"
         );
     }
 

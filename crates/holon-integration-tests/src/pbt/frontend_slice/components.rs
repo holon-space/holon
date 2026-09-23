@@ -1252,6 +1252,17 @@ impl HeadlessFrontendComponent {
     /// The clone shares the underlying
     /// `Arc<RwLock<Option<Arc<LoroDocument>>>>`, so it observes the SAME live
     /// doc.
+    /// The frontend's registry of loaded shared subtree docs — what the
+    /// production Loro authority follows a mount into. `None` when the share
+    /// machinery is not wired on this build.
+    pub fn shared_tree_store(&self) -> Option<Arc<dyn holon_loro::shared_tree::SharedTreeStore>> {
+        use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
+        self.injector()
+            .try_resolve::<Arc<SharedTreeSyncManager>>()
+            .ok() // ALLOW(ok): optional DI service — absent when sharing is not wired
+            .map(|manager| (*manager).clone() as Arc<dyn holon_loro::shared_tree::SharedTreeStore>)
+    }
+
     pub fn loro_doc_store(&self) -> Option<holon_loro::LoroDocumentStore> {
         self.injector()
             .try_resolve::<holon_loro::LoroDocumentStore>()
@@ -3423,8 +3434,17 @@ impl SutReadModel for HeadlessFrontendComponent {
             .map(snapshot_row)
             .collect();
 
+        // A share's rows are written by that share's own projection from its
+        // own doc, never through the global projection this read model is
+        // published by — the read model does not carry shared content yet
+        // (Overlay proposal §5: one stitching emitter feeding both is the
+        // target). Judging them here would compare two writers' outputs;
+        // `inv-share-mount-carries-page-identity` judges them instead.
         let mut sql: Vec<Vec<String>> = self
-            .sql_query("SELECT id, parent_id, sort_key, content FROM block_raw")
+            .sql_query(
+                "SELECT id, parent_id, sort_key, content FROM block_raw WHERE \
+                 json_extract(properties, '$.\"shared-tree-id\"') IS NULL",
+            )
             .await
             .iter()
             .filter(|r| {

@@ -388,6 +388,15 @@ impl RefSharedView for NullRef {
     ) -> std::collections::BTreeMap<EntityUri, crate::capabilities::PeerWrite> {
         panic!("class-2: invariant read RefSharedView::peer_writes_pending")
     }
+    fn page_shares(&self) -> std::collections::BTreeMap<EntityUri, crate::capabilities::PageShare> {
+        panic!("class-2: invariant read RefSharedView::page_shares")
+    }
+    fn shareable_pages(&self) -> Vec<EntityUri> {
+        panic!("class-2: invariant read RefSharedView::shareable_pages")
+    }
+    fn receiver_pages(&self) -> Vec<EntityUri> {
+        panic!("class-2: invariant read RefSharedView::receiver_pages")
+    }
 }
 
 #[allow(unused_variables)]

@@ -16,11 +16,14 @@ use std::collections::BTreeSet;
 
 use holon_pbt_core::capabilities::Audience;
 use holon_pbt_core::capabilities::EntityUri;
+use holon_pbt_core::capabilities::PageShare;
 use holon_pbt_core::capabilities::PeerWrite;
+use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefSharedView;
 use holon_pbt_core::capabilities::RefSharedViewMut;
 
 use super::super::reference_state::ReferenceState;
+use crate::pbt::sharing_state::RECEIVER_PAGES;
 use crate::pbt::sharing_state::RECEIVER_PRINCIPAL;
 
 impl RefSharedView for ReferenceState {
@@ -54,6 +57,41 @@ impl RefSharedView for ReferenceState {
     fn peer_writes_pending(&self) -> BTreeMap<EntityUri, PeerWrite> {
         self.sharing.peer_writes_pending.clone()
     }
+
+    fn page_shares(&self) -> BTreeMap<EntityUri, PageShare> {
+        self.sharing.page_shares.clone()
+    }
+
+    fn shareable_pages(&self) -> Vec<EntityUri> {
+        let journals = EntityUri::parse(holon_frontend::JOURNALS_PAGE_ID).expect("journals id");
+        self.files
+            .documents
+            .keys()
+            // Journal pages are minted by date on every device, so the receiver
+            // already holds each one under the same id and refuses the share
+            // as a shadowing collision. Not a page a user shares.
+            .filter(|page| {
+                **page != journals
+                    && self.parent_of(page).as_ref() != Some(&journals)
+                    && !self.sharing.page_shares.contains_key(*page)
+            })
+            .filter(|page| {
+                self.domain
+                    .block_state
+                    .blocks
+                    .get(*page)
+                    .is_some_and(|b| b.is_page())
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn receiver_pages(&self) -> Vec<EntityUri> {
+        RECEIVER_PAGES
+            .iter()
+            .map(|p| EntityUri::parse(p).expect("a well-formed receiver page id"))
+            .collect()
+    }
 }
 
 impl RefSharedViewMut for ReferenceState {
@@ -75,5 +113,26 @@ impl RefSharedViewMut for ReferenceState {
 
     fn note_peer_write(&mut self, id: EntityUri, write: PeerWrite) {
         self.sharing.note_peer_write(id, write);
+    }
+
+    fn note_page_share(&mut self, page: EntityUri, receiver_parent: EntityUri) {
+        let owner_parent = self.parent_of(&page).unwrap_or_else(EntityUri::no_parent);
+        self.sharing.page_shares.insert(
+            page,
+            PageShare {
+                receiver_parent,
+                owner_parent,
+                moved: false,
+            },
+        );
+    }
+
+    fn note_placed_root_move(&mut self, page: &EntityUri, new_parent: EntityUri) {
+        let share =
+            self.sharing.page_shares.get_mut(page).unwrap_or_else(|| {
+                panic!("MovePlacedRoot names {page}, which the model never shared")
+            });
+        share.receiver_parent = new_parent;
+        share.moved = true;
     }
 }

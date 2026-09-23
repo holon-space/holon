@@ -128,6 +128,7 @@ pub mod join_block;
 mod jump_to_search_hit;
 pub mod move_cursor;
 pub mod move_down;
+pub mod move_placed_root;
 pub mod move_up;
 mod navigate_back;
 mod navigate_focus;
@@ -153,6 +154,7 @@ mod select_bias;
 pub mod set_edge_field;
 mod setup_watch;
 pub mod share_container;
+pub mod share_page;
 mod simulate_restart;
 pub mod split_block;
 pub mod stale_external_rewrite;
@@ -220,6 +222,7 @@ pub use join_block::JoinBlock;
 pub use jump_to_search_hit::JumpToSearchHit;
 pub use move_cursor::MoveCursor;
 pub use move_down::MoveDown;
+pub use move_placed_root::MovePlacedRoot;
 pub use move_up::MoveUp;
 pub use navigate_back::NavigateBack;
 pub use navigate_focus::NavigateFocus;
@@ -244,6 +247,7 @@ pub use search::Search;
 pub use set_edge_field::SetEdgeField;
 pub use setup_watch::SetupWatch;
 pub use share_container::ShareContainer;
+pub use share_page::SharePage;
 pub use simulate_restart::SimulateRestart;
 pub use split_block::SplitBlock;
 pub use stale_external_rewrite::StaleExternalRewrite;
@@ -351,6 +355,8 @@ crate::declare_e2e_transitions! {
         ShareContainer(ShareContainer),
         SyncNow(SyncNow),
         ReceiverCreateBlock(ReceiverCreateBlock),
+        SharePage(SharePage),
+        MovePlacedRoot(MovePlacedRoot),
     }
 }
 

@@ -46,7 +46,12 @@ use crate::sibling_order::compare_sibling_order;
 /// normalization class as the timestamps — stamping *correctness* is owned by
 /// the dedicated C2a unit/integration tests (`provenance_stamp_tests`,
 /// `provenance::tests`), not by this oracle.
+///
+/// `shared-tree-id` is the share projection's stamp naming the share a row
+/// belongs to. The reference does not know the SUT-minted share id, so the
+/// stamp is judged by `inv-share-mount-carries-page-identity` instead.
 pub const INTERNAL_PROPS: &[&str] = &[
+    holon_api::share_props::SHARED_TREE_ID_PROPERTY,
     "sequence",
     "level",
     "ID",

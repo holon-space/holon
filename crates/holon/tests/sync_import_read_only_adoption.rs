@@ -196,12 +196,10 @@ fn recipe_documents() -> Arc<ReadOnlyDocuments> {
 
 fn share_backend(
     dir: &TempDir,
+    store: Arc<RwLock<LoroDocumentStore>>,
     sink: Arc<RecordingSink>,
     documents: Arc<ReadOnlyDocuments>,
 ) -> Arc<LoroShareBackend> {
-    let store = Arc::new(RwLock::new(LoroDocumentStore::new(
-        dir.path().to_path_buf(),
-    )));
     let bus = Arc::new(ConditionBus::new());
     let snapshot_store = Arc::new(holon_loro::shared_snapshot_store::SharedSnapshotStore::new(
         dir.path().to_path_buf(),
@@ -240,22 +238,17 @@ async fn a_block_imported_by_the_share_projection_refuses_the_users_next_edit() 
     let dir = TempDir::new().expect("temp dir");
     let documents = recipe_documents();
     let sink = Arc::new(RecordingSink::default());
-    let backend = share_backend(&dir, sink.clone(), documents.clone());
+    let store = Arc::new(RwLock::new(LoroDocumentStore::new(
+        dir.path().to_path_buf(),
+    )));
+    let backend = share_backend(&dir, store.clone(), sink.clone(), documents.clone());
 
     // The shared doc: its root IS the recipe step, and the peer hung a block
-    // under it. Attaching the worker before the commit makes the commit the
-    // import the worker projects.
+    // under it. The root is there when the share is mounted; attaching the
+    // worker before the child's commit makes that commit the import the worker
+    // projects.
     let shared = Arc::new(LoroDoc::new());
-    backend
-        .attach_projection_worker(
-            "stid-seam".to_string(),
-            shared.clone(),
-            "block:mount".to_string(),
-        )
-        .await
-        .expect("the projection worker attaches");
-
-    {
+    let root = {
         let tree = shared.get_tree(TREE_NAME);
         let root = tree.create(None::<TreeID>).unwrap();
         let root_meta = tree.get_meta(root).unwrap();
@@ -264,7 +257,35 @@ async fn a_block_imported_by_the_share_projection_refuses_the_users_next_edit() 
             .unwrap();
         let root_text: LoroText = root_meta.ensure_mergeable_text("content_raw").unwrap();
         root_text.insert(0, "Crack the eggs").unwrap();
+        shared.commit();
+        root
+    };
+    {
+        let global = store
+            .read()
+            .await
+            .get_doc(holon_loro::loro_document_store::DocScope::Global)
+            .await
+            .expect("the global doc");
+        // ALLOW(loro_doc_escape): single-threaded test setup; no concurrent writer
+        // exists to observe.
+        let doc = global.doc();
+        let tree = doc.get_tree(TREE_NAME);
+        let mount =
+            holon_loro::shared_tree::create_mount_node(&tree, None, "stid-seam", root).unwrap();
+        tree.get_meta(mount)
+            .unwrap()
+            .insert(STABLE_ID, loro::LoroValue::from("mount"))
+            .unwrap();
+        doc.commit();
+    }
+    backend
+        .attach_projection_worker("stid-seam".to_string(), shared.clone())
+        .await
+        .expect("the projection worker attaches");
 
+    {
+        let tree = shared.get_tree(TREE_NAME);
         let child = tree.create(Some(root)).unwrap();
         let child_meta = tree.get_meta(child).unwrap();
         child_meta

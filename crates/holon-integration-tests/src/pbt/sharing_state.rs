@@ -21,6 +21,7 @@ use std::collections::BTreeSet;
 
 use holon_api::entity_uri::EntityUri;
 use holon_pbt_core::capabilities::Audience;
+use holon_pbt_core::capabilities::PageShare;
 use holon_pbt_core::capabilities::PeerWrite;
 
 /// Reference-model sharing overlay: audiences + epoch. Default = nothing
@@ -75,12 +76,24 @@ pub struct SharingRefState {
     /// the convergence law, not to a reference model that would have to
     /// re-implement RGA tiebreaks to predict it.
     pub peer_writes_delivered: BTreeMap<EntityUri, PeerWrite>,
+
+    /// Per-page shares (the Overlay proposal's placement records), keyed by
+    /// the shared page. Exclusive with [`Self::vault_share`]: whole-store
+    /// pairing refuses a receiver that holds a mount (D73.a), so the model
+    /// never draws both.
+    pub page_shares: BTreeMap<EntityUri, PageShare>,
 }
 
 /// The principal the two-instance slice's receiver acts as. Fixed: the model
 /// needs one stable name for the audience, and a drawn principal would add a
 /// dimension the oracle cannot observe on the SUT.
 pub const RECEIVER_PRINCIPAL: &str = "receiver";
+
+/// The receiver's own pages, in the order the model offers them: the first is
+/// where a per-page share is accepted, the rest are where the receiver may move
+/// it. Both are seeded on every two-instance receiver
+/// (`boot_two_instances_seeded_on`).
+pub const RECEIVER_PAGES: [&str; 2] = ["block:receiver-root", "block:receiver-shelf"];
 
 /// The principal the two-instance slice's owner acts as. Needed as its own name
 /// because the audience is a function of the round's direction: a
@@ -178,6 +191,20 @@ impl SharingRefState {
                 .peer_writes_delivered
                 .iter()
                 .map(|(k, v)| (resolve(k), resolve_write(v)))
+                .collect(),
+            page_shares: self
+                .page_shares
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        resolve(k),
+                        PageShare {
+                            receiver_parent: resolve(&v.receiver_parent),
+                            owner_parent: resolve(&v.owner_parent),
+                            moved: v.moved,
+                        },
+                    )
+                })
                 .collect(),
         }
     }

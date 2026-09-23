@@ -280,7 +280,10 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // four restart tests share this single helper rather than each taking a raw
     // doc; sealing it needs that function split into guarded reads around its
     // awaits, which is the follow-up `loro_module.rs` already names.
-    ("crates/holon-loro/src/loro_share_backend.rs", 16),
+    // +1: the share projection's global-doc commit subscription, which wakes it
+    // when this device moves the mount that places the share (D198.a).
+    // +2: tests planting a mount in the global doc, the way an accept does.
+    ("crates/holon-loro/src/loro_share_backend.rs", 19),
     // +1: the layout doc's `subscribe_root` registration, same rationale as the
     // global doc's.
     ("crates/holon-loro/src/loro_sync_controller.rs", 2),
@@ -289,6 +292,8 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     ("crates/holon/tests/api_pbt/loro_backend_pbt.rs", 4),
     ("crates/holon/tests/api_suite/loro_backend_pbt.rs", 4),
     ("crates/holon/tests/sync_suite/sync_pbt.rs", 3),
+    // Plants the mount that places the share, the way an accept does.
+    ("crates/holon/tests/sync_import_read_only_adoption.rs", 1),
 ];
 
 /// Every `doc()` call per file, whichever type it belongs to.

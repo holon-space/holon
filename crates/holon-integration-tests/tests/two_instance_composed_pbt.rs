@@ -1826,11 +1826,17 @@ async fn mount_the_owners_subtree_on_the_receiver(
         holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
     >,
 ) -> String {
+    // A block the receiver does not hold: a share keeps its root's id on every
+    // peer, so a root the receiver already has (the date-minted journal day
+    // page both devices seed) is refused as a shadowing collision.
     let owner_tree = handle.loro_tree_state(true, &BTreeSet::new()).await;
+    let receiver_tree = handle.loro_tree_state(false, &BTreeSet::new()).await;
     let shareable = owner_tree
         .keys()
-        .find(|id| id.as_str() != holon_api::DEFAULT_DOC_BLOCK_ID)
-        .expect("the owner's seeded tree holds a shareable block")
+        .find(|id| {
+            id.as_str() != holon_api::DEFAULT_DOC_BLOCK_ID && !receiver_tree.contains_key(*id)
+        })
+        .expect("the owner's seeded tree holds a block the receiver does not")
         .clone();
 
     let mut share = holon_api::StorageEntity::new();
@@ -2520,4 +2526,88 @@ fn pairing_keeps_a_page_created_under_the_device_local_layout_root() {
             "`{page}` names more than one live node after pairing"
         );
     });
+}
+
+// ─── The Overlay proposal, increment 1: page-share placement (D198.a) ──────
+
+use holon_integration_tests::pbt::transitions::MovePlacedRoot;
+use holon_integration_tests::pbt::transitions::SharePage;
+
+/// One invariant's verdict, demanded: absent or `Skipped` is a failure, because
+/// the chain exists to put the store in exactly the state it judges.
+fn assert_engaged_and_ok(report: &RunReport, id: &str) {
+    let verdict = report
+        .ran
+        .iter()
+        .find(|(ran, _)| ran.0 == id)
+        .map(|(_, r)| r.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "`{id}` did not run against a two-instance CapMap. Ran: {:?}, deselected: {:?}",
+                report.ran_ids(),
+                report.deselected
+            )
+        });
+    match verdict {
+        InvariantResult::Ok => {}
+        other => panic!("`{id}` did not pass after the page-share chain: {other:?}"),
+    }
+}
+
+/// **Page-share placement, asserted deterministically.** The owner shares a
+/// page, the receiver accepts it, then moves it to its other page and back.
+/// Driven through `StateMachineTest::apply`, so the harness's per-tick
+/// owner-vs-oracle reconcile judges every step as the property does, and
+/// finished with the WHOLE catalog.
+///
+/// The property draws `SharePage` only in the draws that do not open with a
+/// `ShareContainer`, and `MovePlacedRoot` only after it, so a short random run
+/// can miss both; this chain is what guarantees they engage in the gate.
+#[test]
+fn a_shared_page_keeps_its_identity_and_the_receiver_places_it_locally() {
+    let mut ref_state = wide_e2e_ref();
+    let mut sut = <Sut as StateMachineTest>::init_test(&ref_state);
+    let step = |sut: Sut, ref_state: &mut ReferenceState, t: E2ETransition| -> Sut {
+        assert!(
+            Machine::preconditions(ref_state, &t),
+            "page-share chain: {t:?} violates its precondition against the booted oracle"
+        );
+        *ref_state = Machine::apply(ref_state.clone(), &t);
+        let sut = <Sut as StateMachineTest>::apply(sut, ref_state, t);
+        sut.settle_projections();
+        sut
+    };
+
+    let page = ref_state
+        .shareable_pages()
+        .into_iter()
+        .next()
+        .expect("the booted owner holds a user page to share");
+    let [accepted_under, shelf] = ref_state
+        .receiver_pages()
+        .try_into()
+        .expect("the model names exactly two receiver pages");
+
+    sut = step(
+        sut,
+        &mut ref_state,
+        E2ETransition::SharePage(SharePage { page: page.clone() }),
+    );
+    let report = sut.run_report_now(&ref_state);
+    assert_engaged_and_ok(&report, "inv-share-mount-carries-page-identity");
+
+    for new_parent in [shelf, accepted_under] {
+        sut = step(
+            sut,
+            &mut ref_state,
+            E2ETransition::MovePlacedRoot(MovePlacedRoot {
+                page: page.clone(),
+                new_parent,
+            }),
+        );
+        let report = sut.run_report_now(&ref_state);
+        assert_engaged_and_ok(&report, "inv-share-mount-carries-page-identity");
+        assert_engaged_and_ok(&report, "inv-overlay-placement-local");
+    }
+    <Sut as StateMachineTest>::check_invariants(&sut, &ref_state);
 }

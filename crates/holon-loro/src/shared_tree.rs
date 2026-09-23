@@ -571,6 +571,19 @@ pub fn is_mount_node(tree: &LoroTree, node: TreeID) -> bool {
     )
 }
 
+/// The live mount node that places shared tree `shared_tree_id` in `tree`.
+/// One share has at most one mount per tree: a second accept of a mounted share
+/// is refused (`accept_shared_subtree`).
+pub fn find_mount_node(tree: &LoroTree, shared_tree_id: &str) -> Option<TreeID> {
+    tree.get_nodes(false)
+        .into_iter()
+        .filter(|n| !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist))
+        .find(|n| {
+            read_mount_info(tree, n.id).is_some_and(|info| info.shared_tree_id == shared_tree_id)
+        })
+        .map(|n| n.id)
+}
+
 /// Read mount info from a mount node. Returns None if the node is not a mount.
 pub fn read_mount_info(tree: &LoroTree, node: TreeID) -> Option<MountInfo> {
     let meta = tree.get_meta(node).ok()?; // ALLOW(ok): node may be deleted

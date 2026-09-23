@@ -374,6 +374,7 @@ async fn compose_sut_seeded_impl(
     // store's authority doc so a write through the frontend op pipeline is
     // visible to them (task #4).
     let mut frontend_loro_store: Option<holon_loro::LoroDocumentStore> = None;
+    let mut frontend_shared_trees: Option<Arc<dyn holon_loro::shared_tree::SharedTreeStore>> = None;
     // The frontend session's `LoroSyncController` handle (when the frontend boots
     // with Loro on). In full mode (`has_turso && has_loro`) the Loro arm hands
     // this to `LoroSut` so a `MergeFromPeer` waits for the controller to
@@ -652,6 +653,7 @@ async fn compose_sut_seeded_impl(
         // build = an editor config) so the Loro arm below reads its caps over the SAME
         // doc the frontend op pipeline writes (task #4 read-doc unification).
         frontend_loro_store = comp.loro_doc_store();
+        frontend_shared_trees = comp.shared_tree_store();
         // In full mode (Loro on = editor config) also capture the sync-controller
         // handle so the Loro arm's `LoroSut` can wait for the controller to
         // project an imported peer delta into Turso `block_raw`. Resolution is
@@ -773,7 +775,13 @@ async fn compose_sut_seeded_impl(
         // The slice's Loro cap reads the DEVICE's whole store, not the
         // replicated half: layout blocks are as real to a block invariant as
         // any other, and a cap blind to them would report them missing.
-        let backend = Arc::new(LoroBackend::from_document(global_doc).with_layout_doc(layout_doc));
+        let backend = LoroBackend::from_document(global_doc).with_layout_doc(layout_doc);
+        // ...and every shared subtree the device has loaded, which the
+        // authority follows through its mount.
+        let backend = Arc::new(match frontend_shared_trees.clone() {
+            Some(store) => backend.with_shared_trees(store),
+            None => backend,
+        });
         loro_backend = Some(backend.clone());
 
         let mut loro_caps = CapMap::new();

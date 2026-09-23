@@ -86,9 +86,11 @@ use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transitions::CreateBlockUnderFocus;
 use crate::pbt::transitions::E2ETransition;
+use crate::pbt::transitions::MovePlacedRoot;
 use crate::pbt::transitions::Nothing;
 use crate::pbt::transitions::ReceiverCreateBlock;
 use crate::pbt::transitions::ShareContainer;
+use crate::pbt::transitions::SharePage;
 use crate::pbt::transitions::SyncNow;
 use crate::pbt::transitions::TypeChars;
 
@@ -103,6 +105,10 @@ pub const RECEIVER_PEER_ID: u64 = 2;
 /// would make every owner block trivially "present" on the receiver and the
 /// convergence oracle vacuous.
 pub const RECEIVER_SEED_ORG: &str = "#+ID: receiver-root\n* Receiver local page\n";
+
+/// The receiver's second page — somewhere other than the accept target that a
+/// shared page can be moved to (`crate::pbt::sharing_state::RECEIVER_PAGES`).
+pub const RECEIVER_SHELF_ORG: &str = "#+ID: receiver-shelf\n* Receiver shelf note\n";
 
 /// Lease window for the receiver's membership cert. Long relative to a case, so
 /// Inc1 never trips expiry by accident; a later `RevokeLease` drives the clock
@@ -597,6 +603,52 @@ impl SutTwoInstance for TwoInstanceHandle {
             .await;
     }
 
+    async fn share_page(&self, page: &EntityUri, receiver_parent: &EntityUri) {
+        let page = self.resolve_owner_id(page);
+        let mut share = holon_api::StorageEntity::new();
+        share.insert("id".into(), holon_api::Value::String(page.to_string()));
+        share.insert("retention".into(), holon_api::Value::String("none".into()));
+        let shared = dispatch_op(&self.owner, "owner", "tree", "share_subtree", share)
+            .await
+            .unwrap_or_else(|e| panic!("the owner refused to share page {page}: {e:#}"));
+        let ticket = response_field(&shared, "share_subtree", "ticket");
+
+        let mut accept = holon_api::StorageEntity::new();
+        accept.insert(
+            "parent_id".into(),
+            holon_api::Value::String(receiver_parent.to_string()),
+        );
+        accept.insert("ticket".into(), holon_api::Value::String(ticket));
+        dispatch_op(
+            &self.receiver,
+            "receiver",
+            "tree",
+            "accept_shared_subtree",
+            accept,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "the receiver refused to accept the share of {page} under {receiver_parent}: {e:#}"
+            )
+        });
+    }
+
+    async fn move_on_receiver(&self, id: &EntityUri, new_parent: &EntityUri) {
+        let id = self.resolve_owner_id(id);
+        let mut params = holon_api::StorageEntity::new();
+        params.insert("id".into(), holon_api::Value::String(id.to_string()));
+        params.insert(
+            "parent_id".into(),
+            holon_api::Value::String(new_parent.to_string()),
+        );
+        dispatch_op(&self.receiver, "receiver", "block", "move_block", params)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("the receiver refused to move {id} under {new_parent}: {e:#}")
+            });
+    }
+
     async fn sync_witness(&self) -> SyncRoundWitness {
         let witness = self
             .state
@@ -606,6 +658,50 @@ impl SutTwoInstance for TwoInstanceHandle {
             .clone();
         self.with_transport_counters(witness)
     }
+}
+
+impl TwoInstanceHandle {
+    /// Oracle id space → the owner's real id, which a shared page keeps on
+    /// both peers.
+    fn resolve_owner_id(&self, id: &EntityUri) -> EntityUri {
+        self.owner_resolver
+            .lock()
+            .expect("resolver lock")
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| id.clone())
+    }
+}
+
+/// Dispatch one production operation on one side's engine.
+async fn dispatch_op(
+    handle: &WideHandle,
+    side: &str,
+    entity: &str,
+    op: &str,
+    params: holon_api::StorageEntity,
+) -> anyhow::Result<holon_api::OpOutcome> {
+    let engine = handle
+        .engine()
+        .unwrap_or_else(|| panic!("the {side} instance has no backend engine"));
+    let entity: holon_api::EntityName = entity.to_string().into();
+    engine
+        .execute_operation(&entity, op, params, holon_api::OpOrigin::User)
+        .await
+}
+
+/// One string field of a share op's JSON response.
+fn response_field(outcome: &holon_api::OpOutcome, op: &str, field: &str) -> String {
+    let json = outcome
+        .response
+        .as_ref()
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| panic!("{op} returned no response"));
+    serde_json::from_str::<serde_json::Value>(json)
+        .unwrap_or_else(|e| panic!("{op}'s response is not JSON ({e}): {json}"))[field]
+        .as_str()
+        .unwrap_or_else(|| panic!("{op}'s response carries no {field}: {json}"))
+        .to_string()
 }
 
 async fn backend_ids(backend: &Arc<dyn SutBackend>) -> BTreeSet<EntityUri> {
@@ -657,6 +753,10 @@ impl SutReceiverBackend for TwoInstanceHandle {
 
     async fn owner_org_block_ids(&self) -> BTreeSet<EntityUri> {
         org_ids(self.owner_org.as_ref()).await
+    }
+
+    async fn receiver_block_raw_snapshot(&self) -> Vec<holon_api::Block> {
+        self.receiver_backend.block_raw_snapshot().await
     }
 
     async fn crdt_converged(&self) -> Option<bool> {
@@ -809,7 +909,10 @@ async fn boot_two_instances_with_receiver_caps_on(
         resolver,
         ref_state,
         transport,
-        &[("receiver-root.org", RECEIVER_SEED_ORG)],
+        &[
+            ("receiver-root.org", RECEIVER_SEED_ORG),
+            ("receiver-shelf.org", RECEIVER_SHELF_ORG),
+        ],
     )
     .await
 }
@@ -926,6 +1029,10 @@ impl ReferenceStateMachine for TwoInstanceMachine {
         // The SECOND writer. Gated in its own generator on a delivered parent,
         // so it can only draw once the receiver provably holds something.
         offer!(ReceiverCreateBlock);
+        // The per-page share and the receiver's move of its placement (the
+        // Overlay proposal's increment 1). Exclusive with `ShareContainer`.
+        offer!(SharePage);
+        offer!(MovePlacedRoot);
         // `Nothing` has no preconditions, so `arms` is never empty and the
         // Union below cannot panic on a state where everything else is gated.
         offer!(Nothing);
@@ -960,6 +1067,8 @@ impl ComposedSlice for TwoInstanceE2E {
         "inv-two-instance-convergence",
         "inv-boundary-respected",
         "inv-two-writer-peer-writes-land",
+        "inv-share-mount-carries-page-identity",
+        "inv-overlay-placement-local",
         // Engagement only. Capability-free, so it can never deselect, and
         // listing it proves nothing more than that the credential-isolation
         // invariant RUNS in this slice: no drawn transition reaches a keychain

@@ -51,7 +51,6 @@ use holon_api::lifecycle::SessionShutdown;
 use holon_api::types::ContentType;
 use holon_core::OriginTaggedWrites;
 use loro::Frontiers;
-use loro::LoroDoc;
 use tokio::sync::Notify;
 use tokio::sync::RwLock;
 use tracing::error;
@@ -61,7 +60,6 @@ use tracing::warn;
 use crate::LoroDocument;
 use crate::LoroDocumentStore;
 use crate::loro_backend::SnapshotBlock;
-use crate::loro_backend::snapshot_blocks_from_doc;
 use crate::loro_backend::snapshot_blocks_from_doc_settled;
 use crate::loro_document_store::DocScope;
 
@@ -1282,7 +1280,20 @@ impl LoroProjection {
             }
         }
         let after = after;
-        let before: Arc<HashMap<String, SnapshotBlock>> = Arc::new(self.read_sql_snapshot().await?);
+        // A share's rows are written by that share's projection from its own
+        // doc, which this walk never reads; diffing them here would delete them.
+        let before: Arc<HashMap<String, SnapshotBlock>> = Arc::new(
+            self.read_sql_snapshot()
+                .await?
+                .into_iter()
+                .filter(|(_, snap)| {
+                    !snap
+                        .block
+                        .properties_map()
+                        .contains_key(holon_api::share_props::SHARED_TREE_ID_PROPERTY)
+                })
+                .collect(),
+        );
         let snapshot_ms = t0.elapsed().as_millis();
 
         let mut ops = diff_snapshots_to_ops(&before, &after);
@@ -2658,22 +2669,6 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
     }
 
     params
-}
-
-/// Snapshot a shared LoroDoc into topo-sorted SQL create ops.
-///
-/// `patch_block` is called on each `Block` before conversion to params —
-/// callers use it to remap `parent_id` (shared root → mount URI) and
-/// stamp properties like `shared-tree-id`.
-pub(crate) fn project_shared_doc_to_ops(
-    shared_doc: &LoroDoc,
-    patch_block: impl Fn(&mut Block),
-) -> Vec<(String, holon_api::StorageEntity)> {
-    let mut blocks = snapshot_blocks_from_doc(shared_doc);
-    for snap in blocks.values_mut() {
-        patch_block(&mut snap.block);
-    }
-    diff_snapshots_to_ops(&HashMap::new(), &blocks)
 }
 
 fn blocks_differ(a: &SnapshotBlock, b: &SnapshotBlock) -> bool {

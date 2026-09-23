@@ -278,6 +278,40 @@ mount metadata as untrusted on the read side. Malformed `shared_root` currently
 **vanishes silently** (`.ok()?` / `_ => None`, `shared_tree.rs:407-422,490-495`)
 instead of surfacing corruption — against the repo's "fail loud" rule.
 
+**A mount is a placement record, not a block** (D198.a, Overlay proposal
+increment 1 — [docs/Proposals/Overlay-2026-09-23.md](../Proposals/Overlay-2026-09-23.md)).
+Its parent and sibling position are this device's data: where the shared
+subtree hangs here.
+
+- **Page share.** The shared page `P` keeps its identity on every peer: one SQL
+  row with `id = P`, `parent_id`/`sort_key` from the mount, every other field
+  (title, tags, properties, `#+TODO` keywords) from `P` in the shared doc. `P`'s
+  children keep parent `P`. No row carries the mount's id. The Loro authority
+  answers the same: `get_block(P).parent_id` is the mount's parent, and
+  `list_children(mount parent)` lists `P`.
+- **Block share.** The mount projects as a synthetic container page
+  (`Shared tree (<id>)`, tagged `Page`, `share-role: mount`) and the shared
+  block hangs under it.
+- **Moving a shared page** (`move_block` / `update_block_position` /
+  `update_parent_id` on `P`) moves the mount in the global doc and never writes
+  the shared doc, so a recipient's placement never reaches the owner. The
+  share's projection worker is woken by global-doc commits too, so the move
+  reaches `P`'s row.
+- **One placement per share per device.** A second `accept_shared_subtree` of
+  a share this device already mounts is refused before any network work, naming
+  the existing mount.
+- **The global Loro→SQL projection skips mount nodes**, and its full reseed
+  leaves rows stamped `shared-tree-id` alone: the share's own projection owns
+  every row of the tree it places.
+- The org file of a page share is `P`'s own; the ingest guard
+  (`is_registered_mount`) recognizes it by `P`'s id through the mount that
+  places it.
+
+Covered by `share_page_keeps_the_pages_identity`,
+`accept_page_keeps_the_pages_identity_and_places_it_locally` and the
+two-instance keystone transitions `SharePage` / `MovePlacedRoot`
+(`inv-share-mount-carries-page-identity`, `inv-overlay-placement-local`).
+
 **Sibling position is not preserved.** `commit_share_prune` deletes the subtree
 and `create_mount_node` appends a fresh node at the end of the parent's child
 list, so the mounted content jumps to the bottom of its siblings. Preserve the
@@ -305,7 +339,7 @@ A                                   B
                               |      sync_doc_initiate — pull state (timeout-bounded)
                               |      save shared snapshot
                               |      create mount node under parent_Y
-                              |      project mount + descendants into SQL
+                              |      project the shared subtree into SQL
                               |      register + attach save/sync/projection workers
                               |    <-- returns mount_block_id
 ```
@@ -457,8 +491,8 @@ Property tests worth adding (each proves a blocker's fix):
   counter (B2);
 - two peers holding one share converge after **every** operation kind, `create`
   and `delete` included, comparing the subtree by `(child id, content,
-  properties)` — each peer mints its own mount-block id, so comparing
-  `parent_id` reports a false divergence (B3);
+  properties)` — a shared root's `parent_id` is each peer's own placement
+  (its mount's parent), so comparing it reports a false divergence (B3);
 - a peer sending a 4-byte length then stalling does not hang the acceptor past
   a timeout, and an oversize length returns `Err` (not panic) (B4/B5);
 - `unmount` with reintegration leaves all kept (non-shared) nodes alive

@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 80 transitions; the repo declares 82 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 82 transitions; the repo declares 84 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -182,6 +182,7 @@ Known hazards, not bugs to re-discover: `_`-prefixed property **keys** are erase
 | Crossing log & arbitration | Owner-scoped totally-ordered log with deterministic conflict resolution | `tests/inc4_pbt.rs` (crate-local, not the keystone) | [0028](../adr/0028-sharing-policy-overlay.md) | — | `crates/holon-sharing/src/log.rs` |
 | Alias ledger | Owner-private old-id → new-id succession chains | `tests/inc56_pbt.rs` (crate-local) | [0028](../adr/0028-sharing-policy-overlay.md) | — | `crates/holon-sharing/src/alias_ledger.rs` |
 | Mount boundary | A shared subtree's org file is a one-way projection sink | *(oracles are taught to MAP the Loro↔SQL shape difference; no dedicated invariant)* | Model.md inv 11 (disclosed exception) | Transport; File adapter | [Model.md](Model.md) |
+| Page-share placement | A shared page keeps its identity on every peer; where a peer hangs it is that peer's own placement record | `SharePage`, `MovePlacedRoot`; `inv-share-mount-carries-page-identity`, `inv-overlay-placement-local`; *two-instance slice only* | Model.md inv 11; [Overlay proposal](../Proposals/Overlay-2026-09-23.md) (D198.a, D201.a) | Transport | `crates/holon-loro/src/loro_share_backend.rs` |
 | Encrypted relay | Server-blind relay transport | *(design only)* | [EncryptedRelaySync.md](EncryptedRelaySync.md) — design discussion captured 2026-07-20 | Transport | *(not implemented)* |
 
 Ratified design; increments 4–6 exist in code, the end-to-end feature does not ship yet.

@@ -79,8 +79,10 @@ pub mod no_page_under_non_page;
 pub mod no_parent_cycles;
 pub mod no_write_outside_vault_root;
 pub mod org_render_fixed_point;
+pub mod overlay_placement_local;
 pub mod read_only_home_refuses_writes;
 pub mod settle_budget;
+pub mod share_mount_carries_page_identity;
 pub mod sidebar_page_tag_preserved;
 pub mod source_language;
 /// `inv-sql-budget` — `otel-testing`-gated (the budget body + composed host
