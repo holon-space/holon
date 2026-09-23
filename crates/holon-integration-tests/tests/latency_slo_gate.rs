@@ -740,34 +740,28 @@ fn latency_slo_rung_a_facade_clock_in_flight_does_not_alter_a_ui_sample() {
 // scorer — is what only an integration test can show, and it is what the test
 // below asserts.
 //
-// Why the integration test does NOT assert the flip. Measured across injected
-// per-row delays of 60 / 250 / 300ms and paced drives of 30 / 40 / 80 writes:
-// an injection strong enough to move a verdict also destroys the sample
-// population that verdict needs. Paced service samples fell to n=0 / 6 / 19 /
-// 28 against a floor of 30 (a slowed pipeline stops draining between
-// transitions, so samples stop qualifying as service time), and the burst arm
-// delivered 0 of 150 writes at EVERY delay tried — 60ms and 250ms alike, so
-// 60ms is a rejected configuration, not a shipped one. The two knobs are not
-// independently controllable through this lever, so a flip assertion here would
-// report INCONCLUSIVE on an unmodified tree — a flaky gate, not a teeth check.
-// What IS shipped is [`TEETH_DELAY_MS`] = 250ms on the paced arm only.
-// An earlier version accepted `Unjudged` as "red enough" precisely to dodge
-// this, and duly reported that the rung had teeth on a run that collected ZERO
-// samples. That vacuity is what this structure removes.
+// The integration test checks the wiring only; the flip stays with the unit
+// tests. The burst arm cannot carry the injection: it delivered 0 of 150
+// writes at 60ms and at 250ms per row. What IS shipped is [`TEETH_DELAY_MS`] =
+// 250ms on the paced arm only, where each write waits for its own sample.
+// An earlier version accepted `Unjudged` as "red enough", and duly reported
+// that the rung had teeth on a run that collected ZERO samples. That vacuity
+// is what this structure removes.
 
 /// The injected per-ROW delay for the wiring check.
 const TEETH_DELAY_MS: u64 = 250;
 
 /// Service p50 the slowed run must exceed. Clean runs measured 22-45ms across
-/// every run of this lane; slowed runs measured 112-125ms. 90ms sits ~2x above
-/// the clean ceiling and ~1.25x below the slowed floor, so neither host noise
-/// nor a lost sample decides it.
+/// every run of this lane. Every slowed sample carries the whole armed delay,
+/// so 90ms sits ~2x above the clean ceiling and far below the delay.
 const TEETH_MIN_SLOWED_P50_MS: u64 = 90;
 
-/// Writes the wiring check drives. More than [`PACED_WRITES`], because the
-/// injection costs samples: measured n=4 surviving from 40 writes, n=19 from
-/// 80.
+/// Writes the wiring check drives.
 const TEETH_PACED_WRITES: usize = 80;
+
+/// How long one slowed write may take to become visible before the drive
+/// declares the pipeline stuck.
+const TEETH_WRITE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Enough surviving samples for a median to mean anything. Deliberately far
 /// below `MIN_SERVICE_SAMPLES`: this test does not render a verdict, it checks
@@ -787,9 +781,20 @@ fn a_slowed_pipeline_moves_the_service_statistic() {
 
     let probe = SloProbe::arm();
     set_delivery_delay_ms(TEETH_DELAY_MS);
-    for t in write_sequence(TEETH_PACED_WRITES) {
+    // A transition returns before the slowed delivery lands. Each write waits
+    // for its own sample, so every write flies alone and is service time.
+    for (i, t) in write_sequence(TEETH_PACED_WRITES).into_iter().enumerate() {
         ref_state = WideE2EMachine::apply(ref_state, &t);
         sut = <ComposedSut<WideE2E> as StateMachineTest>::apply(sut, &ref_state, t);
+        let started = std::time::Instant::now();
+        while probe.snapshot(ClockOrigin::Ui).len() <= i {
+            assert!(
+                started.elapsed() < TEETH_WRITE_DEADLINE,
+                "[latency-slo gate] teeth write {i} produced no e2e sample within \
+                 {TEETH_WRITE_DEADLINE:?} with {TEETH_DELAY_MS}ms per row armed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
     set_delivery_delay_ms(0);
     let window = probe.snapshot(ClockOrigin::Ui);

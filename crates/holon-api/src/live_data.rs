@@ -520,6 +520,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                     return;
                 };
                 batches_seen += 1;
+                let received_at = std::time::Instant::now();
                 let seq = batch.metadata.seq;
                 // The actor outlives every interaction, so its own span is a
                 // root. Applying a batch belongs to the interaction that WROTE
@@ -575,6 +576,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 live.apply_changes_with_origins(changes, &origins);
                 crate::latency_e2e::rows_delivered(
                     source_name,
+                    received_at,
                     touched.iter().map(|(id, obs)| (id.as_str(), *obs)),
                 );
                 if seq > 0 {

@@ -104,6 +104,7 @@ impl IntegrationStateProjector {
     /// projected". Rows for providers this build no longer bundles are dropped,
     /// which is the mirror-repair leg.
     pub async fn project(&self) -> anyhow::Result<()> {
+        let read_at = std::time::Instant::now();
         let rows = self.vm.rows();
         let updated_at = now_utc();
 
@@ -185,6 +186,7 @@ impl IntegrationStateProjector {
         // for its `integration:` target and expires as `e2e_expired`.
         holon_api::latency_e2e::rows_delivered(
             "integration_state",
+            read_at,
             projected_ids.iter().map(|id| {
                 (
                     id.as_str(),

@@ -3,7 +3,7 @@ id: 2026-09-23-stale-tokenless-delivery-closes-newer-e2e-clock
 date: 2026-09-23
 gap: ORACLE
 secondary: ENVIRONMENT
-status: OPEN
+status: FIXED
 summary: >-
   An e2e latency clock can be closed by a delivery produced BEFORE the clock
   was dispatched. The delivered block row carries no write_seq, so the
@@ -72,13 +72,35 @@ is still in flight, with the Loro-on wiring (which carries no token).
 
 ## Remedy
 
-OPEN. This is a product correlator defect, so it is reported and not fixed in
-this lane. Candidate fixes:
+FIXED with a guard in the correlator, not with the token.
 
-- carry `write_seq` onto the block row in the Loro-on wiring, so that rule 1
-  (exact op-instance match) applies;
-- have `rows_delivered` receive the instant at which its batch was received, and
-  refuse to close a clock dispatched after it.
+- **Where the token is lost:** in the Loro-on wiring, `set_field` goes to
+  `LoroBlockOperations::set_field` (`crates/holon-loro/src/loro_block_operations.rs`).
+  That call has the `CrudOperations::set_field(id, field, value)` signature,
+  which drops `write_seq`, and the Loro to SQL projection writes the row with
+  `write_seq = 0`. A trace showed 80 of 80 teeth writes on the Loro path, 0 on
+  `SqlOperationProvider`, and every delivered row with `write_seq = Integer(0)`.
+  The SQL-only wiring keeps the token because
+  `SqlOperationProvider::set_field` writes it in the same UPDATE. Carrying it
+  through Loro needs the trait signature, a per-block place for a process-local
+  token in or beside the CRDT, and the projection writer. The editor's echo
+  ordering also reads this column. That is a cross-cutting change, so it is
+  not done here.
+- **Guard:** `rows_delivered` takes the instant at which the subscriber
+  received its batch (`LiveData::subscribe`, and the start of the integration
+  projector's pass). `close_received` offers the batch only the clocks
+  dispatched at or before that instant. A clock dispatched later stays pending
+  for its own batch. The same guard makes the second `block` subscriber's
+  repeated delivery close no later clock.
+- **Red first:** `a_batch_never_closes_a_clock_dispatched_after_it_was_received`
+  (left 25, right 283) and `a_repeated_delivery_of_one_batch_closes_no_later_clock`
+  (left 1, right 0) fail with the guard removed.
+- **Teeth test:** the drive now waits for each write's own sample. The guard
+  had shown the old drive's writes to overlap, so they were never service time.
+- **Result:** 10 of 10 full `latency_slo_gate` runs pass, with a teeth p50 of
+  274–276 ms and n = 80.
 
-Either fix makes the teeth test deterministic: every sample then covers its
-own armed delay.
+**Residual:** a subscriber that lags receives a batch later than it was
+emitted. A tokenless batch can then still close a clock dispatched between
+emission and receipt. Only the token (rule 1) or an emission instant on the
+batch removes this case.

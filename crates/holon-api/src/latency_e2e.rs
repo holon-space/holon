@@ -739,8 +739,13 @@ fn block_row_pairs(c: &crate::Change<crate::StorageEntity>) -> Vec<(String, Opti
 /// Report the entities made visible by an applied `LiveData` batch, as
 /// `(id, Observable)` pairs (see [`touched_entities`]). Emits one `stage="e2e"`
 /// event per closed entry.
+///
+/// `received_at` is when the subscriber took the batch off its stream. A clock
+/// dispatched after that cannot be what the batch carries, so it is not closed
+/// here: see [`close_received`].
 pub fn rows_delivered<'a>(
     source: &'static str,
+    received_at: Instant,
     deliveries: impl IntoIterator<Item = (&'a str, Observable)>,
 ) {
     if PENDING_LEN.load(Ordering::Acquire) == 0 {
@@ -771,7 +776,7 @@ pub fn rows_delivered<'a>(
         // otherwise close on this batch and report a >30s "measurement" the SLO
         // oracle would fire on.
         expired.extend(prune_expired(slot, now));
-        closed.extend(close_delivered(slot, &deliveries, now));
+        closed.extend(close_received(slot, &deliveries, received_at, now));
     }
     PENDING_LEN.store(registry.len(), Ordering::Release);
     drop(registry);
@@ -812,6 +817,33 @@ pub fn rows_delivered<'a>(
             "holon_latency",
         );
     }
+}
+
+/// [`close_delivered`] over the clocks dispatched BEFORE the batch was
+/// received.
+///
+/// A delivered row that carries no `WriteSeq` names no op instance, so
+/// `close_delivered` gives it to the newest pending clock on its target. A
+/// clock dispatched after the batch was received is newer than anything the
+/// batch can carry: the batch would close it and report a latency too short to
+/// be true. The second `LiveData` subscriber of one source, which delivers the
+/// same rows again, is the same case.
+fn close_received<S: AsRef<str>>(
+    pending: &mut Vec<Pending>,
+    deliveries: &[(S, Observable)],
+    received_at: Instant,
+    now: Instant,
+) -> Vec<Closed> {
+    let (mut eligible, dispatched_after): (Vec<Pending>, Vec<Pending>) = std::mem::take(pending)
+        .into_iter()
+        .partition(|p| p.t0 <= received_at);
+    let mut closed = close_delivered(&mut eligible, deliveries, now);
+    eligible.extend(dispatched_after);
+    for c in &mut closed {
+        c.backlog = eligible.len();
+    }
+    *pending = eligible;
+    closed
 }
 
 /// Pure correlation core: close the pending entries a batch's deliveries
@@ -1397,6 +1429,62 @@ mod tests {
         );
     }
 
+    /// A keystroke typed while the previous keystroke's batch is still being
+    /// applied is not what that batch carries. The delivered row has no token,
+    /// so without the receipt bound the batch closes the NEWER clock after 25ms
+    /// and drops the older one as superseded: a 283ms write reported as 25ms.
+    #[test]
+    fn a_batch_never_closes_a_clock_dispatched_after_it_was_received() {
+        let base = Instant::now();
+        let received = base + Duration::from_millis(28);
+        let mut pending = vec![
+            pend("set_field", "block:host", Some(3), base),
+            pend(
+                "set_field",
+                "block:host",
+                Some(4),
+                base + Duration::from_millis(258),
+            ),
+        ];
+        let now = base + Duration::from_millis(283);
+        let closed = close_received(&mut pending, &[("block:host", row(None))], received, now);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].ms, 283, "the batch closes the write it carries");
+        assert_eq!(closed[0].backlog, 1, "the newer write is still in flight");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].observable, row(Some(4)));
+    }
+
+    /// The second subscriber of one source delivers the same rows again. A
+    /// clock dispatched between the two deliveries stays pending.
+    #[test]
+    fn a_repeated_delivery_of_one_batch_closes_no_later_clock() {
+        let base = Instant::now();
+        let received = base + Duration::from_millis(20);
+        let mut pending = vec![pend("set_field", "block:host", Some(11), base)];
+        let first = close_received(
+            &mut pending,
+            &[("block:host", row(None))],
+            received,
+            base + Duration::from_millis(272),
+        );
+        assert_eq!(first.len(), 1);
+        pending.push(pend(
+            "set_field",
+            "block:host",
+            Some(12),
+            base + Duration::from_millis(273),
+        ));
+        let repeat = close_received(
+            &mut pending,
+            &[("block:host", row(None))],
+            received,
+            base + Duration::from_millis(274),
+        );
+        assert_eq!(repeat.len(), 0, "the repeat closed a clock it cannot carry");
+        assert_eq!(pending.len(), 1);
+    }
+
     /// Exact match leaves a NEWER same-target entry pending for its own delta.
     #[test]
     fn exact_match_preserves_newer_entry() {
@@ -1440,6 +1528,7 @@ mod tests {
         );
         rows_delivered(
             "block",
+            Instant::now(),
             [("block:other", row(None)), ("block:e2e-test-a", row(None))],
         );
         let pending = PENDING.lock().unwrap();
@@ -1452,7 +1541,7 @@ mod tests {
     #[test]
     fn global_unmatched_ids_leave_entry_pending() {
         interaction_dispatched("set_field", "block:e2e-test-b", row(None), ClockOrigin::Ui);
-        rows_delivered("block", [("block:unrelated", row(None))]);
+        rows_delivered("block", Instant::now(), [("block:unrelated", row(None))]);
         let pending = PENDING.lock().unwrap();
         assert!(pending.iter().any(|p| p.target == "block:e2e-test-b"));
     }
@@ -1629,6 +1718,7 @@ mod tests {
         );
         rows_delivered(
             FOCUS_ROOTS_SOURCE,
+            Instant::now(),
             [("block:e2e-nav-test", Observable::FocusRoot)],
         );
         let pending = PENDING.lock().unwrap();
@@ -1707,6 +1797,7 @@ mod tests {
                 // A CDC batch applied to the reactive mirror (projection-visible).
                 rows_delivered(
                     FOCUS_ROOTS_SOURCE,
+                    Instant::now(),
                     [("block:proj-visible-lock", Observable::FocusRoot)],
                 );
                 if captured
@@ -1754,6 +1845,7 @@ mod tests {
                 );
                 rows_delivered(
                     "blocks",
+                    Instant::now(),
                     [("block:facade-origin-lock", Observable::BlockRow(None))],
                 );
                 if captured
