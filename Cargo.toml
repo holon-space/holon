@@ -47,9 +47,11 @@ members = [
   "frontends/gpui",
   "tools",
   "workspace-hack",
-  "experiments/lorotree-spike",
 ]
 exclude = [
+  # A standalone experiment under its own license (MIT OR Apache-2.0), kept
+  # outside the FSL workspace.
+  "experiments/lorotree-spike",
   # wasm plugin guests: each targets wasm32-unknown-unknown, carries its own
   # `[workspace]` and `Cargo.lock`, and is built into a checked-in `.wasm`
   # under `crates/holon-plugin-host/plugins/`. Nothing in the workspace
@@ -392,9 +394,9 @@ core-graphics = { path = ".cargo/patches/core-graphics" }
 # projection worker forks it at a watermark to compute incremental diffs
 # (crates/holon-loro/src/loro_share_backend.rs:362). Upstream 1.13.9 still bails
 # with NotImplemented("fork_at on shallow docs"); this fork fills the at/after-
-# shallow-root case. Patching `loro` catches ALL crates.io references (incl.
-# lorotree-spike's literal `loro = "1.0"`), so the whole workspace uses the
-# fork's loro-internal — no duplicate registry/path loro-internal.
+# shallow-root case. Patching `loro` catches ALL crates.io references, so the
+# whole workspace uses the fork's loro-internal — no duplicate registry/path
+# loro-internal.
 # PR upstream is planned (fork-and-contribute); drop this patch when a released
 # loro version ships fork_at-on-shallow.
 #
