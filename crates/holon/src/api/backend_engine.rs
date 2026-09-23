@@ -675,8 +675,9 @@ impl BackendEngine {
     /// The rendered sort-key spec (`col` / `-col`) implied by the query's
     /// trailing `ORDER BY`, or `None` when it declares no order.
     ///
-    /// Only derivable here: the matview body cannot carry the clause (Turso
-    /// IVM rejects a Sort node) and the frontend never sees compiled SQL.
+    /// Only derivable here: the clause is stripped from the matview body
+    /// (Turso accepts it there only as column ordinals) and the frontend
+    /// never sees compiled SQL.
     /// Context/parameter binding is irrelevant — an `ORDER BY` term is a
     /// column, never a placeholder.
     pub fn query_ordering_spec(

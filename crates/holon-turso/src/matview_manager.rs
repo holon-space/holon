@@ -1103,8 +1103,9 @@ impl MatviewManager {
 
     /// `query_view` with the definition's `ORDER BY` re-applied.
     ///
-    /// The matview body cannot carry an `ORDER BY` (Turso IVM rejects Sort),
-    /// so `ensure_view` strips it. Re-applying it here is what keeps a watched
+    /// `ensure_view` strips the `ORDER BY` from the matview body: Turso accepts
+    /// it only as column ordinals, and an ordered matview refuses indexes and
+    /// rowid seeks. Re-applying it here is what keeps a watched
     /// query's snapshot in the same order a one-shot `execute_query` of the
     /// same SQL returns; without it the two disagree and the watched read comes
     /// back in rowid order.

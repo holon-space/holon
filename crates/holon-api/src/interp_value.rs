@@ -165,9 +165,9 @@ pub trait ReactiveRowProvider: Send + Sync {
     /// (`col` for ascending, `-col` for descending) — the same form a
     /// `sortkey:` template arg takes.
     ///
-    /// A watched query's `ORDER BY` cannot survive into the matview body
-    /// (Turso IVM rejects a Sort node), so the rendered collection is the
-    /// only place left that can honour it. A collection with no explicit
+    /// A watched query's `ORDER BY` is stripped from the matview body (Turso
+    /// accepts it there only as column ordinals), so the rendered collection
+    /// is the only place left that can honour it. A collection with no explicit
     /// `sortkey:` adopts this; an explicit one always wins.
     ///
     /// Default: `None` — a provider whose rows carry no declared order.
