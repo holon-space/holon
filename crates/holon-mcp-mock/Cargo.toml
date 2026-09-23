@@ -2,6 +2,7 @@
 name = "holon-mcp-mock"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 publish = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every

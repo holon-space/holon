@@ -2,6 +2,7 @@
 name = "holon-toon"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 publish = false
 description = "Experiment: a TOON-based dense, round-trippable text projection of the Holon block forest, compared against Org syntax for agent read/patch workflows."
 

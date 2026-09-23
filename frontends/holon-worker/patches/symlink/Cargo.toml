@@ -10,5 +10,6 @@
 name = "symlink"
 version = "0.1.0"
 edition = "2021"
+license = "FSL-1.1-ALv2"
 publish = false
 description = "wasi-compatible drop-in for the symlink crate (holon-worker patch)"

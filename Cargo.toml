@@ -71,6 +71,9 @@ exclude = [
 ]
 resolver = "2"
 
+[workspace.package]
+license = "FSL-1.1-ALv2"
+
 [workspace.dependencies]
 # === Serialization ===
 serde = { version = "1", features = ["derive", "rc"] }

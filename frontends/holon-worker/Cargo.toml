@@ -14,6 +14,7 @@ resolver = "2"
 name = "holon-worker"
 version = "0.1.0"
 edition = "2021"
+license = "FSL-1.1-ALv2"
 publish = false
 description = "Holon backend running as a Web Worker on wasm32-wasip1-threads"
 
