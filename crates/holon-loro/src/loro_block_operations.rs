@@ -426,10 +426,11 @@ impl holon_core::WriteAuthorityReads for LoroBlockOperations {
 
     async fn children(&self, parent: &holon_api::EntityUri) -> Result<Vec<holon_api::EntityUri>> {
         let backend = self.get_backend("").await?;
-        backend
-            .list_children(parent.as_str())
-            .await?
-            .iter()
+        let mut ids = backend.list_children(parent.as_str()).await?;
+        if parent.is_no_parent() {
+            ids.extend(backend.layout_root_ids()?);
+        }
+        ids.iter()
             .map(|child| {
                 holon_api::EntityUri::parse(child)
                     .map_err(|e| format!("child `{child}` of `{parent}`: {e}").into())
@@ -439,10 +440,7 @@ impl holon_core::WriteAuthorityReads for LoroBlockOperations {
 
     async fn owning_page(&self, id: &holon_api::EntityUri) -> Result<holon_core::OwningPage> {
         let backend = self.get_backend("").await?;
-        match backend.owning_page_in_global_tree(id.as_str())? {
-            Some(answer) => Ok(answer),
-            None => holon_core::owning_page_by_hops(self, id).await,
-        }
+        Ok(backend.owning_page(id.as_str())?)
     }
 }
 

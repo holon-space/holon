@@ -111,8 +111,10 @@ impl WriteAuthorityReads for SqlWriteAuthority {
     }
 
     async fn children(&self, parent: &EntityUri) -> Result<Vec<EntityUri>> {
+        // The root sentinel's own row names itself as its parent.
         let sql = format!(
-            "SELECT id FROM {BLOCK_WRITE_TABLE} WHERE parent_id = $parent ORDER BY sort_key, id"
+            "SELECT id FROM {BLOCK_WRITE_TABLE} WHERE parent_id = $parent AND id != $parent \
+             ORDER BY sort_key, id"
         );
         let params = HashMap::from([("parent".to_string(), Value::String(parent.to_string()))]);
         let rows = self
@@ -120,7 +122,7 @@ impl WriteAuthorityReads for SqlWriteAuthority {
             .query(&sql, params)
             .await
             .map_err(|e| format!("children of {parent}: {e}"))?;
-        if rows.is_empty() && !self.block_exists(parent).await? {
+        if rows.is_empty() && !parent.is_no_parent() && !self.block_exists(parent).await? {
             return Err(
                 format!("children of {parent}: the write authority holds no such block").into(),
             );

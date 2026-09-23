@@ -885,7 +885,9 @@ pub trait WriteAuthorityReads: MaybeSendSync {
     /// The ids of `parent`'s children, in sibling order. `Err` when the
     /// authority does not hold `parent`.
     async fn children(&self, parent: &EntityUri) -> Result<Vec<EntityUri>>;
-    /// The nearest `Page` at or above `id`.
+    /// The page whose org file stores `id` (D197.a): in a block share its mount
+    /// page, in a page share the shared page. Never derive it by walking
+    /// parents.
     async fn owning_page(&self, id: &EntityUri) -> Result<OwningPage> {
         owning_page_by_hops(self, id).await
     }
@@ -937,7 +939,8 @@ impl std::fmt::Display for ChainBreak {
     }
 }
 
-/// [`WriteAuthorityReads::owning_page`] as one `block` read per hop.
+/// [`WriteAuthorityReads::owning_page`] as one `block` read per hop. Sound only
+/// where `parent_id` follows the file model, as in the SQL projection's mounts.
 pub async fn owning_page_by_hops<A: WriteAuthorityReads + ?Sized>(
     authority: &A,
     id: &EntityUri,

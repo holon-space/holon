@@ -153,6 +153,11 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     stays uncollapsed in the shared Loro doc. When a plain BLOCK is shared the
     mount is a synthetic container page. A mount page never sits under a
     non-page (Amendment A: it bubbles to the nearest page ancestor).
+    `owning_page` follows this FILE model in both write authorities — a block
+    in a block share answers its mount page, a block in a page share answers
+    `P` — while Loro's `children` follow its write model (the host lists the
+    shared root, not the mount), so code needing a block's page calls
+    `owning_page` and never walks parents (D197.a).
 12. **Every field write resolves a cell backing** — content and scalars do so
     in both modes: `LoroTextCellBacking`/`LoroMetaCellBacking<T>` in Full,
     `LwwTextCellBacking`/`LwwScalarBacking<T>` in SqlOnly (via

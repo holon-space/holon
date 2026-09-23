@@ -586,6 +586,64 @@ fn read_block_from_tree(
 // resolving.
 pub use holon_api::SnapshotBlock;
 
+/// Where a walk up one doc's tree stopped.
+enum WalkEnd {
+    Page(Box<holon_api::StoredBlock>),
+    Mount {
+        info: crate::shared_tree::MountInfo,
+        mount: Box<holon_api::StoredBlock>,
+    },
+    /// A node with no parent in this doc, and no page on the way.
+    Root,
+    TooDeep,
+}
+
+fn walk_to_page(tree: &loro::LoroTree, start: loro::TreeID) -> anyhow::Result<WalkEnd> {
+    let mut node = start;
+    for _ in 0..holon_core::traits::MAX_OWNING_PAGE_WALK {
+        if let Some(info) = read_mount_info(tree, node) {
+            return Ok(WalkEnd::Mount {
+                info,
+                mount: Box::new(stored_block_at(tree, node)?),
+            });
+        }
+        if node_is_page(tree, node)? {
+            return Ok(WalkEnd::Page(Box::new(stored_block_at(tree, node)?)));
+        }
+        match get_node_parent(tree, node) {
+            Some(parent) => node = parent,
+            None => return Ok(WalkEnd::Root),
+        }
+    }
+    Ok(WalkEnd::TooDeep)
+}
+
+/// The one live mount of `shared_tree_id` in `tree`.
+fn mount_node_of(tree: &loro::LoroTree, shared_tree_id: &str) -> anyhow::Result<loro::TreeID> {
+    let mounts: Vec<loro::TreeID> = tree
+        .get_nodes(false)
+        .into_iter()
+        .filter(|n| {
+            !matches!(
+                n.parent,
+                loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+            )
+        })
+        .filter(|n| {
+            read_mount_info(tree, n.id).is_some_and(|info| info.shared_tree_id == shared_tree_id)
+        })
+        .map(|n| n.id)
+        .collect();
+    match mounts.as_slice() {
+        [mount] => Ok(*mount),
+        [] => anyhow::bail!("shared tree {shared_tree_id} has no live mount in the global doc"),
+        many => anyhow::bail!(
+            "shared tree {shared_tree_id} has {} live mounts: {many:?}",
+            many.len()
+        ),
+    }
+}
+
 /// The block at `node` plus the `block_type` and `completed` values its meta
 /// holds.
 fn stored_block_at(
@@ -3984,42 +4042,102 @@ impl LoroBackend {
             })
     }
 
-    /// The nearest `Page` at or above `id`, walked under ONE read of the
-    /// global doc. `None` when `id` lives in the layout doc or a shared
-    /// subtree, whose chains leave their own doc.
-    pub fn owning_page_in_global_tree(
-        &self,
-        id: &str,
-    ) -> Result<Option<holon_core::OwningPage>, ApiError> {
-        let tree_id = match self.resolve_write_target_sync(id) {
-            Ok(WriteTarget::Global(tree_id)) => tree_id,
-            Ok(WriteTarget::Layout(_) | WriteTarget::Shared { .. }) => return Ok(None),
-            Err(ApiError::BlockNotFound { .. }) => return Ok(Some(holon_core::OwningPage::Absent)),
+    /// The page whose org file stores `id` (D197.a), each doc walked under ONE
+    /// read: a block share answers its mount, a page share the shared page.
+    pub fn owning_page(&self, id: &str) -> Result<holon_core::OwningPage, ApiError> {
+        use holon_core::OwningPage;
+        // ALLOW(entity_uri_from_raw): backend string-id surface
+        if EntityUri::from_raw(id).is_no_parent() {
+            return Ok(OwningPage::NoOwner);
+        }
+        let target = match self.resolve_write_target_sync(id) {
+            Ok(target) => target,
+            Err(ApiError::BlockNotFound { .. }) => return Ok(OwningPage::Absent),
             Err(e) => return Err(e),
         };
-        self.collab_doc
+        let fail = |e: anyhow::Error| ApiError::InternalError {
+            message: format!("owning_page({id}): {e:#}"),
+        };
+        let (doc, start) = self.target_doc(&target);
+        let end = doc
+            .with_read(|doc| walk_to_page(&doc.get_tree(TREE_NAME), start))
+            .map_err(fail)?;
+        match (end, &target) {
+            (WalkEnd::Page(page), _) => Ok(OwningPage::Page(page)),
+            (WalkEnd::TooDeep, _) => Ok(OwningPage::Broken(holon_core::ChainBreak::TooDeep)),
+            (WalkEnd::Root, WriteTarget::Global(_) | WriteTarget::Layout(_)) => {
+                Ok(OwningPage::NoOwner)
+            }
+            (WalkEnd::Root, WriteTarget::Shared { shared_tree_id, .. }) => self
+                .collab_doc
+                .with_read(|doc| {
+                    let tree = doc.get_tree(TREE_NAME);
+                    let mount = mount_node_of(&tree, shared_tree_id)?;
+                    Ok(OwningPage::Page(Box::new(stored_block_at(&tree, mount)?)))
+                })
+                .map_err(fail),
+            (WalkEnd::Mount { info, mount }, WriteTarget::Global(_)) => {
+                let shared = self.loaded_shared_doc(&info.shared_tree_id).map_err(fail)?;
+                let shared_page = shared
+                    .with_read(|doc| {
+                        let tree = doc.get_tree(TREE_NAME);
+                        if node_is_page(&tree, info.shared_root)? {
+                            return Ok(Some(stored_block_at(&tree, info.shared_root)?));
+                        }
+                        Ok(None)
+                    })
+                    .map_err(fail)?;
+                Ok(OwningPage::Page(match shared_page {
+                    Some(page) => Box::new(page),
+                    None => mount,
+                }))
+            }
+            (WalkEnd::Mount { info, .. }, WriteTarget::Layout(_) | WriteTarget::Shared { .. }) => {
+                Err(fail(anyhow::anyhow!(
+                    "the chain reaches a mount of shared tree {} outside the global doc, where \
+                     no mount can live",
+                    info.shared_tree_id
+                )))
+            }
+        }
+    }
+
+    /// The layout doc's root blocks, in tree order. Empty without a layout doc.
+    pub fn layout_root_ids(&self) -> Result<Vec<String>, ApiError> {
+        let Some(layout) = self.layout_doc.as_ref() else {
+            return Ok(Vec::new());
+        };
+        layout
             .with_read(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
-                let mut node = tree_id;
-                for _ in 0..holon_core::traits::MAX_OWNING_PAGE_WALK {
-                    if node_is_page(&tree, node)? {
-                        return Ok(holon_core::OwningPage::Page(Box::new(stored_block_at(
-                            &tree, node,
-                        )?)));
-                    }
-                    match get_node_parent(&tree, node) {
-                        Some(parent) => node = parent,
-                        None => return Ok(holon_core::OwningPage::NoOwner),
+                let mut ids = Vec::new();
+                for root in tree.roots() {
+                    match classify(&tree, root) {
+                        LiveNode::Settled(sid) => ids.push(EntityUri::block(&sid).to_string()),
+                        LiveNode::HalfBorn => warn_half_born("layout_root_ids", root, "root"),
+                        LiveNode::MetaUnreadable => {
+                            anyhow::bail!("layout root {root:?} has no readable meta")
+                        }
                     }
                 }
-                Ok(holon_core::OwningPage::Broken(
-                    holon_core::ChainBreak::TooDeep,
-                ))
+                Ok(ids)
             })
-            .map(Some)
             .map_err(|e| ApiError::InternalError {
-                message: format!("owning_page({id}): {e:#}"),
+                message: format!("layout roots: {e:#}"),
             })
+    }
+
+    /// The loaded doc of shared tree `shared_tree_id`, under its boundary lock.
+    fn loaded_shared_doc(&self, shared_tree_id: &str) -> anyhow::Result<LoroDocument> {
+        let doc = self
+            .shared_trees
+            .as_ref()
+            .and_then(|store| store.get_shared_doc(shared_tree_id))
+            .ok_or_else(|| {
+                anyhow::anyhow!("the doc of shared tree {shared_tree_id} is not loaded")
+            })?;
+        // ALLOW(loro_doc_escape): re-wrapped under the same boundary lock.
+        Ok(LoroDocument::from_existing(doc, shared_tree_id.to_string()))
     }
 
     /// The Loro tree's fractional index for `id` — the adapter's internal
