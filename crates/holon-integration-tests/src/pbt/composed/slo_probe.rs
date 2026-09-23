@@ -142,6 +142,7 @@ struct E2eVisitor {
     backlog: Option<u64>,
     contended: Option<bool>,
     delivery_batch: Option<u64>,
+    source: Option<String>,
 }
 
 impl tracing::field::Visit for E2eVisitor {
@@ -173,6 +174,7 @@ impl tracing::field::Visit for E2eVisitor {
             "stage" => self.stage = Some(value.to_string()),
             "action" => self.action = Some(value.to_string()),
             "origin" => self.origin = Some(value.to_string()),
+            "source" => self.source = Some(value.to_string()),
             _ => {}
         }
     }
@@ -213,14 +215,27 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
         // A rung that silently scored an unscoreable sample would be the exact
         // vacuous-pass this gate exists to prevent, so a missing queue depth is
         // a panic on the emitting thread rather than a defaulted `1`.
-        let (Some(ms), Some(in_flight), Some(backlog), Some(contended), Some(delivery_batch)) =
-            (v.ms, v.in_flight, v.backlog, v.contended, v.delivery_batch)
+        let (
+            Some(ms),
+            Some(in_flight),
+            Some(backlog),
+            Some(contended),
+            Some(delivery_batch),
+            Some(source),
+        ) = (
+            v.ms,
+            v.in_flight,
+            v.backlog,
+            v.contended,
+            v.delivery_batch,
+            v.source.clone(),
+        )
         else {
             panic!(
-                "slo probe: an `e2e` event lacked ms/in_flight/backlog/contended/delivery_batch \
-                 (ms={:?} in_flight={:?} backlog={:?} contended={:?} delivery_batch={:?}) — the \
-                 correlator's emission and this probe have diverged",
-                v.ms, v.in_flight, v.backlog, v.contended, v.delivery_batch
+                "slo probe: an `e2e` event lacked ms/in_flight/backlog/contended/delivery_batch/\
+                 source (ms={:?} in_flight={:?} backlog={:?} contended={:?} delivery_batch={:?} \
+                 source={:?}) — the correlator's emission and this probe have diverged",
+                v.ms, v.in_flight, v.backlog, v.contended, v.delivery_batch, v.source
             );
         };
         // Same reasoning as the queue depths: a sample nobody can attribute to a
@@ -245,6 +260,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
                 contended,
                 delivered_at: Instant::now(),
                 delivery_batch,
+                source,
             });
     }
 }

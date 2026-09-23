@@ -14,11 +14,12 @@
 //!
 //! * [`latency_slo_rung_service_time_p95`] — one interaction in flight
 //!   (dispatch, settle, next), p95 over n ≥ 30 `set_field`-class writes.
-//! * [`latency_slo_rung_throughput_floor`] — the same writes dispatched
-//!   back-to-back through the fire-and-forget door, scored on how fast the
-//!   pipeline drains while saturated. REPORT-ONLY on the rate today; see its
-//!   doc comment for the measured spread that forced that and what promoting it
-//!   to a gate needs.
+//! * [`latency_slo_rung_throughput_floor`] — `set_field` writes offered faster
+//!   than the pipeline retires them, through the fire-and-forget door, scored
+//!   on how fast the pipeline drains while its queue stays full. REPORT-ONLY on
+//!   the rate today; see its doc comment for what promoting it to a gate needs.
+//! * [`a_slowed_pipeline_fails_the_throughput_rung`] — the same drive with a
+//!   per-row delivery delay armed must FAIL the throughput verdict.
 //! * [`latency_slo_rung_facade_origin_is_measured_and_not_pooled`] — an
 //!   agent/MCP-driven operation through `HolonService::execute_operation` is
 //!   measured at all, and its samples stay out of the UI percentile (D119.a).
@@ -61,7 +62,6 @@ use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::latency_e2e::MAX_PENDING;
 use holon_api::latency_slo::ClockOrigin;
-use holon_api::latency_slo::MIN_DRAIN_INTERVALS;
 use holon_api::latency_slo::MIN_SERVICE_SAMPLES;
 use holon_api::latency_slo::RungVerdict;
 use holon_api::latency_slo::SERVICE_TIME_SLO_MS;
@@ -91,23 +91,31 @@ use proptest_state_machine::StateMachineTest;
 /// coalesced.
 const PACED_WRITES: usize = 40;
 
-/// Burst waves. The projector drains its whole queue per pass, so one wave
-/// can retire in ONE delivery batch — a single saturated interval however
-/// deep the wave is. Each wave therefore guarantees at least one interval, and
-/// the wave count is what puts the rung past [`MIN_DRAIN_INTERVALS`].
-const BURST_WAVES: usize = 5;
+/// Writes the clean sustained drive offers, each to its own block. A clean
+/// pass retires about a dozen, so this makes about a dozen passes: well past
+/// the three saturated ones a verdict needs.
+const SUSTAINED_WRITES: usize = 150;
 
-/// Writes per wave. Kept at or below half the correlator's per-origin capacity
-/// (`MAX_PENDING`), so a wave plus the unretired rest of the previous one never
-/// evicts a pending clock — an evicted clock is a write the rung cannot see.
-const WAVE_WRITES: usize = 30;
+/// Writes the slowed drive offers. A slowed pass retires a few, so this is
+/// enough passes, and it keeps the slowed run to about 10s.
+const TEETH_SUSTAINED_WRITES: usize = 60;
 
-const BURST_WRITES: usize = BURST_WAVES * WAVE_WRITES;
+/// Offered load: one write per this interval, far faster than the pipeline
+/// retires them, so every pass lands with writes already queued behind it.
+const OFFER_EVERY: std::time::Duration = std::time::Duration::from_millis(5);
 
-/// How long a wave may go without its first delivery, or the queue without
-/// draining room for the next wave. The correlator expires a clock at 30s, so
-/// waiting longer would only measure its expiry.
-const WAVE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+/// Most writes the drive keeps pending. Below the correlator's per-origin
+/// capacity (`MAX_PENDING`), so no clock is ever evicted.
+const MAX_OFFERED_PENDING: usize = 48;
+
+/// How long the drive may go without a new delivery before it declares the
+/// pipeline stuck. The correlator expires a clock at 30s.
+const DELIVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The per-row delivery delay the throughput teeth arm. A pass carrying `r`
+/// rows then takes at least `r` times this, so the drain rate is at most
+/// 1000 / 150 = 6.7 writes/s, under the 10/s floor, however the rows batch.
+const THROUGHPUT_TEETH_DELAY_MS: u64 = 150;
 
 /// The block every write lands on. Born-equal id, so oracle and SUT share it
 /// and no synthetic→real reconcile is in the measured path.
@@ -121,10 +129,10 @@ fn host_uri() -> EntityUri {
     EntityUri::parse(HOST_ID).expect("HOST_ID is a well-formed block uri")
 }
 
-/// The burst rung's per-write target. One block per write, because the
-/// correlator closes only the NEWEST pending entry per target and supersedes
-/// the rest: 40 rapid writes to ONE row coalesce into a single delivery and a
-/// single sample (measured), which is no evidence about drain rate at all.
+/// The sustained drive's per-write target. One block per write: a delivered
+/// block row carries no `write_seq` in this wiring, so the correlator closes
+/// the NEWEST pending clock on a target and supersedes the rest. Distinct
+/// targets make every closure the write's own.
 fn burst_target(i: usize) -> String {
     format!("block:slo-gate-burst-{i}")
 }
@@ -135,7 +143,7 @@ fn burst_target(i: usize) -> String {
 fn setup_sequence() -> Vec<E2ETransition> {
     // Burst targets FIRST, then the host, then the focus: a create moves the
     // editor, so focusing the host has to be the last thing the prefix does.
-    let mut v: Vec<E2ETransition> = (0..BURST_WRITES)
+    let mut v: Vec<E2ETransition> = (0..SUSTAINED_WRITES)
         .map(|i| {
             E2ETransition::CreateBlockUnderFocus(CreateBlockUnderFocus {
                 content: format!("burst target {i}"),
@@ -221,16 +229,20 @@ fn require_a_judgeable_host() {
     );
 }
 
-/// Boot a fresh SUT and drive the burst through the production fire-and-forget
-/// door, wave by wave. Returns the measured window.
+/// Boot a fresh SUT and offer `writes` writes through the production
+/// fire-and-forget door, one per [`OFFER_EVERY`], with at most
+/// [`MAX_OFFERED_PENDING`] pending. `delay_ms` arms the per-row delivery delay
+/// for the drive only. Returns the measured window.
 ///
-/// A wave is dispatched back-to-back; the next one waits until a write OF THIS
-/// WAVE has been delivered, so each wave is its own pass. Every write closes
-/// exactly one clock (one target each), so more deliveries than all earlier
-/// waves' writes means one of this wave's landed. At most a wave minus one is
-/// then pending, so the next wave never evicts a clock.
-fn measure_burst() -> SloWindow {
-    const _: () = assert!(2 * WAVE_WRITES <= MAX_PENDING);
+/// The delay sleeps in `LiveData::subscribe` before the subscriber applies a
+/// batch, so a slowed "pass" is one subscriber batch: exactly the step after
+/// which the user sees the rows.
+fn measure_sustained(delay_ms: u64, writes: usize) -> SloWindow {
+    assert!(
+        writes <= SUSTAINED_WRITES,
+        "setup creates {SUSTAINED_WRITES} targets"
+    );
+    const _: () = assert!(MAX_OFFERED_PENDING < MAX_PENDING);
     let (sut, _ref_state) = boot();
     let engine = sut
         .handle()
@@ -238,61 +250,60 @@ fn measure_burst() -> SloWindow {
         .expect("the full-headless draw boots a reactive engine");
 
     let probe = SloProbe::arm();
+    set_delivery_delay_ms(delay_ms);
     sut.runtime().block_on(async {
         engine.ui_state().set_detached_dispatch(true);
-        for wave in 0..BURST_WAVES {
-            for j in 0..WAVE_WRITES {
-                let i = wave * WAVE_WRITES + j;
+        let mut dispatched = 0;
+        let mut delivered = 0;
+        let mut last_progress = std::time::Instant::now();
+        while delivered < writes {
+            if dispatched < writes && dispatched - delivered < MAX_OFFERED_PENDING {
                 let mut params = HashMap::new();
-                params.insert("id".to_string(), Value::String(burst_target(i)));
+                params.insert("id".to_string(), Value::String(burst_target(dispatched)));
                 params.insert("field".to_string(), Value::String("content".to_string()));
-                // Distinct per write: an identity re-commit produces no CDC delta,
-                // so it would yield no sample and silently shrink the burst.
-                params.insert("value".to_string(), Value::String(format!("burst {i}")));
+                // Distinct per write: an identity re-commit produces no CDC
+                // delta, so it would yield no sample.
+                params.insert(
+                    "value".to_string(),
+                    Value::String(format!("sustained {dispatched}")),
+                );
                 dispatch_intent_through_armed_door(
                     &engine,
                     OperationIntent::new(EntityName::new("block"), "set_field".to_string(), params),
                 )
                 .await
                 .expect("the detached door accepts a content write");
+                dispatched += 1;
             }
-            let earlier_waves = wave * WAVE_WRITES;
-            let started = std::time::Instant::now();
-            loop {
-                let delivered = probe.snapshot(ClockOrigin::Ui).len();
-                if delivered > earlier_waves {
-                    break;
-                }
-                assert!(
-                    started.elapsed() < WAVE_DEADLINE,
-                    "[latency-slo gate] wave {wave}: {delivered} deliveries after \
-                     {WAVE_DEADLINE:?}, none of them from this wave ({earlier_waves} writes were \
-                     dispatched before it) — the pipeline stopped retiring the burst"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            tokio::time::sleep(OFFER_EVERY).await;
+            let now = probe.snapshot(ClockOrigin::Ui).len();
+            if now > delivered {
+                delivered = now;
+                last_progress = std::time::Instant::now();
             }
+            assert!(
+                last_progress.elapsed() < DELIVERY_DEADLINE,
+                "[latency-slo gate] {delivered} of {dispatched} dispatched writes delivered, and \
+                 none for {DELIVERY_DEADLINE:?} (delay {delay_ms}ms per row) — the pipeline \
+                 stopped retiring the drive"
+            );
         }
         engine.ui_state().set_detached_dispatch(false);
     });
-    sut.settle_projections();
+    set_delivery_delay_ms(0);
     let window = probe.snapshot(ClockOrigin::Ui);
     drop(probe);
-
-    // The fire-and-forget door returns `Ok` the moment it hands the intent
-    // off, so a downstream failure is invisible to the caller; this count is
-    // the only place it shows. The waves never exceed the correlator's
-    // capacity, so every dispatched write must close a clock.
-    let landed = window.len();
     eprintln!(
-        "[latency-slo gate] burst: {landed}/{BURST_WRITES} dispatched writes produced a \
-         delivery in {BURST_WAVES} waves of {WAVE_WRITES}",
+        "[latency-slo gate] sustained drive (delay {delay_ms}ms/row): {}/{writes} \
+         writes delivered: {}",
+        window.len(),
+        window.report(),
     );
     assert_eq!(
-        landed,
-        BURST_WRITES,
-        "[latency-slo gate] only {landed} of {BURST_WRITES} burst writes produced a delivery. \
-         No wave can evict a pending clock, so each missing one is a write the pipeline never \
-         made visible. Window: {}",
+        window.len(),
+        writes,
+        "[latency-slo gate] the drive never exceeds the correlator's capacity, so every write \
+         must close its own clock. Window: {}",
         window.report(),
     );
     window
@@ -370,75 +381,35 @@ fn latency_slo_rung_service_time_p95() {
     );
 }
 
-/// **RUNG 2 — THROUGHPUT FLOOR.** The same `set_field` writes dispatched
-/// back-to-back through the production fire-and-forget door, so the queue
-/// builds and the deliveries measure how fast the pipeline RETIRES work rather
-/// than how fast the driver offers it.
+/// **RUNG 2 — THROUGHPUT FLOOR.** Writes offered faster than the pipeline
+/// retires them, so its queue stays full and the deliveries measure how fast
+/// it DRAINS rather than how fast the driver offers.
 ///
 /// Driven by intent rather than by the `TypeChars` transition: the editor cap
 /// awaits each commit before returning, so a transition drive cannot put two
-/// interactions in flight no matter which door it takes (measured — a detached
-/// `TypeChars` burst produced 0 saturated intervals over 38 deliveries).
-/// `dispatch_intent_through_armed_door` is the same door the GPUI keystroke
-/// handler uses, and it dispatches the same `block`/`set_field` op.
-///
-/// The oracle is deliberately not advanced: this rung measures throughput, and
-/// the SUT state it leaves behind is discarded. Convergence over these writes
-/// is the keystone's job, not this rung's.
+/// interactions in flight. `dispatch_intent_through_armed_door` is the same
+/// door the GPUI keystroke handler uses, and it dispatches the same
+/// `block`/`set_field` op. The oracle is deliberately not advanced: the SUT
+/// state this leaves behind is discarded.
 ///
 /// **REPORT-ONLY on the rate.** The floor is computed and printed, but a rate
-/// below it does not fail this test; the floor's own falsification lives in
-/// `holon_api::latency_slo`'s `throughput_rung_fails_a_slow_drain`.
-///
-/// This is the treatment `docs/Testing/latency-ceilings.txt` already gives its
-/// two SplitBlock rungs: measured and printed every run, unable to fail a build
-/// until calibrated. What DOES fail here is structural — a burst that never had
-/// two interactions in flight, one that closed fewer saturated intervals than a
-/// verdict needs, or one that lost a write — because those mean the rung
-/// measured nothing, which must never read as a pass.
-///
-/// To promote it to a gate, calibrate per the ceilings file's methodology (see
-/// `THROUGHPUT_FLOOR_WRITES_PER_SEC`).
+/// below it does not fail this test. What DOES fail is a drive that produced
+/// no judged busy period: it measured nothing, which must never read as a pass.
+/// The verdict's teeth are [`a_slowed_pipeline_fails_the_throughput_rung`].
+/// To promote the rate to a gate, calibrate per the ceilings file's
+/// methodology (see `THROUGHPUT_FLOOR_WRITES_PER_SEC`).
 #[test]
 fn latency_slo_rung_throughput_floor() {
     let _turn = RUNG_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let window = measure_burst();
+    let window = measure_sustained(0, SUSTAINED_WRITES);
     require_a_judgeable_host();
-
     eprintln!(
-        "[latency-slo gate] throughput rung: {} ({} samples, {} saturated intervals)",
+        "[latency-slo gate] throughput rung: {} ({} samples, {} saturated passes)",
         window.report(),
         window.len(),
-        window.drain_interval_count(),
-    );
-    // A burst that never had two interactions in flight measured nothing about
-    // drain rate. That is an unusable run, not a fast one.
-    let max_in_flight = window
-        .samples()
-        .iter()
-        .map(|s| s.in_flight)
-        .max()
-        .expect("measure_burst asserted every one of the burst's writes landed");
-    assert!(
-        max_in_flight >= 2,
-        "[latency-slo gate] no burst write was dispatched behind another: the deepest queue any \
-         of the {} deliveries saw at dispatch was {max_in_flight}. The detached dispatch door \
-         serialized the burst, so drain rate is unmeasurable. Window: {}",
-        window.len(),
-        window.report(),
-    );
-    assert!(
-        window.drain_interval_count() >= MIN_DRAIN_INTERVALS,
-        "[latency-slo gate] {} interactions were in flight at once, yet the {BURST_WAVES}-wave \
-         burst produced only {} saturated intervals out of {} deliveries — each wave waits for \
-         a delivery before the next is dispatched, so every wave should close at least one. \
-         Window: {}",
-        max_in_flight,
-        window.drain_interval_count(),
-        window.len(),
-        window.report(),
+        window.drain_pass_count(),
     );
     // REPORT-ONLY (see the doc comment): printed, never fatal on the rate.
     match window.throughput_verdict() {
@@ -452,11 +423,38 @@ fn latency_slo_rung_throughput_floor() {
              rung is report-only; investigate if it persists on an idle host."
         ),
         RungVerdict::Unjudged { n, needed } => panic!(
-            "[latency-slo gate] throughput produced NO VERDICT: {n} deliveries, {needed} \
-             required. The burst measured nothing, which is not a pass.\n  {}",
+            "[latency-slo gate] throughput produced NO VERDICT: the longest busy period had {n} \
+             saturated passes, {needed} required. The drive offers writes faster than the \
+             pipeline retires them, so its queue should stay full; it did not, and the rung \
+             measured nothing, which is not a pass.\n  {}",
             window.report(),
         ),
     }
+}
+
+/// **The throughput verdict must respond to the pipeline.** The same
+/// sustained drive with [`THROUGHPUT_TEETH_DELAY_MS`] per row armed in
+/// `LiveData`'s apply path must FAIL the throughput rung.
+#[test]
+fn a_slowed_pipeline_fails_the_throughput_rung() {
+    let _turn = RUNG_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let window = measure_sustained(THROUGHPUT_TEETH_DELAY_MS, TEETH_SUSTAINED_WRITES);
+    let verdict = window.throughput_verdict();
+    assert!(
+        verdict.is_fail(),
+        "[latency-slo gate] {THROUGHPUT_TEETH_DELAY_MS}ms per row caps the drain at \
+         {:.1} writes/s, under the {THROUGHPUT_FLOOR_WRITES_PER_SEC:.0}/s floor, yet the \
+         throughput rung said {verdict:?}. Either the injector is not reaching the subscriber, \
+         or the estimator no longer sees a slow drain. Window: {}",
+        1000.0 / THROUGHPUT_TEETH_DELAY_MS as f64,
+        window.report(),
+    );
+    eprintln!(
+        "[latency-slo gate] throughput teeth: {verdict:?} with {THROUGHPUT_TEETH_DELAY_MS}ms per \
+         row armed"
+    );
 }
 
 /// The facade rung's target: the block the paced prefix already focuses, so the
@@ -725,28 +723,20 @@ fn latency_slo_rung_a_facade_clock_in_flight_does_not_alter_a_ui_sample() {
 }
 
 // ── TEETH ────────────────────────────────────────────────────────────────────
-// What a gate promises has to be falsifiable, and the two halves of that
-// promise are proven at different levels — deliberately, after measurement.
+// What a gate promises has to be falsifiable.
 //
-// THE VERDICT FLIP is owned by `holon_api::latency_slo`'s unit tests, which
-// feed the scorer synthetic windows and need no host:
-//   * `service_rung_fails_on_a_slow_paced_pipeline` — slow input ⇒ Fail.
-//   * `throughput_rung_fails_a_slow_drain` — slow drain ⇒ Fail.
-//   * `an_idle_session_with_one_queued_delivery_is_not_a_slow_drain` and
-//     `batched_deliveries_do_not_inflate_the_drain_rate` — the two false-red
-//     estimators this rung shipped and lost, pinned so they cannot return.
+// * SERVICE: the test below arms [`TEETH_DELAY_MS`] per row on the paced arm,
+//   where each write waits for its own sample, and the service statistic must
+//   move. It proves the wiring; the service verdict's flip is owned by
+//   `holon_api::latency_slo`'s `service_rung_fails_on_a_slow_paced_pipeline`.
+// * THROUGHPUT: [`a_slowed_pipeline_fails_the_throughput_rung`] arms a per-row
+//   delay under the sustained drive and asserts the verdict itself fails. The
+//   estimator's false-red and false-green pins are the probe tests in
+//   `holon_api::latency_slo`.
 //
-// THE WIRING — that a real slowdown in the real CDC apply path reaches that
-// scorer — is what only an integration test can show, and it is what the test
-// below asserts.
-//
-// The integration test checks the wiring only; the flip stays with the unit
-// tests. The burst arm cannot carry the injection: it delivered 0 of 150
-// writes at 60ms and at 250ms per row. What IS shipped is [`TEETH_DELAY_MS`] =
-// 250ms on the paced arm only, where each write waits for its own sample.
 // An earlier version accepted `Unjudged` as "red enough", and duly reported
-// that the rung had teeth on a run that collected ZERO samples. That vacuity
-// is what this structure removes.
+// that a rung had teeth on a run that collected ZERO samples. Both teeth
+// therefore require a judged, moving statistic.
 
 /// The injected per-ROW delay for the wiring check.
 const TEETH_DELAY_MS: u64 = 250;

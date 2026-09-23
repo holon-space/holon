@@ -15,18 +15,18 @@
 //!    were alone in the pipeline for their whole life (see
 //!    [`E2eSample::is_service_time`]), so no sample carries another
 //!    interaction's wait. Budget: [`SERVICE_TIME_SLO_MS`].
-//! 2. **Throughput** — [`SloWindow::drain_rate_per_sec`]. Deliveries per second
-//!    of wall time, summed over the INTERVALS in which the queue held more than
-//!    one interaction (see [`SloWindow::drain_rate_per_sec`]). An idle gap
-//!    contributes neither its time nor its deliveries, so a mostly-quiet
-//!    session cannot be scored as slow draining. Floor:
+//! 2. **Throughput** — [`SloWindow::drain_rate_per_sec`]. Writes retired per
+//!    second while the queue STAYED full: over busy periods of at least
+//!    [`MIN_SATURATED_PASSES`] consecutive passes that each started with work
+//!    already queued. A slow pass without sustained load is a service event,
+//!    and an idle gap ends a busy period. Floor:
 //!    [`THROUGHPUT_FLOOR_WRITES_PER_SEC`].
 //!
 //! Each rung reports [`RungVerdict::Unjudged`] below its sample floor rather
 //! than passing on thin evidence: a gate that goes green because it collected
 //! four samples is the failure mode this module exists to prevent.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
@@ -46,13 +46,11 @@ pub const SERVICE_TIME_SLO_MS: u64 = 200;
 /// headless harness carries OTel span layers and its own runtime, so only its
 /// numbers can fail a build.
 ///
-/// Observed by `latency_slo_rung_throughput_floor` on hosts the contention
-/// covariate ADMITTED (test profile, five waves of 30, batches identified by
-/// `delivery_batch`, every dispatched write delivered): **9.5 · 13.5 · 26.4 ·
-/// 30.8 · 31.5 · 45.6 · 52.9 · 65.1 · 69.3 · 71.4 · 75.1 · 75.8 · 84.9
-/// writes/s** — a 9x spread, the low end on hosts with a load average of
-/// 20-60. (Earlier observations were taken before samples carried their batch
-/// identity, while the correlator evicted most of the burst, and are void.)
+/// Observed by `latency_slo_rung_throughput_floor` (test profile, the
+/// sustained drive, the busy-period estimator): **56.5 · 58.7 · 61.7 · 68.6 ·
+/// 74.0 writes/s**.
+/// Observations under the earlier wave drive and interval estimators are void:
+/// those estimators could inflate a rate by charging a pass to a 1ms span.
 ///
 /// The rate is REPORT-ONLY: `latency_slo_rung_throughput_floor` prints it and
 /// never fails on it. 10/s is a floor-of-last-resort, below every observation,
@@ -69,17 +67,13 @@ pub const THROUGHPUT_FLOOR_WRITES_PER_SEC: f64 = 10.0;
 /// ruling names n ≥ 30; a p95 over fewer samples is one sample's opinion.
 pub const MIN_SERVICE_SAMPLES: usize = 30;
 
-/// Saturated intervals the throughput rung needs before it will report a rate.
+/// Saturated passes a busy period needs before the throughput rung judges it.
 ///
-/// Low on purpose. The rate is REPORT-ONLY (see
-/// [`THROUGHPUT_FLOOR_WRITES_PER_SEC`]), so this floor is not protecting a
-/// verdict — it exists to catch a drive that stopped saturating at all, which
-/// is the failure mode an integration rung owns. How many intervals one burst
-/// opens depends on how the projector batches it — a pass can retire a whole
-/// burst — so the gate drives its burst in waves that each close at least one.
-/// The interval and delivery counts are printed beside every rate so thin
-/// evidence is visible rather than silently averaged.
-pub const MIN_DRAIN_INTERVALS: usize = 3;
+/// One slow pass, or a burst of two writes, is a SERVICE event: the queue did
+/// not stay full. Three consecutive passes that each started with work already
+/// queued mean arrivals kept up with retirement, which is the sustained load a
+/// drain rate describes.
+pub const MIN_SATURATED_PASSES: usize = 3;
 
 /// Slow the CDC delivery actor on purpose, so the rungs above can be shown to
 /// have teeth.
@@ -143,18 +137,16 @@ pub struct E2eSample {
     /// batch retired share it; their `delivered_at` differ by the emit loop's
     /// own microseconds, so the instant cannot identify the batch.
     pub delivery_batch: u64,
+    /// The `LiveData` source whose delivery closed this sample. A subscriber
+    /// applies its batches one after another, and different sources run
+    /// concurrently, so passes are sequenced per source.
+    pub source: String,
 }
 
 impl E2eSample {
-    /// The earliest instant this interaction can have been dispatched. `ms` is
+    /// The latest instant this interaction can have been dispatched. `ms` is
     /// truncated to whole milliseconds, so the true dispatch lies up to one
-    /// millisecond before `delivered_at - ms`; taking that bound makes every
-    /// interval opened here as long as it could have been.
-    pub fn earliest_dispatch(&self) -> Instant {
-        self.delivered_at - Duration::from_millis(self.ms + 1)
-    }
-
-    /// The latest instant this interaction can have been dispatched.
+    /// millisecond before this.
     pub fn latest_dispatch(&self) -> Instant {
         self.delivered_at - Duration::from_millis(self.ms)
     }
@@ -196,12 +188,43 @@ impl E2eSample {
     }
 }
 
-/// One applied delivery batch, as the samples it closed describe it.
-struct Batch {
-    id: u64,
+/// One applied delivery batch of one source — one PASS of its subscriber — as
+/// the samples it closed describe it.
+struct Pass {
     /// When it landed: its first sample's delivery.
     at: Instant,
     deliveries: usize,
+    /// The earliest `latest_dispatch` of the writes it retired.
+    first_dispatch: Instant,
+}
+
+/// What the judged busy periods of one source measured.
+struct SourceDrain<'a> {
+    source: &'a str,
+    deliveries: usize,
+    passes: usize,
+    elapsed: Duration,
+}
+
+impl SourceDrain<'_> {
+    fn rate_per_sec(&self) -> f64 {
+        self.deliveries as f64 / self.elapsed.as_secs_f64()
+    }
+}
+
+/// The throughput rung's reading of a window.
+struct Drain<'a> {
+    judged: Vec<SourceDrain<'a>>,
+    /// The most saturated passes any busy period reached, judged or not.
+    longest_busy_period: usize,
+}
+
+impl Drain<'_> {
+    fn worst(&self) -> Option<&SourceDrain<'_>> {
+        self.judged
+            .iter()
+            .min_by(|a, b| a.rate_per_sec().total_cmp(&b.rate_per_sec()))
+    }
 }
 
 /// One rung's outcome. `Unjudged` is not a pass: it says the window never held
@@ -374,151 +397,148 @@ impl SloWindow {
         }
     }
 
-    /// The window's delivery batches, ordered by when they landed. The batch —
-    /// not the sample — is the unit this rung reasons about: every closure one
-    /// applied batch made retired at the same moment.
-    fn batches(&self) -> Vec<Batch> {
-        let mut out: Vec<Batch> = Vec::new();
-        let mut index: HashMap<u64, usize> = HashMap::new();
+    /// Each source's passes, ordered by when they landed. The batch — not the
+    /// sample — is the unit this rung reasons about: every closure one applied
+    /// batch made retired at the same moment.
+    fn passes_by_source(&self) -> BTreeMap<&str, Vec<Pass>> {
+        let mut by_batch: HashMap<u64, (&str, Pass)> = HashMap::new();
         for s in &self.samples {
-            match index.get(&s.delivery_batch) {
-                Some(&i) => {
-                    let b = &mut out[i];
-                    b.at = b.at.min(s.delivered_at);
-                    b.deliveries += 1;
-                }
-                None => {
-                    index.insert(s.delivery_batch, out.len());
-                    out.push(Batch {
-                        id: s.delivery_batch,
-                        at: s.delivered_at,
-                        deliveries: 1,
-                    });
-                }
-            }
+            let (source, pass) = by_batch.entry(s.delivery_batch).or_insert((
+                s.source.as_str(),
+                Pass {
+                    at: s.delivered_at,
+                    deliveries: 0,
+                    first_dispatch: s.latest_dispatch(),
+                },
+            ));
+            assert_eq!(
+                *source, s.source,
+                "delivery batch {} names two sources — the correlator stamps one source per \
+                 `rows_delivered` call",
+                s.delivery_batch,
+            );
+            pass.at = pass.at.min(s.delivered_at);
+            pass.deliveries += 1;
+            pass.first_dispatch = pass.first_dispatch.min(s.latest_dispatch());
         }
-        out.sort_by_key(|b| b.at);
+        let mut out: BTreeMap<&str, Vec<Pass>> = BTreeMap::new();
+        for (source, pass) in by_batch.into_values() {
+            out.entry(source).or_default().push(pass);
+        }
+        for passes in out.values_mut() {
+            passes.sort_by_key(|p| p.at);
+        }
         out
     }
 
-    /// The drain measurement: deliveries retired across SATURATED intervals,
-    /// how many such intervals there were, and their total wall time.
+    /// The drain measurement, per source.
     ///
-    /// Each batch closes at most one interval, and only if two or more
-    /// delivered interactions were in flight before it landed: those it
-    /// retires, plus those a later batch retires that were already dispatched.
-    /// The interval starts at the SECOND of their dispatches, and never before
-    /// the previous batch landed. Time with one interaction in flight is that
-    /// interaction's own service time; counting it here would report a slow
-    /// write as a slow drain. A dispatch is resolved to `ms`'s millisecond and
-    /// taken at its earliest, so the rate stays a lower bound and at most that
-    /// millisecond of single-flight time can enter.
+    /// Pass `j` is SATURATED when a write it or a later pass retired had
+    /// certainly been dispatched by the time pass `j-1` landed: the queue was
+    /// not empty then, so the subscriber went straight on to pass `j`, and
+    /// `at_j - at_(j-1)` is exactly pass `j`'s duration. A busy period is a
+    /// run of consecutive saturated passes. It is judged only with at least
+    /// [`MIN_SATURATED_PASSES`]; its rate is the deliveries of its saturated
+    /// passes over the time from the landing before them to the last landing.
     ///
-    /// Only DELIVERED samples count as in flight. The correlator's `backlog`
-    /// also counts a clock that never closes, which would hold a stretch open
-    /// over idle gaps until the clock expires.
-    ///
-    /// An idle gap therefore contributes nothing — not its time and not its
-    /// deliveries — so a session that was quiet for an hour and then queued
-    /// once cannot be scored as an hour of slow draining. Counting the opening
-    /// stretch is what lets a burst the pipeline retires in ONE pass be scored
-    /// at all, instead of reading as a drive that never saturated.
-    ///
-    /// Three estimators failed here before this one; each is worth knowing
-    /// because each looked right:
-    ///  * the MEAN OF PER-DELIVERY GAPS reported 99,156 writes/s for a pipeline
-    ///    sleeping 300ms per batch — deliveries inside one batch share an
-    ///    instant, so most gaps were zero;
-    ///  * FIRST-TO-LAST DELIVERY reported up to 179,834 writes/s for the same
-    ///    reason: a burst landing in one batch spans microseconds;
-    ///  * FIRST DISPATCH TO LAST DELIVERY over the whole window fixed both but
-    ///    stopped excluding idle time, so 40 healthy writes one per minute plus
-    ///    a single queued one scored `0.0 writes/s` and raised a banner on a
-    ///    perfectly healthy pipeline — the exact false-red class this module
-    ///    exists to remove.
-    fn saturated_drain(&self) -> Option<(usize, usize, Duration)> {
-        let batches = self.batches();
-        let position: HashMap<u64, usize> =
-            batches.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
-        // Sample k is in flight before batches enters[k]..=retired[k] land.
-        let mut enters: Vec<Vec<usize>> = vec![Vec::new(); batches.len()];
-        let mut leaves: Vec<Vec<usize>> = vec![Vec::new(); batches.len()];
-        for (k, s) in self.samples.iter().enumerate() {
-            let retired = position[&s.delivery_batch];
-            let first = batches
-                .partition_point(|b| b.at < s.latest_dispatch())
-                .min(retired);
-            enters[first].push(k);
-            leaves[retired].push(k);
-        }
-        let mut in_flight: BTreeSet<(Instant, usize)> = BTreeSet::new();
-        let mut deliveries = 0usize;
-        let mut intervals = 0usize;
-        let mut elapsed = Duration::ZERO;
-        for (i, b) in batches.iter().enumerate() {
-            for &k in &enters[i] {
-                in_flight.insert((self.samples[k].earliest_dispatch(), k));
+    /// * No delivery is charged to less than its own pass, so a rate cannot
+    ///   inflate: the previous estimator charged whole passes to 1ms spans and
+    ///   passed a 3.3/s pipeline at 500/s.
+    /// * A slow pass without sustained load stays a SERVICE event: one slow
+    ///   write, or a slow write with one follower, cannot make three saturated
+    ///   passes.
+    /// * Only delivered samples count, so a clock that never closes cannot hold
+    ///   a busy period open, and an idle gap ends it.
+    /// * A dispatch is resolved to `ms`'s millisecond and taken at its latest,
+    ///   so a doubtful arrival ends a busy period rather than extending one.
+    fn drain(&self) -> Drain<'_> {
+        let mut judged = Vec::new();
+        let mut longest_busy_period = 0;
+        for (source, passes) in self.passes_by_source() {
+            // queued_from[j]: the earliest dispatch among writes pass j or a
+            // later pass retired.
+            let mut queued_from: Vec<Instant> = passes.iter().map(|p| p.first_dispatch).collect();
+            for j in (0..queued_from.len().saturating_sub(1)).rev() {
+                queued_from[j] = queued_from[j].min(queued_from[j + 1]);
             }
-            if let Some(&(second, _)) = in_flight.iter().nth(1) {
-                let start = match i.checked_sub(1) {
-                    Some(p) => second.max(batches[p].at),
-                    None => second,
-                };
-                deliveries += b.deliveries;
-                intervals += 1;
-                elapsed += b.at.saturating_duration_since(start);
-            }
-            for &k in &leaves[i] {
-                in_flight.remove(&(self.samples[k].earliest_dispatch(), k));
-            }
-        }
-        (intervals > 0).then_some((deliveries, intervals, elapsed))
-    }
-
-    /// RUNG 2 — writes per second the pipeline retires while saturated.
-    pub fn drain_rate_per_sec(&self) -> Option<f64> {
-        let (deliveries, _, elapsed) = self.saturated_drain()?;
-        let secs = elapsed.as_secs_f64();
-        // Saturated work inside one clock tick is unmeasurable, never
-        // "infinitely fast" — a caller must not read a pass out of it.
-        if secs <= 0.0 {
-            return None;
-        }
-        Some(deliveries as f64 / secs)
-    }
-
-    /// Intervals during which the pipeline had work queued — the count the
-    /// rung's guard and [`MIN_DRAIN_INTERVALS`] are about. Says what it means:
-    /// an unsaturated window returns 0 however many samples it holds.
-    pub fn drain_interval_count(&self) -> usize {
-        self.saturated_drain()
-            .map_or(0, |(_, intervals, _)| intervals)
-    }
-
-    /// Deliveries retired across those intervals — the verdict's `n`.
-    pub fn drain_delivery_count(&self) -> usize {
-        self.saturated_drain()
-            .map_or(0, |(deliveries, _, _)| deliveries)
-    }
-
-    pub fn throughput_verdict(&self) -> RungVerdict {
-        let n = self.drain_interval_count();
-        if n < MIN_DRAIN_INTERVALS {
-            return RungVerdict::Unjudged {
-                n,
-                needed: MIN_DRAIN_INTERVALS,
+            let mut drain = SourceDrain {
+                source,
+                deliveries: 0,
+                passes: 0,
+                elapsed: Duration::ZERO,
             };
+            let mut judge = |a: usize, b: usize| {
+                longest_busy_period = longest_busy_period.max(b - a);
+                if b - a >= MIN_SATURATED_PASSES {
+                    drain.deliveries += passes[a + 1..=b]
+                        .iter()
+                        .map(|p| p.deliveries)
+                        .sum::<usize>();
+                    drain.passes += b - a;
+                    drain.elapsed += passes[b].at - passes[a].at;
+                }
+            };
+            let mut opened: Option<usize> = None;
+            for j in 1..passes.len() {
+                let saturated = queued_from[j] <= passes[j - 1].at;
+                match (saturated, opened) {
+                    (true, None) => opened = Some(j - 1),
+                    (false, Some(a)) => {
+                        judge(a, j - 1);
+                        opened = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(a) = opened {
+                judge(a, passes.len() - 1);
+            }
+            if drain.passes > 0 {
+                assert!(
+                    drain.elapsed > Duration::ZERO,
+                    "source {source}: {} saturated passes landed at one instant",
+                    drain.passes,
+                );
+                judged.push(drain);
+            }
         }
-        let Some(rate) = self.drain_rate_per_sec() else {
+        Drain {
+            judged,
+            longest_busy_period,
+        }
+    }
+
+    /// RUNG 2 — the slowest judged source's drain rate, in writes per second.
+    pub fn drain_rate_per_sec(&self) -> Option<f64> {
+        self.drain().worst().map(SourceDrain::rate_per_sec)
+    }
+
+    /// Saturated passes across every judged busy period — the verdict's `n`.
+    pub fn drain_pass_count(&self) -> usize {
+        self.drain().judged.iter().map(|d| d.passes).sum()
+    }
+
+    /// Deliveries retired by those passes.
+    pub fn drain_delivery_count(&self) -> usize {
+        self.drain().judged.iter().map(|d| d.deliveries).sum()
+    }
+
+    /// Each source with a judged busy period is judged on its own; the rung
+    /// fails when the slowest of them is below the floor.
+    pub fn throughput_verdict(&self) -> RungVerdict {
+        let drain = self.drain();
+        let n = drain.judged.iter().map(|d| d.passes).sum();
+        let Some(worst) = drain.worst() else {
             return RungVerdict::Unjudged {
-                n: 0,
-                needed: MIN_DRAIN_INTERVALS,
+                n: drain.longest_busy_period,
+                needed: MIN_SATURATED_PASSES,
             };
         };
-        if rate >= self.floor_per_sec {
-            RungVerdict::Pass { measured: rate, n }
+        let measured = worst.rate_per_sec();
+        if measured >= self.floor_per_sec {
+            RungVerdict::Pass { measured, n }
         } else {
-            RungVerdict::Fail { measured: rate, n }
+            RungVerdict::Fail { measured, n }
         }
     }
 
@@ -547,19 +567,23 @@ impl SloWindow {
                 self.origin.other().as_str()
             ),
         };
+        let worst_source = self
+            .drain()
+            .worst()
+            .map_or(String::new(), |d| format!(", slowest source {}", d.source));
         let throughput = match self.throughput_verdict() {
             RungVerdict::Pass { measured, n } => format!(
-                "drain {measured:.1}/s >= {:.1}/s over {n} saturated intervals ({} deliveries)",
+                "drain {measured:.1}/s >= {:.1}/s over {n} saturated passes ({} deliveries{worst_source})",
                 self.floor_per_sec,
                 self.drain_delivery_count(),
             ),
             RungVerdict::Fail { measured, n } => format!(
-                "drain {measured:.1}/s BELOW {:.1}/s over {n} saturated intervals ({} deliveries)",
+                "drain {measured:.1}/s BELOW {:.1}/s over {n} saturated passes ({} deliveries{worst_source})",
                 self.floor_per_sec,
                 self.drain_delivery_count(),
             ),
             RungVerdict::Unjudged { n, needed } => {
-                format!("drain rate unjudged ({n} saturated intervals < {needed})")
+                format!("drain rate unjudged (longest busy period {n} saturated passes < {needed})")
             }
         };
         format!(
@@ -650,6 +674,7 @@ mod tests {
             contended: false,
             delivered_at: at,
             delivery_batch: batch,
+            source: "block".to_string(),
         }
     }
 
@@ -746,177 +771,177 @@ mod tests {
         assert!(matches!(w.throughput_verdict(), RungVerdict::Pass { .. }));
     }
 
+    /// A write of source `block`, dispatched and landed at the given offsets
+    /// from `t0` in microseconds, closed by delivery batch `batch`.
+    fn write(t0: Instant, dispatched_us: u64, landed_us: u64, batch: u64) -> E2eSample {
+        batched(
+            (landed_us - dispatched_us) / 1000,
+            2,
+            0,
+            t0 + Duration::from_micros(landed_us),
+            batch,
+        )
+    }
+
+    /// A serial pipeline of `pass_ms` per write, fed so that write `k` is
+    /// dispatched `lead_ms` before write `k-1` lands. Write 0 is dispatched at
+    /// `t0 + start_ms`.
+    fn serial(
+        w: &mut SloWindow,
+        t0: Instant,
+        start_ms: u64,
+        writes: u64,
+        pass_ms: u64,
+        lead_ms: u64,
+        first_batch: u64,
+    ) {
+        for k in 0..writes {
+            let landed = start_ms + pass_ms * (k + 1);
+            let dispatched = if k == 0 {
+                start_ms
+            } else {
+                landed - pass_ms - lead_ms
+            };
+            w.record(write(t0, dispatched * 1000, landed * 1000, first_batch + k));
+        }
+    }
+
+    fn assert_unjudged(w: &SloWindow, longest: usize) {
+        assert_eq!(
+            w.throughput_verdict(),
+            RungVerdict::Unjudged {
+                n: longest,
+                needed: MIN_SATURATED_PASSES
+            },
+            "{}",
+            w.report()
+        );
+        assert_eq!(w.drain_rate_per_sec(), None);
+    }
+
+    fn assert_fails_at(w: &SloWindow, rate: f64, passes: usize) {
+        assert_eq!(
+            w.throughput_verdict(),
+            RungVerdict::Fail {
+                measured: w.drain_rate_per_sec().expect("a judged busy period"),
+                n: passes
+            },
+            "{}",
+            w.report()
+        );
+        let measured = w.drain_rate_per_sec().expect("a judged busy period");
+        assert!(
+            (measured - rate).abs() < 0.01,
+            "expected {rate}/s, got {measured}/s"
+        );
+    }
+
     #[test]
     fn throughput_rung_ignores_idle_gaps() {
-        // Paced samples leave an empty backlog, so their 50ms gaps are the
-        // driver waiting and form no saturated stretch at all.
+        // Paced samples: each write lands before the next is dispatched.
         let w = paced(&[11; 60]);
-        assert_eq!(w.drain_interval_count(), 0);
-        assert!(matches!(
-            w.throughput_verdict(),
-            RungVerdict::Unjudged { .. }
-        ));
+        assert_unjudged(&w, 0);
     }
 
     /// Batched deliveries retire together. Averaging the per-delivery gaps
     /// counted the zeros between them as infinitely fast work and reported
-    /// 99,156 writes/s for a pipeline sleeping 300ms per batch; wall time
-    /// across the stretch reports what actually happened.
+    /// 99,156 writes/s for a pipeline sleeping 300ms per batch; landing gaps
+    /// report what actually happened.
     #[test]
     fn batched_deliveries_do_not_inflate_the_drain_rate() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
-        // 40 writes dispatched at t0, retired in four batches of 10, 300ms
-        // apart. The first batch opens the stretch at the earliest possible
-        // dispatch (t0 - 1ms, `ms` being truncated), so: 40 deliveries over
-        // 1.201s.
-        for batch in 0..4u64 {
-            let at = Duration::from_millis(300 * (batch + 1));
+        // 40 writes dispatched at t0, retired in four passes of 10, 300ms
+        // apart: passes 2-4 are saturated, 30 deliveries over 900ms.
+        for pass in 0..4u64 {
             for i in 0..10u64 {
-                w.record(batched(
-                    at.as_millis() as u64,
-                    (batch * 10 + i + 1) as usize,
-                    (40 - 10 * (batch + 1)) as usize,
-                    t0 + at + Duration::from_micros(i),
-                    batch,
-                ));
+                w.record(write(t0, 0, 300_000 * (pass + 1) + i, pass));
             }
         }
-        let rate = w.drain_rate_per_sec().expect("a measurable stretch");
-        assert!(
-            (rate - 33.3).abs() < 1.0,
-            "expected 40 deliveries over 1.201s = ~33/s, got {rate}"
-        );
-        assert_eq!(w.drain_interval_count(), 4);
-        assert_eq!(w.drain_delivery_count(), 40);
+        assert_eq!(w.drain_pass_count(), 3);
+        assert_eq!(w.drain_delivery_count(), 30);
+        let rate = w.drain_rate_per_sec().expect("a judged busy period");
+        assert!((rate - 30.0 / 0.9).abs() < 0.01, "got {rate}");
     }
 
-    /// **A burst the pipeline retires in ONE pass is a saturated stretch.**
-    /// The projector drains its whole queue per pass, so a fast pipeline can
-    /// close 64 queued interactions in one batch. Every sample then reports
-    /// `backlog == 0` — and scoring only batch-to-batch gaps read that as "the
-    /// drive never saturated", the false structural red the land gate hit.
-    /// The samples also carry distinct `delivered_at` (the emit loop runs
-    /// between them), so the batch must be identified by `delivery_batch`.
+    /// One pass says nothing about a drain rate: its start is not observable,
+    /// and the time before it holds the first write's own service time.
     #[test]
-    fn a_burst_retired_in_one_pass_is_one_saturated_interval() {
+    fn a_burst_retired_in_one_pass_is_unjudged() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
-        let landed = t0 + Duration::from_millis(100);
         for i in 0..64u64 {
-            let dispatched = t0 + Duration::from_micros(20 * i);
-            let at = landed + Duration::from_micros(i);
-            w.record(batched(
-                at.duration_since(dispatched).as_millis() as u64,
-                i as usize + 1,
-                0,
-                at,
-                7,
-            ));
+            w.record(write(t0, 20 * i, 100_000 + i, 7));
         }
-        assert_eq!(w.drain_interval_count(), 1);
-        assert_eq!(w.drain_delivery_count(), 64);
-        let rate = w.drain_rate_per_sec().expect("a measurable stretch");
-        assert!(
-            (600.0..=650.0).contains(&rate),
-            "64 deliveries over ~100ms from the second dispatch, got {rate}"
-        );
+        assert_unjudged(&w, 0);
     }
 
-    /// **Single-flight time is service time, never drain time.** A write alone
-    /// in the pipeline for 300ms, joined by a second one 1ms before the pass
-    /// lands, is a slow SERVICE, not a slow drain: the queue held two
-    /// interactions for 1ms. Opening the stretch at the first dispatch scores
-    /// 6.6/s, a false THROUGHPUT banner.
+    /// Probe P1. A write alone for 300ms, joined by a second one 1ms before
+    /// the pass lands, is a slow SERVICE, not a slow drain.
     #[test]
     fn a_lone_slow_write_joined_late_is_not_a_slow_drain() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
         for round in 0..3u64 {
-            let landed = t0 + Duration::from_millis(1000 * round + 300);
-            w.record(batched(300, 1, 0, landed, round));
-            w.record(batched(1, 2, 0, landed + Duration::from_micros(5), round));
+            let start = 1_000_000 * round;
+            w.record(write(t0, start, start + 300_000, round));
+            w.record(write(t0, start + 299_000, start + 300_005, round));
         }
-        assert_eq!(w.drain_interval_count(), 3);
-        let rate = w.drain_rate_per_sec().expect("three measurable stretches");
-        assert!(
-            rate >= 1000.0,
-            "only the ~2ms with two writes in flight is saturated, got {rate}/s: {}",
-            w.report()
-        );
-        assert!(!w.throughput_verdict().is_fail(), "{}", w.report());
+        assert_unjudged(&w, 0);
     }
 
-    /// An interaction still queued behind a batch counts toward the two in
-    /// flight, even though a LATER batch retires it: C waits alone until X
-    /// joins it, and X's stretch opens at X's dispatch. C's last 100ms, alone
-    /// again after X landed, is not saturated.
+    /// Probe M1's fixture. C waits behind X's pass and lands in the next one:
+    /// one saturated pass is not sustained load.
     #[test]
-    fn a_stretch_opens_on_a_write_a_later_batch_retires() {
+    fn a_write_queued_across_one_landing_is_not_sustained_load() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
-        // X: dispatched t0+50, retired alone at t0+100, leaving C queued.
-        w.record(batched(50, 2, 1, t0 + Duration::from_millis(100), 1));
-        // C: dispatched t0+10, retired at t0+200.
-        w.record(batched(190, 1, 0, t0 + Duration::from_millis(200), 2));
-        assert_eq!(w.drain_interval_count(), 1, "{}", w.report());
-        let rate = w.drain_rate_per_sec().expect("one stretch");
-        // 1 delivery over (t0+49 .. t0+100) = 51ms.
-        assert!((rate - 1.0 / 0.051).abs() < 0.01, "got {rate}");
+        w.record(write(t0, 50_000, 100_000, 1));
+        w.record(write(t0, 10_000, 200_000, 2));
+        assert_unjudged(&w, 1);
     }
 
-    /// An opening stretch never starts before the previous batch landed: the
-    /// queue was empty then, and a dispatch resolved to the millisecond
-    /// before it is rounding, not queued work.
+    /// Probe M2's fixture. A write whose dispatch cannot be placed before the
+    /// previous landing, even within its millisecond, did not keep the queue
+    /// non-empty.
     #[test]
-    fn an_opening_stretch_never_starts_before_the_previous_batch() {
+    fn a_pass_after_an_empty_queue_is_not_saturated() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
-        w.record(batched(10, 1, 0, t0 + Duration::from_millis(100), 1));
-        // Dispatched in (t0+99.5, t0+100.5]: the lower bound falls inside
-        // the previous batch's millisecond.
+        w.record(write(t0, 90_000, 100_000, 1));
         for _ in 0..2 {
-            w.record(batched(50, 2, 0, t0 + Duration::from_micros(150_500), 2));
+            w.record(write(t0, 100_300, 150_500, 2));
         }
-        assert_eq!(w.drain_interval_count(), 1, "{}", w.report());
-        let rate = w.drain_rate_per_sec().expect("one stretch");
-        assert!(
-            (rate - 2.0 / 0.0505).abs() < 0.01,
-            "2 over the 50.5ms since the previous batch, got {rate}"
-        );
+        assert_unjudged(&w, 0);
     }
 
-    /// A write left alone after the batch ahead of it landed is single-flight
-    /// too: X and Y are dispatched together, X lands after 5ms, and Y takes
-    /// another 300ms on its own. Counting Y's 300ms as drain time scores 6.6/s,
-    /// a false THROUGHPUT banner.
+    /// Probe M4's fixture: one pass, one of whose writes reports `ms` 0.
+    #[test]
+    fn a_sub_millisecond_write_is_one_pass() {
+        let mut w = SloWindow::default();
+        let t0 = Instant::now();
+        w.record(write(t0, 0, 5_000, 1));
+        w.record(write(t0, 4_900, 5_003, 1));
+        assert_unjudged(&w, 0);
+    }
+
+    /// X and Y are dispatched together, X lands after 5ms, and Y takes another
+    /// 300ms on its own. A two-write burst is a service event.
     #[test]
     fn a_write_left_alone_behind_a_retired_one_is_not_a_slow_drain() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
         for round in 0..3u64 {
-            let t = t0 + Duration::from_millis(1000 * round);
-            w.record(batched(5, 1, 1, t + Duration::from_millis(5), 2 * round));
-            w.record(batched(
-                304,
-                2,
-                0,
-                t + Duration::from_millis(305),
-                2 * round + 1,
-            ));
+            let start = 1_000_000 * round;
+            w.record(write(t0, start, start + 5_000, 2 * round));
+            w.record(write(t0, start + 1_000, start + 305_000, 2 * round + 1));
         }
-        assert_eq!(w.drain_interval_count(), 3, "{}", w.report());
-        let rate = w.drain_rate_per_sec().expect("three measurable stretches");
-        assert!(
-            rate >= 100.0,
-            "only X's ~5ms with Y also in flight is saturated, got {rate}/s: {}",
-            w.report()
-        );
-        assert!(!w.throughput_verdict().is_fail(), "{}", w.report());
+        assert_unjudged(&w, 1);
     }
 
-    /// A clock that never delivers holds no stretch open: the paced writes
-    /// after it each fly alone, whatever backlog the correlator reports.
+    /// Probe P2. A clock that never delivers holds no busy period open: the
+    /// paced writes after it each fly alone, whatever backlog the correlator
+    /// reports.
     #[test]
     fn an_undelivered_clock_does_not_make_idle_gaps_saturated() {
         let mut w = SloWindow::default();
@@ -924,48 +949,131 @@ mod tests {
         for i in 0..40u64 {
             w.record(sample(20, 2, 1, t0 + Duration::from_secs(i)));
         }
-        assert_eq!(w.drain_interval_count(), 0, "{}", w.report());
-        assert!(!w.throughput_verdict().is_fail(), "{}", w.report());
+        assert_unjudged(&w, 0);
     }
 
-    /// Every write the opening batch retires was in flight before it landed,
-    /// even one whose truncated `ms` of 0 puts its latest dispatch microseconds
-    /// after the batch's first delivery.
+    /// Probe Q1. A serial 300ms pipeline fed so that it never idles: write
+    /// `k` arrives 1ms before pass `k-1` lands. 3.3 writes/s, under the floor.
     #[test]
-    fn a_sub_millisecond_write_in_the_opening_batch_is_in_flight() {
+    fn a_serial_pipeline_that_never_idles_is_a_slow_drain() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
-        w.record(batched(5, 1, 0, t0, 1));
-        w.record(batched(0, 2, 0, t0 + Duration::from_micros(3), 1));
-        assert_eq!(w.drain_interval_count(), 1, "{}", w.report());
+        serial(&mut w, t0, 0, 40, 300, 1, 0);
+        assert_fails_at(&w, 1000.0 / 300.0, 39);
     }
 
-    /// Three such passes, each dispatched after the previous one landed, are
-    /// three saturated intervals: enough for a verdict, and a slow one fails.
+    /// Probe Q2. Arrivals every 299ms against a 300ms serial pipeline: the
+    /// queue grows without limit, and the rate stays the pipeline's own.
     #[test]
-    fn three_one_pass_waves_are_judged_and_a_slow_one_fails() {
-        let judge = |pass_ms: u64| {
-            let mut w = SloWindow::default();
+    fn an_overloaded_serial_pipeline_is_a_slow_drain() {
+        for n in [40u64, 100, 150] {
+            let mut w = SloWindow::new(
+                ClockOrigin::Ui,
+                512,
+                SERVICE_TIME_SLO_MS,
+                THROUGHPUT_FLOOR_WRITES_PER_SEC,
+            );
             let t0 = Instant::now();
-            for wave in 0..3u64 {
-                let start = t0 + Duration::from_millis(wave * (pass_ms + 5));
-                let at = start + Duration::from_millis(pass_ms);
-                for i in 0..50u64 {
-                    w.record(batched(pass_ms, i as usize + 1, 0, at, wave));
-                }
+            for k in 0..n {
+                w.record(write(t0, 299_000 * k, 300_000 * (k + 1), k));
             }
-            w.throughput_verdict()
-        };
-        assert!(matches!(judge(100), RungVerdict::Pass { n: 3, .. }));
-        // 50 writes per 6s pass is ~8.3/s, under the 10/s floor.
-        assert!(judge(6000).is_fail(), "got {:?}", judge(6000));
+            assert_fails_at(&w, 1000.0 / 300.0, n as usize - 1);
+        }
     }
 
-    /// **The false-red the third estimator shipped** (verifier probe 1). A
-    /// healthy session — 40 writes of 10ms, one per minute — plus a single
-    /// delivery that happened to leave a backlog. Scoring the whole window
-    /// reported `0.0 writes/s` and raised a THROUGHPUT banner on a pipeline
-    /// doing 10ms of work per write. Idle gaps must contribute nothing.
+    /// Probe Q3. Two writes together through a serial 300ms pipeline, three
+    /// times with idle gaps: a two-write burst, so no verdict.
+    #[test]
+    fn a_two_write_burst_through_a_slow_pipeline_is_unjudged() {
+        let mut w = SloWindow::default();
+        let t0 = Instant::now();
+        for round in 0..3u64 {
+            let start = 10_000_000 * round;
+            w.record(write(t0, start, start + 300_000, 2 * round));
+            w.record(write(t0, start, start + 600_000, 2 * round + 1));
+        }
+        assert_unjudged(&w, 1);
+    }
+
+    /// Probe Q4. A slow head alone for 300ms and a cheap write that joins 1ms
+    /// after it and lands 1ms after it: the slowness is the head's service.
+    #[test]
+    fn a_slow_head_with_a_cheap_follower_is_unjudged() {
+        let mut w = SloWindow::default();
+        let t0 = Instant::now();
+        for round in 0..3u64 {
+            let start = 10_000_000 * round;
+            w.record(write(t0, start, start + 300_000, 2 * round));
+            w.record(write(t0, start + 1_000, start + 301_000, 2 * round + 1));
+        }
+        assert_unjudged(&w, 1);
+    }
+
+    /// A write dispatched in the very instant the previous pass lands is
+    /// queued when the next pass starts.
+    #[test]
+    fn a_write_dispatched_as_a_pass_lands_keeps_the_busy_period_open() {
+        let mut w = SloWindow::default();
+        let t0 = Instant::now();
+        serial(&mut w, t0, 0, 5, 300, 0, 0);
+        assert_fails_at(&w, 1000.0 / 300.0, 4);
+    }
+
+    /// [`MIN_SATURATED_PASSES`] is the line between a burst and sustained
+    /// load: two saturated passes are not judged, three are.
+    #[test]
+    fn two_saturated_passes_are_not_a_busy_period_and_three_are() {
+        let t0 = Instant::now();
+        let mut w = SloWindow::default();
+        for k in 0..3u64 {
+            w.record(write(t0, 0, 300_000 * (k + 1), k));
+        }
+        assert_unjudged(&w, 2);
+        w.record(write(t0, 0, 1_200_000, 3));
+        assert_fails_at(&w, 1000.0 / 300.0, 3);
+    }
+
+    /// An idle gap ends a busy period. Two short ones either side of it are
+    /// not one long one, and two judged ones do not charge the gap.
+    #[test]
+    fn an_idle_gap_splits_busy_periods() {
+        let t0 = Instant::now();
+        let mut w = SloWindow::default();
+        serial(&mut w, t0, 0, 3, 300, 1, 0);
+        serial(&mut w, t0, 10_000, 3, 300, 1, 10);
+        assert_unjudged(&w, 2);
+
+        let mut w = SloWindow::default();
+        serial(&mut w, t0, 0, 4, 300, 1, 0);
+        serial(&mut w, t0, 10_000, 4, 300, 1, 10);
+        assert_fails_at(&w, 1000.0 / 300.0, 6);
+    }
+
+    /// Passes are sequenced per source: a subscriber applies its own batches in
+    /// order, and two sources run side by side. The slowest judged source
+    /// decides the verdict.
+    #[test]
+    fn sources_are_sequenced_and_judged_separately() {
+        let t0 = Instant::now();
+        let mut w = SloWindow::default();
+        serial(&mut w, t0, 0, 5, 300, 1, 0);
+        for k in 0..5u64 {
+            w.record(E2eSample {
+                source: "focus_roots".to_string(),
+                ..write(t0, 150_000, 160_000 + 10_000 * k, 100 + k)
+            });
+        }
+        assert_fails_at(&w, 1000.0 / 300.0, 8);
+        assert!(
+            w.report().contains("slowest source block"),
+            "{}",
+            w.report()
+        );
+    }
+
+    /// **The false-red the third estimator shipped.** A healthy session — 40
+    /// writes of 10ms, one per minute — plus a single delivery that happened
+    /// to leave a backlog. Idle gaps must contribute nothing.
     #[test]
     fn an_idle_session_with_one_queued_delivery_is_not_a_slow_drain() {
         let mut w = SloWindow::default();
@@ -974,25 +1082,14 @@ mod tests {
             w.record(sample(10, 1, 0, t0 + Duration::from_secs(60 * i)));
         }
         w.record(sample(10, 2, 1, t0 + Duration::from_secs(60 * 40)));
-        assert_eq!(
-            w.drain_interval_count(),
-            0,
-            "no delivered sample shared the pipeline with another, so none is scoreable: {}",
-            w.report()
-        );
-        assert!(
-            matches!(w.throughput_verdict(), RungVerdict::Unjudged { .. }),
-            "an idle session must be UNJUDGED, never a throughput failure: {}",
-            w.report()
-        );
+        assert_unjudged(&w, 0);
     }
 
-    /// **`drain_interval_count` must count intervals, not samples** (verifier
-    /// probe 3). It names the quantity `MIN_DRAIN_INTERVALS` gates and the
-    /// quantity the rung's guard message quotes; returning `samples.len()` let
-    /// 39 unsaturated samples plus one saturated one satisfy a floor of 20.
+    /// **`drain_pass_count` counts saturated passes, not samples.** Returning
+    /// `samples.len()` once let 39 unsaturated samples plus one saturated one
+    /// satisfy a floor of 20.
     #[test]
-    fn drain_interval_count_counts_saturated_intervals_only() {
+    fn drain_pass_count_counts_saturated_passes_only() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
         for i in 0..39u64 {
@@ -1000,44 +1097,32 @@ mod tests {
         }
         w.record(sample(10, 2, 1, t0 + Duration::from_millis(50 * 39)));
         assert_eq!(w.samples().len(), 40);
-        assert_eq!(w.drain_interval_count(), 0);
+        assert_eq!(w.drain_pass_count(), 0);
     }
 
+    /// 40 writes dispatched together, retired one per 150ms: 39 saturated
+    /// passes in 5.85s, ~6.7/s, under the 10/s floor. The time before the
+    /// first landing is not charged: it holds the first write's service.
     #[test]
     fn throughput_rung_fails_a_slow_drain() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
-        // 40 writes dispatched together, retired one per 150ms: while two or
-        // more are queued, 39 deliveries take ~5.85s = ~6.7/s, under the 10/s
-        // floor.
-        for i in 0..40 {
-            w.record(sample(
-                150 * (i as u64 + 1),
-                i + 1,
-                40 - i - 1,
-                t0 + Duration::from_millis(150 * (i as u64 + 1)),
-            ));
+        for k in 0..40u64 {
+            w.record(write(t0, 0, 150_000 * (k + 1), k));
         }
-        let v = w.throughput_verdict();
-        assert!(v.is_fail(), "expected a fail, got {v:?}");
+        assert_fails_at(&w, 39.0 / 5.85, 39);
     }
 
-    /// A burst whose every write reports zero elapsed in one shared batch
-    /// resolved below the clock's millisecond. It is scored at its lower bound
-    /// — one full millisecond — and a rate of infinity is never read.
+    /// A burst whose every write reports zero elapsed in one shared batch is
+    /// one pass, and a rate of infinity is never read.
     #[test]
-    fn an_unresolvable_burst_is_scored_at_its_lower_bound_never_infinitely_fast() {
+    fn an_unresolvable_burst_is_never_infinitely_fast() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
         for i in 0..40 {
             w.record(batched(0, i + 1, 0, t0, 1));
         }
-        let rate = w.drain_rate_per_sec().expect("a bounded stretch");
-        assert!((rate - 40_000.0).abs() < 1.0, "got {rate}");
-        assert!(matches!(
-            w.throughput_verdict(),
-            RungVerdict::Unjudged { n: 1, .. }
-        ));
+        assert_unjudged(&w, 0);
     }
 
     #[test]

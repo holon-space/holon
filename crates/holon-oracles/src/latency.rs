@@ -219,6 +219,7 @@ struct LatencyFields {
     backlog: Option<u64>,
     contended: Option<bool>,
     delivery_batch: Option<u64>,
+    source: Option<String>,
 }
 
 impl LatencyFields {
@@ -228,6 +229,7 @@ impl LatencyFields {
             "action" => self.action = Some(value),
             "block" => self.block = Some(value),
             "origin" => self.origin = Some(value),
+            "source" => self.source = Some(value),
             _ => {}
         }
     }
@@ -307,17 +309,25 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
             // every queued sample as service time and restore the exact
             // false-banner behaviour this rung replaces, so an event without
             // the fields is dropped and disclosed rather than guessed at.
-            let (Some(in_flight), Some(backlog), Some(contended), Some(delivery_batch)) = (
+            let (
+                Some(in_flight),
+                Some(backlog),
+                Some(contended),
+                Some(delivery_batch),
+                Some(source),
+            ) = (
                 fields.in_flight,
                 fields.backlog,
                 fields.contended,
                 fields.delivery_batch,
-            ) else {
+                fields.source,
+            )
+            else {
                 tracing::warn!(
                     target: "holon_oracles",
                     oracle = "latency-slo",
-                    "[latency-slo] an `e2e` event carried no queue depths or delivery batch — this sample is \
-                     unscoreable and the SLO rungs are running on partial evidence",
+                    "[latency-slo] an `e2e` event carried no queue depths, delivery batch or source — \
+                     this sample is unscoreable and the SLO rungs are running on partial evidence",
                 );
                 return;
             };
@@ -346,6 +356,7 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
                 contended,
                 delivered_at: Instant::now(),
                 delivery_batch,
+                source,
             });
         } else if ms > self.slo_ms {
             // Diagnostic attribution: which pipeline stage ate the budget.
@@ -427,6 +438,7 @@ mod tests {
                     backlog = backlog as u64,
                     contended = false,
                     delivery_batch = i as u64,
+                    source = "block",
                     "holon_latency",
                 );
             }
@@ -486,6 +498,7 @@ mod tests {
                         backlog = 59 - i,
                         contended = false,
                         delivery_batch = i,
+                        source = "block",
                         "holon_latency",
                     );
                 }
@@ -562,6 +575,7 @@ mod tests {
                         in_flight = i + 1,
                         backlog = 19 - i,
                         delivery_batch = i,
+                        source = "block",
                         "holon_latency",
                     );
                     // Real wall time — the drain rate is measured against the
@@ -613,6 +627,7 @@ mod tests {
                         backlog = 0u64,
                         contended = false,
                         delivery_batch = i,
+                        source = "block",
                         "holon_latency",
                     );
                 }
@@ -657,6 +672,7 @@ mod tests {
                         contended = false,
                         // Present, so the event reaches the origin check.
                         delivery_batch = i,
+                        source = "block",
                         "holon_latency",
                     );
                 }

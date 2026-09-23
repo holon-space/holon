@@ -57,3 +57,8 @@ expired clock therefore cannot hold a stretch open.
   `drain 6.6/s BELOW 10.0/s over 6 saturated intervals`.
 - Removing the step that takes a retired write out of the in-flight set makes
   both tests red again.
+
+The busy-period estimator later replaced this interval rule, because it could
+inflate a rate (probes Q1 and Q2). It keeps the same property: only delivered
+samples decide whether the queue was non-empty. The P2 shape stays pinned by
+`an_undelivered_clock_does_not_make_idle_gaps_saturated`.
