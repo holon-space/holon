@@ -313,6 +313,10 @@ struct Closed {
     /// Whether the other origin overlapped this interaction's life, carried
     /// from [`Pending`].
     contended: bool,
+    /// Clocks this closure retired: the winner plus the older clocks on its
+    /// target that it superseded. The rows it delivered made all of them
+    /// visible, so a drain rate must count them all.
+    retired: usize,
 }
 
 /// The pending-interaction registry, **partitioned by [`ClockOrigin`]**.
@@ -813,6 +817,7 @@ pub fn rows_delivered<'a>(
             // foreign traffic shared the pipeline anyway, which is what tells an
             // uncontended sample from a queued one (D119.a rounds 2-3).
             contended = c.contended,
+            retired = c.retired as u64,
             delivery_batch,
             "holon_latency",
         );
@@ -938,6 +943,10 @@ fn close_delivered<S: AsRef<str>>(
             continue;
         };
         let winner_t0 = pending[winner].t0;
+        let retired = pending
+            .iter()
+            .filter(|p| p.target == target && p.observable.kind() == kind && p.t0 <= winner_t0)
+            .count();
         closed.push(Closed {
             action: pending[winner].action.clone(),
             target: pending[winner].target.clone(),
@@ -946,6 +955,7 @@ fn close_delivered<S: AsRef<str>>(
             in_flight: pending[winner].in_flight,
             backlog: 0,
             contended: pending[winner].contended,
+            retired,
         });
         // Remove the winner and all OLDER entries of the same (target, kind)
         // (superseded). A different kind on the same target is a different
@@ -1423,6 +1433,10 @@ mod tests {
             closed[0].ms, 7,
             "newest entry's elapsed, not the older one's"
         );
+        assert_eq!(
+            closed[0].retired, 2,
+            "the delivery made the superseded entry visible too"
+        );
         assert!(
             pending.is_empty(),
             "older same-target entry dropped as superseded"
@@ -1505,6 +1519,7 @@ mod tests {
         );
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].ms, 3);
+        assert_eq!(closed[0].retired, 1, "a newer entry is not retired");
         assert_eq!(
             pending.len(),
             1,

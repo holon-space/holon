@@ -62,6 +62,7 @@ use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::latency_e2e::MAX_PENDING;
 use holon_api::latency_slo::ClockOrigin;
+use holon_api::latency_slo::MIN_SATURATED_PASSES;
 use holon_api::latency_slo::MIN_SERVICE_SAMPLES;
 use holon_api::latency_slo::RungVerdict;
 use holon_api::latency_slo::SERVICE_TIME_SLO_MS;
@@ -91,14 +92,23 @@ use proptest_state_machine::StateMachineTest;
 /// coalesced.
 const PACED_WRITES: usize = 40;
 
-/// Writes the clean sustained drive offers, each to its own block. A clean
-/// pass retires about a dozen, so this makes about a dozen passes: well past
-/// the three saturated ones a verdict needs.
-const SUSTAINED_WRITES: usize = 150;
+/// Blocks the sustained drive writes to, created by the setup prefix. The
+/// drive cycles through them; at most [`MAX_OFFERED_PENDING`] are pending, so
+/// a block is written again only long after its previous write.
+const DRIVE_TARGETS: usize = 150;
 
-/// Writes the slowed drive offers. A slowed pass retires a few, so this is
-/// enough passes, and it keeps the slowed run to about 10s.
-const TEETH_SUSTAINED_WRITES: usize = 60;
+/// Saturated passes the drive runs until. Twice the scorer's minimum, so one
+/// lost pass cannot turn a run Unjudged.
+const DRIVE_SATURATED_PASSES: usize = 2 * MIN_SATURATED_PASSES;
+
+/// Writes the same-block phase offers to ONE block. The correlator closes one
+/// clock per pass there and retires the older ones with it, which is how a
+/// user typing into one block looks.
+const SAME_BLOCK_WRITES: usize = 60;
+
+/// How long the whole drive may run before it declares the pipeline unable to
+/// sustain a busy period.
+const DRIVE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Offered load: one write per this interval, far faster than the pipeline
 /// retires them, so every pass lands with writes already queued behind it.
@@ -110,7 +120,7 @@ const MAX_OFFERED_PENDING: usize = 48;
 
 /// How long the drive may go without a new delivery before it declares the
 /// pipeline stuck. The correlator expires a clock at 30s.
-const DELIVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+const STALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The per-row delivery delay the throughput teeth arm. A pass carrying `r`
 /// rows then takes at least `r` times this, so the drain rate is at most
@@ -133,6 +143,8 @@ fn host_uri() -> EntityUri {
 /// block row carries no `write_seq` in this wiring, so the correlator closes
 /// the NEWEST pending clock on a target and supersedes the rest. Distinct
 /// targets make every closure the write's own.
+const DRIVE_TARGET_PREFIX: &str = "block:slo-gate-burst-";
+
 fn burst_target(i: usize) -> String {
     format!("block:slo-gate-burst-{i}")
 }
@@ -143,7 +155,7 @@ fn burst_target(i: usize) -> String {
 fn setup_sequence() -> Vec<E2ETransition> {
     // Burst targets FIRST, then the host, then the focus: a create moves the
     // editor, so focusing the host has to be the last thing the prefix does.
-    let mut v: Vec<E2ETransition> = (0..SUSTAINED_WRITES)
+    let mut v: Vec<E2ETransition> = (0..DRIVE_TARGETS)
         .map(|i| {
             E2ETransition::CreateBlockUnderFocus(CreateBlockUnderFocus {
                 content: format!("burst target {i}"),
@@ -229,37 +241,125 @@ fn require_a_judgeable_host() {
     );
 }
 
-/// Boot a fresh SUT and offer `writes` writes through the production
-/// fire-and-forget door, one per [`OFFER_EVERY`], with at most
-/// [`MAX_OFFERED_PENDING`] pending. `delay_ms` arms the per-row delivery delay
-/// for the drive only. Returns the measured window.
-///
-/// The delay sleeps in `LiveData::subscribe` before the subscriber applies a
-/// batch, so a slowed "pass" is one subscriber batch: exactly the step after
-/// which the user sees the rows.
-fn measure_sustained(delay_ms: u64, writes: usize) -> SloWindow {
-    assert!(
-        writes <= SUSTAINED_WRITES,
-        "setup creates {SUSTAINED_WRITES} targets"
+/// Arms the per-row delivery delay, and disarms it when dropped, a panic
+/// included: the delay is process-global, and a later test must not run
+/// against a slowed pipeline.
+struct ArmedDeliveryDelay;
+
+impl ArmedDeliveryDelay {
+    fn arm(ms: u64) -> Self {
+        set_delivery_delay_ms(ms);
+        Self
+    }
+}
+
+impl Drop for ArmedDeliveryDelay {
+    fn drop(&mut self) {
+        set_delivery_delay_ms(0);
+    }
+}
+
+/// The drive's own samples: those on its targets. Any other UI interaction in
+/// the window is not the drive's to count.
+fn drive_window(probe: &SloProbe) -> SloWindow {
+    let all = probe.snapshot(ClockOrigin::Ui);
+    let mut drive = SloWindow::new(
+        ClockOrigin::Ui,
+        all.len().max(1),
+        SERVICE_TIME_SLO_MS,
+        THROUGHPUT_FLOOR_WRITES_PER_SEC,
     );
+    for s in all.samples() {
+        if s.target.starts_with(DRIVE_TARGET_PREFIX) {
+            drive.record(s.clone());
+        }
+    }
+    drive
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DrivePhase {
+    Distinct,
+    Draining,
+    SameBlock,
+    Done,
+}
+
+/// Writes the drive has seen retired, superseded ones included.
+fn retired(window: &SloWindow) -> usize {
+    window.samples().iter().map(|s| s.retired.get()).sum()
+}
+
+/// Offer writes through the production fire-and-forget door, one per
+/// [`OFFER_EVERY`], with at most [`MAX_OFFERED_PENDING`] pending, and return
+/// the drive's window once every offered write is retired.
+///
+/// * Phase 1 writes to a different block each time until the window holds
+///   [`DRIVE_SATURATED_PASSES`] judged saturated passes. It ends on that
+///   property, not on a write count, so a slow host costs time, not margin.
+/// * Phase 2, when `same_block_writes > 0`, writes to ONE block. The rows of
+///   one pass then close one clock and retire the older ones with it, so the
+///   drive only finishes if every superseded write is counted as retired.
+///
+/// `delay_ms` arms the per-row delivery delay for the drive. It sleeps in
+/// `LiveData::subscribe` before the subscriber applies a batch, so a slowed
+/// "pass" is one subscriber batch: exactly the step after which the user sees
+/// the rows.
+fn measure_sustained(
+    sut: &ComposedSut<WideE2E>,
+    delay_ms: u64,
+    same_block_writes: usize,
+) -> SloWindow {
     const _: () = assert!(MAX_OFFERED_PENDING < MAX_PENDING);
-    let (sut, _ref_state) = boot();
+    const _: () = assert!(MAX_OFFERED_PENDING < DRIVE_TARGETS);
     let engine = sut
         .handle()
         .reactive()
         .expect("the full-headless draw boots a reactive engine");
 
     let probe = SloProbe::arm();
-    set_delivery_delay_ms(delay_ms);
+    let delay = ArmedDeliveryDelay::arm(delay_ms);
     sut.runtime().block_on(async {
         engine.ui_state().set_detached_dispatch(true);
+        let started = std::time::Instant::now();
+        let mut last_progress = started;
         let mut dispatched = 0;
         let mut delivered = 0;
-        let mut last_progress = std::time::Instant::now();
-        while delivered < writes {
-            if dispatched < writes && dispatched - delivered < MAX_OFFERED_PENDING {
+        let mut phase = DrivePhase::Distinct;
+        let mut same_block_offered = 0;
+        loop {
+            let window = drive_window(&probe);
+            let now = retired(&window);
+            if now > delivered {
+                delivered = now;
+                last_progress = std::time::Instant::now();
+            }
+            let drained = delivered == dispatched;
+            phase = match phase {
+                DrivePhase::Distinct if window.drain_pass_count() >= DRIVE_SATURATED_PASSES => {
+                    DrivePhase::Draining
+                }
+                DrivePhase::Draining if drained && same_block_writes > 0 => DrivePhase::SameBlock,
+                DrivePhase::Draining if drained => DrivePhase::Done,
+                DrivePhase::SameBlock if same_block_offered == same_block_writes => {
+                    DrivePhase::Done
+                }
+                other => other,
+            };
+            let target = match phase {
+                DrivePhase::Distinct => Some(burst_target(dispatched % DRIVE_TARGETS)),
+                DrivePhase::SameBlock => Some(burst_target(0)),
+                DrivePhase::Draining => None,
+                DrivePhase::Done if drained => break,
+                DrivePhase::Done => None,
+            };
+            let room = dispatched - delivered < MAX_OFFERED_PENDING;
+            if let Some(target) = target.filter(|_| room) {
+                if phase == DrivePhase::SameBlock {
+                    same_block_offered += 1;
+                }
                 let mut params = HashMap::new();
-                params.insert("id".to_string(), Value::String(burst_target(dispatched)));
+                params.insert("id".to_string(), Value::String(target));
                 params.insert("field".to_string(), Value::String("content".to_string()));
                 // Distinct per write: an identity re-commit produces no CDC
                 // delta, so it would yield no sample.
@@ -275,35 +375,33 @@ fn measure_sustained(delay_ms: u64, writes: usize) -> SloWindow {
                 .expect("the detached door accepts a content write");
                 dispatched += 1;
             }
-            tokio::time::sleep(OFFER_EVERY).await;
-            let now = probe.snapshot(ClockOrigin::Ui).len();
-            if now > delivered {
-                delivered = now;
-                last_progress = std::time::Instant::now();
-            }
             assert!(
-                last_progress.elapsed() < DELIVERY_DEADLINE,
-                "[latency-slo gate] {delivered} of {dispatched} dispatched writes delivered, and \
-                 none for {DELIVERY_DEADLINE:?} (delay {delay_ms}ms per row) — the pipeline \
-                 stopped retiring the drive"
+                last_progress.elapsed() < STALL_DEADLINE,
+                "[latency-slo gate] {delivered} of {dispatched} dispatched writes retired, and \
+                 none for {STALL_DEADLINE:?} (delay {delay_ms}ms per row) — the pipeline \
+                 stopped retiring the drive, or a retired write went uncounted"
             );
+            assert!(
+                started.elapsed() < DRIVE_DEADLINE,
+                "[latency-slo gate] {DRIVE_DEADLINE:?} of drive produced only {} judged \
+                 saturated passes, {DRIVE_SATURATED_PASSES} required (delay {delay_ms}ms per \
+                 row). Window: {}",
+                window.drain_pass_count(),
+                window.report(),
+            );
+            tokio::time::sleep(OFFER_EVERY).await;
         }
         engine.ui_state().set_detached_dispatch(false);
     });
-    set_delivery_delay_ms(0);
-    let window = probe.snapshot(ClockOrigin::Ui);
+    drop(delay);
+    let window = drive_window(&probe);
     drop(probe);
     eprintln!(
-        "[latency-slo gate] sustained drive (delay {delay_ms}ms/row): {}/{writes} \
-         writes delivered: {}",
+        "[latency-slo gate] sustained drive (delay {delay_ms}ms/row, {same_block_writes} \
+         same-block writes): {} writes retired in {} samples, {} saturated passes: {}",
+        retired(&window),
         window.len(),
-        window.report(),
-    );
-    assert_eq!(
-        window.len(),
-        writes,
-        "[latency-slo gate] the drive never exceeds the correlator's capacity, so every write \
-         must close its own clock. Window: {}",
+        window.drain_pass_count(),
         window.report(),
     );
     window
@@ -403,8 +501,9 @@ fn latency_slo_rung_throughput_floor() {
     let _turn = RUNG_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let window = measure_sustained(0, SUSTAINED_WRITES);
+    let (sut, _ref_state) = boot();
     require_a_judgeable_host();
+    let window = measure_sustained(&sut, 0, SAME_BLOCK_WRITES);
     eprintln!(
         "[latency-slo gate] throughput rung: {} ({} samples, {} saturated passes)",
         window.report(),
@@ -440,7 +539,8 @@ fn a_slowed_pipeline_fails_the_throughput_rung() {
     let _turn = RUNG_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let window = measure_sustained(THROUGHPUT_TEETH_DELAY_MS, TEETH_SUSTAINED_WRITES);
+    let (sut, _ref_state) = boot();
+    let window = measure_sustained(&sut, THROUGHPUT_TEETH_DELAY_MS, 0);
     let verdict = window.throughput_verdict();
     assert!(
         verdict.is_fail(),

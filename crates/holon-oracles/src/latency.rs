@@ -53,6 +53,7 @@
 //! build that is actually dogfooded. Guarded by
 //! `latency_events_are_emitted_above_the_release_level_ceiling`.
 
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::time::Instant;
 use std::time::SystemTime;
@@ -220,6 +221,7 @@ struct LatencyFields {
     contended: Option<bool>,
     delivery_batch: Option<u64>,
     source: Option<String>,
+    retired: Option<u64>,
 }
 
 impl LatencyFields {
@@ -244,6 +246,7 @@ impl Visit for LatencyFields {
             "in_flight" => self.in_flight = Some(value),
             "backlog" => self.backlog = Some(value),
             "delivery_batch" => self.delivery_batch = Some(value),
+            "retired" => self.retired = Some(value),
 
             _ => {}
         }
@@ -315,19 +318,24 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
                 Some(contended),
                 Some(delivery_batch),
                 Some(source),
+                Some(target),
+                Some(retired),
             ) = (
                 fields.in_flight,
                 fields.backlog,
                 fields.contended,
                 fields.delivery_batch,
                 fields.source,
+                fields.block,
+                fields.retired.and_then(|r| NonZeroUsize::new(r as usize)),
             )
             else {
                 tracing::warn!(
                     target: "holon_oracles",
                     oracle = "latency-slo",
-                    "[latency-slo] an `e2e` event carried no queue depths, delivery batch or source — \
-                     this sample is unscoreable and the SLO rungs are running on partial evidence",
+                    "[latency-slo] an `e2e` event carried no queue depths, delivery batch, source, \
+                     block or non-zero `retired` — this sample is unscoreable and the SLO rungs \
+                     are running on partial evidence",
                 );
                 return;
             };
@@ -349,6 +357,7 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
             };
             self.record_and_judge(E2eSample {
                 action: fields.action.unwrap_or_else(|| "?".to_string()),
+                target,
                 origin,
                 ms,
                 in_flight: in_flight as usize,
@@ -357,6 +366,7 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
                 delivered_at: Instant::now(),
                 delivery_batch,
                 source,
+                retired,
             });
         } else if ms > self.slo_ms {
             // Diagnostic attribution: which pipeline stage ate the budget.
@@ -439,6 +449,7 @@ mod tests {
                     contended = false,
                     delivery_batch = i as u64,
                     source = "block",
+                        retired = 1u64,
                     "holon_latency",
                 );
             }
@@ -499,6 +510,7 @@ mod tests {
                         contended = false,
                         delivery_batch = i,
                         source = "block",
+                        retired = 1u64,
                         "holon_latency",
                     );
                 }
@@ -576,6 +588,7 @@ mod tests {
                         backlog = 19 - i,
                         delivery_batch = i,
                         source = "block",
+                        retired = 1u64,
                         "holon_latency",
                     );
                     // Real wall time — the drain rate is measured against the
@@ -628,6 +641,7 @@ mod tests {
                         contended = false,
                         delivery_batch = i,
                         source = "block",
+                        retired = 1u64,
                         "holon_latency",
                     );
                 }
@@ -673,6 +687,7 @@ mod tests {
                         // Present, so the event reaches the origin check.
                         delivery_batch = i,
                         source = "block",
+                        retired = 1u64,
                         "holon_latency",
                     );
                 }

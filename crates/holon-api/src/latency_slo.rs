@@ -28,6 +28,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -118,6 +119,8 @@ pub mod fault_injection {
 #[derive(Clone, Debug)]
 pub struct E2eSample {
     pub action: String,
+    /// The entity the interaction addressed.
+    pub target: String,
     /// The seam that opened this interaction's clock. Decides which window
     /// scores the sample; a [`SloWindow`] holds exactly one origin.
     pub origin: ClockOrigin,
@@ -141,6 +144,10 @@ pub struct E2eSample {
     /// applies its batches one after another, and different sources run
     /// concurrently, so passes are sequenced per source.
     pub source: String,
+    /// Interactions this closure retired: this one plus the older ones on the
+    /// same target it superseded. Typing on one block closes one clock per
+    /// pass however many keystrokes the pass made visible.
+    pub retired: NonZeroUsize,
 }
 
 impl E2eSample {
@@ -193,8 +200,9 @@ impl E2eSample {
 struct Pass {
     /// When it landed: its first sample's delivery.
     at: Instant,
+    /// Interactions it retired, superseded ones included.
     deliveries: usize,
-    /// The earliest `latest_dispatch` of the writes it retired.
+    /// The earliest `latest_dispatch` of the clocks it closed.
     first_dispatch: Instant,
 }
 
@@ -418,7 +426,7 @@ impl SloWindow {
                 s.delivery_batch,
             );
             pass.at = pass.at.min(s.delivered_at);
-            pass.deliveries += 1;
+            pass.deliveries += s.retired.get();
             pass.first_dispatch = pass.first_dispatch.min(s.latest_dispatch());
         }
         let mut out: BTreeMap<&str, Vec<Pass>> = BTreeMap::new();
@@ -518,7 +526,7 @@ impl SloWindow {
         self.drain().judged.iter().map(|d| d.passes).sum()
     }
 
-    /// Deliveries retired by those passes.
+    /// Interactions retired by those passes, superseded ones included.
     pub fn drain_delivery_count(&self) -> usize {
         self.drain().judged.iter().map(|d| d.deliveries).sum()
     }
@@ -667,6 +675,7 @@ mod tests {
     fn batched(ms: u64, in_flight: usize, backlog: usize, at: Instant, batch: u64) -> E2eSample {
         E2eSample {
             action: "set_field".to_string(),
+            target: "block:x".to_string(),
             origin: ClockOrigin::Ui,
             ms,
             in_flight,
@@ -675,6 +684,7 @@ mod tests {
             delivered_at: at,
             delivery_batch: batch,
             source: "block".to_string(),
+            retired: NonZeroUsize::MIN,
         }
     }
 
@@ -1069,6 +1079,71 @@ mod tests {
             "{}",
             w.report()
         );
+    }
+
+    /// One keystroke every `gap_ms` to ONE block through a serial subscriber
+    /// of `pass_ms` per pass. A pass starts when the previous one lands, or at
+    /// the next keystroke if none is queued, and shows every keystroke
+    /// dispatched before it started. The correlator closes only the newest
+    /// clock on the block and retires the older ones with it.
+    fn typed_on_one_block(gap_ms: u64, pass_ms: u64, keys: u64) -> SloWindow {
+        let mut w = SloWindow::new(
+            ClockOrigin::Ui,
+            keys as usize,
+            SERVICE_TIME_SLO_MS,
+            THROUGHPUT_FLOOR_WRITES_PER_SEC,
+        );
+        let t0 = Instant::now();
+        let mut next = 0u64;
+        let mut start = 0u64;
+        let mut batch = 0u64;
+        while next < keys {
+            start = start.max(gap_ms * next);
+            let taken = (next..keys).take_while(|k| gap_ms * k <= start).count() as u64;
+            let newest = next + taken - 1;
+            let landed = start + pass_ms;
+            w.record(E2eSample {
+                retired: NonZeroUsize::new(taken as usize).expect("a pass takes a keystroke"),
+                ..write(t0, gap_ms * newest * 1000, landed * 1000, batch)
+            });
+            next += taken;
+            start = landed;
+            batch += 1;
+        }
+        w
+    }
+
+    /// Probe T1. The pipeline keeps up with 10 keystrokes/s by showing one or
+    /// two per 150ms pass. Counting one delivery per pass scored 6.7/s, a
+    /// THROUGHPUT banner with the wrong cause.
+    #[test]
+    fn typing_on_one_block_counts_every_keystroke_a_pass_retires() {
+        let w = typed_on_one_block(100, 150, 400);
+        let rate = w.drain_rate_per_sec().expect("a judged busy period");
+        assert!(
+            (rate - 10.0).abs() < 0.05,
+            "offered 10/s, got {rate}/s: {}",
+            w.report()
+        );
+    }
+
+    /// Probe T1's variants: 20/s and 12.5/s offered, both retired in full.
+    #[test]
+    fn typing_faster_than_a_pass_is_retired_in_full() {
+        for (gap, pass, offered) in [(50, 120, 20.0), (80, 110, 12.5)] {
+            let w = typed_on_one_block(gap, pass, 400);
+            let rate = w.drain_rate_per_sec().expect("a judged busy period");
+            assert!(
+                (rate - offered).abs() < offered * 0.01,
+                "gap {gap}ms pass {pass}ms: offered {offered}/s, got {rate}/s: {}",
+                w.report()
+            );
+            assert!(
+                matches!(w.throughput_verdict(), RungVerdict::Pass { .. }),
+                "{}",
+                w.report()
+            );
+        }
     }
 
     /// **The false-red the third estimator shipped.** A healthy session — 40
