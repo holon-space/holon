@@ -898,7 +898,7 @@ pub const MAX_OWNING_PAGE_WALK: usize = 1024;
 #[derive(Clone, Debug, PartialEq)]
 pub enum OwningPage {
     /// The nearest `Page`-tagged block at or above the start.
-    Page(holon_api::StoredBlock),
+    Page(Box<holon_api::StoredBlock>),
     /// The chain reaches the root sentinel with no `Page` on it.
     NoOwner,
     /// The authority does not hold the start block.
@@ -959,7 +959,7 @@ pub async fn owning_page_by_hops<A: WriteAuthorityReads + ?Sized>(
             });
         };
         if stored.block.is_page() {
-            return Ok(OwningPage::Page(stored));
+            return Ok(OwningPage::Page(Box::new(stored)));
         }
         cur = stored.block.parent_id.clone();
     }

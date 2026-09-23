@@ -996,6 +996,37 @@ enum ParentResolution {
     Unresolvable,
 }
 
+/// `stable id -> TreeID` for the global tree. One instance may serve every
+/// backend over that tree, so an entry outlives the backend that wrote it.
+pub type StableIdCache = Arc<Mutex<HashMap<String, loro::TreeID>>>;
+
+/// The cached node for `stable_id` when it is still alive in `tree`; a dead
+/// entry is dropped. A live node that carries another stable id is a cache
+/// the write path failed to invalidate, and serving it would address the
+/// wrong block.
+fn cached_live_node(
+    tree: &loro::LoroTree,
+    id_cache: &StableIdCache,
+    stable_id: &str,
+) -> Option<loro::TreeID> {
+    let tid = id_cache.lock().unwrap().get(stable_id).copied()?;
+    if node_deleted_now(tree, tid) {
+        id_cache.lock().unwrap().remove(stable_id);
+        return None;
+    }
+    match classify(tree, tid) {
+        LiveNode::Settled(sid) if sid == stable_id => Some(tid),
+        LiveNode::Settled(sid) => panic!(
+            "stable-id cache names {tid:?} for `{stable_id}`, but that live node carries \
+             `{sid}` — a STABLE_ID rewrite did not invalidate the cache"
+        ),
+        LiveNode::HalfBorn | LiveNode::MetaUnreadable => panic!(
+            "stable-id cache names {tid:?} for `{stable_id}`, but that live node has no \
+             readable STABLE_ID"
+        ),
+    }
+}
+
 fn resolve_parent_core(
     tree: &loro::LoroTree,
     id_cache: &Arc<Mutex<HashMap<String, loro::TreeID>>>,
@@ -1015,25 +1046,10 @@ fn resolve_parent_core(
     let tree_id = uri_to_tree_id(parent_uri)
         .or_else(|| {
             if parent_uri.is_block() {
-                let cached = id_cache.lock().unwrap().get(parent_uri.id()).copied();
-                match cached {
-                    // Live cache hit — use it.
-                    Some(tid) if !node_deleted_now(tree, tid) => Some(tid),
-                    // Stale hit: the cached node is TOMBSTONED. loro 1.12's
-                    // get_meta returns Ok for a tombstoned (deleted-but-still-
-                    // existing) node, so the old `get_meta(tid).is_ok()` guard
-                    // would serve it as a live parent — attaching children under
-                    // a dead node. This bites cache entries tombstoned by a
-                    // REMOTE / CRDT-merge delete, which never runs delete_block's
-                    // uncache. Drop the stale entry and fall through to the tree
-                    // walk below, which re-resolves to the live node if the same
-                    // stable id was recreated under a new TreeID.
-                    Some(_) => {
-                        id_cache.lock().unwrap().remove(parent_uri.id());
-                        None
-                    }
-                    None => None,
-                }
+                // A remote / CRDT-merge delete never runs delete_block's
+                // uncache, so a tombstoned entry is dropped here and the walk
+                // below re-resolves a stable id recreated under a new TreeID.
+                cached_live_node(tree, id_cache, parent_uri.id())
             } else {
                 None
             }
@@ -2098,6 +2114,12 @@ impl Clone for LoroBackend {
 }
 
 impl LoroBackend {
+    /// Share `cache` with every other backend over the same global tree.
+    pub fn with_id_cache(mut self, cache: StableIdCache) -> Self {
+        self.id_cache = cache;
+        self
+    }
+
     pub fn from_document(collab_doc: Arc<LoroDocument>) -> Self {
         Self {
             collab_doc,
@@ -3981,7 +4003,9 @@ impl LoroBackend {
                 let mut node = tree_id;
                 for _ in 0..holon_core::traits::MAX_OWNING_PAGE_WALK {
                     if node_is_page(&tree, node)? {
-                        return Ok(holon_core::OwningPage::Page(stored_block_at(&tree, node)?));
+                        return Ok(holon_core::OwningPage::Page(Box::new(stored_block_at(
+                            &tree, node,
+                        )?)));
                     }
                     match get_node_parent(&tree, node) {
                         Some(parent) => node = parent,
@@ -4105,28 +4129,31 @@ impl LoroBackend {
     /// creating a node on the keystroke path — needs this shape, and the async
     /// twin above is the wrapper, not the implementation.
     pub fn find_tree_id_by_stable_id_sync(&self, stable_id: &str) -> Option<loro::TreeID> {
-        if let Some(tid) = self.resolve_stable_id_cached(stable_id) {
-            // Validate the cached TreeID is still alive. A delete → undo(create)
-            // resurrects the SAME stable id under a NEW TreeID (delete+recreate,
-            // not in-place un-delete), so a handle that cached the pre-delete
-            // TreeID would otherwise resolve to the tombstoned node and report
-            // the restored block as missing. On a dead hit, drop the stale entry
-            // and fall through to the tree-walk below, which re-resolves and
-            // re-caches the live TreeID.
-            let alive = self
-                .collab_doc
-                .with_read(|doc| Ok(!node_deleted_now(&doc.get_tree(TREE_NAME), tid)))
-                .unwrap_or(false);
-            if alive {
-                return Some(tid);
-            }
-            self.uncache_stable_id(stable_id);
+        // A delete → undo(create) resurrects the SAME stable id under a NEW
+        // TreeID, so a dead hit falls through to the tree walk below.
+        let hit = self
+            .collab_doc
+            .with_read(|doc| {
+                Ok(cached_live_node(
+                    &doc.get_tree(TREE_NAME),
+                    &self.id_cache,
+                    stable_id,
+                ))
+            })
+            // ALLOW(ok): a read-lock timeout answers "not found", the same
+            // contract as the scan below.
+            .ok()
+            .flatten();
+        if hit.is_some() {
+            return hit;
         }
-        let stable_id_owned = stable_id.to_string();
-        let id_cache = self.id_cache.clone();
+        // A miss pays one whole-tree scan and caches every live node, so the
+        // shared cache is warm after the first miss instead of after one miss
+        // per id.
         self.collab_doc
             .with_read(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
+                let mut seen: HashMap<String, loro::TreeID> = HashMap::new();
                 for tree_node in tree.get_nodes(false) {
                     if matches!(
                         tree_node.parent,
@@ -4135,20 +4162,17 @@ impl LoroBackend {
                         continue;
                     }
                     // Same silent skip as `find_stable_id_in_doc`: a half-born
-                    // or torn node has no id to match or to cache, and this
-                    // scan runs on every cache miss.
+                    // or torn node has no id to match or to cache.
                     match classify(&tree, tree_node.id) {
                         LiveNode::Settled(sid) => {
-                            // Populate cache for every node we encounter
-                            id_cache.lock().unwrap().insert(sid.clone(), tree_node.id);
-                            if sid == stable_id_owned {
-                                return Ok(Some(tree_node.id));
-                            }
+                            seen.entry(sid).or_insert(tree_node.id);
                         }
                         LiveNode::HalfBorn | LiveNode::MetaUnreadable => {}
                     }
                 }
-                Ok(None)
+                let found = seen.get(stable_id).copied();
+                self.id_cache.lock().unwrap().extend(seen);
+                Ok(found)
             })
             // ALLOW(ok): returning Option<TreeID> at the API surface; the
             // with_read error is a "couldn't acquire read lock" diagnostic
@@ -4213,12 +4237,22 @@ impl LoroBackend {
             .strip_prefix("block:")
             .unwrap_or(external_id)
             .to_string();
+        let is_global = target.doc_key() == DocKey::Global;
+        let id_cache = self.id_cache.clone();
         write_doc.with_write(WriteOrigin::BlockOps, |doc| {
             let tree = doc.get_tree(TREE_NAME);
             let meta = tree.get_meta(tree_id)?;
+            let previous = read_stable_id(&meta);
             meta.insert(STABLE_ID, loro::LoroValue::from(raw_id.as_str()))?;
             meta.insert(EXTERNAL_ID, loro::LoroValue::from(ext_id.as_str()))?;
             doc.commit();
+            if is_global {
+                let mut cache = id_cache.lock().unwrap();
+                if let Some(previous) = previous {
+                    cache.remove(&previous);
+                }
+                cache.insert(raw_id.clone(), tree_id);
+            }
             Ok(())
         })
     }
@@ -6617,5 +6651,91 @@ mod half_born_node_tests {
             guarded_waited >= Duration::from_millis(WIDENED_BIRTH_MS / 4),
             "the guarded read returned in {guarded_waited:?} without blocking on the write guard"
         );
+    }
+}
+
+#[cfg(test)]
+mod stable_id_cache_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::LoroDocument;
+
+    async fn create(backend: &LoroBackend, id: &str) -> loro::TreeID {
+        backend
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::text(id),
+                Some(EntityUri::block(id)),
+                &HashMap::new(),
+                &holon_api::BlockEdges::default(),
+            )
+            .await
+            .unwrap();
+        backend
+            .resolve_to_tree_id(&EntityUri::block(id).to_string())
+            .await
+            .expect("a block just created resolves")
+    }
+
+    #[tokio::test]
+    async fn a_renamed_stable_id_no_longer_resolves_to_its_node() {
+        let doc = Arc::new(LoroDocument::new("rename".to_string()).unwrap());
+        let backend = LoroBackend::from_document(doc);
+        let node = create(&backend, "before").await;
+
+        backend
+            .set_external_id(&tree_id_to_uri(node).to_string(), "block:after")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            backend.resolve_to_tree_id("block:before").await,
+            None,
+            "the node now carries `after`; the cache must not keep serving it for `before`"
+        );
+        assert_eq!(backend.resolve_to_tree_id("block:after").await, Some(node));
+    }
+
+    #[tokio::test]
+    async fn a_node_deleted_behind_a_shared_cache_resolves_to_its_recreation() {
+        let doc = Arc::new(LoroDocument::new("shared".to_string()).unwrap());
+        let cache = StableIdCache::default();
+        let writer = LoroBackend::from_document(doc.clone()).with_id_cache(cache.clone());
+        let reader = LoroBackend::from_document(doc.clone()).with_id_cache(cache);
+        let first = create(&writer, "reborn").await;
+        assert_eq!(reader.resolve_to_tree_id("block:reborn").await, Some(first));
+
+        // A peer's delete arrives by merge, which runs no uncache.
+        doc.with_write(WriteOrigin::BlockOps, |d| {
+            d.get_tree(TREE_NAME).delete(first)?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(reader.resolve_to_tree_id("block:reborn").await, None);
+
+        let second = create(&writer, "reborn").await;
+        assert_ne!(first, second);
+        assert_eq!(
+            reader.resolve_to_tree_id("block:reborn").await,
+            Some(second)
+        );
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "stable-id cache")]
+    async fn a_cached_node_whose_stable_id_changed_behind_the_cache_fails_loud() {
+        let doc = Arc::new(LoroDocument::new("rewrite".to_string()).unwrap());
+        let backend = LoroBackend::from_document(doc.clone());
+        let node = create(&backend, "cached").await;
+
+        doc.with_write(WriteOrigin::BlockOps, |d| {
+            let meta = d.get_tree(TREE_NAME).get_meta(node)?;
+            meta.insert(STABLE_ID, loro::LoroValue::from("someone-else"))?;
+            Ok(())
+        })
+        .unwrap();
+
+        backend.resolve_to_tree_id("block:cached").await;
     }
 }

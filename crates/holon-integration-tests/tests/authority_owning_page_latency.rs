@@ -113,9 +113,10 @@ where
             }
         }
     }
+    let first = samples[0];
     samples.sort();
     format!(
-        "OWNING_PAGE_LATENCY {label}: n={} p50={:?} p95={:?} max={:?}",
+        "OWNING_PAGE_LATENCY {label}: n={} first={first:?} p50={:?} p95={:?} max={:?}",
         samples.len(),
         percentile(&samples, 0.50),
         percentile(&samples, 0.95),
