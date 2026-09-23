@@ -290,6 +290,25 @@ fn share_answers_follow_the_file_model() {
         for id in [p, "block:shr-delta", "block:shr-delta-one", n.as_str()] {
             assert_eq!(owning_page_id(loro, id).await, p, "Loro owning_page({id})");
         }
+        let OwningPage::Page(shared_page) = loro
+            .owning_page(&uri("block:shr-delta-one"))
+            .await
+            .expect("Loro owning_page(block:shr-delta-one)")
+        else {
+            panic!("Loro names no page for block:shr-delta-one");
+        };
+        assert_eq!(
+            shared_page.block.todo_keywords(),
+            Some(vec![
+                holon_api::TaskState::active("WAIT"),
+                holon_api::TaskState::done("GONE"),
+            ]),
+            "the shared page carries its own task vocabulary"
+        );
+        assert_eq!(child_ids(loro, p).await, ["block:shr-delta"]);
+        for authority in [loro, &sql as &dyn WriteAuthorityReads] {
+            assert_eq!(child_ids(authority, &n).await, ["block:shr-delta"]);
+        }
         let sql_answers = [
             owning_page_id(&sql, p).await,
             owning_page_id(&sql, "block:shr-delta").await,

@@ -618,30 +618,59 @@ fn walk_to_page(tree: &loro::LoroTree, start: loro::TreeID) -> anyhow::Result<Wa
     Ok(WalkEnd::TooDeep)
 }
 
-/// The one live mount of `shared_tree_id` in `tree`.
-fn mount_node_of(tree: &loro::LoroTree, shared_tree_id: &str) -> anyhow::Result<loro::TreeID> {
-    let mounts: Vec<loro::TreeID> = tree
-        .get_nodes(false)
-        .into_iter()
-        .filter(|n| {
-            !matches!(
-                n.parent,
-                loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
-            )
-        })
-        .filter(|n| {
-            read_mount_info(tree, n.id).is_some_and(|info| info.shared_tree_id == shared_tree_id)
-        })
-        .map(|n| n.id)
-        .collect();
-    match mounts.as_slice() {
-        [mount] => Ok(*mount),
-        [] => anyhow::bail!("shared tree {shared_tree_id} has no live mount in the global doc"),
-        many => anyhow::bail!(
+/// `shared tree id -> mount TreeID` for the global tree, shared like
+/// [`StableIdCache`] by every backend over that tree.
+pub type MountCache = Arc<Mutex<HashMap<String, loro::TreeID>>>;
+
+/// The one live mount of `shared_tree_id` in `tree`, `None` when it has none.
+/// A hit is checked against the tree; a miss scans it once and caches every
+/// mount it finds.
+fn mount_node_of(
+    tree: &loro::LoroTree,
+    mounts: &MountCache,
+    shared_tree_id: &str,
+) -> anyhow::Result<Option<loro::TreeID>> {
+    let cached = mounts.lock().unwrap().get(shared_tree_id).copied();
+    if let Some(mount) = cached {
+        if !node_deleted_now(tree, mount) {
+            let info = read_mount_info(tree, mount);
+            assert!(
+                info.as_ref()
+                    .is_some_and(|info| info.shared_tree_id == shared_tree_id),
+                "mount cache names {mount:?} for shared tree `{shared_tree_id}`, but that live \
+                 node carries {info:?}"
+            );
+            return Ok(Some(mount));
+        }
+        mounts.lock().unwrap().remove(shared_tree_id);
+    }
+    let mut found: HashMap<String, Vec<loro::TreeID>> = HashMap::new();
+    for node in tree.get_nodes(false) {
+        if matches!(
+            node.parent,
+            loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+        ) {
+            continue;
+        }
+        if let Some(info) = read_mount_info(tree, node.id) {
+            found.entry(info.shared_tree_id).or_default().push(node.id);
+        }
+    }
+    let answer = match found.get(shared_tree_id).map(Vec::as_slice) {
+        None => None,
+        Some([mount]) => Some(*mount),
+        Some(many) => anyhow::bail!(
             "shared tree {shared_tree_id} has {} live mounts: {many:?}",
             many.len()
         ),
-    }
+    };
+    mounts.lock().unwrap().extend(found.into_iter().filter_map(
+        |(id, nodes)| match nodes.as_slice() {
+            [mount] => Some((id, *mount)),
+            _ => None,
+        },
+    ));
+    Ok(answer)
 }
 
 /// The block at `node` plus the `block_type` and `completed` values its meta
@@ -2154,6 +2183,7 @@ pub struct LoroBackend {
     /// Cache: stable_id (UUID string) → TreeID. Populated eagerly on create,
     /// lazily on lookup, invalidated on delete.
     id_cache: Arc<Mutex<HashMap<String, loro::TreeID>>>,
+    mount_cache: MountCache,
     clock: std::sync::Arc<dyn holon_api::Clock>,
 }
 
@@ -2166,6 +2196,7 @@ impl Clone for LoroBackend {
             event_log: self.event_log.clone(),
             shared_trees: self.shared_trees.clone(),
             id_cache: self.id_cache.clone(),
+            mount_cache: self.mount_cache.clone(),
             clock: self.clock.clone(),
         }
     }
@@ -2178,6 +2209,12 @@ impl LoroBackend {
         self
     }
 
+    /// Share `cache` with every other backend over the same global tree.
+    pub fn with_mount_cache(mut self, cache: MountCache) -> Self {
+        self.mount_cache = cache;
+        self
+    }
+
     pub fn from_document(collab_doc: Arc<LoroDocument>) -> Self {
         Self {
             collab_doc,
@@ -2186,6 +2223,7 @@ impl LoroBackend {
             event_log: Arc::new(Mutex::new(EventRing::new(DEFAULT_EVENT_RING_CAPACITY))),
             shared_trees: None,
             id_cache: Arc::new(Mutex::new(HashMap::new())),
+            mount_cache: MountCache::default(),
             clock: std::sync::Arc::new(holon_api::SystemClock),
         }
     }
@@ -4072,12 +4110,26 @@ impl LoroBackend {
                 .collab_doc
                 .with_read(|doc| {
                     let tree = doc.get_tree(TREE_NAME);
-                    let mount = mount_node_of(&tree, shared_tree_id)?;
-                    Ok(OwningPage::Page(Box::new(stored_block_at(&tree, mount)?)))
+                    Ok(
+                        match mount_node_of(&tree, &self.mount_cache, shared_tree_id)? {
+                            Some(mount) => {
+                                OwningPage::Page(Box::new(stored_block_at(&tree, mount)?))
+                            }
+                            None => OwningPage::Broken(holon_core::ChainBreak::OrphanedShare {
+                                shared_tree_id: shared_tree_id.clone(),
+                            }),
+                        },
+                    )
                 })
                 .map_err(fail),
             (WalkEnd::Mount { info, mount }, WriteTarget::Global(_)) => {
-                let shared = self.loaded_shared_doc(&info.shared_tree_id).map_err(fail)?;
+                let Some(shared) = self.loaded_shared_doc(&info.shared_tree_id) else {
+                    return Ok(OwningPage::Broken(
+                        holon_core::ChainBreak::SharedSubtreeNotMaterialized {
+                            shared_tree_id: info.shared_tree_id,
+                        },
+                    ));
+                };
                 let shared_page = shared
                     .with_read(|doc| {
                         let tree = doc.get_tree(TREE_NAME);
@@ -4094,8 +4146,8 @@ impl LoroBackend {
             }
             (WalkEnd::Mount { info, .. }, WriteTarget::Layout(_) | WriteTarget::Shared { .. }) => {
                 Err(fail(anyhow::anyhow!(
-                    "the chain reaches a mount of shared tree {} outside the global doc, where \
-                     no mount can live",
+                    "the chain reaches a mount of shared tree {} outside the global doc; \
+                     share_subtree refuses nested shares (ADR 0028 A7)",
                     info.shared_tree_id
                 )))
             }
@@ -4128,16 +4180,13 @@ impl LoroBackend {
     }
 
     /// The loaded doc of shared tree `shared_tree_id`, under its boundary lock.
-    fn loaded_shared_doc(&self, shared_tree_id: &str) -> anyhow::Result<LoroDocument> {
+    fn loaded_shared_doc(&self, shared_tree_id: &str) -> Option<LoroDocument> {
         let doc = self
             .shared_trees
             .as_ref()
-            .and_then(|store| store.get_shared_doc(shared_tree_id))
-            .ok_or_else(|| {
-                anyhow::anyhow!("the doc of shared tree {shared_tree_id} is not loaded")
-            })?;
+            .and_then(|store| store.get_shared_doc(shared_tree_id))?;
         // ALLOW(loro_doc_escape): re-wrapped under the same boundary lock.
-        Ok(LoroDocument::from_existing(doc, shared_tree_id.to_string()))
+        Some(LoroDocument::from_existing(doc, shared_tree_id.to_string()))
     }
 
     /// The Loro tree's fractional index for `id` — the adapter's internal
@@ -4459,6 +4508,7 @@ impl Lifecycle for LoroBackend {
             event_log: Arc::new(Mutex::new(EventRing::new(DEFAULT_EVENT_RING_CAPACITY))),
             shared_trees: None,
             id_cache: Arc::new(Mutex::new(HashMap::new())),
+            mount_cache: MountCache::default(),
             clock: std::sync::Arc::new(holon_api::SystemClock),
         })
     }

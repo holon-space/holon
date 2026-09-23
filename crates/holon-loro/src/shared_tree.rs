@@ -336,6 +336,36 @@ pub struct MountInfo {
     pub shared_root: TreeID,
 }
 
+/// Why `share_subtree` refuses a block: v1 forbids nested and overlapping
+/// shares (ADR 0028 A7).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NestedShareRefusal {
+    #[error(
+        "cannot share {id}: it contains the shared subtree mounted at {mount}. Stop sharing \
+         that subtree first; shares cannot nest."
+    )]
+    ContainsShare { id: String, mount: String },
+    #[error(
+        "cannot share {id}: it is already inside shared tree {shared_tree_id}. Everyone in that \
+         share sees it already; shares cannot nest."
+    )]
+    InsideShare { id: String, shared_tree_id: String },
+}
+
+/// A mount strictly below `root`, if any.
+pub fn first_mount_below(tree: &LoroTree, root: TreeID) -> Option<TreeID> {
+    let mut queue = vec![root];
+    while let Some(node) = queue.pop() {
+        for child in tree.children(node).unwrap_or_default() {
+            if is_mount_node(tree, child) {
+                return Some(child);
+            }
+            queue.push(child);
+        }
+    }
+    None
+}
+
 /// Result of a share_subtree operation: extraction + mount replacement.
 pub struct ShareResult {
     pub extracted: ExtractedSubtree,

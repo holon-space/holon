@@ -886,8 +886,9 @@ pub trait WriteAuthorityReads: MaybeSendSync {
     /// authority does not hold `parent`.
     async fn children(&self, parent: &EntityUri) -> Result<Vec<EntityUri>>;
     /// The page whose org file stores `id` (D197.a): in a block share its mount
-    /// page, in a page share the shared page. Never derive it by walking
-    /// parents.
+    /// page, in a page share the shared page. Callers must ask this, never walk
+    /// parents; the default walks because SQL's `parent_id` follows the file
+    /// model.
     async fn owning_page(&self, id: &EntityUri) -> Result<OwningPage> {
         owning_page_by_hops(self, id).await
     }
@@ -917,6 +918,12 @@ pub enum ChainBreak {
     MissingParent(EntityUri),
     /// Longer than [`MAX_OWNING_PAGE_WALK`].
     TooDeep,
+    /// The block lives in this shared tree, whose mount the authority no
+    /// longer holds.
+    OrphanedShare { shared_tree_id: String },
+    /// The chain reaches the mount of this shared tree, whose doc is not
+    /// loaded on this device.
+    SharedSubtreeNotMaterialized { shared_tree_id: String },
 }
 
 impl std::fmt::Display for ChainBreak {
@@ -935,6 +942,16 @@ impl std::fmt::Display for ChainBreak {
                     "the parent chain is longer than {MAX_OWNING_PAGE_WALK} blocks"
                 )
             }
+            ChainBreak::OrphanedShare { shared_tree_id } => write!(
+                f,
+                "the block lives in shared tree `{shared_tree_id}`, which is no longer mounted \
+                 in any page"
+            ),
+            ChainBreak::SharedSubtreeNotMaterialized { shared_tree_id } => write!(
+                f,
+                "shared tree `{shared_tree_id}` is not loaded on this device, so the page that \
+                 stores it is unknown"
+            ),
         }
     }
 }

@@ -70,6 +70,7 @@ use crate::share_enrollment::peer_fingerprint;
 use crate::share_peer_id::stable_peer_id;
 use crate::shared_snapshot_store::SharedSnapshotStore;
 use crate::shared_tree::HistoryRetention;
+use crate::shared_tree::NestedShareRefusal;
 use crate::shared_tree::SHARE_ROLE_MOUNT;
 use crate::shared_tree::SHARE_ROLE_PROPERTY;
 use crate::shared_tree::SHARED_TREE_ID_PROPERTY;
@@ -1517,6 +1518,19 @@ impl LoroShareBackend {
         self.global_doc().await.expect("test global_doc")
     }
 
+    /// The loaded shared tree whose doc holds `id`.
+    fn shared_tree_holding(&self, id: &EntityUri) -> Option<String> {
+        use crate::shared_tree::SharedTreeStore;
+        self.manager
+            .shared_tree_ids()
+            .into_iter()
+            .find(|shared_tree_id| {
+                self.manager
+                    .get_doc(shared_tree_id)
+                    .is_some_and(|doc| find_tree_id_by_stable_id(&doc, id).is_some())
+            })
+    }
+
     /// Test-only access to the shared-tree manager (to fetch shared docs).
     pub fn manager_for_test(&self) -> Arc<SharedTreeSyncManager> {
         self.manager.clone()
@@ -1856,17 +1870,32 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // forks the shared doc; the snapshot is written to disk before
         // we mutate the source tree. If the save fails, Phase B never
         // runs and the source stays untouched — no rollback.
-        let (shared_arc, shared_root, mount_parent_uri) =
-            collab.with_write(WriteOrigin::ShareLifecycle, |txn| {
+        let (shared_arc, shared_root, mount_parent_uri) = collab
+            .with_write(WriteOrigin::ShareLifecycle, |txn| {
                 let doc = txn.doc();
 
-                let tid = find_tree_id_by_stable_id(doc, &id_uri).ok_or_else(|| {
-                    anyhow::Error::msg(format!("block {id} not found in Loro tree"))
-                })?;
-                if shared_tree::is_mount_node(&doc.get_tree(crate::loro_backend::TREE_NAME), tid) {
+                let Some(tid) = find_tree_id_by_stable_id(doc, &id_uri) else {
+                    if let Some(shared_tree_id) = self.shared_tree_holding(&id_uri) {
+                        return Err(anyhow::Error::new(NestedShareRefusal::InsideShare {
+                            id: id.to_string(),
+                            shared_tree_id,
+                        }));
+                    }
+                    anyhow::bail!("block {id} not found in Loro tree");
+                };
+                let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+                if shared_tree::is_mount_node(&tree, tid) {
                     return Err(anyhow::Error::msg(format!(
                         "block {id} is already a mount node; sharing a mount is not supported"
                     )));
+                }
+                if let Some(mount) = shared_tree::first_mount_below(&tree, tid) {
+                    return Err(anyhow::Error::new(NestedShareRefusal::ContainsShare {
+                        id: id.to_string(),
+                        mount: read_stable_id(&tree, mount)
+                            .map(|s| block_uri_from_bare(&s))
+                            .unwrap_or_else(|| format!("{mount:?}")),
+                    }));
                 }
                 // Amendment A: the mount is a Page (Inc 2), so it must sit under a
                 // Page (or a root). Bubble the subtree's original parent to its
@@ -1958,6 +1987,10 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     shared_root,
                     mount_parent_uri,
                 ))
+            })
+            .map_err(|e| match e.downcast::<NestedShareRefusal>() {
+                Ok(refusal) => Box::new(refusal) as Box<dyn std::error::Error + Send + Sync>,
+                Err(e) => e.into(),
             })?;
 
         // Flush the global doc so the mount node survives in lockstep
@@ -6816,5 +6849,121 @@ mod tests {
             !String::from_utf8_lossy(&bytes).contains(MOUNT_SECRET),
             "the unshared mount node's container survived in the global doc's compacted state"
         );
+    }
+
+    /// `(mount_block_id, shared_tree_id)` of a fresh share of `id`.
+    async fn share_ok(b: &LoroShareBackend, id: &str) -> (String, String) {
+        let r = b
+            .share_subtree(id, "none".into())
+            .await
+            .unwrap_or_else(|e| panic!("share {id}: {e}"));
+        let j: serde_json::Value = match r.response {
+            Some(Value::String(s)) => serde_json::from_str(&s).unwrap(),
+            other => panic!("share {id} response: {other:?}"),
+        };
+        (
+            j["mount_block_id"].as_str().unwrap().to_string(),
+            j["shared_tree_id"].as_str().unwrap().to_string(),
+        )
+    }
+
+    fn reads_of(
+        b: &LoroShareBackend,
+        global: Arc<crate::loro_document::LoroDocument>,
+    ) -> crate::loro_backend::LoroBackend {
+        crate::loro_backend::LoroBackend::from_document(global)
+            .with_shared_trees(b.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>)
+    }
+
+    fn page_id(answer: holon_core::OwningPage) -> String {
+        match answer {
+            holon_core::OwningPage::Page(p) => p.block.id.to_string(),
+            other => panic!("expected a page, got {other:?}"),
+        }
+    }
+
+    /// ADR 0028 A7: a share whose subtree holds a mount, or that sits inside a
+    /// shared subtree, is refused with a typed error and changes nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn share_subtree_refuses_nested_shares() {
+        let (b, _d) = make_backend();
+        seed_page(&b, "host", None, "Host").await;
+        seed_block(&b, "gamma", Some("host"), "Gamma").await;
+        seed_block(&b, "gamma-one", Some("gamma"), "Gamma one").await;
+        let (m1, st1) = share_ok(&b, "block:gamma").await;
+
+        let outer = b
+            .share_subtree("block:host", "none".into())
+            .await
+            .expect_err("sharing a page that holds a mount must be refused");
+        assert_eq!(
+            outer.downcast_ref::<NestedShareRefusal>(),
+            Some(&NestedShareRefusal::ContainsShare {
+                id: "block:host".into(),
+                mount: m1.clone(),
+            }),
+            "{outer}"
+        );
+        let inner = b
+            .share_subtree("block:gamma-one", "none".into())
+            .await
+            .expect_err("sharing a block inside a share must be refused");
+        assert_eq!(
+            inner.downcast_ref::<NestedShareRefusal>(),
+            Some(&NestedShareRefusal::InsideShare {
+                id: "block:gamma-one".into(),
+                shared_tree_id: st1,
+            }),
+            "{inner}"
+        );
+
+        let reads = reads_of(&b, b.global_doc().await.unwrap());
+        for id in ["block:gamma", "block:gamma-one", m1.as_str()] {
+            assert_eq!(
+                page_id(reads.owning_page(id).unwrap()),
+                m1,
+                "owning_page({id})"
+            );
+        }
+        assert_eq!(
+            page_id(reads.owning_page("block:host").unwrap()),
+            "block:host"
+        );
+        b.advertiser.close_all().await;
+    }
+
+    /// A share whose mount is gone, or whose doc this device has not loaded,
+    /// answers a typed chain break instead of an internal error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn owning_page_types_a_missing_mount_and_an_unloaded_share() {
+        use holon_api::repository::CoreOperations;
+        use holon_core::ChainBreak;
+        use holon_core::OwningPage;
+        let (b, _d) = make_backend();
+        seed_page(&b, "host", None, "Host").await;
+        seed_block(&b, "gamma", Some("host"), "Gamma").await;
+        let (m1, st1) = share_ok(&b, "block:gamma").await;
+
+        let unloaded =
+            crate::loro_backend::LoroBackend::from_document(b.global_doc().await.unwrap());
+        assert_eq!(
+            unloaded.owning_page(&m1).unwrap(),
+            OwningPage::Broken(ChainBreak::SharedSubtreeNotMaterialized {
+                shared_tree_id: st1.clone()
+            })
+        );
+
+        let reads = reads_of(&b, b.global_doc().await.unwrap());
+        assert_eq!(page_id(reads.owning_page("block:gamma").unwrap()), m1);
+        reads.delete_block("block:host").await.unwrap();
+        assert_eq!(
+            reads.owning_page("block:gamma").unwrap(),
+            OwningPage::Broken(ChainBreak::OrphanedShare {
+                shared_tree_id: st1
+            })
+        );
+        b.advertiser.close_all().await;
     }
 }

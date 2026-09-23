@@ -10,6 +10,9 @@
 //! each holding `HOLON_OWNING_PAGE_CHAINS` chains (default 50) of
 //! `HOLON_OWNING_PAGE_DEPTH` nested headlines (default 20) — 10 000 blocks.
 //!
+//! A block share per document adds the walk that ends at a shared root and
+//! must find its mount in the global doc.
+//!
 //! @pbt kind harness
 //! @pbt covers write-authority-owning-page-latency — the cost of the
 //!   owning-page walk on each write authority at vault scale
@@ -124,6 +127,33 @@ where
     )
 }
 
+/// Shares `id` as a block share and returns the mount block it minted.
+async fn share_mount(env: &holon_integration_tests::TestEnvironment, id: &str) -> EntityUri {
+    let params: holon_api::StorageEntity = [("id", id), ("retention", "none")]
+        .into_iter()
+        .map(|(k, v)| (k.into(), holon_api::Value::String(v.to_string())))
+        .collect();
+    let response = env
+        .engine()
+        .execute_operation(
+            &"tree".to_string().into(),
+            "share_subtree",
+            params,
+            holon_api::OpOrigin::User,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("share {id}: {e:#}"))
+        .response
+        .and_then(|v| v.as_string().map(str::to_string))
+        .unwrap_or_else(|| panic!("share {id} answered no response"));
+    let json: serde_json::Value = serde_json::from_str(&response)
+        .unwrap_or_else(|e| panic!("share {id} response `{response}`: {e}"));
+    let mount = json["mount_block_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("share {id} names no mount_block_id: {response}"));
+    EntityUri::parse(mount).unwrap_or_else(|e| panic!("mount {mount}: {e}"))
+}
+
 #[test]
 fn owning_page_cost_on_a_deep_vault() {
     let shape = Shape::from_env();
@@ -179,6 +209,43 @@ fn owning_page_cost_on_a_deep_vault() {
             })
             .await,
         );
+        let mut shared_probes = Vec::new();
+        for doc in 0..shape.docs {
+            let root = format!("block:op-{doc:03}-000-01");
+            let mount = share_mount(&loro_env, &root).await;
+            shared_probes.extend((1..=shape.depth).map(|level| {
+                (
+                    EntityUri::block(&format!("op-{doc:03}-000-{level:02}")),
+                    mount.clone(),
+                )
+            }));
+        }
+        loro_env
+            .wait_for_loro_quiescence(Duration::from_secs(600))
+            .await;
+        report.push(
+            measure("loro in a block share", &shared_probes, |leaf| {
+                let loro = loro.clone();
+                async move { loro.owning_page(&leaf).await }
+            })
+            .await,
+        );
+        let mut reads = Vec::with_capacity(shared_probes.len());
+        for (leaf, _) in &shared_probes {
+            let started = Instant::now();
+            loro.block(leaf)
+                .await
+                .unwrap_or_else(|e| panic!("block({leaf}): {e}"))
+                .unwrap_or_else(|| panic!("block({leaf}) is absent"));
+            reads.push(started.elapsed());
+        }
+        reads.sort();
+        report.push(format!(
+            "OWNING_PAGE_LATENCY loro block() in a block share: n={} p50={:?} p95={:?}",
+            reads.len(),
+            percentile(&reads, 0.50),
+            percentile(&reads, 0.95)
+        ));
         drop(loro_env);
 
         let mut builder = TestEnvironmentBuilder::new().without_loro();
