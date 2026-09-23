@@ -1568,38 +1568,28 @@ impl DispatchingOperationEngine {
     /// The block's stored `task_state` keyword, or `None` when it carries none
     /// — or when the row is not there yet (a `create` converges on its own
     /// params). Unlike [`Self::read_task_keyword_prior_state`] this tolerates a
-    /// missing row, because it runs on writes that mint one.
+    /// missing row, because it runs on writes that mint one. Read from the
+    /// write authority: a keystroke must see the previous keystroke's demotion,
+    /// which a lagging projection does not hold yet.
     async fn stored_task_keyword(&self, id: &str) -> Result<Option<String>> {
-        let Some(reader) = self.reader.as_ref() else {
+        let Some(authority) = self.write_authority.as_ref() else {
             return Ok(None);
         };
         // ALLOW(entity_uri_from_raw): `id` is the operation's own `id` param.
         let uri = holon_api::EntityUri::from_raw(id);
-        let keyword = match reader.field_value(&uri, "properties").await? {
-            None | Some(Value::Null) => None,
-            Some(Value::Object(map)) => map
+        let block = authority
+            .block(&uri)
+            .await
+            .map_err(|e| anyhow::anyhow!("task-keyword convergence: reading {id}: {e}"))?;
+        Ok(block.and_then(|stored| {
+            stored
+                .block
+                .properties
                 .get("task_state")
                 .and_then(|v| v.as_string())
                 .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            Some(Value::String(json)) | Some(Value::Json(json)) if !json.trim().is_empty() => {
-                let parsed: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
-                    anyhow::anyhow!(
-                        "task-keyword convergence: corrupt properties JSON on {id}: {e}"
-                    )
-                })?;
-                parsed
-                    .get("task_state")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            }
-            Some(Value::String(_)) | Some(Value::Json(_)) => None,
-            Some(other) => bail!(
-                "task-keyword convergence: block {id} has a non-object `properties` value {other:?}"
-            ),
-        };
-        Ok(keyword)
+                .map(str::to_string)
+        }))
     }
 
     /// The vault format's illegal-state rule: a block that carries no task

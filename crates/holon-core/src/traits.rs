@@ -877,6 +877,8 @@ pub trait WriteAuthorityReads: MaybeSendSync {
     async fn block_exists(&self, id: &EntityUri) -> Result<bool>;
     /// Whether the block carries the `Page` tag.
     async fn block_is_page(&self, id: &EntityUri) -> Result<bool>;
+    /// The block, or `None` when it does not exist.
+    async fn block(&self, id: &EntityUri) -> Result<Option<holon_api::StoredBlock>>;
     /// `root` and every descendant: root first, parent before child, siblings
     /// in order. `None` when `root` does not exist.
     async fn subtree(&self, root: &EntityUri) -> Result<Option<Vec<holon_api::StoredBlock>>>;

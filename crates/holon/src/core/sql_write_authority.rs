@@ -84,6 +84,10 @@ impl WriteAuthorityReads for SqlWriteAuthority {
         Ok(!rows.is_empty())
     }
 
+    async fn block(&self, id: &EntityUri) -> Result<Option<StoredBlock>> {
+        Ok(self.blocks_where("id", id.as_str()).await?.pop())
+    }
+
     async fn subtree(&self, root: &EntityUri) -> Result<Option<Vec<StoredBlock>>> {
         let Some(root_block) = self.blocks_where("id", root.as_str()).await?.pop() else {
             return Ok(None);

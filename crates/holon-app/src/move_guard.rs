@@ -9,8 +9,9 @@
 //! It lives with the composition root for the same reason `rehome_entity`
 //! does: deciding a destination's capability needs `holon-capability`, which
 //! `holon` may not link. It builds no writer — every read goes through the
-//! backend-blind `BlockReader` seam and the profile resolver's computed
-//! fields, so the guard evaluates with Turso absent (ADR 0032 D10).
+//! backend-blind `BlockReader` and `WriteAuthorityReads` seams and the profile
+//! resolver's computed fields, so the guard evaluates with Turso absent (ADR
+//! 0032 D10).
 
 use std::sync::Arc;
 
@@ -26,10 +27,12 @@ use holon::api::net_guard::NetVerdict;
 use holon_api::EntityUri;
 use holon_api::live_data::home_by::DurableFormat;
 use holon_api::live_data::home_by::HomeAuthority;
+use holon_api::live_data::home_by::Placement;
 use holon_capability::EntityKind;
 use holon_capability::ProfileRegistry;
 use holon_capability::profile_of;
 use holon_core::Result;
+use holon_core::WriteAuthorityReads;
 use holon_core::block_ordering::BlockOrdering;
 use holon_filesystem::BlockReader;
 use holon_orgmode::home_authority::BlockHomeAuthority;
@@ -40,6 +43,10 @@ use holon_profiles::ProfileResolving;
 /// The op whose delta this policy ranges over. `rehome_entity` performs its
 /// move by dispatching this one, so guarding it covers both.
 const MOVE_BLOCK_OP: &str = "move_block";
+
+/// How long a destination the write authority holds may take to reach the
+/// projection before the move fails loud.
+const PROJECTION_CATCH_UP_MS: u64 = 10_000;
 
 /// What the store says about the block being moved.
 struct Subject {
@@ -166,22 +173,65 @@ impl MoveGuard {
         if parent.is_no_parent() {
             return Ok(None);
         }
-        let mut memo = HomeBurstMemo::default();
-        let placement = self
-            .authority()
-            .await
-            .locate(parent.as_str(), &mut memo)
-            .await
-            .map_err(|e| format!("net guard: locating destination `{parent}`: {e}"))?
-            .ok_or_else(|| {
-                format!("net guard: destination `{parent}` is not a block the store holds")
-            })?;
+        let placement = match self.locate(parent).await? {
+            Some(placement) => placement,
+            None => {
+                self.await_projection_of(parent).await?;
+                self.locate(parent).await?.ok_or_else(|| {
+                    format!("net guard: destination `{parent}` is not a block the store holds")
+                })?
+            }
+        };
         Ok(match placement.doc {
             DocHome::Resolved(_) => Some(DurableFormat::Org),
             // Neither absence names a file: one has no owner, the other has an
             // owner nothing can currently name.
             DocHome::Untracked | DocHome::Unresolvable(_) => None,
         })
+    }
+
+    async fn locate(&self, id: &EntityUri) -> Result<Option<Placement<DocHome>>> {
+        let mut memo = HomeBurstMemo::default();
+        Ok(self
+            .authority()
+            .await
+            .locate(id.as_str(), &mut memo)
+            .await
+            .map_err(|e| format!("net guard: locating destination `{id}`: {e}"))?)
+    }
+
+    /// `locate` reads the projection. When a write authority other than the
+    /// projection exists (Loro), a block the running compound just created is
+    /// held there before the projection reflects it — wait for the projection.
+    async fn await_projection_of(&self, id: &EntityUri) -> Result<()> {
+        let authority = match self
+            .injector
+            .try_resolve_async::<dyn WriteAuthorityReads>()
+            .await
+        {
+            Ok(authority) => authority,
+            // The projection IS the write authority, so its miss is final.
+            Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => return Ok(()),
+            Err(e) => {
+                return Err(format!("net guard: resolving the block write authority: {e}").into());
+            }
+        };
+        if !authority.block_exists(id).await? {
+            return Ok(());
+        }
+        let caught_up = self
+            .reader()
+            .await
+            .wait_for_blocks_in_feed(&[id.to_string()], PROJECTION_CATCH_UP_MS)
+            .await;
+        if !caught_up {
+            return Err(format!(
+                "net guard: destination `{id}` is held by the write authority, but the projection \
+                 did not reflect it within {PROJECTION_CATCH_UP_MS} ms"
+            )
+            .into());
+        }
+        Ok(())
     }
 
     /// Whether the destination's home profile declares it can store `kind`.

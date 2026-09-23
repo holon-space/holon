@@ -387,6 +387,15 @@ impl holon_core::WriteAuthorityReads for LoroBlockOperations {
             .unwrap_or(false))
     }
 
+    async fn block(&self, id: &holon_api::EntityUri) -> Result<Option<holon_api::StoredBlock>> {
+        let backend = self.get_backend("").await?;
+        match backend.get_stored_block(id.as_str()).await {
+            Ok(block) => Ok(Some(block)),
+            Err(ApiError::BlockNotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn subtree(
         &self,
         root: &holon_api::EntityUri,
